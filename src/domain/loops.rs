@@ -817,6 +817,16 @@ pub struct LoopNodeRun {
     /// foundation for resume mode (RS2): without it there is nothing to
     /// resume.
     pub session_id: Option<String>,
+    /// CB43: platform/model resolved at dispatch time — the CLI name that
+    /// `run_agent_process` actually used and the model string actually handed
+    /// to the CLI argv (`None` when no model was requested or the platform's
+    /// `model_flag` cannot select one). Never derived from the node's current
+    /// config at read time; `None` for pre-migration rows and non-agent nodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executed_platform: Option<String>,
+    /// CB43: see `executed_platform`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executed_model: Option<String>,
 }
 
 /// One firing of a loop hook. Deliberately its own table/type rather than
@@ -840,6 +850,13 @@ pub struct LoopCompletionHookRun {
     /// Same B12 kill-on-abnormal-end treatment as [`LoopNodeRun::pid`].
     pub pid: Option<i64>,
     pub boot_id: Option<String>,
+    /// CB43: platform/model resolved at dispatch for agent hooks
+    /// (`None` for command/interactive hooks and pre-migration rows).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executed_platform: Option<String>,
+    /// CB43: see `executed_platform`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executed_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -3286,13 +3286,18 @@ impl TaskTriggerHandler {
             // when the registry gives us an enumeration command we use it and
             // skip models.dev entirely — never requiring it to be reachable.
             if let Some((binary, args)) = platform_enumeration_cmd(platform) {
-                return Ok(native_models_result(platform, binary, args, force_refresh, full).await);
+                let mut result =
+                    native_models_result(platform, binary, args, force_refresh, full).await;
+                prepend_recent_usage(&mut result, &recent_usage_section(&self.db));
+                return Ok(result);
             }
         }
 
         // models.dev-derived path: the all-providers listing, or a platform
         // without native enumeration (e.g. claude, whose bare ids are correct).
-        Ok(catalogue_models_result(platform, force_refresh, full).await)
+        let mut result = catalogue_models_result(platform, force_refresh, full).await;
+        prepend_recent_usage(&mut result, &recent_usage_section(&self.db));
+        Ok(result)
     }
 
     /// Get log output for an agent.
@@ -9508,6 +9513,75 @@ fn configured_models() -> crate::domain::canopy_config::ModelsConfig {
         .unwrap_or_default()
 }
 
+/// CB43: the "recently used" section that leads `agent_models` output — one
+/// line per platform+model pair this installation has run in the last 30
+/// days (most recent first, capped at fifteen): when it last ran, how many
+/// times, and how the most recent run ended. Computed only from this
+/// installation's own runs; a pair never run here never appears. The
+/// catalogue below is unchanged.
+fn recent_usage_section(db: &Database) -> String {
+    let since = chrono::Utc::now() - chrono::Duration::days(30);
+    match db.list_recent_platform_model_usage(since, 15) {
+        Ok(rows) => format_recent_usage_section(&rows),
+        Err(_) => String::new(),
+    }
+}
+
+/// CB43: render the section (testable without a database). A NULL model is
+/// the CLI's default. The last outcome is what keeps the list honest: a
+/// pair used forty times whose last run timed out must not read as a
+/// recommendation.
+fn format_recent_usage_section(rows: &[crate::db::loops::RecentModelUsage]) -> String {
+    const HEADER: &str =
+        "Recently used on this machine (last 30 days) — from this installation's own runs:";
+    if rows.is_empty() {
+        return format!("{HEADER}\nNo models have run on this installation in the last 30 days.");
+    }
+    let now = chrono::Utc::now();
+    let mut out = String::from(HEADER);
+    for row in rows {
+        let model = row
+            .model
+            .as_deref()
+            .filter(|model| !model.is_empty())
+            .unwrap_or("(default)");
+        let age = now
+            .signed_duration_since(row.last_run)
+            .to_std()
+            .map(format_duration_short)
+            .unwrap_or_else(|_| "0s".to_string());
+        out.push_str(&format!(
+            "\n- {}/{}: last used {} ago ({}), {} runs, last outcome: {}",
+            row.platform,
+            model,
+            age,
+            row.last_run.to_rfc3339(),
+            row.count,
+            row.last_outcome,
+        ));
+    }
+    out
+}
+
+/// CB43: lead a successful `agent_models` result with the recently-used
+/// section. Error results (unknown platform, unreachable catalogue) are left
+/// untouched — the section informs a model choice, and there is no choice
+/// on offer when the listing itself failed.
+fn prepend_recent_usage(result: &mut CallToolResult, section: &str) {
+    if section.is_empty() || result.is_error == Some(true) {
+        return;
+    }
+    let existing = result
+        .content
+        .first()
+        .and_then(|content| content.as_text().map(|text| text.text.clone()));
+    if let Some(existing) = existing {
+        if !result.content.is_empty() {
+            result.content[0] = Content::text(format!("{section}\n\n{existing}"));
+        }
+    }
+}
+
 /// The shared provenance/footer block for `agent_models`, used by both the
 /// models.dev and native-enumeration paths. States the cache's age and
 /// whether a refresh is due, not just its timestamp — and when the source was
@@ -10248,33 +10322,79 @@ fn loop_node_run_summary_json(
         .ok()
         .flatten()
         .map(|node| node.name);
+    // CB43: the pair resolved at dispatch. Keys are omitted (not null) when
+    // the run predates the recording, so old rows read exactly as before.
+    let mut executed = serde_json::Map::new();
+    if let Some(platform) = run.executed_platform.as_deref() {
+        executed.insert(
+            "platform".to_string(),
+            serde_json::Value::String(platform.to_string()),
+        );
+    }
+    if let Some(model) = run.executed_model.as_deref() {
+        executed.insert(
+            "model".to_string(),
+            serde_json::Value::String(model.to_string()),
+        );
+    }
     if compact {
         let spec_name = db
             .get_loop_spec(&run.spec_id)
             .ok()
             .flatten()
             .map(|s| s.name);
-        serde_json::json!({
-            "id": run.id,
-            "node_name": node_name,
-            "status": run.status.as_str(),
-            "iteration": run.iteration,
-            "spec_name": spec_name,
-            "started_at": run.started_at.to_rfc3339(),
-            "completed_at": run.completed_at.map(|value| value.to_rfc3339()),
-        })
+        let mut obj = serde_json::Map::from_iter([
+            ("id".to_string(), serde_json::json!(run.id)),
+            (
+                "node_name".to_string(),
+                node_name
+                    .map(serde_json::Value::String)
+                    .unwrap_or(serde_json::Value::Null),
+            ),
+            ("status".to_string(), serde_json::json!(run.status.as_str())),
+            ("iteration".to_string(), serde_json::json!(run.iteration)),
+            (
+                "spec_name".to_string(),
+                spec_name
+                    .map(serde_json::Value::String)
+                    .unwrap_or(serde_json::Value::Null),
+            ),
+            (
+                "started_at".to_string(),
+                serde_json::json!(run.started_at.to_rfc3339()),
+            ),
+            (
+                "completed_at".to_string(),
+                serde_json::json!(run.completed_at.map(|value| value.to_rfc3339())),
+            ),
+        ]);
+        obj.extend(executed);
+        serde_json::Value::Object(obj)
     } else {
-        serde_json::json!({
-            "id": run.id,
-            "spec_id": run.spec_id,
-            "node_id": run.node_id,
-            "node_name": node_name,
-            "status": run.status.as_str(),
-            "iteration": run.iteration,
-            "started_at": run.started_at.to_rfc3339(),
-            "completed_at": run.completed_at.map(|value| value.to_rfc3339()),
-            "session_id": run.session_id,
-        })
+        let mut obj = serde_json::Map::from_iter([
+            ("id".to_string(), serde_json::json!(run.id)),
+            ("spec_id".to_string(), serde_json::json!(run.spec_id)),
+            ("node_id".to_string(), serde_json::json!(run.node_id)),
+            (
+                "node_name".to_string(),
+                node_name
+                    .map(serde_json::Value::String)
+                    .unwrap_or(serde_json::Value::Null),
+            ),
+            ("status".to_string(), serde_json::json!(run.status.as_str())),
+            ("iteration".to_string(), serde_json::json!(run.iteration)),
+            (
+                "started_at".to_string(),
+                serde_json::json!(run.started_at.to_rfc3339()),
+            ),
+            (
+                "completed_at".to_string(),
+                serde_json::json!(run.completed_at.map(|value| value.to_rfc3339())),
+            ),
+            ("session_id".to_string(), serde_json::json!(run.session_id)),
+        ]);
+        obj.extend(executed);
+        serde_json::Value::Object(obj)
     }
 }
 
@@ -10285,20 +10405,52 @@ fn loop_node_run_summary_json(
 /// wrote verbatim otherwise, including the B19 `infra_attempt`/`infra_crash`
 /// markers a caller needs to tell an infra retry from a semantic failure.
 fn loop_node_run_detail_json(run: &LoopNodeRun, node_name: Option<&str>) -> serde_json::Value {
-    serde_json::json!({
-        "id": run.id,
-        "loop_id": run.loop_id,
-        "spec_id": run.spec_id,
-        "node_id": run.node_id,
-        "node_name": node_name,
-        "status": run.status.as_str(),
-        "iteration": run.iteration,
-        "input": run.input.as_ref().map(redact_sensitive_value),
-        "output": run.output.as_ref().map(redact_sensitive_value),
-        "started_at": run.started_at.to_rfc3339(),
-        "completed_at": run.completed_at.map(|value| value.to_rfc3339()),
-        "session_id": run.session_id,
-    })
+    let mut obj = serde_json::Map::from_iter([
+        ("id".to_string(), serde_json::json!(run.id)),
+        ("loop_id".to_string(), serde_json::json!(run.loop_id)),
+        ("spec_id".to_string(), serde_json::json!(run.spec_id)),
+        ("node_id".to_string(), serde_json::json!(run.node_id)),
+        ("node_name".to_string(), serde_json::json!(node_name)),
+        ("status".to_string(), serde_json::json!(run.status.as_str())),
+        ("iteration".to_string(), serde_json::json!(run.iteration)),
+        (
+            "input".to_string(),
+            run.input
+                .as_ref()
+                .map(redact_sensitive_value)
+                .unwrap_or(serde_json::Value::Null),
+        ),
+        (
+            "output".to_string(),
+            run.output
+                .as_ref()
+                .map(redact_sensitive_value)
+                .unwrap_or(serde_json::Value::Null),
+        ),
+        (
+            "started_at".to_string(),
+            serde_json::json!(run.started_at.to_rfc3339()),
+        ),
+        (
+            "completed_at".to_string(),
+            serde_json::json!(run.completed_at.map(|value| value.to_rfc3339())),
+        ),
+        ("session_id".to_string(), serde_json::json!(run.session_id)),
+    ]);
+    // CB43: omit (not null) when the run predates the recording.
+    if let Some(platform) = run.executed_platform.as_deref() {
+        obj.insert(
+            "platform".to_string(),
+            serde_json::Value::String(platform.to_string()),
+        );
+    }
+    if let Some(model) = run.executed_model.as_deref() {
+        obj.insert(
+            "model".to_string(),
+            serde_json::Value::String(model.to_string()),
+        );
+    }
+    serde_json::Value::Object(obj)
 }
 
 /// Secret-shaped substrings a node run's stored input/output can carry
@@ -11341,6 +11493,8 @@ mod tests {
             pid: None,
             boot_id: None,
             session_id: None,
+            executed_platform: None,
+            executed_model: None,
         })
         .unwrap();
 
@@ -11447,6 +11601,8 @@ mod tests {
             pid: None,
             boot_id: None,
             session_id: None,
+            executed_platform: None,
+            executed_model: None,
         })
         .unwrap();
 
@@ -12105,6 +12261,8 @@ mod tests {
             pid: None,
             boot_id: None,
             session_id: None,
+            executed_platform: None,
+            executed_model: None,
         }
     }
 
@@ -13666,6 +13824,8 @@ mod tests {
             pid: None,
             boot_id: None,
             session_id: None,
+            executed_platform: None,
+            executed_model: None,
         })
         .unwrap();
 
@@ -15223,6 +15383,8 @@ mod additional_tests {
             pid: None,
             boot_id: None,
             session_id: None,
+            executed_platform: None,
+            executed_model: None,
         }
     }
 
@@ -16610,6 +16772,8 @@ mod coverage_tests {
             pid: None,
             boot_id: None,
             session_id: None,
+            executed_platform: None,
+            executed_model: None,
         }
     }
 
@@ -16733,6 +16897,8 @@ mod coverage_tests {
             pid: None,
             boot_id: None,
             session_id: None,
+            executed_platform: None,
+            executed_model: None,
         };
         assert_eq!(
             super::loop_run_blocker(&run).as_deref(),
@@ -16756,6 +16922,8 @@ mod coverage_tests {
             pid: None,
             boot_id: None,
             session_id: None,
+            executed_platform: None,
+            executed_model: None,
         };
         assert!(super::loop_run_blocker(&run).is_none());
     }
@@ -16776,6 +16944,8 @@ mod coverage_tests {
             pid: None,
             boot_id: None,
             session_id: None,
+            executed_platform: None,
+            executed_model: None,
         };
         assert!(super::loop_run_blocker(&run).is_none());
     }
@@ -16796,6 +16966,8 @@ mod coverage_tests {
             pid: None,
             boot_id: None,
             session_id: None,
+            executed_platform: None,
+            executed_model: None,
         };
         assert!(super::loop_run_blocker(&run).is_none());
     }
@@ -16891,6 +17063,8 @@ mod coverage_tests {
             pid: None,
             boot_id: None,
             session_id: None,
+            executed_platform: None,
+            executed_model: None,
         };
         let json = super::loop_run_json(&run);
         assert_eq!(json["status"], "pass");
@@ -16915,6 +17089,8 @@ mod coverage_tests {
             pid: None,
             boot_id: None,
             session_id: None,
+            executed_platform: None,
+            executed_model: None,
         };
         let json = super::loop_run_json(&run);
         assert!(json["completed_at"].is_null());
@@ -16936,6 +17112,8 @@ mod coverage_tests {
             pid: None,
             boot_id: None,
             session_id: None,
+            executed_platform: None,
+            executed_model: None,
         };
         let json = super::loop_run_json(&run);
         assert_eq!(json["status"], "fail");
@@ -17094,6 +17272,8 @@ mod coverage_tests {
             completed_at: Some(chrono::Utc::now()),
             pid: Some(123),
             boot_id: None,
+            executed_platform: None,
+            executed_model: None,
         };
         let json = super::loop_completion_hook_run_json(&run);
         assert_eq!(json["id"], "chr1");
@@ -17115,6 +17295,8 @@ mod coverage_tests {
             completed_at: None,
             pid: None,
             boot_id: None,
+            executed_platform: None,
+            executed_model: None,
         };
         let json = super::loop_completion_hook_run_json(&run);
         assert!(json["completed_at"].is_null());
@@ -17928,6 +18110,124 @@ mod coverage_tests {
             full.get("spec_name").is_none(),
             "full mode does not carry spec_name"
         );
+    }
+
+    /// T3 (CB43): the recorded pair appears in both list modes; pre-migration
+    /// rows (NULL) omit the keys rather than emitting nulls.
+    #[test]
+    fn cb43_run_pair_appears_in_both_list_modes() {
+        let dir = tempdir().unwrap();
+        let db = Database::new(&dir.path().join("test.db")).unwrap();
+        db.insert_loop_spec(&standalone_spec("spec-1")).unwrap();
+        insert_test_node(&db, "node-1", "spec-1");
+        let mut run = loop_run_row("run-1", "loop-1", "spec-1", LoopRunStatus::Pass);
+        run.executed_platform = Some("opencode".to_string());
+        run.executed_model = Some("opencode/big-pickle".to_string());
+
+        for compact in [true, false] {
+            let json = loop_node_run_summary_json(&db, &run, compact);
+            assert_eq!(json["platform"], "opencode");
+            assert_eq!(json["model"], "opencode/big-pickle");
+        }
+
+        let detail = loop_node_run_detail_json(&run, Some("node-1"));
+        assert_eq!(detail["platform"], "opencode");
+        assert_eq!(detail["model"], "opencode/big-pickle");
+
+        // Legacy row: keys omitted, not null.
+        let legacy = loop_run_row("run-2", "loop-1", "spec-1", LoopRunStatus::Pass);
+        for compact in [true, false] {
+            let json = loop_node_run_summary_json(&db, &legacy, compact);
+            assert!(json.get("platform").is_none());
+            assert!(json.get("model").is_none());
+        }
+        let detail = loop_node_run_detail_json(&legacy, Some("node-1"));
+        assert!(detail.get("platform").is_none());
+        assert!(detail.get("model").is_none());
+    }
+
+    /// T4 (CB43): the recent section leads the output and carries last
+    /// outcome + frequency; an empty installation gets a one-line notice.
+    #[test]
+    fn cb43_recent_section_leads_with_last_outcome() {
+        use crate::db::loops::RecentModelUsage;
+
+        let now = chrono::Utc::now();
+        let rows = vec![
+            RecentModelUsage {
+                platform: "opencode".to_string(),
+                model: Some("opencode/big-pickle".to_string()),
+                last_run: now,
+                count: 12,
+                last_outcome: "pass".to_string(),
+            },
+            RecentModelUsage {
+                platform: "claude".to_string(),
+                model: None,
+                last_run: now - chrono::Duration::hours(2),
+                count: 40,
+                last_outcome: "timeout".to_string(),
+            },
+        ];
+        let section = format_recent_usage_section(&rows);
+        assert!(
+            section.starts_with("Recently used"),
+            "section must lead so truncation drops the catalogue tail, not the signal"
+        );
+        assert!(section.contains("opencode/big-pickle"));
+        assert!(section.contains("12 runs"));
+        assert!(section.contains("last outcome: pass"));
+        // A heavily-used model whose last run timed out must not read as a
+        // recommendation: the outcome, not the count, is the honest signal.
+        assert!(section.contains("claude/(default)"));
+        assert!(section.contains("last outcome: timeout"));
+
+        let empty = format_recent_usage_section(&[]);
+        assert!(empty.starts_with("Recently used"));
+        assert!(empty.contains("No models have run"));
+    }
+
+    /// T4/T11 (CB43): prepending puts the section first on success, leaves
+    /// errors alone, and stays inside budget.
+    #[test]
+    fn cb43_prepend_recent_usage_first_on_success_only() {
+        let section = "Recently used on this machine (last 30 days):\n- a/b: x".to_string();
+
+        let mut ok = CallToolResult::success(vec![Content::text("Source: catalogue".to_string())]);
+        prepend_recent_usage(&mut ok, &section);
+        let text = ok.content[0].as_text().unwrap().text.clone();
+        assert!(text.starts_with("Recently used"));
+        assert!(text.contains("Source: catalogue"));
+
+        let mut err = error_result("No known model providers are mapped for platform 'x'.");
+        let before = format!("{:?}", err.content);
+        prepend_recent_usage(&mut err, &section);
+        assert_eq!(format!("{:?}", err.content), before);
+
+        let mut ok2 = CallToolResult::success(vec![Content::text("Source: catalogue".to_string())]);
+        prepend_recent_usage(&mut ok2, "");
+        assert_eq!(ok2.content[0].as_text().unwrap().text, "Source: catalogue");
+    }
+
+    /// T11 (CB43): a full fifteen-pair section is a couple of KB at most —
+    /// the header survives catalogue truncation.
+    #[test]
+    fn cb43_full_section_stays_inside_budget() {
+        use crate::db::loops::RecentModelUsage;
+
+        let now = chrono::Utc::now();
+        let rows: Vec<RecentModelUsage> = (0..15)
+            .map(|i| RecentModelUsage {
+                platform: "opencode".to_string(),
+                model: Some(format!("org/model-{i:02}-with-a-long-name")),
+                last_run: now - chrono::Duration::minutes(i),
+                count: 100,
+                last_outcome: "pass".to_string(),
+            })
+            .collect();
+        let section = format_recent_usage_section(&rows);
+        assert!(section.len() < 8192, "section was {} bytes", section.len());
+        assert!(section.starts_with("Recently used"));
     }
 }
 
@@ -19275,6 +19575,8 @@ mod endpoint_tests {
             finished_at: None,
             exit_code: None,
             timeout_at: None,
+            executed_platform: None,
+            executed_model: None,
         }
     }
 
@@ -22587,6 +22889,8 @@ mod endpoint_tests {
             pid: None,
             boot_id: None,
             session_id: Some("ses_test_123".to_string()),
+            executed_platform: None,
+            executed_model: None,
         };
         db.insert_loop_run(&run).unwrap();
         run
@@ -22879,6 +23183,8 @@ mod endpoint_tests {
             pid: None,
             boot_id: None,
             session_id: None,
+            executed_platform: None,
+            executed_model: None,
         };
         db.insert_loop_run(&run).unwrap();
         run

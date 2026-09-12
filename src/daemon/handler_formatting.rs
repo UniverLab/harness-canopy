@@ -462,6 +462,8 @@ mod formatting_unit_tests {
             finished_at: None,
             exit_code: None,
             timeout_at: None,
+            executed_platform: None,
+            executed_model: None,
         }
     }
 

@@ -2213,6 +2213,8 @@ mod tests {
             pid: None,
             boot_id: None,
             session_id: None,
+            executed_platform: None,
+            executed_model: None,
         })
         .unwrap();
     }

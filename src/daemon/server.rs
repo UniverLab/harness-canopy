@@ -1435,6 +1435,8 @@ mod stdio_startup_reconciliation_tests {
             pid: None,
             boot_id: None,
             session_id: None,
+            executed_platform: None,
+            executed_model: None,
         };
 
         db.insert_loop(&lp).unwrap();

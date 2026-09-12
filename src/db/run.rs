@@ -33,7 +33,7 @@ impl RunRepository for Database {
         // active run" and both starting an execution.
         let active = {
             let mut stmt = conn.prepare(
-                "SELECT id, background_agent_id, status, trigger_type, summary, started_at, finished_at, exit_code, timeout_at
+                "SELECT id, background_agent_id, status, trigger_type, summary, started_at, finished_at, exit_code, timeout_at, executed_platform, executed_model
                  FROM runs WHERE background_agent_id = ?1 AND status IN ('pending', 'in_progress') LIMIT 1",
             )?;
             stmt.query_row(params![&run.background_agent_id], |row| {
@@ -47,6 +47,8 @@ impl RunRepository for Database {
                     finished_at_str: row.get(6)?,
                     exit_code: row.get(7)?,
                     timeout_at_str: row.get(8)?,
+                    executed_platform: row.get(9)?,
+                    executed_model: row.get(10)?,
                 })
             })
             .optional()?
@@ -68,7 +70,7 @@ impl RunRepository for Database {
             .lock()
             .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, background_agent_id, status, trigger_type, summary, started_at, finished_at, exit_code, timeout_at
+            "SELECT id, background_agent_id, status, trigger_type, summary, started_at, finished_at, exit_code, timeout_at, executed_platform, executed_model
              FROM runs WHERE background_agent_id = ?1 ORDER BY started_at DESC LIMIT ?2",
         )?;
 
@@ -83,6 +85,8 @@ impl RunRepository for Database {
                 finished_at_str: row.get(6)?,
                 exit_code: row.get(7)?,
                 timeout_at_str: row.get(8)?,
+                executed_platform: row.get(9)?,
+                executed_model: row.get(10)?,
             })
         })?;
 
@@ -99,7 +103,7 @@ impl RunRepository for Database {
             .lock()
             .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, background_agent_id, status, trigger_type, summary, started_at, finished_at, exit_code, timeout_at
+            "SELECT id, background_agent_id, status, trigger_type, summary, started_at, finished_at, exit_code, timeout_at, executed_platform, executed_model
              FROM runs ORDER BY started_at DESC LIMIT ?1",
         )?;
 
@@ -114,6 +118,8 @@ impl RunRepository for Database {
                 finished_at_str: row.get(6)?,
                 exit_code: row.get(7)?,
                 timeout_at_str: row.get(8)?,
+                executed_platform: row.get(9)?,
+                executed_model: row.get(10)?,
             })
         })?;
 
@@ -130,7 +136,7 @@ impl RunRepository for Database {
             .lock()
             .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, background_agent_id, status, trigger_type, summary, started_at, finished_at, exit_code, timeout_at
+            "SELECT id, background_agent_id, status, trigger_type, summary, started_at, finished_at, exit_code, timeout_at, executed_platform, executed_model
              FROM runs WHERE background_agent_id = ?1 AND status IN ('pending', 'in_progress') LIMIT 1",
         )?;
 
@@ -146,6 +152,8 @@ impl RunRepository for Database {
                     finished_at_str: row.get(6)?,
                     exit_code: row.get(7)?,
                     timeout_at_str: row.get(8)?,
+                    executed_platform: row.get(9)?,
+                    executed_model: row.get(10)?,
                 })
             })
             .optional()?;
@@ -203,7 +211,7 @@ impl RunRepository for Database {
             .lock()
             .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, background_agent_id, status, trigger_type, summary, started_at, finished_at, exit_code, timeout_at
+            "SELECT id, background_agent_id, status, trigger_type, summary, started_at, finished_at, exit_code, timeout_at, executed_platform, executed_model
              FROM runs WHERE id = ?1",
         )?;
 
@@ -219,6 +227,8 @@ impl RunRepository for Database {
                     finished_at_str: row.get(6)?,
                     exit_code: row.get(7)?,
                     timeout_at_str: row.get(8)?,
+                    executed_platform: row.get(9)?,
+                    executed_model: row.get(10)?,
                 })
             })
             .optional()?;
@@ -285,8 +295,8 @@ impl Database {
 /// and `try_start_run` so the INSERT itself stays single-sourced.
 fn insert_run_row(conn: &rusqlite::Connection, run: &RunLog) -> Result<()> {
     conn.execute(
-        "INSERT INTO runs (id, background_agent_id, status, trigger_type, summary, started_at, finished_at, exit_code, timeout_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        "INSERT INTO runs (id, background_agent_id, status, trigger_type, summary, started_at, finished_at, exit_code, timeout_at, executed_platform, executed_model)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             &run.id,
             &run.background_agent_id,
@@ -297,6 +307,8 @@ fn insert_run_row(conn: &rusqlite::Connection, run: &RunLog) -> Result<()> {
             run.finished_at.map(|t| t.to_rfc3339()),
             run.exit_code,
             run.timeout_at.map(|t| t.to_rfc3339()),
+            &run.executed_platform,
+            &run.executed_model,
         ],
     )?;
     Ok(())
@@ -312,6 +324,8 @@ struct RunRow {
     finished_at_str: Option<String>,
     exit_code: Option<i32>,
     timeout_at_str: Option<String>,
+    executed_platform: Option<String>,
+    executed_model: Option<String>,
 }
 
 impl RunRow {
@@ -339,6 +353,8 @@ impl RunRow {
             finished_at,
             exit_code: self.exit_code,
             timeout_at,
+            executed_platform: self.executed_platform,
+            executed_model: self.executed_model,
         })
     }
 }
@@ -367,6 +383,8 @@ mod tests {
             finished_at: None,
             exit_code: None,
             timeout_at: None,
+            executed_platform: None,
+            executed_model: None,
         }
     }
 

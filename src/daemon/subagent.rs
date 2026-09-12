@@ -166,6 +166,15 @@ pub async fn spawn_subagent(
     let cli = Cli::resolve(Some(platform_name)).map_err(|e| anyhow::anyhow!(e))?;
     let strategy = cli.strategy();
     let effort_not_applied = resolve_effort_for_spawn(&strategy, platform_name, effort)?;
+    // CB43: `subagent_runs.model` is the pair resolved at dispatch — the
+    // model actually handed to the CLI argv, not the request when the
+    // platform's `model_flag` cannot select one.
+    let resolved_model =
+        if crate::domain::cli_config::model_flag_selects_model(strategy.model_flag.as_deref()) {
+            model
+        } else {
+            None
+        };
 
     let home =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
@@ -183,7 +192,7 @@ pub async fn spawn_subagent(
     db.insert_subagent_run(
         &run_id,
         platform_name,
-        model,
+        resolved_model,
         prompt,
         workdir,
         &started_at,
@@ -281,6 +290,13 @@ pub async fn spawn_subagent_blocking(
     let cli = Cli::resolve(Some(platform_name)).map_err(|e| anyhow::anyhow!(e))?;
     let strategy = cli.strategy();
     let effort_not_applied = resolve_effort_for_spawn(&strategy, platform_name, effort)?;
+    // CB43: see `spawn_subagent` — the stored model is the resolved one.
+    let resolved_model =
+        if crate::domain::cli_config::model_flag_selects_model(strategy.model_flag.as_deref()) {
+            model
+        } else {
+            None
+        };
 
     let home =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
@@ -299,7 +315,7 @@ pub async fn spawn_subagent_blocking(
     db.insert_subagent_run(
         &run_id,
         platform_name,
-        model,
+        resolved_model,
         prompt,
         workdir,
         &started_at,

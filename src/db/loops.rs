@@ -13,6 +13,17 @@ use crate::domain::loops::{
 };
 use crate::domain::models::Trigger;
 
+/// CB43: one platform+model pair this installation has run in the window —
+/// when it last ran, how many times, and how the most recent run ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecentModelUsage {
+    pub platform: String,
+    pub model: Option<String>,
+    pub last_run: DateTime<Utc>,
+    pub count: i64,
+    pub last_outcome: String,
+}
+
 impl Database {
     pub fn delete_loop(&self, loop_id: &str) -> Result<()> {
         let conn = self
@@ -1381,8 +1392,8 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         conn.execute(
-            "INSERT INTO loop_runs (id, loop_id, spec_id, node_id, status, input, output, started_at, completed_at, iteration, pid, boot_id, session_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            "INSERT INTO loop_runs (id, loop_id, spec_id, node_id, status, input, output, started_at, completed_at, iteration, pid, boot_id, session_id, executed_platform, executed_model)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 &run.id,
                 &run.loop_id,
@@ -1403,6 +1414,8 @@ impl Database {
                 run.pid,
                 &run.boot_id,
                 &run.session_id,
+                &run.executed_platform,
+                &run.executed_model,
             ],
         )?;
         Ok(())
@@ -1460,7 +1473,7 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, loop_id, spec_id, node_id, status, input, output, started_at, completed_at, iteration, pid, boot_id, session_id
+            "SELECT id, loop_id, spec_id, node_id, status, input, output, started_at, completed_at, iteration, pid, boot_id, session_id, executed_platform, executed_model
              FROM loop_runs WHERE status = 'running'",
         )?;
         let rows = stmt.query_map(params![], map_loop_run_row)?;
@@ -1474,7 +1487,7 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, loop_id, spec_id, node_id, status, input, output, started_at, completed_at, iteration, pid, boot_id, session_id
+            "SELECT id, loop_id, spec_id, node_id, status, input, output, started_at, completed_at, iteration, pid, boot_id, session_id, executed_platform, executed_model
              FROM loop_runs WHERE spec_id = ?1 ORDER BY started_at ASC, iteration ASC",
         )?;
         let rows = stmt.query_map(params![spec_id], map_loop_run_row)?;
@@ -1495,7 +1508,7 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, loop_id, spec_id, node_id, status, input, output, started_at, completed_at, iteration, pid, boot_id, session_id
+            "SELECT id, loop_id, spec_id, node_id, status, input, output, started_at, completed_at, iteration, pid, boot_id, session_id, executed_platform, executed_model
              FROM loop_runs WHERE loop_id = ?1 ORDER BY started_at ASC, iteration ASC",
         )?;
         let rows = stmt.query_map(params![loop_id], map_loop_run_row)?;
@@ -1533,7 +1546,7 @@ impl Database {
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
 
         let mut sql = String::from(
-            "SELECT id, loop_id, spec_id, node_id, status, input, output, started_at, completed_at, iteration, pid, boot_id, session_id
+            "SELECT id, loop_id, spec_id, node_id, status, input, output, started_at, completed_at, iteration, pid, boot_id, session_id, executed_platform, executed_model
              FROM loop_runs WHERE loop_id = ?",
         );
         let mut query_params: Vec<&dyn rusqlite::ToSql> = vec![&loop_id];
@@ -1582,6 +1595,149 @@ impl Database {
             .map_err(Into::into)
     }
 
+    /// CB43: platform+model pairs this installation has actually run since
+    /// `since`, across every run table (loop node runs, hook runs,
+    /// background agent runs, subagent runs). One lock acquisition; each
+    /// branch is bounded by its `started_at` predicate. Ordered by most
+    /// recent use, capped at `limit`. Rows with no recorded pair
+    /// (`executed_platform IS NULL` — every run predating CB43) are omitted,
+    /// never guessed at. Never reads a node's current config.
+    pub fn list_recent_platform_model_usage(
+        &self,
+        since: DateTime<Utc>,
+        limit: i64,
+    ) -> Result<Vec<RecentModelUsage>> {
+        use std::collections::HashMap;
+
+        struct Sample {
+            started_at: DateTime<Utc>,
+            status: String,
+        }
+
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+
+        let since_epoch = since.timestamp();
+        let mut grouped: HashMap<(String, Option<String>), Vec<Sample>> = HashMap::new();
+
+        // loop_runs + loop_completion_hook_runs store epoch INTEGERs.
+        for table in ["loop_runs", "loop_completion_hook_runs"] {
+            let sql = format!(
+                "SELECT executed_platform, executed_model, status, started_at FROM {table} \
+                 WHERE executed_platform IS NOT NULL AND started_at >= ?1"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(params![since_epoch], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })?;
+            for row in rows {
+                let (platform, model, status, started_at) = row?;
+                let started_at = from_timestamp(started_at)?;
+                grouped
+                    .entry((platform, model))
+                    .or_default()
+                    .push(Sample { started_at, status });
+            }
+        }
+
+        // runs + subagent_runs store RFC3339 TEXT timestamps.
+        {
+            let mut stmt = conn.prepare(
+                "SELECT executed_platform, executed_model, status, started_at FROM runs \
+                 WHERE executed_platform IS NOT NULL",
+            )?;
+            let rows = stmt.query_map(params![], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?;
+            for row in rows {
+                let (platform, model, status, started_at): (
+                    String,
+                    Option<String>,
+                    String,
+                    String,
+                ) = row?;
+                let Ok(started_at) = chrono::DateTime::parse_from_rfc3339(&started_at)
+                    .map(|dt| dt.with_timezone(&Utc))
+                else {
+                    continue;
+                };
+                if started_at < since {
+                    continue;
+                }
+                grouped
+                    .entry((platform, model))
+                    .or_default()
+                    .push(Sample { started_at, status });
+            }
+        }
+
+        // CB43: `subagent_runs.platform`/`model` are the pair resolved at
+        // dispatch (see schema comment); `platform` is NOT NULL by schema so
+        // every row in the window counts. NULL model = the CLI's default.
+        {
+            let mut stmt =
+                conn.prepare("SELECT platform, model, status, started_at FROM subagent_runs")?;
+            let rows = stmt.query_map(params![], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?;
+            for row in rows {
+                let (platform, model, status, started_at): (
+                    String,
+                    Option<String>,
+                    String,
+                    String,
+                ) = row?;
+                let Ok(started_at) = chrono::DateTime::parse_from_rfc3339(&started_at)
+                    .map(|dt| dt.with_timezone(&Utc))
+                else {
+                    continue;
+                };
+                if started_at < since {
+                    continue;
+                }
+                grouped
+                    .entry((platform, model))
+                    .or_default()
+                    .push(Sample { started_at, status });
+            }
+        }
+
+        let mut out: Vec<RecentModelUsage> = grouped
+            .into_iter()
+            .map(|((platform, model), mut samples)| {
+                samples.sort_by_key(|sample| std::cmp::Reverse(sample.started_at));
+                let last = &samples[0];
+                RecentModelUsage {
+                    last_run: last.started_at,
+                    count: samples.len() as i64,
+                    last_outcome: last.status.clone(),
+                    platform,
+                    model,
+                }
+            })
+            .collect();
+        out.sort_by_key(|usage| std::cmp::Reverse(usage.last_run));
+        out.truncate(limit.max(0) as usize);
+        Ok(out)
+    }
+
     /// Most recent `loop_runs.started_at` per loop, across every loop in a
     /// single query — the sidebar's "last activity" signal. Unlike
     /// [`Self::list_loop_specs`] (a loop's own bound specs, empty for a
@@ -1616,7 +1772,7 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, loop_id, spec_id, node_id, status, input, output, started_at, completed_at, iteration, pid, boot_id, session_id
+            "SELECT id, loop_id, spec_id, node_id, status, input, output, started_at, completed_at, iteration, pid, boot_id, session_id, executed_platform, executed_model
              FROM loop_runs WHERE id = ?1",
         )?;
 
@@ -1631,7 +1787,7 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, loop_id, spec_id, node_id, status, input, output, started_at, completed_at, iteration, pid, boot_id, session_id
+            "SELECT id, loop_id, spec_id, node_id, status, input, output, started_at, completed_at, iteration, pid, boot_id, session_id, executed_platform, executed_model
              FROM loop_runs
              WHERE node_id = ?1 AND status = 'running'
              ORDER BY started_at DESC
@@ -1886,8 +2042,8 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         conn.execute(
-            "INSERT INTO loop_completion_hook_runs (id, loop_id, status, output, summary, started_at, completed_at, pid, boot_id, event, hook_index)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            "INSERT INTO loop_completion_hook_runs (id, loop_id, status, output, summary, started_at, completed_at, pid, boot_id, event, hook_index, executed_platform, executed_model)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 &run.id,
                 &run.loop_id,
@@ -1900,6 +2056,8 @@ impl Database {
                 &run.boot_id,
                 run.event.as_str(),
                 run.hook_index,
+                &run.executed_platform,
+                &run.executed_model,
             ],
         )?;
         Ok(())
@@ -1966,7 +2124,7 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, loop_id, status, output, summary, started_at, completed_at, pid, boot_id, event, hook_index
+            "SELECT id, loop_id, status, output, summary, started_at, completed_at, pid, boot_id, event, hook_index, executed_platform, executed_model
              FROM loop_completion_hook_runs WHERE loop_id = ?1 ORDER BY started_at ASC, rowid ASC",
         )?;
         let rows = stmt.query_map(params![loop_id], map_loop_completion_hook_run_row)?;
@@ -2048,7 +2206,7 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, loop_id, spec_id, node_id, status, input, output, started_at, completed_at, iteration, pid, boot_id, session_id
+            "SELECT id, loop_id, spec_id, node_id, status, input, output, started_at, completed_at, iteration, pid, boot_id, session_id, executed_platform, executed_model
              FROM loop_runs WHERE loop_id = ?1 AND status = 'running'",
         )?;
         let rows = stmt.query_map(params![loop_id], map_loop_run_row)?;
@@ -2132,7 +2290,7 @@ impl Database {
         for lp in &orphaned {
             let dangling_runs: Vec<LoopNodeRun> = {
                 let mut stmt = tx.prepare(
-                    "SELECT id, loop_id, spec_id, node_id, status, input, output, started_at, completed_at, iteration, pid, boot_id, session_id
+                    "SELECT id, loop_id, spec_id, node_id, status, input, output, started_at, completed_at, iteration, pid, boot_id, session_id, executed_platform, executed_model
                      FROM loop_runs WHERE loop_id = ?1 AND status = 'running'",
                 )?;
                 let rows = stmt.query_map(params![lp.id], map_loop_run_row)?;
@@ -2738,7 +2896,7 @@ fn active_loop_run_for_spec_locked(
     spec_id: &str,
 ) -> rusqlite::Result<Option<LoopNodeRun>> {
     let mut stmt = conn.prepare(
-        "SELECT id, loop_id, spec_id, node_id, status, input, output, started_at, completed_at, iteration, pid, boot_id, session_id
+        "SELECT id, loop_id, spec_id, node_id, status, input, output, started_at, completed_at, iteration, pid, boot_id, session_id, executed_platform, executed_model
          FROM loop_runs
          WHERE spec_id = ?1 AND status = 'running'
          ORDER BY started_at DESC
@@ -2774,6 +2932,8 @@ fn map_loop_run_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LoopNodeRun> {
         pid: row.get(10)?,
         boot_id: row.get(11)?,
         session_id: row.get(12)?,
+        executed_platform: row.get(13)?,
+        executed_model: row.get(14)?,
     })
 }
 
@@ -2810,6 +2970,8 @@ fn map_loop_completion_hook_run_row(
             .transpose()?,
         pid: row.get(7)?,
         boot_id: row.get(8)?,
+        executed_platform: row.get(11)?,
+        executed_model: row.get(12)?,
     })
 }
 
@@ -3302,6 +3464,8 @@ mod tests {
             pid: None,
             boot_id: None,
             session_id: None,
+            executed_platform: None,
+            executed_model: None,
         })
         .unwrap();
     }

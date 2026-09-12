@@ -793,6 +793,10 @@ impl LoopEngine {
             // to resolve below still shows up in `loop_get`/`canopy loop info`
             // as a failed firing, rather than silently vanishing.
             let run_id = uuid::Uuid::new_v4().to_string();
+            // CB43: agent hooks record their resolved pair; command,
+            // interactive and loop hooks dispatch no model (None, None).
+            let (executed_platform, executed_model) =
+                executed_pair_for_platform_model(hook.platform.as_deref(), hook.model.as_deref());
             if let Err(error) = self
                 .db
                 .insert_loop_completion_hook_run(&LoopCompletionHookRun {
@@ -807,6 +811,8 @@ impl LoopEngine {
                     completed_at: None,
                     pid: None,
                     boot_id: None,
+                    executed_platform,
+                    executed_model,
                 })
             {
                 tracing::warn!(
@@ -1927,6 +1933,9 @@ impl LoopEngine {
                         }
                     }
                     let mut run_id = uuid::Uuid::new_v4().to_string();
+                    // CB43: record the pair resolved at dispatch, on the row
+                    // itself — never re-derived from the node config later.
+                    let (executed_platform, executed_model) = executed_pair_for_node(node);
                     self.db.insert_loop_run(&LoopNodeRun {
                         id: run_id.clone(),
                         loop_id: lp.id.clone(),
@@ -1941,6 +1950,8 @@ impl LoopEngine {
                         pid: None,
                         boot_id: crate::system::boot_id(),
                         session_id: None,
+                        executed_platform,
+                        executed_model,
                     })?;
 
                     {
@@ -2664,6 +2675,11 @@ impl LoopEngine {
                 .cloned()
                 .ok_or_else(|| anyhow!("Ensemble member node '{}' not found.", member.node_id))?;
             let run_id = uuid::Uuid::new_v4().to_string();
+            // CB43: each member row carries its own resolved pair.
+            let (executed_platform, executed_model) = executed_pair_for_platform_model(
+                Some(member.platform.as_str()),
+                member.model.as_deref(),
+            );
             self.db.insert_loop_run(&LoopNodeRun {
                 id: run_id.clone(),
                 loop_id: lp.id.clone(),
@@ -2678,6 +2694,8 @@ impl LoopEngine {
                 pid: None,
                 boot_id: crate::system::boot_id(),
                 session_id: None,
+                executed_platform,
+                executed_model,
             })?;
 
             {
@@ -2960,7 +2978,10 @@ impl LoopEngine {
             iteration: iteration as i64,
             pid: None,
             boot_id: crate::system::boot_id(),
+            // CB43: quorum/join rows dispatch no model — no pair.
             session_id: None,
+            executed_platform: None,
+            executed_model: None,
         })?;
 
         Ok(execution)
@@ -2988,6 +3009,8 @@ impl LoopEngine {
         all_node_names: &[String],
     ) -> Result<(NodeExecution, bool)> {
         let run_id = uuid::Uuid::new_v4().to_string();
+        // CB43: member run — resolved from the node config at dispatch.
+        let (executed_platform, executed_model) = executed_pair_for_node(node);
         self.db.insert_loop_run(&LoopNodeRun {
             id: run_id.clone(),
             loop_id: lp.id.clone(),
@@ -3002,6 +3025,8 @@ impl LoopEngine {
             pid: None,
             boot_id: crate::system::boot_id(),
             session_id: None,
+            executed_platform,
+            executed_model,
         })?;
 
         let db = Arc::clone(&self.db);
@@ -3266,7 +3291,10 @@ impl LoopEngine {
                     iteration: iteration as i64,
                     pid: None,
                     boot_id: crate::system::boot_id(),
+                    // CB43: quorum/join rows dispatch no model — no pair.
                     session_id: None,
+                    executed_platform: None,
+                    executed_model: None,
                 })?;
 
                 return Ok(join_execution);
@@ -3324,7 +3352,10 @@ impl LoopEngine {
             iteration: iteration as i64,
             pid: None,
             boot_id: crate::system::boot_id(),
+            // CB43: quorum/join rows dispatch no model — no pair.
             session_id: None,
+            executed_platform: None,
+            executed_model: None,
         })?;
 
         Ok(execution)
@@ -3521,7 +3552,10 @@ impl LoopEngine {
                 iteration: iteration as i64,
                 pid: None,
                 boot_id: crate::system::boot_id(),
+                // CB43: quorum/join rows dispatch no model — no pair.
                 session_id: None,
+                executed_platform: None,
+                executed_model: None,
             })?;
 
             return Ok(join_execution);
@@ -3574,7 +3608,10 @@ impl LoopEngine {
             iteration: iteration as i64,
             pid: None,
             boot_id: crate::system::boot_id(),
+            // CB43: quorum/join rows dispatch no model — no pair.
             session_id: None,
+            executed_platform: None,
+            executed_model: None,
         })?;
 
         Ok(execution)
@@ -4136,6 +4173,16 @@ async fn begin_infra_retry(
     ))
     .await;
     let run_id = uuid::Uuid::new_v4().to_string();
+    // CB43: the retry is the same dispatch as the crashed attempt — carry
+    // its recorded pair (re-resolve from config only if the original has none,
+    // e.g. a pre-migration row).
+    let (executed_platform, executed_model) = db
+        .get_loop_run(crashed_run_id)
+        .ok()
+        .flatten()
+        .map(|run| (run.executed_platform, run.executed_model))
+        .filter(|(platform, _)| platform.is_some())
+        .unwrap_or_else(|| executed_pair_for_node(node));
     db.insert_loop_run(&LoopNodeRun {
         id: run_id.clone(),
         loop_id: lp.id.clone(),
@@ -4150,6 +4197,8 @@ async fn begin_infra_retry(
         pid: None,
         boot_id: crate::system::boot_id(),
         session_id: None,
+        executed_platform,
+        executed_model,
     })?;
     Ok(run_id)
 }
@@ -4939,6 +4988,75 @@ fn model_notice(
         model,
     )
     .map(serde_json::Value::from)
+}
+
+/// CB43: the model string actually handed to the CLI argv — `None` when no
+/// model was requested, blank, or the platform's `model_flag` cannot select
+/// one. This is the stored `executed_model`, never the requested value when
+/// it was not applied.
+fn resolved_model_for_run(model_flag: Option<&str>, model: Option<&str>) -> Option<String> {
+    if !crate::domain::cli_config::model_flag_selects_model(model_flag) {
+        return None;
+    }
+    model
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(str::to_string)
+}
+
+/// CB43: the platform+model pair resolved at dispatch for a node run —
+/// recorded on the run row itself so readers never join to the node's
+/// current config. `Cli::resolve` failure (unknown platform) stores the
+/// configured values as-is rather than dropping them. Check/gate nodes
+/// carry no platform and record `(None, None)`.
+fn executed_pair_for_node(node: &LoopNode) -> (Option<String>, Option<String>) {
+    let platform = node
+        .config
+        .get("platform")
+        .or_else(|| node.config.get("cli"))
+        .and_then(Value::as_str);
+    let model = node.config.get("model").and_then(Value::as_str);
+    executed_pair_for_platform_model(platform, model)
+}
+
+/// CB43: same as [`executed_pair_for_node`] for ensemble members and hooks,
+/// whose platform/model live outside a node config.
+///
+/// Never panics: an unknown platform (no registry entry) stores the
+/// requested model as-is rather than dropping it — the record is what was
+/// handed to dispatch, and the engine must not invent a gate it cannot see.
+fn executed_pair_for_platform_model(
+    platform: Option<&str>,
+    model: Option<&str>,
+) -> (Option<String>, Option<String>) {
+    let platform = platform
+        .map(str::trim)
+        .filter(|platform| !platform.is_empty())
+        .map(str::to_string);
+    if platform.is_none() {
+        return (None, None);
+    }
+    let trimmed_model = model
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(str::to_string);
+    let flag = platform.as_deref().and_then(cli_model_flag);
+    match flag {
+        Some(flag) => (
+            platform,
+            resolved_model_for_run(flag.as_deref(), trimmed_model.as_deref()),
+        ),
+        None => (platform, trimmed_model),
+    }
+}
+
+/// CB43: the registry's `model_flag` for `platform`, without panicking
+/// (unlike `Cli::strategy`). `None` means unknown — no home directory or no
+/// registry entry — and the caller stores the model as-is.
+fn cli_model_flag(platform: &str) -> Option<Option<String>> {
+    let home = dirs::home_dir()?;
+    let config = crate::domain::canopy_config::CanopyConfig::load(&home.join(".canopy"));
+    config.get_cli(platform).map(|cli| cli.model_flag.clone())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -8861,6 +8979,8 @@ mod tests {
             pid: None,
             boot_id: None,
             session_id: None,
+            executed_platform: None,
+            executed_model: None,
         }];
 
         let (cursor, node_outputs, resume_previous_output, iterations) =
@@ -8935,6 +9055,8 @@ mod tests {
                 pid: None,
                 boot_id: None,
                 session_id: None,
+                executed_platform: None,
+                executed_model: None,
             })
             .collect();
 
@@ -9685,6 +9807,8 @@ mod tests {
             pid: None,
             boot_id: None,
             session_id: None,
+            executed_platform: None,
+            executed_model: None,
         })
         .unwrap();
         node
@@ -10856,6 +10980,8 @@ echo done
             pid: None,
             boot_id: None,
             session_id: None,
+            executed_platform: None,
+            executed_model: None,
         };
         assert!(
             is_infra_crash(&node, &execution, &run, 0, 3, 60),
@@ -11011,6 +11137,58 @@ echo done
         .unwrap();
 
         assert!(execution.output.get("model_not_applied").is_none());
+    }
+
+    /// CB43 (T1/T2): the stored `executed_model` is what the CLI argv would
+    /// receive — trimmed when selectable, `None` when the platform cannot
+    /// select a model or none was requested. A test that stored the raw
+    /// request would fail the blank-flag case below.
+    #[test]
+    fn cb43_resolved_model_for_run_gates_on_model_flag() {
+        assert_eq!(
+            resolved_model_for_run(Some("--model"), Some("opencode/big-pickle")),
+            Some("opencode/big-pickle".to_string())
+        );
+        assert_eq!(
+            resolved_model_for_run(Some("--model"), Some("  spaced  ")),
+            Some("spaced".to_string())
+        );
+        // Blank/None flag (antigravity shape): the request is NOT stored.
+        assert_eq!(resolved_model_for_run(Some(""), Some("m")), None);
+        assert_eq!(resolved_model_for_run(Some("   "), Some("m")), None);
+        assert_eq!(resolved_model_for_run(None, Some("m")), None);
+        // No model requested: nothing to store regardless of flag.
+        assert_eq!(resolved_model_for_run(Some("--model"), None), None);
+        assert_eq!(resolved_model_for_run(Some("--model"), Some("  ")), None);
+    }
+
+    /// CB43: node dispatch resolves the pair without panicking, even for a
+    /// platform with no registry entry (stored as-is), and yields `(None,
+    /// None)` for nodes that dispatch no model.
+    #[test]
+    fn cb43_executed_pair_for_node_never_panics_or_invents() {
+        let mut node = sample_agent_node();
+        node.config = serde_json::json!({
+            "platform": "cb43-unknown-platform",
+            "model": "some-model",
+        });
+        let (platform, model) = executed_pair_for_node(&node);
+        assert_eq!(platform.as_deref(), Some("cb43-unknown-platform"));
+        assert_eq!(model.as_deref(), Some("some-model"));
+
+        node.config = serde_json::json!({"command": "true"});
+        assert_eq!(
+            executed_pair_for_node(&node),
+            (None, None),
+            "a check node dispatches no model"
+        );
+
+        node.config = serde_json::json!({"platform": "  ", "model": "m"});
+        assert_eq!(
+            executed_pair_for_node(&node),
+            (None, None),
+            "a blank platform is no platform"
+        );
     }
 
     /// C3: the 2026-08-13 `gitkit-composition` incident, reproduced with the
@@ -11300,6 +11478,8 @@ echo done
             pid: None,
             boot_id: None,
             session_id: None,
+            executed_platform: None,
+            executed_model: None,
         };
         assert!(
             is_infra_crash(&node, &execution, &run, 0, 3, 60),
@@ -11490,6 +11670,8 @@ echo done
             pid: None,
             boot_id: None,
             session_id: None,
+            executed_platform: None,
+            executed_model: None,
         };
         assert!(
             is_infra_crash(&node, &execution, &run, 0, 3, 60),
@@ -11545,6 +11727,8 @@ echo done
             pid: None,
             boot_id: None,
             session_id: None,
+            executed_platform: None,
+            executed_model: None,
         };
         assert!(
             !is_infra_crash(&node, &execution, &run, 0, 3, 60),
@@ -11616,6 +11800,8 @@ echo done
             pid: None,
             boot_id: None,
             session_id: None,
+            executed_platform: None,
+            executed_model: None,
         };
         assert!(
             is_infra_crash(&node, &execution, &run, 0, 3, 60),
@@ -12479,6 +12665,8 @@ echo done
             pid: None,
             boot_id: None,
             session_id: None,
+            executed_platform: None,
+            executed_model: None,
         })
         .unwrap();
 
@@ -13794,6 +13982,8 @@ echo done
             pid: None,
             boot_id: None,
             session_id: None,
+            executed_platform: None,
+            executed_model: None,
         })
         .unwrap();
 
@@ -13866,6 +14056,8 @@ echo done
             pid: None,
             boot_id: None,
             session_id: None,
+            executed_platform: None,
+            executed_model: None,
         })
         .unwrap();
 
@@ -13928,6 +14120,8 @@ echo done
             pid: None,
             boot_id: None,
             session_id: None,
+            executed_platform: None,
+            executed_model: None,
         })
         .unwrap();
 
@@ -13987,6 +14181,8 @@ echo done
             pid: None,
             boot_id: None,
             session_id: None,
+            executed_platform: None,
+            executed_model: None,
         })
         .unwrap();
 
@@ -14285,6 +14481,8 @@ echo done
             pid: None,
             boot_id: None,
             session_id: None,
+            executed_platform: None,
+            executed_model: None,
         })
         .unwrap();
 
@@ -16425,6 +16623,8 @@ echo done
             pid: None,
             boot_id: crate::system::boot_id(),
             session_id: None,
+            executed_platform: None,
+            executed_model: None,
         })
         .unwrap();
         let hook = crate::domain::loops::LoopCompletionHook {
@@ -19284,6 +19484,8 @@ echo done
             pid: None,
             boot_id: None,
             session_id: None,
+            executed_platform: None,
+            executed_model: None,
         };
 
         let agent_node = LoopNode {
@@ -20606,6 +20808,8 @@ echo done
             pid: None,
             boot_id: None,
             session_id: None,
+            executed_platform: None,
+            executed_model: None,
         };
         db.insert_loop(&loop_a).unwrap();
         db.insert_loop_spec(&spec_a).unwrap();
@@ -20832,6 +21036,8 @@ echo done
             pid: None,
             boot_id: None,
             session_id: None,
+            executed_platform: None,
+            executed_model: None,
         };
         db.insert_loop(&loop_a).unwrap();
         db.insert_loop_spec(&spec_a).unwrap();
@@ -21170,6 +21376,8 @@ echo done
                 pid: None,
                 boot_id: None,
                 session_id: None,
+                executed_platform: None,
+                executed_model: None,
             })
             .unwrap();
         }
@@ -23490,6 +23698,8 @@ exit 0
             pid: None,
             boot_id: None,
             session_id: None,
+            executed_platform: None,
+            executed_model: None,
         };
         assert!(
             is_infra_crash(&node, &execution, &run, 0, 3, 60),
@@ -23528,6 +23738,8 @@ exit 0
             pid: None,
             boot_id: None,
             session_id: None,
+            executed_platform: None,
+            executed_model: None,
         };
         assert!(
             is_infra_crash(&node, &execution, &run, 0, 3, 60),
@@ -23594,6 +23806,8 @@ exit 0
             pid: None,
             boot_id: None,
             session_id: None,
+            executed_platform: None,
+            executed_model: None,
         };
 
         // member_had_no_verdict must be true for the unreported member.
@@ -23626,6 +23840,8 @@ exit 0
             pid: None,
             boot_id: None,
             session_id: None,
+            executed_platform: None,
+            executed_model: None,
         };
 
         let no_verdict_b = is_infra_crash_shape(&node_b, &exec_b, &run_b, 60);
@@ -23693,6 +23909,8 @@ exit 0
                     pid: None,
                     boot_id: None,
                     session_id: None,
+                    executed_platform: None,
+                    executed_model: None,
                 },
                 60
             ),
@@ -24039,6 +24257,8 @@ exit 0
             pid: None,
             boot_id: None,
             session_id: None,
+            executed_platform: None,
+            executed_model: None,
         };
         assert!(!run_self_reported(&run));
         run.status = LoopRunStatus::Pass;

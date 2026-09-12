@@ -692,6 +692,9 @@ impl CronScheduler {
                     finished_at: Some(now),
                     exit_code: None,
                     timeout_at: None,
+                    // CB43: nothing executed on a skipped run — no pair.
+                    executed_platform: None,
+                    executed_model: None,
                 };
                 let _ = self.db.insert_run(&missed);
                 return Ok(());
@@ -1401,6 +1404,8 @@ mod tests {
             pid: None,
             boot_id: None,
             session_id: None,
+            executed_platform: None,
+            executed_model: None,
         })
         .unwrap();
 

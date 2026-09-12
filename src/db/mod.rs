@@ -238,7 +238,9 @@ impl Database {
                 started_at TEXT NOT NULL,
                 finished_at TEXT,
                 exit_code INTEGER,
-                timeout_at TEXT
+                timeout_at TEXT,
+                executed_platform TEXT,
+                executed_model TEXT
             );
 
             CREATE TABLE IF NOT EXISTS daemon_state (
@@ -474,7 +476,9 @@ impl Database {
                 pid INTEGER,
                 boot_id TEXT,
                 session_id TEXT,
-                paused_through INTEGER NOT NULL DEFAULT 0
+                paused_through INTEGER NOT NULL DEFAULT 0,
+                executed_platform TEXT,
+                executed_model TEXT
             );
 
             CREATE INDEX IF NOT EXISTS idx_loop_runs_spec_started
@@ -504,7 +508,9 @@ impl Database {
                 pid INTEGER,
                 boot_id TEXT,
                 event TEXT NOT NULL DEFAULT 'on_completed',
-                hook_index INTEGER NOT NULL DEFAULT 0
+                hook_index INTEGER NOT NULL DEFAULT 0,
+                executed_platform TEXT,
+                executed_model TEXT
             );
 
             CREATE INDEX IF NOT EXISTS idx_loop_completion_hook_runs_loop_started
@@ -637,6 +643,10 @@ impl Database {
             -- schedule, no permanent state) and not `loop_runs` (no spec/graph).
             -- A row lives only until it is collected or its TTL (`expires_at`)
             -- passes; the health routine deletes both on its periodic tick.
+            -- CB43: `platform`/`model` below mean RESOLVED at dispatch (the
+            -- model actually handed to the CLI argv; NULL when the platform's
+            -- `model_flag` cannot select one) — never the requested value when
+            -- it was not applied.
             CREATE TABLE IF NOT EXISTS subagent_runs (
                 id TEXT PRIMARY KEY,
                 platform TEXT NOT NULL,
@@ -1553,6 +1563,43 @@ impl Database {
                 event TEXT NOT NULL,
                 launched_at INTEGER NOT NULL
             );",
+        )
+        .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
+
+        // CB43: record which platform+model actually executed a run. Two
+        // nullable TEXT columns on the row already written — no new table, no
+        // second write. Pre-migration rows keep NULL (omitted, never guessed).
+        for (table, column) in [
+            ("loop_runs", "executed_platform"),
+            ("loop_runs", "executed_model"),
+            ("loop_completion_hook_runs", "executed_platform"),
+            ("loop_completion_hook_runs", "executed_model"),
+            ("runs", "executed_platform"),
+            ("runs", "executed_model"),
+        ] {
+            let has_column: bool = conn
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1"),
+                    rusqlite::params![column],
+                    |row| Ok(row.get::<_, i32>(0)? > 0),
+                )
+                .unwrap_or(false);
+            if !has_column {
+                let sql = format!("ALTER TABLE {table} ADD COLUMN {column} TEXT");
+                conn.execute(&sql, [])
+                    .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
+            }
+        }
+        // Keep the 30-day recent-usage scan bounded per table.
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_loop_runs_executed_started
+                ON loop_runs(executed_platform, started_at DESC);
+             CREATE INDEX IF NOT EXISTS idx_hook_runs_executed_started
+                ON loop_completion_hook_runs(executed_platform, started_at DESC);
+             CREATE INDEX IF NOT EXISTS idx_runs_executed_started
+                ON runs(executed_platform, started_at DESC);
+             CREATE INDEX IF NOT EXISTS idx_subagent_runs_platform_started
+                ON subagent_runs(platform, started_at DESC);",
         )
         .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
 

@@ -375,6 +375,8 @@ fn test_list_active_sync_agent_ids_includes_live_sessions_and_running_background
         finished_at: None,
         exit_code: None,
         timeout_at: None,
+        executed_platform: None,
+        executed_model: None,
     };
     db.insert_run(&run).unwrap();
 
@@ -1232,6 +1234,8 @@ fn loop_run_roundtrip_preserves_json_payloads() {
         pid: Some(4242),
         boot_id: Some("boot-abc".to_string()),
         session_id: None,
+        executed_platform: None,
+        executed_model: None,
     };
 
     db.insert_loop(&lp).unwrap();
@@ -1386,6 +1390,8 @@ fn reconcile_orphaned_loops_pauses_running_loop_and_interrupts_its_run() {
         pid: None,
         boot_id: None,
         session_id: None,
+        executed_platform: None,
+        executed_model: None,
     };
 
     db.insert_loop(&lp).unwrap();
@@ -1472,6 +1478,8 @@ fn reconcile_orphaned_loops_marks_queue_member_spec_interrupted() {
         pid: None,
         boot_id: None,
         session_id: None,
+        executed_platform: None,
+        executed_model: None,
     })
     .unwrap();
 
@@ -1535,6 +1543,8 @@ fn queue_stale_running_members_flags_only_the_member_with_no_live_run() {
         pid: None,
         boot_id: Some("boot-current".to_string()),
         session_id: None,
+        executed_platform: None,
+        executed_model: None,
     })
     .unwrap();
 
@@ -1567,6 +1577,8 @@ fn reconcile_orphaned_loops_is_idempotent() {
         pid: None,
         boot_id: None,
         session_id: None,
+        executed_platform: None,
+        executed_model: None,
     };
 
     db.insert_loop(&lp).unwrap();
@@ -1640,6 +1652,8 @@ async fn reconcile_orphaned_loops_kills_survivor_pid_from_same_boot() {
         pid: Some(pid),
         boot_id: Some(current_boot_id),
         session_id: None,
+        executed_platform: None,
+        executed_model: None,
     };
 
     db.insert_loop(&lp).unwrap();
@@ -1696,6 +1710,8 @@ fn reconcile_orphaned_loops_skips_kill_for_mismatched_boot_id() {
         pid: Some(1),
         boot_id: Some("some-other-boot-that-is-not-current".to_string()),
         session_id: None,
+        executed_platform: None,
+        executed_model: None,
     };
 
     db.insert_loop(&lp).unwrap();
@@ -1773,6 +1789,8 @@ async fn reconcile_orphaned_loops_skips_everything_when_foreign_daemon_pid_is_li
         pid: Some(foreign_daemon.id() as i64),
         boot_id: Some(current_boot_id),
         session_id: None,
+        executed_platform: None,
+        executed_model: None,
     };
 
     db.insert_loop(&lp).unwrap();
@@ -1857,6 +1875,8 @@ fn reconcile_orphaned_loops_skips_kill_for_own_ancestor_pid() {
         pid: Some(ppid as i64),
         boot_id: Some(current_boot_id),
         session_id: None,
+        executed_platform: None,
+        executed_model: None,
     };
 
     db.insert_loop(&lp).unwrap();
@@ -2084,6 +2104,8 @@ fn seed_group_sibling(
         pid: None,
         boot_id: None,
         session_id: session_id.map(str::to_string),
+        executed_platform: None,
+        executed_model: None,
     };
     db.insert_loop_run(&run).unwrap();
     db.update_loop_spec_status(spec_id, status, Some(Utc::now()), Some(Utc::now()))
@@ -2250,6 +2272,8 @@ fn group_session_is_independent_per_node() {
         pid: None,
         boot_id: None,
         session_id: Some("ses-impl".to_string()),
+        executed_platform: None,
+        executed_model: None,
     };
     db.insert_loop_run(&run_impl).unwrap();
     let run_review = LoopNodeRun {
@@ -3467,6 +3491,8 @@ fn test_rename_agent_updates_agent_and_run_references() {
         finished_at: Some(Utc::now()),
         exit_code: Some(0),
         timeout_at: None,
+        executed_platform: None,
+        executed_model: None,
     };
     db.insert_run(&run).unwrap();
 
@@ -3525,6 +3551,8 @@ fn test_insert_and_list_runs() {
         finished_at: Some(Utc::now()),
         exit_code: Some(0),
         timeout_at: None,
+        executed_platform: None,
+        executed_model: None,
     };
     db.insert_run(&run).unwrap();
 
@@ -3551,6 +3579,8 @@ fn test_list_runs_limit() {
             finished_at: Some(Utc::now()),
             exit_code: Some(0),
             timeout_at: None,
+            executed_platform: None,
+            executed_model: None,
         };
         db.insert_run(&run).unwrap();
     }
@@ -3574,6 +3604,8 @@ fn test_delete_agent_cascades_runs() {
         finished_at: None,
         exit_code: None,
         timeout_at: None,
+        executed_platform: None,
+        executed_model: None,
     };
     db.insert_run(&run).unwrap();
     assert_eq!(db.list_runs("cascade-agent", 10).unwrap().len(), 1);
@@ -3598,6 +3630,8 @@ fn test_update_run_status() {
         finished_at: None,
         exit_code: None,
         timeout_at: None,
+        executed_platform: None,
+        executed_model: None,
     };
     db.insert_run(&run).unwrap();
 
@@ -3639,6 +3673,8 @@ fn test_update_run_exit_code() {
         finished_at: Some(Utc::now()),
         exit_code: None,
         timeout_at: None,
+        executed_platform: None,
+        executed_model: None,
     };
     db.insert_run(&run).unwrap();
 
@@ -4550,6 +4586,8 @@ fn unbind_loop_spec_preserves_execution_history() {
         pid: None,
         boot_id: None,
         session_id: None,
+        executed_platform: None,
+        executed_model: None,
     };
     db.insert_loop_run(&run).unwrap();
 
@@ -4587,6 +4625,8 @@ fn set_spec_admin_status_rejects_active_run() {
         pid: None,
         boot_id: None,
         session_id: None,
+        executed_platform: None,
+        executed_model: None,
     };
     db.insert_loop_run(&run).unwrap();
 
@@ -4796,6 +4836,8 @@ fn reconcile_stranded_queue_specs_preserves_spec_with_active_run_in_current_boot
         pid: None,
         boot_id: Some(crate::system::boot_id().unwrap_or_default()),
         session_id: None,
+        executed_platform: None,
+        executed_model: None,
     })
     .unwrap();
 
@@ -4912,6 +4954,8 @@ fn reconcile_orphaned_loops_marks_interrupted_and_leaves_dirty_worktree_untouche
         pid: None,
         boot_id: None,
         session_id: None,
+        executed_platform: None,
+        executed_model: None,
     };
 
     db.insert_loop(&lp).unwrap();
@@ -4973,6 +5017,8 @@ fn reconcile_orphaned_loops_marks_interrupted_for_clean_worktree_too() {
         pid: None,
         boot_id: None,
         session_id: None,
+        executed_platform: None,
+        executed_model: None,
     };
 
     db.insert_loop(&lp).unwrap();
@@ -5029,6 +5075,8 @@ fn reconcile_orphaned_loops_marks_interrupted_in_non_git_workdir() {
         pid: None,
         boot_id: None,
         session_id: None,
+        executed_platform: None,
+        executed_model: None,
     };
 
     db.insert_loop(&lp).unwrap();
@@ -5083,6 +5131,8 @@ fn reconcile_orphaned_loops_interrupted_marking_is_idempotent_across_two_passes(
         pid: None,
         boot_id: None,
         session_id: None,
+        executed_platform: None,
+        executed_model: None,
     };
 
     db.insert_loop(&lp).unwrap();
@@ -5154,6 +5204,8 @@ fn reconcile_stranded_queue_specs_marks_spec_interrupted_and_leaves_worktree_unt
         pid: None,
         boot_id: Some("some-other-boot-that-is-not-current".to_string()),
         session_id: None,
+        executed_platform: None,
+        executed_model: None,
     })
     .unwrap();
 
@@ -5230,6 +5282,8 @@ fn reconcile_stranded_queue_specs_leaves_worktree_untouched_for_healthy_run() {
         pid: None,
         boot_id: Some(crate::system::boot_id().unwrap_or_default()),
         session_id: None,
+        executed_platform: None,
+        executed_model: None,
     })
     .unwrap();
 
@@ -5393,6 +5447,8 @@ fn archive_then_restore_preserves_identity_and_run_history() {
         pid: None,
         boot_id: Some("boot-archive".to_string()),
         session_id: Some("session-archive".to_string()),
+        executed_platform: None,
+        executed_model: None,
     };
     db.insert_loop(&lp).unwrap();
     db.insert_loop_spec(&spec).unwrap();
@@ -5539,6 +5595,8 @@ fn permanent_delete_removes_the_loop_and_its_run_history() {
         pid: None,
         boot_id: None,
         session_id: None,
+        executed_platform: None,
+        executed_model: None,
     };
     db.insert_loop(&lp).unwrap();
     db.insert_loop_spec(&spec).unwrap();
@@ -6503,6 +6561,8 @@ mod hooks_tests {
             completed_at: None,
             pid: None,
             boot_id: None,
+            executed_platform: None,
+            executed_model: None,
         }
     }
 
@@ -6706,5 +6766,350 @@ mod hooks_tests {
         assert_eq!(completed.len(), 2);
         assert_eq!(completed[0].platform.as_deref(), Some("claude"));
         assert_eq!(completed[1].platform.as_deref(), Some("mimo"));
+    }
+}
+
+// ── CB43: record which model actually ran ──────────────────────────────
+
+/// CB43 fixtures: a loop + spec + agent node plus one `Running` node run
+/// carrying `executed_platform`/`executed_model`. Returns the ids.
+fn cb43_setup(db: &Database, pair: (Option<&str>, Option<&str>)) -> (String, String, String) {
+    let lp = sample_loop("loop-cb43");
+    db.insert_loop(&lp).unwrap();
+    let spec = sample_loop_spec(&lp.id, "spec-cb43", 1);
+    db.insert_loop_spec(&spec).unwrap();
+    let node = sample_loop_node(&spec.id, "node-cb43", 1);
+    db.insert_loop_node(&node).unwrap();
+    let run = LoopNodeRun {
+        id: uuid::Uuid::new_v4().to_string(),
+        loop_id: lp.id.clone(),
+        spec_id: spec.id.clone(),
+        node_id: node.id,
+        status: LoopRunStatus::Pass,
+        input: None,
+        output: None,
+        started_at: Utc::now(),
+        completed_at: Some(Utc::now()),
+        iteration: 1,
+        pid: None,
+        boot_id: None,
+        session_id: None,
+        executed_platform: pair.0.map(str::to_string),
+        executed_model: pair.1.map(str::to_string),
+    };
+    db.insert_loop_run(&run).unwrap();
+    (lp.id, spec.id, run.id)
+}
+
+fn cb43_node_run(
+    loop_id: &str,
+    spec_id: &str,
+    node_id: &str,
+    platform: Option<&str>,
+    model: Option<&str>,
+    status: LoopRunStatus,
+    started_at: chrono::DateTime<Utc>,
+) -> LoopNodeRun {
+    LoopNodeRun {
+        id: uuid::Uuid::new_v4().to_string(),
+        loop_id: loop_id.to_string(),
+        spec_id: spec_id.to_string(),
+        node_id: node_id.to_string(),
+        status,
+        input: None,
+        output: None,
+        started_at,
+        completed_at: Some(started_at),
+        iteration: 1,
+        pid: None,
+        boot_id: None,
+        session_id: None,
+        executed_platform: platform.map(str::to_string),
+        executed_model: model.map(str::to_string),
+    }
+}
+
+/// T1: a run records the resolved pair, readable back from the row itself —
+/// no join to the node's config.
+#[test]
+fn cb43_run_records_resolved_pair() {
+    let db = test_db();
+    let (_, _, run_id) = cb43_setup(&db, (Some("opencode"), Some("opencode/big-pickle")));
+    let run = db.get_loop_run(&run_id).unwrap().unwrap();
+    assert_eq!(run.executed_platform.as_deref(), Some("opencode"));
+    assert_eq!(run.executed_model.as_deref(), Some("opencode/big-pickle"));
+}
+
+/// T2: when the platform cannot select a model the stored model is `None`,
+/// not the requested string (the `model_not_applied` path stores honestly).
+#[test]
+fn cb43_unapplied_model_records_none() {
+    let db = test_db();
+    let (_, _, run_id) = cb43_setup(&db, (Some("antigravity"), None));
+    let run = db.get_loop_run(&run_id).unwrap().unwrap();
+    assert_eq!(run.executed_platform.as_deref(), Some("antigravity"));
+    assert_eq!(run.executed_model, None);
+}
+
+/// T3/T9: `list_loop_node_runs` carries the pair; pre-migration rows (NULL)
+/// read back as `None`.
+#[test]
+fn cb43_list_returns_pair_and_null_stays_null() {
+    let db = test_db();
+    let (loop_id, spec_id, _) = cb43_setup(&db, (Some("opencode"), Some("m")));
+    let node = sample_loop_node(&spec_id, "node-cb43-b", 2);
+    db.insert_loop_node(&node).unwrap();
+    // Pre-migration row: both columns NULL.
+    db.insert_loop_run(&cb43_node_run(
+        &loop_id,
+        &spec_id,
+        &node.id,
+        None,
+        None,
+        LoopRunStatus::Pass,
+        Utc::now(),
+    ))
+    .unwrap();
+
+    let runs = db.list_loop_node_runs(&loop_id, None, None, 20, 0).unwrap();
+    assert_eq!(runs.len(), 2);
+    let with_pair = runs
+        .iter()
+        .find(|r| r.executed_platform.is_some())
+        .expect("pair row present");
+    assert_eq!(with_pair.executed_model.as_deref(), Some("m"));
+    let legacy = runs
+        .iter()
+        .find(|r| r.executed_platform.is_none())
+        .expect("legacy row present");
+    assert_eq!(legacy.executed_model, None);
+}
+
+/// T5: the 30-day window excludes older pairs.
+#[test]
+fn cb43_recent_usage_honours_thirty_day_window() {
+    let db = test_db();
+    let (loop_id, spec_id, _) = cb43_setup(&db, (Some("opencode"), Some("fresh")));
+    let node = db
+        .get_loop_node("node-cb43")
+        .unwrap()
+        .expect("fixture node");
+    let now = Utc::now();
+    db.insert_loop_run(&cb43_node_run(
+        &loop_id,
+        &spec_id,
+        &node.id,
+        Some("opencode"),
+        Some("stale"),
+        LoopRunStatus::Pass,
+        now - Duration::days(31),
+    ))
+    .unwrap();
+
+    let rows = db
+        .list_recent_platform_model_usage(now - Duration::days(30), 15)
+        .unwrap();
+    let models: Vec<_> = rows
+        .iter()
+        .map(|r| r.model.clone().unwrap_or_default())
+        .collect();
+    assert!(models.contains(&"fresh".to_string()));
+    assert!(!models.contains(&"stale".to_string()));
+}
+
+/// T6: capped at fifteen, most-recent-first.
+#[test]
+fn cb43_recent_usage_caps_at_fifteen_ordered_by_recency() {
+    let db = test_db();
+    let (loop_id, spec_id, _) = cb43_setup(&db, (Some("opencode"), Some("model-00")));
+    let node = db
+        .get_loop_node("node-cb43")
+        .unwrap()
+        .expect("fixture node");
+    let now = Utc::now();
+    for i in 1..20 {
+        db.insert_loop_run(&cb43_node_run(
+            &loop_id,
+            &spec_id,
+            &node.id,
+            Some("opencode"),
+            Some(&format!("model-{i:02}")),
+            LoopRunStatus::Pass,
+            now - Duration::minutes(i as i64),
+        ))
+        .unwrap();
+    }
+    let rows = db
+        .list_recent_platform_model_usage(now - Duration::days(30), 15)
+        .unwrap();
+    assert_eq!(rows.len(), 15);
+    // Most recent first: model-00 (now) leads, then model-01, ...
+    assert_eq!(rows[0].model.as_deref(), Some("model-00"));
+    assert_eq!(rows[1].model.as_deref(), Some("model-01"));
+    for pair in rows.windows(2) {
+        assert!(pair[0].last_run >= pair[1].last_run);
+    }
+}
+
+/// T7: the section shows how the most recent run ended, not a frequency vote.
+#[test]
+fn cb43_recent_usage_reports_last_outcome() {
+    let db = test_db();
+    // NB: the setup row itself is the newest run in the DB, so it must carry
+    // a different pair than the one under test.
+    let (loop_id, spec_id, _) = cb43_setup(&db, (Some("opencode"), Some("setup-filler")));
+    let node = db
+        .get_loop_node("node-cb43")
+        .unwrap()
+        .expect("fixture node");
+    let now = Utc::now();
+    for (mins_ago, status) in [
+        (120, LoopRunStatus::Pass),
+        (60, LoopRunStatus::Fail),
+        (30, LoopRunStatus::Fail),
+    ] {
+        db.insert_loop_run(&cb43_node_run(
+            &loop_id,
+            &spec_id,
+            &node.id,
+            Some("opencode"),
+            Some("flaky"),
+            status,
+            now - Duration::minutes(mins_ago),
+        ))
+        .unwrap();
+    }
+    let rows = db
+        .list_recent_platform_model_usage(now - Duration::days(30), 15)
+        .unwrap();
+    let flaky = rows
+        .iter()
+        .find(|r| r.model.as_deref() == Some("flaky"))
+        .expect("flaky present");
+    assert!(flaky.count >= 3);
+    assert_eq!(flaky.last_outcome, "fail");
+
+    // A newer pass flips the outcome without changing the count's meaning.
+    db.insert_loop_run(&cb43_node_run(
+        &loop_id,
+        &spec_id,
+        &node.id,
+        Some("opencode"),
+        Some("flaky"),
+        LoopRunStatus::Pass,
+        now - Duration::minutes(5),
+    ))
+    .unwrap();
+    let rows = db
+        .list_recent_platform_model_usage(now - Duration::days(30), 15)
+        .unwrap();
+    let flaky = rows
+        .iter()
+        .find(|r| r.model.as_deref() == Some("flaky"))
+        .expect("flaky present");
+    assert_eq!(flaky.last_outcome, "pass");
+}
+
+/// T8: a pair never run here is absent.
+#[test]
+fn cb43_never_run_pair_is_absent() {
+    let db = test_db();
+    cb43_setup(&db, (Some("opencode"), Some("only-a")));
+    let rows = db
+        .list_recent_platform_model_usage(Utc::now() - Duration::days(30), 15)
+        .unwrap();
+    assert!(rows.iter().all(|r| r.model.as_deref() != Some("b")));
+    assert!(rows.iter().any(|r| r.model.as_deref() == Some("only-a")));
+}
+
+/// T9 (usage side): pre-migration rows are omitted, not invented.
+#[test]
+fn cb43_null_rows_omitted_from_recent_usage() {
+    let db = test_db();
+    let (loop_id, spec_id, _) = cb43_setup(&db, (Some("opencode"), Some("real")));
+    let node = db
+        .get_loop_node("node-cb43")
+        .unwrap()
+        .expect("fixture node");
+    db.insert_loop_run(&cb43_node_run(
+        &loop_id,
+        &spec_id,
+        &node.id,
+        None,
+        None,
+        LoopRunStatus::Pass,
+        Utc::now(),
+    ))
+    .unwrap();
+    let rows = db
+        .list_recent_platform_model_usage(Utc::now() - Duration::days(30), 15)
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].model.as_deref(), Some("real"));
+}
+
+/// T10: every run kind contributes to the section.
+#[test]
+fn cb43_all_run_kinds_contribute() {
+    let db = test_db();
+    let (loop_id, _, _) = cb43_setup(&db, (Some("p-loop"), Some("m-loop")));
+    let now = Utc::now();
+
+    // Hook run.
+    db.insert_loop_completion_hook_run(&crate::domain::loops::LoopCompletionHookRun {
+        id: uuid::Uuid::new_v4().to_string(),
+        loop_id,
+        event: crate::domain::loops::LoopHookEvent::OnCompleted,
+        hook_index: 0,
+        status: LoopRunStatus::Pass,
+        output: None,
+        summary: None,
+        started_at: now,
+        completed_at: Some(now),
+        pid: None,
+        boot_id: None,
+        executed_platform: Some("p-hook".to_string()),
+        executed_model: Some("m-hook".to_string()),
+    })
+    .unwrap();
+
+    // Background agent run.
+    db.upsert_agent(&sample_cron_agent("bg-cb43")).unwrap();
+    db.insert_run(&RunLog {
+        id: uuid::Uuid::new_v4().to_string(),
+        background_agent_id: "bg-cb43".to_string(),
+        status: RunStatus::Success,
+        trigger_type: TriggerType::Manual,
+        summary: None,
+        started_at: now,
+        finished_at: Some(now),
+        exit_code: Some(0),
+        timeout_at: None,
+        executed_platform: Some("p-bg".to_string()),
+        executed_model: Some("m-bg".to_string()),
+    })
+    .unwrap();
+
+    // Subagent run.
+    db.insert_subagent_run(
+        &uuid::Uuid::new_v4().to_string(),
+        "p-sub",
+        Some("m-sub"),
+        "prompt",
+        "/tmp",
+        &now.to_rfc3339(),
+        &(now + Duration::hours(1)).to_rfc3339(),
+    )
+    .unwrap();
+
+    let rows = db
+        .list_recent_platform_model_usage(now - Duration::days(30), 15)
+        .unwrap();
+    let platforms: Vec<_> = rows.iter().map(|r| r.platform.as_str()).collect();
+    for expected in ["p-loop", "p-hook", "p-bg", "p-sub"] {
+        assert!(
+            platforms.contains(&expected),
+            "missing {expected} in {platforms:?}"
+        );
     }
 }

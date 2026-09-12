@@ -104,6 +104,8 @@ impl Executor {
         let run_id = uuid::Uuid::new_v4().to_string();
         let now = Utc::now();
         let timeout_at = now + chrono::Duration::minutes(i64::from(agent.timeout_minutes));
+        // CB43: record the pair resolved at dispatch, on the row itself.
+        let (executed_platform, executed_model) = executed_pair_for_agent(agent);
         let run = RunLog {
             id: run_id.clone(),
             background_agent_id: agent.id.clone(),
@@ -114,6 +116,8 @@ impl Executor {
             finished_at: None,
             exit_code: None,
             timeout_at: Some(timeout_at),
+            executed_platform,
+            executed_model,
         };
 
         match self.db.try_start_run(&run)? {
@@ -134,6 +138,9 @@ impl Executor {
                     finished_at: Some(now),
                     exit_code: None,
                     timeout_at: None,
+                    // CB43: nothing executed on a skipped run — no pair.
+                    executed_platform: None,
+                    executed_model: None,
                 };
                 let _ = self.db.insert_run(&missed);
                 Ok(None)
@@ -463,6 +470,26 @@ impl Executor {
 fn resolve_cli_binary(cli: &Cli) -> Result<PathBuf> {
     let cmd_name = cli.command_name();
     crate::domain::cli_strategy::resolve_binary(&cmd_name)
+}
+
+/// CB43: the platform+model pair resolved at dispatch for a background agent
+/// run. The model gate reads the registry without panicking (unlike
+/// `Cli::strategy`): an unknown platform stores the requested model as-is
+/// rather than dropping it.
+fn executed_pair_for_agent(agent: &Agent) -> (Option<String>, Option<String>) {
+    let platform = agent.cli.as_str().to_string();
+    let model = agent
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(str::to_string);
+    let selectable = dirs::home_dir()
+        .map(|home| crate::domain::canopy_config::CanopyConfig::load(&home.join(".canopy")))
+        .and_then(|config| config.get_cli(&platform).map(|cli| cli.model_flag.clone()))
+        .map(|flag| crate::domain::cli_config::model_flag_selects_model(flag.as_deref()))
+        .unwrap_or(true);
+    (Some(platform), if selectable { model } else { None })
 }
 
 /// Build the CLI command with appropriate flags.
