@@ -656,6 +656,20 @@ impl Database {
                 boot_id TEXT
             );
 
+            -- CM18: tombstones for blocking `subagent_spawn` deliveries. A
+            -- blocking spawn returns its result inline and deletes the
+            -- `subagent_runs` row immediately, so a later `subagent_collect`
+            -- would otherwise be indistinguishable from never-existed.
+            -- A tombstone records the delivered id until the original
+            -- `expires_at`, letting `collect` answer already-delivered.
+            -- Async rows never touch this table (no change to async
+            -- storage or TTL).
+            CREATE TABLE IF NOT EXISTS subagent_delivered_tombstones (
+                id TEXT PRIMARY KEY,
+                delivered_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS sandbox_runs (
                 id TEXT PRIMARY KEY,
                 project_hash TEXT NOT NULL,
@@ -1683,9 +1697,57 @@ impl Database {
         let now = chrono::Utc::now().to_rfc3339();
         let count = conn.execute(
             "DELETE FROM subagent_runs WHERE collected_at IS NOT NULL OR expires_at < ?1",
-            [now],
+            [&now],
         )?;
-        Ok(count as u64)
+        // CM18: tombstones expire on the same schedule as the rows they
+        // stand in for, using the original `expires_at` copied at delivery.
+        let tombstones = conn.execute(
+            "DELETE FROM subagent_delivered_tombstones WHERE expires_at < ?1",
+            [&now],
+        )?;
+        Ok((count + tombstones) as u64)
+    }
+
+    /// CM18: record that a blocking spawn delivered `id` inline. The
+    /// `subagent_runs` row is already deleted; this tombstone lets a later
+    /// `subagent_collect` answer "already delivered" instead of "not found".
+    /// `expires_at` must be the original run's expiry so natural expiry
+    /// cleans the tombstone on the same schedule.
+    pub fn insert_delivered_tombstone(
+        &self,
+        id: &str,
+        delivered_at: &str,
+        expires_at: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO subagent_delivered_tombstones (id, delivered_at, expires_at)
+             VALUES (?1, ?2, ?3)",
+            rusqlite::params![id, delivered_at, expires_at],
+        )?;
+        Ok(())
+    }
+
+    /// CM18: true if `id` was delivered by a blocking spawn (and its
+    /// tombstone has not yet expired).
+    pub fn is_delivered_tombstone(&self, id: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM subagent_delivered_tombstones WHERE id = ?1",
+            [id],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    #[allow(dead_code)]
+    pub fn delete_delivered_tombstone(&self, id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM subagent_delivered_tombstones WHERE id = ?1",
+            [id],
+        )?;
+        Ok(())
     }
 }
 

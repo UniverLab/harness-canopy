@@ -21,6 +21,10 @@ pub(crate) enum SubagentAction {
         timeout_minutes: u64,
         #[arg(long = "ttl", default_value = "60")]
         ttl_minutes: u64,
+        /// Wait for the subagent to finish and print its result directly,
+        /// instead of printing an id for later `collect`.
+        #[arg(long)]
+        blocking: bool,
     },
     /// Collect the result of an ephemeral subagent.
     Collect {
@@ -46,12 +50,16 @@ pub(crate) async fn handle_subagent_action(
             mcp_servers,
             timeout_minutes,
             ttl_minutes,
+            blocking,
         } => {
             let mut args = serde_json::json!({
                 "prompt": prompt,
                 "timeout_minutes": timeout_minutes,
                 "ttl_minutes": ttl_minutes,
             });
+            if blocking {
+                args["blocking"] = serde_json::json!(true);
+            }
             if let Some(cli) = cli {
                 args["cli"] = serde_json::json!(cli);
             }

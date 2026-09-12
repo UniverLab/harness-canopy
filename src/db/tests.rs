@@ -5951,6 +5951,81 @@ fn fail_subagent_run_sets_status() {
     assert!(record.exit_code.is_none());
 }
 
+// ── CM18: blocking subagent delivery tombstones ─────────────────────────
+
+#[test]
+fn tombstone_distinguishes_delivered_from_missing() {
+    let db = test_db();
+    let now = Utc::now().to_rfc3339();
+    let future = (Utc::now() + Duration::hours(1)).to_rfc3339();
+
+    // An id that was never delivered has no tombstone.
+    assert!(
+        !db.is_delivered_tombstone("never-existed").unwrap(),
+        "unknown id must not look delivered"
+    );
+
+    db.insert_delivered_tombstone("done-1", &now, &future)
+        .unwrap();
+    assert!(
+        db.is_delivered_tombstone("done-1").unwrap(),
+        "blocking-delivered id must be distinguishable from missing"
+    );
+    // Recording a delivery must not create or disturb async rows.
+    assert!(db.get_subagent_run("done-1").unwrap().is_none());
+}
+
+#[test]
+fn expire_cleans_tombstones() {
+    let db = test_db();
+    let now = Utc::now().to_rfc3339();
+    let past = (Utc::now() - Duration::hours(1)).to_rfc3339();
+    let future = (Utc::now() + Duration::hours(1)).to_rfc3339();
+
+    db.insert_delivered_tombstone("old-1", &now, &past).unwrap();
+    db.insert_delivered_tombstone("fresh-1", &now, &future)
+        .unwrap();
+
+    db.expire_subagent_runs().unwrap();
+
+    assert!(
+        !db.is_delivered_tombstone("old-1").unwrap(),
+        "expired tombstone must be cleaned on the same schedule as rows"
+    );
+    assert!(
+        db.is_delivered_tombstone("fresh-1").unwrap(),
+        "unexpired tombstone must survive expiry"
+    );
+}
+
+#[test]
+fn blocking_delivery_sequence_collect_reports_delivered_not_missing() {
+    // Drives the exact tail `spawn_subagent_blocking` performs after its
+    // direct await: the terminal row is collected once (deleted, result
+    // returned inline) and a tombstone is left so the next `collect`
+    // reports "already delivered" instead of "not found" (FR4).
+    let db = test_db();
+    let now = Utc::now().to_rfc3339();
+    let expires = (Utc::now() + Duration::hours(1)).to_rfc3339();
+    db.insert_subagent_run("run-block", "opencode", None, "p", "/tmp", &now, &expires)
+        .unwrap();
+    db.complete_subagent_run("run-block", 0, "the answer", "", Some("blind"), &now)
+        .unwrap();
+
+    // Inline delivery: collect deletes the row and returns the result.
+    let delivered = db.collect_subagent_run("run-block").unwrap().unwrap();
+    assert_eq!(delivered.status, "finished");
+    assert_eq!(delivered.stdout.as_deref(), Some("the answer"));
+    db.insert_delivered_tombstone("run-block", &now, &delivered.expires_at)
+        .unwrap();
+
+    // No second delivery: the row is gone, but the tombstone says why.
+    assert!(db.collect_subagent_run("run-block").unwrap().is_none());
+    assert!(db.is_delivered_tombstone("run-block").unwrap());
+    // And a genuinely unknown id still has no tombstone.
+    assert!(!db.is_delivered_tombstone("run-never").unwrap());
+}
+
 // ── CM9: typed project graph ──────────────────────────────────────────
 
 /// Register a project row at an on-disk path (hash derived like production).

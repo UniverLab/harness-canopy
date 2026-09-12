@@ -8964,9 +8964,13 @@ impl TaskTriggerHandler {
 
     #[tool(
         name = "subagent_spawn",
-        description = "Launch an ephemeral subagent. Returns an ID immediately; \
-         use subagent_collect to get the result. The result persists until collected \
-         or until TTL expires. No agent, schedule, or permanent state is registered."
+        description = "Launch an ephemeral subagent. By default returns an ID \
+         immediately (async); poll subagent_collect for the result. Pass \
+         `blocking: true` to wait for the subagent to finish and return its \
+         result directly — the shape is identical to what subagent_collect \
+         would return, and no collect call is needed. Blocking respects \
+         `timeout_minutes` and returns a timeout as a result, not as an error. \
+         No agent, schedule, or permanent state is registered."
     )]
     async fn subagent_spawn(
         &self,
@@ -9001,6 +9005,7 @@ impl TaskTriggerHandler {
         let mcp_servers = params.mcp_servers.unwrap_or_default();
         let timeout_minutes = params.timeout_minutes.unwrap_or(15);
         let ttl_minutes = params.ttl_minutes.unwrap_or(60);
+        let blocking = params.blocking.unwrap_or(false);
 
         let db = Arc::clone(&self.db);
         let prompt = params.prompt.clone();
@@ -9008,33 +9013,78 @@ impl TaskTriggerHandler {
         let effort = params.effort.clone();
         let workdir_clone = workdir.clone();
 
-        match crate::daemon::subagent::spawn_subagent(
-            &db,
-            platform,
-            &prompt,
-            model.as_deref(),
-            &workdir_clone,
-            &mcp_servers,
-            timeout_minutes,
-            ttl_minutes,
-            effort.as_deref(),
-        )
-        .await
-        {
-            Ok((id, effort_not_applied)) => {
-                let mut result = serde_json::json!({
-                    "id": id,
-                    "status": "running",
-                    "handle": id,
-                });
-                if let Some(reason) = effort_not_applied {
-                    result["effort_not_applied"] = serde_json::json!(reason);
+        // CM18: blocking stays opt-in; absent/false is today's async path,
+        // unchanged. The blocking wait holds no DB guard across its await
+        // (see `spawn_subagent_blocking`), so other MCP work progresses.
+        if blocking {
+            match crate::daemon::subagent::spawn_subagent_blocking(
+                &db,
+                platform,
+                &prompt,
+                model.as_deref(),
+                &workdir_clone,
+                &mcp_servers,
+                timeout_minutes,
+                ttl_minutes,
+                effort.as_deref(),
+            )
+            .await
+            {
+                Ok(blocking_result) => {
+                    // Identical shape to `subagent_collect` (guideline), plus
+                    // the wait accounting FR3 requires on timeouts.
+                    let result = blocking_result.result;
+                    let mut json = serde_json::json!({
+                        "id": result.id,
+                        "status": result.status,
+                        "exit_code": result.exit_code,
+                        "stdout": result.stdout,
+                        "stderr": result.stderr,
+                        "mcp_surface": result.mcp_surface,
+                        "platform": result.platform,
+                        "model": result.model,
+                        "waited_secs": blocking_result.waited_secs,
+                        "waited_minutes": timeout_minutes,
+                        "timed_out": blocking_result.timed_out,
+                    });
+                    if let Some(reason) = blocking_result.effort_not_applied {
+                        json["effort_not_applied"] = serde_json::json!(reason);
+                    }
+                    Ok(CallToolResult::success(vec![Content::text(
+                        serde_json::to_string_pretty(&json).unwrap_or_default(),
+                    )]))
                 }
-                Ok(CallToolResult::success(vec![Content::text(
-                    serde_json::to_string_pretty(&result).unwrap_or_default(),
-                )]))
+                Err(e) => Ok(error_result(&e.to_string())),
             }
-            Err(e) => Ok(error_result(&e.to_string())),
+        } else {
+            match crate::daemon::subagent::spawn_subagent(
+                &db,
+                platform,
+                &prompt,
+                model.as_deref(),
+                &workdir_clone,
+                &mcp_servers,
+                timeout_minutes,
+                ttl_minutes,
+                effort.as_deref(),
+            )
+            .await
+            {
+                Ok((id, effort_not_applied)) => {
+                    let mut result = serde_json::json!({
+                        "id": id,
+                        "status": "running",
+                        "handle": id,
+                    });
+                    if let Some(reason) = effort_not_applied {
+                        result["effort_not_applied"] = serde_json::json!(reason);
+                    }
+                    Ok(CallToolResult::success(vec![Content::text(
+                        serde_json::to_string_pretty(&result).unwrap_or_default(),
+                    )]))
+                }
+                Err(e) => Ok(error_result(&e.to_string())),
+            }
         }
     }
 
@@ -9065,10 +9115,20 @@ impl TaskTriggerHandler {
                     serde_json::to_string_pretty(&json).unwrap_or_default(),
                 )]))
             }
-            Ok(None) => Ok(error_result(&format!(
-                "Subagent run '{}' not found",
-                params.id
-            ))),
+            Ok(None) => {
+                // CM18: a blocking spawn delivers its result inline and
+                // deletes the row, leaving a tombstone — report that it was
+                // already delivered rather than that it is missing (FR4).
+                if db.is_delivered_tombstone(&params.id).unwrap_or(false) {
+                    return Ok(error_result(
+                        &crate::daemon::subagent::already_delivered_message(&params.id),
+                    ));
+                }
+                Ok(error_result(&format!(
+                    "Subagent run '{}' not found",
+                    params.id
+                )))
+            }
             Err(e) => Ok(error_result(&e.to_string())),
         }
     }

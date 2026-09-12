@@ -1319,6 +1319,11 @@ pub struct SubagentSpawnParams {
     pub timeout_minutes: Option<u64>,
     /// TTL in minutes before an uncollected result expires. Default: 60.
     pub ttl_minutes: Option<u64>,
+    /// When true, wait for the subagent to finish and return its result
+    /// directly, instead of returning an id for later `subagent_collect`.
+    /// Default false (async, today's behaviour).
+    #[serde(default)]
+    pub blocking: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -1471,5 +1476,31 @@ mod tests {
             reviewer.model.is_none(),
             "omitted model must default to None"
         );
+    }
+
+    /// CM18: async stays the default (FR2). Omitting `blocking` must
+    /// deserialize to `None` (falsy → today's id-and-poll path), and an
+    /// explicit `blocking: true` opts into the inline-result path.
+    #[test]
+    fn subagent_spawn_params_blocking_defaults_to_async() {
+        let bare: SubagentSpawnParams =
+            serde_json::from_value(serde_json::json!({ "prompt": "hi" }))
+                .expect("should deserialize without blocking");
+        assert_eq!(bare.prompt, "hi");
+        assert!(
+            bare.blocking.is_none(),
+            "omitted blocking must deserialize to None"
+        );
+        assert!(
+            !bare.blocking.unwrap_or(false),
+            "omitted blocking must take the async path"
+        );
+
+        let explicit: SubagentSpawnParams = serde_json::from_value(serde_json::json!({
+            "prompt": "hi",
+            "blocking": true,
+        }))
+        .expect("should deserialize with blocking");
+        assert_eq!(explicit.blocking, Some(true));
     }
 }
