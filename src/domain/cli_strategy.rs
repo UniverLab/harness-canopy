@@ -177,12 +177,237 @@ fn resolve_binary_with_path(binary: &str, path: &str) -> Result<PathBuf> {
         .map_err(Into::into)
 }
 
+/// How long an identity check may run before it is treated as a failure.
+/// Diagnosis-only (probe/doctor, CB44) — never on dispatch.
+pub const IDENTITY_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Maximum characters of captured output kept in a [`WrongBinaryError`].
+pub const IDENTITY_CHECK_OUTPUT_LIMIT: usize = 500;
+
+/// The resolved binary does not identify as the platform it was resolved
+/// for (CB44): the registry's `identity_check` ran against the resolved
+/// path and its output did not contain the expected substring.
+///
+/// The captured output is evidence for the report and nothing else — callers
+/// must not scrape it for quota/model meaning.
+#[derive(Debug, thiserror::Error)]
+#[error("Resolved '{resolved}' which does not identify as the {platform} CLI (expected '{expected}' in output; saw: {output}")]
+pub struct WrongBinaryError {
+    pub platform: String,
+    pub resolved: PathBuf,
+    pub expected: String,
+    pub output: String,
+}
+
+impl WrongBinaryError {
+    /// The full failure text: absolute path, platform, expected substring,
+    /// invoked command, and truncated evidence. This wording (not "platform
+    /// unreachable") is the whole value of CB44 — it ends the months-long
+    /// "blackbox is broken" misdiagnosis by naming what was actually found.
+    pub fn report(&self, binary: &str, cmd: &str) -> String {
+        format!(
+            "Resolved '{}', which does not identify as the {} CLI (expected '{}' in output of '{} {}'; saw: {})",
+            self.resolved.display(),
+            self.platform,
+            self.expected,
+            binary,
+            cmd,
+            self.output,
+        )
+    }
+}
+
+/// Truncate captured output to [`IDENTITY_CHECK_OUTPUT_LIMIT`] chars for
+/// the report, keeping the head (where `--version`-shaped output lives).
+pub fn truncate_identity_output(output: &str) -> String {
+    let trimmed = output.trim();
+    if trimmed.len() <= IDENTITY_CHECK_OUTPUT_LIMIT {
+        return trimmed.to_string();
+    }
+    format!("{}…", &trimmed[..IDENTITY_CHECK_OUTPUT_LIMIT])
+}
+
+/// Case-insensitive substring check of combined stdout+stderr against the
+/// registry's expected token. Pure so unit tests can pin the matching rule
+/// without spawning a process.
+fn identity_output_matches(combined: &str, expected: &str) -> bool {
+    combined.to_lowercase().contains(&expected.to_lowercase())
+}
+
+fn wrong_binary_error(
+    cli: &super::cli_config::CliConfig,
+    resolved: &Path,
+    expected: &str,
+    output: &str,
+) -> WrongBinaryError {
+    WrongBinaryError {
+        platform: cli.name.clone(),
+        resolved: resolved.to_path_buf(),
+        expected: expected.to_string(),
+        output: truncate_identity_output(output),
+    }
+}
+
+/// Synchronous identity check for sync contexts (doctor). Runs
+/// `<resolved> <check.cmd>` with stdin nulled, no network, no credentials,
+/// and judges combined stdout+stderr against `check.contains`.
+///
+/// - `Ok(())` when the platform declares no check (backward compatible) or
+///   the output contains the expected substring.
+/// - Never searches for another candidate binary: reports what was found
+///   and lets a human point at the right one via the absolute-path override.
+/// - Never called on dispatch (constraint 3) — probe/doctor only.
+pub fn verify_identity(
+    cli: &super::cli_config::CliConfig,
+    resolved: &Path,
+) -> std::result::Result<(), WrongBinaryError> {
+    let Some(check) = cli.identity_check.as_ref() else {
+        return Ok(());
+    };
+    let args = match shell_words::split(&check.cmd) {
+        Ok(args) => args,
+        Err(e) => {
+            return Err(wrong_binary_error(
+                cli,
+                resolved,
+                &check.contains,
+                &format!("failed to parse identity check command: {e}"),
+            ));
+        }
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    let resolved_owned = resolved.to_path_buf();
+    std::thread::spawn(move || {
+        let out = std::process::Command::new(&resolved_owned)
+            .args(&args)
+            .stdin(std::process::Stdio::null())
+            .output();
+        let _ = tx.send(out);
+    });
+    let output = match rx.recv_timeout(IDENTITY_CHECK_TIMEOUT) {
+        Ok(Ok(out)) => out,
+        Ok(Err(e)) => {
+            return Err(wrong_binary_error(
+                cli,
+                resolved,
+                &check.contains,
+                &format!("failed to run identity check: {e}"),
+            ));
+        }
+        Err(_) => {
+            return Err(wrong_binary_error(
+                cli,
+                resolved,
+                &check.contains,
+                "identity check timed out",
+            ));
+        }
+    };
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if identity_output_matches(&combined, &check.contains) {
+        Ok(())
+    } else {
+        Err(wrong_binary_error(
+            cli,
+            resolved,
+            &check.contains,
+            &combined,
+        ))
+    }
+}
+
+/// Async identity check for async contexts (probe). Same rule as
+/// [`verify_identity`]: `<resolved> <check.cmd>` judged against
+/// `check.contains`, case-insensitively, on combined stdout+stderr.
+pub async fn verify_identity_async(
+    cli: &super::cli_config::CliConfig,
+    resolved: &Path,
+) -> std::result::Result<(), WrongBinaryError> {
+    let Some(check) = cli.identity_check.as_ref() else {
+        return Ok(());
+    };
+    let args = match shell_words::split(&check.cmd) {
+        Ok(args) => args,
+        Err(e) => {
+            return Err(wrong_binary_error(
+                cli,
+                resolved,
+                &check.contains,
+                &format!("failed to parse identity check command: {e}"),
+            ));
+        }
+    };
+    let mut cmd = tokio::process::Command::new(resolved);
+    cmd.args(&args);
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    #[cfg(unix)]
+    cmd.process_group(0);
+    cmd.kill_on_drop(true);
+    let child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            return Err(wrong_binary_error(
+                cli,
+                resolved,
+                &check.contains,
+                &format!("failed to run identity check: {e}"),
+            ));
+        }
+    };
+    let output = match tokio::time::timeout(IDENTITY_CHECK_TIMEOUT, child.wait_with_output()).await
+    {
+        Ok(Ok(out)) => out,
+        Ok(Err(e)) => {
+            return Err(wrong_binary_error(
+                cli,
+                resolved,
+                &check.contains,
+                &format!("failed to run identity check: {e}"),
+            ));
+        }
+        Err(_) => {
+            return Err(wrong_binary_error(
+                cli,
+                resolved,
+                &check.contains,
+                "identity check timed out",
+            ));
+        }
+    };
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if identity_output_matches(&combined, &check.contains) {
+        Ok(())
+    } else {
+        Err(wrong_binary_error(
+            cli,
+            resolved,
+            &check.contains,
+            &combined,
+        ))
+    }
+}
+
 impl CliStrategy {
     /// Build a strategy straight from a registry [`CliConfig`] entry — the
     /// one place that lists every field this struct mirrors from it, so
     /// [`super::models::Cli::strategy`] and anything else that needs a
     /// strategy from a resolved config (e.g. the platform probe) can never
     /// drift apart by hand-copying the field list twice.
+    ///
+    /// CB44: `identity_check` is deliberately NOT mirrored here. Dispatch
+    /// builds every command through this strategy, so leaving the check out
+    /// keeps verification diagnosis-only (probe/doctor) with zero per-call
+    /// tax — a user who never runs doctor or probe keeps today's behaviour.
     ///
     /// [`CliConfig`]: super::cli_config::CliConfig
     pub fn from_cli_config(cli_config: &super::cli_config::CliConfig) -> Self {
@@ -1717,5 +1942,167 @@ mod tests {
             .unwrap();
         let cmd_str = format!("{:?}", cmd);
         assert!(!cmd_str.contains("--effort"));
+    }
+
+    // ── CB44 identity check ──────────────────────────────────────
+
+    fn identity_cli(
+        binary: &str,
+        cmd: Option<&str>,
+        contains: Option<&str>,
+    ) -> super::super::cli_config::CliConfig {
+        super::super::cli_config::CliConfig {
+            name: "blackbox".to_string(),
+            binary: binary.to_string(),
+            identity_check: match (cmd, contains) {
+                (Some(c), Some(s)) => Some(super::super::cli_config::IdentityCheck {
+                    cmd: c.to_string(),
+                    contains: s.to_string(),
+                }),
+                _ => None,
+            },
+            ..Default::default()
+        }
+    }
+
+    fn write_identity_script(dir: &tempfile::TempDir, name: &str, body: &str) -> PathBuf {
+        let path = dir.path().join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        path
+    }
+
+    #[test]
+    fn verify_identity_passes_when_output_contains_expected_substring() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = write_identity_script(&dir, "bb", "echo 'Blackbox CLI v1.2.3'\n");
+        let cli = identity_cli(
+            &script.to_string_lossy(),
+            Some("--version"),
+            Some("Blackbox"),
+        );
+        assert!(verify_identity(&cli, &script).is_ok());
+    }
+
+    #[test]
+    fn verify_identity_fails_when_output_missing_substring_reports_wrong_binary_with_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = write_identity_script(
+            &dir,
+            "blackbox",
+            "echo \"blackbox: another window manager is already running on display ':0'\"\n",
+        );
+        let cli = identity_cli(
+            &script.to_string_lossy(),
+            Some("--version"),
+            Some("Blackbox CLI"),
+        );
+        let err = verify_identity(&cli, &script).unwrap_err();
+        assert_eq!(err.resolved, script);
+        assert_eq!(err.expected, "Blackbox CLI");
+        assert!(
+            err.output.contains("another window manager"),
+            "error must carry the wrong program's output as evidence: {}",
+            err.output
+        );
+        let report = err.report(&cli.binary, "--version");
+        assert!(
+            report.contains(&script.to_string_lossy().to_string()),
+            "report must name the resolved absolute path: {report}"
+        );
+        assert!(report.contains("does not identify as the blackbox CLI"));
+    }
+
+    #[test]
+    fn verify_identity_skipped_when_check_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = write_identity_script(
+            &dir,
+            "whatever",
+            "echo 'another window manager is already running'\n",
+        );
+        let cli = identity_cli(&script.to_string_lossy(), None, None);
+        assert!(verify_identity(&cli, &script).is_ok());
+    }
+
+    #[test]
+    fn verify_identity_uses_absolute_path_directly_without_path_search() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = write_identity_script(&dir, "real-bb", "echo 'Blackbox CLI'\n");
+        let cli = identity_cli(
+            &script.to_string_lossy(),
+            Some("--version"),
+            Some("blackbox"),
+        );
+        // Absolute binary is used as-is; no PATH lookup happens.
+        assert!(verify_identity(&cli, &script).is_ok());
+    }
+
+    #[test]
+    fn verify_identity_matches_case_insensitively() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = write_identity_script(&dir, "bb", "echo 'BLACKBOX cli'\n");
+        let cli = identity_cli(
+            &script.to_string_lossy(),
+            Some("--version"),
+            Some("blackbox"),
+        );
+        assert!(verify_identity(&cli, &script).is_ok());
+    }
+
+    #[test]
+    fn verify_identity_truncates_long_output_but_keeps_evidence() {
+        let long = "x".repeat(IDENTITY_CHECK_OUTPUT_LIMIT + 1000);
+        let truncated = truncate_identity_output(&long);
+        assert!(truncated.len() <= IDENTITY_CHECK_OUTPUT_LIMIT + 3);
+        assert!(truncated.starts_with("xxx"));
+    }
+
+    /// CB44 constraint 3: the identity check is diagnosis-only
+    /// (probe/doctor), never a per-dispatch tax. Dispatch builds every
+    /// command through `CliStrategy::from_cli_config`, which deliberately
+    /// drops `identity_check` — and neither the executor nor the loop
+    /// engine may reference the check or its helper directly. Greps their
+    /// production code the way doctor's glyph test greps its own.
+    #[test]
+    fn agent_dispatch_never_runs_identity_check() {
+        for (name, source) in [
+            ("executor", include_str!("../executor/mod.rs")),
+            ("loop_engine", include_str!("../loop_engine.rs")),
+        ] {
+            let production_code = source.split("mod tests {").next().unwrap_or(source);
+            for marker in ["verify_identity", "identity_check"] {
+                assert!(
+                    !production_code.contains(marker),
+                    "CB44: `{marker}` must not appear in {name} production code — \
+                     identity verification is diagnosis-only (probe/doctor)"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn verify_identity_async_passes_and_fails_like_sync() {
+        let dir = tempfile::tempdir().unwrap();
+        let good = write_identity_script(&dir, "good", "echo 'Blackbox CLI'\n");
+        let bad = write_identity_script(
+            &dir,
+            "bad",
+            "echo 'another window manager is already running'\n",
+        );
+        let good_cli = identity_cli(&good.to_string_lossy(), Some("--version"), Some("Blackbox"));
+        let bad_cli = identity_cli(
+            &bad.to_string_lossy(),
+            Some("--version"),
+            Some("Blackbox CLI"),
+        );
+        assert!(verify_identity_async(&good_cli, &good).await.is_ok());
+        let err = verify_identity_async(&bad_cli, &bad).await.unwrap_err();
+        assert_eq!(err.resolved, bad);
+        assert!(err.output.contains("another window manager"));
     }
 }

@@ -701,6 +701,96 @@ mod tests {
         assert_eq!(cli.headless_mode, "--new-headless");
     }
 
+    /// CB44: the generic `merge_cli_fields` loop must carry the new
+    /// `identity_check` field — a platform whose check the user never
+    /// touched gets the registry's updated check on refresh.
+    #[test]
+    fn identity_check_never_touched_by_user_is_updated_on_refresh() {
+        use crate::domain::cli_config::IdentityCheck;
+        let home = TempDir::new().unwrap();
+        let canopy_dir = home.path().join(".canopy");
+
+        let old = CliConfig {
+            name: "testcli".to_string(),
+            binary: "ls".to_string(),
+            headless_mode: "--headless".to_string(),
+            identity_check: Some(IdentityCheck {
+                cmd: "--version".to_string(),
+                contains: "old".to_string(),
+            }),
+            ..Default::default()
+        };
+        write_config(&canopy_dir, vec![old.clone()]);
+        write_baseline(&canopy_dir, vec![old]);
+
+        let registry = registry_of(vec![detected_platform(
+            home.path(),
+            "testcli",
+            serde_json::json!({
+                "binary": "ls",
+                "headless_mode": "--headless",
+                "identity_check": {"cmd": "--version", "contains": "new"}
+            }),
+        )]);
+
+        apply_registry_refresh(home.path(), &registry).unwrap();
+
+        let config = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir);
+        let cli = config.get_cli("testcli").unwrap();
+        assert_eq!(
+            cli.identity_check.as_ref().map(|c| c.contains.as_str()),
+            Some("new")
+        );
+    }
+
+    /// CB44: a user-customised `identity_check` survives a registry refresh
+    /// that changes the same field — deliberate edits win over the registry.
+    #[test]
+    fn identity_check_customised_by_user_survives_refresh() {
+        use crate::domain::cli_config::IdentityCheck;
+        let home = TempDir::new().unwrap();
+        let canopy_dir = home.path().join(".canopy");
+
+        let baseline_cli = CliConfig {
+            name: "testcli".to_string(),
+            binary: "ls".to_string(),
+            headless_mode: "--headless".to_string(),
+            identity_check: Some(IdentityCheck {
+                cmd: "--version".to_string(),
+                contains: "old".to_string(),
+            }),
+            ..Default::default()
+        };
+        let local_cli = CliConfig {
+            identity_check: Some(IdentityCheck {
+                cmd: "--version".to_string(),
+                contains: "custom".to_string(),
+            }),
+            ..baseline_cli.clone()
+        };
+        write_config(&canopy_dir, vec![local_cli]);
+        write_baseline(&canopy_dir, vec![baseline_cli]);
+
+        let registry = registry_of(vec![detected_platform(
+            home.path(),
+            "testcli",
+            serde_json::json!({
+                "binary": "ls",
+                "headless_mode": "--headless",
+                "identity_check": {"cmd": "--version", "contains": "new"}
+            }),
+        )]);
+
+        apply_registry_refresh(home.path(), &registry).unwrap();
+
+        let config = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir);
+        let cli = config.get_cli("testcli").unwrap();
+        assert_eq!(
+            cli.identity_check.as_ref().map(|c| c.contains.as_str()),
+            Some("custom")
+        );
+    }
+
     #[test]
     fn brand_new_cli_is_still_added() {
         let home = TempDir::new().unwrap();

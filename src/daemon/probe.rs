@@ -65,6 +65,12 @@ pub(crate) enum ProbeOutcome {
     /// contained the probe token — the defect class this module exists to
     /// catch, including "exit 0 with an error and nothing else."
     Broken,
+    /// The resolved binary does not identify as this platform (CB44): the
+    /// registry's `identity_check` ran and its output lacked the expected
+    /// substring. Distinct from `Broken`/`SpawnFailed` so the caller knows
+    /// it is not a quota, model, or network problem — the wrong program
+    /// answered to the bare CLI name.
+    WrongBinary,
     /// The process was still running when the timeout elapsed; its process
     /// group has been killed. Deliberately distinct from `Broken`: the
     /// harness never got a chance to answer at all.
@@ -102,6 +108,7 @@ impl ProbeOutcome {
         match self {
             Self::Reachable => "reachable",
             Self::Broken => "broken",
+            Self::WrongBinary => "wrong_binary",
             Self::TimedOut => "timed_out",
             Self::NotConfigured => "not_configured",
             Self::SpawnFailed => "spawn_failed",
@@ -268,6 +275,43 @@ pub(crate) async fn probe_target(
                      `model` to probe the platform's own default instead.",
                     target.platform, model
                 )),
+            };
+        }
+    }
+
+    // CB44: identity check before the probe prompt. When the resolved
+    // binary is a different program answering to the same bare name (e.g.
+    // the Blackbox window manager), report WrongBinary with the resolved
+    // absolute path — never a quota, model, or network problem — and do not
+    // run the probe prompt at all. Platforms with no declared check behave
+    // exactly as today. Dispatch never runs this (probe/doctor only).
+    if cli_config.identity_check.is_some() {
+        let resolved_path = match cli_config.resolve() {
+            Ok((p, _step)) => p,
+            Err(error) => {
+                return ProbeReport {
+                    platform: target.platform.clone(),
+                    model: target.model.clone(),
+                    outcome: ProbeOutcome::SpawnFailed,
+                    duration_ms: start.elapsed().as_millis(),
+                    error: Some(redact_secrets(&error.to_string())),
+                };
+            }
+        };
+        if let Err(wb) =
+            crate::domain::cli_strategy::verify_identity_async(cli_config, &resolved_path).await
+        {
+            let check_cmd = cli_config
+                .identity_check
+                .as_ref()
+                .map(|c| c.cmd.as_str())
+                .unwrap_or("");
+            return ProbeReport {
+                platform: target.platform.clone(),
+                model: target.model.clone(),
+                outcome: ProbeOutcome::WrongBinary,
+                duration_ms: start.elapsed().as_millis(),
+                error: Some(redact_secrets(&wb.report(&cli_config.binary, check_cmd))),
             };
         }
     }
@@ -908,6 +952,119 @@ mod tests {
         assert!(report.error.is_some());
     }
 
+    /// CB44: the resolved binary answers to the platform's name but is a
+    /// different program (the Blackbox window-manager shape). The identity
+    /// check fails, so the probe reports `WrongBinary` — naming the resolved
+    /// absolute path and what the check saw — never quota/model/network.
+    #[tokio::test]
+    async fn probe_target_reports_wrong_binary_when_identity_check_fails() {
+        use crate::domain::cli_config::IdentityCheck;
+        let dir = tempfile::tempdir().unwrap();
+        let script = write_script(
+            &dir,
+            "blackbox",
+            "if [ \"$1\" = \"--version\" ]; then echo \"blackbox: another window manager is already running on display ':0'\"; else echo \"$1\"; fi\n",
+        );
+        let mut config = config_with_cli("blackbox", &script);
+        config.clis[0].identity_check = Some(IdentityCheck {
+            cmd: "--version".to_string(),
+            contains: "Blackbox CLI".to_string(),
+        });
+        let target = ProbeTarget {
+            platform: "blackbox".to_string(),
+            model: None,
+            effort: None,
+        };
+        let report = probe_target(&config, &target, None, Duration::from_secs(5)).await;
+        assert_eq!(report.outcome, ProbeOutcome::WrongBinary);
+        assert!(!report.outcome.reachable());
+        let error = report.error.unwrap();
+        assert!(
+            error.contains(&script.to_string_lossy().to_string()),
+            "must name the resolved absolute path: {error}"
+        );
+        assert!(
+            error.contains("does not identify as the blackbox CLI"),
+            "must use the wrong-binary wording, not quota/model: {error}"
+        );
+        assert!(error.contains("another window manager"));
+        assert_eq!(report.outcome.as_str(), "wrong_binary");
+    }
+
+    /// CB44: once the identity check fails, the probe prompt is never built
+    /// or spawned — the wrong program's output is evidence only, never
+    /// scraped for meaning. The fixture would echo the token back (looking
+    /// healthy) if the probe prompt ever ran; `WrongBinary` proves it didn't.
+    #[tokio::test]
+    async fn probe_target_does_not_run_probe_prompt_when_identity_fails() {
+        use crate::domain::cli_config::IdentityCheck;
+        let dir = tempfile::tempdir().unwrap();
+        let script = write_script(
+            &dir,
+            "blackbox",
+            "if [ \"$1\" = \"--version\" ]; then echo 'wrong program'; else echo \"$1\"; fi\n",
+        );
+        let mut config = config_with_cli("blackbox-noprompt", &script);
+        config.clis[0].identity_check = Some(IdentityCheck {
+            cmd: "--version".to_string(),
+            contains: "expected-token-xyz".to_string(),
+        });
+        let target = ProbeTarget {
+            platform: "blackbox-noprompt".to_string(),
+            model: None,
+            effort: None,
+        };
+        let report = probe_target(&config, &target, None, Duration::from_secs(5)).await;
+        assert_eq!(report.outcome, ProbeOutcome::WrongBinary);
+        assert!(!report.outcome.reachable());
+    }
+
+    /// CB44: a binary that passes the identity check proceeds to the normal
+    /// probe prompt and is `Reachable` when it echoes the token.
+    #[tokio::test]
+    async fn probe_target_reachable_when_identity_check_passes_then_token_echoed() {
+        use crate::domain::cli_config::IdentityCheck;
+        let dir = tempfile::tempdir().unwrap();
+        let script = write_script(
+            &dir,
+            "real-bb",
+            "if [ \"$1\" = \"--version\" ]; then echo 'Blackbox CLI v1.2.3'; else echo \"$1\"; fi\n",
+        );
+        let mut config = config_with_cli("real-bb", &script);
+        config.clis[0].identity_check = Some(IdentityCheck {
+            cmd: "--version".to_string(),
+            contains: "Blackbox".to_string(),
+        });
+        let target = ProbeTarget {
+            platform: "real-bb".to_string(),
+            model: None,
+            effort: None,
+        };
+        let report = probe_target(&config, &target, None, Duration::from_secs(5)).await;
+        assert_eq!(report.outcome, ProbeOutcome::Reachable);
+        assert!(report.error.is_none());
+    }
+
+    /// CB44 requirement 5: a platform with no declared check behaves exactly
+    /// as today — the window-manager output is `Broken`, never `WrongBinary`.
+    #[tokio::test]
+    async fn probe_target_with_no_identity_check_still_reports_broken_for_window_manager_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = write_script(
+            &dir,
+            "blackbox-unchecked",
+            "echo \"blackbox: another window manager is already running on display ':0'\"\nexit 0\n",
+        );
+        let config = config_with_cli("blackbox-unchecked", &script);
+        let target = ProbeTarget {
+            platform: "blackbox-unchecked".to_string(),
+            model: None,
+            effort: None,
+        };
+        let report = probe_target(&config, &target, None, Duration::from_secs(5)).await;
+        assert_eq!(report.outcome, ProbeOutcome::Broken);
+    }
+
     #[tokio::test]
     async fn probe_target_redacts_secrets_in_error_text() {
         let dir = tempfile::tempdir().unwrap();
@@ -1187,6 +1344,16 @@ mod tests {
             duration_ms: 0,
             error: None,
         }
+    }
+
+    /// CB44: `WrongBinary` is a confirmed failure (the binary is the wrong
+    /// program, not an unvalidated pair), so `would_fail` counts it — and
+    /// `unknown_count` does not.
+    #[test]
+    fn would_fail_count_counts_wrong_binary_as_confirmed_failure() {
+        let reports = vec![report(ProbeOutcome::WrongBinary)];
+        assert_eq!(would_fail_count(&reports), 1);
+        assert_eq!(unknown_count(&reports), 0);
     }
 
     /// `would_fail` must count every confirmed-failure outcome — not just

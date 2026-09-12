@@ -327,6 +327,32 @@ pub(crate) async fn run_doctor() -> Result<()> {
                     ));
                 }
                 Ok((resolved, step)) => {
+                    // CB44: identity check — the resolved binary may be a
+                    // different program answering to the same bare name
+                    // (e.g. `/usr/bin/blackbox` is the Blackbox X11 window
+                    // manager, not the Blackbox CLI). Runs once per doctor
+                    // invocation, never on dispatch. Platforms with no
+                    // declared check behave exactly as today.
+                    if let Some(wb) = diagnose_cli_identity(cli_config, &resolved) {
+                        let check = cli_config
+                            .identity_check
+                            .as_ref()
+                            .map_or("", |c| c.contains.as_str());
+                        println!(
+                            " \x1b[31m✗\x1b[0m {} → {} (via {} — wrong binary: expected '{}' in output; saw: {})",
+                            cli_config.name,
+                            resolved.display(),
+                            step.label(),
+                            check,
+                            wb.output,
+                        );
+                        let check_cmd = cli_config
+                            .identity_check
+                            .as_ref()
+                            .map_or("", |c| c.cmd.as_str());
+                        issues.push(wb.report(&cli_config.binary, check_cmd));
+                        continue;
+                    }
                     // Check daemon reachability: does the binary also
                     // resolve under the daemon's captured PATH?
                     let daemon_reachable = match &daemon_path {
@@ -851,6 +877,19 @@ fn binary_is_executable(path: &Path) -> bool {
     path.is_file()
 }
 
+/// CB44: run the platform's registry-declared identity check against the
+/// already-resolved absolute path. `Some(error)` exactly when the binary
+/// does not identify as this platform (wrong program answering to the bare
+/// name); `None` when no check is declared (backward compatible) or the
+/// check passes. Pure diagnosis — never called on dispatch.
+pub(crate) fn diagnose_cli_identity(
+    cli_config: &crate::domain::cli_config::CliConfig,
+    resolved: &Path,
+) -> Option<crate::domain::cli_strategy::WrongBinaryError> {
+    let _check = cli_config.identity_check.as_ref()?;
+    crate::domain::cli_strategy::verify_identity(cli_config, resolved).err()
+}
+
 /// Best-effort `<binary> --version` output, trimmed. `None` on any failure —
 /// doctor reports a skew warning either way, just without a version string
 /// to show alongside a path that couldn't be run.
@@ -1345,6 +1384,95 @@ mod tests {
         std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755))
             .unwrap();
         assert_eq!(binary_version(&path), None);
+    }
+
+    // ── CB44 identity check ──────────────────────────────────
+
+    fn identity_cli_config(
+        binary: &std::path::Path,
+        cmd: Option<&str>,
+        contains: Option<&str>,
+    ) -> crate::domain::cli_config::CliConfig {
+        crate::domain::cli_config::CliConfig {
+            name: "blackbox".to_string(),
+            binary: binary.to_string_lossy().to_string(),
+            identity_check: match (cmd, contains) {
+                (Some(c), Some(s)) => Some(crate::domain::cli_config::IdentityCheck {
+                    cmd: c.to_string(),
+                    contains: s.to_string(),
+                }),
+                _ => None,
+            },
+            ..Default::default()
+        }
+    }
+
+    fn write_identity_script(dir: &tempfile::TempDir, name: &str, body: &str) -> PathBuf {
+        let path = dir.path().join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        path
+    }
+
+    #[test]
+    fn doctor_reports_wrong_binary_with_resolved_path_when_identity_check_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = write_identity_script(
+            &dir,
+            "blackbox",
+            "echo \"blackbox: another window manager is already running on display ':0'\"\n",
+        );
+        let cli = identity_cli_config(&script, Some("--version"), Some("Blackbox CLI"));
+        let wb = diagnose_cli_identity(&cli, &script)
+            .expect("window-manager output must fail the identity check");
+        assert_eq!(wb.resolved, script);
+        let issue = wb.report(&cli.binary, "--version");
+        assert!(
+            issue.contains(&script.to_string_lossy().to_string()),
+            "issue must name the resolved absolute path: {issue}"
+        );
+        assert!(issue.contains("does not identify as the blackbox CLI"));
+        assert!(issue.contains("another window manager"));
+    }
+
+    #[test]
+    fn doctor_does_not_report_wrong_binary_when_check_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = write_identity_script(
+            &dir,
+            "blackbox",
+            "echo 'another window manager is already running'\n",
+        );
+        let cli = identity_cli_config(&script, None, None);
+        assert!(diagnose_cli_identity(&cli, &script).is_none());
+    }
+
+    #[test]
+    fn doctor_does_not_report_wrong_binary_when_identity_check_passes() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = write_identity_script(&dir, "real-bb", "echo 'Blackbox CLI v1.2.3'\n");
+        let cli = identity_cli_config(&script, Some("--version"), Some("Blackbox"));
+        assert!(diagnose_cli_identity(&cli, &script).is_none());
+    }
+
+    #[test]
+    fn doctor_respects_absolute_path_override() {
+        // Two binaries share the bare name: the failing one would win a
+        // PATH search, but the config points at the absolute path of the
+        // real CLI — doctor must check exactly that path and pass.
+        let dir = tempfile::tempdir().unwrap();
+        let failing = write_identity_script(&dir, "bb-failing", "echo 'another window manager'\n");
+        let passing = write_identity_script(&dir, "bb-passing", "echo 'Blackbox CLI'\n");
+        let cli = identity_cli_config(&passing, Some("--version"), Some("Blackbox"));
+        assert_eq!(
+            PathBuf::from(cli.binary.clone()),
+            passing,
+            "the override must be the absolute path, not a bare name"
+        );
+        assert!(diagnose_cli_identity(&cli, &passing).is_none());
+        let failing_cli = identity_cli_config(&failing, Some("--version"), Some("Blackbox CLI"));
+        assert!(diagnose_cli_identity(&failing_cli, &failing).is_some());
     }
 
     #[test]

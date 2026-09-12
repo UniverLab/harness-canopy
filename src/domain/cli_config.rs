@@ -86,6 +86,13 @@ pub struct CliConfig {
     /// hot path.
     #[serde(default)]
     pub models_list_cmd: Option<String>,
+    /// Command + expected substring that proves the resolved binary is this platform.
+    /// When `None`, no verification is done (backward compatible).
+    /// `cmd` is shell-words-split and appended to the resolved binary, e.g. `"--version"`.
+    /// `contains` is matched case-insensitively against combined stdout+stderr.
+    /// Example (registry): `identity_check = { cmd = "--version", contains = "blackbox" }`
+    #[serde(default)]
+    pub identity_check: Option<IdentityCheck>,
     /// RGB accent color for this CLI's agents in the TUI.
     #[serde(default)]
     pub accent_color: Option<[u8; 3]>,
@@ -153,6 +160,18 @@ pub struct CliConfig {
     /// Declarative effort support. See [`EffortDeclaration`].
     #[serde(default)]
     pub effort_declaration: Option<EffortDeclaration>,
+}
+
+/// Identity check proving the resolved binary is the intended AI CLI.
+///
+/// `cmd` is shell-words-split and appended to the resolved binary path
+/// (e.g. `"--version"`); `contains` must appear (case-insensitively) in the
+/// combined stdout+stderr for the binary to be accepted. Diagnosis-only
+/// (probe/doctor, CB44) — never run on dispatch.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IdentityCheck {
+    pub cmd: String,
+    pub contains: String,
 }
 
 /// How this CLI exposes reasoning-effort control.
@@ -416,6 +435,7 @@ mod tests {
             session_list_format_args: None,
             session_id_pattern: None,
             models_list_cmd: None,
+            identity_check: None,
             accent_color: None,
             yolo_flag: None,
             trust_flag: None,

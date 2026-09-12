@@ -18,6 +18,13 @@ pub struct CanopyConfig {
     pub mcp_filesystem_root: String,
 
     /// Available CLIs detected during setup.
+    ///
+    /// CB44: a platform's `binary` may be an absolute path instead of the
+    /// registry's bare name — e.g. `binary = "/opt/blackbox/bin/bb"` when
+    /// the real CLI lives under another name or outside `PATH`. The edit
+    /// lives in this local file only (never in `canopy-registry`) and is
+    /// preserved across registry refreshes by `merge_cli_fields`; the
+    /// resolver uses an absolute path as-is with no `PATH` search.
     #[serde(default)]
     pub clis: Vec<CliConfig>,
 
