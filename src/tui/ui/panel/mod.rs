@@ -237,6 +237,21 @@ fn panel_mode_label(app: &App) -> Option<&'static str> {
     }
 }
 
+fn loop_live_mode_label(app: &App) -> Option<&'static str> {
+    if app.sidebar_layer == SidebarLayer::Automation
+        && app.automation_kind == crate::tui::app::AutomationKind::Loop
+        && app.loop_live_state.is_some()
+    {
+        if app.loop_graph_follow {
+            Some(" Auto-follow ")
+        } else {
+            Some(" Manual ")
+        }
+    } else {
+        None
+    }
+}
+
 fn show_home_fallback(app: &App) -> bool {
     app.agents.is_empty()
         && app.projects.is_empty()
@@ -576,14 +591,22 @@ pub(super) fn draw_log_panel(frame: &mut Frame, area: Rect, app: &mut App, theme
 
     let border_color = log_panel_border_color(app, theme);
     let label_color = panel_mode_label_color(app, theme);
-    let title = panel_mode_label(app).map(|label| {
-        Span::styled(
-            label,
+    let loop_title = loop_live_mode_label(app);
+    let title = match (loop_title, panel_mode_label(app)) {
+        (Some(lt), _) => Some(Span::styled(
+            lt,
             Style::default()
                 .fg(label_color)
                 .add_modifier(Modifier::BOLD),
-        )
-    });
+        )),
+        (None, Some(bt)) => Some(Span::styled(
+            bt,
+            Style::default()
+                .fg(label_color)
+                .add_modifier(Modifier::BOLD),
+        )),
+        (None, None) => None,
+    };
     let inner = render_panel_block(frame, area, border_color, title, theme);
     if inner.width == 0 || inner.height == 0 {
         return;
@@ -2451,5 +2474,147 @@ mod tests {
         let (text, color) = rag_status(&app, &theme);
         assert_eq!(text, "✗ download failed");
         assert_eq!(color, Color::Red);
+    }
+
+    fn loop_live_state() -> crate::tui::app::loop_live_state::LoopLiveState {
+        crate::tui::app::loop_live_state::LoopLiveState {
+            loop_id: "lp1".to_string(),
+            loop_name: "test".to_string(),
+            loop_status: crate::domain::loops::LoopStatus::Running,
+            workdir: "/tmp".to_string(),
+            trigger_type: "manual".to_string(),
+            schedule_expr: None,
+            watch_path: None,
+            autorun_at: None,
+            spec_queue: vec![],
+            done_count: 0,
+            total_count: 0,
+            current_spec_id: None,
+            effective_nodes: vec![],
+            effective_edges: vec![],
+            ensembles: vec![],
+            router_taken_routes: std::collections::HashMap::new(),
+            current_node_id: None,
+            current_node_status: None,
+            current_node_started_at: None,
+            current_node_iteration: None,
+            current_node_output_tail: None,
+        }
+    }
+
+    fn loop_app(follow: bool) -> App {
+        let db_file = tempfile::NamedTempFile::new().unwrap();
+        let db_path: std::path::PathBuf = db_file.path().to_path_buf();
+        std::mem::forget(db_file);
+        let mut app = App::new(
+            Arc::new(crate::db::Database::new(&db_path).unwrap()),
+            tempfile::tempdir().unwrap().path(),
+        )
+        .unwrap();
+        app.focus = Focus::Preview;
+        app.sidebar_layer = SidebarLayer::Automation;
+        app.automation_kind = crate::tui::app::AutomationKind::Loop;
+        app.loop_live_state = Some(loop_live_state());
+        app.loop_graph_follow = follow;
+        app
+    }
+
+    #[test]
+    fn loop_mode_appears_in_border_title_auto_follow() {
+        let mut app = loop_app(true);
+        let theme = Theme::classic();
+        let text = render_to_text(80, 24, |frame, area| {
+            draw_log_panel(frame, area, &mut app, &theme);
+        });
+        assert!(
+            text.contains("Auto-follow"),
+            "border title should show Auto-follow in loop view:\n{text}"
+        );
+        assert!(
+            !text.contains("AUTO-FOLLOW"),
+            "strip must not appear in the live view:\n{text}"
+        );
+    }
+
+    #[test]
+    fn loop_mode_appears_in_border_title_manual() {
+        let mut app = loop_app(false);
+        let theme = Theme::classic();
+        let text = render_to_text(80, 24, |frame, area| {
+            draw_log_panel(frame, area, &mut app, &theme);
+        });
+        assert!(
+            text.contains("Manual"),
+            "border title should show Manual in manual mode:\n{text}"
+        );
+        assert!(
+            !text.contains("MANUAL"),
+            "all-caps strip text must not appear:\n{text}"
+        );
+        assert!(
+            !text.contains("Esc"),
+            "instruction must not leak into border title:\n{text}"
+        );
+    }
+
+    #[test]
+    fn narrow_pane_keeps_mode_label() {
+        // At narrow width the border title must still show the mode label.
+        // (FR4: mode survives when pane is too narrow for both title and label.)
+        let app = loop_app(false);
+        assert_eq!(loop_live_mode_label(&app), Some(" Manual "));
+        let title = loop_live_mode_label(&app).map(|label| {
+            Span::styled(
+                label,
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            )
+        });
+        let backend = TestBackend::new(10, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                render_panel_block(frame, area, Color::DarkGray, title, &Theme::classic());
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let mut text = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                text.push_str(buffer[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+        assert!(
+            text.contains("Manual"),
+            "mode label must survive at narrow width:\n{text}"
+        );
+    }
+
+    #[test]
+    fn loop_mode_label_changes_with_follow() {
+        let mut app = loop_app(true);
+        assert_eq!(loop_live_mode_label(&app), Some(" Auto-follow "));
+        app.loop_graph_follow = false;
+        assert_eq!(loop_live_mode_label(&app), Some(" Manual "));
+    }
+
+    #[test]
+    fn loop_mode_not_shown_when_not_loop_view() {
+        // Outside the loop live view the loop mode must not appear; the
+        // panel falls back to the interactive session label (or none).
+        let mut app = loop_app(true);
+        app.sidebar_layer = SidebarLayer::Live;
+        assert_eq!(loop_live_mode_label(&app), None);
+
+        let mut app = loop_app(true);
+        app.automation_kind = crate::tui::app::AutomationKind::Agent;
+        assert_eq!(loop_live_mode_label(&app), None);
+
+        let mut app = loop_app(true);
+        app.loop_live_state = None;
+        assert_eq!(loop_live_mode_label(&app), None);
     }
 }

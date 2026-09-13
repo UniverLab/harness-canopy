@@ -126,21 +126,6 @@ fn render_loop_live_view(
     ctx: &LiveViewContext,
 ) -> LiveViewRenderResult {
     let state = ctx.state;
-    // CT8: the top row is a persistent mode indicator that never scrolls with
-    // the graph content. Everything below runs on `area` minus that row.
-    let indicator_area = Rect {
-        x: area.x,
-        y: area.y,
-        width: area.width,
-        height: 1,
-    };
-    let area = Rect {
-        x: area.x,
-        y: area.y + 1,
-        width: area.width,
-        height: area.height.saturating_sub(1),
-    };
-    frame.render_widget(mode_indicator(ctx.follow, ctx.theme), indicator_area);
     let mut lines = header_lines(state, ctx.blocked, ctx.theme);
     lines.push(Line::from(""));
 
@@ -282,32 +267,6 @@ fn ensure_visible(start: u16, span: u16, scroll: u16, height: u16) -> u16 {
     } else {
         scroll
     }
-}
-
-/// CT8: the always-visible badge naming the current scroll mode. Rendered on
-/// a reserved top row so it never scrolls away with the graph. In manual mode
-/// it also names the key (`Esc`) that returns to auto-follow. Both modes are
-/// labelled outright — the reader never has to infer the mode from behaviour.
-/// The colour fills the whole row (widget `style`, not just the span) so the
-/// badge reads as a solid bar at a glance, matching the interactive preview's
-/// focus state.
-fn mode_indicator(follow: bool, theme: &Theme) -> Paragraph<'static> {
-    let (text, bg) = if follow {
-        (
-            " \u{25cf} AUTO-FOLLOW \u{2014} view tracks the running node ",
-            theme.status_running,
-        )
-    } else {
-        (
-            " \u{2016} MANUAL \u{2014} press Esc to return to auto-follow ",
-            theme.warning,
-        )
-    };
-    let style = Style::default()
-        .fg(theme.accent_fg)
-        .bg(bg)
-        .add_modifier(Modifier::BOLD);
-    Paragraph::new(Line::from(Span::styled(text.to_string(), style))).style(style)
 }
 
 fn status_icon_and_label(
@@ -2318,9 +2277,8 @@ mod tests {
             })
             .unwrap();
         let (clamped_scroll, total_lines) = clamped.unwrap();
-        // The indicator row consumes 1 row of the 15-row viewport, so the
-        // renderer's internal max_scroll is total_lines - 14.
-        let max = total_lines.saturating_sub(14);
+        // With the strip removed, the full viewport height is available.
+        let max = total_lines.saturating_sub(15);
         assert_eq!(
             clamped_scroll, max,
             "scroll must clamp to total_lines - height ({max}), got {clamped_scroll} with total {total_lines}"
@@ -3025,7 +2983,7 @@ mod tests {
     // Breaks if: the manual branch stops calling `ensure_visible`.
 
     #[test]
-    fn ct8_mode_indicator_present_in_both_modes_and_names_the_key() {
+    fn strip_absent_after_ct11() {
         let state = running_state();
         let node_info = NodeRunInfo::default();
 
@@ -3049,8 +3007,8 @@ mod tests {
             );
         });
         assert!(
-            follow_text.contains("AUTO-FOLLOW"),
-            "auto-follow mode must render a labelled indicator:\n{follow_text}"
+            !follow_text.contains("AUTO-FOLLOW") && !follow_text.contains("MANUAL"),
+            "strip must be absent from the live view in auto-follow mode:\n{follow_text}"
         );
 
         let manual_text = render_to_text(80, 30, |frame, area| {
@@ -3073,14 +3031,10 @@ mod tests {
             );
         });
         assert!(
-            manual_text.contains("MANUAL"),
-            "manual mode must render a labelled indicator:\n{manual_text}"
-        );
-        assert!(
-            manual_text.contains("Esc"),
-            "the manual indicator must name the key that restores auto-follow:\n{manual_text}"
+            !manual_text.contains("AUTO-FOLLOW") && !manual_text.contains("MANUAL — press Esc"),
+            "strip must be absent from the live view in manual mode:\n{manual_text}"
         );
     }
-    // Breaks if: `mode_indicator_line` is removed, stops being rendered, or
-    // drops the "Esc" hint from the manual variant.
+    // Breaks if: the strip is re-added to the live view instead of
+    // the border title.
 }
