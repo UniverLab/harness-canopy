@@ -280,7 +280,7 @@ fn draw_panel_picker(frame: &mut Frame, app: &App, theme: &Theme) {
     use crate::tui::app::panel_face::PANEL_PICKER_OPTIONS;
     use ratatui::style::{Modifier, Style};
     use ratatui::text::{Line, Span};
-    use ratatui::widgets::{Block, Paragraph};
+    use ratatui::widgets::{Block, Clear, Paragraph};
 
     let rows: Vec<(String, bool)> = PANEL_PICKER_OPTIONS
         .iter()
@@ -311,10 +311,13 @@ fn draw_panel_picker(frame: &mut Frame, app: &App, theme: &Theme) {
         height.min(frame.area().height.saturating_sub(2)),
     );
 
+    frame.render_widget(Clear, area);
+    crate::tui::ui::dialogs::draw_dialog_left_wave(frame, area, app.animation_tick.into());
     let block = Block::default()
         .title(" panel face · F6 ")
         .borders(borders_for(theme))
-        .border_style(Style::default().fg(theme.header_color));
+        .border_style(Style::default().fg(theme.header_color))
+        .style(Style::default().bg(theme.dialog_bg));
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height < 3 {
@@ -537,5 +540,256 @@ mod tests {
         let area = Rect::new(0, 0, 100, 40);
         let result = centered_rect(100, 5, area);
         assert_eq!(result.height, 5);
+    }
+
+    // CT12 — panel picker shares the dialog chrome (waves rail + opaque body).
+    fn picker_test_app() -> (App, tempfile::TempDir) {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        std::mem::forget(tmp);
+        let db = std::sync::Arc::new(crate::db::Database::new(&path).unwrap());
+        let data_dir = tempfile::tempdir().unwrap();
+        let app = App::new(db, data_dir.path()).unwrap();
+        (app, data_dir)
+    }
+
+    fn render_picker_buffer(
+        app: &App,
+        theme: &Theme,
+        width: u16,
+        height: u16,
+        behind: Color,
+    ) -> ratatui::buffer::Buffer {
+        use ratatui::backend::TestBackend;
+        use ratatui::widgets::{Paragraph, Wrap};
+        use ratatui::Terminal;
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                let full = frame.area();
+                // Distinctive backdrop standing in for the loop graph /
+                // interactive output / knowledge view the picker floats over.
+                let filler = vec!["#".repeat(width as usize); height as usize].join("\n");
+                frame.render_widget(
+                    Paragraph::new(filler)
+                        .style(Style::default().bg(behind).fg(Color::White))
+                        .wrap(Wrap { trim: false }),
+                    full,
+                );
+                draw_panel_picker(frame, app, theme);
+            })
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    /// Mirror of `draw_panel_picker`'s size/position math (labels + pinned
+    /// state only — no chrome), so tests can scope assertions to the picker.
+    fn expected_picker_area(app: &App, full: Rect) -> Rect {
+        use crate::tui::app::panel_face::PANEL_PICKER_OPTIONS;
+        let rows: Vec<String> = PANEL_PICKER_OPTIONS
+            .iter()
+            .map(|option| {
+                let name = option.map_or("automatic", |face| face.label()).to_string();
+                if *option == app.panel_pinned {
+                    format!("{name}  · pinned")
+                } else {
+                    name
+                }
+            })
+            .collect();
+        let width = rows
+            .iter()
+            .map(|label| label.chars().count())
+            .max()
+            .unwrap_or(9)
+            .max(22) as u16
+            + 6;
+        let height = rows.len() as u16 + 4;
+        let center = centered_rect(40, height, full);
+        Rect::new(
+            center.x,
+            center.y,
+            width.min(full.width.saturating_sub(2)),
+            height.min(full.height.saturating_sub(2)),
+        )
+    }
+
+    fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {
+        let mut text = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                text.push_str(buffer[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+        text
+    }
+
+    #[test]
+    fn panel_picker_has_waves_rail() {
+        for theme in [Theme::classic(), Theme::modern()] {
+            let (app, _data_dir) = picker_test_app();
+            let (width, height) = (100u16, 40u16);
+            let buffer = render_picker_buffer(&app, &theme, width, height, Color::Blue);
+            let area = expected_picker_area(&app, Rect::new(0, 0, width, height));
+            assert!(area.x > 0, "picker must leave a gutter column for the rail");
+            let rail_x = area.x.saturating_sub(1);
+            let rail_y = area.y + area.height.saturating_sub(3) / 2;
+            let glyphs: Vec<&str> = (0..3)
+                .map(|i| buffer[(rail_x, rail_y + i as u16)].symbol())
+                .collect();
+            // Same `░▒░` rail the shared `draw_dialog_left_wave` paints.
+            assert_eq!(
+                glyphs,
+                vec!["░", "▒", "░"],
+                "panel picker must draw the shared waves rail"
+            );
+        }
+    }
+
+    #[test]
+    fn panel_picker_body_is_opaque_over_every_background() {
+        for theme in [Theme::classic(), Theme::modern()] {
+            let (app, _data_dir) = picker_test_app();
+            let behind = Color::Blue;
+            assert_ne!(theme.dialog_bg, behind);
+            assert_ne!(theme.selected_bg, behind);
+            let (width, height) = (100u16, 40u16);
+            let buffer = render_picker_buffer(&app, &theme, width, height, behind);
+            let area = expected_picker_area(&app, Rect::new(0, 0, width, height));
+            for y in area.y..area.y + area.height {
+                for x in area.x..area.x + area.width {
+                    let cell = &buffer[(x, y)];
+                    assert_ne!(
+                        cell.symbol(),
+                        "#",
+                        "picker cell ({x},{y}) leaks the backdrop symbol"
+                    );
+                    assert!(
+                        cell.bg == theme.dialog_bg || cell.bg == theme.selected_bg,
+                        "picker cell ({x},{y}) has backdrop bg {:?}, want {:?} or {:?}",
+                        cell.bg,
+                        theme.dialog_bg,
+                        theme.selected_bg
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn panel_picker_border_and_title_match_shared_chrome() {
+        // Classic: box border in the header colour with the F6 title on top.
+        let (app, _data_dir) = picker_test_app();
+        let theme = Theme::classic();
+        let (width, height) = (100u16, 40u16);
+        let buffer = render_picker_buffer(&app, &theme, width, height, Color::Blue);
+        let area = expected_picker_area(&app, Rect::new(0, 0, width, height));
+        let text = buffer_text(&buffer);
+        assert!(
+            text.contains("panel face"),
+            "picker must carry its title\n{text}"
+        );
+        assert_eq!(buffer[(area.x, area.y)].symbol(), "┌");
+        assert_eq!(
+            buffer[(area.x, area.y)].fg,
+            theme.header_color,
+            "picker border must use the shared header colour"
+        );
+        assert_eq!(buffer[(area.x + area.width - 1, area.y)].symbol(), "┐");
+        assert_eq!(
+            buffer[(area.x + 1, area.y)].fg,
+            theme.header_color,
+            "picker top border must use the shared header colour"
+        );
+
+        // Modern (`Borders::NONE`): no box-drawing glyphs anywhere in the
+        // picker rect, same rule `borders_for` gives every other dialog.
+        let modern = Theme::modern();
+        let modern_buffer = render_picker_buffer(&app, &modern, width, height, Color::Blue);
+        let modern_area = expected_picker_area(&app, Rect::new(0, 0, width, height));
+        for y in modern_area.y..modern_area.y + modern_area.height {
+            for x in modern_area.x..modern_area.x + modern_area.width {
+                let symbol = modern_buffer[(x, y)].symbol();
+                assert!(
+                    !["─", "│", "┌", "┐", "└", "┘"].contains(&symbol),
+                    "modern picker cell ({x},{y}) must not draw a border glyph"
+                );
+            }
+        }
+        // The modern picker is still opaque: every cell carries the dialog
+        // background (which equals the panel background on this theme) or
+        // the selected-row background.
+        for y in modern_area.y..modern_area.y + modern_area.height {
+            for x in modern_area.x..modern_area.x + modern_area.width {
+                let cell = &modern_buffer[(x, y)];
+                assert!(
+                    cell.bg == modern.dialog_bg || cell.bg == modern.selected_bg,
+                    "modern picker cell ({x},{y}) has bg {:?}",
+                    cell.bg
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn panel_picker_and_quit_confirm_share_dialog_bg() {
+        use ratatui::backend::TestBackend;
+        use ratatui::widgets::{Paragraph, Wrap};
+        use ratatui::Terminal;
+        for theme in [Theme::classic(), Theme::modern()] {
+            let (app, _data_dir) = picker_test_app();
+            let (width, height) = (100u16, 40u16);
+            let full = Rect::new(0, 0, width, height);
+            let backend = TestBackend::new(width, height);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal
+                .draw(|frame| {
+                    let filler = vec!["#".repeat(width as usize); height as usize].join("\n");
+                    frame.render_widget(
+                        Paragraph::new(filler)
+                            .style(Style::default().bg(Color::Blue).fg(Color::White))
+                            .wrap(Wrap { trim: false }),
+                        full,
+                    );
+                    crate::tui::ui::dialogs::draw_quit_confirm(frame, &theme);
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            // `draw_modal_confirm` centers a 40%-wide rect; its height is the
+            // wrapped message lines plus borders.
+            let message = "Press y/Enter to quit, any key to cancel";
+            let dialog_width = width * 40 / 100;
+            let inner_width = dialog_width.saturating_sub(2).max(1) as usize;
+            let needed = message.len().div_ceil(inner_width).max(1) as u16;
+            let quit_area = centered_rect(40, needed + 2, full);
+            let mut saw_dialog_bg = false;
+            for y in quit_area.y..quit_area.y + quit_area.height {
+                for x in quit_area.x..quit_area.x + quit_area.width {
+                    let cell = &buffer[(x, y)];
+                    assert_eq!(
+                        cell.bg, theme.dialog_bg,
+                        "quit confirm cell ({x},{y}) has bg {:?}, want {:?}",
+                        cell.bg, theme.dialog_bg
+                    );
+                    saw_dialog_bg = true;
+                }
+            }
+            assert!(saw_dialog_bg);
+
+            // The picker paints that same background over its own rect.
+            let picker_buffer = render_picker_buffer(&app, &theme, width, height, Color::Blue);
+            let picker_area = expected_picker_area(&app, full);
+            let picker_uses_dialog_bg = (picker_area.y..picker_area.y + picker_area.height)
+                .flat_map(|y| {
+                    (picker_area.x..picker_area.x + picker_area.width).map(move |x| (x, y))
+                })
+                .any(|(x, y)| picker_buffer[(x, y)].bg == theme.dialog_bg);
+            assert!(
+                picker_uses_dialog_bg,
+                "picker must paint the shared dialog background {theme:?}"
+            );
+        }
     }
 }
