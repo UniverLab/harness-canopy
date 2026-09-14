@@ -560,6 +560,57 @@ fn draw_sidebar_tabs(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme
     }
 }
 
+/// CT14 (C32 follow-on): the guaranteed floor must track the section holding
+/// the cursor, derived from where `selected` actually lives — not from the
+/// stored `agent_section_focus` alone, which can drift after a data refresh
+/// that clamps `selected` without updating focus.
+pub(crate) fn live_section_floor_index(
+    app: &App,
+    interactive_indices: &[usize],
+    terminal_indices: &[usize],
+) -> Option<usize> {
+    let cursor_idx = if interactive_indices.contains(&app.selected) {
+        Some(0)
+    } else if terminal_indices.contains(&app.selected) {
+        Some(1)
+    } else if matches!(app.agents.get(app.selected), Some(AgentEntry::Group(_))) {
+        Some(2)
+    } else {
+        None
+    };
+    cursor_idx.or(match app.agent_section_focus {
+        AgentSectionFocus::Interactive => Some(0),
+        AgentSectionFocus::Terminal => Some(1),
+        AgentSectionFocus::Groups => Some(2),
+        AgentSectionFocus::Brain => None,
+    })
+}
+
+/// CT14: like [`live_section_floor_index`], the Automation floor tracks the
+/// entry holding the cursor — a valid loop selection means the Loops section,
+/// a background-agent `selected` means Agents — falling back to the stored
+/// `automation_kind` only when neither resolves (both sub-lists empty).
+pub(crate) fn automation_section_floor_index(
+    app: &App,
+    background_indices: &[usize],
+) -> Option<usize> {
+    let loop_active = app
+        .selected_loop_id
+        .as_deref()
+        .is_some_and(|id| app.sidebar_loops().iter().any(|lp| lp.id == id));
+    let agent_active = background_indices.contains(&app.selected);
+    if loop_active {
+        Some(1)
+    } else if agent_active {
+        Some(0)
+    } else {
+        match app.automation_kind {
+            AutomationKind::Agent => Some(0),
+            AutomationKind::Loop => Some(1),
+        }
+    }
+}
+
 fn draw_live_body(
     frame: &mut Frame,
     area: Rect,
@@ -573,12 +624,9 @@ fn draw_live_body(
         card_list_demand(terminal_indices.len()),
         groups_list_demand(app.split_groups.len()),
     ];
-    let focused_idx = match app.agent_section_focus {
-        AgentSectionFocus::Interactive => Some(0),
-        AgentSectionFocus::Terminal => Some(1),
-        AgentSectionFocus::Groups => Some(2),
-        AgentSectionFocus::Brain => None,
-    };
+    // CT14: the guaranteed floor tracks the section holding the cursor
+    // (C32 follow-on) — see `live_section_floor_index`.
+    let focused_idx = live_section_floor_index(app, interactive_indices, terminal_indices);
     let alloc = fair_section_heights(&demands, area.height, focused_idx, 6);
     let mut remaining = area;
 
@@ -627,10 +675,11 @@ fn draw_automation_body(
         card_list_demand(background_indices.len()),
         card_list_demand(loop_count),
     ];
-    let focused_idx = match app.automation_kind {
-        AutomationKind::Agent => Some(0),
-        AutomationKind::Loop => Some(1),
-    };
+    // CT14: like `draw_live_body` above, the floor tracks the entry holding
+    // the cursor — see `automation_section_floor_index`.
+    // Row counts are recomputed per frame from current lengths (FR5); nothing
+    // is cached across frames.
+    let focused_idx = automation_section_floor_index(app, background_indices);
     let alloc = fair_section_heights(&demands, area.height, focused_idx, 6);
     let mut remaining = area;
 
@@ -1034,6 +1083,8 @@ fn draw_automation_loops_list(frame: &mut Frame, area: Rect, app: &mut App, them
     let scroll = scroll_state(
         loops.len(),
         selected_index,
+        // CT14 (FR5): visible-row count recomputed from the current height
+        // every frame — never remembered from when the list was last drawn.
         ((area.height + 1) / 4).max(1) as usize,
     );
     let panel_focused =
@@ -3599,6 +3650,63 @@ mod tests {
         assert!(
             !text.contains("No relationships yet"),
             "empty message must not be drawn when panel has no content: {text}"
+        );
+    }
+
+    #[test]
+    fn ct14_fair_section_floor_tracks_cursor_not_stored_focus() {
+        // CT14 render invariant (C32 follow-on): the guaranteed floor follows
+        // the section holding the cursor, not the stored focus alone — so a
+        // zero-row focused section cannot steal the floor on short screens.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        std::mem::forget(tmp);
+        let db = Arc::new(crate::db::Database::new(&path).unwrap());
+        let data_dir = tempfile::tempdir().unwrap();
+        let mut app = crate::tui::app::App::new(Arc::clone(&db), data_dir.path()).unwrap();
+
+        // Cursor sits on a terminal row while stored focus claims Interactive.
+        app.agents = vec![
+            AgentEntry::Interactive(0),
+            AgentEntry::Interactive(1),
+            AgentEntry::Terminal(0),
+        ];
+        app.selected = 2;
+        app.agent_section_focus = AgentSectionFocus::Interactive;
+        assert_eq!(
+            super::live_section_floor_index(&app, &[0, 1], &[2]),
+            Some(1),
+            "floor must track the terminal cursor, not the stored Interactive focus"
+        );
+
+        // Automation mirror: cursor on a background agent while the stored
+        // kind claims Loops (whose list is empty here).
+        app.agents = vec![AgentEntry::Agent(crate::domain::models::Agent {
+            id: "bg-1".to_string(),
+            prompt: String::new(),
+            trigger: None,
+            cli: crate::domain::models::Cli::new("claude"),
+            model: None,
+            effort: None,
+            working_dir: None,
+            enabled: true,
+            enable_at: None,
+            created_at: chrono::Utc::now(),
+            log_path: "/tmp/bg-1.log".to_string(),
+            timeout_minutes: 15,
+            expires_at: None,
+            last_run_at: None,
+            last_run_ok: None,
+            last_triggered_at: None,
+            trigger_count: 0,
+        })];
+        app.selected = 0;
+        app.selected_loop_id = None;
+        app.automation_kind = AutomationKind::Loop;
+        assert_eq!(
+            super::automation_section_floor_index(&app, &[0]),
+            Some(0),
+            "floor must track the agent cursor, not the stored Loop kind"
         );
     }
 }

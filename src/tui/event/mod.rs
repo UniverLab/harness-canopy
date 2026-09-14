@@ -258,6 +258,11 @@ fn sidebar_tab_step_applies(app: &App) -> bool {
 /// Shared by the F2 key and a sidebar right-click.
 fn cycle_sidebar_layer_and_normalize_focus(app: &mut App) {
     app.cycle_sidebar_layer();
+    // CT14: defensive (idempotent with the `cycle/step/switch` clears in
+    // `App` itself) — no dangling `project_focus` may survive a layer change.
+    if app.project_focus.is_some() && app.sidebar_layer != SidebarLayer::Knowledge {
+        app.exit_project_focus();
+    }
     if matches!(app.focus, Focus::Agent) {
         app.focus = Focus::Preview;
     }
@@ -269,6 +274,10 @@ fn cycle_sidebar_layer_and_normalize_focus(app: &mut App) {
 /// not whatever agent happened to be focused on the previous tab.
 fn switch_sidebar_tab_and_normalize_focus(app: &mut App, layer: SidebarLayer) {
     app.switch_sidebar_tab(layer);
+    // CT14: defensive (idempotent) — see `cycle_sidebar_layer_and_normalize_focus`.
+    if app.project_focus.is_some() && app.sidebar_layer != SidebarLayer::Knowledge {
+        app.exit_project_focus();
+    }
     if matches!(app.focus, Focus::Agent) {
         app.focus = Focus::Preview;
     }
@@ -2739,5 +2748,47 @@ mod preview_focus_click_tests {
         assert!(matches!(app.focus, Focus::Agent));
         assert!(app.terminal_selection.is_none());
         app.interactive_agents[0].kill();
+    }
+}
+
+// ── CT14: defensive focus clears on the F2 / click wrappers ──────────────
+#[cfg(test)]
+mod ct14_sidebar_tests {
+    use super::*;
+    use crate::db::Database;
+    use crate::tui::app::types::ProjectTab;
+    use std::sync::Arc;
+    use tempfile::{tempdir, NamedTempFile};
+
+    fn test_db() -> Arc<Database> {
+        let tmp = NamedTempFile::new().expect("create temp file");
+        let path = tmp.path().to_path_buf();
+        std::mem::forget(tmp);
+        Arc::new(Database::new(&path).expect("create test db"))
+    }
+
+    #[test]
+    fn ct14_f2_clears_dangling_project_focus_defensively() {
+        // Inject the illegal state directly: a `project_focus` surviving on a
+        // non-Knowledge layer. Both wrappers must clear it idempotently.
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+
+        app.sidebar_layer = SidebarLayer::Live;
+        app.project_focus = Some(ProjectTab::Backlog);
+        cycle_sidebar_layer_and_normalize_focus(&mut app);
+        assert!(
+            app.project_focus.is_none(),
+            "F2 cycle must clear a dangling project focus"
+        );
+
+        app.sidebar_layer = SidebarLayer::Live;
+        app.project_focus = Some(ProjectTab::Backlog);
+        switch_sidebar_tab_and_normalize_focus(&mut app, SidebarLayer::Automation);
+        assert!(
+            app.project_focus.is_none(),
+            "tab click must clear a dangling project focus"
+        );
     }
 }

@@ -20,6 +20,12 @@ enum FocusedAgent {
 }
 
 pub fn handle_agent_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> Result<()> {
+    // CT14: `project_focus` is only meaningful on the Knowledge layer — the
+    // `cycle/step/switch` clears in `App` uphold this; flag any drift early.
+    debug_assert!(
+        app.project_focus.is_none() || app.sidebar_layer == SidebarLayer::Knowledge,
+        "project_focus survived leaving Knowledge"
+    );
     if app.sidebar_layer == SidebarLayer::Knowledge && app.project_focus.is_some() {
         handle_project_focus_key(app, code, modifiers);
         return Ok(());

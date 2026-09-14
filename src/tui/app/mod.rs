@@ -249,6 +249,12 @@ impl App {
         self.refresh_agents()?;
         self.refresh_projects()?;
         self.refresh_loops()?;
+        // CT14: correct stale sidebar indices on the existing refresh tick
+        // (pure state, no extra redraw) so navigation works after data
+        // shrinks between ticks.
+        self.normalize_automation_kind();
+        self.normalize_agent_section_focus();
+        self.clamp_sidebar_selection();
         self.refresh_project_graph().ok();
         self.refresh_rag_state()?;
         self.refresh_active_runs()?;
@@ -482,6 +488,10 @@ impl App {
     /// summary above the tab bar when it has anything to show (decision 3);
     /// with nothing to show there, that end wraps to the last item too.
     fn navigate_live(&mut self, forward: bool) {
+        // CT14 (FR5): row count is recomputed from current data at the moment
+        // of use; a stale cursor outside the current indices is corrected
+        // before moving, not left to fail silently.
+        self.normalize_agent_section_focus();
         let indices = self.live_indices();
         if indices.is_empty() {
             return;
@@ -519,6 +529,9 @@ impl App {
     /// has anything to show (decision 3) and otherwise wraps to the last
     /// entry like any other tab.
     fn navigate_automation(&mut self, forward: bool) {
+        // CT14 (FR5): recompute the row count from current data at the moment
+        // of use, and correct a stale kind pointing at an emptied sub-list.
+        self.normalize_automation_kind();
         let agent_indices = self.automation_agent_indices();
         let loop_ids: Vec<String> = self
             .sidebar_loops()
@@ -599,8 +612,19 @@ impl App {
     /// callers that walk multiple layers (`focus_sidebar_from_edge`,
     /// `cycle_sidebar_layer`) can keep looking.
     fn enter_layer(&mut self, layer: SidebarLayer, forward: bool) -> bool {
+        // CT14 (focus bug): leaving Knowledge abandons the deep project view;
+        // a surviving `project_focus` would trap Shift+arrows in the
+        // project-tab keymap on return.
+        if self.sidebar_layer == SidebarLayer::Knowledge
+            && layer != SidebarLayer::Knowledge
+            && self.project_focus.is_some()
+        {
+            self.exit_project_focus();
+        }
         match layer {
             SidebarLayer::Live => {
+                self.normalize_agent_section_focus();
+                self.clamp_sidebar_selection();
                 let indices = self.live_indices();
                 if indices.is_empty() {
                     return false;
@@ -616,6 +640,8 @@ impl App {
                 true
             }
             SidebarLayer::Automation => {
+                self.normalize_automation_kind();
+                self.clamp_sidebar_selection();
                 let agent_indices = self.automation_agent_indices();
                 let loop_ids: Vec<String> = self
                     .sidebar_loops()
@@ -758,6 +784,107 @@ impl App {
                     self.agent_section_focus = AgentSectionFocus::Groups;
                 }
             };
+        }
+    }
+
+    /// CT14: correct (never discard) stored sidebar state at the moment of
+    /// use. Each normalizer below prefers the remembered value and only moves
+    /// it when it no longer points at something that exists — this preserves
+    /// the user's place per the spec constraint (no reset-to-default).
+    pub(crate) fn clamp_sidebar_selection(&mut self) {
+        if !self.agents.is_empty() && self.selected >= self.agents.len() {
+            self.selected = self.agents.len() - 1;
+        }
+        if !self.projects.is_empty() && self.selected_project >= self.projects.len() {
+            self.selected_project = self.projects.len() - 1;
+        }
+        if self.projects.is_empty() {
+            self.selected_project = 0;
+        }
+        // Clamp the Knowledge History-tab cursor to the currently selected
+        // project's entries (moment of use, FR5).
+        if self.project_focus == Some(ProjectTab::History) {
+            let len = self.selected_project_history_entries().len();
+            if len == 0 {
+                self.selected_project_history = 0;
+            } else if self.selected_project_history >= len {
+                self.selected_project_history = len - 1;
+            }
+        }
+        // Clamp the scroll offset against the current layer's row count so a
+        // capacity change across tab switches can't strand it past the end.
+        let total = match self.sidebar_layer {
+            SidebarLayer::Live => self.live_indices().len(),
+            SidebarLayer::Automation => {
+                self.automation_agent_indices().len() + self.sidebar_loops().len()
+            }
+            SidebarLayer::Knowledge => self.projects.len(),
+        };
+        let max_offset = total.saturating_sub(self.sidebar_visible_capacity);
+        if self.sidebar_scroll_offset > max_offset {
+            self.sidebar_scroll_offset = max_offset;
+        }
+    }
+
+    /// CT14 (selection bug): if `automation_kind` points at an empty sub-list
+    /// while the other one has rows, flip it to the non-empty side. Pure
+    /// state, no redraw.
+    pub(crate) fn normalize_automation_kind(&mut self) {
+        let has_agents = !self.automation_agent_indices().is_empty();
+        let has_loops = !self.sidebar_loops().is_empty();
+        match self.automation_kind {
+            AutomationKind::Agent if !has_agents && has_loops => {
+                self.automation_kind = AutomationKind::Loop;
+                // Keep the loop cursor valid without recursing into
+                // `refresh_loops_selection` (which itself calls this
+                // normalizer — see its tail).
+                let valid = self
+                    .selected_loop_id
+                    .as_deref()
+                    .is_some_and(|id| self.sidebar_loops().iter().any(|lp| lp.id == id));
+                if !valid {
+                    self.selected_loop_id = self.sidebar_loops().first().map(|lp| lp.id.clone());
+                }
+            }
+            AutomationKind::Loop if !has_loops && has_agents => {
+                self.automation_kind = AutomationKind::Agent;
+                if !self.automation_agent_indices().contains(&self.selected) {
+                    let prev = self.selected;
+                    self.selected = self.automation_agent_indices()[0];
+                    self.update_agent_section_focus_on_change(prev);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// CT14 (selection bug): if `agent_section_focus` points at an empty Live
+    /// sub-list, move it to the first non-empty one. Pure state, no redraw.
+    pub(crate) fn normalize_agent_section_focus(&mut self) {
+        let has_interactive = self
+            .agents
+            .iter()
+            .any(|a| matches!(a, AgentEntry::Interactive(_) | AgentEntry::Orphaned(_)));
+        let has_terminal = self
+            .agents
+            .iter()
+            .any(|a| matches!(a, AgentEntry::Terminal(_)));
+        let has_groups = !self.split_groups.is_empty();
+        let empty = match self.agent_section_focus {
+            AgentSectionFocus::Interactive => !has_interactive,
+            AgentSectionFocus::Terminal => !has_terminal,
+            AgentSectionFocus::Groups => !has_groups,
+            AgentSectionFocus::Brain => false,
+        };
+        if !empty {
+            return;
+        }
+        if has_interactive {
+            self.agent_section_focus = AgentSectionFocus::Interactive;
+        } else if has_terminal {
+            self.agent_section_focus = AgentSectionFocus::Terminal;
+        } else if has_groups {
+            self.agent_section_focus = AgentSectionFocus::Groups;
         }
     }
 
@@ -1059,6 +1186,9 @@ impl App {
         self.refresh_loop_runs_for_selected_spec();
         self.select_default_loop_node_if_needed(selected_changed);
         self.refresh_loop_live_state();
+        // CT14: a loops-list shrink between ticks can leave `automation_kind`
+        // pointing at the now-empty side; correct it here (no redraw).
+        self.normalize_automation_kind();
     }
 
     /// Assemble a fresh [`LoopLiveState`] snapshot for the currently selected
@@ -1926,6 +2056,13 @@ impl App {
     /// tabs with nothing to select — a keyboard-only shortcut alongside
     /// arrow-key ring navigation.
     pub(crate) fn cycle_sidebar_layer(&mut self) {
+        // CT14 (focus bug): departing Knowledge must not leave a dangling
+        // `project_focus` behind — it traps Shift+arrows in the project-tab
+        // keymap after returning to another layer.
+        if self.sidebar_layer == SidebarLayer::Knowledge && self.project_focus.is_some() {
+            self.exit_project_focus();
+        }
+        self.normalize_automation_kind();
         self.agents_rag_focused = false;
         let ring = Self::SIDEBAR_TAB_RING;
         let start_idx = Self::sidebar_tab_index(self.sidebar_layer);
@@ -1963,11 +2100,21 @@ impl App {
     /// that layer's selection and a step back restores it instead of
     /// re-landing on its edge item the way a fresh jump (click/F2) does.
     pub(crate) fn step_sidebar_tab(&mut self, forward: bool) {
+        // CT14: correct stale indices at the moment of use (FR4/FR5) before
+        // stepping, so tab cycling works from any reachable state.
+        self.clamp_sidebar_selection();
         let ring = Self::SIDEBAR_TAB_RING;
         let idx = Self::sidebar_tab_index(self.sidebar_layer);
         let next = crate::tui::selection::move_index(idx, ring.len(), forward);
         self.remember_current_sidebar_selection();
         let target = ring[next];
+        // CT14 (focus bug): leaving Knowledge clears the deep project view.
+        if self.sidebar_layer == SidebarLayer::Knowledge
+            && target != SidebarLayer::Knowledge
+            && self.project_focus.is_some()
+        {
+            self.exit_project_focus();
+        }
         self.agents_rag_focused = false;
         if !self.restore_remembered_sidebar_selection(target) {
             self.switch_sidebar_tab(target);
@@ -1986,6 +2133,9 @@ impl App {
             }
             SidebarLayer::Automation => {
                 self.sidebar_step_memory.automation_kind = Some(self.automation_kind);
+                // Only the active branch's cursor is refreshed; the other
+                // branch's slot is left alone so a step back restores the
+                // kind that was actually last used.
                 match self.automation_kind {
                     AutomationKind::Agent => {
                         self.sidebar_step_memory.automation_selected = Some(self.selected);
@@ -2012,6 +2162,10 @@ impl App {
                     return false;
                 };
                 if !self.live_indices().contains(&idx) {
+                    // CT14: stale memory must not be re-probed forever —
+                    // clear the dead slot so the next revisit goes straight
+                    // to the edge item.
+                    self.sidebar_step_memory.live_selected = None;
                     return false;
                 }
                 self.sidebar_layer = SidebarLayer::Live;
@@ -2024,6 +2178,8 @@ impl App {
                         return false;
                     };
                     if !self.automation_agent_indices().contains(&idx) {
+                        // CT14: clear the dead slot (see Live branch above).
+                        self.sidebar_step_memory.automation_selected = None;
                         return false;
                     }
                     self.sidebar_layer = SidebarLayer::Automation;
@@ -2036,6 +2192,8 @@ impl App {
                         return false;
                     };
                     if !self.sidebar_loops().iter().any(|lp| lp.id == id) {
+                        // CT14: clear the dead slot (see Live branch above).
+                        self.sidebar_step_memory.automation_loop_id = None;
                         return false;
                     }
                     self.sidebar_layer = SidebarLayer::Automation;
@@ -2051,6 +2209,8 @@ impl App {
                     return false;
                 };
                 if idx >= self.projects.len() {
+                    // CT14: clear the dead slot (see Live branch above).
+                    self.sidebar_step_memory.knowledge_selected = None;
                     return false;
                 }
                 self.sidebar_layer = SidebarLayer::Knowledge;
@@ -2122,6 +2282,14 @@ impl App {
     /// deliberate click on a visible tab must always land there — a click on
     /// an empty Automation should show its empty state, not silently no-op.
     pub(crate) fn switch_sidebar_tab(&mut self, layer: SidebarLayer) {
+        // CT14 (focus bug): direct jumps off Knowledge also leave the deep
+        // project view.
+        if self.sidebar_layer == SidebarLayer::Knowledge
+            && layer != SidebarLayer::Knowledge
+            && self.project_focus.is_some()
+        {
+            self.exit_project_focus();
+        }
         self.agents_rag_focused = false;
         if !self.enter_layer(layer, true) {
             self.sidebar_layer = layer;
@@ -7026,5 +7194,383 @@ mod tests {
         // wrap? sibling move_index wraps, so next should go to a again
         app.loop_graph_navigate_sibling(true);
         assert_eq!(app.loop_graph_highlighted_node_id(), Some("a"));
+    }
+}
+
+// ── CT14: sidebar focus/selection stale-index regressions ────────────────
+// Each test covers one stale index from the CT14 design plan. They use the
+// same `test_db()` + `App::new(...)` pattern as the existing sidebar tests.
+#[cfg(test)]
+mod ct14_sidebar_tests {
+    use super::App;
+    use crate::db::Database;
+    use crate::domain::loops::LoopStatus;
+    use crate::tui::app::types::{
+        AgentEntry, AgentSectionFocus, AutomationKind, ProjectTab, SidebarLayer,
+    };
+    use std::sync::Arc;
+    use tempfile::{tempdir, NamedTempFile};
+
+    fn test_db() -> Arc<Database> {
+        let tmp = NamedTempFile::new().expect("create temp file");
+        let path = tmp.path().to_path_buf();
+        std::mem::forget(tmp);
+        Arc::new(Database::new(&path).expect("create test db"))
+    }
+
+    fn make_project(hash: &str, path: &str) -> crate::domain::project::Project {
+        crate::domain::project::Project {
+            hash: hash.to_string(),
+            path: path.to_string(),
+            name: hash.to_string(),
+            description: None,
+            tags: None,
+            indexed_at: None,
+            created_at: 0,
+        }
+    }
+
+    fn make_loop(id: &str, name: &str) -> crate::domain::loops::Loop {
+        crate::domain::loops::Loop {
+            archived: false,
+            paused_by_reconciliation: false,
+            infra_node_id: None,
+            id: id.to_string(),
+            name: name.to_string(),
+            description: None,
+            workdir: "/tmp".to_string(),
+            status: LoopStatus::Running,
+            trigger: None,
+            created_at: chrono::Utc::now(),
+            started_at: None,
+            completed_at: None,
+            autorun_at: None,
+            auto_continue_at: None,
+            auto_continue_action: None,
+            active_run_queue_id: None,
+            hooks: std::collections::BTreeMap::new(),
+        }
+    }
+
+    fn bg_agent(id: &str) -> crate::domain::models::Agent {
+        crate::domain::models::Agent {
+            id: id.to_string(),
+            prompt: String::new(),
+            trigger: None,
+            cli: crate::domain::models::Cli::new("claude"),
+            model: None,
+            effort: None,
+            working_dir: None,
+            enabled: true,
+            enable_at: None,
+            created_at: chrono::Utc::now(),
+            log_path: format!("/tmp/{id}.log"),
+            timeout_minutes: 15,
+            expires_at: None,
+            last_run_at: None,
+            last_run_ok: None,
+            last_triggered_at: None,
+            trigger_count: 0,
+        }
+    }
+
+    fn history_entry(name: &str) -> crate::db::project::ProjectHistoryEntry {
+        crate::db::project::ProjectHistoryEntry {
+            kind: crate::db::project::ProjectHistoryKind::Loop,
+            name: name.to_string(),
+            status: "done".to_string(),
+            at: 0,
+        }
+    }
+
+    #[test]
+    fn ct14_shift_arrows_cycle_after_knowledge_round_trip() {
+        // FOCUS bug #1: `project_focus` must not survive leaving Knowledge —
+        // a surviving focus traps Shift+←/→ in the project-tab keymap.
+        let db = test_db();
+        db.upsert_project(&make_project("hash0", "/tmp/proj0"))
+            .unwrap();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        app.agents = vec![AgentEntry::Group(0), AgentEntry::Group(1)];
+        app.sidebar_layer = SidebarLayer::Knowledge;
+        app.selected_project = 0;
+
+        app.enter_project_focus(ProjectTab::Overview);
+        assert_eq!(app.project_focus, Some(ProjectTab::Overview));
+
+        // Leave Knowledge via the F2 ring walk.
+        app.cycle_sidebar_layer();
+        assert!(
+            app.project_focus.is_none(),
+            "leaving Knowledge must clear the deep project focus"
+        );
+        assert_ne!(
+            app.sidebar_layer,
+            SidebarLayer::Knowledge,
+            "F2 must land on another tab"
+        );
+
+        // Shift+←/→ steps the sidebar tab ring (not the project tabs).
+        let before = app.sidebar_layer;
+        app.step_sidebar_tab(true);
+        assert!(
+            app.project_focus.is_none(),
+            "tab stepping must not re-enter project focus"
+        );
+        assert_ne!(
+            app.sidebar_layer, before,
+            "Shift+→ must advance the sidebar tab ring"
+        );
+        app.step_sidebar_tab(false);
+        assert_eq!(app.sidebar_layer, before, "Shift+← must step the ring back");
+    }
+
+    #[test]
+    fn ct14_automation_kind_flips_when_its_list_empties_and_loops_still_reachable() {
+        // SELECTION bug #2: `automation_kind` pointing at an emptied sub-list
+        // must flip to the non-empty side so loops stay reachable.
+        let db = test_db();
+        db.insert_loop(&make_loop("loop-1", "Loop 1")).unwrap();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        app.refresh_loops().expect("refresh loops");
+        app.agents = vec![AgentEntry::Agent(bg_agent("bg-1"))];
+        app.automation_kind = AutomationKind::Agent;
+
+        // The last background agent disappears while one loop exists.
+        app.agents
+            .retain(|a| !matches!(a, AgentEntry::Agent(_) | AgentEntry::Corrupt(_)));
+        app.normalize_automation_kind();
+        assert_eq!(app.automation_kind, AutomationKind::Loop);
+        assert_eq!(app.selected_loop_id.as_deref(), Some("loop-1"));
+        assert!(
+            app.enter_layer(SidebarLayer::Automation, true),
+            "loops section must stay reachable"
+        );
+
+        // Symmetric subcase: loops vanish while agents remain.
+        app.loops.clear();
+        app.archived_loops.clear();
+        app.selected_loop_id = Some("loop-1".to_string());
+        app.automation_kind = AutomationKind::Loop;
+        app.agents = vec![AgentEntry::Agent(bg_agent("bg-2"))];
+        app.selected = 99;
+        app.normalize_automation_kind();
+        assert_eq!(app.automation_kind, AutomationKind::Agent);
+        assert!(
+            app.automation_agent_indices().contains(&app.selected),
+            "agent cursor must name a live row"
+        );
+        assert!(
+            app.enter_layer(SidebarLayer::Automation, true),
+            "agents side must stay reachable"
+        );
+    }
+
+    #[test]
+    fn ct14_agent_section_focus_moves_off_empty_section() {
+        // SELECTION bug #3 (C32 follow-on): a zero-row section must not keep
+        // the focus that `fair_section_heights` turns into a floor.
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+
+        app.agents = vec![AgentEntry::Terminal(0)];
+        app.agent_section_focus = AgentSectionFocus::Terminal;
+        app.agents = vec![AgentEntry::Interactive(0)];
+        app.normalize_agent_section_focus();
+        assert_eq!(app.agent_section_focus, AgentSectionFocus::Interactive);
+
+        // Subcase: only Groups remain.
+        app.split_groups.push(crate::domain::models::SplitGroup {
+            id: "g0".to_string(),
+            orientation: crate::domain::models::SplitOrientation::Horizontal,
+            session_a: "a".to_string(),
+            session_b: "b".to_string(),
+            created_at: chrono::Utc::now(),
+        });
+        app.agents = vec![AgentEntry::Group(0)];
+        app.agent_section_focus = AgentSectionFocus::Terminal;
+        app.normalize_agent_section_focus();
+        assert_eq!(app.agent_section_focus, AgentSectionFocus::Groups);
+    }
+
+    #[test]
+    fn ct14_selected_and_scroll_clamped_after_shrink() {
+        // SELECTION bugs #4/#5/#7: every stored cursor is corrected at the
+        // moment of use instead of failing silently.
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+
+        // `selected` past the end of a shrunk agent list.
+        app.agents = vec![
+            AgentEntry::Group(0),
+            AgentEntry::Group(1),
+            AgentEntry::Group(2),
+            AgentEntry::Group(3),
+            AgentEntry::Group(4),
+        ];
+        app.sidebar_layer = SidebarLayer::Live;
+        app.selected = 4;
+        app.agents.truncate(3);
+        app.clamp_sidebar_selection();
+        assert_eq!(app.selected, 2);
+
+        // `selected_project` past the end of a shrunk project list.
+        app.projects = vec![
+            make_project("h0", "/tmp/a"),
+            make_project("h1", "/tmp/b"),
+            make_project("h2", "/tmp/c"),
+        ];
+        app.selected_project = 2;
+        app.projects.truncate(1);
+        app.clamp_sidebar_selection();
+        assert_eq!(app.selected_project, 0);
+
+        // History cursor belongs to the previous project's longer list.
+        app.projects = vec![make_project("h0", "/tmp/a"), make_project("h1", "/tmp/b")];
+        app.project_history_cache.insert(
+            "h0".to_string(),
+            (0..6).map(|i| history_entry(&format!("e{i}"))).collect(),
+        );
+        app.project_history_cache
+            .insert("h1".to_string(), vec![history_entry("only")]);
+        app.selected_project = 0;
+        app.selected_project_history = 5;
+        app.project_focus = Some(ProjectTab::History);
+        app.selected_project = 1;
+        app.clamp_sidebar_selection();
+        assert_eq!(app.selected_project_history, 0);
+
+        // Scroll offset stranded past the new tab total.
+        app.project_focus = None;
+        app.sidebar_layer = SidebarLayer::Live;
+        app.sidebar_visible_capacity = 5;
+        app.sidebar_scroll_offset = 10;
+        app.agents = vec![AgentEntry::Group(0), AgentEntry::Group(1)];
+        app.selected = 0;
+        app.clamp_sidebar_selection();
+        assert_eq!(app.sidebar_scroll_offset, 0);
+
+        // Arrow navigation stays within the new bounds.
+        let live: Vec<usize> = app.live_indices();
+        app.select_next();
+        assert!(
+            live.contains(&app.selected),
+            "select_next must land on an existing row"
+        );
+        app.select_prev();
+        assert!(
+            live.contains(&app.selected),
+            "select_prev must land on an existing row"
+        );
+    }
+
+    #[test]
+    fn ct14_tab_memory_dead_slot_cleared_on_failed_restore() {
+        // SELECTION bug #6: a dead `SidebarStepMemory` slot must be cleared on
+        // failed restore, not re-probed on every revisit.
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        app.agents = vec![AgentEntry::Group(0)];
+
+        app.sidebar_step_memory.live_selected = Some(99);
+        assert!(!app.restore_remembered_sidebar_selection(SidebarLayer::Live));
+        assert_eq!(app.sidebar_step_memory.live_selected, None);
+
+        app.sidebar_step_memory.automation_kind = Some(AutomationKind::Loop);
+        app.sidebar_step_memory.automation_loop_id = Some("ghost".to_string());
+        assert!(!app.restore_remembered_sidebar_selection(SidebarLayer::Automation));
+        assert_eq!(app.sidebar_step_memory.automation_loop_id, None);
+
+        app.sidebar_step_memory.knowledge_selected = Some(7);
+        assert!(!app.restore_remembered_sidebar_selection(SidebarLayer::Knowledge));
+        assert_eq!(app.sidebar_step_memory.knowledge_selected, None);
+    }
+
+    #[test]
+    fn ct14_long_scripted_sequence_leaves_navigation_working() {
+        // The spec's scripted reproduction: start Live → enter Knowledge →
+        // move within it → leave → F2 cycle → Shift+←/→ both ways → enter
+        // Automation → navigate both ways → shrink loops between ticks →
+        // navigate again. Navigation must work throughout.
+        let db = test_db();
+        db.upsert_project(&make_project("hash0", "/tmp/proj0"))
+            .unwrap();
+        db.insert_loop(&make_loop("loop-1", "Loop 1")).unwrap();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        app.refresh_loops().expect("refresh loops");
+        app.agents = vec![
+            AgentEntry::Group(0),
+            AgentEntry::Group(1),
+            AgentEntry::Agent(bg_agent("bg-1")),
+        ];
+        app.sidebar_layer = SidebarLayer::Live;
+        app.selected = 0;
+
+        // Enter Knowledge, move within the project tabs, leave via Esc.
+        app.sidebar_layer = SidebarLayer::Knowledge;
+        app.selected_project = 0;
+        app.enter_project_focus(ProjectTab::Overview);
+        app.navigate_project_tab_list(true);
+        app.cycle_project_tab(true);
+        assert_eq!(app.project_focus, Some(ProjectTab::Backlog));
+        app.navigate_project_tab_list(true);
+        app.exit_project_focus();
+        assert!(app.project_focus.is_none());
+
+        // Switch sections a few times (F2) and cycle tabs (Shift+←/→).
+        app.cycle_sidebar_layer();
+        app.cycle_sidebar_layer();
+        let ring_pos = app.sidebar_layer;
+        app.step_sidebar_tab(true);
+        app.step_sidebar_tab(false);
+        assert_eq!(app.sidebar_layer, ring_pos);
+        assert!(app.project_focus.is_none());
+
+        // Reach the loops section and move within Automation.
+        app.switch_sidebar_tab(SidebarLayer::Automation);
+        assert_eq!(app.sidebar_layer, SidebarLayer::Automation);
+        app.select_next();
+        app.select_prev();
+
+        // Shrink the loops list between ticks, then navigate again.
+        app.loops.clear();
+        app.archived_loops.clear();
+        app.refresh_loops_selection();
+        app.normalize_automation_kind();
+        app.normalize_agent_section_focus();
+        app.clamp_sidebar_selection();
+        app.select_next();
+        app.select_prev();
+
+        // Every cursor still names something that exists.
+        match app.sidebar_layer {
+            SidebarLayer::Live => {
+                assert!(app.live_indices().contains(&app.selected));
+            }
+            SidebarLayer::Automation => match app.automation_kind {
+                AutomationKind::Agent => {
+                    assert!(app.automation_agent_indices().contains(&app.selected));
+                }
+                AutomationKind::Loop => {
+                    let id = app.selected_loop_id.clone().expect("loop cursor set");
+                    assert!(app.sidebar_loops().iter().any(|lp| lp.id == id));
+                }
+            },
+            SidebarLayer::Knowledge => {
+                assert!(app.selected_project < app.projects.len());
+            }
+        }
+
+        // Shift+←/→ still cycles the tab ring.
+        let before = app.sidebar_layer;
+        app.step_sidebar_tab(true);
+        assert_ne!(app.sidebar_layer, before);
+        assert!(app.project_focus.is_none());
     }
 }
