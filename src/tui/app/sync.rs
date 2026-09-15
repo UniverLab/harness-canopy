@@ -38,9 +38,28 @@ impl App {
         &self,
         workdir: &str,
     ) -> Vec<crate::domain::sync::ActiveIntent> {
-        let Ok(messages) = self.db.list_sync_messages(workdir, RECENT_MESSAGE_LIMIT) else {
+        let Ok(mut messages) = self
+            .db
+            .list_activity_log_entries(workdir, RECENT_MESSAGE_LIMIT)
+            .map(|entries| {
+                entries
+                    .into_iter()
+                    .map(crate::domain::sync::SyncMessage::from)
+                    .collect::<Vec<_>>()
+            })
+        else {
             return Vec::new();
         };
+        // The bitácora stores `source` (e.g. "sync"), not the actor's display
+        // name — resolve it the same way the activity face does so intents
+        // carry a real identity, not the literal source tag.
+        for message in &mut messages {
+            if let Ok(Some(session_name)) =
+                self.db.resolve_sync_actor_name(workdir, &message.agent_id)
+            {
+                message.agent_name = session_name;
+            }
+        }
         let active_agent_ids = messages
             .iter()
             .map(|m| m.agent_id.clone())
@@ -116,7 +135,16 @@ impl App {
 
     pub(crate) fn activity_panel_state_for_workdir(&self, workdir: &str) -> Option<SyncPanelState> {
         let recent_limit = self.message_window_limit_for_scroll();
-        let mut recent_messages = self.db.list_sync_messages(workdir, recent_limit).ok()?;
+        let mut recent_messages = self
+            .db
+            .list_activity_log_entries(workdir, recent_limit)
+            .map(|entries| {
+                entries
+                    .into_iter()
+                    .map(crate::domain::sync::SyncMessage::from)
+                    .collect::<Vec<_>>()
+            })
+            .ok()?;
 
         for message in &mut recent_messages {
             if let Ok(Some(session_name)) =
@@ -209,11 +237,12 @@ mod tests {
     #[test]
     fn activity_panel_auto_shows_for_single_agent_when_messages_exist() {
         let db = test_db();
-        db.insert_sync_message(
+        // The panel renders the bitácora, not `sync_messages`.
+        db.insert_activity_log_entry(
             "/tmp/project",
-            "agent-a",
-            "copilot",
-            crate::domain::sync::MessageKind::Info,
+            "sync",
+            Some("agent-a"),
+            "info",
             "first activity",
             None,
         )
@@ -234,6 +263,77 @@ mod tests {
     }
 
     #[test]
+    fn activity_panel_reads_from_activity_log() {
+        let db = test_db();
+        // Seed ONLY the bitácora — nothing in sync_messages.
+        db.insert_activity_log_entry(
+            "/tmp/project",
+            "loop",
+            Some("loop-7"),
+            "info",
+            "bitacora-only event",
+            None,
+        )
+        .unwrap();
+
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        app.agents = vec![AgentEntry::Agent(sample_agent("bg-1", "/tmp/project"))];
+        app.selected = 0;
+
+        let state = app
+            .activity_panel_state()
+            .expect("activity panel should render from the bitácora");
+        assert_eq!(state.workdir, "/tmp/project");
+        assert_eq!(state.recent_messages.len(), 1);
+        assert_eq!(state.recent_messages[0].message, "bitacora-only event");
+        // Panel and direct read return the same entries.
+        let direct = db.list_activity_log_entries("/tmp/project", 10).unwrap();
+        assert_eq!(direct.len(), 1);
+        assert_eq!(direct[0].message, state.recent_messages[0].message);
+    }
+
+    #[test]
+    fn active_missions_resolves_actor_name_from_bitacora() {
+        let db = test_db();
+        db.insert_interactive_session(
+            "agent-x",
+            "test-display",
+            "copilot",
+            "/tmp/project",
+            None,
+            None,
+            "interactive",
+            None,
+        )
+        .unwrap();
+
+        let intent_payload = serde_json::to_string(&crate::domain::sync::IntentPayload {
+            mission: "deploy".to_string(),
+            impact: crate::domain::sync::MissionImpact::High,
+            description: "ship it".to_string(),
+        })
+        .unwrap();
+        db.insert_activity_log_entry(
+            "/tmp/project",
+            "sync",
+            Some("agent-x"),
+            "intent",
+            "intent",
+            Some(intent_payload.as_str()),
+        )
+        .unwrap();
+
+        let data_dir = tempdir().expect("create data dir");
+        let app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+
+        let intents = app.active_missions_for_workdir("/tmp/project");
+        assert_eq!(intents.len(), 1);
+        assert_ne!(intents[0].agent_name, "sync");
+        assert_eq!(intents[0].agent_name, "test-display · copilot");
+    }
+
+    #[test]
     fn activity_panel_hides_intents_for_inactive_agents() {
         let db = test_db();
         let intent_payload = serde_json::to_string(&crate::domain::sync::IntentPayload {
@@ -242,11 +342,12 @@ mod tests {
             description: "should not show when inactive".to_string(),
         })
         .expect("serialize intent payload");
-        db.insert_sync_message(
+        // The panel renders the bitácora, not `sync_messages`.
+        db.insert_activity_log_entry(
             "/tmp/project",
-            "agent-a",
-            "copilot",
-            crate::domain::sync::MessageKind::Intent,
+            "sync",
+            Some("agent-a"),
+            "intent",
             "intent",
             Some(intent_payload.as_str()),
         )
@@ -268,11 +369,12 @@ mod tests {
     fn activity_panel_expands_message_window_with_scroll() {
         let db = test_db();
         for index in 0..(RECENT_MESSAGE_LIMIT + 4) {
-            db.insert_sync_message(
+            // The panel renders the bitácora, not `sync_messages`.
+            db.insert_activity_log_entry(
                 "/tmp/project",
-                &format!("agent-{index}"),
-                "copilot",
-                crate::domain::sync::MessageKind::Info,
+                "sync",
+                Some(&format!("agent-{index}")),
+                "info",
                 &format!("message-{index}"),
                 None,
             )
@@ -343,11 +445,11 @@ mod tests {
     #[test]
     fn explicit_activity_toggle_forces_width_on_narrow_screens() {
         let db = test_db();
-        db.insert_sync_message(
+        db.insert_activity_log_entry(
             "/tmp/project",
-            "agent-a",
-            "copilot",
-            crate::domain::sync::MessageKind::Info,
+            "sync",
+            Some("agent-a"),
+            "info",
             "first activity",
             None,
         )
@@ -371,11 +473,12 @@ mod tests {
     #[test]
     fn toggle_activity_panel_shows_when_auto_panel_is_suppressed_by_width() {
         let db = test_db();
-        db.insert_sync_message(
+        // The panel renders the bitácora, not `sync_messages`.
+        db.insert_activity_log_entry(
             "/tmp/project",
-            "agent-a",
-            "copilot",
-            crate::domain::sync::MessageKind::Info,
+            "sync",
+            Some("agent-a"),
+            "info",
             "first activity",
             None,
         )
@@ -439,11 +542,11 @@ mod tests {
     #[test]
     fn activity_panel_width_uses_forced_minimum_when_narrow() {
         let db = test_db();
-        db.insert_sync_message(
+        db.insert_activity_log_entry(
             "/tmp/project",
-            "agent-a",
-            "copilot",
-            crate::domain::sync::MessageKind::Info,
+            "sync",
+            Some("agent-a"),
+            "info",
             "first activity",
             None,
         )

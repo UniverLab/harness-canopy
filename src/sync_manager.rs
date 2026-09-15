@@ -141,7 +141,15 @@ impl SyncManager {
         workdir: &str,
         chatter_limit: usize,
     ) -> anyhow::Result<SyncContextSnapshot> {
-        let recent_messages = self.db.list_sync_messages(workdir, CONTEXT_WINDOW)?;
+        let recent_entries = self.db.list_activity_log_entries(workdir, CONTEXT_WINDOW)?;
+        let mut recent_messages: Vec<SyncMessage> =
+            recent_entries.into_iter().map(SyncMessage::from).collect();
+        for message in &mut recent_messages {
+            message.agent_name = self
+                .db
+                .resolve_sync_actor_display_name(workdir, &message.agent_id)
+                .unwrap_or_else(|_| message.agent_name.clone());
+        }
         let active_agent_ids: HashSet<String> = self
             .db
             .list_active_sync_agent_ids(workdir)?
@@ -167,6 +175,27 @@ impl SyncManager {
         let sync_message = self
             .db
             .insert_sync_message(workdir, agent_id, agent_name, kind, message, payload)?;
+        // Bitácora: mirror every published event into the durable activity
+        // log, off the hot path. Spawned rather than awaited so a loop
+        // node's status report isn't slowed by its own log line (NFR:
+        // writing must not block the producer); best-effort — a full or
+        // locked activity table must never break the live broadcast path.
+        let db = Arc::clone(&self.db);
+        let workdir_owned = workdir.to_owned();
+        let agent_id_owned = agent_id.to_owned();
+        let kind_str = kind.as_str();
+        let message_owned = message.to_owned();
+        let payload_owned = payload.map(str::to_owned);
+        tokio::spawn(async move {
+            let _ = db.insert_activity_log_entry(
+                &workdir_owned,
+                "sync",
+                Some(&agent_id_owned),
+                kind_str,
+                &message_owned,
+                payload_owned.as_deref(),
+            );
+        });
         let sender = self.ensure_sender(workdir).await;
         let _ = sender.send(sync_message.clone());
         Ok(sync_message)
@@ -312,6 +341,52 @@ mod tests {
             .await
             .expect("broadcast");
         assert_eq!(broadcast_message.agent_name, tui_display_name);
+    }
+
+    /// Every broadcast lands in BOTH `sync_messages` (live fan-out) and
+    /// `activity_log` (durable bitácora) — one call, two rows, same content.
+    #[tokio::test]
+    async fn publish_writes_to_both_tables() {
+        let (manager, _dir) = test_manager();
+        let workdir = "/tmp/bitacora-dual-write";
+
+        let message = manager
+            .broadcast(
+                workdir,
+                "agent-x",
+                None,
+                MessageKind::Info,
+                "dual write probe",
+                None,
+            )
+            .await
+            .expect("broadcast");
+
+        let live = manager.db.list_sync_messages(workdir, 10).expect("live");
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].message, message.message);
+
+        // The bitácora write is spawned off the hot path (NFR: must not
+        // block the producer), so it can land shortly after `broadcast`
+        // returns rather than being visible immediately.
+        let stored = wait_for_activity_entry(&manager.db, workdir).await;
+        assert_eq!(stored.message, "dual write probe");
+        assert_eq!(stored.source, "sync");
+        assert_eq!(stored.source_id.as_deref(), Some("agent-x"));
+    }
+
+    async fn wait_for_activity_entry(
+        db: &Database,
+        workdir: &str,
+    ) -> crate::db::activity_log::ActivityLogEntry {
+        for _ in 0..100 {
+            let entries = db.list_activity_log_entries(workdir, 10).expect("bitacora");
+            if let Some(entry) = entries.into_iter().next() {
+                return entry;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("activity log entry for {workdir} did not appear in time");
     }
 
     /// A bridge with no resolvable identity (mirrors

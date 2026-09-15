@@ -3679,6 +3679,22 @@ impl TaskTriggerHandler {
             .db
             .list_recent_sync_messages(sync_limit)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        // Bitácora: recent activity for the resolved project (or across all
+        // workdirs when no project resolved), readable without the TUI.
+        let activity_workdir: Option<String> = effective_project_hash
+            .as_deref()
+            .and_then(|hash| self.db.get_project(hash).ok().flatten().map(|p| p.path));
+        let activity_entries: Vec<crate::db::activity_log::ActivityLogEntry> =
+            match activity_workdir {
+                Some(ref workdir) => self
+                    .db
+                    .list_activity_log_entries(workdir, sync_limit)
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?,
+                None => self
+                    .db
+                    .list_recent_activity_log_entries(sync_limit)
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?,
+            };
         let cross_project_dependencies = if scope == "full" {
             self.db
                 .list_cross_project_dependencies(dependency_limit)
@@ -3732,6 +3748,7 @@ impl TaskTriggerHandler {
             "sessions": sessions.iter().map(intelligence_node_json).collect::<Vec<_>>(),
             "knowledge": knowledge.iter().map(intelligence_node_json).collect::<Vec<_>>(),
             "sync_messages": sync_messages.iter().map(sync_message_json).collect::<Vec<_>>(),
+            "activity": activity_entries.iter().map(activity_log_entry_json).collect::<Vec<_>>(),
             "cross_project_dependencies": cross_project_dependencies,
         });
 
@@ -9962,6 +9979,19 @@ fn intelligence_edge_json(
         "relation": edge.relation,
         "weight": edge.weight,
         "created_at": edge.created_at,
+    })
+}
+
+fn activity_log_entry_json(entry: &crate::db::activity_log::ActivityLogEntry) -> serde_json::Value {
+    serde_json::json!({
+        "id": entry.id,
+        "workdir": entry.workdir,
+        "source": entry.source,
+        "source_id": entry.source_id,
+        "kind": entry.kind,
+        "message": entry.message,
+        "payload": entry.payload,
+        "created_at": entry.created_at,
     })
 }
 

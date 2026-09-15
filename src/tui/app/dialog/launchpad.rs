@@ -100,9 +100,13 @@ impl LaunchpadDialog {
         let selected_index = 0;
 
         let active_missions = db
-            .list_sync_messages(workdir, 30)
+            .list_activity_log_entries(workdir, 30)
             .ok()
-            .map(|messages| {
+            .map(|entries| {
+                let messages: Vec<crate::domain::sync::SyncMessage> = entries
+                    .into_iter()
+                    .map(crate::domain::sync::SyncMessage::from)
+                    .collect();
                 let agent_ids = messages
                     .iter()
                     .map(|m| m.agent_id.clone())

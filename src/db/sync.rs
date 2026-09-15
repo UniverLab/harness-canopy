@@ -58,6 +58,7 @@ impl Database {
         })
     }
 
+    #[allow(dead_code)]
     pub fn list_sync_messages(&self, workdir: &str, limit: usize) -> Result<Vec<SyncMessage>> {
         let conn = self
             .conn
@@ -221,6 +222,15 @@ impl Database {
             &format!("{agent_name} session ended — missions closed"),
             Some(r#"{"mission_closed":true}"#),
         )?;
+        // Bitácora: closing markers belong to the durable log too.
+        let _ = self.insert_activity_log_entry(
+            workdir,
+            "sync",
+            Some(agent_id),
+            MessageKind::Info.as_str(),
+            &format!("{agent_name} session ended — missions closed"),
+            Some(r#"{"mission_closed":true}"#),
+        );
         Ok(())
     }
 

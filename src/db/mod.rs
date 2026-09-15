@@ -6,9 +6,9 @@ use std::sync::{Arc, Mutex};
 /// Bumped whenever a migration changes table/column names in a way that an
 /// older binary's `CREATE TABLE IF NOT EXISTS` / `ADD COLUMN IF NOT EXISTS`
 /// guards can't detect (they'd silently recreate the old names as empty
-/// rather than erroring) — see `check_schema_version`. Version 2 is the
-/// legacy queue-table rename (see `migrate_legacy_queue_schema`).
-const SCHEMA_VERSION: i64 = 3;
+/// rather than erroring) — see `check_schema_version`. Version 4 adds
+/// the `activity_log` table (CM20 bitácora).
+const SCHEMA_VERSION: i64 = 4;
 
 /// Thread-safe `SQLite` database wrapper.
 ///
@@ -297,6 +297,21 @@ impl Database {
                 payload TEXT,
                 created_at INTEGER NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS activity_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                workdir TEXT NOT NULL,
+                source TEXT NOT NULL,
+                source_id TEXT,
+                kind TEXT NOT NULL,
+                message TEXT NOT NULL,
+                payload TEXT,
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_activity_log_workdir_created
+                ON activity_log(workdir, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_activity_log_kind
+                ON activity_log(kind);
 
             CREATE TABLE IF NOT EXISTS sync_locks (
                 id TEXT PRIMARY KEY,
@@ -1818,6 +1833,7 @@ pub struct SubagentRunRecord {
 }
 
 pub mod achievements;
+pub mod activity_log;
 pub mod agent;
 pub mod blueprints;
 pub mod clean;

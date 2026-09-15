@@ -970,40 +970,69 @@ impl Database {
         kind: Option<&str>,
         limit: usize,
     ) -> Result<Vec<IntelligenceNodeRecord>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
-        let mut stmt = if kind.is_some() {
-            conn.prepare(
-                "SELECT id, kind, status, title, body, metadata, project_hash, session_id, created_at, updated_at
-                 FROM intelligence_nodes
-                 WHERE kind = ?1
-                 ORDER BY updated_at DESC
-                 LIMIT ?2",
-            )?
-        } else {
-            conn.prepare(
-                "SELECT id, kind, status, title, body, metadata, project_hash, session_id, created_at, updated_at
-                 FROM intelligence_nodes
-                 ORDER BY updated_at DESC
-                 LIMIT ?1",
-            )?
-        };
+        // The bitácora lives in its own table, distinguishable from curated
+        // knowledge from the first commit — never in `intelligence_nodes`.
+        if kind == Some("activity") {
+            return Ok(self
+                .list_recent_activity_log_entries(limit)?
+                .iter()
+                .map(Self::activity_entry_to_intelligence_record)
+                .collect());
+        }
+        // The whole node read (guard + statement + row collection) runs in
+        // one scope so the mutex guard is released before the bitácora read
+        // below (which takes the lock itself — nesting would deadlock).
+        let mut nodes: Vec<IntelligenceNodeRecord> = {
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+            let mut stmt = if kind.is_some() {
+                conn.prepare(
+                    "SELECT id, kind, status, title, body, metadata, project_hash, session_id, created_at, updated_at
+                     FROM intelligence_nodes
+                     WHERE kind = ?1
+                     ORDER BY updated_at DESC
+                     LIMIT ?2",
+                )?
+            } else {
+                conn.prepare(
+                    "SELECT id, kind, status, title, body, metadata, project_hash, session_id, created_at, updated_at
+                     FROM intelligence_nodes
+                     ORDER BY updated_at DESC
+                     LIMIT ?1",
+                )?
+            };
 
-        let rows = if let Some(kind) = kind {
-            stmt.query_map(
-                rusqlite::params![kind, limit as i64],
-                Self::read_intelligence_node,
-            )?
-        } else {
-            stmt.query_map(
-                rusqlite::params![limit as i64],
-                Self::read_intelligence_node,
-            )?
+            let rows = if let Some(kind) = kind {
+                stmt.query_map(
+                    rusqlite::params![kind, limit as i64],
+                    Self::read_intelligence_node,
+                )?
+            } else {
+                stmt.query_map(
+                    rusqlite::params![limit as i64],
+                    Self::read_intelligence_node,
+                )?
+            };
+            rows.filter_map(|row| row.ok()).collect()
         };
-
-        Ok(rows.filter_map(|row| row.ok()).collect())
+        // Unfiltered listing also surfaces the bitácora alongside curated
+        // knowledge — same surface, separate table.
+        if kind.is_none() {
+            // Fill only the remaining budget so activity entries are not
+            // silently dropped when `limit` knowledge nodes already matched.
+            let remaining = limit.saturating_sub(nodes.len());
+            if remaining > 0 {
+                nodes.extend(
+                    self.list_recent_activity_log_entries(remaining)?
+                        .iter()
+                        .map(Self::activity_entry_to_intelligence_record),
+                );
+            }
+            nodes.truncate(limit);
+        }
+        Ok(nodes)
     }
 
     pub fn search_intelligence_nodes(
@@ -1024,16 +1053,14 @@ impl Database {
             });
         }
 
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
-
         // Ranking follows the spec guideline: order primarily by how many
         // distinct query terms match anywhere, then break ties by *where* they
         // match (a title hit outweighs a body hit), then by recency. The WHERE
         // clause keeps OR semantics — any term matching any field is enough, so
         // extra words degrade a node's rank but never drop it from the results.
+        // (SQL text is built before taking the mutex; the guard lives only in
+        // the query scope below so the later bitácora search — which locks
+        // again — cannot deadlock.)
         let mut match_count_parts: Vec<String> = Vec::with_capacity(terms.len());
         let mut score_parts: Vec<String> = Vec::with_capacity(terms.len() * 5);
         let mut or_clauses: Vec<String> = Vec::with_capacity(terms.len() * 5);
@@ -1080,7 +1107,6 @@ impl Database {
              LIMIT ?{limit_placeholder}"
         );
 
-        let mut stmt = conn.prepare(&sql)?;
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(terms.len() + 2);
         params.push(Box::new(kind.map(str::to_string)));
         for term in &terms {
@@ -1089,8 +1115,34 @@ impl Database {
         params.push(Box::new(limit as i64));
         let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(Box::as_ref).collect();
 
-        let rows = stmt.query_map(param_refs.as_slice(), Self::read_intelligence_node)?;
-        let results: Vec<IntelligenceNodeRecord> = rows.filter_map(|row| row.ok()).collect();
+        // Guard + statement + row collection share one scope so the mutex is
+        // released before the bitácora search below.
+        let mut results: Vec<IntelligenceNodeRecord> = {
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(param_refs.as_slice(), Self::read_intelligence_node)?;
+            rows.filter_map(|row| row.ok()).collect()
+        };
+        // Bitácora hits ride along with Knowledge search results as
+        // structural `kind = "activity"` records — same surface, separate
+        // table. No summarising or interpretation on the way in or out.
+        if kind.is_none() || kind == Some("activity") {
+            let remaining = limit.saturating_sub(results.len());
+            if remaining > 0 {
+                let activity_hits = self
+                    .search_activity_log_entries(query, None, remaining)
+                    .unwrap_or_default();
+                results.extend(
+                    activity_hits
+                        .iter()
+                        .map(Self::activity_entry_to_intelligence_record),
+                );
+            }
+            results.truncate(limit);
+        }
         Ok(IntelligenceSearchResult {
             results,
             examined_count,
@@ -1684,11 +1736,9 @@ impl Database {
             });
         }
 
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
-
+        // (SQL text is built before taking the mutex; the guard lives only in
+        // the query scope below so the later bitácora lookups — which lock
+        // again — cannot deadlock.)
         let mut match_count_parts: Vec<String> = Vec::with_capacity(terms.len());
         let mut score_parts: Vec<String> = Vec::with_capacity(terms.len() * 5);
         let mut or_clauses: Vec<String> = Vec::with_capacity(terms.len() * 5);
@@ -1741,7 +1791,6 @@ impl Database {
              LIMIT ?{limit_placeholder}"
         );
 
-        let mut stmt = conn.prepare(&sql)?;
         // Placeholder index order: ?1 kind, ?2.. terms, ?{limit} limit,
         // then hash IN-list placeholders (rusqlite binds by index).
         let mut params: Vec<Box<dyn rusqlite::ToSql>> =
@@ -1756,8 +1805,42 @@ impl Database {
         }
         let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(Box::as_ref).collect();
 
-        let rows = stmt.query_map(param_refs.as_slice(), Self::read_intelligence_node)?;
-        let results: Vec<IntelligenceNodeRecord> = rows.filter_map(|row| row.ok()).collect();
+        // Guard + statement + row collection share one scope so the mutex is
+        // released before the bitácora lookups below (each takes the lock
+        // itself — holding both would deadlock the mutex). Workdir
+        // resolution via `get_project` also locks, so it runs after the
+        // guard is gone.
+        let mut results: Vec<IntelligenceNodeRecord> = {
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(param_refs.as_slice(), Self::read_intelligence_node)?;
+            rows.filter_map(|row| row.ok()).collect()
+        };
+        // Scoped bitácora hits: activity entries whose workdir matches one
+        // of the scoped projects' paths.
+        if kind.is_none() || kind == Some("activity") {
+            for hash in hashes {
+                let remaining = limit.saturating_sub(results.len());
+                if remaining == 0 {
+                    break;
+                }
+                let workdir = self.get_project(hash).ok().flatten().map(|p| p.path);
+                if let Some(workdir) = workdir {
+                    let activity_hits = self
+                        .search_activity_log_entries(query, Some(&workdir), remaining)
+                        .unwrap_or_default();
+                    results.extend(
+                        activity_hits
+                            .iter()
+                            .map(Self::activity_entry_to_intelligence_record),
+                    );
+                }
+            }
+            results.truncate(limit);
+        }
         Ok(IntelligenceSearchResult {
             results,
             examined_count,
@@ -2228,6 +2311,104 @@ mod tests {
         let db = test_db();
         let nodes = db.list_intelligence_nodes(None, 100).unwrap();
         assert!(nodes.is_empty());
+    }
+
+    #[test]
+    fn search_includes_activity_log_entries() {
+        let db = test_db();
+        db.insert_activity_log_entry(
+            "/tmp/bitacora-search",
+            "hook",
+            Some("hook-3"),
+            "info",
+            "zephyr deploy marker uniqueword",
+            None,
+        )
+        .unwrap();
+        let result = db
+            .search_intelligence_nodes("zephyr uniqueword", None, 10)
+            .unwrap();
+        let activity_hit = result.results.iter().find(|r| r.kind == "activity");
+        assert!(
+            activity_hit.is_some(),
+            "bitácora entry should surface in Knowledge search"
+        );
+        assert!(activity_hit
+            .unwrap()
+            .body
+            .contains("zephyr deploy marker uniqueword"));
+    }
+
+    #[test]
+    fn search_shows_activity_alongside_knowledge() {
+        let db = test_db();
+        for i in 0..3 {
+            db.upsert_intelligence_node(sample_node_input(&format!("shared-{i}")))
+                .unwrap();
+        }
+        db.insert_activity_log_entry(
+            "/tmp/search-know-plus-activity",
+            "sync",
+            Some("agent-1"),
+            "info",
+            "shared activity event",
+            None,
+        )
+        .unwrap();
+
+        let result = db.search_intelligence_nodes("shared", None, 10).unwrap();
+        assert!(
+            result.results.iter().any(|r| r.kind != "activity"),
+            "knowledge nodes should appear in search"
+        );
+        assert!(
+            result.results.iter().any(|r| r.kind == "activity"),
+            "activity entries should appear alongside knowledge in search"
+        );
+    }
+
+    #[test]
+    fn list_activity_kind_reads_bitacora_not_nodes() {
+        let db = test_db();
+        db.insert_activity_log_entry(
+            "/tmp/bitacora-list",
+            "user",
+            None,
+            "info",
+            "bitacora list marker",
+            None,
+        )
+        .unwrap();
+        let nodes = db.list_intelligence_nodes(Some("activity"), 10).unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].kind, "activity");
+        assert!(nodes[0].body.contains("bitacora list marker"));
+    }
+
+    #[test]
+    fn list_intelligence_nodes_merges_knowledge_and_activity() {
+        let db = test_db();
+        db.upsert_intelligence_node(sample_node_input("alpha"))
+            .unwrap();
+        db.insert_activity_log_entry(
+            "/tmp/list-know-plus-activity",
+            "sync",
+            Some("agent-1"),
+            "info",
+            "activity alongside knowledge",
+            None,
+        )
+        .unwrap();
+
+        let nodes = db.list_intelligence_nodes(None, 10).unwrap();
+        assert!(
+            nodes.iter().any(|n| n.kind == "fact"),
+            "knowledge nodes should appear in unfiltered list"
+        );
+        assert!(
+            nodes.iter().any(|n| n.kind == "activity"),
+            "activity entries should appear alongside knowledge"
+        );
     }
 
     #[test]
