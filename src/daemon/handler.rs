@@ -114,6 +114,22 @@ const _: () = assert!(
     "spec_list default page must stay within [1, 200]"
 );
 
+/// Estimated serialised size of one `intelligence_upsert` duplicate-candidate
+/// row (id ~36, kind ~10, title ~60, project_hash ~64, excerpt up to
+/// `crate::db::intelligence::DUPLICATE_EXCERPT_MAX_CHARS` chars, plus JSON
+/// keys/quotes/commas) in bytes. Budgeted generously since excerpt is free
+/// text. `intelligence_upsert` reads this so its duplicate-candidate report
+/// stays inside `MCP_RESULT_BUDGET_BYTES` regardless of corpus size — CB45,
+/// following the same derivation `SPEC_LIST_DEFAULT_LIMIT` and
+/// `SESSION_LIST_DEFAULT_LIMIT` already use.
+const INTELLIGENCE_DUPLICATE_CANDIDATE_ROW_BYTES: usize = 450;
+pub(crate) const INTELLIGENCE_DUPLICATE_CANDIDATES_CAP: usize =
+    MCP_RESULT_BUDGET_BYTES / INTELLIGENCE_DUPLICATE_CANDIDATE_ROW_BYTES;
+const _: () = assert!(
+    INTELLIGENCE_DUPLICATE_CANDIDATES_CAP >= 1 && INTELLIGENCE_DUPLICATE_CANDIDATES_CAP <= 200,
+    "intelligence_upsert duplicate-candidates cap must stay within [1, 200]"
+);
+
 fn missing_sync_identity_error() -> McpError {
     McpError::invalid_params(MISSING_SYNC_IDENTITY_MESSAGE.to_string(), None)
 }
@@ -3884,13 +3900,21 @@ impl TaskTriggerHandler {
             }
         }
         if !duplicate_candidates.is_empty() {
-            out["duplicate_candidates"] = serde_json::json!(duplicate_candidates
+            let total_duplicates = duplicate_candidates.len();
+            let visible_duplicates = &duplicate_candidates
+                [..total_duplicates.min(INTELLIGENCE_DUPLICATE_CANDIDATES_CAP)];
+            out["duplicate_candidates"] = serde_json::json!(visible_duplicates
                 .iter()
-                .map(intelligence_node_json)
+                .map(intelligence_duplicate_candidate_json)
                 .collect::<Vec<_>>());
             out["duplicate_warning"] = serde_json::json!(
                 "Potential duplicate(s) found; review duplicate_candidates before recording another node."
             );
+            let duplicates_omitted = total_duplicates.saturating_sub(visible_duplicates.len());
+            if duplicates_omitted > 0 {
+                out["duplicate_candidates_truncated"] = serde_json::json!(true);
+                out["duplicate_candidates_omitted"] = serde_json::json!(duplicates_omitted);
+            }
         }
         if !undeclared_references.is_empty() {
             out["undeclared_references"] = serde_json::json!(undeclared_references);
@@ -9966,6 +9990,20 @@ fn intelligence_node_compact_json(
         "project_hash": node.project_hash,
         "created_at": node.created_at,
         "updated_at": node.updated_at,
+    })
+}
+
+/// JSON for one `intelligence_upsert` duplicate candidate — id, kind,
+/// title, project_hash and a short excerpt, never the full body. CB45.
+fn intelligence_duplicate_candidate_json(
+    candidate: &crate::db::intelligence::DuplicateCandidate,
+) -> serde_json::Value {
+    serde_json::json!({
+        "id": candidate.id,
+        "kind": candidate.kind,
+        "title": candidate.title,
+        "project_hash": candidate.project_hash,
+        "excerpt": candidate.excerpt,
     })
 }
 
@@ -26226,6 +26264,183 @@ mod endpoint_tests {
     }
 
     // ── CB28: result budget contract for graph walk + spec_list ──────────
+
+    #[tokio::test]
+    async fn intelligence_upsert_duplicate_candidates_fit_budget_and_omit_body() {
+        let (_dir, _db, handler) = endpoint_test_handler();
+        let _agent_guard = AgentIdVar::set("agent-cb45-fit");
+
+        // Three large-bodied existing nodes, all citing the same file:line so
+        // all three are flagged as duplicates of the node upserted below.
+        for i in 0..3 {
+            let body = format!(
+                "see src/cb45-shared.rs:1 for details. {}",
+                "y".repeat(12_000)
+            );
+            let result = handler
+                .intelligence_upsert(
+                    Parameters(IntelligenceUpsertParams {
+                        node_data: IntelligenceNodeParams {
+                            id: Some(format!("cb45-fit-{i}")),
+                            kind: Some("fact".to_string()),
+                            status: None,
+                            title: Some(format!("CB45 fit node {i}")),
+                            body: Some(body),
+                            body_replace: None,
+                            metadata: None,
+                            project_hash: None,
+                            session_id: None,
+                            relations: None,
+                        },
+                    }),
+                    OptionalExtension(None),
+                )
+                .await
+                .unwrap();
+            assert!(!is_err(&result), "{}", text(&result));
+        }
+
+        let new_body = format!("also see src/cb45-shared.rs:1. {}", "z".repeat(12_000));
+        let upserted = handler
+            .intelligence_upsert(
+                Parameters(IntelligenceUpsertParams {
+                    node_data: IntelligenceNodeParams {
+                        id: Some("cb45-fit-new".to_string()),
+                        kind: Some("fact".to_string()),
+                        status: None,
+                        title: Some("CB45 fit new node".to_string()),
+                        body: Some(new_body.clone()),
+                        body_replace: None,
+                        metadata: None,
+                        project_hash: None,
+                        session_id: None,
+                        relations: None,
+                    },
+                }),
+                OptionalExtension(None),
+            )
+            .await
+            .unwrap();
+        assert!(!is_err(&upserted), "{}", text(&upserted));
+
+        let body = raw_text(&upserted);
+        assert!(
+            body.len() < MCP_RESULT_BUDGET_BYTES,
+            "upsert response ({} bytes) with 3 large duplicate candidates must fit the {}-byte budget",
+            body.len(),
+            MCP_RESULT_BUDGET_BYTES
+        );
+
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        // The written node itself is returned complete — requirement 4.
+        assert_eq!(
+            parsed["node"]["body"].as_str().unwrap(),
+            new_body,
+            "the caller's own write must not be truncated"
+        );
+
+        let candidates = parsed["duplicate_candidates"].as_array().unwrap();
+        assert_eq!(candidates.len(), 3, "expected all 3 duplicates reported");
+        for candidate in candidates {
+            assert!(candidate.get("id").is_some());
+            assert!(candidate.get("title").is_some());
+            assert!(candidate.get("kind").is_some());
+            assert!(candidate.get("excerpt").is_some());
+            assert!(
+                candidate.get("body").is_none(),
+                "duplicate candidate must never carry a full body field"
+            );
+            let excerpt = candidate["excerpt"].as_str().unwrap();
+            assert!(
+                excerpt.len() < 300,
+                "excerpt must be short, got {} chars",
+                excerpt.len()
+            );
+            assert!(
+                !excerpt.contains(&"y".repeat(1000)),
+                "excerpt must not carry the candidate's large body"
+            );
+        }
+
+        // Existing fields kept as-is — requirement 5.
+        assert!(parsed.get("duplicate_warning").is_some());
+        assert_eq!(
+            parsed["duplicate_detection_note"].as_str().unwrap(),
+            crate::db::intelligence::LEXICAL_DUPLICATE_LIMITATION
+        );
+    }
+
+    #[tokio::test]
+    async fn intelligence_upsert_duplicate_candidates_capped_with_omitted_count() {
+        let (_dir, _db, handler) = endpoint_test_handler();
+        let _agent_guard = AgentIdVar::set("agent-cb45-cap");
+
+        let total = INTELLIGENCE_DUPLICATE_CANDIDATES_CAP + 5;
+        for i in 0..total {
+            let result = handler
+                .intelligence_upsert(
+                    Parameters(IntelligenceUpsertParams {
+                        node_data: IntelligenceNodeParams {
+                            id: Some(format!("cb45-cap-{i:03}")),
+                            kind: Some("fact".to_string()),
+                            status: None,
+                            title: Some(format!("CB45 cap node {i:03}")),
+                            body: Some(format!("see src/cb45-cap-{i:03}.rs:1 for details.")),
+                            body_replace: None,
+                            metadata: None,
+                            project_hash: None,
+                            session_id: None,
+                            relations: None,
+                        },
+                    }),
+                    OptionalExtension(None),
+                )
+                .await
+                .unwrap();
+            assert!(!is_err(&result), "{}", text(&result));
+        }
+
+        let citations: String = (0..total)
+            .map(|i| format!("see src/cb45-cap-{i:03}.rs:1"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let upserted = handler
+            .intelligence_upsert(
+                Parameters(IntelligenceUpsertParams {
+                    node_data: IntelligenceNodeParams {
+                        id: Some("cb45-cap-new".to_string()),
+                        kind: Some("fact".to_string()),
+                        status: None,
+                        title: Some("CB45 cap new node".to_string()),
+                        body: Some(citations),
+                        body_replace: None,
+                        metadata: None,
+                        project_hash: None,
+                        session_id: None,
+                        relations: None,
+                    },
+                }),
+                OptionalExtension(None),
+            )
+            .await
+            .unwrap();
+        assert!(!is_err(&upserted), "{}", text(&upserted));
+
+        let parsed: serde_json::Value = serde_json::from_str(&raw_text(&upserted)).unwrap();
+        let candidates = parsed["duplicate_candidates"].as_array().unwrap();
+        assert_eq!(
+            candidates.len(),
+            INTELLIGENCE_DUPLICATE_CANDIDATES_CAP,
+            "duplicate_candidates must be capped at the budget-derived limit"
+        );
+        assert_eq!(parsed["duplicate_candidates_truncated"], true);
+        assert_eq!(
+            parsed["duplicate_candidates_omitted"].as_u64().unwrap() as usize,
+            5,
+            "omitted count must equal total minus the cap"
+        );
+    }
 
     async fn upsert_large_intel_node(
         handler: &TaskTriggerHandler,

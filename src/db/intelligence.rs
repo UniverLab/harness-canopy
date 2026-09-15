@@ -115,12 +115,25 @@ pub struct IntelligenceNodeInput {
     pub relations: Option<Vec<IntelligenceRelationInput>>,
 }
 
+/// One write-time duplicate candidate, reported without its body — a
+/// caller recognises it by id/title/excerpt and fetches the full node
+/// itself (via intelligence_search/intelligence_get_context) if it wants
+/// more. CB45: a full-body candidate list blew the MCP result budget.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DuplicateCandidate {
+    pub id: String,
+    pub kind: String,
+    pub title: String,
+    pub project_hash: Option<String>,
+    pub excerpt: String,
+}
+
 /// Outcome of [`Database::upsert_intelligence_node`].
 #[derive(Debug, Clone)]
 pub struct UpsertResult {
     pub record: IntelligenceNodeRecord,
     pub created: bool,
-    pub duplicates: Vec<IntelligenceNodeRecord>,
+    pub duplicates: Vec<DuplicateCandidate>,
     pub undeclared_references: Vec<String>,
     /// Fields that actually changed, so a caller does not have to read the
     /// node back to find out. `updated_at` is always present: every write
@@ -201,6 +214,24 @@ pub const DUPLICATE_SIMILARITY_THRESHOLD: i64 = 5;
 /// cross languages — surfaced in the upsert output wherever candidates
 /// are reported.
 pub const LEXICAL_DUPLICATE_LIMITATION: &str = "Lexical duplicate detection does not catch paraphrase and does not cross languages, so a bilingual corpus will pass duplicates through.";
+
+/// Hard cap, in characters, on a duplicate candidate's reported excerpt —
+/// applied after taking the first two non-empty lines, so a candidate whose
+/// body is one long unbroken line still stays short. CB45.
+const DUPLICATE_EXCERPT_MAX_CHARS: usize = 240;
+
+/// First line or two of `body`, capped at [`DUPLICATE_EXCERPT_MAX_CHARS`] —
+/// enough for a caller to recognise a duplicate candidate without the
+/// response carrying its full body. CB45.
+fn duplicate_excerpt(body: &str) -> String {
+    let head: String = body
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .take(2)
+        .collect::<Vec<_>>()
+        .join(" ");
+    head.chars().take(DUPLICATE_EXCERPT_MAX_CHARS).collect()
+}
 
 pub fn validate_knowledge_kind(kind: &str) -> Result<()> {
     if kind == "project" || KNOWLEDGE_KINDS.contains(&kind) {
@@ -762,12 +793,15 @@ impl Database {
     ///
     /// Candidates are a warning, never a rejection. Best-effort: any
     /// internal lookup failure yields fewer candidates, not a failed write.
+    /// Returns every match found (uncapped, deduped by id) — CB45's
+    /// reporting cap is applied by the caller (the MCP handler), not here,
+    /// so this method's result stays the authoritative "how many total".
     fn detect_duplicate_candidates(
         &self,
         node: &IntelligenceNodeRecord,
-    ) -> Vec<IntelligenceNodeRecord> {
+    ) -> Vec<DuplicateCandidate> {
         let mut seen: HashSet<String> = HashSet::from([node.id.clone()]);
-        let mut candidates: Vec<IntelligenceNodeRecord> = Vec::new();
+        let mut candidates: Vec<DuplicateCandidate> = Vec::new();
 
         // Signal 1: shared citations. This includes both file:line citations
         // and references to other knowledge-node ids.
@@ -784,6 +818,11 @@ impl Database {
         }
 
         // Signal 2: lexical ranking over title + body head, same kind only.
+        // search_intelligence_nodes is shared with intelligence_search and
+        // out of scope to change; its hits carry full bodies because
+        // lexical_duplicate_score needs the full text to score against, not
+        // just an excerpt — that body is used here, then excerpted only for
+        // the candidates that actually clear the threshold.
         let body_head: String = node.body.chars().take(100).collect();
         let query = format!("{} {body_head}", node.title);
         if let Ok(results) = self.search_intelligence_nodes(&query, Some(&node.kind), 10) {
@@ -793,7 +832,13 @@ impl Database {
                     continue;
                 }
                 if lexical_duplicate_score(&terms, &hit) >= DUPLICATE_SIMILARITY_THRESHOLD {
-                    candidates.push(hit);
+                    candidates.push(DuplicateCandidate {
+                        id: hit.id.clone(),
+                        kind: hit.kind.clone(),
+                        title: hit.title.clone(),
+                        project_hash: hit.project_hash.clone(),
+                        excerpt: duplicate_excerpt(&hit.body),
+                    });
                 }
             }
         }
@@ -803,26 +848,38 @@ impl Database {
 
     /// Same-kind nodes (excluding `exclude_id`) whose body mentions
     /// `citation`. Backs signal 1 of [`Database::detect_duplicate_candidates`].
+    /// Selects only the fields a duplicate candidate reports plus a bounded
+    /// head of the body (500 chars, well over `DUPLICATE_EXCERPT_MAX_CHARS`)
+    /// to build the excerpt from — the WHERE clause still matches against
+    /// the full `body` column, but the full column is never pulled into
+    /// this process. CB45: this query previously selected the whole node,
+    /// body and metadata included, purely to discard both past the id.
     fn list_nodes_citing(
         &self,
         citation: &str,
         kind: &str,
         exclude_id: &str,
-    ) -> Result<Vec<IntelligenceNodeRecord>> {
+    ) -> Result<Vec<DuplicateCandidate>> {
         let conn = self
             .conn
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, kind, status, title, body, metadata, project_hash, session_id, created_at, updated_at
+            "SELECT id, kind, title, project_hash, substr(body, 1, 500)
              FROM intelligence_nodes
              WHERE kind = ?1 AND id != ?2 AND instr(body, ?3) > 0
              LIMIT 10",
         )?;
-        let rows = stmt.query_map(
-            rusqlite::params![kind, exclude_id, citation],
-            Self::read_intelligence_node,
-        )?;
+        let rows = stmt.query_map(rusqlite::params![kind, exclude_id, citation], |row| {
+            let body_head: String = row.get(4)?;
+            Ok(DuplicateCandidate {
+                id: row.get(0)?,
+                kind: row.get(1)?,
+                title: row.get(2)?,
+                project_hash: row.get(3)?,
+                excerpt: duplicate_excerpt(&body_head),
+            })
+        })?;
         Ok(rows.filter_map(|row| row.ok()).collect())
     }
 
@@ -3214,6 +3271,39 @@ mod tests {
             result.duplicates.iter().any(|n| n.id == "lex-a"),
             "expected lex-a among duplicates, got: {:?}",
             result.duplicates.iter().map(|n| &n.id).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn duplicate_candidate_excludes_full_body() {
+        let db = test_db();
+        let big_body = format!("see src/cb45.rs:1 for details. {}", "y".repeat(20_000));
+        db.upsert_intelligence_node(IntelligenceNodeInput {
+            body: Some(big_body),
+            body_replace: None,
+            ..sample_node_input("cb45-big")
+        })
+        .unwrap();
+        let result = db
+            .upsert_intelligence_node(IntelligenceNodeInput {
+                body: Some("also see src/cb45.rs:1".to_string()),
+                body_replace: None,
+                ..sample_node_input("cb45-new")
+            })
+            .unwrap();
+        let candidate = result
+            .duplicates
+            .iter()
+            .find(|c| c.id == "cb45-big")
+            .expect("expected cb45-big among duplicates");
+        assert!(
+            candidate.excerpt.len() < 300,
+            "excerpt must be short, got {} chars",
+            candidate.excerpt.len()
+        );
+        assert!(
+            !candidate.excerpt.contains(&"y".repeat(1000)),
+            "excerpt must not carry the candidate's large body"
         );
     }
 
