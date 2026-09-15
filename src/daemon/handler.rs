@@ -5192,22 +5192,24 @@ impl TaskTriggerHandler {
 
         let description = spec.description.as_deref().unwrap_or("");
         match extract_spec_section(description, section) {
-            Ok(SpecSectionResult::Tagged { content }) => {
+            Ok(SpecSectionResult::Tagged { content, present }) => {
                 let body = serde_json::json!({
                     "spec_id": spec_id,
                     "section": section.tag(),
                     "content": content,
+                    "present": present,
                     "needs_conversion": false,
                 });
                 Ok(CallToolResult::success(vec![Content::text(
                     serde_json::to_string_pretty(&body).unwrap_or_default(),
                 )]))
             }
-            Ok(SpecSectionResult::Legacy { content }) => {
+            Ok(SpecSectionResult::Legacy { content, present }) => {
                 let body = serde_json::json!({
                     "spec_id": spec_id,
                     "section": section.tag(),
                     "content": content,
+                    "present": present,
                     "needs_conversion": true,
                 });
                 Ok(CallToolResult::success(vec![Content::text(

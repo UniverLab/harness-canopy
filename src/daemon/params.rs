@@ -549,10 +549,10 @@ pub struct LoopAddSpecParams {
     pub loop_id: String,
     /// Human-readable spec name.
     pub name: String,
-    /// Optional spec description. Must use the tagged `<spec>` format with all
-    /// seven section tags: `<objective>`, `<functional_requirements>`,
-    /// `<non_functional_requirements>`, `<constraints>`, `<guidelines>`,
-    /// `<in_scope>`, `<out_of_scope>`. Markdown is allowed inside each section.
+    /// Optional spec description. Must use the tagged `<spec>` format.
+    /// Required: `<objective>`, `<functional_requirements>`, `<guidelines>`.
+    /// Optional: `<non_functional_requirements>`, `<constraints>`, `<in_scope>`,
+    /// `<out_of_scope>`. Markdown is allowed inside each section.
     pub description: Option<String>,
     /// Execution order within the loop.
     pub position: i64,
@@ -566,8 +566,9 @@ pub struct LoopUpdateSpecParams {
     pub spec_id: String,
     /// New human-readable spec name.
     pub name: Option<String>,
-    /// New spec description. Must use the tagged `<spec>` format with all
-    /// seven section tags. Markdown is allowed inside each section.
+    /// New spec description. Must use the tagged `<spec>` format. Required:
+    /// `<objective>`, `<functional_requirements>`, `<guidelines>`; four more
+    /// are optional. Markdown is allowed inside each section.
     pub description: Option<String>,
     /// New execution order within the loop.
     pub position: Option<i64>,
@@ -579,10 +580,10 @@ pub struct LoopUpdateSpecParams {
 pub struct SpecCreateParams {
     /// Human-readable spec name.
     pub name: String,
-    /// Spec description. Must use the tagged `<spec>` format with all seven
-    /// section tags: `<objective>`, `<functional_requirements>`,
-    /// `<non_functional_requirements>`, `<constraints>`, `<guidelines>`,
-    /// `<in_scope>`, `<out_of_scope>`. Markdown is allowed inside each section.
+    /// Spec description. Must use the tagged `<spec>` format. Required:
+    /// `<objective>`, `<functional_requirements>`, `<guidelines>`. Optional:
+    /// `<non_functional_requirements>`, `<constraints>`, `<in_scope>`,
+    /// `<out_of_scope>`. Markdown is allowed inside each section.
     pub description: String,
     /// Optional absolute workdir tag, for backlog filtering only — it does
     /// not drive execution.
@@ -613,8 +614,9 @@ pub struct SpecUpdateParams {
     pub spec_id: String,
     /// New human-readable spec name.
     pub name: Option<String>,
-    /// New spec description. Must use the tagged `<spec>` format with all
-    /// seven section tags. Markdown is allowed inside each section.
+    /// New spec description. Must use the tagged `<spec>` format. Required:
+    /// `<objective>`, `<functional_requirements>`, `<guidelines>`; four more
+    /// are optional. Markdown is allowed inside each section.
     pub description: Option<String>,
     /// New absolute workdir tag, or null to clear it.
     pub workdir: Option<Option<String>>,

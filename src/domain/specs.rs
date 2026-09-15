@@ -45,6 +45,13 @@ impl SpecSection {
         None
     }
 
+    pub fn is_required(self) -> bool {
+        matches!(
+            self,
+            Self::Objective | Self::FunctionalRequirements | Self::Guidelines
+        )
+    }
+
     pub fn legacy_heading_patterns(self) -> &'static [&'static str] {
         match self {
             Self::Objective => &["objective", "expected outcome"],
@@ -113,8 +120,8 @@ pub enum ParsedSpecDescription {
 
 #[derive(Debug)]
 pub enum SpecSectionResult {
-    Tagged { content: String },
-    Legacy { content: String },
+    Tagged { content: String, present: bool },
+    Legacy { content: String, present: bool },
 }
 
 pub fn parse_spec_description(input: &str) -> Result<ParsedSpecDescription, SpecParseError> {
@@ -225,7 +232,7 @@ fn parse_tagged_spec(input: &str) -> Result<ParsedTaggedSpec, SpecParseError> {
     }
 
     for section in SpecSection::all() {
-        if !seen_tags.contains(section) {
+        if section.is_required() && !seen_tags.contains(section) {
             return Err(SpecParseError::MissingTag(section.tag().to_string()));
         }
     }
@@ -381,24 +388,28 @@ pub fn extract_spec_section(
 ) -> Result<SpecSectionResult, SpecParseError> {
     match parse_spec_description(input)? {
         ParsedSpecDescription::Tagged(parsed) => {
+            let present = parsed.section_body(section).is_some();
             let content = parsed.section_body(section).unwrap_or("").to_string();
-            Ok(SpecSectionResult::Tagged { content })
+            Ok(SpecSectionResult::Tagged { content, present })
         }
         ParsedSpecDescription::Legacy(body) => {
-            let content = extract_legacy_section(&body, section)?;
-            Ok(SpecSectionResult::Legacy { content })
+            let (content, present) = extract_legacy_section(&body, section)?;
+            Ok(SpecSectionResult::Legacy { content, present })
         }
     }
 }
 
-fn extract_legacy_section(body: &str, target: SpecSection) -> Result<String, SpecParseError> {
+fn extract_legacy_section(
+    body: &str,
+    target: SpecSection,
+) -> Result<(String, bool), SpecParseError> {
     let sections = parse_legacy_sections(body)?;
     for (section, content) in &sections {
         if *section == target {
-            return Ok(content.clone());
+            return Ok((content.clone(), true));
         }
     }
-    Ok(String::new())
+    Ok((String::new(), false))
 }
 
 fn parse_legacy_sections(body: &str) -> Result<Vec<(SpecSection, String)>, SpecParseError> {
@@ -611,7 +622,7 @@ URL: https://example.com/<path>?a=1&b=2
     }
 
     #[test]
-    fn parse_missing_tag_names_it() {
+    fn parse_optional_section_may_be_absent() {
         let input = r#"<spec>
   <objective>Ship.</objective>
   <functional_requirements>Does thing.</functional_requirements>
@@ -620,10 +631,13 @@ URL: https://example.com/<path>?a=1&b=2
   <guidelines>Style.</guidelines>
   <in_scope>This.</in_scope>
 </spec>"#;
-        let err = parse_spec_description(input).unwrap_err();
-        match err {
-            SpecParseError::MissingTag(tag) => assert_eq!(tag, "out_of_scope"),
-            other => panic!("expected MissingTag, got: {}", other),
+        let result = parse_spec_description(input).unwrap();
+        match result {
+            ParsedSpecDescription::Tagged(parsed) => {
+                assert_eq!(parsed.sections.len(), 6);
+                assert!(parsed.section_body(SpecSection::OutOfScope).is_none());
+            }
+            _ => panic!("expected tagged"),
         }
     }
 
@@ -898,8 +912,9 @@ Qué no:
         let input = valid_tagged_spec();
         let result = extract_spec_section(&input, SpecSection::Constraints).unwrap();
         match result {
-            SpecSectionResult::Tagged { content } => {
+            SpecSectionResult::Tagged { content, present } => {
                 assert_eq!(content, "None extra.");
+                assert!(present);
             }
             _ => panic!("expected tagged"),
         }
@@ -929,8 +944,9 @@ This.
 Nothing."#;
         let result = extract_spec_section(input, SpecSection::Constraints).unwrap();
         match result {
-            SpecSectionResult::Legacy { content } => {
+            SpecSectionResult::Legacy { content, present } => {
                 assert_eq!(content, "None extra.");
+                assert!(present);
             }
             _ => panic!("expected legacy"),
         }
@@ -976,5 +992,107 @@ Nothing."#;
             "functional_requirements"
         );
         assert_eq!(format!("{}", SpecSection::Constraints), "constraints");
+    }
+
+    #[test]
+    fn parse_accepts_only_required_sections() {
+        let input = r#"<spec>
+  <objective>Ship the feature.</objective>
+  <functional_requirements>Does the thing.</functional_requirements>
+  <guidelines>Follow house style.</guidelines>
+</spec>"#;
+        let result = parse_spec_description(input).unwrap();
+        match result {
+            ParsedSpecDescription::Tagged(parsed) => {
+                assert_eq!(parsed.sections.len(), 3);
+                assert!(parsed.section_body(SpecSection::Objective).is_some());
+                assert!(parsed
+                    .section_body(SpecSection::NonFunctionalRequirements)
+                    .is_none());
+            }
+            _ => panic!("expected tagged"),
+        }
+        assert!(validate_spec_description_template(input).is_ok());
+    }
+
+    #[test]
+    fn parse_missing_guidelines_names_it() {
+        let input = r#"<spec>
+  <objective>Ship.</objective>
+  <functional_requirements>Does thing.</functional_requirements>
+</spec>"#;
+        let err = parse_spec_description(input).unwrap_err();
+        match err {
+            SpecParseError::MissingTag(tag) => assert_eq!(tag, "guidelines"),
+            other => panic!("expected MissingTag, got: {}", other),
+        }
+    }
+
+    #[test]
+    fn parse_missing_objective_names_it() {
+        let input = r#"<spec>
+  <functional_requirements>Does thing.</functional_requirements>
+  <guidelines>Style.</guidelines>
+</spec>"#;
+        let err = parse_spec_description(input).unwrap_err();
+        match err {
+            SpecParseError::MissingTag(tag) => assert_eq!(tag, "objective"),
+            other => panic!("expected MissingTag, got: {}", other),
+        }
+    }
+
+    #[test]
+    fn parse_missing_functional_requirements_names_it() {
+        let input = r#"<spec>
+  <objective>Ship.</objective>
+  <guidelines>Style.</guidelines>
+</spec>"#;
+        let err = parse_spec_description(input).unwrap_err();
+        match err {
+            SpecParseError::MissingTag(tag) => assert_eq!(tag, "functional_requirements"),
+            other => panic!("expected MissingTag, got: {}", other),
+        }
+    }
+
+    #[test]
+    fn parse_unknown_tag_refused_with_minimal_required_set() {
+        let input = r#"<spec>
+  <objective>Ship.</objective>
+  <functional_requirements>Does thing.</functional_requirements>
+  <guidelines>Style.</guidelines>
+  <risks>Something could go wrong.</risks>
+</spec>"#;
+        let err = parse_spec_description(input).unwrap_err();
+        match err {
+            SpecParseError::UnexpectedTag(tag) => assert_eq!(tag, "risks"),
+            other => panic!("expected UnexpectedTag, got: {}", other),
+        }
+    }
+
+    #[test]
+    fn extract_section_distinguishes_absent_from_empty() {
+        let input = r#"<spec>
+  <objective>Ship.</objective>
+  <functional_requirements>Does thing.</functional_requirements>
+  <guidelines>Style.</guidelines>
+  <constraints></constraints>
+</spec>"#;
+        let present_empty = extract_spec_section(input, SpecSection::Constraints).unwrap();
+        match present_empty {
+            SpecSectionResult::Tagged { content, present } => {
+                assert_eq!(content, "");
+                assert!(present);
+            }
+            _ => panic!("expected tagged"),
+        }
+
+        let absent = extract_spec_section(input, SpecSection::OutOfScope).unwrap();
+        match absent {
+            SpecSectionResult::Tagged { content, present } => {
+                assert_eq!(content, "");
+                assert!(!present);
+            }
+            _ => panic!("expected tagged"),
+        }
     }
 }

@@ -44,9 +44,9 @@ pub enum SpecAction {
         /// Human-readable spec name.
         #[arg(long)]
         name: String,
-        /// Spec description. Must use the tagged `<spec>` format with all
-        /// seven section tags: `<objective>`, `<functional_requirements>`,
-        /// `<non_functional_requirements>`, `<constraints>`, `<guidelines>`,
+        /// Spec description. Must use the tagged `<spec>` format. Required:
+        /// `<objective>`, `<functional_requirements>`, `<guidelines>`.
+        /// Optional: `<non_functional_requirements>`, `<constraints>`,
         /// `<in_scope>`, `<out_of_scope>`. Markdown is allowed inside each section.
         #[arg(long)]
         description: String,
