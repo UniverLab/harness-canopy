@@ -651,12 +651,18 @@ impl App {
             if dominated {
                 continue;
             }
-            // Warp-mode terminals lose 3 rows for the input box
+            // Warp-mode terminals lose 3 rows for the input box. This must
+            // stay equal to `pty_area.height.saturating_sub(3)` where
+            // `pty_area` is what `draw_terminal_warp_mode` stores in
+            // `last_panel_inner` (panel inner minus input_height + gap);
+            // a future warp-height change that drifts from it would silently
+            // reintroduce completion-timed shrinks (CT15).
             let effective_rows = if agent.warp_mode {
                 rows.saturating_sub(3)
             } else {
                 rows
             };
+            debug_assert!(effective_rows <= rows);
             if agent.last_pty_cols != cols || agent.last_pty_rows != effective_rows {
                 agent.resize(cols, effective_rows);
             }

@@ -98,6 +98,15 @@ pub(crate) type Vt = vt100::Parser<ClipboardForwarder>;
 /// onto the scrollback deque; the matching Cursor Up keeps the shell's prompt on
 /// its logical line so it does not appear to jump. A grow (or an unchanged
 /// height, e.g. a cols-only resize) is a no-op.
+///
+/// The scroll is anchored at the cursor (what xterm does): only the overflow
+/// of the cursor past the new bottom is scrolled, so a shrink of a
+/// mostly-blank screen — cursor near the top, blanks below — scrolls nothing
+/// and keeps the newest output (the just-finished command's) on screen. A
+/// blind `old_rows - new_rows` scroll anchored at the top would discard the
+/// oldest rows first and push the newest content off into scrollback or drop
+/// it (CT15); when the screen is full the cursor sits at the bottom and both
+/// computations agree (CT9).
 fn preserve_rows_on_shrink<C: vt100::Callbacks>(
     parser: &mut vt100::Parser<C>,
     old_rows: u16,
@@ -106,8 +115,12 @@ fn preserve_rows_on_shrink<C: vt100::Callbacks>(
     if new_rows >= old_rows {
         return;
     }
-    let delta = old_rows - new_rows;
-    parser.process(format!("\x1b[{delta}S\x1b[{delta}A").as_bytes());
+    let cursor_row = parser.screen().cursor_position().0;
+    let needed = (cursor_row + 1).saturating_sub(new_rows);
+    if needed == 0 {
+        return;
+    }
+    parser.process(format!("\x1b[{needed}S\x1b[{needed}A").as_bytes());
 }
 
 fn apply_canopy_session_env(
@@ -729,5 +742,78 @@ mod tests {
             before,
             "a grow moved rows into scrollback"
         );
+    }
+
+    #[test]
+    fn ct15_ordinary_lines_survive_el_then_exit() {
+        let mut parser = agent_parser(24);
+        for i in 1..=5 {
+            parser.process(format!("ordinary line {i}\r\n").as_bytes());
+        }
+        // The installer's progress bar: every frame carriage-returns,
+        // erases the previous frame with ESC[K, and writes the new one with
+        // no newline. Frame 2's EL erases frame 1 — a legitimate request
+        // that must keep working. The final frame stays on screen, exactly
+        // as in a system terminal (only a later EL could remove it).
+        parser.process(b"\r\x1b[K  progress 10%\r");
+        parser.process(b"\x1b[K  progress 42%\r\n");
+        parser.process(b"error: boom\r\nexit status 1\r\n$ ");
+
+        let contents = parser.screen().contents();
+        for line in [
+            "ordinary line 1",
+            "ordinary line 2",
+            "ordinary line 3",
+            "ordinary line 4",
+            "ordinary line 5",
+            "error: boom",
+            "exit status 1",
+        ] {
+            assert!(
+                contents.contains(line),
+                "output was lost: {line:?}: {contents:?}"
+            );
+        }
+        // The program deliberately erased frame 1 — it stays erased. The
+        // fix restores what canopy destroyed, never what the program
+        // deliberately overwrote. The final frame remains, as it would in
+        // a system terminal.
+        assert!(
+            !contents.contains("progress 10%"),
+            "ESC[K must keep erasing what the program overwrote: {contents:?}"
+        );
+        assert!(
+            contents.contains("progress 42%"),
+            "the final progress frame must stay visible like in a system terminal: {contents:?}"
+        );
+    }
+
+    #[test]
+    fn ct15_shrink_of_mostly_blank_screen_preserves_newest() {
+        let mut parser = agent_parser(21);
+        for i in 0..10 {
+            parser.process(format!("real line {i}\r\n").as_bytes());
+        }
+        parser.process(b"$ ");
+        preserve_rows_on_shrink(&mut parser, 21, 8);
+        parser.screen_mut().set_size(8, 80);
+
+        assert!(parser.screen().contents().contains("real line 9"));
+        parser.screen_mut().set_scrollback(usize::MAX);
+        assert!(parser.screen().contents().contains("real line 0"));
+    }
+
+    #[test]
+    fn ct15_shrink_that_still_fits_scrolls_nothing() {
+        let mut parser = agent_parser(21);
+        for i in 0..10 {
+            parser.process(format!("real line {i}\r\n").as_bytes());
+        }
+        parser.process(b"$ ");
+        preserve_rows_on_shrink(&mut parser, 21, 16);
+        parser.screen_mut().set_size(16, 80);
+        assert_eq!(scrollback_len(&mut parser), 0);
+        let live = parser.screen().contents();
+        assert!(live.contains("real line 9") && live.contains("real line 0"));
     }
 }
