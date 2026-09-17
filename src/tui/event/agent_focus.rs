@@ -247,7 +247,7 @@ const RESERVED_FOCUS_KEYS: &[(KeyCode, KeyModifiers)] = &[
     (KeyCode::F(4), KeyModifiers::SHIFT),
 ];
 
-fn is_reserved_focus_key(code: KeyCode, modifiers: KeyModifiers) -> bool {
+pub(crate) fn is_reserved_focus_key(code: KeyCode, modifiers: KeyModifiers) -> bool {
     RESERVED_FOCUS_KEYS
         .iter()
         .any(|(reserved, required)| *reserved == code && modifiers.contains(*required))
@@ -1879,6 +1879,80 @@ mod focus_shortcuts_keyboard_claim_tests {
             app.agents.is_empty() || app.selected < app.agents.len(),
             "selection must point at a live session"
         );
+    }
+
+    // CT16 (T2): a warp terminal whose child entered the alternate screen
+    // routes keys like an interactive session — ordinary keystrokes yield to
+    // the child, reserved keys stay with canopy, and the direct-PTY path
+    // never forwards a reserved key.
+    fn spawn_cat_terminal(name: &str) -> InteractiveAgent {
+        InteractiveAgent::spawn_terminal("cat", "/tmp", 80, 24, Some(name), &[], Color::Reset)
+            .expect("spawn cat as a stand-in terminal child")
+    }
+
+    fn app_with_terminal_agent(agent: InteractiveAgent) -> App {
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        app.terminal_agents = vec![agent];
+        app.agents = vec![AgentEntry::Terminal(0)];
+        app.selected = 0;
+        app.focus = Focus::Agent;
+        app
+    }
+
+    #[test]
+    fn ct16_terminal_alt_screen_keys_go_to_child_but_reserved_stay_canopy() {
+        let agent = spawn_cat_terminal("ct16-term");
+        agent.vt.lock().expect("vt lock").process(b"\x1b[?1049h");
+        assert!(agent.in_alternate_screen());
+        let mut app = app_with_terminal_agent(agent);
+        assert!(focused_child_claimed_keyboard(&app));
+
+        assert!(
+            handle_focus_shortcuts(&mut app, KeyCode::F(10), KeyModifiers::NONE),
+            "F10 leaves focus even while a terminal child holds the alt screen"
+        );
+        app.focus = Focus::Agent;
+        assert!(
+            handle_focus_shortcuts(&mut app, KeyCode::Char('t'), KeyModifiers::CONTROL),
+            "Ctrl+T stays with canopy while a terminal child holds the alt screen"
+        );
+        app.focus = Focus::Agent;
+        assert!(
+            !handle_focus_shortcuts(&mut app, KeyCode::Char('a'), KeyModifiers::NONE),
+            "an ordinary key yields to the alt-screen terminal child"
+        );
+        app.terminal_agents[0].kill();
+    }
+
+    #[test]
+    fn ct16_terminal_direct_pty_key_never_forwards_reserved_keys() {
+        // `handle_terminal_direct_pty_key` is only reached for non-reserved
+        // keys in production (`handle_focus_shortcuts` consumes reserved
+        // first); this is the defensive second gate. `history_index` is the
+        // observable: the normal path clears it, the guard must not.
+        let agent = spawn_cat_terminal("ct16-term-guard");
+        agent.vt.lock().expect("vt lock").process(b"\x1b[?1049h");
+        let mut app = app_with_terminal_agent(agent);
+
+        app.terminal_agents[0].history_index = Some(0);
+        handle_terminal_direct_pty_key(&mut app, 0, KeyCode::Char('t'), KeyModifiers::CONTROL)
+            .expect("reserved direct key");
+        assert_eq!(
+            app.terminal_agents[0].history_index,
+            Some(0),
+            "a reserved key in alt screen must not reach the PTY path"
+        );
+
+        app.terminal_agents[0].history_index = Some(0);
+        handle_terminal_direct_pty_key(&mut app, 0, KeyCode::Char('a'), KeyModifiers::NONE)
+            .expect("ordinary direct key");
+        assert_eq!(
+            app.terminal_agents[0].history_index, None,
+            "an ordinary key in alt screen still reaches the child"
+        );
+        app.terminal_agents[0].kill();
     }
 
     #[test]

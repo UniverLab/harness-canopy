@@ -442,6 +442,28 @@ fn draw_focused_terminal_panel(frame: &mut Frame, area: Rect, app: &mut App, idx
         return false;
     };
 
+    // CT16: the alternate screen must always be full-pane. `last_panel_inner`
+    // is left at the full `inner` size on this path (only
+    // `draw_terminal_warp_mode` overwrites it with the smaller `pty_area`),
+    // which is what `resize_interactive_agents` reports to the child.
+    debug_assert!(
+        !agent.in_alternate_screen() || !(agent.warp_mode && !agent.should_bypass_warp_input()),
+        "alt screen must be full-pane (warp_active false)"
+    );
+    // CT16 fallback: never render nothing. If the pane is too small to host
+    // a full-screen child, say so on screen and point at an interactive
+    // session instead of leaving a blank pane.
+    if agent.in_alternate_screen() && (area.width < 20 || area.height < 6) {
+        let msg = format!(
+            "{} wants full screen — open as interactive session (Ctrl+N)",
+            agent.shell
+        );
+        frame.render_widget(
+            Paragraph::new(msg).style(Style::default().fg(Color::Yellow)),
+            area,
+        );
+        return true;
+    }
     let sensitive = agent.is_sensitive_input_active();
     // Warp input box only while the shell itself owns the terminal; when a
     // wizard/TUI/foreground command is running the PTY gets the whole pane.
