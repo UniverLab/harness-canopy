@@ -405,8 +405,12 @@ impl Database {
                 params![old_path, new_canonical_path],
             )?;
             tx.execute(
-                "UPDATE loop_specs SET workdir = ?2 WHERE workdir = ?1",
-                params![old_path, new_canonical_path],
+                "UPDATE loop_specs SET workdir = ?2, updated_at = ?3 WHERE workdir = ?1",
+                params![
+                    old_path,
+                    new_canonical_path,
+                    chrono::Utc::now().timestamp_millis()
+                ],
             )?;
             tx.execute(
                 "UPDATE sync_messages SET workdir = ?2 WHERE workdir = ?1",

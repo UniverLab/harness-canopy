@@ -998,10 +998,9 @@ pub struct App {
     /// Set by a mouse-wheel scroll over the panel; consumed (cleared) by
     /// the next panel-face tick, which drops the pending switch with it.
     pub(crate) panel_interacting: bool,
-    /// Baselines for event detection: knowledge-entry and backlog counts
-    /// at the last tick. A change fires a Knowledge event.
-    pub(crate) panel_last_knowledge_count: usize,
-    pub(crate) panel_last_backlog_count: usize,
+    /// Baselines for event detection, independent of the capped display lists.
+    pub(crate) panel_last_knowledge_updated: Option<i64>,
+    pub(crate) panel_last_backlog_updated: Option<i64>,
     /// Loop-running state at the last tick (the STATE input).
     pub(crate) panel_last_loop_running: bool,
     /// False until the first tick has seeded the baselines above, so the

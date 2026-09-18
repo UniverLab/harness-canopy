@@ -361,13 +361,16 @@ impl Database {
                 project_hash TEXT,
                 session_id TEXT,
                 created_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL
+                updated_at INTEGER NOT NULL,
+                content_touched_at INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE INDEX IF NOT EXISTS idx_intelligence_nodes_kind_updated
                 ON intelligence_nodes(kind, updated_at DESC);
             CREATE INDEX IF NOT EXISTS idx_intelligence_nodes_project_hash
                 ON intelligence_nodes(project_hash);
+            CREATE INDEX IF NOT EXISTS idx_intelligence_nodes_project_hash_touched
+                ON intelligence_nodes(project_hash, content_touched_at DESC);
             CREATE INDEX IF NOT EXISTS idx_intelligence_nodes_session_id
                 ON intelligence_nodes(session_id);
 
@@ -442,7 +445,15 @@ impl Database {
                 completed_via_reason TEXT,
                 completed_via_at INTEGER,
                 spec_committed_head TEXT,
-                cross_run_attempts INTEGER NOT NULL DEFAULT 0
+                cross_run_attempts INTEGER NOT NULL DEFAULT 0,
+                -- CT17: monotonic change signal for the panel's backlog event.
+                -- Milliseconds since epoch; every write to this row refreshes
+                -- it (see `insert_loop_spec` and the `UPDATE loop_specs`
+                -- writers in `db/loops.rs`). Never rendered, so the unit is
+                -- free — millis make same-tick edits distinguishable where
+                -- seconds would tie. Legacy rows backfilled below hold
+                -- seconds-scale values and are always smaller.
+                updated_at INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE UNIQUE INDEX IF NOT EXISTS idx_loop_specs_position
@@ -1415,6 +1426,54 @@ impl Database {
             )
             .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         }
+
+        // CT17: dedicated change signal for project knowledge, independent of the
+        // public `updated_at` (seconds, exposed via MCP in daemon/handler.rs) so
+        // this migration cannot change that column's unit or meaning.
+        let has_spec_updated_at: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('loop_specs') WHERE name = 'updated_at'",
+                [],
+                |row| Ok(row.get::<_, i32>(0)? > 0),
+            )
+            .unwrap_or(false);
+        if !has_spec_updated_at {
+            conn.execute(
+                "ALTER TABLE loop_specs ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0",
+                [],
+            )
+            .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
+        }
+        conn.execute(
+            "UPDATE loop_specs SET updated_at = COALESCE(started_at, completed_at, strftime('%s', 'now')) WHERE updated_at = 0",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_loop_specs_workdir_updated ON loop_specs(workdir, updated_at DESC)",
+            [],
+        )?;
+        let has_content_touched_at: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('intelligence_nodes') WHERE name = 'content_touched_at'",
+                [],
+                |row| Ok(row.get::<_, i32>(0)? > 0),
+            )
+            .unwrap_or(false);
+        if !has_content_touched_at {
+            conn.execute(
+                "ALTER TABLE intelligence_nodes ADD COLUMN content_touched_at INTEGER NOT NULL DEFAULT 0",
+                [],
+            )
+            .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
+        }
+        conn.execute(
+            "DROP INDEX IF EXISTS idx_intelligence_nodes_project_hash_updated",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_intelligence_nodes_project_hash_touched ON intelligence_nodes(project_hash, content_touched_at DESC)",
+            [],
+        )?;
 
         let has_ensemble_kind: bool = conn
             .query_row(

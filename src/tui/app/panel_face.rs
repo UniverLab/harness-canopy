@@ -83,12 +83,24 @@ impl App {
     /// refresh tick, after the data refreshes it reads have run.
     pub(crate) fn tick_panel_face(&mut self) {
         let loop_running = self.panel_loop_running();
-        let knowledge_count = self.project_knowledge.len();
-        let backlog_count = self.backlog_specs.len();
+        let project = self
+            .selected_project()
+            .map(|project| (project.hash.clone(), project.path.clone()));
+        let knowledge_updated = project.as_ref().and_then(|(hash, _)| {
+            self.db
+                .max_project_knowledge_updated_at(hash)
+                .ok()
+                .flatten()
+        });
+        let backlog_updated = self
+            .db
+            .max_backlog_updated_at(project.as_ref().map(|(_, path)| path.as_str()))
+            .ok()
+            .flatten();
 
         if !self.panel_baselines_init {
-            self.panel_last_knowledge_count = knowledge_count;
-            self.panel_last_backlog_count = backlog_count;
+            self.panel_last_knowledge_updated = knowledge_updated;
+            self.panel_last_backlog_updated = backlog_updated;
             self.panel_last_loop_running = loop_running;
             self.panel_baselines_init = true;
             self.panel_face = self
@@ -102,14 +114,24 @@ impl App {
         // EVENT inputs. Knowledge insertion and backlog change both take the
         // Knowledge face; when both change on the same tick the backlog
         // change is the newer event and wins the dwell.
-        if knowledge_count != self.panel_last_knowledge_count {
+        let knowledge_changed = match (self.panel_last_knowledge_updated, knowledge_updated) {
+            (None, Some(_)) => true,
+            (Some(previous), Some(current)) => current > previous,
+            _ => false,
+        };
+        if knowledge_changed {
             self.fire_panel_event(PanelFace::Knowledge, "new knowledge");
         }
-        if backlog_count != self.panel_last_backlog_count {
+        let backlog_changed = match (self.panel_last_backlog_updated, backlog_updated) {
+            (None, Some(_)) => true,
+            (Some(previous), Some(current)) => current > previous,
+            _ => false,
+        };
+        if backlog_changed {
             self.fire_panel_event(PanelFace::Knowledge, "backlog changed");
         }
-        self.panel_last_knowledge_count = knowledge_count;
-        self.panel_last_backlog_count = backlog_count;
+        self.panel_last_knowledge_updated = knowledge_updated;
+        self.panel_last_backlog_updated = backlog_updated;
         self.panel_last_loop_running = loop_running;
 
         if self
@@ -296,9 +318,11 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::intelligence::IntelligenceNodeInput;
     use crate::db::Database;
     use crate::domain::loops::{Loop, LoopStatus};
     use crate::domain::models::{Agent, Cli};
+    use crate::domain::project::Project;
     use crate::tui::app::types::{AgentEntry, Focus};
     use chrono::Utc;
     use std::sync::Arc;
@@ -319,6 +343,174 @@ mod tests {
         // handle alive via the app itself.
         let _ = &mut app;
         app
+    }
+
+    fn knowledge_input(id: &str, body: &str) -> IntelligenceNodeInput {
+        IntelligenceNodeInput {
+            id: Some(id.to_string()),
+            kind: Some("fact".to_string()),
+            status: None,
+            title: Some(id.to_string()),
+            body: Some(body.to_string()),
+            body_replace: None,
+            metadata: None,
+            project_hash: Some(Some("panel-project".to_string())),
+            session_id: None,
+            relations: None,
+        }
+    }
+
+    #[test]
+    fn knowledge_signal_is_independent_of_display_cap_and_length() {
+        let db = test_db();
+        for index in 0..51 {
+            db.upsert_intelligence_node(knowledge_input(&format!("knowledge-{index}"), "initial"))
+                .unwrap();
+        }
+
+        let data_dir = tempdir().unwrap();
+        let mut app = App::new(Arc::clone(&db), data_dir.path()).unwrap();
+        app.projects = vec![Project {
+            hash: "panel-project".to_string(),
+            path: "/tmp/panel-project".to_string(),
+            name: "panel-project".to_string(),
+            description: None,
+            tags: None,
+            indexed_at: None,
+            created_at: Utc::now().timestamp(),
+        }];
+        app.panel_baselines_init = false;
+        app.refresh_project_knowledge().unwrap();
+        app.tick_panel_face();
+        assert_eq!(app.project_knowledge.len(), 50);
+
+        db.upsert_intelligence_node(knowledge_input("knowledge-51", "added"))
+            .unwrap();
+        app.refresh_project_knowledge().unwrap();
+        app.tick_panel_face();
+        assert_eq!(app.panel_dwell_reason.as_deref(), Some("new knowledge"));
+
+        app.panel_dwell_until = None;
+        db.upsert_intelligence_node(knowledge_input("knowledge-0", "edited"))
+            .unwrap();
+        app.refresh_project_knowledge().unwrap();
+        app.tick_panel_face();
+        assert_eq!(app.panel_dwell_reason.as_deref(), Some("new knowledge"));
+    }
+
+    #[test]
+    fn knowledge_delete_does_not_fire_event() {
+        let db = test_db();
+        for index in 0..5 {
+            db.upsert_intelligence_node(knowledge_input(&format!("knowledge-{index}"), "initial"))
+                .unwrap();
+        }
+        let data_dir = tempdir().unwrap();
+        let mut app = App::new(Arc::clone(&db), data_dir.path()).unwrap();
+        app.projects = vec![Project {
+            hash: "panel-project".to_string(),
+            path: "/tmp/panel-project".to_string(),
+            name: "panel-project".to_string(),
+            description: None,
+            tags: None,
+            indexed_at: None,
+            created_at: Utc::now().timestamp(),
+        }];
+        app.panel_baselines_init = false;
+        app.refresh_project_knowledge().unwrap();
+        app.tick_panel_face();
+        app.clear_panel_dwell();
+
+        db.delete_intelligence_node("knowledge-0").unwrap();
+        app.refresh_project_knowledge().unwrap();
+        app.tick_panel_face();
+        assert_eq!(app.panel_dwell_reason, None);
+    }
+
+    #[test]
+    fn knowledge_add_and_delete_in_same_tick_fires_once() {
+        let db = test_db();
+        for index in 0..5 {
+            db.upsert_intelligence_node(knowledge_input(&format!("knowledge-{index}"), "initial"))
+                .unwrap();
+        }
+        let data_dir = tempdir().unwrap();
+        let mut app = App::new(Arc::clone(&db), data_dir.path()).unwrap();
+        app.projects = vec![Project {
+            hash: "panel-project".to_string(),
+            path: "/tmp/panel-project".to_string(),
+            name: "panel-project".to_string(),
+            description: None,
+            tags: None,
+            indexed_at: None,
+            created_at: Utc::now().timestamp(),
+        }];
+        app.panel_baselines_init = false;
+        app.refresh_project_knowledge().unwrap();
+        app.tick_panel_face();
+        app.clear_panel_dwell();
+
+        db.upsert_intelligence_node(knowledge_input("knowledge-new", "added"))
+            .unwrap();
+        db.delete_intelligence_node("knowledge-1").unwrap();
+        app.refresh_project_knowledge().unwrap();
+        app.tick_panel_face();
+        assert_eq!(app.panel_dwell_reason.as_deref(), Some("new knowledge"));
+    }
+
+    fn standalone_spec(id: &str, workdir: &str) -> crate::domain::loops::LoopSpec {
+        crate::domain::loops::LoopSpec {
+            id: id.to_string(),
+            loop_id: None,
+            name: format!("Backlog {id}"),
+            description: Some("stub".to_string()),
+            position: 0,
+            parallelizable: false,
+            status: crate::domain::loops::LoopSpecStatus::Pending,
+            started_at: None,
+            completed_at: None,
+            spec_start_head: None,
+            spec_committed_head: None,
+            workdir: Some(workdir.to_string()),
+            completed_via: None,
+            completed_via_reason: None,
+            completed_via_at: None,
+        }
+    }
+
+    #[test]
+    fn backlog_signal_add_edit_delete() {
+        let db = test_db();
+        let data_dir = tempdir().unwrap();
+        let mut app = App::new(Arc::clone(&db), data_dir.path()).unwrap();
+        app.projects = vec![Project {
+            hash: "panel-project".to_string(),
+            path: "/tmp/panel-project".to_string(),
+            name: "panel-project".to_string(),
+            description: None,
+            tags: None,
+            indexed_at: None,
+            created_at: Utc::now().timestamp(),
+        }];
+        app.panel_baselines_init = false;
+        app.tick_panel_face();
+        app.clear_panel_dwell();
+
+        db.insert_loop_spec(&standalone_spec("backlog-1", "/tmp/panel-project"))
+            .unwrap();
+        app.tick_panel_face();
+        assert_eq!(app.panel_dwell_reason.as_deref(), Some("backlog changed"));
+        app.clear_panel_dwell();
+
+        db.update_spec_tag_details("backlog-1", Some("Renamed"), None, None)
+            .unwrap();
+        app.tick_panel_face();
+        assert_eq!(app.panel_dwell_reason.as_deref(), Some("backlog changed"));
+        app.clear_panel_dwell();
+
+        db.delete_loop_spec("backlog-1").unwrap();
+        app.tick_panel_face();
+        assert_eq!(app.panel_dwell_reason, None);
     }
 
     fn sample_agent(id: &str, workdir: &str) -> Agent {

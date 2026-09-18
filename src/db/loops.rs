@@ -595,17 +595,20 @@ impl Database {
             .conn
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let updated_at = Utc::now().timestamp_millis();
         let rows = conn.execute(
             "UPDATE loop_specs SET status = ?1, started_at = NULL, completed_at = NULL, spec_start_head = NULL, spec_committed_head = NULL,
                  completed_via = CASE WHEN ?3 THEN NULL ELSE completed_via END,
                  completed_via_reason = CASE WHEN ?3 THEN NULL ELSE completed_via_reason END,
                  completed_via_at = CASE WHEN ?3 THEN NULL ELSE completed_via_at END,
-                 cross_run_attempts = CASE WHEN ?3 THEN 0 ELSE cross_run_attempts END
+                 cross_run_attempts = CASE WHEN ?3 THEN 0 ELSE cross_run_attempts END,
+                 updated_at = ?4
              WHERE id = ?2",
             params![
                 LoopSpecStatus::Pending.as_str(),
                 spec_id,
                 clear_cross_run_attempts,
+                updated_at,
             ],
         )?;
         Ok(rows > 0)
@@ -640,8 +643,8 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         conn.execute(
-            "UPDATE loop_specs SET cross_run_attempts = cross_run_attempts + 1 WHERE id = ?1",
-            params![spec_id],
+            "UPDATE loop_specs SET cross_run_attempts = cross_run_attempts + 1, updated_at = ?2 WHERE id = ?1",
+            params![spec_id, Utc::now().timestamp_millis()],
         )?;
         conn.query_row(
             "SELECT cross_run_attempts FROM loop_specs WHERE id = ?1",
@@ -689,6 +692,7 @@ impl Database {
 
         // 4. Update the spec with admin status
         let now = Utc::now().timestamp();
+        let updated_at = Utc::now().timestamp_millis();
         let (completed_at, completed_via_at) = match status {
             LoopSpecStatus::Pending => (None, None),
             _ => (Some(now), Some(now)),
@@ -697,7 +701,7 @@ impl Database {
         conn.execute(
             "UPDATE loop_specs
              SET status = ?1, completed_at = ?2, completed_via = 'admin',
-                 completed_via_reason = ?3, completed_via_at = ?4
+                 completed_via_reason = ?3, completed_via_at = ?4, updated_at = ?6
              WHERE id = ?5",
             params![
                 status.as_str(),
@@ -705,6 +709,7 @@ impl Database {
                 reason,
                 completed_via_at,
                 spec_id,
+                updated_at,
             ],
         )?;
 
@@ -827,8 +832,8 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         conn.execute(
-            "INSERT INTO loop_specs (id, loop_id, name, description, position, parallelizable, status, started_at, completed_at, spec_start_head, workdir, spec_committed_head, completed_via, completed_via_reason, completed_via_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            "INSERT INTO loop_specs (id, loop_id, name, description, position, parallelizable, status, started_at, completed_at, spec_start_head, workdir, spec_committed_head, completed_via, completed_via_reason, completed_via_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 &spec.id,
                 &spec.loop_id,
@@ -845,6 +850,7 @@ impl Database {
                 &spec.completed_via,
                 &spec.completed_via_reason,
                 spec.completed_via_at.map(|value| value.timestamp()),
+                Utc::now().timestamp_millis(),
             ],
         )?;
         Ok(())
@@ -924,6 +930,23 @@ impl Database {
             .map_err(Into::into)
     }
 
+    /// Return the newest write for backlog (unassigned) specs in the given
+    /// workdir, independent of the capped list used to render the Knowledge
+    /// face. Mirrors [`Database::max_project_knowledge_updated_at`].
+    pub fn max_backlog_updated_at(&self, workdir: Option<&str>) -> Result<Option<i64>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        conn.query_row(
+            "SELECT MAX(updated_at) FROM loop_specs
+             WHERE (?1 IS NULL OR workdir = ?1) AND loop_id IS NULL",
+            rusqlite::params![workdir],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
+    }
+
     /// Update a standalone/backlog spec's name, description, and/or workdir
     /// tag. Unlike [`Self::update_loop_spec_details`] (position/parallelizable,
     /// used by `loop_update_spec`), this is for `spec_update` and never
@@ -939,18 +962,21 @@ impl Database {
             .conn
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let updated_at = Utc::now().timestamp_millis();
         let rows = conn.execute(
             "UPDATE loop_specs
              SET name = COALESCE(?1, name),
                  description = COALESCE(?2, description),
-                 workdir = CASE WHEN ?3 IS NULL THEN workdir ELSE ?4 END
+                 workdir = CASE WHEN ?3 IS NULL THEN workdir ELSE ?4 END,
+                 updated_at = ?6
              WHERE id = ?5",
             params![
                 name,
                 description,
                 workdir.map(|_| 1),
                 workdir.flatten(),
-                spec_id
+                spec_id,
+                updated_at,
             ],
         )?;
         Ok(rows > 0)
@@ -981,8 +1007,8 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let rows = conn.execute(
-            "UPDATE loop_specs SET description = ?1 WHERE id = ?2 AND status != 'running'",
-            params![new_description, spec_id],
+            "UPDATE loop_specs SET description = ?1, updated_at = ?3 WHERE id = ?2 AND status != 'running'",
+            params![new_description, spec_id, Utc::now().timestamp_millis()],
         )?;
         Ok(rows > 0)
     }
@@ -1008,8 +1034,8 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let rows = conn.execute(
-            "UPDATE loop_specs SET loop_id = NULL WHERE id = ?1 AND loop_id IS NOT NULL",
-            params![spec_id],
+            "UPDATE loop_specs SET loop_id = NULL, updated_at = ?2 WHERE id = ?1 AND loop_id IS NOT NULL",
+            params![spec_id, Utc::now().timestamp_millis()],
         )?;
         Ok(rows > 0)
     }
@@ -1024,8 +1050,8 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let rows = conn.execute(
-            "UPDATE loop_specs SET spec_start_head = ?1 WHERE id = ?2",
-            params![head, spec_id],
+            "UPDATE loop_specs SET spec_start_head = ?1, updated_at = ?3 WHERE id = ?2",
+            params![head, spec_id, Utc::now().timestamp_millis()],
         )?;
         Ok(rows > 0)
     }
@@ -1047,8 +1073,8 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let rows = conn.execute(
-            "UPDATE loop_specs SET spec_committed_head = ?1 WHERE id = ?2",
-            params![head, spec_id],
+            "UPDATE loop_specs SET spec_committed_head = ?1, updated_at = ?3 WHERE id = ?2",
+            params![head, spec_id, Utc::now().timestamp_millis()],
         )?;
         Ok(rows > 0)
     }
@@ -1070,9 +1096,17 @@ impl Database {
              SET name = COALESCE(?1, name),
                  description = COALESCE(?2, description),
                  position = COALESCE(?3, position),
-                 parallelizable = COALESCE(?4, parallelizable)
+                 parallelizable = COALESCE(?4, parallelizable),
+                 updated_at = ?6
              WHERE id = ?5",
-            params![name, description, position, parallelizable, spec_id],
+            params![
+                name,
+                description,
+                position,
+                parallelizable,
+                spec_id,
+                Utc::now().timestamp_millis()
+            ],
         )?;
         Ok(rows > 0)
     }
@@ -1092,13 +1126,15 @@ impl Database {
             "UPDATE loop_specs
              SET status = ?1,
                  started_at = COALESCE(?2, started_at),
-                 completed_at = COALESCE(?3, completed_at)
+                 completed_at = COALESCE(?3, completed_at),
+                 updated_at = ?5
              WHERE id = ?4",
             params![
                 status.as_str(),
                 started_at.map(|value| value.timestamp()),
                 completed_at.map(|value| value.timestamp()),
                 spec_id,
+                Utc::now().timestamp_millis(),
             ],
         )?;
         Ok(rows > 0)
@@ -2375,9 +2411,14 @@ impl Database {
                 // hasn't committed anything itself yet.
                 tx.execute(
                     "UPDATE loop_specs
-                     SET status = ?1, started_at = NULL, completed_at = NULL, spec_start_head = NULL, spec_committed_head = NULL
+                     SET status = ?1, started_at = NULL, completed_at = NULL, spec_start_head = NULL, spec_committed_head = NULL,
+                         updated_at = ?3
                      WHERE id = ?2",
-                    params![LoopSpecStatus::Interrupted.as_str(), run.spec_id],
+                    params![
+                        LoopSpecStatus::Interrupted.as_str(),
+                        run.spec_id,
+                        Utc::now().timestamp_millis()
+                    ],
                 )?;
             }
             // C1: flag this pause as reconciliation's own, distinct from an
@@ -2519,9 +2560,10 @@ impl Database {
                 tx.execute(
                     "UPDATE loop_specs
                      SET status = ?1, started_at = NULL, completed_at = NULL,
-                         spec_start_head = NULL, spec_committed_head = NULL
+                         spec_start_head = NULL, spec_committed_head = NULL,
+                         updated_at = ?3
                      WHERE id = ?2",
-                    params![new_status.as_str(), spec_id],
+                    params![new_status.as_str(), spec_id, Utc::now().timestamp_millis()],
                 )?;
                 reset_count += 1;
             }

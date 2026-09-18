@@ -434,6 +434,7 @@ impl Database {
 
         let node_id = id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let now = Utc::now().timestamp();
+        let content_touched_at = Utc::now().timestamp_millis();
         let conn = self
             .conn
             .lock()
@@ -497,8 +498,8 @@ impl Database {
 
             conn.execute(
                 "INSERT INTO intelligence_nodes (
-                    id, kind, status, title, body, metadata, project_hash, session_id, created_at, updated_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    id, kind, status, title, body, metadata, project_hash, session_id, created_at, updated_at, content_touched_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 rusqlite::params![
                     node_id,
                     kind,
@@ -509,7 +510,8 @@ impl Database {
                     project_hash,
                     session_id,
                     now,
-                    now
+                    now,
+                    content_touched_at
                 ],
             )?;
 
@@ -726,6 +728,8 @@ impl Database {
         }
         set_clauses.push("updated_at = ?");
         values.push(Box::new(now));
+        set_clauses.push("content_touched_at = ?");
+        values.push(Box::new(content_touched_at));
         let sql = format!(
             "UPDATE intelligence_nodes SET {} WHERE id = ?",
             set_clauses.join(", ")
@@ -2054,6 +2058,25 @@ impl Database {
             )?,
         };
         Ok(rows.filter_map(|row| row.ok()).collect())
+    }
+
+    /// Return the newest knowledge write for a project, independent of the
+    /// capped list used to render the Knowledge face. Reads a dedicated
+    /// millisecond-resolution column, not the public `updated_at` (seconds) —
+    /// the panel ticks every 50-200ms (see `tui/event/mod.rs::tick_duration`),
+    /// so two writes inside the same second must stay distinguishable.
+    pub fn max_project_knowledge_updated_at(&self, project_hash: &str) -> Result<Option<i64>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        conn.query_row(
+            "SELECT MAX(content_touched_at) FROM intelligence_nodes
+             WHERE project_hash = ?1 AND kind IN ('fact', 'pattern')",
+            rusqlite::params![project_hash],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
     }
 
     /// List projects related to a given project via edges.
