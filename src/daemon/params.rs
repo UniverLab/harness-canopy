@@ -1123,6 +1123,31 @@ pub struct SessionListParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ScheduledSendCreateParams {
+    /// The prompt text to deliver. Plain text only — delivered to the target
+    /// session exactly as typed, the same as a promptbuilder send.
+    pub prompt: String,
+    /// Target interactive session id. Omit to schedule to your own session.
+    pub target_session_id: Option<String>,
+    /// ISO 8601 absolute time to fire at. Mutually exclusive with `in_seconds`.
+    pub at: Option<String>,
+    /// Relative delay in whole seconds. Mutually exclusive with `at`.
+    pub in_seconds: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ScheduledSendListParams {
+    /// Session id to list pending scheduled sends for. Omit for your own session.
+    pub session_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ScheduledSendCancelParams {
+    /// Scheduled send id, as returned by scheduled_send_create.
+    pub id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct LoopRestoreParams {
     /// Loop ID to restore from the archive back to the main list.
     pub loop_id: String,

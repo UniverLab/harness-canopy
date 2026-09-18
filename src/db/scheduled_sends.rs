@@ -6,18 +6,20 @@ use serde::{Deserialize, Serialize};
 use crate::db::Database;
 
 /// Structured origin of a scheduled send, stored as JSON in the nullable
-/// `provenance` column. Only hook provenance (`kind = "hook"`) is produced
-/// today — prompt-builder sends store `None`. Kept out of `prompt` so the
-/// delivered text stays exactly what the promptbuilder would submit while
-/// the recipient can still tell which loop and event sent it.
+/// `provenance` column. Kept out of `prompt` so the delivered text stays
+/// exactly what the promptbuilder would submit while the recipient can still
+/// tell which loop, event, or agent sent it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScheduledSendProvenance {
-    /// Provenance kind. Only `"hook"` is produced by this feature.
+    /// Provenance kind: `"hook"` or `"agent"`.
     pub kind: String,
-    /// Id of the loop whose hook enqueued the send.
+    /// Id of the loop whose hook enqueued the send. Empty for `"agent"`.
     pub loop_id: String,
-    /// Hook event that produced it (e.g. `"on_failed"`).
+    /// Hook event that produced it (e.g. `"on_failed"`). Empty for `"agent"`.
     pub event: String,
+    /// Id of the calling session that scheduled an agent send.
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 impl ScheduledSendProvenance {
@@ -27,6 +29,17 @@ impl ScheduledSendProvenance {
             kind: "hook".to_string(),
             loop_id: loop_id.to_string(),
             event: event.to_string(),
+            session_id: None,
+        }
+    }
+
+    /// Provenance for a message an agent scheduled via the MCP surface.
+    pub fn agent(session_id: &str) -> Self {
+        Self {
+            kind: "agent".to_string(),
+            loop_id: String::new(),
+            event: String::new(),
+            session_id: Some(session_id.to_string()),
         }
     }
 
@@ -880,6 +893,64 @@ mod tests {
             .unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].provenance, Some(provenance));
+    }
+
+    #[test]
+    fn agent_provenance_round_trips() {
+        let db = test_db();
+        let fire = Utc::now();
+        let provenance = ScheduledSendProvenance::agent("session-caller");
+        db.insert_scheduled_send(
+            "ss-agent",
+            "wake me up",
+            "session-1",
+            Some("/proj"),
+            fire,
+            None,
+            Some(&provenance),
+        )
+        .unwrap();
+
+        let due = db.list_due_scheduled_sends(Utc::now()).unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].provenance, Some(provenance));
+        assert_eq!(due[0].provenance.as_ref().unwrap().kind, "agent");
+        assert_eq!(
+            due[0].provenance.as_ref().unwrap().session_id.as_deref(),
+            Some("session-caller")
+        );
+    }
+
+    #[test]
+    fn old_hook_provenance_json_without_session_id_field_deserializes() {
+        let db = test_db();
+        let fire = Utc::now() + chrono::Duration::hours(1);
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO scheduled_sends (id, prompt, target_session_id, workdir, fire_at, created_at, builder_state, provenance)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    "ss-old-hook",
+                    "old style",
+                    "session-1",
+                    Option::<&str>::None,
+                    fire.timestamp(),
+                    fire.timestamp(),
+                    Option::<&str>::None,
+                    r#"{"kind":"hook","loop_id":"loop-1","event":"on_failed"}"#,
+                ],
+            )
+            .unwrap();
+        }
+        let pending = db
+            .list_pending_scheduled_sends_for_session("session-1")
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+        let provenance = pending[0].provenance.as_ref().unwrap();
+        assert_eq!(provenance.kind, "hook");
+        assert_eq!(provenance.loop_id, "loop-1");
+        assert!(provenance.session_id.is_none());
     }
 
     /// A dead-target hook send must retain its origin metadata in the failed
