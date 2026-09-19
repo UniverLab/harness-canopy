@@ -256,7 +256,8 @@ mod tests {
     #[test]
     fn import_graph_persists_ensemble_unit() {
         use crate::domain::graph_transfer::{
-            GraphExportEnsemble, GraphExportEnsembleMember, GraphExportNode,
+            GraphExportEnsemble, GraphExportEnsembleMember, GraphExportEnsembleTarget,
+            GraphExportNode,
         };
         let db = test_db();
         let document = GraphExportDocument {
@@ -282,9 +283,9 @@ mod tests {
                 name: "Proposers".to_string(),
                 kind: None,
                 prompt_template: "draft it".to_string(),
-                entry_from_node: "kickoff".to_string(),
+                entry_from_node: GraphExportEnsembleTarget::Node("kickoff".to_string()),
                 entry_condition: GraphEdgeCondition::Always,
-                on_pass_to: "downstream".to_string(),
+                on_pass_to: GraphExportEnsembleTarget::Node("downstream".to_string()),
                 on_fail_to: None,
                 min_pass: 2,
                 timeout_minutes: 30,

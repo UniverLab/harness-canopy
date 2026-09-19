@@ -436,6 +436,11 @@ printed by the CLI.
 
 An [ensemble](#ensembles) round-trips as one ensemble — not as its
 expanded member/quorum nodes — via its own `ensembles` array entry.
+The `entry_from_node`, `on_pass_to`, and `on_fail_to` fields use a bare
+string for a plain node. When wiring to another ensemble's quorum, export
+uses `{ "ensemble": "<name>" }` so an ensemble target is distinct from a
+plain node with the same name; import resolves that table to the target
+ensemble's join node and restores its member fan-out edges.
 
 Here is a complete, hand-writable example: an implementer, a 2-model
 ensemble of reviewers, and a committer the quorum routes to on pass.

@@ -94,16 +94,32 @@ pub struct GraphExportEnsembleMember {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum GraphExportEnsembleTarget {
+    Node(String),
+    Ensemble { ensemble: String },
+}
+
+impl GraphExportEnsembleTarget {
+    fn as_ensemble_name(&self) -> Option<&str> {
+        match self {
+            Self::Ensemble { ensemble } => Some(ensemble),
+            Self::Node(_) => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GraphExportEnsemble {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     pub prompt_template: String,
-    pub entry_from_node: String,
+    pub entry_from_node: GraphExportEnsembleTarget,
     pub entry_condition: GraphEdgeCondition,
-    pub on_pass_to: String,
+    pub on_pass_to: GraphExportEnsembleTarget,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub on_fail_to: Option<String>,
+    pub on_fail_to: Option<GraphExportEnsembleTarget>,
     pub min_pass: i64,
     pub timeout_minutes: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -165,6 +181,26 @@ pub fn build_export_document(
         ));
     }
 
+    let mut ensemble_name_counts: HashMap<&str, usize> = HashMap::new();
+    for details in ensembles {
+        *ensemble_name_counts
+            .entry(details.ensemble.name.as_str())
+            .or_insert(0) += 1;
+    }
+    let mut duplicate_ensemble_names: Vec<&str> = ensemble_name_counts
+        .into_iter()
+        .filter(|(_, count)| *count > 1)
+        .map(|(name, _)| name)
+        .collect();
+    if !duplicate_ensemble_names.is_empty() {
+        duplicate_ensemble_names.sort_unstable();
+        return Err(format!(
+            "Graph '{}' has duplicate ensemble name(s): {}. Export requires unique ensemble names, since the exported file references ensembles by name — rename before exporting.",
+            lp.name,
+            duplicate_ensemble_names.join(", ")
+        ));
+    }
+
     let id_to_name: HashMap<&str, &str> = plain_nodes
         .iter()
         .map(|node| (node.id.as_str(), node.name.as_str()))
@@ -179,6 +215,29 @@ pub fn build_export_document(
                     lp.name
                 )
             })
+    };
+    let join_id_to_ensemble_name: HashMap<&str, &str> = ensembles
+        .iter()
+        .map(|details| {
+            (
+                details.ensemble.join_node_id.as_str(),
+                details.ensemble.name.as_str(),
+            )
+        })
+        .collect();
+    let resolve_target = |node_id: &str| -> Result<GraphExportEnsembleTarget, String> {
+        if let Some(name) = id_to_name.get(node_id) {
+            return Ok(GraphExportEnsembleTarget::Node((*name).to_string()));
+        }
+        if let Some(name) = join_id_to_ensemble_name.get(node_id) {
+            return Ok(GraphExportEnsembleTarget::Ensemble {
+                ensemble: (*name).to_string(),
+            });
+        }
+        Err(format!(
+            "Graph '{}' references node '{}' that is not part of its own graph.",
+            lp.name, node_id
+        ))
     };
 
     let export_nodes = plain_nodes
@@ -219,8 +278,8 @@ pub fn build_export_document(
         let ensemble = &details.ensemble;
         let on_fail_to = ensemble
             .on_fail_to
-            .as_deref()
-            .map(resolve_name)
+            .as_ref()
+            .map(|target| resolve_target(target))
             .transpose()?;
 
         let mut sorted_members: Vec<&EnsembleMember> = details.members.iter().collect();
@@ -247,9 +306,9 @@ pub fn build_export_document(
                 Some(ensemble.kind.as_str().to_string())
             },
             prompt_template: ensemble.prompt_template.clone(),
-            entry_from_node: resolve_name(&ensemble.entry_from_node)?,
+            entry_from_node: resolve_target(&ensemble.entry_from_node)?,
             entry_condition: ensemble.entry_condition.clone(),
-            on_pass_to: resolve_name(&ensemble.on_pass_to)?,
+            on_pass_to: resolve_target(&ensemble.on_pass_to)?,
             on_fail_to,
             min_pass: ensemble.min_pass,
             timeout_minutes: ensemble.timeout_minutes,
@@ -418,6 +477,25 @@ pub fn build_import_plan(
         ));
     }
 
+    let mut ensemble_name_counts: HashMap<&str, usize> = HashMap::new();
+    for ensemble in &document.ensembles {
+        *ensemble_name_counts
+            .entry(ensemble.name.as_str())
+            .or_insert(0) += 1;
+    }
+    let mut duplicate_ensemble_names: Vec<&str> = ensemble_name_counts
+        .into_iter()
+        .filter(|(_, count)| *count > 1)
+        .map(|(name, _)| name)
+        .collect();
+    if !duplicate_ensemble_names.is_empty() {
+        duplicate_ensemble_names.sort_unstable();
+        return Err(format!(
+            "Graph export document has duplicate ensemble name(s): {}.",
+            duplicate_ensemble_names.join(", ")
+        ));
+    }
+
     let now = chrono::Utc::now();
     let mut name_to_id: HashMap<&str, String> = HashMap::new();
     let mut nodes = Vec::with_capacity(document.nodes.len());
@@ -508,8 +586,55 @@ pub fn build_import_plan(
         .map(|max| max + 1)
         .unwrap_or(1);
 
+    let allocations: Vec<(String, String, Vec<String>)> = document
+        .ensembles
+        .iter()
+        .map(|ensemble| {
+            (
+                uuid::Uuid::new_v4().to_string(),
+                uuid::Uuid::new_v4().to_string(),
+                ensemble
+                    .members
+                    .iter()
+                    .map(|_| uuid::Uuid::new_v4().to_string())
+                    .collect(),
+            )
+        })
+        .collect();
+    let ensemble_name_to_join_id: HashMap<&str, &str> = document
+        .ensembles
+        .iter()
+        .zip(&allocations)
+        .map(|(ensemble, (_, join_id, _))| (ensemble.name.as_str(), join_id.as_str()))
+        .collect();
+    let ensemble_name_to_member_ids: HashMap<&str, &[String]> = document
+        .ensembles
+        .iter()
+        .zip(&allocations)
+        .map(|(ensemble, (_, _, member_ids))| (ensemble.name.as_str(), member_ids.as_slice()))
+        .collect();
+    let resolve_target = |target: &GraphExportEnsembleTarget,
+                          field: &str,
+                          ensemble_name: &str|
+     -> Result<String, String> {
+        match target {
+            GraphExportEnsembleTarget::Node(name) => resolve(name)
+                .map_err(|e| format!("Ensemble '{ensemble_name}' {field} {e}.")),
+            GraphExportEnsembleTarget::Ensemble { ensemble } => ensemble_name_to_join_id
+                .get(ensemble.as_str())
+                .map(|id| (*id).to_string())
+                .ok_or_else(|| {
+                    format!(
+                        "Ensemble '{ensemble_name}' {field} references unknown ensemble '{ensemble}'."
+                    )
+                }),
+        }
+    };
+
     let mut ensembles = Vec::with_capacity(document.ensembles.len());
-    for doc_ensemble in &document.ensembles {
+    for (doc_ensemble, (ensemble_id, join_node_id, member_node_ids)) in
+        document.ensembles.iter().zip(&allocations)
+    {
         let import_kind = doc_ensemble
             .kind
             .as_deref()
@@ -548,26 +673,24 @@ pub fn build_import_plan(
             }
         }
 
-        let entry_from_node = resolve(&doc_ensemble.entry_from_node)
-            .map_err(|e| format!("Ensemble '{}' entry_from_node {e}.", doc_ensemble.name))?;
-        let on_pass_to = resolve(&doc_ensemble.on_pass_to)
-            .map_err(|e| format!("Ensemble '{}' on_pass_to {e}.", doc_ensemble.name))?;
+        let entry_from_node = resolve_target(
+            &doc_ensemble.entry_from_node,
+            "entry_from_node",
+            &doc_ensemble.name,
+        )?;
+        let on_pass_to =
+            resolve_target(&doc_ensemble.on_pass_to, "on_pass_to", &doc_ensemble.name)?;
         let on_fail_to = doc_ensemble
             .on_fail_to
-            .as_deref()
-            .map(|name| {
-                resolve(name)
-                    .map_err(|e| format!("Ensemble '{}' on_fail_to {e}.", doc_ensemble.name))
-            })
+            .as_ref()
+            .map(|target| resolve_target(target, "on_fail_to", &doc_ensemble.name))
             .transpose()?;
 
-        let ensemble_id = uuid::Uuid::new_v4().to_string();
-        let join_node_id = uuid::Uuid::new_v4().to_string();
         let mut member_nodes = Vec::with_capacity(doc_ensemble.members.len());
         let mut members = Vec::with_capacity(doc_ensemble.members.len());
 
         for (index, member) in doc_ensemble.members.iter().enumerate() {
-            let node_id = uuid::Uuid::new_v4().to_string();
+            let node_id = member_node_ids[index].clone();
             let effective_prompt = member
                 .prompt_override
                 .as_deref()
@@ -633,23 +756,40 @@ pub fn build_import_plan(
         };
         next_position += 1;
 
-        edges.push(GraphEdge {
-            id: uuid::Uuid::new_v4().to_string(),
-            spec_id: None,
-            graph_id: Some(graph_id.to_string()),
-            from_node: join_node_id.clone(),
-            to_node: on_pass_to.clone(),
-            condition: GraphEdgeCondition::Pass,
-        });
-        if let Some(on_fail_to) = &on_fail_to {
+        let pass_targets = doc_ensemble
+            .on_pass_to
+            .as_ensemble_name()
+            .and_then(|name| ensemble_name_to_member_ids.get(name))
+            .map(|member_ids| member_ids.to_vec())
+            .unwrap_or_else(|| vec![on_pass_to.clone()]);
+        for target in pass_targets {
             edges.push(GraphEdge {
                 id: uuid::Uuid::new_v4().to_string(),
                 spec_id: None,
                 graph_id: Some(graph_id.to_string()),
                 from_node: join_node_id.clone(),
-                to_node: on_fail_to.clone(),
-                condition: GraphEdgeCondition::Fail,
+                to_node: target,
+                condition: GraphEdgeCondition::Pass,
             });
+        }
+        if let Some(on_fail_to) = &on_fail_to {
+            let fail_targets = doc_ensemble
+                .on_fail_to
+                .as_ref()
+                .and_then(GraphExportEnsembleTarget::as_ensemble_name)
+                .and_then(|name| ensemble_name_to_member_ids.get(name))
+                .map(|member_ids| member_ids.to_vec())
+                .unwrap_or_else(|| vec![on_fail_to.clone()]);
+            for target in fail_targets {
+                edges.push(GraphEdge {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    spec_id: None,
+                    graph_id: Some(graph_id.to_string()),
+                    from_node: join_node_id.clone(),
+                    to_node: target,
+                    condition: GraphEdgeCondition::Fail,
+                });
+            }
         }
 
         let import_kind = doc_ensemble
@@ -660,12 +800,12 @@ pub fn build_import_plan(
 
         ensembles.push(GraphImportEnsemblePlan {
             ensemble: Ensemble {
-                id: ensemble_id,
+                id: ensemble_id.clone(),
                 spec_id: None,
                 graph_id: Some(graph_id.to_string()),
                 name: doc_ensemble.name.clone(),
                 prompt_template: doc_ensemble.prompt_template.clone(),
-                join_node_id,
+                join_node_id: join_node_id.clone(),
                 entry_from_node,
                 entry_condition: doc_ensemble.entry_condition.clone(),
                 min_pass: doc_ensemble.min_pass,
@@ -1411,6 +1551,191 @@ mod tests {
         assert_eq!(first_export.ensembles, second_export.ensembles);
     }
 
+    #[test]
+    fn chained_ensembles_export_as_tables_and_import_to_join_fanout() {
+        let lp = make_graph("canopy-v4");
+        let nodes = vec![
+            make_node(
+                "kickoff",
+                "kickoff",
+                GraphNodeKind::Check,
+                serde_json::json!({}),
+                1,
+            ),
+            make_node(
+                "final",
+                "final",
+                GraphNodeKind::Check,
+                serde_json::json!({}),
+                2,
+            ),
+            make_node(
+                "m1",
+                "Reviewer 1 [1]",
+                GraphNodeKind::Agent,
+                serde_json::json!({}),
+                3,
+            ),
+            make_node(
+                "m2",
+                "Reviewer 1 [2]",
+                GraphNodeKind::Agent,
+                serde_json::json!({}),
+                4,
+            ),
+            make_node(
+                "n1",
+                "Reviewer 2 [1]",
+                GraphNodeKind::Agent,
+                serde_json::json!({}),
+                5,
+            ),
+            make_node(
+                "n2",
+                "Reviewer 2 [2]",
+                GraphNodeKind::Agent,
+                serde_json::json!({}),
+                6,
+            ),
+            make_node(
+                "j1",
+                "Reviewer 1 (quorum)",
+                GraphNodeKind::Join,
+                serde_json::json!({}),
+                7,
+            ),
+            make_node(
+                "j2",
+                "Reviewer 2 (quorum)",
+                GraphNodeKind::Join,
+                serde_json::json!({}),
+                8,
+            ),
+        ];
+        let edges = vec![
+            make_edge("e1", "kickoff", "m1", GraphEdgeCondition::Always),
+            make_edge("e2", "kickoff", "m2", GraphEdgeCondition::Always),
+            make_edge("e3", "m1", "j1", GraphEdgeCondition::Always),
+            make_edge("e4", "m2", "j1", GraphEdgeCondition::Always),
+            make_edge("e5", "j1", "n1", GraphEdgeCondition::Pass),
+            make_edge("e6", "j1", "n2", GraphEdgeCondition::Pass),
+            make_edge("e7", "n1", "j2", GraphEdgeCondition::Always),
+            make_edge("e8", "n2", "j2", GraphEdgeCondition::Always),
+            make_edge("e9", "j2", "final", GraphEdgeCondition::Pass),
+        ];
+        let mut reviewer1 = make_ensemble_details("ens1", "j1", "kickoff", "j2", &["m1", "m2"]);
+        reviewer1.ensemble.name = "Reviewer 1".to_string();
+        let mut reviewer2 = make_ensemble_details("ens2", "j2", "kickoff", "final", &["n1", "n2"]);
+        reviewer2.ensemble.name = "Reviewer 2".to_string();
+
+        let document = build_export_document(&lp, &nodes, &edges, &[reviewer1, reviewer2]).unwrap();
+        assert_eq!(
+            document.ensembles[0].on_pass_to,
+            GraphExportEnsembleTarget::Ensemble {
+                ensemble: "Reviewer 2".to_string()
+            }
+        );
+        assert!(serde_json::to_string(&document)
+            .unwrap()
+            .contains("\"ensemble\":\"Reviewer 2\""));
+        assert!(document.edges.iter().all(|edge| {
+            edge.from_node != "Reviewer 1 (quorum)"
+                && edge.to_node != "Reviewer 1 (quorum)"
+                && edge.from_node != "Reviewer 2 (quorum)"
+                && edge.to_node != "Reviewer 2 (quorum)"
+        }));
+
+        let plan = build_import_plan(&document, "graph-2").unwrap();
+        let imported_r1 = plan
+            .ensembles
+            .iter()
+            .find(|ensemble| ensemble.ensemble.name == "Reviewer 1")
+            .unwrap();
+        let imported_r2 = plan
+            .ensembles
+            .iter()
+            .find(|ensemble| ensemble.ensemble.name == "Reviewer 2")
+            .unwrap();
+        assert_eq!(
+            imported_r1.ensemble.on_pass_to,
+            imported_r2.ensemble.join_node_id
+        );
+        for member in &imported_r2.members {
+            assert!(plan.edges.iter().any(|edge| {
+                edge.from_node == imported_r1.ensemble.join_node_id
+                    && edge.to_node == member.node_id
+                    && edge.condition == GraphEdgeCondition::Pass
+            }));
+        }
+    }
+
+    #[test]
+    fn export_refuses_duplicate_ensemble_names() {
+        let lp = make_graph("duplicate-ensembles");
+        let mut first = make_ensemble_details("ens1", "j1", "kickoff", "final", &["m1", "m2"]);
+        let mut second = make_ensemble_details("ens2", "j2", "kickoff", "final", &["n1", "n2"]);
+        first.ensemble.name = "Reviewer 1".to_string();
+        second.ensemble.name = "Reviewer 1".to_string();
+        let error = build_export_document(&lp, &[], &[], &[first, second]).unwrap_err();
+        assert!(error.contains("duplicate ensemble name"));
+        assert!(error.contains("Reviewer 1"));
+    }
+
+    #[test]
+    fn import_rejects_unknown_ensemble_target() {
+        let document = GraphExportDocument {
+            format_version: 3,
+            name: "unknown-target".to_string(),
+            description: None,
+            nodes: vec![
+                GraphExportNode {
+                    name: "kickoff".to_string(),
+                    kind: GraphNodeKind::Check,
+                    position: 1,
+                    config: serde_json::json!({}),
+                },
+                GraphExportNode {
+                    name: "final".to_string(),
+                    kind: GraphNodeKind::Check,
+                    position: 2,
+                    config: serde_json::json!({}),
+                },
+            ],
+            edges: vec![],
+            ensembles: vec![GraphExportEnsemble {
+                name: "Reviewer 1".to_string(),
+                kind: None,
+                prompt_template: "review".to_string(),
+                entry_from_node: GraphExportEnsembleTarget::Node("kickoff".to_string()),
+                entry_condition: GraphEdgeCondition::Always,
+                on_pass_to: GraphExportEnsembleTarget::Ensemble {
+                    ensemble: "Ghost".to_string(),
+                },
+                on_fail_to: Some(GraphExportEnsembleTarget::Node("final".to_string())),
+                min_pass: 2,
+                timeout_minutes: 10,
+                straggler_timeout_minutes: None,
+                members: vec![
+                    GraphExportEnsembleMember {
+                        platform: Some("x".to_string()),
+                        model: None,
+                        prompt_override: None,
+                        timeout_minutes: None,
+                    },
+                    GraphExportEnsembleMember {
+                        platform: Some("x".to_string()),
+                        model: None,
+                        prompt_override: None,
+                        timeout_minutes: None,
+                    },
+                ],
+            }],
+            infra_node: None,
+        };
+        let error = build_import_plan(&document, "graph-1").unwrap_err();
+        assert!(error.contains("unknown ensemble") && error.contains("Ghost"));
+    }
+
     /// Requirement 5's full statement: export -> import -> export again
     /// produces an identical document except for the name, for a plain
     /// (non-ensemble) graph too.
@@ -1692,9 +2017,9 @@ mod tests {
                 name: "solo".to_string(),
                 kind: None,
                 prompt_template: "go".to_string(),
-                entry_from_node: "kickoff".to_string(),
+                entry_from_node: GraphExportEnsembleTarget::Node("kickoff".to_string()),
                 entry_condition: GraphEdgeCondition::Always,
-                on_pass_to: "next".to_string(),
+                on_pass_to: GraphExportEnsembleTarget::Node("next".to_string()),
                 on_fail_to: None,
                 min_pass: 1,
                 timeout_minutes: 30,
@@ -1741,9 +2066,9 @@ mod tests {
                 name: "team".to_string(),
                 kind: None,
                 prompt_template: "go".to_string(),
-                entry_from_node: "kickoff".to_string(),
+                entry_from_node: GraphExportEnsembleTarget::Node("kickoff".to_string()),
                 entry_condition: GraphEdgeCondition::Always,
-                on_pass_to: "next".to_string(),
+                on_pass_to: GraphExportEnsembleTarget::Node("next".to_string()),
                 on_fail_to: None,
                 min_pass: 1,
                 timeout_minutes: 20,
