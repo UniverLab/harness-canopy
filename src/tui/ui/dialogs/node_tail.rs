@@ -11,7 +11,7 @@
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::domain::graphs::GraphRunStatus;
@@ -103,7 +103,7 @@ pub(crate) fn draw_node_tail_dialog(
     let title = format!(" Tail: {} ", dialog.node_name);
     let block = Block::default()
         .title(title)
-        .borders(Borders::ALL)
+        .borders(crate::tui::ui::dialog_borders_for(theme))
         .border_style(Style::default().fg(theme.border_color))
         .style(Style::default().bg(theme.dialog_bg));
     let inner = block.inner(area);

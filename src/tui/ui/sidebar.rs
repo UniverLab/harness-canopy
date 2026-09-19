@@ -9,7 +9,9 @@ use ratatui::widgets::{Block, Paragraph};
 use ratatui::Frame;
 
 use super::theme::Theme;
-use super::{borders_for, last_two_segments, truncate_str, BG_HOVER, INTERACTIVE_COLOR};
+use super::{
+    borders_for, dialog_borders_for, last_two_segments, truncate_str, BG_HOVER, INTERACTIVE_COLOR,
+};
 use super::{STATUS_DISABLED, STATUS_FAIL, STATUS_OK, STATUS_RUNNING};
 use crate::domain::graphs::{Graph, GraphStatus};
 use crate::tui::agent::AgentStatus;
@@ -543,6 +545,7 @@ fn draw_sidebar_tabs(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme
     if let Some(bar) = take_top(&mut remaining, 1) {
         draw_sidebar_tab_bar(frame, bar, app, theme);
     }
+    draw_sidebar_gap(frame, &mut remaining, theme);
 
     match app.sidebar_layer {
         SidebarLayer::Live => draw_live_body(
@@ -643,6 +646,7 @@ fn draw_live_body(
             theme,
         );
     }
+    draw_sidebar_gap(frame, &mut remaining, theme);
     if let Some(sub) = take_top(&mut remaining, alloc[1]) {
         let border_style = agent_section_border_style(app, AgentSectionFocus::Terminal, theme);
         render_agent_list_panel(
@@ -656,6 +660,7 @@ fn draw_live_body(
             theme,
         );
     }
+    draw_sidebar_gap(frame, &mut remaining, theme);
     if let Some(sub) = take_top(&mut remaining, alloc[2]) {
         render_groups_panel(frame, Some(sub), app, AgentSectionFocus::Groups, theme);
     }
@@ -696,6 +701,7 @@ fn draw_automation_body(
             theme,
         );
     }
+    draw_sidebar_gap(frame, &mut remaining, theme);
     if let Some(sub) = take_top(&mut remaining, alloc[1]) {
         // The archived count is always shown here — even while browsing the
         // main list — so the archive is never an invisible state; see the
@@ -750,8 +756,20 @@ fn draw_knowledge_body(frame: &mut Frame, area: Rect, app: &mut App, theme: &The
             |frame, inner| draw_projects_list(frame, inner, app, theme),
         );
     }
+    draw_sidebar_gap(frame, &mut remaining, theme);
 
     remaining
+}
+
+fn draw_sidebar_gap(frame: &mut Frame, remaining: &mut Rect, theme: &Theme) {
+    if remaining.height > 0 {
+        if let Some(gap) = take_top(remaining, 1) {
+            frame.render_widget(
+                Paragraph::new("").style(Style::default().bg(theme.sidebar_bg)),
+                gap,
+            );
+        }
+    }
 }
 
 // ── Focus/border styling ────────────────────────────────────────────
@@ -1834,7 +1852,7 @@ fn draw_project_relation_dialog(
 
     let block = Block::default()
         .title(format!(" Link: {} ", dialog.from_name))
-        .borders(borders_for(theme))
+        .borders(dialog_borders_for(theme))
         .border_style(Style::default().fg(theme.header_color));
     frame.render_widget(block, area);
 
@@ -2117,6 +2135,106 @@ mod tests {
         assert!(
             !text.contains("Knowledge (2)"),
             "tabs carry the label alone, no item count: {text}"
+        );
+    }
+
+    #[test]
+    fn sidebar_has_tab_to_list_gap() {
+        use crate::db::Database;
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        std::mem::forget(tmp);
+        let db = Arc::new(Database::new(&path).unwrap());
+        let data_dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(db, data_dir.path()).unwrap();
+        let theme = Theme::modern();
+        let backend = TestBackend::new(45, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                draw_sidebar_tabs(frame, area, &mut app, &theme);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        assert!((0..buffer.area.width)
+            .all(|x| { buffer[(x, 1)].symbol() == " " && buffer[(x, 1)].bg == theme.sidebar_bg }));
+    }
+
+    #[test]
+    fn sidebar_has_gaps_between_all_sections() {
+        use crate::db::Database;
+        use crate::tui::agent::InteractiveAgent;
+        use crate::tui::app::App;
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        std::mem::forget(tmp);
+        let db = Arc::new(Database::new(&path).unwrap());
+        let data_dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(Arc::clone(&db), data_dir.path()).unwrap();
+        // Seed Live with one interactive and one terminal so both sub-panels allocate.
+        let mut interactive = InteractiveAgent::spawn_terminal(
+            "cat",
+            "/tmp",
+            80,
+            24,
+            Some("interactive-1"),
+            &[],
+            Color::White,
+        )
+        .expect("spawn interactive");
+        interactive.status = crate::tui::agent::AgentStatus::Running;
+        app.interactive_agents.push(interactive);
+        let mut terminal = InteractiveAgent::spawn_terminal(
+            "cat",
+            "/tmp",
+            80,
+            24,
+            Some("terminal-1"),
+            &[],
+            Color::White,
+        )
+        .expect("spawn terminal");
+        terminal.status = crate::tui::agent::AgentStatus::Running;
+        app.terminal_agents.push(terminal);
+        app.agents.push(AgentEntry::Interactive(0));
+        app.agents.push(AgentEntry::Terminal(0));
+        app.sidebar_layer = SidebarLayer::Live;
+
+        let theme = Theme::modern();
+        let backend = TestBackend::new(45, 40);
+        let mut terminal_backend = Terminal::new(backend).unwrap();
+        terminal_backend
+            .draw(|frame| {
+                let area = frame.area();
+                draw_sidebar_tabs(frame, area, &mut app, &theme);
+            })
+            .unwrap();
+        let buffer = terminal_backend.backend().buffer();
+        // Tab bar is y=0, gap at y=1 must be blank sidebar_bg.
+        assert!((0..buffer.area.width)
+            .all(|x| { buffer[(x, 1)].symbol() == " " && buffer[(x, 1)].bg == theme.sidebar_bg }));
+        // After the first titled panel (interactive) there must be another blank gap
+        // before the terminal panel, and likewise between terminal and groups.
+        // Count blank rows inside the Live body to ensure the rule is applied between
+        // every section, not just tabs->list.
+        let blank_gap_rows = (0..buffer.area.height)
+            .filter(|&y| {
+                (0..buffer.area.width).all(|x| {
+                    buffer[(x, y)].symbol() == " " && buffer[(x, y)].bg == theme.sidebar_bg
+                })
+            })
+            .count();
+        assert!(
+            blank_gap_rows >= 3,
+            "expected at least 3 breathing gaps (tab->interactive, interactive->terminal, terminal->groups), found {blank_gap_rows}"
         );
     }
 

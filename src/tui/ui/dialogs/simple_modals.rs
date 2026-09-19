@@ -77,7 +77,7 @@ fn draw_modal_confirm(frame: &mut Frame, title: &str, text: &str, theme: &Theme)
 
     let block = Block::default()
         .title(title)
-        .borders(crate::tui::ui::borders_for(theme))
+        .borders(crate::tui::ui::dialog_borders_for(theme))
         .border_style(Style::default().fg(theme.header_color))
         .style(Style::default().bg(theme.dialog_bg));
     let inner = block.inner(area);
@@ -544,7 +544,7 @@ pub fn draw_legend(frame: &mut Frame, app: &mut App, theme: &Theme) {
 
     let block = Block::default()
         .title(" Canopy Missions ")
-        .borders(crate::tui::ui::borders_for(theme))
+        .borders(crate::tui::ui::dialog_borders_for(theme))
         .border_style(Style::default().fg(theme.header_color))
         .style(Style::default().bg(Color::Rgb(12, 20, 12)));
     let inner = block.inner(area);

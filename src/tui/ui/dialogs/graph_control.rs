@@ -31,7 +31,7 @@ pub fn draw_graph_autorun_dialog(frame: &mut Frame, app: &App, theme: &Theme) {
     let title = format!(" Autorun: {} ", dialog.graph_name);
     let block = Block::default()
         .title(title)
-        .borders(crate::tui::ui::borders_for(theme))
+        .borders(crate::tui::ui::dialog_borders_for(theme))
         .border_style(Style::default().fg(theme.header_color))
         .style(Style::default().bg(theme.dialog_bg));
     let inner = block.inner(area);
@@ -158,7 +158,7 @@ pub fn draw_graph_action_message(frame: &mut Frame, app: &App, theme: &Theme) {
 
     let block = Block::default()
         .title(title)
-        .borders(crate::tui::ui::borders_for(theme))
+        .borders(crate::tui::ui::dialog_borders_for(theme))
         .border_style(Style::default().fg(color))
         .style(Style::default().bg(theme.dialog_bg));
     let inner = block.inner(area);

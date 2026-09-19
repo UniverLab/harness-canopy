@@ -484,23 +484,14 @@ fn select_temperature_unit() -> Result<crate::domain::canopy_config::Temperature
 const THEME_OPTION_CLASSIC: &str = "Classic (bordered)";
 const THEME_OPTION_MODERN: &str = "Modern (borderless)";
 
-/// The `modern` theme shipped before its visual pass was finished
-/// (node `20334a3a`) and is no longer offered in the setup wizard. It is
-/// still honoured by [`crate::tui::ui::theme::Theme::resolve`] for anyone
-/// already configured with it — and this predicate is why a setup re-run
-/// doesn't silently downgrade them: their prompt is skipped rather than
-/// forcing the sole remaining option onto their config.
-fn skip_theme_prompt(current: &str) -> bool {
-    current == "modern"
-}
-
 fn select_theme(current: &str) -> Result<String> {
-    if skip_theme_prompt(current) {
-        return Ok(current.to_string());
-    }
-
-    let selected = Select::new("TUI theme:", vec![THEME_OPTION_CLASSIC])
-        .with_starting_cursor(0)
+    let options = vec![THEME_OPTION_CLASSIC, THEME_OPTION_MODERN];
+    let starting_cursor = options
+        .iter()
+        .position(|option| theme_choice_to_config_value(option) == current)
+        .unwrap_or(0);
+    let selected = Select::new("TUI theme:", options)
+        .with_starting_cursor(starting_cursor)
         .with_help_message("enter: confirm | restart the TUI to apply")
         .prompt()
         .map_err(|e| anyhow::anyhow!("Theme selection cancelled: {}", e))?;
@@ -1008,20 +999,9 @@ mod tests {
     }
 
     #[test]
-    fn setup_never_prompts_a_modern_user_so_a_rerun_keeps_their_theme() {
-        // `modern` is hidden from the selector, but an existing `modern`
-        // config must survive a `canopy setup` re-run — the wizard skips
-        // the theme prompt entirely rather than writing the only remaining
-        // option (classic) over their choice.
-        assert!(skip_theme_prompt("modern"));
-    }
-
-    #[test]
-    fn setup_prompts_for_theme_for_every_non_modern_config() {
-        // Everyone else gets the (classic-only) prompt.
-        assert!(!skip_theme_prompt("classic"));
-        assert!(!skip_theme_prompt(""));
-        assert!(!skip_theme_prompt("some-future-theme"));
+    fn wizard_lists_modern_again() {
+        let source = include_str!("wizard.rs");
+        assert!(source.contains("vec![THEME_OPTION_CLASSIC, THEME_OPTION_MODERN]"));
     }
 
     #[test]

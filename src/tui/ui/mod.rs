@@ -43,11 +43,18 @@ pub(crate) fn borders_for(theme: &Theme) -> ratatui::widgets::Borders {
     }
 }
 
+/// Dialogs retain a visible edge in every theme, including modern's
+/// otherwise borderless panels.
+pub(crate) fn dialog_borders_for(_theme: &Theme) -> ratatui::widgets::Borders {
+    ratatui::widgets::Borders::ALL
+}
+
 // ── Layout ──────────────────────────────────────────────────────
 
 /// Width in columns of the agent sidebar when visible. Shared by the layout
 /// split here and the mouse hit-testing in `tui::event` so both stay in sync.
 pub(crate) const SIDEBAR_WIDTH: u16 = 33;
+const MODERN_USES_SEPARATOR_COLUMN: bool = false;
 
 // ── Main draw entry point ───────────────────────────────────────
 
@@ -71,6 +78,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             Layout::horizontal([Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(0)]).areas(body);
         header::draw_header(frame, header_area, app, &theme);
         sidebar::draw_sidebar(frame, sidebar, app, &theme);
+        if !theme.show_borders && MODERN_USES_SEPARATOR_COLUMN {
+            let separator = Rect::new(sidebar.x + sidebar.width, sidebar.y, 1, sidebar.height);
+            frame.render_widget(
+                ratatui::widgets::Paragraph::new("").style(Style::default().bg(theme.border_color)),
+                separator,
+            );
+        }
         content
     } else {
         header::draw_header(frame, header_area, app, &theme);
@@ -315,7 +329,7 @@ fn draw_panel_picker(frame: &mut Frame, app: &App, theme: &Theme) {
     crate::tui::ui::dialogs::draw_dialog_left_wave(frame, area, app.animation_tick.into());
     let block = Block::default()
         .title(" panel face · F6 ")
-        .borders(borders_for(theme))
+        .borders(dialog_borders_for(theme))
         .border_style(Style::default().fg(theme.header_color))
         .style(Style::default().bg(theme.dialog_bg));
     let inner = block.inner(area);
@@ -425,6 +439,50 @@ mod tests {
         assert_eq!(sidebar.x, 0);
         assert_eq!(content.x, SIDEBAR_WIDTH);
         assert_eq!(content.width, body.width - SIDEBAR_WIDTH);
+    }
+
+    #[test]
+    fn modern_sidebar_and_work_area_have_distinct_rendered_boundary() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let (mut app, _data_dir) = picker_test_app();
+        app.theme = Theme::modern();
+        app.sidebar_visible = true;
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let boundary_x = SIDEBAR_WIDTH - 1;
+        assert!((1..39).any(|y| {
+            buffer[(boundary_x, y)].bg == app.theme.sidebar_bg
+                && buffer[(SIDEBAR_WIDTH, y)].bg == app.theme.panel_bg
+        }));
+    }
+
+    #[test]
+    fn every_dialog_source_uses_dialog_border_helper() {
+        for source in [
+            include_str!("dialogs/at_picker.rs"),
+            include_str!("dialogs/context_transfer.rs"),
+            include_str!("dialogs/graph_control.rs"),
+            include_str!("dialogs/graph_editor.rs"),
+            include_str!("dialogs/graph_form.rs"),
+            include_str!("dialogs/knowledge_dialog.rs"),
+            include_str!("dialogs/launchpad.rs"),
+            include_str!("dialogs/new_agent_dialog.rs"),
+            include_str!("dialogs/node_tail.rs"),
+            include_str!("dialogs/pickers.rs"),
+            include_str!("dialogs/rag_transfer.rs"),
+            include_str!("dialogs/section_picker.rs"),
+            include_str!("dialogs/simple_modals.rs"),
+            include_str!("dialogs/simple_prompt.rs"),
+        ] {
+            assert!(source.contains("dialog_borders_for"));
+            assert!(!source.contains("::borders_for(theme)"));
+            assert!(!source.contains(".borders(borders_for(theme))"));
+        }
     }
 
     #[test]
@@ -704,20 +762,16 @@ mod tests {
             "picker top border must use the shared header colour"
         );
 
-        // Modern (`Borders::NONE`): no box-drawing glyphs anywhere in the
-        // picker rect, same rule `borders_for` gives every other dialog.
+        // Modern keeps the dialog exception: the picker must still have a
+        // visible edge even though panels use `Borders::NONE`.
         let modern = Theme::modern();
         let modern_buffer = render_picker_buffer(&app, &modern, width, height, Color::Blue);
         let modern_area = expected_picker_area(&app, Rect::new(0, 0, width, height));
-        for y in modern_area.y..modern_area.y + modern_area.height {
-            for x in modern_area.x..modern_area.x + modern_area.width {
-                let symbol = modern_buffer[(x, y)].symbol();
-                assert!(
-                    !["─", "│", "┌", "┐", "└", "┘"].contains(&symbol),
-                    "modern picker cell ({x},{y}) must not draw a border glyph"
-                );
-            }
-        }
+        assert_eq!(modern_buffer[(modern_area.x, modern_area.y)].symbol(), "┌");
+        assert_eq!(
+            modern_buffer[(modern_area.x, modern_area.y)].fg,
+            modern.header_color
+        );
         // The modern picker is still opaque: every cell carries the dialog
         // background (which equals the panel background on this theme) or
         // the selected-row background.
@@ -731,6 +785,14 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn dialog_borders_for_always_all() {
+        use ratatui::widgets::Borders;
+
+        assert_eq!(dialog_borders_for(&Theme::classic()), Borders::ALL);
+        assert_eq!(dialog_borders_for(&Theme::modern()), Borders::ALL);
     }
 
     #[test]

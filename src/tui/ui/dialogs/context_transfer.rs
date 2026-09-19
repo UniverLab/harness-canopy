@@ -48,7 +48,7 @@ fn draw_ctx_preview(frame: &mut Frame, app: &App, theme: &Theme) {
     };
     let block = Block::default()
         .title(format!(" Context Transfer — from: {src_id} "))
-        .borders(crate::tui::ui::borders_for(theme))
+        .borders(crate::tui::ui::dialog_borders_for(theme))
         .border_style(Style::default().fg(accent))
         .style(Style::default().bg(theme.dialog_bg));
 
@@ -132,7 +132,7 @@ fn draw_ctx_picker(frame: &mut Frame, app: &App, theme: &Theme) {
 
     let block = Block::default()
         .title(" Select Destination Agent ")
-        .borders(crate::tui::ui::borders_for(theme))
+        .borders(crate::tui::ui::dialog_borders_for(theme))
         .border_style(Style::default().fg(src_accent))
         .style(Style::default().bg(theme.dialog_bg));
 

@@ -443,7 +443,7 @@ pub fn draw_simple_prompt_dialog(
     let title = " Prompt Builder ";
     let block = Block::default()
         .title(title)
-        .borders(crate::tui::ui::borders_for(theme))
+        .borders(crate::tui::ui::dialog_borders_for(theme))
         .border_style(Style::default().fg(accent))
         .style(Style::default().bg(theme.dialog_bg));
 

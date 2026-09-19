@@ -56,7 +56,7 @@ pub(crate) fn draw_at_picker_dropdown(
     let title = format!(" {} ", picker.title());
     let block = Block::default()
         .title(title)
-        .borders(crate::tui::ui::borders_for(theme))
+        .borders(crate::tui::ui::dialog_borders_for(theme))
         .border_style(Style::default().fg(accent))
         .style(Style::default().bg(Color::Rgb(10, 20, 10)));
     let inner = block.inner(drop_area);

@@ -26,7 +26,7 @@ pub fn draw_graph_editor_dialog(frame: &mut Frame, app: &App, theme: &Theme) {
 
     let block = Block::default()
         .title(dialog.title.as_str())
-        .borders(crate::tui::ui::borders_for(theme))
+        .borders(crate::tui::ui::dialog_borders_for(theme))
         .border_style(Style::default().fg(border_color))
         .style(Style::default().bg(theme.dialog_bg));
     let inner = block.inner(area);

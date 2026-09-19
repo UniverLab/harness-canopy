@@ -23,7 +23,7 @@ pub fn draw_knowledge_dialog(frame: &mut Frame, app: &App, theme: &Theme) {
         } else {
             " New Knowledge "
         })
-        .borders(crate::tui::ui::borders_for(theme))
+        .borders(crate::tui::ui::dialog_borders_for(theme))
         .border_style(Style::default().fg(ACCENT));
 
     let inner = block.inner(dialog_area);
@@ -114,7 +114,7 @@ fn draw_field(
     };
     let block = Block::default()
         .title(Span::styled(format!(" {} ", label), title_style))
-        .borders(crate::tui::ui::borders_for(theme))
+        .borders(crate::tui::ui::dialog_borders_for(theme))
         .border_style(Style::default().fg(border_color));
 
     let inner = block.inner(area);
@@ -145,7 +145,7 @@ fn draw_multiline_field(
     };
     let block = Block::default()
         .title(Span::styled(format!(" {} ", label), title_style))
-        .borders(crate::tui::ui::borders_for(theme))
+        .borders(crate::tui::ui::dialog_borders_for(theme))
         .border_style(Style::default().fg(border_color));
 
     let inner = block.inner(area);

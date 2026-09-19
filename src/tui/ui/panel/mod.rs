@@ -252,6 +252,47 @@ fn graph_live_mode_label(app: &App) -> Option<&'static str> {
     }
 }
 
+fn render_focus_indicator(
+    frame: &mut Frame,
+    area: Rect,
+    inner: Rect,
+    app: &App,
+    theme: &Theme,
+    label: Option<&str>,
+) {
+    if theme.show_borders || area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let rail_color = match app.focus {
+        Focus::Agent => theme.header_color,
+        Focus::Preview => theme.dim_text,
+        _ => return,
+    };
+    let rail = Rect::new(area.x, area.y, 1, area.height);
+    frame.render_widget(
+        Paragraph::new("█".repeat(rail.height as usize))
+            .style(Style::default().fg(rail_color).bg(rail_color)),
+        rail,
+    );
+
+    if let Some(label) = label.filter(|_| inner.height > 0 && inner.width > 4) {
+        let text = label.trim();
+        let width = text.chars().count() as u16;
+        if width + 2 <= inner.width {
+            let pill_area = Rect::new(inner.x + 1, inner.y, width + 2, 1);
+            let pill = Span::styled(
+                format!(" {text} "),
+                Style::default()
+                    .fg(theme.accent_fg)
+                    .bg(theme.header_color)
+                    .add_modifier(Modifier::BOLD),
+            );
+            frame.render_widget(Paragraph::new(Line::from(pill)), pill_area);
+        }
+    }
+}
+
 fn show_home_fallback(app: &App) -> bool {
     app.agents.is_empty()
         && app.projects.is_empty()
@@ -614,20 +655,25 @@ pub(super) fn draw_log_panel(frame: &mut Frame, area: Rect, app: &mut App, theme
     let border_color = log_panel_border_color(app, theme);
     let label_color = panel_mode_label_color(app, theme);
     let graph_title = graph_live_mode_label(app);
-    let title = match (graph_title, panel_mode_label(app)) {
-        (Some(lt), _) => Some(Span::styled(
-            lt,
-            Style::default()
-                .fg(label_color)
-                .add_modifier(Modifier::BOLD),
-        )),
-        (None, Some(bt)) => Some(Span::styled(
-            bt,
-            Style::default()
-                .fg(label_color)
-                .add_modifier(Modifier::BOLD),
-        )),
-        (None, None) => None,
+    let indicator_label = graph_title.or_else(|| panel_mode_label(app));
+    let title = if theme.show_borders {
+        match (graph_title, panel_mode_label(app)) {
+            (Some(lt), _) => Some(Span::styled(
+                lt,
+                Style::default()
+                    .fg(label_color)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            (None, Some(bt)) => Some(Span::styled(
+                bt,
+                Style::default()
+                    .fg(label_color)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            (None, None) => None,
+        }
+    } else {
+        None
     };
     let inner = render_panel_block(frame, area, border_color, title, theme);
     if inner.width == 0 || inner.height == 0 {
@@ -640,14 +686,17 @@ pub(super) fn draw_log_panel(frame: &mut Frame, area: Rect, app: &mut App, theme
 
     if show_home_fallback(app) {
         draw_home_panel(frame, inner, app);
+        render_focus_indicator(frame, area, inner, app, theme, indicator_label);
         return;
     }
 
     if draw_log_panel_focus(frame, inner, app, theme) {
+        render_focus_indicator(frame, area, inner, app, theme, indicator_label);
         return;
     }
 
     draw_log_text(frame, area, inner, app);
+    render_focus_indicator(frame, area, inner, app, theme, indicator_label);
 }
 
 fn format_intent_lines(
@@ -2161,6 +2210,115 @@ mod tests {
         let mut app = App::new(db, data_dir.path()).unwrap();
         app.focus = Focus::Home;
         assert_eq!(panel_mode_label(&app), None);
+    }
+
+    #[test]
+    fn focus_preview_is_evident_in_modern_buffer_without_border_title() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        std::mem::forget(tmp);
+        let db = Arc::new(crate::db::Database::new(&path).unwrap());
+        let data_dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(db, data_dir.path()).unwrap();
+        let theme = Theme::modern();
+        let area = Rect::new(0, 0, 30, 8);
+
+        for (focus, expected_color, expected_label) in [
+            (Focus::Agent, theme.header_color, "Focus"),
+            (Focus::Preview, theme.dim_text, "Preview"),
+        ] {
+            app.focus = focus;
+            let backend = TestBackend::new(area.width, area.height);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal
+                .draw(|frame| {
+                    render_focus_indicator(frame, area, area, &app, &theme, panel_mode_label(&app));
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            assert_eq!(buffer[(0, 0)].symbol(), "█");
+            assert_eq!(buffer[(0, 0)].fg, expected_color);
+            let text: String = (0..area.height)
+                .flat_map(|y| (0..area.width).map(move |x| buffer[(x, y)].symbol()))
+                .collect();
+            assert!(
+                text.contains(expected_label),
+                "missing {expected_label}: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn draw_log_panel_modern_renders_rail_and_hides_border_title() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        std::mem::forget(tmp);
+        let db = Arc::new(crate::db::Database::new(&path).unwrap());
+        let data_dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(db, data_dir.path()).unwrap();
+        app.focus = Focus::Agent;
+        // Prevent the home fallback (empty workspace) from taking over the
+        // panel and hiding the rail/title distinction we want to assert.
+        app.projects
+            .push(crate::domain::project::Project::new("/tmp/proj"));
+        // Also seed a minimal agent so the Agent-focused branch doesn't fall
+        // through to an empty log (keeps the exercised path stable).
+        {
+            let mut agent = crate::tui::agent::InteractiveAgent::spawn_terminal(
+                "cat",
+                "/tmp",
+                80,
+                24,
+                Some("focus-agent"),
+                &[],
+                ratatui::style::Color::White,
+            )
+            .expect("spawn");
+            agent.status = crate::tui::agent::AgentStatus::Running;
+            app.interactive_agents.push(agent);
+            app.agents
+                .push(crate::tui::app::types::AgentEntry::Interactive(0));
+        }
+        let modern = Theme::modern();
+        let area = Rect::new(0, 0, 40, 12);
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| draw_log_panel(frame, area, &mut app, &modern))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        // Modern must show the 1-col rail at the panel's left edge.
+        assert_eq!(buffer[(area.x, area.y)].symbol(), "█");
+        assert_eq!(buffer[(area.x, area.y)].fg, modern.header_color);
+        // The border title for Focus must NOT be drawn as a top border (it's the
+        // pill instead), so the top row should be the rail, not box-drawing.
+        let top_row: String = (0..area.width)
+            .map(|x| buffer[(x, area.y)].symbol())
+            .collect();
+        assert!(
+            !top_row.contains('┌') && !top_row.contains('─'),
+            "modern must not render a border title, top row was {top_row:?}"
+        );
+
+        // Classic still uses the border title (and no rail).
+        let classic = Theme::classic();
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| draw_log_panel(frame, area, &mut app, &classic))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        assert_eq!(buffer[(area.x, area.y)].symbol(), "┌");
+        let mut text = String::new();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                text.push_str(buffer[(x, y)].symbol());
+            }
+        }
+        assert!(
+            text.contains("Focus"),
+            "classic title must contain Focus, got {text:?}"
+        );
     }
 
     #[test]
