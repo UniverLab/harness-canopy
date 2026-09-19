@@ -16,6 +16,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::application::ports::{AgentRepository, RunRepository};
 use crate::db::Database;
+use crate::domain::activity;
 use crate::domain::graphs::{GraphResetOutcome, GraphStatus};
 use crate::executor::Executor;
 use crate::graph_engine::GraphEngine;
@@ -460,6 +461,13 @@ impl CronScheduler {
             }
 
             tracing::info!("Graph '{}' reached its autorun_at time; launching", lp.id);
+            activity::publish(
+                &self.db,
+                &lp.workdir,
+                &lp.id,
+                &lp.name,
+                "Autorun fired; resuming.",
+            );
             // Resume with the graph's persisted run context (its queue, if any)
             // rather than a fresh `start_background`, which would fall back
             // to the graph's own bound specs — empty for a queue run, and

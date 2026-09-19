@@ -10,6 +10,7 @@ use crate::application::notification_service::{GraphFinishOutcome, NotificationS
 use crate::daemon::process::KILL_GRACE;
 use crate::db::scheduled_sends::ScheduledSendProvenance;
 use crate::db::Database;
+use crate::domain::activity;
 use crate::domain::graphs::{
     EnsembleDetails, EnsembleKind, EnsembleMember, Graph, GraphCompletionHook,
     GraphCompletionHookRun, GraphEdge, GraphEdgeCondition, GraphHookEvent, GraphNode,
@@ -263,6 +264,9 @@ impl GraphEngine {
                     let result =
                         self.db
                             .update_graph_status(graph_id, GraphStatus::Paused, None, None);
+                    if matches!(result, Ok(true)) {
+                        activity::publish(&self.db, &lp.workdir, graph_id, &lp.name, "Paused.");
+                    }
                     for run in self
                         .db
                         .list_running_graph_runs(graph_id)
@@ -279,8 +283,13 @@ impl GraphEngine {
                 {
                     // Req 6: nothing is in flight, so there is nothing to wait
                     // for — pause immediately, exactly as before this change.
-                    self.db
-                        .update_graph_status(graph_id, GraphStatus::Paused, None, None)
+                    let result =
+                        self.db
+                            .update_graph_status(graph_id, GraphStatus::Paused, None, None);
+                    if matches!(result, Ok(true)) {
+                        activity::publish(&self.db, &lp.workdir, graph_id, &lp.name, "Paused.");
+                    }
+                    result
                 } else {
                     // Wait-for-completion mode: a node is running. Record the
                     // pending pause; the engine transitions the graph to
@@ -298,8 +307,13 @@ impl GraphEngine {
                     {
                         self.interrupt_run(&run, "operator requested interrupt");
                     }
-                    self.db
-                        .update_graph_status(graph_id, GraphStatus::Paused, None, None)
+                    let result =
+                        self.db
+                            .update_graph_status(graph_id, GraphStatus::Paused, None, None);
+                    if matches!(result, Ok(true)) {
+                        activity::publish(&self.db, &lp.workdir, graph_id, &lp.name, "Paused.");
+                    }
+                    result
                 } else {
                     Ok(true) // Already pausing, nothing to do
                 }
@@ -484,6 +498,17 @@ impl GraphEngine {
             total_specs,
             resumed,
             first_pending.as_deref(),
+        );
+        activity::publish(
+            &self.db,
+            &workdir,
+            &graph_id,
+            &lp.name,
+            if resumed {
+                format!("Resumed ({total_specs} spec(s), {done} done).")
+            } else {
+                format!("Started ({total_specs} spec(s) pending).")
+            },
         );
 
         // Specs this dispatch itself completes — never specs that were
@@ -752,6 +777,13 @@ impl GraphEngine {
             Some(chrono::Utc::now()),
         )?;
         let (done, total) = self.spec_progress(&graph_id, queue_id.as_deref())?;
+        activity::publish(
+            &self.db,
+            &workdir,
+            &graph_id,
+            &lp.name,
+            format!("Completed ({done}/{total} specs)."),
+        );
         // (B17) This dispatch's own completed-spec count is what makes a
         // completion "real": a run that never actually executed a spec this
         // dispatch (every bound spec was already completed/skipped, or —
@@ -974,6 +1006,38 @@ impl GraphEngine {
                 Some(&execution.output),
                 Some(&execution.summary),
                 Some(chrono::Utc::now()),
+            );
+
+            let kind_label = if hook.is_interactive() {
+                "interactive"
+            } else if hook.is_command() {
+                "command"
+            } else if hook.is_graph() {
+                "graph"
+            } else {
+                "agent"
+            };
+            let outcome_text = if execution.status == GraphRunStatus::Pass {
+                "passed".to_string()
+            } else {
+                match execution
+                    .output
+                    .get("exit_code")
+                    .and_then(serde_json::Value::as_i64)
+                {
+                    Some(code) => format!("failed: exit {code}"),
+                    None => format!("failed: {}", execution.summary),
+                }
+            };
+            activity::publish(
+                &self.db,
+                ctx.workdir,
+                &lp.id,
+                &lp.name,
+                format!(
+                    "Hook {}[{idx}] ({kind_label}) {outcome_text}.",
+                    event.as_str()
+                ),
             );
 
             if execution.status != GraphRunStatus::Pass {
@@ -1635,6 +1699,13 @@ impl GraphEngine {
         is_resume: bool,
         queue_id: Option<&str>,
     ) -> Result<SpecExecutionOutcome> {
+        activity::publish(
+            &self.db,
+            workdir,
+            &lp.id,
+            &lp.name,
+            format!("Spec '{}' started.", spec.name),
+        );
         let spec_details = self
             .db
             .get_graph_spec_details(&spec.id)?
@@ -2244,6 +2315,61 @@ impl GraphEngine {
                         }
                     }
 
+                    match node.kind {
+                        GraphNodeKind::Agent => {
+                            let reason = if final_execution.status == GraphRunStatus::Pass {
+                                None
+                            } else {
+                                failure_reason_text(
+                                    &final_execution.output,
+                                    &final_execution.summary,
+                                )
+                            };
+                            activity::publish(
+                                &self.db,
+                                workdir,
+                                &lp.id,
+                                &lp.name,
+                                match (final_execution.status, &reason) {
+                                    (GraphRunStatus::Pass, _) => {
+                                        format!("Node '{}' passed.", node.name)
+                                    }
+                                    (_, Some(reason)) => {
+                                        format!("Node '{}' failed: {reason}", node.name)
+                                    }
+                                    (_, None) => format!("Node '{}' failed.", node.name),
+                                },
+                            );
+                        }
+                        GraphNodeKind::Check | GraphNodeKind::Gate
+                            if final_execution.status != GraphRunStatus::Pass =>
+                        {
+                            let exit_code = final_execution
+                                .output
+                                .get("exit_code")
+                                .and_then(serde_json::Value::as_i64);
+                            activity::publish(
+                                &self.db,
+                                workdir,
+                                &lp.id,
+                                &lp.name,
+                                match exit_code {
+                                    Some(code) => format!(
+                                        "Node '{}' ({}) failed: exit {code}.",
+                                        node.name,
+                                        node.kind.as_str()
+                                    ),
+                                    None => format!(
+                                        "Node '{}' ({}) failed.",
+                                        node.name,
+                                        node.kind.as_str()
+                                    ),
+                                },
+                            );
+                        }
+                        _ => {}
+                    }
+
                     // CB31: a wait-for-completion pause was requested while this
                     // node was running. It ran to its own completion and its
                     // verdict is now recorded normally; flag that run so
@@ -2257,6 +2383,7 @@ impl GraphEngine {
                             iteration_value as i64,
                         )?;
                         self.db.complete_pause(&lp.id)?;
+                        activity::publish(&self.db, workdir, &lp.id, &lp.name, "Paused.");
                         return Ok(SpecExecutionOutcome::Paused);
                     }
 
@@ -2272,6 +2399,20 @@ impl GraphEngine {
                             Some(chrono::Utc::now()),
                         )?;
                         self.notify_spec_completed(lp, spec, queue_id)?;
+                        activity::publish(
+                            &self.db,
+                            workdir,
+                            &lp.id,
+                            &lp.name,
+                            match &spec_committed_head {
+                                Some(head) => format!(
+                                    "Spec '{}' completed (committed {}).",
+                                    spec.name,
+                                    &head[..head.len().min(7)]
+                                ),
+                                None => format!("Spec '{}' completed.", spec.name),
+                            },
+                        );
                         return Ok(SpecExecutionOutcome::Completed {
                             summary: final_execution.summary,
                         });
@@ -2326,6 +2467,7 @@ impl GraphEngine {
                             iteration_value as i64,
                         )?;
                         self.db.complete_pause(&lp.id)?;
+                        activity::publish(&self.db, workdir, &lp.id, &lp.name, "Paused.");
                         return Ok(SpecExecutionOutcome::Paused);
                     }
 
@@ -2454,6 +2596,20 @@ impl GraphEngine {
                         Some(chrono::Utc::now()),
                     )?;
                     self.notify_spec_completed(lp, spec, queue_id)?;
+                    activity::publish(
+                        &self.db,
+                        workdir,
+                        &lp.id,
+                        &lp.name,
+                        match &spec_committed_head {
+                            Some(head) => format!(
+                                "Spec '{}' completed (committed {}).",
+                                spec.name,
+                                &head[..head.len().min(7)]
+                            ),
+                            None => format!("Spec '{}' completed.", spec.name),
+                        },
+                    );
                     return Ok(SpecExecutionOutcome::Completed {
                         summary: final_execution.summary,
                     });
@@ -2900,6 +3056,13 @@ impl GraphEngine {
                         }
                     }
                 };
+                activity::publish(
+                    &db, &workdir, &lp.id, &lp.name,
+                    match execution.status {
+                        GraphRunStatus::Pass => format!("Ensemble member '{}' passed.", node.name),
+                        _ => format!("Ensemble member '{}' failed: {}", node.name, failure_reason_text(&execution.output, &execution.summary).unwrap_or_default()),
+                    },
+                );
                 (node.id, label, execution)
             });
         }
@@ -2994,6 +3157,13 @@ impl GraphEngine {
                             ),
                         },
                     ),
+                );
+                activity::publish(
+                    &self.db,
+                    workdir,
+                    &lp.id,
+                    &lp.name,
+                    format!("Ensemble member '{node_name}' failed: quorum met."),
                 );
             }
             if terminated_any {
@@ -3126,6 +3296,22 @@ impl GraphEngine {
             executed_platform: None,
             executed_model: None,
         })?;
+        activity::publish(
+            &self.db,
+            workdir,
+            &lp.id,
+            &lp.name,
+            format!(
+                "Ensemble '{}' {} ({passed}/{} passed).",
+                ensemble.name,
+                if execution.status == GraphRunStatus::Pass {
+                    "passed"
+                } else {
+                    "failed"
+                },
+                details.members.len()
+            ),
+        );
 
         Ok(execution)
     }
@@ -3326,6 +3512,21 @@ impl GraphEngine {
             }
         };
 
+        activity::publish(
+            &self.db,
+            &workdir,
+            &lp.id,
+            &lp.name,
+            match result.0.status {
+                GraphRunStatus::Pass => format!("Ensemble member '{}' passed.", node.name),
+                _ => format!(
+                    "Ensemble member '{}' failed: {}",
+                    node.name,
+                    failure_reason_text(&result.0.output, &result.0.summary).unwrap_or_default()
+                ),
+            },
+        );
+
         Ok(result)
     }
 
@@ -3464,6 +3665,13 @@ impl GraphEngine {
                     executed_platform: None,
                     executed_model: None,
                 })?;
+                activity::publish(
+                    &self.db,
+                    workdir,
+                    &lp.id,
+                    &lp.name,
+                    join_execution.summary.clone(),
+                );
 
                 return Ok(join_execution);
             }
@@ -3525,6 +3733,13 @@ impl GraphEngine {
             executed_platform: None,
             executed_model: None,
         })?;
+        activity::publish(
+            &self.db,
+            workdir,
+            &lp.id,
+            &lp.name,
+            execution.summary.clone(),
+        );
 
         Ok(execution)
     }
@@ -3726,6 +3941,13 @@ impl GraphEngine {
                 executed_platform: None,
                 executed_model: None,
             })?;
+            activity::publish(
+                &self.db,
+                workdir,
+                &lp.id,
+                &lp.name,
+                join_execution.summary.clone(),
+            );
 
             return Ok(join_execution);
         }
@@ -3782,6 +4004,13 @@ impl GraphEngine {
             executed_platform: None,
             executed_model: None,
         })?;
+        activity::publish(
+            &self.db,
+            workdir,
+            &lp.id,
+            &lp.name,
+            execution.summary.clone(),
+        );
 
         Ok(execution)
     }
@@ -3942,6 +4171,24 @@ impl GraphEngine {
             None,
             Some(chrono::Utc::now()),
         )?;
+        if let Ok(Some(lp)) = self.db.get_graph(graph_id) {
+            if let Some(spec_name) = spec_name {
+                activity::publish(
+                    &self.db,
+                    &lp.workdir,
+                    graph_id,
+                    &lp.name,
+                    format!("Spec '{spec_name}' failed: {summary}"),
+                );
+            }
+            activity::publish(
+                &self.db,
+                &lp.workdir,
+                graph_id,
+                &lp.name,
+                format!("Failed: {summary}"),
+            );
+        }
         // Resolve the human-readable ending node name BEFORE sweeping the
         // running runs below — afterwards there is nothing left to resolve.
         let ending_node = self.ending_node_name(graph_id, spec_name);
@@ -4123,6 +4370,15 @@ impl GraphEngine {
         let ending_node = self.ending_node_name(graph_id, None);
         self.db
             .update_graph_status(graph_id, GraphStatus::Paused, None, None)?;
+        if let Ok(Some(lp)) = self.db.get_graph(graph_id) {
+            activity::publish(
+                &self.db,
+                &lp.workdir,
+                graph_id,
+                &lp.name,
+                format!("Blocked: {blocker}"),
+            );
+        }
         for run in self
             .db
             .list_running_graph_runs(graph_id)
@@ -6329,6 +6585,30 @@ fn cursor_node_ids(cursor: &SpecCursor, ensembles: &[EnsembleDetails]) -> Vec<St
                     .collect()
             })
             .unwrap_or_default(),
+    }
+}
+
+/// Verbatim failure reason for an activity line: prefers the structured
+/// `error`/`failure_kind` fields the engine itself stamps (`is_infra_crash`
+/// family — see `src/graph_engine.rs:4309-4327`), falls back to the node's
+/// own summary.
+fn failure_reason_text(output: &serde_json::Value, summary: &str) -> Option<String> {
+    if let Some(reason) = output.get("reason").and_then(serde_json::Value::as_str) {
+        return Some(reason.to_string());
+    }
+    if let Some(err) = output.get("error").and_then(serde_json::Value::as_str) {
+        return Some(err.to_string());
+    }
+    if let Some(kind) = output
+        .get("failure_kind")
+        .and_then(serde_json::Value::as_str)
+    {
+        return Some(kind.to_string());
+    }
+    if summary.trim().is_empty() {
+        None
+    } else {
+        Some(summary.to_string())
     }
 }
 
@@ -9210,6 +9490,156 @@ mod tests {
 
         assert_eq!(lp.status, GraphStatus::Failed);
         assert_eq!(spec.status, GraphSpecStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn activity_publishes_expected_sequence_for_passing_two_node_spec() {
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+        db.insert_graph_node(&GraphNode {
+            id: "node-check".to_string(),
+            spec_id: Some(spec_id.clone()),
+            graph_id: None,
+            name: "check".to_string(),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({"command": "printf APPROVED", "success_condition": "exit_code_0"}),
+            position: 1,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+        db.insert_graph_node(&GraphNode {
+            id: "node-gate".to_string(),
+            spec_id: Some(spec_id.clone()),
+            graph_id: None,
+            name: "gate".to_string(),
+            kind: GraphNodeKind::Gate,
+            config: serde_json::json!({"evaluate": "output_contains", "value": "APPROVED", "pass_route": "next_spec"}),
+            position: 2,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+        db.insert_graph_edge(&GraphEdge {
+            id: "edge-pass".to_string(),
+            spec_id: Some(spec_id.clone()),
+            graph_id: None,
+            from_node: "node-check".to_string(),
+            to_node: "node-gate".to_string(),
+            condition: crate::domain::graphs::GraphEdgeCondition::Pass,
+        })
+        .unwrap();
+
+        engine
+            .run_graph(graph_id.clone(), None, None, None, None)
+            .await
+            .unwrap();
+
+        let workdir = dir.path().to_string_lossy().to_string();
+        let entries = db.list_activity_log_entries(&workdir, 50).unwrap();
+        let messages: Vec<&str> = entries.iter().map(|e| e.message.as_str()).collect();
+
+        // Exact sequence: no per-node entries at all, because both Check and Gate
+        // passed (FR1: "a check/gate node only when it fails").
+        assert_eq!(
+            messages,
+            vec![
+                "Started (1 spec(s) pending).",
+                "Spec 'Spec' started.",
+                "Spec 'Spec' completed.",
+                "Completed (1/1 specs).",
+            ],
+            "got: {messages:?}"
+        );
+        for entry in &entries {
+            assert_eq!(entry.source, "loop:Graph");
+            assert_eq!(entry.source_id.as_deref(), Some(graph_id.as_str()));
+        }
+    }
+
+    #[tokio::test]
+    async fn activity_publishes_check_failure_with_exit_code() {
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+        db.insert_graph_node(&GraphNode {
+            id: "node-check".to_string(),
+            spec_id: Some(spec_id.clone()),
+            graph_id: None,
+            name: "check".to_string(),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({"command": "exit 3", "success_condition": "exit_code_0"}),
+            position: 1,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+        // No Fail edge: mirrors `graph_engine_fails_spec_when_check_fails_without_route`.
+
+        engine
+            .run_graph(graph_id.clone(), None, None, None, None)
+            .await
+            .unwrap();
+
+        let workdir = dir.path().to_string_lossy().to_string();
+        let entries = db.list_activity_log_entries(&workdir, 50).unwrap();
+        let messages: Vec<&str> = entries.iter().map(|e| e.message.as_str()).collect();
+
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("check") && m.contains("exit 3")),
+            "expected a check-failure entry with exit code 3, got: {messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.starts_with("Spec 'Spec' failed:")),
+            "expected a spec-failed entry, got: {messages:?}"
+        );
+        assert!(
+            messages.iter().any(|m| m.starts_with("Failed:")),
+            "expected a loop-failed entry, got: {messages:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn activity_publishes_hook_failure_with_exit_code() {
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+        db.insert_graph_node(&GraphNode {
+            id: "node-check".to_string(),
+            spec_id: Some(spec_id.clone()),
+            graph_id: None,
+            name: "check".to_string(),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({"command": "printf APPROVED", "success_condition": "exit_code_0"}),
+            position: 1,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+        let hook = crate::domain::graphs::GraphCompletionHook {
+            platform: None,
+            model: None,
+            effort: None,
+            prompt: None,
+            command: Some("exit 2".to_string()),
+            target_session_id: None,
+            timeout_minutes: Some(1),
+            target_graph_id: None,
+            queue_id: None,
+            workdir_override: None,
+            idea: None,
+        };
+        let mut hooks = std::collections::BTreeMap::new();
+        hooks.insert(GraphHookEvent::OnCompleted, vec![hook]);
+        db.update_graph_hooks(&graph_id, &hooks).unwrap();
+
+        engine
+            .run_graph(graph_id.clone(), None, None, None, None)
+            .await
+            .unwrap();
+
+        let workdir = dir.path().to_string_lossy().to_string();
+        let entries = db.list_activity_log_entries(&workdir, 50).unwrap();
+        let messages: Vec<&str> = entries.iter().map(|e| e.message.as_str()).collect();
+        assert!(
+            messages.iter().any(|m| m.contains("on_completed") && m.contains("command") && m.contains("exit 2")),
+            "expected a hook-failure entry naming the event, kind, and exit code, got: {messages:?}"
+        );
     }
 
     #[test]
