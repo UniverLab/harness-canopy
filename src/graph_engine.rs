@@ -1834,6 +1834,13 @@ impl GraphEngine {
         // specs.
         let mut resumable_sessions: HashMap<String, String> = HashMap::new();
 
+        // CM26: round-robin's per-spec pinned member index — which member THIS
+        // spec's first visit landed on, since `round_robin_index` itself gets
+        // advanced past it immediately and can't answer that question on a
+        // later bounce. Same lifetime as `resumable_sessions`: fresh per spec
+        // dispatch.
+        let mut round_robin_pins: HashMap<String, i64> = HashMap::new();
+
         // RS3: the context group this spec belongs to within the running
         // queue, if any. Only queue/queue runs carry a group (a graph's own
         // bound specs never do — `queue_id` is `None` there), so ungrouped and
@@ -2453,6 +2460,8 @@ impl GraphEngine {
                             enforce_commit_rights,
                             &node_outputs,
                             &all_node_names,
+                            &mut resumable_sessions,
+                            &mut round_robin_pins,
                         )
                         .await?;
 
@@ -2775,6 +2784,8 @@ impl GraphEngine {
         enforce_commit_rights: bool,
         node_outputs: &HashMap<String, Value>,
         all_node_names: &[String],
+        resumable_sessions: &mut HashMap<String, String>,
+        round_robin_pins: &mut HashMap<String, i64>,
     ) -> Result<NodeExecution> {
         let ensemble = &details.ensemble;
         match ensemble.kind {
@@ -2792,6 +2803,7 @@ impl GraphEngine {
                         enforce_commit_rights,
                         node_outputs,
                         all_node_names,
+                        resumable_sessions,
                     )
                     .await;
             }
@@ -2808,6 +2820,8 @@ impl GraphEngine {
                         enforce_commit_rights,
                         node_outputs,
                         all_node_names,
+                        resumable_sessions,
+                        round_robin_pins,
                     )
                     .await;
             }
@@ -2910,6 +2924,10 @@ impl GraphEngine {
             let dynamic_skills = self.dynamic_skills.clone();
             let node_outputs = node_outputs.clone();
             let all_node_names = all_node_names.to_vec();
+            // CM26: a bounce within the same spec resumes this member's own
+            // last-Pass session instead of cold-starting; `None` on a first
+            // visit or after that member's own prior Fail.
+            let resume_candidate_seed = resumable_sessions.get(&member.node_id).cloned();
 
             set.spawn(async move {
                 let _permit = semaphore
@@ -2934,7 +2952,7 @@ impl GraphEngine {
                         let (retry_limit, crash_max_secs, backoff_secs) = read_infra_config(&node);
                         let mut attempt: u32 = 0;
                         let mut member_run_id = run_id.clone();
-                        let mut resume_candidate: Option<String> = None;
+                        let mut resume_candidate: Option<String> = resume_candidate_seed;
                         loop {
                             let execution = execute_agent_node(
                                 &db,
@@ -2990,7 +3008,7 @@ impl GraphEngine {
                 )
                 .await;
 
-                let execution = match outcome {
+                let (execution, member_session_id) = match outcome {
                     Ok(Ok((execution, run, final_run_id))) => {
                         tracing::info!(
                             run_id = %final_run_id,
@@ -2999,7 +3017,8 @@ impl GraphEngine {
                             ensemble_id = %ensemble_id,
                             "ensemble member run completed"
                         );
-                        if run.status == GraphRunStatus::Running {
+                        let session_id = run.session_id.clone();
+                        let execution = if run.status == GraphRunStatus::Running {
                             let _ = db.update_graph_run_result(
                                 &final_run_id,
                                 execution.status,
@@ -3013,7 +3032,8 @@ impl GraphEngine {
                                 output: run.output.unwrap_or_else(|| serde_json::json!({})),
                                 summary: execution.summary,
                             }
-                        }
+                        };
+                        (execution, session_id)
                     }
                     // A DB error (or other hard error) from within the retry
                     // graph — reuse the finalized row output if there is one.
@@ -3024,11 +3044,14 @@ impl GraphEngine {
                             .flatten()
                             .and_then(|run| run.output)
                             .unwrap_or_else(|| serde_json::json!({ "error": error.to_string() }));
-                        NodeExecution {
-                            status: GraphRunStatus::Fail,
-                            output,
-                            summary: format!("Ensemble member '{}' failed: {error}", node.name),
-                        }
+                        (
+                            NodeExecution {
+                                status: GraphRunStatus::Fail,
+                                output,
+                                summary: format!("Ensemble member '{}' failed: {error}", node.name),
+                            },
+                            None,
+                        )
                     }
                     // This ensemble's own straggler timeout elapsed before the
                     // member resolved (still executing, or still retrying/
@@ -3041,19 +3064,22 @@ impl GraphEngine {
                         if let Ok(Some(run)) = db.get_active_graph_run_for_node(&node.id) {
                             terminate_run_row(&db, &run, "ensemble straggler timeout");
                         }
-                        NodeExecution {
-                            status: GraphRunStatus::Fail,
-                            output: serde_json::json!({
-                                "kind": "agent",
-                                "node_id": node.id,
-                                "error": "straggler timeout",
-                                "straggler_timeout_minutes": straggler_minutes,
-                            }),
-                            summary: format!(
-                                "Ensemble member '{}' killed: straggler timeout after {straggler_minutes}m.",
-                                node.name
-                            ),
-                        }
+                        (
+                            NodeExecution {
+                                status: GraphRunStatus::Fail,
+                                output: serde_json::json!({
+                                    "kind": "agent",
+                                    "node_id": node.id,
+                                    "error": "straggler timeout",
+                                    "straggler_timeout_minutes": straggler_minutes,
+                                }),
+                                summary: format!(
+                                    "Ensemble member '{}' killed: straggler timeout after {straggler_minutes}m.",
+                                    node.name
+                                ),
+                            },
+                            None,
+                        )
                     }
                 };
                 activity::publish(
@@ -3063,7 +3089,7 @@ impl GraphEngine {
                         _ => format!("Ensemble member '{}' failed: {}", node.name, failure_reason_text(&execution.output, &execution.summary).unwrap_or_default()),
                     },
                 );
-                (node.id, label, execution)
+                (node.id, label, execution, member_session_id)
             });
         }
 
@@ -3073,7 +3099,7 @@ impl GraphEngine {
         // behaviour below exactly. Cascade/round_robin never reach here
         // (early returns above), so the grace is parallel-only per spec.
         let quorum_grace: Option<i64> = ensemble.quorum_grace_minutes;
-        let mut results: HashMap<String, (String, NodeExecution)> = HashMap::new();
+        let mut results: HashMap<String, (String, NodeExecution, Option<String>)> = HashMap::new();
         // Set only when the grace path actually fired (quorum reached while
         // members were still pending); drives the `quorum_met_at` /
         // `grace_minutes` join-output fields.
@@ -3085,7 +3111,7 @@ impl GraphEngine {
                 if results.len() >= details.members.len() {
                     break;
                 }
-                let completed: Option<(String, String, NodeExecution)> =
+                let completed: Option<(String, String, NodeExecution, Option<String>)> =
                     match grace_deadline {
                         Some(deadline) => {
                             tokio::select! {
@@ -3106,11 +3132,11 @@ impl GraphEngine {
                             None => break,
                         },
                     };
-                if let Some((node_id, label, execution)) = completed {
+                if let Some((node_id, label, execution, session_id)) = completed {
                     if execution.status == GraphRunStatus::Pass {
                         passed_so_far += 1;
                     }
-                    results.insert(node_id, (label, execution));
+                    results.insert(node_id, (label, execution, session_id));
                     // The grace window is measured from the instant the
                     // quorum is met, not from ensemble start.
                     if grace_deadline.is_none() && passed_so_far >= ensemble.min_pass {
@@ -3156,6 +3182,7 @@ impl GraphEngine {
                                 "Ensemble member '{node_name}' terminated: quorum met."
                             ),
                         },
+                        None,
                     ),
                 );
                 activity::publish(
@@ -3176,9 +3203,9 @@ impl GraphEngine {
                 // never exceeded early): drain normally. `quorum_met_at` was
                 // still set above, so the join output records the grace path.
                 while let Some(joined) = set.join_next().await {
-                    let (node_id, label, execution) = joined
+                    let (node_id, label, execution, session_id) = joined
                         .map_err(|error| anyhow!("Ensemble member task panicked: {error}"))?;
-                    results.insert(node_id, (label, execution));
+                    results.insert(node_id, (label, execution, session_id));
                 }
             }
         } else {
@@ -3186,9 +3213,9 @@ impl GraphEngine {
             // regardless of arrival order, so the join can never fire while
             // a member is still in flight.
             while let Some(joined) = set.join_next().await {
-                let (node_id, label, execution) =
+                let (node_id, label, execution, session_id) =
                     joined.map_err(|error| anyhow!("Ensemble member task panicked: {error}"))?;
-                results.insert(node_id, (label, execution));
+                results.insert(node_id, (label, execution, session_id));
             }
         }
 
@@ -3196,18 +3223,26 @@ impl GraphEngine {
         let mut consolidated_doc = String::new();
         let mut member_summaries = Vec::with_capacity(details.members.len());
         for member in &details.members {
-            let (label, execution) = results.remove(&member.node_id).ok_or_else(|| {
-                anyhow!(
-                    "Ensemble member '{}' produced no result after wait-all.",
-                    member.node_id
-                )
-            })?;
+            let (label, execution, session_id) =
+                results.remove(&member.node_id).ok_or_else(|| {
+                    anyhow!(
+                        "Ensemble member '{}' produced no result after wait-all.",
+                        member.node_id
+                    )
+                })?;
             let status_label = if execution.status == GraphRunStatus::Pass {
                 passed += 1;
                 "pass"
             } else {
                 "fail"
             };
+            if execution.status == GraphRunStatus::Pass {
+                if let Some(sid) = session_id {
+                    resumable_sessions.insert(member.node_id.clone(), sid);
+                }
+            } else {
+                resumable_sessions.remove(&member.node_id);
+            }
             consolidated_doc.push_str(&format!(
                 "## {label} [{status_label}]\n\n{}\n\n",
                 member_output_text(&execution.output)
@@ -3337,6 +3372,8 @@ impl GraphEngine {
         straggler_minutes: u64,
         node_outputs: &HashMap<String, Value>,
         all_node_names: &[String],
+        initial_resume_candidate: Option<String>,
+        resumable_sessions: &mut HashMap<String, String>,
     ) -> Result<(NodeExecution, bool)> {
         let bound_minutes = member_timeout_minutes
             .map(|minutes| minutes.max(0) as u64)
@@ -3377,7 +3414,7 @@ impl GraphEngine {
                 let (retry_limit, crash_max_secs, backoff_secs) = read_infra_config(&node);
                 let mut attempt: u32 = 0;
                 let mut member_run_id = run_id.clone();
-                let mut resume_candidate: Option<String> = None;
+                let mut resume_candidate: Option<String> = initial_resume_candidate;
                 loop {
                     let execution = execute_agent_node(
                         &db,
@@ -3437,8 +3474,10 @@ impl GraphEngine {
             })
             .await;
 
+        let mut settled_session_id: Option<String> = None;
         let result = match outcome {
             Ok(Ok((execution, run, final_run_id, no_verdict))) => {
+                settled_session_id = run.session_id.clone();
                 let execution = if run.status == GraphRunStatus::Running {
                     let _ = db.update_graph_run_result(
                         &final_run_id,
@@ -3512,6 +3551,14 @@ impl GraphEngine {
             }
         };
 
+        if result.0.status == GraphRunStatus::Pass {
+            if let Some(sid) = settled_session_id {
+                resumable_sessions.insert(node.id.clone(), sid);
+            }
+        } else {
+            resumable_sessions.remove(&node.id);
+        }
+
         activity::publish(
             &self.db,
             &workdir,
@@ -3543,6 +3590,7 @@ impl GraphEngine {
         enforce_commit_rights: bool,
         node_outputs: &HashMap<String, Value>,
         all_node_names: &[String],
+        resumable_sessions: &mut HashMap<String, String>,
     ) -> Result<NodeExecution> {
         let ensemble = &details.ensemble;
         let straggler_minutes = ensemble.effective_straggler_timeout_minutes().max(0) as u64;
@@ -3581,7 +3629,25 @@ impl GraphEngine {
 
         let previous_output_owned = previous_output.cloned();
 
-        for member in &details.members {
+        // CM26: a bounce within the same spec resumes at the member that
+        // last passed (at most one member can have an entry — only the
+        // walk's eventual winner ever passes), instead of always restarting
+        // at position 0.
+        let resume_start = details
+            .members
+            .iter()
+            .position(|m| resumable_sessions.contains_key(&m.node_id));
+        let initial_resume_candidate =
+            resume_start.and_then(|p| resumable_sessions.get(&details.members[p].node_id).cloned());
+        let walk_start = resume_start.unwrap_or(0);
+
+        for (offset, member) in details.members.iter().enumerate().skip(walk_start) {
+            let is_resume_start = offset == walk_start;
+            let candidate = if is_resume_start {
+                initial_resume_candidate.clone()
+            } else {
+                None
+            };
             let node = member_nodes
                 .get(&member.node_id)
                 .cloned()
@@ -3599,10 +3665,19 @@ impl GraphEngine {
                     straggler_minutes,
                     node_outputs,
                     all_node_names,
+                    candidate.clone(),
+                    resumable_sessions,
                 )
                 .await?;
 
-            if !member_had_no_verdict {
+            // CM26 FR3: only the resumed starting member's own genuine `Fail`
+            // is treated like "no verdict" for the purpose of continuing the
+            // walk — every other position keeps the existing fail-fast rule.
+            let resumed_start_failed = is_resume_start
+                && candidate.is_some()
+                && !member_had_no_verdict
+                && execution.status != GraphRunStatus::Pass;
+            if !member_had_no_verdict && !resumed_start_failed {
                 let join_status = execution.status;
                 let join_output = serde_json::json!({
                     "kind": "cascade",
@@ -3614,7 +3689,7 @@ impl GraphEngine {
                         "status": if join_status == GraphRunStatus::Pass { "pass" } else { "fail" },
                         "output": execution.output,
                     },
-                    "members_tried": details.members.iter().position(|m| m.node_id == member.node_id).unwrap_or(0) + 1,
+                    "members_tried": (offset - walk_start) + 1,
                     "members_total": details.members.len(),
                 });
 
@@ -3676,19 +3751,28 @@ impl GraphEngine {
                 return Ok(join_execution);
             }
 
-            tracing::info!(
-                ensemble_id = %ensemble.id,
-                member = %node.name,
-                position = member.position,
-                "cascade member infra-crashed, trying next"
-            );
+            if resumed_start_failed {
+                tracing::info!(
+                    ensemble_id = %ensemble.id,
+                    member = %node.name,
+                    position = member.position,
+                    "cascade resumed start member failed on retry, trying next"
+                );
+            } else {
+                tracing::info!(
+                    ensemble_id = %ensemble.id,
+                    member = %node.name,
+                    position = member.position,
+                    "cascade member infra-crashed, trying next"
+                );
+            }
         }
 
         let join_output = serde_json::json!({
             "kind": "cascade",
             "ensemble_id": ensemble.id,
-            "error": "all members infra-crashed",
-            "members_tried": details.members.len(),
+            "error": "no member produced a passing verdict",
+            "members_tried": details.members.len() - walk_start,
             "members_total": details.members.len(),
         });
 
@@ -3696,9 +3780,9 @@ impl GraphEngine {
             status: GraphRunStatus::Fail,
             output: join_output,
             summary: format!(
-                "Cascade ensemble '{}' failed: all {} members infra-crashed.",
+                "Cascade ensemble '{}' failed: no member from position {} onward produced a passing verdict.",
                 ensemble.name,
-                details.members.len(),
+                walk_start + 1,
             ),
         };
 
@@ -3757,6 +3841,8 @@ impl GraphEngine {
         enforce_commit_rights: bool,
         node_outputs: &HashMap<String, Value>,
         all_node_names: &[String],
+        resumable_sessions: &mut HashMap<String, String>,
+        round_robin_pins: &mut HashMap<String, i64>,
     ) -> Result<NodeExecution> {
         let ensemble = &details.ensemble;
         let member_count = details.members.len() as i64;
@@ -3766,28 +3852,63 @@ impl GraphEngine {
                 ensemble.id
             ));
         }
-        // `details` is a per-dispatch snapshot; re-read the persisted index so
-        // a second visit to this ensemble in the same dispatch still advances
-        // rather than replaying the stale in-memory value.
-        let persisted_index = self
-            .db
-            .get_ensemble(&ensemble.id)
-            .ok()
-            .flatten()
-            .and_then(|e| e.round_robin_index)
-            .or(ensemble.round_robin_index)
-            .unwrap_or(0);
-        let start_index = persisted_index.rem_euclid(member_count);
 
-        // CM3: load spreading and failover are independent concerns. The
-        // rotation index advances by exactly one per invocation regardless of
-        // how many verdict-less members the failover walk below has to skip —
-        // the next invocation starts one past where this one started. Persist
-        // it up front so a hard error mid-walk still rotates, matching the
-        // pre-failover behaviour.
-        let next_index = (start_index + 1).rem_euclid(member_count);
-        self.db
-            .update_ensemble_kind(&ensemble.id, None, Some(Some(next_index)))?;
+        // CM26: `round_robin_pins` (in-memory, per-spec) says whether this
+        // dispatch is a bounce back into this ensemble within the same spec.
+        let is_bounce = round_robin_pins.contains_key(&ensemble.id);
+
+        let (start_index, initial_resume_candidate, next_index) = if !is_bounce {
+            // First visit to this ensemble in this spec — CM26 trigger (a).
+            // Exactly the pre-CM26 behavior: use whatever is currently
+            // persisted, cold, and eagerly persist +1 for whatever visits
+            // this ensemble next (a bounce here, or the next spec). Existing
+            // tests (`round_robin_spreads_invocations_across_members_in_order`,
+            // `round_robin_fallthrough_wraps_around_to_the_first_member`,
+            // etc.) assert this exact eager-advance-regardless-of-outcome
+            // behavior for first visits — unchanged.
+            //
+            // `details` is a per-dispatch snapshot; re-read the persisted
+            // index so a second visit to this ensemble in the same dispatch
+            // still advances rather than replaying the stale in-memory value.
+            let persisted_index = self
+                .db
+                .get_ensemble(&ensemble.id)
+                .ok()
+                .flatten()
+                .and_then(|e| e.round_robin_index)
+                .or(ensemble.round_robin_index)
+                .unwrap_or(0);
+            let start = persisted_index.rem_euclid(member_count);
+            let next = (start + 1).rem_euclid(member_count);
+            self.db
+                .update_ensemble_kind(&ensemble.id, None, Some(Some(next)))?;
+            round_robin_pins.insert(ensemble.id.clone(), start);
+            (start, None, next)
+        } else {
+            // Bounce within this spec — CM26. `round_robin_pins` (not
+            // `round_robin_index`, which the first visit above already
+            // advanced past this) says which member this spec pinned to.
+            let pinned = round_robin_pins[&ensemble.id];
+            let pinned_node_id = details.members[pinned as usize].node_id.clone();
+            match resumable_sessions.get(&pinned_node_id).cloned() {
+                // Pinned member's last run in this spec passed: resume it,
+                // no index change (FR2: "a bounce within the same spec after
+                // a pass re-invokes the same member, resumed").
+                Some(sid) => (pinned, Some(sid), pinned),
+                // Absent means the pinned member's last run in this spec did
+                // NOT pass (`resumable_sessions` only holds Pass entries) —
+                // CM26 trigger (b): advance past it now, cold, and persist so
+                // a future new spec (or a further bounce landing here) picks
+                // up from the new pin.
+                None => {
+                    let next = (pinned + 1).rem_euclid(member_count);
+                    self.db
+                        .update_ensemble_kind(&ensemble.id, None, Some(Some(next)))?;
+                    round_robin_pins.insert(ensemble.id.clone(), next);
+                    (next, None, next)
+                }
+            }
+        };
 
         let straggler_minutes = ensemble.effective_straggler_timeout_minutes().max(0) as u64;
 
@@ -3851,6 +3972,12 @@ impl GraphEngine {
                     straggler_minutes,
                     node_outputs,
                     all_node_names,
+                    if offset == 0 {
+                        initial_resume_candidate.clone()
+                    } else {
+                        None
+                    },
+                    resumable_sessions,
                 )
                 .await?;
 
@@ -18166,6 +18293,26 @@ echo done
         fake_home
     }
 
+    /// Like [`setup_multi_cli_home`] but for CM26 resume tests: the caller
+    /// builds each member's full [`crate::domain::cli_config::CliConfig`]
+    /// (session_resume_cmd / session_id_set_flag / per-member env such as its
+    /// own `ARGV_FILE`) via [`argv_cli_config`] rather than the bare
+    /// name/binary pair `setup_multi_cli_home` accepts.
+    fn setup_multi_resume_cli_home(
+        clis: Vec<crate::domain::cli_config::CliConfig>,
+    ) -> tempfile::TempDir {
+        let fake_home = tempfile::tempdir().unwrap();
+        let canopy_dir = fake_home.path().join(".canopy");
+        std::fs::create_dir_all(&canopy_dir).unwrap();
+        let config = crate::domain::canopy_config::CanopyConfig {
+            configured_at: Some(chrono::Utc::now().to_rfc3339()),
+            clis,
+            ..Default::default()
+        };
+        config.save(&canopy_dir).unwrap();
+        fake_home
+    }
+
     /// Builds a real ensemble unit (kickoff -> N members -> join -> pass/fail
     /// exits) directly against the DB, the same shape `graph_add_ensemble`
     /// assembles in one MCP call — but constructed here node-by-node so
@@ -18318,6 +18465,903 @@ echo done
             &edges,
         )
         .unwrap();
+    }
+
+    /// CM26: like [`insert_test_ensemble`] but the ensemble `kind` and
+    /// round-robin's starting index are caller-chosen, since the CM26 tests
+    /// need a bounce edge to route back INTO the ensemble (one `GraphEdge`
+    /// per member, `to_node` = that member's node id, matching condition —
+    /// the `select_next_step` fan-out convention documented on
+    /// [`select_next_step`]) rather than always terminating at a fixed
+    /// pass/fail node the way [`insert_test_ensemble`] does.
+    #[allow(clippy::too_many_arguments)]
+    fn insert_bouncing_ensemble(
+        db: &Database,
+        spec_id: &str,
+        kind: crate::domain::graphs::EnsembleKind,
+        members: &[(&str, &str)], // (node_id, cli_platform_name)
+        min_pass: i64,
+        straggler_timeout_minutes: Option<i64>,
+        round_robin_index: Option<i64>,
+        on_pass_to: &str,
+        on_fail_to: &str,
+    ) {
+        let now = chrono::Utc::now();
+
+        db.insert_graph_node(&GraphNode {
+            id: "kickoff".to_string(),
+            spec_id: Some(spec_id.to_string()),
+            graph_id: None,
+            name: "kickoff".to_string(),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({ "command": "printf ok", "success_condition": "exit_code_0" }),
+            position: 1,
+            created_at: now,
+        })
+        .unwrap();
+
+        let member_nodes: Vec<GraphNode> = members
+            .iter()
+            .enumerate()
+            .map(|(i, (node_id, platform))| GraphNode {
+                id: node_id.to_string(),
+                spec_id: Some(spec_id.to_string()),
+                graph_id: None,
+                name: format!("member-{}", i + 1),
+                kind: GraphNodeKind::Agent,
+                config: serde_json::json!({
+                    "platform": platform,
+                    "prompt_template": "ignored by the member's test script",
+                    "timeout_minutes": 5,
+                    "infra_backoff_seconds": 0,
+                }),
+                position: 2 + i as i64,
+                created_at: now,
+            })
+            .collect();
+
+        let join_node = GraphNode {
+            id: "join1".to_string(),
+            spec_id: Some(spec_id.to_string()),
+            graph_id: None,
+            name: "join".to_string(),
+            kind: GraphNodeKind::Join,
+            config: serde_json::json!({ "ensemble_id": "ens1" }),
+            position: 50,
+            created_at: now,
+        };
+
+        let mut edges = Vec::new();
+        for (node_id, _) in members {
+            edges.push(GraphEdge {
+                id: format!("kickoff->{node_id}"),
+                spec_id: Some(spec_id.to_string()),
+                graph_id: None,
+                from_node: "kickoff".to_string(),
+                to_node: node_id.to_string(),
+                condition: GraphEdgeCondition::Always,
+            });
+            edges.push(GraphEdge {
+                id: format!("{node_id}->join1"),
+                spec_id: Some(spec_id.to_string()),
+                graph_id: None,
+                from_node: node_id.to_string(),
+                to_node: "join1".to_string(),
+                condition: GraphEdgeCondition::Always,
+            });
+        }
+        edges.push(GraphEdge {
+            id: "join1->pass".to_string(),
+            spec_id: Some(spec_id.to_string()),
+            graph_id: None,
+            from_node: "join1".to_string(),
+            to_node: on_pass_to.to_string(),
+            condition: GraphEdgeCondition::Pass,
+        });
+        edges.push(GraphEdge {
+            id: "join1->fail".to_string(),
+            spec_id: Some(spec_id.to_string()),
+            graph_id: None,
+            from_node: "join1".to_string(),
+            to_node: on_fail_to.to_string(),
+            condition: GraphEdgeCondition::Fail,
+        });
+
+        let ensemble = crate::domain::graphs::Ensemble {
+            id: "ens1".to_string(),
+            spec_id: Some(spec_id.to_string()),
+            graph_id: None,
+            name: "Bouncing Ensemble".to_string(),
+            prompt_template: "ignored by the member's test script".to_string(),
+            join_node_id: "join1".to_string(),
+            entry_from_node: "kickoff".to_string(),
+            entry_condition: GraphEdgeCondition::Always,
+            min_pass,
+            straggler_timeout_minutes,
+            quorum_grace_minutes: None,
+            timeout_minutes: 5,
+            on_pass_to: on_pass_to.to_string(),
+            on_fail_to: Some(on_fail_to.to_string()),
+            kind,
+            round_robin_index,
+            created_at: now,
+        };
+        let ensemble_members: Vec<EnsembleMember> = members
+            .iter()
+            .enumerate()
+            .map(|(i, (node_id, platform))| EnsembleMember {
+                ensemble_id: "ens1".to_string(),
+                node_id: node_id.to_string(),
+                position: i as i64,
+                platform: platform.to_string(),
+                model: None,
+                prompt_override: None,
+                timeout_minutes: None,
+            })
+            .collect();
+
+        db.insert_ensemble_unit(
+            &ensemble,
+            &ensemble_members,
+            &member_nodes,
+            &join_node,
+            &edges,
+        )
+        .unwrap();
+    }
+
+    /// Edges routing a gate node's `Fail` verdict back INTO the ensemble
+    /// (`ens1`) — one `GraphEdge` per member, `to_node` = that member's node
+    /// id, condition `Fail`, matching `select_next_step`'s "distinct targets
+    /// equal one ensemble's member set" fan-out convention.
+    fn bounce_edges_into_ensemble(
+        spec_id: &str,
+        gate_id: &str,
+        member_ids: &[&str],
+    ) -> Vec<GraphEdge> {
+        member_ids
+            .iter()
+            .map(|member_id| GraphEdge {
+                id: format!("{gate_id}->{member_id}"),
+                spec_id: Some(spec_id.to_string()),
+                graph_id: None,
+                from_node: gate_id.to_string(),
+                to_node: member_id.to_string(),
+                condition: GraphEdgeCondition::Fail,
+            })
+            .collect()
+    }
+
+    /// A `Check` node that fails on its first invocation and passes
+    /// (`printf APPROVED`) from the second invocation on — used to force
+    /// exactly one bounce back into an ensemble before a spec is allowed to
+    /// terminate.
+    fn counter_gate_node(
+        id: &str,
+        spec_id: &str,
+        counter: &std::path::Path,
+        position: i64,
+    ) -> GraphNode {
+        GraphNode {
+            id: id.to_string(),
+            spec_id: Some(spec_id.to_string()),
+            graph_id: None,
+            name: id.to_string(),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({
+                "command": format!(
+                    "n=$(cat \"{c}\" 2>/dev/null || echo 0); n=$((n+1)); echo $n > \"{c}\"; [ \"$n\" -ge 2 ] && printf APPROVED || exit 1",
+                    c = counter.display(),
+                ),
+                "success_condition": "exit_code_0"
+            }),
+            position,
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    /// CM26 FR1: a parallel bounce resumes the member whose last run in this
+    /// spec passed, and cold-starts a member whose last run was a straggler
+    /// kill. `member-pass` (VerdictFiler-Passed, lingers just long enough for
+    /// the filer to land the verdict before it exits) and `member-straggler`
+    /// (never filed; its own node-level `timeout_minutes: 0` — NOT the
+    /// ensemble's shared `straggler_timeout_minutes`, which the parallel path
+    /// applies to every member alike and would kill `member-pass` too —
+    /// forces its own agent timeout to fire immediately every dispatch) run
+    /// twice each. A counter-gate downstream of the join bounces back into
+    /// the ensemble exactly once before letting the spec finish.
+    #[tokio::test]
+    async fn parallel_bounce_resumes_passer_and_cold_starts_straggler() {
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+        let script = write_argv_echo_cli(dir.path());
+
+        let argv_pass = dir.path().join("argv-pass.log");
+        let mut env_pass = HashMap::new();
+        env_pass.insert(
+            "ARGV_FILE".to_string(),
+            argv_pass.to_string_lossy().into_owned(),
+        );
+        env_pass.insert("RESUME_FLAG".to_string(), "--resume".to_string());
+        env_pass.insert("LINGER_SECONDS".to_string(), "1".to_string());
+        let mut cli_pass =
+            argv_cli_config(&script, env_pass, Some("--resume"), Some("--set"), None);
+        cli_pass.name = "cli-pass".to_string();
+
+        let argv_straggler = dir.path().join("argv-straggler.log");
+        let mut env_straggler = HashMap::new();
+        env_straggler.insert(
+            "ARGV_FILE".to_string(),
+            argv_straggler.to_string_lossy().into_owned(),
+        );
+        env_straggler.insert("RESUME_FLAG".to_string(), "--resume".to_string());
+        env_straggler.insert("LINGER_SECONDS".to_string(), "3".to_string());
+        let mut cli_straggler = argv_cli_config(
+            &script,
+            env_straggler,
+            Some("--resume"),
+            Some("--set"),
+            None,
+        );
+        cli_straggler.name = "cli-straggler".to_string();
+
+        let home = setup_multi_resume_cli_home(vec![cli_pass, cli_straggler]);
+
+        let counter = dir.path().join("gate-counter");
+        db.insert_graph_node(&counter_gate_node("gate", &spec_id, &counter, 60))
+            .unwrap();
+        let done_marker = dir.path().join("done.marker");
+        db.insert_graph_node(&touch_marker_node("done", &spec_id, &done_marker, 61))
+            .unwrap();
+
+        insert_bouncing_ensemble(
+            &db,
+            &spec_id,
+            EnsembleKind::Parallel,
+            &[
+                ("member-pass", "cli-pass"),
+                ("member-straggler", "cli-straggler"),
+            ],
+            1,
+            Some(5),
+            None,
+            "gate",
+            "done",
+        );
+        // Force member-straggler's OWN agent timeout to fire immediately,
+        // every dispatch, without touching the ensemble's shared straggler
+        // window (which `member-pass` shares and needs to survive).
+        db.update_graph_node_details(
+            "member-straggler",
+            None,
+            None,
+            Some(&serde_json::json!({
+                "platform": "cli-straggler",
+                "prompt_template": "ignored by the member's test script",
+                "timeout_minutes": 0,
+                "infra_backoff_seconds": 0,
+            })),
+            None,
+        )
+        .unwrap();
+        db.insert_graph_edge(&GraphEdge {
+            id: "gate->done".to_string(),
+            spec_id: Some(spec_id.clone()),
+            graph_id: None,
+            from_node: "gate".to_string(),
+            to_node: "done".to_string(),
+            condition: GraphEdgeCondition::Pass,
+        })
+        .unwrap();
+        for edge in
+            bounce_edges_into_ensemble(&spec_id, "gate", &["member-pass", "member-straggler"])
+        {
+            db.insert_graph_edge(&edge).unwrap();
+        }
+
+        let _filer = VerdictFiler::spawn(&db, vec![("member-pass".to_string(), None)]);
+        let _home = HomeGuard::set(home.path());
+        engine
+            .run_graph(graph_id, None, None, None, None)
+            .await
+            .unwrap();
+        drop(_home);
+        drop(_filer);
+
+        assert!(
+            done_marker.exists(),
+            "gate must eventually pass (second visit) and reach the terminal node"
+        );
+
+        let pass_runs = member_runs(&db, &spec_id, "member-pass");
+        assert_eq!(
+            pass_runs.len(),
+            2,
+            "member-pass must run once per ensemble dispatch"
+        );
+        let first_session = pass_runs[0]
+            .session_id
+            .clone()
+            .expect("first (cold) run must capture a session id via --set");
+        assert_eq!(
+            pass_runs[1].session_id.as_deref(),
+            Some(first_session.as_str()),
+            "the resumed run's row keeps the SAME session id, never a fresh one"
+        );
+
+        let argv_pass_text = std::fs::read_to_string(&argv_pass).unwrap();
+        let chunks: Vec<&str> = argv_pass_text.split("===\n").collect();
+        assert!(
+            !chunks[0].contains("--resume"),
+            "member-pass's first visit must be cold"
+        );
+        assert!(
+            chunks[1].contains("--resume") && chunks[1].contains(&first_session),
+            "member-pass's second visit must resume the SAME session id the spawn actually received"
+        );
+
+        let straggler_runs = member_runs(&db, &spec_id, "member-straggler");
+        assert_eq!(
+            straggler_runs.len(),
+            2,
+            "member-straggler must run once per ensemble dispatch"
+        );
+        for run in &straggler_runs {
+            assert_eq!(
+                run.status,
+                GraphRunStatus::Fail,
+                "the straggler is killed by the 0-minute timeout every dispatch"
+            );
+        }
+        let argv_straggler_text = std::fs::read_to_string(&argv_straggler).unwrap_or_default();
+        assert!(
+            !argv_straggler_text.contains("--resume"),
+            "a member that never passed must never be offered a resume candidate"
+        );
+    }
+
+    /// CM26 FR2: round-robin's full within-spec contract in one topology —
+    /// `rr-a` (position 0) always fails, `rr-b` (position 1) always passes.
+    /// Visit 1 (cold, index 0) fails -> bounce. Visit 2 (bounce, pinned=0,
+    /// absent from `resumable_sessions` since it just failed -> advance to 1,
+    /// cold) passes -> bounce. Visit 3 (bounce, pinned=1, present -> resume)
+    /// passes -> spec ends. `rr-a` must never be revisited once the pin
+    /// advances past it, and the persisted `round_robin_index` must land on
+    /// 1 and stay there through the resumed visit 3 (which writes nothing).
+    #[tokio::test]
+    async fn round_robin_bounce_after_fail_advances_then_resumes_and_stays() {
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+        let script = write_argv_echo_cli(dir.path());
+
+        let argv_a = dir.path().join("argv-a.log");
+        let mut env_a = HashMap::new();
+        env_a.insert(
+            "ARGV_FILE".to_string(),
+            argv_a.to_string_lossy().into_owned(),
+        );
+        env_a.insert("RESUME_FLAG".to_string(), "--resume".to_string());
+        env_a.insert("LINGER_SECONDS".to_string(), "1".to_string());
+        let mut cli_a = argv_cli_config(&script, env_a, Some("--resume"), Some("--set"), None);
+        cli_a.name = "cli-a".to_string();
+
+        let argv_b = dir.path().join("argv-b.log");
+        let mut env_b = HashMap::new();
+        env_b.insert(
+            "ARGV_FILE".to_string(),
+            argv_b.to_string_lossy().into_owned(),
+        );
+        env_b.insert("RESUME_FLAG".to_string(), "--resume".to_string());
+        env_b.insert("LINGER_SECONDS".to_string(), "1".to_string());
+        let mut cli_b = argv_cli_config(&script, env_b, Some("--resume"), Some("--set"), None);
+        cli_b.name = "cli-b".to_string();
+
+        let home = setup_multi_resume_cli_home(vec![cli_a, cli_b]);
+
+        let counter_fail = dir.path().join("gate-fail-counter");
+        db.insert_graph_node(&counter_gate_node(
+            "retry-gate-fail",
+            &spec_id,
+            &counter_fail,
+            60,
+        ))
+        .unwrap();
+        let counter_pass = dir.path().join("gate-pass-counter");
+        db.insert_graph_node(&counter_gate_node(
+            "retry-gate-pass",
+            &spec_id,
+            &counter_pass,
+            61,
+        ))
+        .unwrap();
+        let done_via_fail_gate = dir.path().join("done-via-fail-gate.marker");
+        db.insert_graph_node(&touch_marker_node(
+            "done-via-fail-gate",
+            &spec_id,
+            &done_via_fail_gate,
+            62,
+        ))
+        .unwrap();
+        let done_via_pass_gate = dir.path().join("done-via-pass-gate.marker");
+        db.insert_graph_node(&touch_marker_node(
+            "done-via-pass-gate",
+            &spec_id,
+            &done_via_pass_gate,
+            63,
+        ))
+        .unwrap();
+
+        insert_bouncing_ensemble(
+            &db,
+            &spec_id,
+            EnsembleKind::RoundRobin,
+            &[("rr-a", "cli-a"), ("rr-b", "cli-b")],
+            1,
+            Some(1),
+            Some(0),
+            "retry-gate-pass",
+            "retry-gate-fail",
+        );
+        db.insert_graph_edge(&GraphEdge {
+            id: "fail-gate->done".to_string(),
+            spec_id: Some(spec_id.clone()),
+            graph_id: None,
+            from_node: "retry-gate-fail".to_string(),
+            to_node: "done-via-fail-gate".to_string(),
+            condition: GraphEdgeCondition::Pass,
+        })
+        .unwrap();
+        db.insert_graph_edge(&GraphEdge {
+            id: "pass-gate->done".to_string(),
+            spec_id: Some(spec_id.clone()),
+            graph_id: None,
+            from_node: "retry-gate-pass".to_string(),
+            to_node: "done-via-pass-gate".to_string(),
+            condition: GraphEdgeCondition::Pass,
+        })
+        .unwrap();
+        for edge in bounce_edges_into_ensemble(&spec_id, "retry-gate-fail", &["rr-a", "rr-b"]) {
+            db.insert_graph_edge(&edge).unwrap();
+        }
+        for edge in bounce_edges_into_ensemble(&spec_id, "retry-gate-pass", &["rr-a", "rr-b"]) {
+            db.insert_graph_edge(&edge).unwrap();
+        }
+
+        let _filer_b = VerdictFiler::spawn_with_status(
+            &db,
+            vec![("rr-b".to_string(), None)],
+            GraphRunStatus::Pass,
+        );
+        let _filer_a = VerdictFiler::spawn_with_status(
+            &db,
+            vec![("rr-a".to_string(), None)],
+            GraphRunStatus::Fail,
+        );
+        let _home = HomeGuard::set(home.path());
+        engine
+            .run_graph(graph_id, None, None, None, None)
+            .await
+            .unwrap();
+        drop(_home);
+        drop(_filer_a);
+        drop(_filer_b);
+
+        assert!(
+            done_via_pass_gate.exists(),
+            "the spec must finish via the pass-gate's second (APPROVED) call"
+        );
+        assert!(
+            !done_via_fail_gate.exists(),
+            "the fail-gate must never see its own second call in this sequence"
+        );
+
+        let a_runs = member_runs(&db, &spec_id, "rr-a");
+        assert_eq!(
+            a_runs.len(),
+            1,
+            "rr-a must never be revisited once the pin advances past it"
+        );
+        assert_eq!(a_runs[0].status, GraphRunStatus::Fail);
+
+        let b_runs = member_runs(&db, &spec_id, "rr-b");
+        assert_eq!(b_runs.len(), 2, "rr-b runs the cold advance and the resume");
+        assert_eq!(b_runs[0].status, GraphRunStatus::Pass);
+        assert_eq!(b_runs[1].status, GraphRunStatus::Pass);
+        let b_session = b_runs[0]
+            .session_id
+            .clone()
+            .expect("rr-b's cold run must capture a session id via --set");
+        assert_eq!(
+            b_runs[1].session_id.as_deref(),
+            Some(b_session.as_str()),
+            "rr-b's resumed run keeps the SAME session id"
+        );
+
+        let argv_b_text = std::fs::read_to_string(&argv_b).unwrap();
+        let chunks: Vec<&str> = argv_b_text.split("===\n").collect();
+        assert!(
+            !chunks[0].contains("--resume"),
+            "rr-b's cold advance visit must not resume"
+        );
+        assert!(
+            chunks[1].contains("--resume") && chunks[1].contains(&b_session),
+            "rr-b's third-visit run must resume the SAME session id"
+        );
+
+        assert_eq!(
+            db.get_ensemble("ens1").unwrap().unwrap().round_robin_index,
+            Some(1),
+            "the persisted index lands on rr-b (set once, during the fail-advance) \
+             and is unchanged by the later resume, which writes nothing"
+        );
+    }
+
+    /// CM26 FR3: a cascade bounce resumes at the member that produced the
+    /// previous pass, not position 0. `casc-a` (position 0) is a genuinely
+    /// crashing script with no self-report, so visit 1 exhausts its infra
+    /// retries and falls through to `casc-b` (position 1), which passes cold.
+    /// The gate bounces once; visit 2 must start directly at `casc-b`,
+    /// resumed — `casc-a` must not run again.
+    #[tokio::test]
+    async fn cascade_bounce_resumes_previous_passer() {
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+
+        let crash_script = write_member_script(dir.path(), "crash.sh", "exit 1");
+        let cli_crash = crate::domain::cli_config::CliConfig {
+            name: "cli-crash".to_string(),
+            binary: crash_script,
+            headless_mode: String::new(),
+            prompt_via_stdin: true,
+            ..Default::default()
+        };
+
+        let script_b = write_argv_echo_cli(dir.path());
+        let argv_b = dir.path().join("argv-b.log");
+        let mut env_b = HashMap::new();
+        env_b.insert(
+            "ARGV_FILE".to_string(),
+            argv_b.to_string_lossy().into_owned(),
+        );
+        env_b.insert("RESUME_FLAG".to_string(), "--resume".to_string());
+        env_b.insert("LINGER_SECONDS".to_string(), "1".to_string());
+        let mut cli_b = argv_cli_config(&script_b, env_b, Some("--resume"), Some("--set"), None);
+        cli_b.name = "cli-b".to_string();
+
+        let home = setup_multi_resume_cli_home(vec![cli_crash, cli_b]);
+
+        let counter = dir.path().join("gate-counter");
+        db.insert_graph_node(&counter_gate_node("gate", &spec_id, &counter, 60))
+            .unwrap();
+        let done_marker = dir.path().join("done.marker");
+        db.insert_graph_node(&touch_marker_node("done", &spec_id, &done_marker, 61))
+            .unwrap();
+
+        insert_bouncing_ensemble(
+            &db,
+            &spec_id,
+            EnsembleKind::Cascade,
+            &[("casc-a", "cli-crash"), ("casc-b", "cli-b")],
+            1,
+            Some(1),
+            None,
+            "gate",
+            "done",
+        );
+        db.insert_graph_edge(&GraphEdge {
+            id: "gate->done".to_string(),
+            spec_id: Some(spec_id.clone()),
+            graph_id: None,
+            from_node: "gate".to_string(),
+            to_node: "done".to_string(),
+            condition: GraphEdgeCondition::Pass,
+        })
+        .unwrap();
+        for edge in bounce_edges_into_ensemble(&spec_id, "gate", &["casc-a", "casc-b"]) {
+            db.insert_graph_edge(&edge).unwrap();
+        }
+
+        let _filer = VerdictFiler::spawn(&db, vec![("casc-b".to_string(), None)]);
+        let _home = HomeGuard::set(home.path());
+        engine
+            .run_graph(graph_id, None, None, None, None)
+            .await
+            .unwrap();
+        drop(_home);
+        drop(_filer);
+
+        assert!(
+            done_marker.exists(),
+            "the gate's second call must pass and reach the terminal node"
+        );
+
+        let a_runs_after = member_runs(&db, &spec_id, "casc-a").len();
+        assert_eq!(
+            a_runs_after, 3,
+            "casc-a exhausts its infra-retry budget once in visit 1 (initial + 2 retries) \
+             and must NOT run again in visit 2 — proves the walk started at casc-b, not position 0"
+        );
+
+        let b_runs = member_runs(&db, &spec_id, "casc-b");
+        assert_eq!(
+            b_runs.len(),
+            2,
+            "casc-b runs once cold (visit 1's fallthrough) and once resumed (visit 2)"
+        );
+        assert_eq!(b_runs[0].status, GraphRunStatus::Pass);
+        assert_eq!(b_runs[1].status, GraphRunStatus::Pass);
+        let first_session = b_runs[0]
+            .session_id
+            .clone()
+            .expect("casc-b's cold run must capture a session id via --set");
+        assert_eq!(
+            b_runs[1].session_id.as_deref(),
+            Some(first_session.as_str()),
+            "casc-b's resumed run keeps the SAME session id"
+        );
+
+        let argv_b_text = std::fs::read_to_string(&argv_b).unwrap();
+        let chunks: Vec<&str> = argv_b_text.split("===\n").collect();
+        assert!(
+            !chunks[0].contains("--resume"),
+            "casc-b's first (fallthrough) visit must be cold"
+        );
+        assert!(
+            chunks[1].contains("--resume") && chunks[1].contains(&first_session),
+            "casc-b's second visit must resume the SAME session id"
+        );
+    }
+
+    /// CM26 FR4: a member configured `resume: false` still cold-starts on a
+    /// bounce even though `resumable_sessions` holds a valid entry for it —
+    /// `node_allows_resume` (shared with plain nodes) gates it before the
+    /// ensemble candidate is ever consulted. Two members (parallel, `min_pass:
+    /// 1`) both pass every dispatch; only `member-noresume` carries the
+    /// override, so its behaviour is isolated from its sibling's.
+    #[tokio::test]
+    async fn ensemble_member_resume_false_forces_cold_start_on_bounce() {
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+        let script = write_argv_echo_cli(dir.path());
+
+        let argv_noresume = dir.path().join("argv-noresume.log");
+        let mut env_noresume = HashMap::new();
+        env_noresume.insert(
+            "ARGV_FILE".to_string(),
+            argv_noresume.to_string_lossy().into_owned(),
+        );
+        env_noresume.insert("RESUME_FLAG".to_string(), "--resume".to_string());
+        env_noresume.insert("LINGER_SECONDS".to_string(), "1".to_string());
+        let mut cli_noresume =
+            argv_cli_config(&script, env_noresume, Some("--resume"), Some("--set"), None);
+        cli_noresume.name = "cli-noresume".to_string();
+
+        let argv_sibling = dir.path().join("argv-sibling.log");
+        let mut env_sibling = HashMap::new();
+        env_sibling.insert(
+            "ARGV_FILE".to_string(),
+            argv_sibling.to_string_lossy().into_owned(),
+        );
+        env_sibling.insert("RESUME_FLAG".to_string(), "--resume".to_string());
+        env_sibling.insert("LINGER_SECONDS".to_string(), "1".to_string());
+        let mut cli_sibling =
+            argv_cli_config(&script, env_sibling, Some("--resume"), Some("--set"), None);
+        cli_sibling.name = "cli-sibling".to_string();
+
+        let home = setup_multi_resume_cli_home(vec![cli_noresume, cli_sibling]);
+
+        db.insert_graph_node(&GraphNode {
+            id: "kickoff".to_string(),
+            spec_id: Some(spec_id.clone()),
+            graph_id: None,
+            name: "kickoff".to_string(),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({ "command": "printf ok", "success_condition": "exit_code_0" }),
+            position: 1,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+        let member_noresume = GraphNode {
+            id: "member-noresume".to_string(),
+            spec_id: Some(spec_id.clone()),
+            graph_id: None,
+            name: "member-noresume".to_string(),
+            kind: GraphNodeKind::Agent,
+            config: serde_json::json!({
+                "platform": "cli-noresume",
+                "prompt_template": "ignored by the member's test script",
+                "timeout_minutes": 5,
+                "infra_backoff_seconds": 0,
+                "resume": false,
+            }),
+            position: 2,
+            created_at: chrono::Utc::now(),
+        };
+        let member_sibling = GraphNode {
+            id: "member-sibling".to_string(),
+            spec_id: Some(spec_id.clone()),
+            graph_id: None,
+            name: "member-sibling".to_string(),
+            kind: GraphNodeKind::Agent,
+            config: serde_json::json!({
+                "platform": "cli-sibling",
+                "prompt_template": "ignored by the member's test script",
+                "timeout_minutes": 5,
+                "infra_backoff_seconds": 0,
+            }),
+            position: 3,
+            created_at: chrono::Utc::now(),
+        };
+        let join_node = GraphNode {
+            id: "join1".to_string(),
+            spec_id: Some(spec_id.clone()),
+            graph_id: None,
+            name: "join".to_string(),
+            kind: GraphNodeKind::Join,
+            config: serde_json::json!({ "ensemble_id": "ens1" }),
+            position: 50,
+            created_at: chrono::Utc::now(),
+        };
+        let counter = dir.path().join("gate-counter");
+        db.insert_graph_node(&counter_gate_node("gate", &spec_id, &counter, 60))
+            .unwrap();
+        let done_marker = dir.path().join("done.marker");
+        db.insert_graph_node(&touch_marker_node("done", &spec_id, &done_marker, 61))
+            .unwrap();
+
+        let mut edges = vec![
+            GraphEdge {
+                id: "kickoff->noresume".to_string(),
+                spec_id: Some(spec_id.clone()),
+                graph_id: None,
+                from_node: "kickoff".to_string(),
+                to_node: "member-noresume".to_string(),
+                condition: GraphEdgeCondition::Always,
+            },
+            GraphEdge {
+                id: "kickoff->sibling".to_string(),
+                spec_id: Some(spec_id.clone()),
+                graph_id: None,
+                from_node: "kickoff".to_string(),
+                to_node: "member-sibling".to_string(),
+                condition: GraphEdgeCondition::Always,
+            },
+            GraphEdge {
+                id: "noresume->join1".to_string(),
+                spec_id: Some(spec_id.clone()),
+                graph_id: None,
+                from_node: "member-noresume".to_string(),
+                to_node: "join1".to_string(),
+                condition: GraphEdgeCondition::Always,
+            },
+            GraphEdge {
+                id: "sibling->join1".to_string(),
+                spec_id: Some(spec_id.clone()),
+                graph_id: None,
+                from_node: "member-sibling".to_string(),
+                to_node: "join1".to_string(),
+                condition: GraphEdgeCondition::Always,
+            },
+            GraphEdge {
+                id: "join1->gate".to_string(),
+                spec_id: Some(spec_id.clone()),
+                graph_id: None,
+                from_node: "join1".to_string(),
+                to_node: "gate".to_string(),
+                condition: GraphEdgeCondition::Pass,
+            },
+            GraphEdge {
+                id: "join1->done".to_string(),
+                spec_id: Some(spec_id.clone()),
+                graph_id: None,
+                from_node: "join1".to_string(),
+                to_node: "done".to_string(),
+                condition: GraphEdgeCondition::Fail,
+            },
+            GraphEdge {
+                id: "gate->done".to_string(),
+                spec_id: Some(spec_id.clone()),
+                graph_id: None,
+                from_node: "gate".to_string(),
+                to_node: "done".to_string(),
+                condition: GraphEdgeCondition::Pass,
+            },
+        ];
+        for edge in
+            bounce_edges_into_ensemble(&spec_id, "gate", &["member-noresume", "member-sibling"])
+        {
+            edges.push(edge);
+        }
+
+        let ensemble = crate::domain::graphs::Ensemble {
+            id: "ens1".to_string(),
+            spec_id: Some(spec_id.clone()),
+            graph_id: None,
+            name: "Resume False Ensemble".to_string(),
+            prompt_template: "ignored by the member's test script".to_string(),
+            join_node_id: "join1".to_string(),
+            entry_from_node: "kickoff".to_string(),
+            entry_condition: GraphEdgeCondition::Always,
+            min_pass: 1,
+            straggler_timeout_minutes: Some(1),
+            quorum_grace_minutes: None,
+            timeout_minutes: 5,
+            on_pass_to: "gate".to_string(),
+            on_fail_to: Some("done".to_string()),
+            kind: EnsembleKind::Parallel,
+            round_robin_index: None,
+            created_at: chrono::Utc::now(),
+        };
+        let ensemble_members = vec![
+            EnsembleMember {
+                ensemble_id: "ens1".to_string(),
+                node_id: "member-noresume".to_string(),
+                position: 0,
+                platform: "cli-noresume".to_string(),
+                model: None,
+                prompt_override: None,
+                timeout_minutes: None,
+            },
+            EnsembleMember {
+                ensemble_id: "ens1".to_string(),
+                node_id: "member-sibling".to_string(),
+                position: 1,
+                platform: "cli-sibling".to_string(),
+                model: None,
+                prompt_override: None,
+                timeout_minutes: None,
+            },
+        ];
+        db.insert_ensemble_unit(
+            &ensemble,
+            &ensemble_members,
+            &[member_noresume, member_sibling],
+            &join_node,
+            &edges,
+        )
+        .unwrap();
+
+        let _filer = VerdictFiler::spawn(
+            &db,
+            vec![
+                ("member-noresume".to_string(), None),
+                ("member-sibling".to_string(), None),
+            ],
+        );
+        let _home = HomeGuard::set(home.path());
+        engine
+            .run_graph(graph_id, None, None, None, None)
+            .await
+            .unwrap();
+        drop(_home);
+        drop(_filer);
+
+        assert!(
+            done_marker.exists(),
+            "the gate's second call must pass and reach the terminal node"
+        );
+
+        let runs = member_runs(&db, &spec_id, "member-noresume");
+        assert_eq!(runs.len(), 2, "the member runs once per ensemble dispatch");
+        assert_eq!(runs[0].status, GraphRunStatus::Pass);
+        assert_eq!(runs[1].status, GraphRunStatus::Pass);
+        let first_session = runs[0]
+            .session_id
+            .clone()
+            .expect("even a resume:false member still cold-captures a session id via --set");
+        let second_session = runs[1]
+            .session_id
+            .clone()
+            .expect("the bounce's cold start also mints/captures its own session id via --set");
+        assert_ne!(
+            first_session, second_session,
+            "resume:false forces a cold start on the bounce -> a FRESH session id, not the first's, \
+             even though resumable_sessions held a valid (Pass) entry for this member"
+        );
+
+        let argv_text = std::fs::read_to_string(&argv_noresume).unwrap();
+        let chunks: Vec<&str> = argv_text.split("===\n").collect();
+        assert!(!chunks[0].contains("--resume"), "first visit is cold");
+        assert!(
+            !chunks[1].contains("--resume"),
+            "resume:false must force a cold start on the bounce too"
+        );
     }
 
     fn touch_marker_node(

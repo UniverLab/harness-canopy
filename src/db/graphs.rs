@@ -1540,6 +1540,39 @@ impl Database {
         Ok(rows > 0)
     }
 
+    /// RS2/CM26: the earlier run this run's session was continued from, if any.
+    /// A resumed run's own row carries the SAME session_id it continued
+    /// (`run_agent_process` writes it back verbatim, never a fresh uuid — see
+    /// its RS2 comment), while a cold-started run always mints a brand-new
+    /// session id (or none) that can never collide with an earlier row's. So a
+    /// match here can only mean this run resumed that earlier one. Ordered by
+    /// `rowid` (insertion order) rather than `started_at` (only second-
+    /// granularity) to disambiguate deterministically when two runs on the same
+    /// node start within the same second. Display-only — never consulted by the
+    /// engine's own resume logic, which uses `resumable_sessions` in-memory.
+    pub fn find_resumed_from_run_id(
+        &self,
+        run_id: &str,
+        node_id: &str,
+        session_id: &str,
+    ) -> Result<Option<String>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let found: Option<String> = conn
+            .query_row(
+                "SELECT id FROM graph_runs
+                 WHERE session_id = ?1 AND node_id = ?2 AND id != ?3
+                   AND rowid < (SELECT rowid FROM graph_runs WHERE id = ?3)
+                 ORDER BY rowid DESC LIMIT 1",
+                params![session_id, node_id, run_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(found)
+    }
+
     /// The active (`running`) node run for `spec_id`, if any. Mirrors
     /// [`Self::get_active_graph_run_for_node`] but scoped to a whole spec —
     /// used by `graph_reset`, which resets a spec wholesale rather than one

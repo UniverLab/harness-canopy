@@ -7895,10 +7895,21 @@ impl TaskTriggerHandler {
             .get_graph_node(&run.node_id)
             .map_err(internal_error)?
             .map(|node| node.name);
+        let resumed_from_run_id = match run.session_id.as_deref() {
+            Some(sid) => self
+                .db
+                .find_resumed_from_run_id(&run.id, &run.node_id, sid)
+                .map_err(internal_error)?,
+            None => None,
+        };
 
         Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&graph_node_run_detail_json(&run, node_name.as_deref()))
-                .unwrap_or_default(),
+            serde_json::to_string_pretty(&graph_node_run_detail_json(
+                &run,
+                node_name.as_deref(),
+                resumed_from_run_id.as_deref(),
+            ))
+            .unwrap_or_default(),
         )]))
     }
 
@@ -10835,7 +10846,11 @@ fn graph_node_run_summary_json(
 /// content echoed by the wrapped CLI. `output` preserves whatever the engine
 /// wrote verbatim otherwise, including the B19 `infra_attempt`/`infra_crash`
 /// markers a caller needs to tell an infra retry from a semantic failure.
-fn graph_node_run_detail_json(run: &GraphNodeRun, node_name: Option<&str>) -> serde_json::Value {
+fn graph_node_run_detail_json(
+    run: &GraphNodeRun,
+    node_name: Option<&str>,
+    resumed_from_run_id: Option<&str>,
+) -> serde_json::Value {
     let mut obj = serde_json::Map::from_iter([
         ("id".to_string(), serde_json::json!(run.id)),
         ("graph_id".to_string(), serde_json::json!(run.graph_id)),
@@ -10867,6 +10882,10 @@ fn graph_node_run_detail_json(run: &GraphNodeRun, node_name: Option<&str>) -> se
             serde_json::json!(run.completed_at.map(|value| value.to_rfc3339())),
         ),
         ("session_id".to_string(), serde_json::json!(run.session_id)),
+        (
+            "resumed_from_run_id".to_string(),
+            serde_json::json!(resumed_from_run_id),
+        ),
     ]);
     // CB43: omit (not null) when the run predates the recording.
     if let Some(platform) = run.executed_platform.as_deref() {
@@ -18645,7 +18664,7 @@ mod coverage_tests {
             assert_eq!(json["model"], "opencode/big-pickle");
         }
 
-        let detail = graph_node_run_detail_json(&run, Some("node-1"));
+        let detail = graph_node_run_detail_json(&run, Some("node-1"), None);
         assert_eq!(detail["platform"], "opencode");
         assert_eq!(detail["model"], "opencode/big-pickle");
 
@@ -18656,9 +18675,53 @@ mod coverage_tests {
             assert!(json.get("platform").is_none());
             assert!(json.get("model").is_none());
         }
-        let detail = graph_node_run_detail_json(&legacy, Some("node-1"));
+        let detail = graph_node_run_detail_json(&legacy, Some("node-1"), None);
         assert!(detail.get("platform").is_none());
         assert!(detail.get("model").is_none());
+    }
+
+    /// CM26: `find_resumed_from_run_id` recovers "was this run a resume, and
+    /// of what" purely from the session id a resumed run's own row carries
+    /// verbatim — no dedicated column. Two rows on the same node share
+    /// `session_id`; the later one (by insertion order) resumed the earlier
+    /// one, never the reverse, and `graph_node_run_get`'s JSON surfaces it.
+    #[test]
+    fn graph_node_run_get_reports_resumed_from_run_id_for_ensemble_member() {
+        let dir = tempdir().unwrap();
+        let db = Database::new(&dir.path().join("test.db")).unwrap();
+        insert_test_graph(&db, "graph-1");
+        db.insert_graph_spec(&standalone_spec("spec-1")).unwrap();
+        insert_test_node(&db, "node-1", "spec-1");
+
+        let mut first = graph_run_row("run-1", "graph-1", "spec-1", GraphRunStatus::Pass);
+        first.session_id = Some("ses-1".to_string());
+        db.insert_graph_run(&first).unwrap();
+
+        let mut second = graph_run_row("run-2", "graph-1", "spec-1", GraphRunStatus::Pass);
+        second.session_id = Some("ses-1".to_string());
+        db.insert_graph_run(&second).unwrap();
+
+        assert_eq!(
+            db.find_resumed_from_run_id(&second.id, &second.node_id, "ses-1")
+                .unwrap(),
+            Some(first.id.clone()),
+            "the later row (by insertion order) resumed the earlier one"
+        );
+        assert_eq!(
+            db.find_resumed_from_run_id(&first.id, &first.node_id, "ses-1")
+                .unwrap(),
+            None,
+            "nothing precedes the first row with that session id"
+        );
+
+        let resumed_from = db
+            .find_resumed_from_run_id(&second.id, &second.node_id, "ses-1")
+            .unwrap();
+        let detail = graph_node_run_detail_json(&second, Some("node-1"), resumed_from.as_deref());
+        assert_eq!(detail["resumed_from_run_id"], serde_json::json!(first.id));
+
+        let detail_first = graph_node_run_detail_json(&first, Some("node-1"), None);
+        assert_eq!(detail_first["resumed_from_run_id"], serde_json::Value::Null);
     }
 
     /// T4 (CB43): the recent section leads the output and carries last

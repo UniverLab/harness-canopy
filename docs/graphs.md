@@ -143,8 +143,15 @@ from its own start, independently of the grace window.
 
 Members are agent nodes only, and nested ensembles (an ensemble wired
 into another ensemble's members or quorum) are rejected. A bounce back
-into an ensemble re-runs every member and costs one iteration against
-the ensemble's shared budget. The TUI graph view renders an ensemble
+into an ensemble costs one iteration against the ensemble's shared budget,
+same as any node, but no longer cold-starts every member: a parallel
+member whose last run in this spec passed resumes that session (one that
+failed, including a terminated straggler, cold-starts); a round-robin
+bounce after a pass re-invokes the same member resumed, and after a
+failure moves on to the next member cold and stays there for the rest of
+the spec; a cascade bounce resumes the member that last passed, falling
+through to the next member cold only if the resumed one fails again. A
+member's own `resume: false` still forces a cold start. The TUI graph view renders an ensemble
 collapsed as one box (`name [N models]` + quorum) with live per-member
 state while running, expandable on inspect.
 
