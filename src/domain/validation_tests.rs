@@ -170,6 +170,7 @@ mod ensemble_graph {
                 platform: "claude".to_string(),
                 model: None,
                 prompt_override: None,
+                timeout_minutes: None,
             },
             EnsembleMember {
                 ensemble_id: "ens1".to_string(),
@@ -178,6 +179,7 @@ mod ensemble_graph {
                 platform: "codex".to_string(),
                 model: None,
                 prompt_override: None,
+                timeout_minutes: None,
             },
         ];
         let details = vec![EnsembleDetails { ensemble, members }];
@@ -264,6 +266,7 @@ mod ensemble_graph {
             platform: "claude".to_string(),
             model: None,
             prompt_override: None,
+            timeout_minutes: None,
         }];
         let details = vec![EnsembleDetails { ensemble, members }];
         let nodes = vec![node("kickoff"), node("m1"), node("join1"), node("sink")];
@@ -330,6 +333,7 @@ mod ensemble_graph {
             platform: "claude".to_string(),
             model: None,
             prompt_override: None,
+            timeout_minutes: None,
         }];
         // ens1's quorum now routes into ens2 instead of the arbiter.
         details[0].ensemble.on_pass_to = "join2".to_string();
@@ -378,6 +382,7 @@ mod ensemble_graph {
                 platform: "claude".to_string(),
                 model: None,
                 prompt_override: None,
+                timeout_minutes: None,
             },
             EnsembleMember {
                 ensemble_id: "ens2".to_string(),
@@ -386,6 +391,7 @@ mod ensemble_graph {
                 platform: "codex".to_string(),
                 model: None,
                 prompt_override: None,
+                timeout_minutes: None,
             },
         ];
         details[0].ensemble.on_pass_to = "join2".to_string();

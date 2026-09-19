@@ -477,7 +477,19 @@ fn validate_ensemble_members(
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .map(str::to_string);
-            Ok((platform.to_string(), model, prompt_override))
+            if let Some(timeout_minutes) = member.timeout_minutes {
+                if timeout_minutes < 0 {
+                    return Err(
+                        "Ensemble member 'timeout_minutes' must not be negative.".to_string()
+                    );
+                }
+            }
+            Ok((
+                platform.to_string(),
+                model,
+                prompt_override,
+                member.timeout_minutes,
+            ))
         })
         .collect()
 }
@@ -560,10 +572,13 @@ fn build_ensemble_unit(spec: &EnsembleUnitSpec) -> BuiltEnsembleUnit {
     let mut ensemble_members = Vec::with_capacity(spec.members.len());
     let mut edges = Vec::new();
 
-    for (index, (platform, model, prompt_override)) in spec.members.iter().enumerate() {
+    for (index, (platform, model, prompt_override, member_timeout_minutes)) in
+        spec.members.iter().enumerate()
+    {
         let node_id = uuid::Uuid::new_v4().to_string();
         let effective_prompt =
             effective_member_prompt(prompt_override.as_deref(), spec.prompt_template);
+        let effective_timeout_minutes = member_timeout_minutes.unwrap_or(spec.timeout_minutes);
         member_nodes.push(GraphNode {
             id: node_id.clone(),
             spec_id: spec.spec_id.clone(),
@@ -574,7 +589,7 @@ fn build_ensemble_unit(spec: &EnsembleUnitSpec) -> BuiltEnsembleUnit {
                 platform,
                 model.as_deref(),
                 effective_prompt,
-                spec.timeout_minutes,
+                effective_timeout_minutes,
             ),
             position: next_position,
             created_at: now,
@@ -602,6 +617,7 @@ fn build_ensemble_unit(spec: &EnsembleUnitSpec) -> BuiltEnsembleUnit {
             platform: platform.clone(),
             model: model.clone(),
             prompt_override: prompt_override.clone(),
+            timeout_minutes: *member_timeout_minutes,
         });
         next_position += 1;
     }
@@ -2218,6 +2234,7 @@ fn plan_ensemble_copy(
                     m.platform.clone(),
                     m.model.clone(),
                     m.prompt_override.clone(),
+                    m.timeout_minutes,
                 )
             })
             .collect(),
@@ -6105,7 +6122,7 @@ impl TaskTriggerHandler {
 
     #[tool(
         name = "graph_add_ensemble",
-        description = "Create an ensemble in ONE call: N (2-8) parallel agent-node members sharing one prompt by default, plus the quorum that waits for all of them, consolidates their outputs (attributed per member), and routes onward. Members differ by platform/model, and each may set its own prompt_override to review the same input from a different angle instead of sharing the template. (Formerly called 'fusion' — retired to avoid colliding with OpenRouter's fusion technology.) on_pass_to/on_fail_to accept a node id or another ensemble's id (chained: the quorum fans out to every member of that ensemble, no intermediate node). Entry rewiring, extra entry sources, and deletion are graph_update_ensemble/graph_delete_ensemble."
+        description = "Create an ensemble in ONE call: N (2-8) parallel agent-node members sharing one prompt by default, plus the quorum that waits for all of them, consolidates their outputs (attributed per member), and routes onward. Members differ by platform/model, and each may set its own prompt_override to review the same input from a different angle instead of sharing the template. Each member may also set its own timeout_minutes, overriding the ensemble's shared value for that member only. (Formerly called 'fusion' — retired to avoid colliding with OpenRouter's fusion technology.) on_pass_to/on_fail_to accept a node id or another ensemble's id (chained: the quorum fans out to every member of that ensemble, no intermediate node). Entry rewiring, extra entry sources, and deletion are graph_update_ensemble/graph_delete_ensemble."
     )]
     async fn graph_add_ensemble(
         &self,
@@ -6510,7 +6527,7 @@ impl TaskTriggerHandler {
 
     #[tool(
         name = "graph_update_ensemble",
-        description = "Update an ensemble's shared prompt (propagated to every member without its own prompt_override), member list (platform/model/prompt_override — added/removed/replaced by position), quorum config (min_pass, straggler_timeout_minutes, timeout_minutes), entry wiring (from_node/condition replaces every entry; add_entry_from/remove_entry_from add or detach one entry source so several nodes can enter with no relay), and/or exit wiring (on_pass_to/on_fail_to take a node id or another ensemble's id to chain quorums with no intermediate node) — all in one call, without touching individual member nodes directly."
+        description = "Update an ensemble's shared prompt (propagated to every member without its own prompt_override), member list (platform/model/prompt_override/timeout_minutes — added/removed/replaced by position), quorum config (min_pass, straggler_timeout_minutes, timeout_minutes), entry wiring (from_node/condition replaces every entry; add_entry_from/remove_entry_from add or detach one entry source so several nodes can enter with no relay), and/or exit wiring (on_pass_to/on_fail_to take a node id or another ensemble's id to chain quorums with no intermediate node) — all in one call, without touching individual member nodes directly."
     )]
     async fn graph_update_ensemble(
         &self,
@@ -6659,7 +6676,7 @@ impl TaskTriggerHandler {
             let old_len = old_members.len();
             let new_len = members.len();
 
-            for (index, (platform, model, prompt_override)) in
+            for (index, (platform, model, prompt_override, member_timeout_minutes)) in
                 members.iter().enumerate().take(old_len.min(new_len))
             {
                 let existing = &old_members[index];
@@ -6670,15 +6687,17 @@ impl TaskTriggerHandler {
                         platform,
                         model.as_deref(),
                         prompt_override.as_deref(),
+                        *member_timeout_minutes,
                     )
                     .map_err(internal_error)?;
                 let effective_prompt =
                     effective_member_prompt(prompt_override.as_deref(), prompt_template);
+                let effective_timeout_minutes = member_timeout_minutes.unwrap_or(timeout_minutes);
                 let config = member_node_config(
                     platform,
                     model.as_deref(),
                     effective_prompt,
-                    timeout_minutes,
+                    effective_timeout_minutes,
                 );
                 self.db
                     .update_graph_node_details(&existing.node_id, None, None, Some(&config), None)
@@ -6690,7 +6709,7 @@ impl TaskTriggerHandler {
                     .last()
                     .map(|node| node.position + 1)
                     .unwrap_or(1);
-                for (i, (platform, model, prompt_override)) in
+                for (i, (platform, model, prompt_override, member_timeout_minutes)) in
                     members[old_len..new_len].iter().enumerate()
                 {
                     let next_position = start_position + i as i64;
@@ -6698,6 +6717,8 @@ impl TaskTriggerHandler {
                     let node_id = uuid::Uuid::new_v4().to_string();
                     let effective_prompt =
                         effective_member_prompt(prompt_override.as_deref(), prompt_template);
+                    let effective_timeout_minutes =
+                        member_timeout_minutes.unwrap_or(timeout_minutes);
                     let node = GraphNode {
                         id: node_id.clone(),
                         spec_id: details.ensemble.spec_id.clone(),
@@ -6708,7 +6729,7 @@ impl TaskTriggerHandler {
                             platform,
                             model.as_deref(),
                             effective_prompt,
-                            timeout_minutes,
+                            effective_timeout_minutes,
                         ),
                         position: next_position,
                         created_at: chrono::Utc::now(),
@@ -6736,6 +6757,7 @@ impl TaskTriggerHandler {
                         platform: platform.clone(),
                         model: model.clone(),
                         prompt_override: prompt_override.clone(),
+                        timeout_minutes: *member_timeout_minutes,
                     };
                     self.db
                         .add_ensemble_member(&member, &node, &entry_edge, &join_edge)
@@ -6771,11 +6793,12 @@ impl TaskTriggerHandler {
             for member in &details.members {
                 let effective_prompt =
                     effective_member_prompt(member.prompt_override.as_deref(), prompt_template);
+                let effective_timeout_minutes = member.timeout_minutes.unwrap_or(timeout_minutes);
                 let config = member_node_config(
                     &member.platform,
                     member.model.as_deref(),
                     effective_prompt,
-                    timeout_minutes,
+                    effective_timeout_minutes,
                 );
                 self.db
                     .update_graph_node_details(&member.node_id, None, None, Some(&config), None)
@@ -11112,6 +11135,7 @@ mod tests {
             platform: platform.to_string(),
             model: None,
             prompt_override: None,
+            timeout_minutes: None,
         }
     }
 
@@ -11123,6 +11147,7 @@ mod tests {
             platform: platform.to_string(),
             model: None,
             prompt_override: Some(prompt_override.to_string()),
+            timeout_minutes: None,
         }
     }
 
@@ -11251,6 +11276,31 @@ mod tests {
         let result = validate_ensemble_members(&members, EnsembleKind::Parallel).unwrap();
         assert_eq!(result[0].2.as_deref(), Some("review for security"));
         assert_eq!(result[1].2, None);
+    }
+
+    /// CM23: a member's own `timeout_minutes` follows the ensemble-level
+    /// convention — negative is rejected, `0` is a legitimate immediate
+    /// timeout.
+    #[test]
+    fn validate_ensemble_members_rejects_negative_member_timeout() {
+        let members = vec![{
+            let mut m = ensemble_member_params("claude");
+            m.timeout_minutes = Some(-1);
+            m
+        }];
+        let err = validate_ensemble_members(&members, EnsembleKind::Cascade).unwrap_err();
+        assert!(err.contains("timeout_minutes"), "{err}");
+    }
+
+    #[test]
+    fn validate_ensemble_members_accepts_zero_member_timeout() {
+        let members = vec![{
+            let mut m = ensemble_member_params("claude");
+            m.timeout_minutes = Some(0);
+            m
+        }];
+        let result = validate_ensemble_members(&members, EnsembleKind::Cascade).unwrap();
+        assert_eq!(result[0].3, Some(0));
     }
 
     #[test]
@@ -11413,6 +11463,7 @@ mod tests {
                 platform: "claude".to_string(),
                 model: None,
                 prompt_override: None,
+                timeout_minutes: None,
             },
             EnsembleMember {
                 ensemble_id: "ens1".to_string(),
@@ -11421,6 +11472,7 @@ mod tests {
                 platform: "codex".to_string(),
                 model: None,
                 prompt_override: None,
+                timeout_minutes: None,
             },
         ];
         db.insert_ensemble_unit(&ensemble, &members, &member_nodes, &join_node, &edges)
@@ -13847,8 +13899,8 @@ mod tests {
         to: &str,
     ) -> BuiltEnsembleUnit {
         let members = [
-            ("claude".to_string(), None, None),
-            ("codex".to_string(), Some("o1".to_string()), None),
+            ("claude".to_string(), None, None, None),
+            ("codex".to_string(), Some("o1".to_string()), None, None),
         ];
         let built = build_ensemble_unit(&EnsembleUnitSpec {
             spec_id: spec_id.map(str::to_string),
@@ -16333,11 +16385,13 @@ mod additional_tests {
                 platform: "claude".to_string(),
                 model: None,
                 prompt_override: None,
+                timeout_minutes: None,
             },
             EnsembleMemberParams {
                 platform: "\t\n".to_string(),
                 model: None,
                 prompt_override: None,
+                timeout_minutes: None,
             },
         ];
         let err = validate_ensemble_members(&members, EnsembleKind::Parallel).unwrap_err();
@@ -16353,11 +16407,13 @@ mod additional_tests {
                 platform: "claude".to_string(),
                 model: Some("  opus-4  ".to_string()),
                 prompt_override: None,
+                timeout_minutes: None,
             },
             EnsembleMemberParams {
                 platform: "mimo".to_string(),
                 model: Some("   ".to_string()),
                 prompt_override: None,
+                timeout_minutes: None,
             },
         ];
         let result = validate_ensemble_members(&members, EnsembleKind::Parallel).unwrap();
@@ -17566,6 +17622,7 @@ mod coverage_tests {
                     platform: "claude".into(),
                     model: None,
                     prompt_override: Some("review for security issues only".into()),
+                    timeout_minutes: None,
                 },
                 EnsembleMember {
                     ensemble_id: "ens1".into(),
@@ -17574,6 +17631,7 @@ mod coverage_tests {
                     platform: "codex".into(),
                     model: Some("o1".into()),
                     prompt_override: None,
+                    timeout_minutes: None,
                 },
             ],
         };
@@ -17621,6 +17679,7 @@ mod coverage_tests {
                 platform: "claude".into(),
                 model: None,
                 prompt_override: None,
+                timeout_minutes: None,
             }],
         };
         let json = super::ensemble_details_json(&details, &[]);
@@ -17828,8 +17887,8 @@ mod coverage_tests {
     #[test]
     fn ensemble_unit_with_fail_to() {
         let members = vec![
-            ("claude".into(), None, None),
-            ("codex".into(), Some("o1".into()), None),
+            ("claude".into(), None, None, None),
+            ("codex".into(), Some("o1".into()), None, None),
         ];
         let built = build_ensemble_unit(&EnsembleUnitSpec {
             spec_id: Some("s1".into()),
@@ -17861,7 +17920,7 @@ mod coverage_tests {
 
     #[test]
     fn ensemble_unit_no_fail_to() {
-        let members = vec![("claude".into(), None, None)];
+        let members = vec![("claude".into(), None, None, None)];
         let built = build_ensemble_unit(&EnsembleUnitSpec {
             spec_id: None,
             graph_id: Some("l1".into()),
@@ -17892,9 +17951,9 @@ mod coverage_tests {
     #[test]
     fn ensemble_unit_positions_sequential() {
         let members = vec![
-            ("p1".into(), None, None),
-            ("p2".into(), None, None),
-            ("p3".into(), None, None),
+            ("p1".into(), None, None, None),
+            ("p2".into(), None, None, None),
+            ("p3".into(), None, None, None),
         ];
         let built = build_ensemble_unit(&EnsembleUnitSpec {
             spec_id: None,
@@ -18252,6 +18311,7 @@ mod coverage_tests {
                 platform: format!("p{i}"),
                 model: None,
                 prompt_override: None,
+                timeout_minutes: None,
             })
             .collect();
         assert!(validate_ensemble_members(&m, EnsembleKind::Parallel).is_ok());
@@ -18264,6 +18324,7 @@ mod coverage_tests {
                 platform: format!("p{i}"),
                 model: None,
                 prompt_override: None,
+                timeout_minutes: None,
             })
             .collect();
         assert!(validate_ensemble_members(&m, EnsembleKind::Parallel).is_ok());
@@ -18276,6 +18337,7 @@ mod coverage_tests {
                 platform: format!("p{i}"),
                 model: None,
                 prompt_override: None,
+                timeout_minutes: None,
             })
             .collect();
         assert!(validate_ensemble_members(&m, EnsembleKind::Parallel)
@@ -18290,11 +18352,13 @@ mod coverage_tests {
                 platform: "claude".into(),
                 model: Some("".into()),
                 prompt_override: None,
+                timeout_minutes: None,
             },
             EnsembleMemberParams {
                 platform: "mimo".into(),
                 model: None,
                 prompt_override: None,
+                timeout_minutes: None,
             },
         ];
         let result = validate_ensemble_members(&m, EnsembleKind::Parallel).unwrap();
@@ -20872,11 +20936,13 @@ mod endpoint_tests {
                         platform: "openrouter".to_string(),
                         model: Some("model-a".to_string()),
                         prompt_override: None,
+                        timeout_minutes: None,
                     },
                     EnsembleMemberParams {
                         platform: "openrouter".to_string(),
                         model: Some("model-b".to_string()),
                         prompt_override: None,
+                        timeout_minutes: None,
                     },
                 ]),
                 condition: "always".to_string(),
@@ -22977,11 +23043,13 @@ mod endpoint_tests {
                         platform: "opencode".to_string(),
                         model: None,
                         prompt_override: None,
+                        timeout_minutes: None,
                     },
                     EnsembleMemberParams {
                         platform: "opencode".to_string(),
                         model: None,
                         prompt_override: None,
+                        timeout_minutes: None,
                     },
                 ]),
                 ..blank_ensemble_update(&ens)
@@ -23263,11 +23331,13 @@ mod endpoint_tests {
                 platform: "claude".to_string(),
                 model: None,
                 prompt_override: None,
+                timeout_minutes: None,
             },
             crate::daemon::params::EnsembleMemberParams {
                 platform: "opencode".to_string(),
                 model: None,
                 prompt_override: None,
+                timeout_minutes: None,
             },
         ];
 
@@ -24178,11 +24248,13 @@ mod endpoint_tests {
                         platform: "claude".to_string(),
                         model: None,
                         prompt_override: None,
+                        timeout_minutes: None,
                     },
                     crate::daemon::params::EnsembleMemberParams {
                         platform: "opencode".to_string(),
                         model: None,
                         prompt_override: None,
+                        timeout_minutes: None,
                     },
                 ]),
                 blueprint: None,
@@ -24273,11 +24345,13 @@ mod endpoint_tests {
                         platform: "claude".to_string(),
                         model: None,
                         prompt_override: Some("review for security issues".to_string()),
+                        timeout_minutes: None,
                     },
                     crate::daemon::params::EnsembleMemberParams {
                         platform: "codex".to_string(),
                         model: None,
                         prompt_override: None,
+                        timeout_minutes: None,
                     },
                 ]),
                 blueprint: None,
@@ -24391,11 +24465,13 @@ mod endpoint_tests {
                         platform: "claude".to_string(),
                         model: None,
                         prompt_override: None,
+                        timeout_minutes: None,
                     },
                     crate::daemon::params::EnsembleMemberParams {
                         platform: "opencode".to_string(),
                         model: None,
                         prompt_override: None,
+                        timeout_minutes: None,
                     },
                 ]),
                 blueprint: None,
@@ -24469,16 +24545,19 @@ mod endpoint_tests {
                         platform: "claude".to_string(),
                         model: None,
                         prompt_override: None,
+                        timeout_minutes: None,
                     },
                     crate::daemon::params::EnsembleMemberParams {
                         platform: "opencode".to_string(),
                         model: None,
                         prompt_override: None,
+                        timeout_minutes: None,
                     },
                     crate::daemon::params::EnsembleMemberParams {
                         platform: "gemini".to_string(),
                         model: None,
                         prompt_override: Some("Review only for test coverage gaps.".to_string()),
+                        timeout_minutes: None,
                     },
                 ]),
                 min_pass: None,
@@ -24529,11 +24608,13 @@ mod endpoint_tests {
                         platform: "claude".to_string(),
                         model: None,
                         prompt_override: None,
+                        timeout_minutes: None,
                     },
                     crate::daemon::params::EnsembleMemberParams {
                         platform: "opencode".to_string(),
                         model: None,
                         prompt_override: None,
+                        timeout_minutes: None,
                     },
                 ]),
                 min_pass: None,
@@ -24665,6 +24746,114 @@ mod endpoint_tests {
         assert!(is_err(&missing_ensemble));
     }
 
+    /// CM23: `graph_update_ensemble`'s member list can set one member's own
+    /// `timeout_minutes`, independent of the ensemble's shared value — FR3
+    /// (set through the same call that manages membership) and the inner
+    /// wiring together: the override lands on the `EnsembleMember` row AND
+    /// gets baked into that member's own node config, not the ensemble's.
+    #[tokio::test]
+    async fn graph_update_ensemble_sets_member_own_timeout() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let lp = insert_test_graph(&db, dir.path());
+        let spec = insert_test_spec(&db, &lp.id, 1);
+        let entry = add_agent_node(&handler, &spec.id, "Entry").await;
+        let arbiter = add_agent_node(&handler, &spec.id, "Arbiter").await;
+
+        let created = handler
+            .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                spec_id: Some(spec.id.clone()),
+                graph_id: None,
+                name: "Ensemble".to_string(),
+                kind: None,
+                prompt_template: Some("Original prompt".to_string()),
+                members: Some(vec![
+                    crate::daemon::params::EnsembleMemberParams {
+                        platform: "claude".to_string(),
+                        model: None,
+                        prompt_override: None,
+                        timeout_minutes: None,
+                    },
+                    crate::daemon::params::EnsembleMemberParams {
+                        platform: "opencode".to_string(),
+                        model: None,
+                        prompt_override: None,
+                        timeout_minutes: None,
+                    },
+                ]),
+                blueprint: None,
+                from_node: entry,
+                condition: "always".to_string(),
+                min_pass: Some(2),
+                straggler_timeout_minutes: None,
+                timeout_minutes: Some(20),
+                on_pass_to: arbiter,
+                on_fail_to: None,
+            }))
+            .await
+            .unwrap();
+        let ensemble_id = extract_id(&created, "ensemble_id");
+
+        let updated = handler
+            .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+                ensemble_id: ensemble_id.clone(),
+                kind: None,
+                prompt_template: None,
+                members: Some(vec![
+                    crate::daemon::params::EnsembleMemberParams {
+                        platform: "claude".to_string(),
+                        model: None,
+                        prompt_override: None,
+                        timeout_minutes: Some(3),
+                    },
+                    crate::daemon::params::EnsembleMemberParams {
+                        platform: "opencode".to_string(),
+                        model: None,
+                        prompt_override: None,
+                        timeout_minutes: None,
+                    },
+                ]),
+                min_pass: None,
+                straggler_timeout_minutes: None,
+                timeout_minutes: None,
+                on_pass_to: None,
+                on_fail_to: None,
+                from_node: None,
+                condition: None,
+                add_entry_from: None,
+                add_entry_condition: None,
+                remove_entry_from: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&updated), "{}", text(&updated));
+
+        let details = db.get_ensemble_details(&ensemble_id).unwrap().unwrap();
+        assert_eq!(details.members[0].timeout_minutes, Some(3));
+        assert_eq!(details.members[1].timeout_minutes, None);
+
+        let claude_node = db
+            .get_graph_node(&details.members[0].node_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            claude_node.config.get("timeout_minutes").and_then(|v| v.as_i64()),
+            Some(3),
+            "member's own override, not the ensemble's shared 20, must be baked into its node config"
+        );
+        let opencode_node = db
+            .get_graph_node(&details.members[1].node_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            opencode_node
+                .config
+                .get("timeout_minutes")
+                .and_then(|v| v.as_i64()),
+            Some(20),
+            "member with no override still uses the ensemble's shared timeout_minutes"
+        );
+    }
+
     // ── CM14: ensemble entry rewiring, multi-source entry, deletion ──
 
     /// Build a two-member ensemble for the CM14 tests: `name` entered from
@@ -24688,11 +24877,13 @@ mod endpoint_tests {
                         platform: "claude".to_string(),
                         model: None,
                         prompt_override: None,
+                        timeout_minutes: None,
                     },
                     crate::daemon::params::EnsembleMemberParams {
                         platform: "opencode".to_string(),
                         model: None,
                         prompt_override: None,
+                        timeout_minutes: None,
                     },
                 ]),
                 blueprint: None,
@@ -24742,6 +24933,7 @@ mod endpoint_tests {
             platform: "claude".to_string(),
             model: None,
             prompt_override: None,
+            timeout_minutes: None,
         };
 
         let created = handler
@@ -24807,6 +24999,7 @@ mod endpoint_tests {
             platform: "claude".to_string(),
             model: None,
             prompt_override: None,
+            timeout_minutes: None,
         };
 
         let created = handler
@@ -24872,6 +25065,7 @@ mod endpoint_tests {
             platform: "claude".to_string(),
             model: None,
             prompt_override: None,
+            timeout_minutes: None,
         };
 
         let created = handler
@@ -24934,6 +25128,7 @@ mod endpoint_tests {
             platform: "claude".to_string(),
             model: None,
             prompt_override: None,
+            timeout_minutes: None,
         };
 
         let created = handler
@@ -27928,6 +28123,7 @@ mod endpoint_tests {
                     platform: "claude".to_string(),
                     model: None,
                     prompt_override: None,
+                    timeout_minutes: None,
                 }]),
                 blueprint: None,
                 from_node: entry.clone(),
@@ -27966,6 +28162,7 @@ mod endpoint_tests {
                     platform: "claude".to_string(),
                     model: None,
                     prompt_override: None,
+                    timeout_minutes: None,
                 }]),
                 blueprint: None,
                 from_node: entry.clone(),
@@ -28004,11 +28201,13 @@ mod endpoint_tests {
                         platform: "claude".to_string(),
                         model: None,
                         prompt_override: None,
+                        timeout_minutes: None,
                     },
                     EnsembleMemberParams {
                         platform: "openrouter".to_string(),
                         model: None,
                         prompt_override: None,
+                        timeout_minutes: None,
                     },
                 ]),
                 blueprint: None,

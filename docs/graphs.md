@@ -99,7 +99,16 @@ consolidates their findings into one verdict.
 
 Members differ by `platform`/`model`, and each may set its own
 `prompt_override` to review the same input from a different angle instead
-of sharing the template. `graph_update_ensemble` changes the shared prompt
+of sharing the template. Each member may also set its own `timeout_minutes`,
+overriding the ensemble's shared value for that member only — the leash a
+flaky free-tier member needs (say, 3 minutes) and the room a careful review
+needs (say, 50 minutes) no longer have to be the same number. A member
+without one uses the ensemble's `timeout_minutes`, exactly as before this
+field existed. The difference matters at scale: a 3-minute leash instead of
+a 60-minute one on a stalling member saves 57 minutes of wall clock per
+rotation, on a graph that rotates many times a night.
+
+`graph_update_ensemble` changes the shared prompt
 (propagated to every member without its own override), the member list,
 quorum config (`min_pass`, `straggler_timeout_minutes`), exit wiring
 (`on_pass_to`/`on_fail_to` take a node id or another ensemble's id, chaining

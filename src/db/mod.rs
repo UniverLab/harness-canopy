@@ -707,6 +707,7 @@ impl Database {
                 platform TEXT NOT NULL,
                 model TEXT,
                 prompt_override TEXT,
+                timeout_minutes INTEGER,
                 PRIMARY KEY (ensemble_id, node_id)
             );
 
@@ -1454,6 +1455,27 @@ impl Database {
         if !has_member_prompt_override {
             conn.execute(
                 "ALTER TABLE ensemble_members ADD COLUMN prompt_override TEXT",
+                [],
+            )
+            .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
+        }
+
+        // Per-member timeout override (CM23): a member can now carry its own
+        // agent timeout, overriding the ensemble's shared `timeout_minutes` for
+        // that member only — see `EnsembleMember::timeout_minutes`. NULL for
+        // every pre-existing member, which is exactly "use the ensemble's
+        // timeout_minutes", so no behavioural migration is needed alongside the
+        // column add.
+        let has_member_timeout_minutes: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('ensemble_members') WHERE name = 'timeout_minutes'",
+                [],
+                |row| Ok(row.get::<_, i32>(0)? > 0),
+            )
+            .unwrap_or(false);
+        if !has_member_timeout_minutes {
+            conn.execute(
+                "ALTER TABLE ensemble_members ADD COLUMN timeout_minutes INTEGER",
                 [],
             )
             .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;

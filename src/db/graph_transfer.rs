@@ -87,8 +87,8 @@ impl Database {
             )?;
             for member in &ensemble_plan.members {
                 tx.execute(
-                    "INSERT INTO ensemble_members (ensemble_id, node_id, position, platform, model, prompt_override)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    "INSERT INTO ensemble_members (ensemble_id, node_id, position, platform, model, prompt_override, timeout_minutes)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                     params![
                         &member.ensemble_id,
                         &member.node_id,
@@ -96,6 +96,7 @@ impl Database {
                         &member.platform,
                         &member.model,
                         &member.prompt_override,
+                        &member.timeout_minutes,
                     ],
                 )?;
             }
@@ -293,11 +294,13 @@ mod tests {
                         platform: Some("openrouter".to_string()),
                         model: None,
                         prompt_override: None,
+                        timeout_minutes: None,
                     },
                     GraphExportEnsembleMember {
                         platform: Some("openrouter".to_string()),
                         model: None,
                         prompt_override: None,
+                        timeout_minutes: None,
                     },
                 ],
             }],

@@ -89,6 +89,8 @@ pub struct GraphExportEnsembleMember {
     pub model: Option<String>,
     #[serde(default)]
     pub prompt_override: Option<String>,
+    #[serde(default)]
+    pub timeout_minutes: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -233,6 +235,7 @@ pub fn build_export_document(
                 },
                 model: member.model.clone(),
                 prompt_override: member.prompt_override.clone(),
+                timeout_minutes: member.timeout_minutes,
             })
             .collect();
 
@@ -569,6 +572,9 @@ pub fn build_import_plan(
                 .prompt_override
                 .as_deref()
                 .unwrap_or(doc_ensemble.prompt_template.as_str());
+            let effective_timeout_minutes = member
+                .timeout_minutes
+                .unwrap_or(doc_ensemble.timeout_minutes);
             member_nodes.push(GraphNode {
                 id: node_id.clone(),
                 spec_id: None,
@@ -582,7 +588,7 @@ pub fn build_import_plan(
                     "platform": member.platform.clone().unwrap_or_default(),
                     "model": member.model,
                     "prompt_template": effective_prompt,
-                    "timeout_minutes": doc_ensemble.timeout_minutes,
+                    "timeout_minutes": effective_timeout_minutes,
                 }),
                 position: next_position,
                 created_at: now,
@@ -610,6 +616,7 @@ pub fn build_import_plan(
                 platform: member.platform.clone().unwrap_or_default(),
                 model: member.model.clone(),
                 prompt_override: member.prompt_override.clone(),
+                timeout_minutes: member.timeout_minutes,
             });
             next_position += 1;
         }
@@ -1000,6 +1007,7 @@ mod tests {
             platform: "opencode".to_string(),
             model: Some("opencode/muse-spark".to_string()),
             prompt_override: Some("custom angle".to_string()),
+            timeout_minutes: Some(3),
         });
         ensemble_details.members[0] = EnsembleMember {
             ensemble_id: "ens1".to_string(),
@@ -1008,6 +1016,7 @@ mod tests {
             platform: "copilot".to_string(),
             model: None,
             prompt_override: None,
+            timeout_minutes: None,
         };
         ensemble_details.members[1] = EnsembleMember {
             ensemble_id: "ens1".to_string(),
@@ -1016,6 +1025,7 @@ mod tests {
             platform: "opencode".to_string(),
             model: Some("opencode-go/qwen3.7-plus".to_string()),
             prompt_override: None,
+            timeout_minutes: None,
         };
         // Shuffle the stored order so the test pins the sort, not the input.
         ensemble_details.members.swap(0, 2);
@@ -1041,6 +1051,8 @@ mod tests {
             team.members[2].prompt_override.as_deref(),
             Some("custom angle")
         );
+        assert_eq!(team.members[2].timeout_minutes, Some(3));
+        assert_eq!(team.members[0].timeout_minutes, None);
         // Optional fields serialize as explicit nulls, never omitted keys.
         let raw = serde_json::to_string(&doc).unwrap();
         assert!(raw.contains("\"model\":null"));
@@ -1285,6 +1297,7 @@ mod tests {
                 platform: "openrouter".to_string(),
                 model: Some(format!("model-{i}")),
                 prompt_override: None,
+                timeout_minutes: None,
             })
             .collect();
         EnsembleDetails { ensemble, members }
@@ -1690,12 +1703,80 @@ mod tests {
                     platform: Some("claude".to_string()),
                     model: None,
                     prompt_override: None,
+                    timeout_minutes: None,
                 }],
             }],
             infra_node: None,
         };
         let err = build_import_plan(&doc, "new-graph").unwrap_err();
         assert!(err.contains("2-8 members"));
+    }
+
+    /// CM23 (FR6, requirement 5's import half): a member's own exported
+    /// `timeout_minutes` is what gets baked into that member's node config on
+    /// import — not the ensemble's shared value — while a sibling with no
+    /// override still falls back to the ensemble's `timeout_minutes`.
+    #[test]
+    fn import_plan_bakes_member_timeout_override_into_node_config() {
+        let doc = GraphExportDocument {
+            format_version: 1,
+            name: "x".to_string(),
+            description: None,
+            nodes: vec![
+                GraphExportNode {
+                    name: "kickoff".to_string(),
+                    kind: GraphNodeKind::Check,
+                    position: 1,
+                    config: serde_json::json!({"command": "true"}),
+                },
+                GraphExportNode {
+                    name: "next".to_string(),
+                    kind: GraphNodeKind::Check,
+                    position: 2,
+                    config: serde_json::json!({"command": "true"}),
+                },
+            ],
+            edges: vec![],
+            ensembles: vec![GraphExportEnsemble {
+                name: "team".to_string(),
+                kind: None,
+                prompt_template: "go".to_string(),
+                entry_from_node: "kickoff".to_string(),
+                entry_condition: GraphEdgeCondition::Always,
+                on_pass_to: "next".to_string(),
+                on_fail_to: None,
+                min_pass: 1,
+                timeout_minutes: 20,
+                straggler_timeout_minutes: None,
+                members: vec![
+                    GraphExportEnsembleMember {
+                        platform: Some("claude".to_string()),
+                        model: None,
+                        prompt_override: None,
+                        timeout_minutes: Some(3),
+                    },
+                    GraphExportEnsembleMember {
+                        platform: Some("claude".to_string()),
+                        model: None,
+                        prompt_override: None,
+                        timeout_minutes: None,
+                    },
+                ],
+            }],
+            infra_node: None,
+        };
+        let plan = build_import_plan(&doc, "new-graph").unwrap();
+        let ensemble_plan = &plan.ensembles[0];
+        assert_eq!(ensemble_plan.members[0].timeout_minutes, Some(3));
+        assert_eq!(
+            ensemble_plan.member_nodes[0].config["timeout_minutes"],
+            serde_json::json!(3)
+        );
+        assert_eq!(ensemble_plan.members[1].timeout_minutes, None);
+        assert_eq!(
+            ensemble_plan.member_nodes[1].config["timeout_minutes"],
+            serde_json::json!(20)
+        );
     }
 
     #[test]

@@ -1024,13 +1024,15 @@ impl Ensemble {
     }
 }
 
-/// `(platform, model, prompt_override)` — the normalized shape of one
-/// ensemble member's identity, shared by `graph_add_ensemble`/
+/// `(platform, model, prompt_override, timeout_minutes)` — the normalized
+/// shape of one ensemble member's identity, shared by `graph_add_ensemble`/
 /// `graph_update_ensemble`'s validated input, [`EnsembleBlueprint`]'s stored
-/// members, and [`EnsembleMember`] itself.
+/// members, and [`EnsembleMember`] itself. `timeout_minutes` is this
+/// member's own timeout override, or `None` to use the ensemble's shared
+/// `timeout_minutes`.
 ///
 /// [`EnsembleBlueprint`]: crate::domain::blueprints::EnsembleBlueprint
-pub type EnsembleMemberSpec = (String, Option<String>, Option<String>);
+pub type EnsembleMemberSpec = (String, Option<String>, Option<String>, Option<i64>);
 
 /// One member of an [`Ensemble`] — differs from its siblings in
 /// `platform`/`model` and, optionally, its own prompt; `node_id` points at
@@ -1052,6 +1054,11 @@ pub struct EnsembleMember {
     /// existed. Independent of `platform`/`model`: an override never changes
     /// which CLI/model runs it.
     pub prompt_override: Option<String>,
+    /// This member's own agent timeout in minutes, overriding the
+    /// ensemble's shared `timeout_minutes` for this member only. `None`
+    /// (the default) means "use the ensemble's `timeout_minutes`", exactly
+    /// as every member behaved before this field existed.
+    pub timeout_minutes: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

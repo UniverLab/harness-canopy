@@ -773,6 +773,13 @@ pub struct EnsembleMemberParams {
     /// use the shared prompt, same as every member before this field existed.
     /// Independent of `platform`/`model`.
     pub prompt_override: Option<String>,
+    /// This member's own agent timeout in minutes, overriding the
+    /// ensemble's shared `timeout_minutes` for this member only. Omit to
+    /// use the ensemble's `timeout_minutes`, same as every member before
+    /// this field existed. Must not be negative; 0 is legitimate (an
+    /// immediate timeout, same convention as the ensemble's own
+    /// `timeout_minutes`).
+    pub timeout_minutes: Option<i64>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
