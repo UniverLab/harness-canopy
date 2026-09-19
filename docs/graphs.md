@@ -286,10 +286,10 @@ modes — exactly one per hook:
   `timeout_minutes`): launches a CLI process with the rendered prompt.
 - **Command** (`command`): runs a shell command directly with the same
   `{{...}}` placeholders substituted before execution.
-- **Interactive** (`prompt` + `target_session_id`): enqueues a message into
-  a live interactive session, exactly as if sent from the promptbuilder,
-  marked as hook-originated. Fire-and-forget: the hook never reads or waits
-  for a reply.
+- **Interactive** (`prompt` + `target_session_id` or `target_session_name`):
+  enqueues a message into a live interactive session, exactly as if sent
+  from the promptbuilder, marked as hook-originated. Fire-and-forget: the
+  hook never reads or waits for a reply.
 
 - `on_completed` fires exactly once when a run transitions to `completed`
   (only when the dispatch completed at least one spec). A completed →
@@ -327,14 +327,27 @@ The first intended use is a documentation-maintenance agent: on
 completion, review the specs this run closed, the resulting code, and
 `docs/`/`README`, then update the docs to match what actually shipped.
 
-An interactive hook targets the exact session id in its own config, and
-supports the same event placeholders as the other modes, rendered before
-enqueueing. The message carries its provenance — graph id and event — as
-structure alongside the prompt, so the recipient can tell it came from a
-hook without that origin being buried in the prompt text. A session id is
-not stable over time: a hook configured with one will eventually point at
-a session that no longer exists, and firing then fails loudly naming the
-id rather than redirecting the message anywhere else.
+An interactive hook targets a session either by its exact id
+(`target_session_id`) or by its name (`target_session_name`) — exactly one
+of the two must be set. A session id is not stable over time: a hook
+configured with one will eventually point at a session that no longer
+exists (a daemon reinstall or TUI restart changes ids), and firing then
+fails loudly naming the id rather than redirecting the message anywhere
+else. `target_session_name` exists for exactly this case: names survive a
+restart that ids don't, so a name-targeted hook is resolved against the
+live session set fresh on every fire — never cached — the same set
+`session_list` reads. Exactly one live session with that name resolves and
+delivers; zero matches fails naming the name, and more than one match fails
+listing every matching id, rather than guessing which one was meant. Session
+names are not required to be unique, so a hook aimed at a name that two
+people are using at once will fail until only one of them is live.
+
+Both targeting modes support the same event placeholders as the other hook
+modes, rendered before enqueueing. The message carries its provenance —
+graph id, event, and (for a name-targeted hook) the name it was aimed at —
+as structure alongside the prompt, so the recipient, and the delivery
+history, can tell both that it came from a hook and which session actually
+received it, without that origin being buried in the prompt text.
 
 A message enqueued while no TUI is running is queued, not lost: it stays
 pending and is delivered when a TUI later starts.

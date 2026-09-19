@@ -88,6 +88,12 @@ available as `CANOPY_HOOK_LOOP_NAME` (alias `CANOPY_HOOK_GRAPH_NAME`),
 Agent and interactive prompt hooks keep literal marker substitution and are not
 shell-quoted.
 
+An interactive hook targets a session by `target_session_id` or by
+`target_session_name` (exactly one) — see [Graphs](graphs.md#event-keyed-hooks)
+for how name resolution and its failure modes work. `session_list` remains
+the way to see both the names and ids of every live session a hook can
+target.
+
 ## Spec backlog (7)
 
 | Tool | Description |

@@ -6645,6 +6645,7 @@ mod hooks_tests {
             prompt: Some(prompt.to_string()),
             command: None,
             target_session_id: None,
+            target_session_name: None,
             timeout_minutes: Some(5),
             target_graph_id: None,
             queue_id: None,

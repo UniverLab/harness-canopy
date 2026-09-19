@@ -20,6 +20,13 @@ pub struct ScheduledSendProvenance {
     /// Id of the calling session that scheduled an agent send.
     #[serde(default)]
     pub session_id: Option<String>,
+    /// The session *name* an interactive hook was aimed at (CM27), when the
+    /// hook was configured with `target_session_name` rather than a literal
+    /// id — the id it actually resolved to and delivered to is the row's own
+    /// `target_session_id` column, not duplicated here. `None` for id-hooks
+    /// and for agent-scheduled sends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_session_name: Option<String>,
 }
 
 impl ScheduledSendProvenance {
@@ -30,6 +37,19 @@ impl ScheduledSendProvenance {
             graph_id: graph_id.to_string(),
             event: event.to_string(),
             session_id: None,
+            target_session_name: None,
+        }
+    }
+
+    /// Provenance for a message enqueued by a name-targeted interactive
+    /// hook (CM27) — same as `hook`, plus the name it was aimed at.
+    pub fn hook_with_target_name(graph_id: &str, event: &str, target_session_name: &str) -> Self {
+        Self {
+            kind: "hook".to_string(),
+            graph_id: graph_id.to_string(),
+            event: event.to_string(),
+            session_id: None,
+            target_session_name: Some(target_session_name.to_string()),
         }
     }
 
@@ -40,6 +60,7 @@ impl ScheduledSendProvenance {
             graph_id: String::new(),
             event: String::new(),
             session_id: Some(session_id.to_string()),
+            target_session_name: None,
         }
     }
 

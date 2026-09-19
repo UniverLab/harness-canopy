@@ -1079,23 +1079,91 @@ impl GraphEngine {
         event: &GraphHookEvent,
         ctx: &HookContext<'_>,
     ) -> HookExecution {
-        let target = hook
+        let target_id_cfg = hook
             .target_session_id
             .as_deref()
             .map(str::trim)
-            .unwrap_or("");
-        if target.is_empty() {
+            .filter(|s| !s.is_empty());
+        let target_name_cfg = hook
+            .target_session_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+
+        // CM27: id wins if a domain object somehow has both (validation at
+        // graph_update time already forbids it — see build_graph_completion_hook
+        // — this is just priority-of-last-resort for a hand-built value).
+        let (target, target_name): (String, Option<String>) = if let Some(id) = target_id_cfg {
+            (id.to_string(), None)
+        } else if let Some(name) = target_name_cfg {
+            // Reuse the exact acceptance set `session_list` reads (CM16) —
+            // no separate query for name lookups.
+            let candidates = match self.db.list_hookable_sessions(i64::MAX) {
+                Ok(sessions) => sessions,
+                Err(error) => {
+                    return HookExecution {
+                        status: GraphRunStatus::Fail,
+                        output: serde_json::json!({
+                            "target_session_name": name,
+                            "error": error.to_string(),
+                        }),
+                        summary: format!(
+                            "{} hook could not resolve target session name '{name}': {error}",
+                            event.as_str()
+                        ),
+                    };
+                }
+            };
+            let matching_ids: Vec<&str> = candidates
+                .iter()
+                .filter(|session| session.name == name)
+                .map(|session| session.id.as_str())
+                .collect();
+            match matching_ids.as_slice() {
+                [] => {
+                    return HookExecution {
+                        status: GraphRunStatus::Fail,
+                        output: serde_json::json!({
+                            "target_session_name": name,
+                            "error": "session does not exist or is no longer live",
+                        }),
+                        summary: format!(
+                            "{} hook target session name '{name}' does not exist or is no longer live; message not enqueued.",
+                            event.as_str()
+                        ),
+                    };
+                }
+                [only] => (only.to_string(), Some(name.to_string())),
+                many => {
+                    return HookExecution {
+                        status: GraphRunStatus::Fail,
+                        output: serde_json::json!({
+                            "target_session_name": name,
+                            "error": "multiple live sessions share this name",
+                            "matching_ids": many,
+                        }),
+                        summary: format!(
+                            "{} hook target session name '{name}' matches {} live sessions ({}); message not enqueued.",
+                            event.as_str(),
+                            many.len(),
+                            many.join(", ")
+                        ),
+                    };
+                }
+            }
+        } else {
             return HookExecution {
                 status: GraphRunStatus::Fail,
                 output: serde_json::json!({
-                    "error": "interactive hook has no target session id",
+                    "error": "interactive hook has no target session id or name",
                 }),
                 summary: format!(
-                    "{} hook has no target session id; message not enqueued.",
+                    "{} hook has no target session id or name; message not enqueued.",
                     event.as_str()
                 ),
             };
-        }
+        };
+        let target: &str = &target;
         let rendered = match render_hook_prompt(event, ctx, hook.prompt.as_deref().unwrap_or("")) {
             Ok(prompt) => prompt,
             Err(error) => {
@@ -1155,7 +1223,12 @@ impl GraphEngine {
                 };
             }
         };
-        let provenance = ScheduledSendProvenance::hook(&lp.id, event.as_str());
+        let provenance = match &target_name {
+            Some(name) => {
+                ScheduledSendProvenance::hook_with_target_name(&lp.id, event.as_str(), name)
+            }
+            None => ScheduledSendProvenance::hook(&lp.id, event.as_str()),
+        };
         let send_id = uuid::Uuid::new_v4().to_string();
         match self.db.insert_scheduled_send(
             &send_id,
@@ -1166,18 +1239,24 @@ impl GraphEngine {
             Some(&builder_json),
             Some(&provenance),
         ) {
-            Ok(()) => HookExecution {
-                status: GraphRunStatus::Pass,
-                output: serde_json::json!({
+            Ok(()) => {
+                let mut output = serde_json::json!({
                     "scheduled_send_id": send_id,
                     "target_session_id": target,
                     "provenance": provenance,
-                }),
-                summary: format!(
-                    "{} hook enqueued a message for live session '{target}'; it will be delivered when a TUI is running.",
-                    event.as_str()
-                ),
-            },
+                });
+                if let Some(name) = &target_name {
+                    output["target_session_name"] = serde_json::Value::String(name.clone());
+                }
+                HookExecution {
+                    status: GraphRunStatus::Pass,
+                    output,
+                    summary: format!(
+                        "{} hook enqueued a message for live session '{target}'; it will be delivered when a TUI is running.",
+                        event.as_str()
+                    ),
+                }
+            }
             Err(error) => HookExecution {
                 status: GraphRunStatus::Fail,
                 output: serde_json::json!({
@@ -9745,6 +9824,7 @@ mod tests {
             prompt: None,
             command: Some("exit 2".to_string()),
             target_session_id: None,
+            target_session_name: None,
             timeout_minutes: Some(1),
             target_graph_id: None,
             queue_id: None,
@@ -15906,6 +15986,7 @@ echo done
             prompt: Some(format!("touch \"{}\"", marker_path)),
             command: None,
             target_session_id: None,
+            target_session_name: None,
             timeout_minutes: Some(1),
             target_graph_id: None,
             queue_id: None,
@@ -15963,6 +16044,7 @@ echo done
             prompt: Some(format!("touch \"{}\"", marker_path)),
             command: None,
             target_session_id: None,
+            target_session_name: None,
             timeout_minutes: Some(1),
             target_graph_id: None,
             queue_id: None,
@@ -16019,6 +16101,7 @@ echo done
             prompt: Some(format!("echo fire >> \"{}\"", marker_path)),
             command: None,
             target_session_id: None,
+            target_session_name: None,
             timeout_minutes: Some(1),
             target_graph_id: None,
             queue_id: None,
@@ -16907,6 +16990,7 @@ echo done
             prompt: Some(format!("touch \"{}\"", marker_path)),
             command: None,
             target_session_id: None,
+            target_session_name: None,
             timeout_minutes: Some(1),
             target_graph_id: None,
             queue_id: None,
@@ -16965,6 +17049,7 @@ echo done
             prompt: Some(format!("touch \"{}\"", marker_path)),
             command: None,
             target_session_id: None,
+            target_session_name: None,
             timeout_minutes: Some(1),
             target_graph_id: None,
             queue_id: None,
@@ -17213,6 +17298,7 @@ echo done
             prompt: Some("exit 1".to_string()),
             command: None,
             target_session_id: None,
+            target_session_name: None,
             timeout_minutes: Some(1),
             target_graph_id: None,
             queue_id: None,
@@ -17272,6 +17358,7 @@ echo done
             prompt: Some(format!("touch \"{}\"", marker.display())),
             command: None,
             target_session_id: None,
+            target_session_name: None,
             timeout_minutes: Some(1),
             target_graph_id: None,
             queue_id: None,
@@ -17337,6 +17424,7 @@ echo done
             prompt: Some(format!("touch \"{}\"", marker.display())),
             command: None,
             target_session_id: None,
+            target_session_name: None,
             timeout_minutes: Some(1),
             target_graph_id: None,
             queue_id: None,
@@ -17408,6 +17496,7 @@ echo done
             prompt: Some("echo \"{{blocker}} {{node}}\" > /dev/null".to_string()),
             command: None,
             target_session_id: None,
+            target_session_name: None,
             timeout_minutes: Some(1),
             target_graph_id: None,
             queue_id: None,
@@ -17481,6 +17570,7 @@ echo done
             prompt: Some("echo \"{{blocker}} {{node}}\" > /dev/null".to_string()),
             command: None,
             target_session_id: None,
+            target_session_name: None,
             timeout_minutes: Some(1),
             target_graph_id: None,
             queue_id: None,
@@ -17540,6 +17630,7 @@ echo done
             prompt: Some("exit 1".to_string()),
             command: None,
             target_session_id: None,
+            target_session_name: None,
             timeout_minutes: Some(1),
             target_graph_id: None,
             queue_id: None,
@@ -17553,6 +17644,7 @@ echo done
             prompt: Some(format!("touch \"{}\"", marker.display())),
             command: None,
             target_session_id: None,
+            target_session_name: None,
             timeout_minutes: Some(1),
             target_graph_id: None,
             queue_id: None,
@@ -17627,6 +17719,7 @@ echo done
             prompt: Some(format!("touch \"{}\"", marker.display())),
             command: None,
             target_session_id: None,
+            target_session_name: None,
             timeout_minutes: Some(1),
             target_graph_id: None,
             queue_id: None,
@@ -17665,6 +17758,7 @@ echo done
             prompt: Some(prompt.to_string()),
             command: None,
             target_session_id: Some(target.to_string()),
+            target_session_name: None,
             timeout_minutes: None,
             target_graph_id: None,
             queue_id: None,
@@ -17902,6 +17996,249 @@ echo done
             .is_empty());
     }
 
+    fn interactive_hook_name_fixture(
+        target_name: &str,
+        prompt: &str,
+    ) -> crate::domain::graphs::GraphCompletionHook {
+        crate::domain::graphs::GraphCompletionHook {
+            platform: None,
+            model: None,
+            effort: None,
+            prompt: Some(prompt.to_string()),
+            command: None,
+            target_session_id: None,
+            timeout_minutes: None,
+            target_graph_id: None,
+            queue_id: None,
+            workdir_override: None,
+            idea: None,
+            target_session_name: Some(target_name.to_string()),
+        }
+    }
+
+    /// CM27: a name-targeted interactive hook resolves the live session's
+    /// current id at fire time and delivers there, recording both the name
+    /// it was aimed at and the id it resolved to.
+    #[tokio::test]
+    async fn interactive_hook_name_resolves_single_live_match() {
+        let (_dir, db, engine, graph_id, _spec_id) = graph_fixture().unwrap();
+        let workdir = db.get_graph(&graph_id).unwrap().unwrap().workdir.clone();
+        db.insert_interactive_session(
+            "dc4aa96d-live",
+            "marasmius",
+            "claude",
+            &workdir,
+            None,
+            None,
+            "interactive",
+            None,
+        )
+        .unwrap();
+
+        let hook = interactive_hook_name_fixture(
+            "marasmius",
+            "Graph {{graph_name}} failed: {{blocker}} on {{node}}",
+        );
+        let mut hooks = std::collections::BTreeMap::new();
+        hooks.insert(crate::domain::graphs::GraphHookEvent::OnFailed, vec![hook]);
+        db.update_graph_hooks(&graph_id, &hooks).unwrap();
+
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        let ctx = HookContext {
+            graph_name: &lp.name,
+            workdir: &lp.workdir,
+            completed_specs: &[],
+            spec_name: None,
+            spec_id: None,
+            blocker: Some("build broke"),
+            node_name: Some("builder"),
+        };
+        engine
+            .fire_hooks(&lp, crate::domain::graphs::GraphHookEvent::OnFailed, &ctx)
+            .await;
+
+        let hook_runs = db.list_graph_completion_hook_runs(&graph_id).unwrap();
+        assert_eq!(hook_runs.len(), 1);
+        assert_eq!(hook_runs[0].status, GraphRunStatus::Pass);
+
+        let due = db.list_due_scheduled_sends(chrono::Utc::now()).unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].target_session_id, "dc4aa96d-live");
+        let provenance = due[0].provenance.as_ref().expect("provenance populated");
+        assert_eq!(provenance.target_session_name.as_deref(), Some("marasmius"));
+    }
+
+    /// CM27: a name-targeted hook with no live match fails naming the name,
+    /// enqueues nothing, and does not fall back to any other session.
+    #[tokio::test]
+    async fn interactive_hook_name_fails_when_no_live_match() {
+        let (_dir, db, engine, graph_id, _spec_id) = graph_fixture().unwrap();
+
+        let hook = interactive_hook_name_fixture("ghost", "Graph {{graph_name}} finished");
+        let mut hooks = std::collections::BTreeMap::new();
+        hooks.insert(
+            crate::domain::graphs::GraphHookEvent::OnCompleted,
+            vec![hook],
+        );
+        db.update_graph_hooks(&graph_id, &hooks).unwrap();
+
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        let status_before = lp.status;
+        let completed = vec![("Spec".to_string(), "ok".to_string())];
+        let ctx = HookContext {
+            graph_name: &lp.name,
+            workdir: &lp.workdir,
+            completed_specs: &completed,
+            spec_name: None,
+            spec_id: None,
+            blocker: None,
+            node_name: None,
+        };
+        engine
+            .fire_hooks(
+                &lp,
+                crate::domain::graphs::GraphHookEvent::OnCompleted,
+                &ctx,
+            )
+            .await;
+
+        let hook_runs = db.list_graph_completion_hook_runs(&graph_id).unwrap();
+        assert_eq!(hook_runs.len(), 1);
+        assert_eq!(hook_runs[0].status, GraphRunStatus::Fail);
+        let summary = hook_runs[0].summary.as_deref().unwrap_or("");
+        assert!(
+            summary.contains("ghost"),
+            "failure must name the session name, got: {summary}"
+        );
+        assert!(db
+            .list_due_scheduled_sends(chrono::Utc::now())
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            db.get_graph(&graph_id).unwrap().unwrap().status,
+            status_before
+        );
+    }
+
+    /// CM27: two live sessions sharing a name is refused rather than
+    /// guessing which one was meant — the failure lists both ids.
+    #[tokio::test]
+    async fn interactive_hook_name_fails_when_multiple_live_matches() {
+        let (_dir, db, engine, graph_id, _spec_id) = graph_fixture().unwrap();
+        let workdir = db.get_graph(&graph_id).unwrap().unwrap().workdir.clone();
+        db.insert_interactive_session(
+            "twin-a",
+            "twin",
+            "claude",
+            &workdir,
+            None,
+            None,
+            "interactive",
+            None,
+        )
+        .unwrap();
+        db.insert_interactive_session(
+            "twin-b",
+            "twin",
+            "claude",
+            &workdir,
+            None,
+            None,
+            "interactive",
+            None,
+        )
+        .unwrap();
+
+        let hook = interactive_hook_name_fixture("twin", "Graph {{graph_name}} finished");
+        let mut hooks = std::collections::BTreeMap::new();
+        hooks.insert(
+            crate::domain::graphs::GraphHookEvent::OnCompleted,
+            vec![hook],
+        );
+        db.update_graph_hooks(&graph_id, &hooks).unwrap();
+
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        let completed = vec![("Spec".to_string(), "ok".to_string())];
+        let ctx = HookContext {
+            graph_name: &lp.name,
+            workdir: &lp.workdir,
+            completed_specs: &completed,
+            spec_name: None,
+            spec_id: None,
+            blocker: None,
+            node_name: None,
+        };
+        engine
+            .fire_hooks(
+                &lp,
+                crate::domain::graphs::GraphHookEvent::OnCompleted,
+                &ctx,
+            )
+            .await;
+
+        let hook_runs = db.list_graph_completion_hook_runs(&graph_id).unwrap();
+        assert_eq!(hook_runs.len(), 1);
+        assert_eq!(hook_runs[0].status, GraphRunStatus::Fail);
+        let summary = hook_runs[0].summary.as_deref().unwrap_or("");
+        assert!(summary.contains("twin-a"), "got: {summary}");
+        assert!(summary.contains("twin-b"), "got: {summary}");
+        assert!(db
+            .list_due_scheduled_sends(chrono::Utc::now())
+            .unwrap()
+            .is_empty());
+    }
+
+    /// CM27: an id-configured hook is byte-for-byte unaffected by name
+    /// resolution — its provenance carries no target_session_name.
+    #[tokio::test]
+    async fn interactive_hook_id_based_hook_unaffected_by_name_resolution() {
+        let (_dir, db, engine, graph_id, _spec_id) = graph_fixture().unwrap();
+        let workdir = db.get_graph(&graph_id).unwrap().unwrap().workdir.clone();
+        db.insert_interactive_session(
+            "session-live",
+            "operator",
+            "claude",
+            &workdir,
+            None,
+            None,
+            "interactive",
+            None,
+        )
+        .unwrap();
+
+        let hook = interactive_hook_fixture(
+            "session-live",
+            "Graph {{graph_name}} failed: {{blocker}} on {{node}}",
+        );
+        let mut hooks = std::collections::BTreeMap::new();
+        hooks.insert(crate::domain::graphs::GraphHookEvent::OnFailed, vec![hook]);
+        db.update_graph_hooks(&graph_id, &hooks).unwrap();
+
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        let ctx = HookContext {
+            graph_name: &lp.name,
+            workdir: &lp.workdir,
+            completed_specs: &[],
+            spec_name: None,
+            spec_id: None,
+            blocker: Some("build broke"),
+            node_name: Some("builder"),
+        };
+        engine
+            .fire_hooks(&lp, crate::domain::graphs::GraphHookEvent::OnFailed, &ctx)
+            .await;
+
+        let hook_runs = db.list_graph_completion_hook_runs(&graph_id).unwrap();
+        assert_eq!(hook_runs.len(), 1);
+        assert_eq!(hook_runs[0].status, GraphRunStatus::Pass);
+
+        let due = db.list_due_scheduled_sends(chrono::Utc::now()).unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].target_session_id, "session-live");
+        let provenance = due[0].provenance.as_ref().expect("provenance populated");
+        assert!(provenance.target_session_name.is_none());
+    }
+
     // ── CH2: command hook tests ────────────────────────────────────────
 
     /// A command hook on `on_spec_completed` runs once per spec, in the
@@ -17970,6 +18307,7 @@ echo done
             prompt: None,
             command: Some("touch {{spec_name}}.marker".to_string()),
             target_session_id: None,
+            target_session_name: None,
             timeout_minutes: Some(1),
             target_graph_id: None,
             queue_id: None,
@@ -18037,6 +18375,7 @@ echo done
             prompt: None,
             command: Some("echo out; echo err >&2; exit 3".to_string()),
             target_session_id: None,
+            target_session_name: None,
             timeout_minutes: Some(1),
             target_graph_id: None,
             queue_id: None,
@@ -18108,6 +18447,7 @@ echo done
                 output_path
             )),
             target_session_id: None,
+            target_session_name: None,
             timeout_minutes: Some(1),
             target_graph_id: None,
             queue_id: None,
@@ -18167,6 +18507,7 @@ echo done
                 output_path
             )),
             target_session_id: None,
+            target_session_name: None,
             timeout_minutes: Some(1),
             target_graph_id: None,
             queue_id: None,
@@ -25423,6 +25764,7 @@ exit 0
             prompt: None,
             command: None,
             target_session_id: None,
+            target_session_name: None,
             timeout_minutes: None,
             target_graph_id: Some(target_id.to_string()),
             queue_id: queue_id.map(str::to_string),
@@ -25677,6 +26019,7 @@ exit 0
             prompt: None,
             command: None,
             target_session_id: None,
+            target_session_name: None,
             timeout_minutes: None,
             target_graph_id: Some(c_id.clone()),
             queue_id: None,
@@ -26039,6 +26382,7 @@ exit 0
             prompt: None,
             command: None,
             target_session_id: None,
+            target_session_name: None,
             timeout_minutes: None,
             target_graph_id: Some(target_id.clone()),
             queue_id: None,

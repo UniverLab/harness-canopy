@@ -457,9 +457,9 @@ pub struct GraphCreateParams {
 
 /// Config for a graph hook — an agent-node-style payload
 /// (platform/model/prompt), a direct shell command, or an interactive
-/// message into a live session (prompt + target_session_id). Exactly one
-/// mode must be configured; the engine refuses hooks that specify more than
-/// one mode or none.
+/// message into a live session (prompt + target_session_id or
+/// target_session_name). Exactly one mode must be configured; the engine
+/// refuses hooks that specify more than one mode or none.
 /// Used for every event via the `hooks` map on `graph_update`.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GraphCompletionHookParams {
@@ -502,6 +502,17 @@ pub struct GraphCompletionHookParams {
     /// is never lost and never redirected elsewhere.
     #[serde(default)]
     pub target_session_id: Option<String>,
+    /// Session name an interactive hook delivers to (interactive hooks
+    /// only) — an alternative to `target_session_id` that survives the
+    /// session's id changing later (e.g. a daemon reinstall), because it is
+    /// resolved against live sessions by name every time the hook fires.
+    /// Mutually exclusive with `target_session_id`: set exactly one.
+    /// Resolution is never cached between fires. Zero live sessions with
+    /// this name, or more than one, fails the hook loudly instead of
+    /// guessing — see `session_list` to check names before configuring
+    /// this.
+    #[serde(default)]
+    pub target_session_name: Option<String>,
     /// Timeout in minutes for the hook's process (default: 30, same default
     /// as an agent node).
     pub timeout_minutes: Option<u64>,

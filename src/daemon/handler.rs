@@ -273,6 +273,10 @@ fn build_graph_completion_hook(
         .target_session_id
         .as_deref()
         .is_some_and(|s| !s.trim().is_empty());
+    let has_target_name = params
+        .target_session_name
+        .as_deref()
+        .is_some_and(|s| !s.trim().is_empty());
     let has_model = params
         .model
         .as_deref()
@@ -291,10 +295,10 @@ fn build_graph_completion_hook(
         .is_some_and(|s| !s.trim().is_empty());
 
     if has_target_graph {
-        if has_platform || has_command || has_target || has_model || has_effort {
+        if has_platform || has_command || has_target || has_target_name || has_model || has_effort {
             return Err(
                 "Graph hook ('target_graph_id') must not set 'platform', 'command', \
-                 'target_session_id', 'model', or 'effort'. Configure exactly one hook mode."
+                 'target_session_id', 'target_session_name', 'model', or 'effort'. Configure exactly one hook mode."
                     .to_string(),
             );
         }
@@ -326,6 +330,7 @@ fn build_graph_completion_hook(
             prompt: None,
             command: None,
             target_session_id: None,
+            target_session_name: None,
             timeout_minutes: None,
             target_graph_id: Some(target_graph_id),
             queue_id,
@@ -339,10 +344,36 @@ fn build_graph_completion_hook(
         });
     }
 
-    if has_target {
+    // CM27: 'target_session_id' and 'target_session_name' are alternative
+    // ways to say the same thing (an interactive hook's destination) — never
+    // both, and if the caller clearly means an interactive hook (they set
+    // `prompt` but no other mode), never neither either. One message covers
+    // both misconfigurations because "set exactly one of X or Y" is true
+    // whether zero or two of them are set.
+    if has_target && has_target_name {
+        return Err(
+            "Interactive hook requires exactly one of 'target_session_id' \
+             or 'target_session_name', not both."
+                .to_string(),
+        );
+    }
+    if has_prompt
+        && !has_target
+        && !has_target_name
+        && params.platform.is_none()
+        && params.command.is_none()
+    {
+        return Err(
+            "Interactive hook requires exactly one of 'target_session_id' \
+             or 'target_session_name'."
+                .to_string(),
+        );
+    }
+
+    if has_target || has_target_name {
         if has_platform || has_command || has_model || has_effort {
             return Err(
-                "Interactive hook ('target_session_id' + 'prompt') must not \
+                "Interactive hook ('target_session_id'/'target_session_name' + 'prompt') must not \
                  set 'platform', 'model', 'effort', or 'command'. Configure exactly one hook mode."
                     .to_string(),
             );
@@ -350,12 +381,31 @@ fn build_graph_completion_hook(
         if !has_prompt {
             return Err("Interactive hook 'prompt' must not be empty.".to_string());
         }
-        let target_session_id = params
-            .target_session_id
-            .as_deref()
-            .unwrap()
-            .trim()
-            .to_string();
+        let (target_session_id, target_session_name) = if has_target {
+            (
+                Some(
+                    params
+                        .target_session_id
+                        .as_deref()
+                        .unwrap()
+                        .trim()
+                        .to_string(),
+                ),
+                None,
+            )
+        } else {
+            (
+                None,
+                Some(
+                    params
+                        .target_session_name
+                        .as_deref()
+                        .unwrap()
+                        .trim()
+                        .to_string(),
+                ),
+            )
+        };
         let prompt = params.prompt.as_deref().unwrap().trim().to_string();
         return Ok(crate::domain::graphs::GraphCompletionHook {
             platform: None,
@@ -363,12 +413,13 @@ fn build_graph_completion_hook(
             effort: None,
             prompt: Some(prompt),
             command: None,
-            target_session_id: Some(target_session_id),
+            target_session_id,
             timeout_minutes: params.timeout_minutes,
             target_graph_id: None,
             queue_id: None,
             workdir_override: None,
             idea: None,
+            target_session_name,
         });
     }
 
@@ -414,6 +465,7 @@ fn build_graph_completion_hook(
             prompt: Some(prompt),
             command: None,
             target_session_id: None,
+            target_session_name: None,
             timeout_minutes: params.timeout_minutes,
             target_graph_id: None,
             queue_id: None,
@@ -431,6 +483,7 @@ fn build_graph_completion_hook(
         prompt: None,
         command: Some(command),
         target_session_id: None,
+        target_session_name: None,
         timeout_minutes: params.timeout_minutes,
         target_graph_id: None,
         queue_id: None,
@@ -10580,6 +10633,7 @@ fn graph_completion_hook_json(
         "prompt": hook.prompt,
         "command": hook.command,
         "target_session_id": hook.target_session_id,
+        "target_session_name": hook.target_session_name,
         "timeout_minutes": hook.timeout_minutes,
         "target_graph_id": hook.target_graph_id,
         "queue_id": hook.queue_id,
@@ -14577,6 +14631,7 @@ mod tests {
             prompt: Some("run tests".to_string()),
             command: None,
             target_session_id: None,
+            target_session_name: None,
             timeout_minutes: None,
             target_graph_id: None,
             queue_id: None,
@@ -14596,6 +14651,7 @@ mod tests {
             prompt: Some("run tests".to_string()),
             command: None,
             target_session_id: None,
+            target_session_name: None,
             timeout_minutes: None,
             target_graph_id: None,
             queue_id: None,
@@ -14615,6 +14671,7 @@ mod tests {
             prompt: Some("".to_string()),
             command: None,
             target_session_id: None,
+            target_session_name: None,
             timeout_minutes: None,
             target_graph_id: None,
             queue_id: None,
@@ -14634,6 +14691,7 @@ mod tests {
             prompt: Some("  \t  ".to_string()),
             command: None,
             target_session_id: None,
+            target_session_name: None,
             timeout_minutes: None,
             target_graph_id: None,
             queue_id: None,
@@ -14653,6 +14711,7 @@ mod tests {
             prompt: Some("{{graph_name}} completed".to_string()),
             command: None,
             target_session_id: None,
+            target_session_name: None,
             timeout_minutes: Some(10),
             target_graph_id: None,
             queue_id: None,
@@ -14675,6 +14734,7 @@ mod tests {
             prompt: Some("  test  ".to_string()),
             command: None,
             target_session_id: None,
+            target_session_name: None,
             timeout_minutes: None,
             target_graph_id: None,
             queue_id: None,
@@ -14696,6 +14756,7 @@ mod tests {
             prompt: Some("test".to_string()),
             command: None,
             target_session_id: None,
+            target_session_name: None,
             timeout_minutes: None,
             target_graph_id: None,
             queue_id: None,
@@ -14717,6 +14778,7 @@ mod tests {
             prompt: Some("test".to_string()),
             command: Some("echo hi".to_string()),
             target_session_id: None,
+            target_session_name: None,
             timeout_minutes: None,
             target_graph_id: None,
             queue_id: None,
@@ -14737,6 +14799,7 @@ mod tests {
             prompt: None,
             command: None,
             target_session_id: None,
+            target_session_name: None,
             timeout_minutes: None,
             target_graph_id: None,
             queue_id: None,
@@ -14756,6 +14819,7 @@ mod tests {
             prompt: None,
             command: Some("echo hello".to_string()),
             target_session_id: None,
+            target_session_name: None,
             timeout_minutes: Some(5),
             target_graph_id: None,
             queue_id: None,
@@ -14778,6 +14842,7 @@ mod tests {
             prompt: None,
             command: Some("  echo hello  ".to_string()),
             target_session_id: None,
+            target_session_name: None,
             timeout_minutes: None,
             target_graph_id: None,
             queue_id: None,
@@ -14797,6 +14862,7 @@ mod tests {
             prompt: Some("  Graph {{graph_name}} failed  ".to_string()),
             command: None,
             target_session_id: Some("  session-7  ".to_string()),
+            target_session_name: None,
             timeout_minutes: None,
             target_graph_id: None,
             queue_id: None,
@@ -14821,6 +14887,7 @@ mod tests {
             prompt: Some("hi".to_string()),
             command: None,
             target_session_id: Some("session-1".to_string()),
+            target_session_name: None,
             timeout_minutes: None,
             target_graph_id: None,
             queue_id: None,
@@ -14837,6 +14904,7 @@ mod tests {
             prompt: Some("hi".to_string()),
             command: Some("echo hi".to_string()),
             target_session_id: Some("session-1".to_string()),
+            target_session_name: None,
             timeout_minutes: None,
             target_graph_id: None,
             queue_id: None,
@@ -14853,6 +14921,7 @@ mod tests {
             prompt: Some("hi".to_string()),
             command: None,
             target_session_id: Some("session-1".to_string()),
+            target_session_name: None,
             timeout_minutes: None,
             target_graph_id: None,
             queue_id: None,
@@ -14869,6 +14938,7 @@ mod tests {
             prompt: Some("hi".to_string()),
             command: None,
             target_session_id: Some("session-1".to_string()),
+            target_session_name: None,
             timeout_minutes: None,
             target_graph_id: None,
             queue_id: None,
@@ -14885,6 +14955,7 @@ mod tests {
             prompt: None,
             command: None,
             target_session_id: Some("session-1".to_string()),
+            target_session_name: None,
             timeout_minutes: None,
             target_graph_id: None,
             queue_id: None,
@@ -14893,6 +14964,90 @@ mod tests {
         };
         let err = build_graph_completion_hook(&params).unwrap_err();
         assert!(err.contains("prompt"), "{err}");
+    }
+
+    #[test]
+    fn build_graph_completion_hook_accepts_name_based_interactive_config() {
+        let params = GraphCompletionHookParams {
+            platform: None,
+            model: None,
+            effort: None,
+            prompt: Some("hi".to_string()),
+            command: None,
+            target_session_id: None,
+            target_session_name: Some("  marasmius  ".to_string()),
+            timeout_minutes: None,
+            target_graph_id: None,
+            queue_id: None,
+            workdir_override: None,
+            idea: None,
+        };
+        let hook = build_graph_completion_hook(&params).unwrap();
+        assert!(hook.is_interactive());
+        assert_eq!(hook.target_session_name.as_deref(), Some("marasmius"));
+        assert!(hook.target_session_id.is_none());
+    }
+
+    #[test]
+    fn build_graph_completion_hook_rejects_both_target_id_and_name() {
+        let params = GraphCompletionHookParams {
+            platform: None,
+            model: None,
+            effort: None,
+            prompt: Some("hi".to_string()),
+            command: None,
+            target_session_id: Some("session-1".to_string()),
+            target_session_name: Some("session-2".to_string()),
+            timeout_minutes: None,
+            target_graph_id: None,
+            queue_id: None,
+            workdir_override: None,
+            idea: None,
+        };
+        let err = build_graph_completion_hook(&params).unwrap_err();
+        assert!(err.contains("target_session_id"), "{err}");
+        assert!(err.contains("target_session_name"), "{err}");
+    }
+
+    #[test]
+    fn build_graph_completion_hook_rejects_bare_prompt_with_no_target() {
+        let params = GraphCompletionHookParams {
+            platform: None,
+            model: None,
+            effort: None,
+            prompt: Some("hi".to_string()),
+            command: None,
+            target_session_id: None,
+            target_session_name: None,
+            timeout_minutes: None,
+            target_graph_id: None,
+            queue_id: None,
+            workdir_override: None,
+            idea: None,
+        };
+        let err = build_graph_completion_hook(&params).unwrap_err();
+        assert!(err.contains("target_session_id"), "{err}");
+        assert!(err.contains("target_session_name"), "{err}");
+    }
+
+    #[test]
+    fn build_graph_completion_hook_rejects_target_graph_id_with_target_session_name() {
+        let params = GraphCompletionHookParams {
+            platform: None,
+            model: None,
+            effort: None,
+            prompt: None,
+            command: None,
+            target_session_id: None,
+            target_session_name: Some("marasmius".to_string()),
+            timeout_minutes: None,
+            target_graph_id: Some("graph-1".to_string()),
+            queue_id: None,
+            workdir_override: None,
+            idea: None,
+        };
+        let err = build_graph_completion_hook(&params).unwrap_err();
+        assert!(err.contains("target_session_name"), "{err}");
     }
 
     #[test]
@@ -16240,6 +16395,7 @@ mod additional_tests {
             prompt: Some("test".to_string()),
             command: None,
             target_session_id: None,
+            target_session_name: None,
             timeout_minutes: None,
             target_graph_id: None,
             queue_id: None,
@@ -16259,6 +16415,7 @@ mod additional_tests {
             prompt: Some("do stuff".to_string()),
             command: None,
             target_session_id: None,
+            target_session_name: None,
             timeout_minutes: Some(45),
             target_graph_id: None,
             queue_id: None,
@@ -17750,6 +17907,7 @@ mod coverage_tests {
             prompt: Some("{{graph_name}} done".into()),
             command: None,
             target_session_id: None,
+            target_session_name: None,
             timeout_minutes: Some(10),
             target_graph_id: None,
             queue_id: None,
@@ -17771,6 +17929,7 @@ mod coverage_tests {
             prompt: Some("t".into()),
             command: None,
             target_session_id: None,
+            target_session_name: None,
             timeout_minutes: None,
             target_graph_id: None,
             queue_id: None,

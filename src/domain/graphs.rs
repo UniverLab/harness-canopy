@@ -523,12 +523,13 @@ pub struct Graph {
 
 /// Config for a graph completion hook — an agent payload
 /// (`platform`/`model`/`prompt`), a direct shell command (`command`), an
-/// interactive message into a live session (`prompt` + `target_session_id`),
-/// or a graph launch (`target_graph_id`). Exactly one mode must be configured;
+/// interactive message into a live session (`prompt` + `target_session_id` or
+/// `target_session_name`), or a graph launch (`target_graph_id`). Exactly one mode must be configured;
 /// the engine validates this at creation time.
 ///
 /// An interactive hook is fire-and-forget: firing it enqueues one due-now
-/// row in `scheduled_sends` for the exact configured session id, delivered
+/// row in `scheduled_sends` for the configured session (`target_session_id`
+/// or `target_session_name`, resolved to a live id at fire time), delivered
 /// asynchronously by the TUI (which stays queued, not lost, while no TUI is
 /// running). It never reads or waits for a reply.
 ///
@@ -562,6 +563,18 @@ pub struct GraphCompletionHook {
     /// the id rather than redirecting anywhere else.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_session_id: Option<String>,
+    /// Session *name* an interactive hook delivers to, resolved to a live
+    /// session id at fire time (CM27) — the alternative to
+    /// `target_session_id` for hooks that must survive a session's id
+    /// changing (daemon reinstall, TUI restart) while its name stays the
+    /// same. Mutually exclusive with `target_session_id`; exactly one must
+    /// be set for an interactive hook. Resolution is never cached: it reads
+    /// the same live-session set `session_list` and `target_session_id`
+    /// verification both read. Zero or more-than-one live match at fire
+    /// time fails the hook loudly (naming the name, or listing every
+    /// matching id) rather than guessing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_session_name: Option<String>,
     pub timeout_minutes: Option<u64>,
     /// Target graph id to launch (graph hooks only). Mutually exclusive with
     /// platform/command/target_session_id.
@@ -595,9 +608,14 @@ impl GraphCompletionHook {
     /// live session). Selected when `target_session_id` and `prompt` are
     /// present while `platform` and `command` are absent.
     pub fn is_interactive(&self) -> bool {
-        self.target_session_id
+        (self
+            .target_session_id
             .as_deref()
             .is_some_and(|s| !s.trim().is_empty())
+            || self
+                .target_session_name
+                .as_deref()
+                .is_some_and(|s| !s.trim().is_empty()))
             && self.prompt.as_deref().is_some_and(|s| !s.trim().is_empty())
             && self.platform.as_deref().is_none_or(|s| s.trim().is_empty())
             && self.command.as_deref().is_none_or(|s| s.trim().is_empty())
