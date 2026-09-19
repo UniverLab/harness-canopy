@@ -905,6 +905,15 @@ pub struct App {
     /// Knowledge nodes (facts/patterns) for the selected project.
     pub(crate) project_knowledge: Vec<crate::db::intelligence::IntelligenceNodeRecord>,
     pub(crate) selected_knowledge: usize,
+    /// Wheel-scroll offset for the right panel's knowledge list (Knowledge
+    /// face). Independent of `selected_knowledge`, which the main Knowledge
+    /// tab (`ProjectTab::Knowledge`) owns — this only affects what the right
+    /// panel shows.
+    pub(crate) knowledge_list_scroll: u16,
+    /// Wheel-scroll offset (in edges) for the right panel's project-relations
+    /// graph (Knowledge face). Fed into `draw_project_graph`'s new `offset`
+    /// parameter; the sidebar's own project-graph card always passes 0.
+    pub(crate) knowledge_graph_scroll: u16,
     pub(crate) knowledge_filter: String,
     pub(crate) knowledge_filter_mode: bool,
     pub(crate) sidebar_visible: bool,
@@ -968,6 +977,27 @@ pub struct App {
     pub(crate) sync_scroll_offset: u16,
     /// Last rendered area of the activity panel (used for mouse hit-testing).
     pub(crate) last_sync_area: Option<ratatui::layout::Rect>,
+    /// Last-rendered rect of the activity section — the full Activity face,
+    /// or the activity sub-area inside the Knowledge face. Populated during
+    /// draw, cleared to `None` for a frame where it isn't drawn.
+    pub(crate) last_activity_rect: Option<ratatui::layout::Rect>,
+    /// Last-rendered rect of the Knowledge face's project-relations graph.
+    pub(crate) last_knowledge_graph_rect: Option<ratatui::layout::Rect>,
+    /// Last-rendered rect of the Knowledge face's knowledge/backlog list.
+    pub(crate) last_knowledge_list_rect: Option<ratatui::layout::Rect>,
+    /// Last-rendered rect of the Graph face's content (the whole face — it
+    /// isn't sub-divided).
+    pub(crate) last_graph_face_rect: Option<ratatui::layout::Rect>,
+    /// Wheel-scroll offset (lines) for the right panel's Graph face. Own
+    /// field, NOT shared with the main preview pane's
+    /// `graph_live_view_scroll` — see design note in canopy-design.md: the
+    /// right panel's Graph face can be visible independently of the main
+    /// pane's live graph view, so sharing bookkeeping would clamp against
+    /// stale/unrelated state.
+    pub(crate) graph_face_scroll: u16,
+    /// Total rendered line count of the Graph face's last draw, written by
+    /// `draw_graph_face`. Used to clamp `graph_face_scroll`.
+    pub(crate) graph_face_total_lines: u16,
 
     // CT1 multi-face right panel: the switching rule lives in
     // `crate::tui::app::panel_face` — these are its inputs and outputs.

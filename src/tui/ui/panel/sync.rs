@@ -34,8 +34,14 @@ pub(crate) fn draw_panel_face(frame: &mut Frame, area: Rect, app: &mut App, them
         return;
     }
 
+    app.last_activity_rect = None;
+    app.last_knowledge_graph_rect = None;
+    app.last_knowledge_list_rect = None;
+    app.last_graph_face_rect = None;
+
     match face {
         PanelFace::Activity => {
+            app.last_activity_rect = Some(inner);
             if let Some(state) = app.activity_panel_state() {
                 draw_sync_section(frame, inner, &state, app.sync_scroll_offset, theme);
             } else {
@@ -64,6 +70,7 @@ fn draw_knowledge_face(frame: &mut Frame, area: Rect, app: &mut App, theme: &The
     let graph_rows = knowledge_graph_height(app, area.height);
     if area.height < 8 || graph_rows == 0 {
         // Too short to split honestly: activity keeps the whole panel.
+        app.last_activity_rect = Some(area);
         if let Some(state) = app.selected_activity_state() {
             draw_sync_section(frame, area, &state, app.sync_scroll_offset, theme);
         } else {
@@ -79,6 +86,7 @@ fn draw_knowledge_face(frame: &mut Frame, area: Rect, app: &mut App, theme: &The
     ])
     .areas(area);
 
+    app.last_activity_rect = Some(activity_area);
     if let Some(state) = app.selected_activity_state() {
         draw_sync_section(frame, activity_area, &state, app.sync_scroll_offset, theme);
     } else {
@@ -100,8 +108,16 @@ fn draw_knowledge_face(frame: &mut Frame, area: Rect, app: &mut App, theme: &The
         graph_area.width,
         graph_area.height.saturating_sub(1),
     );
-    crate::tui::ui::sidebar::draw_project_graph(frame, graph_inner, app, theme);
+    app.last_knowledge_graph_rect = Some(graph_inner);
+    crate::tui::ui::sidebar::draw_project_graph(
+        frame,
+        graph_inner,
+        app,
+        theme,
+        app.knowledge_graph_scroll,
+    );
 
+    app.last_knowledge_list_rect = Some(list_area);
     draw_knowledge_list(frame, list_area, app, theme);
 }
 
@@ -156,7 +172,8 @@ fn draw_knowledge_list(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) 
     } else {
         let total = app.project_knowledge.len();
         let visible = (area.height as usize).saturating_sub(1).max(1);
-        let start = crate::tui::selection::clamp_scroll(app.selected_knowledge, 0, total, visible);
+        let max_start = total.saturating_sub(visible);
+        let start = (app.knowledge_list_scroll as usize).min(max_start);
         for (idx, node) in app
             .project_knowledge
             .iter()
@@ -196,7 +213,10 @@ fn draw_knowledge_list(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) 
 /// CT5's spec strip — same spec-queue data and same done/current/pending
 /// markers the Automation view renders, without the live node output and
 /// without taking any keys.
-fn draw_graph_face(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+fn draw_graph_face(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
+    app.last_graph_face_rect = Some(area);
+    app.graph_face_total_lines = 0;
+
     let Some(target) = app
         .selected_graph_id
         .as_ref()
@@ -284,7 +304,9 @@ fn draw_graph_face(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         )));
     }
 
-    frame.render_widget(Paragraph::new(lines), area);
+    app.graph_face_total_lines = lines.len() as u16;
+    let scroll = app.graph_face_scroll.min(app.graph_face_scroll_max());
+    frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), area);
 }
 
 /// CT5 spec-strip marker, shared convention: done / current / failed /

@@ -205,6 +205,12 @@ impl App {
             agents_rag_focused: false,
             sync_scroll_offset: 0,
             last_sync_area: None,
+            last_activity_rect: None,
+            last_knowledge_graph_rect: None,
+            last_knowledge_list_rect: None,
+            last_graph_face_rect: None,
+            graph_face_scroll: 0,
+            graph_face_total_lines: 0,
             panel_face: PanelFace::Activity,
             panel_pinned: App::load_panel_pinned_face(&canopy_config.pinned_panel_face),
             panel_dwell_face: None,
@@ -226,6 +232,8 @@ impl App {
             project_graph_trees: Vec::new(),
             project_knowledge: Vec::new(),
             selected_knowledge: 0,
+            knowledge_list_scroll: 0,
+            knowledge_graph_scroll: 0,
             knowledge_filter: String::new(),
             knowledge_filter_mode: false,
             nursery_path: None,
@@ -1696,6 +1704,30 @@ impl App {
     pub fn graph_live_view_max_scroll(&self) -> u16 {
         self.graph_live_view_total_lines
             .saturating_sub(self.last_panel_inner.1)
+    }
+
+    /// Step-and-clamp the right panel's Graph face scroll. Mirrors
+    /// `graph_live_view_scroll_step`'s pattern but uses this face's own
+    /// bookkeeping (`graph_face_total_lines`, `last_graph_face_rect`) —
+    /// deliberately not shared with the main pane's live graph view, which
+    /// can be showing something else entirely while this face is visible.
+    pub fn graph_face_scroll_step(&mut self, dir: i32) {
+        let new = if dir > 0 {
+            self.graph_face_scroll
+                .saturating_add(dir.unsigned_abs() as u16)
+        } else {
+            self.graph_face_scroll
+                .saturating_sub(dir.unsigned_abs() as u16)
+        };
+        self.graph_face_scroll = new.min(self.graph_face_scroll_max());
+    }
+
+    /// Maximum valid scroll value given the last-rendered total line count
+    /// and the Graph face's own rect height. Returns 0 when the content
+    /// fits entirely or the face hasn't drawn this frame.
+    pub fn graph_face_scroll_max(&self) -> u16 {
+        let visible = self.last_graph_face_rect.map_or(0, |r| r.height);
+        self.graph_face_total_lines.saturating_sub(visible)
     }
 
     /// Toggle plain-arrow-key ownership between the graph and the spec

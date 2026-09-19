@@ -277,7 +277,7 @@ fn render_graph_panel(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         Style::default().fg(theme.dim_text),
         Style::default().fg(theme.dim_text),
         theme,
-        |frame, inner| draw_project_graph(frame, inner, app, theme),
+        |frame, inner| draw_project_graph(frame, inner, app, theme, 0),
     );
 }
 
@@ -1784,7 +1784,13 @@ fn graph_edge_row_budget(inner_height: u16, edge_count: usize) -> usize {
     edge_count.min(inner_height as usize)
 }
 
-pub(crate) fn draw_project_graph(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+pub(crate) fn draw_project_graph(
+    frame: &mut Frame,
+    area: Rect,
+    app: &App,
+    theme: &Theme,
+    offset: u16,
+) {
     if app.project_graph_trees.is_empty() || app.project_graph_edges.is_empty() {
         let msg = if app.projects.len() <= 1 {
             "No relationships yet. Press Enter on a project to link."
@@ -1801,9 +1807,19 @@ pub(crate) fn draw_project_graph(frame: &mut Frame, area: Rect, app: &App, theme
         return;
     }
 
-    let edge_count = graph_edge_row_budget(area.height, app.project_graph_edges.len());
+    let total = app.project_graph_edges.len();
+    let visible = area.height as usize;
+    let max_offset = total.saturating_sub(visible.max(1));
+    let clamped_offset = (offset as usize).min(max_offset);
+    let edge_count = graph_edge_row_budget(area.height, total.saturating_sub(clamped_offset));
 
-    for (i, edge) in app.project_graph_edges.iter().take(edge_count).enumerate() {
+    for (i, edge) in app
+        .project_graph_edges
+        .iter()
+        .skip(clamped_offset)
+        .take(edge_count)
+        .enumerate()
+    {
         let y = area.y + i as u16;
         if y + 1 > area.y + area.height {
             break;
