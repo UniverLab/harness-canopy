@@ -480,7 +480,14 @@ pub struct GraphCompletionHookParams {
     pub prompt: Option<String>,
     /// Shell command to run directly (command hooks only). Mutually exclusive
     /// with platform/prompt. Supports the same `{{...}}` placeholders as the
-    /// hook's event, substituted before execution. WARNING: do not configure a
+    /// hook's event, substituted before execution as POSIX shell-quoted
+    /// single-quoted literals (`'...'`, with internal `'` escaped as `'\''`).
+    /// The same values are exported as `CANOPY_HOOK_*` environment variables,
+    /// including `CANOPY_HOOK_LOOP_NAME` (alias `CANOPY_HOOK_GRAPH_NAME`),
+    /// `CANOPY_HOOK_WORKDIR`, `CANOPY_HOOK_SPEC_NAME`, `CANOPY_HOOK_SPEC_ID`,
+    /// `CANOPY_HOOK_COMPLETED_SPECS`, `CANOPY_HOOK_NODE`,
+    /// `CANOPY_HOOK_BLOCKER`, and `CANOPY_HOOK_EVENT`. Use those variables to
+    /// avoid interpolation entirely. WARNING: do not configure a
     /// command that starts a canopy binary (e.g. `canopy graph run`). A
     /// process that starts canopy triggers daemon-startup recovery, which
     /// SIGTERMs live graph runs including the run that spawned the hook.

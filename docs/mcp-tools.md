@@ -74,6 +74,20 @@ stdio. Connect any MCP-capable AI CLI with `canopy mcp`.
 `graph_audit_node_configs`, `graph_schedule_continue`,
 `graph_preflight` — see [Graphs](graphs.md).
 
+### Hook placeholders and shell safety
+
+Command hooks substitute event-bound `{{...}}` markers as POSIX shell-quoted
+single-quoted literals: each value is wrapped in `'...'`, with internal `'`
+escaped as `'\''`. This keeps values containing shell syntax in one safe word;
+`'{{spec_name}}'` and `{{spec_name}}` both remain valid. The same values are
+available as `CANOPY_HOOK_LOOP_NAME` (alias `CANOPY_HOOK_GRAPH_NAME`),
+`CANOPY_HOOK_WORKDIR`, `CANOPY_HOOK_SPEC_NAME`, `CANOPY_HOOK_SPEC_ID`,
+`CANOPY_HOOK_COMPLETED_SPECS`, `CANOPY_HOOK_NODE`, `CANOPY_HOOK_BLOCKER`, and
+`CANOPY_HOOK_EVENT` environment variables, so hooks can use
+`"$CANOPY_HOOK_SPEC_NAME"` without interpolation.
+Agent and interactive prompt hooks keep literal marker substitution and are not
+shell-quoted.
+
 ## Spec backlog (7)
 
 | Tool | Description |

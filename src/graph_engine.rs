@@ -879,6 +879,7 @@ impl GraphEngine {
                             &command,
                             ctx.workdir,
                             timeout_seconds,
+                            &hook_env_vars(&event, ctx),
                         )
                         .await
                         {
@@ -4279,9 +4280,13 @@ async fn execute_shell_command(
     command: &str,
     workdir: &str,
     timeout_seconds: u64,
+    env_vars: &[(String, String)],
 ) -> Result<ShellCommandResult> {
     let mut process = shell_command(command);
     process.current_dir(workdir);
+    for (key, value) in env_vars {
+        process.env(key, value);
+    }
     let mut child = process
         .spawn()
         .with_context(|| format!("Failed to spawn command: {command}"))?;
@@ -4440,7 +4445,7 @@ async fn execute_check_node(
         .and_then(Value::as_u64)
         .unwrap_or(120);
 
-    let result = execute_shell_command(db, run_id, &command, workdir, timeout_seconds).await?;
+    let result = execute_shell_command(db, run_id, &command, workdir, timeout_seconds, &[]).await?;
 
     // B28: a timeout is a check fail, not a hard error and not something to
     // run the success condition against — it must route through the fail
@@ -6773,6 +6778,47 @@ struct HookContext<'a> {
     node_name: Option<&'a str>,
 }
 
+fn hook_env_vars(event: &GraphHookEvent, ctx: &HookContext<'_>) -> Vec<(String, String)> {
+    let mut vars = vec![
+        (
+            "CANOPY_HOOK_GRAPH_NAME".to_string(),
+            ctx.graph_name.to_string(),
+        ),
+        (
+            "CANOPY_HOOK_LOOP_NAME".to_string(),
+            ctx.graph_name.to_string(),
+        ),
+        ("CANOPY_HOOK_WORKDIR".to_string(), ctx.workdir.to_string()),
+        ("CANOPY_HOOK_EVENT".to_string(), event.as_str().to_string()),
+    ];
+
+    if let Some(value) = ctx.spec_name {
+        vars.push(("CANOPY_HOOK_SPEC_NAME".to_string(), value.to_string()));
+    }
+    if let Some(value) = ctx.spec_id {
+        vars.push(("CANOPY_HOOK_SPEC_ID".to_string(), value.to_string()));
+    }
+    if let Some(value) = ctx.blocker {
+        vars.push(("CANOPY_HOOK_BLOCKER".to_string(), value.to_string()));
+    }
+    if let Some(value) = ctx.node_name {
+        vars.push(("CANOPY_HOOK_NODE".to_string(), value.to_string()));
+    }
+    if hook_bindings_for_event(event).contains(&"completed_specs") {
+        let value = if ctx.completed_specs.is_empty() {
+            "(none)".to_string()
+        } else {
+            ctx.completed_specs
+                .iter()
+                .map(|(name, summary)| format!("- {name}: {summary}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        vars.push(("CANOPY_HOOK_COMPLETED_SPECS".to_string(), value));
+    }
+    vars
+}
+
 /// The supported `{{...}}` markers per event.
 fn hook_bindings_for_event(event: &GraphHookEvent) -> &'static [&'static str] {
     match event {
@@ -6851,16 +6897,25 @@ fn render_hook_command(
             .join("\n")
     };
 
+    // A template may already single-quote a marker. Remove only that exact
+    // wrapper so the replacement's shell quoting is not nested inside it.
+    let normalized_template = hook_bindings_for_event(event).iter().fold(
+        command_template.to_string(),
+        |template, marker| {
+            template.replace(&format!("'{{{{{marker}}}}}'"), &format!("{{{{{marker}}}}}"))
+        },
+    );
+
     Ok(crate::domain::prompts::render_template(
-        command_template,
+        &normalized_template,
         |raw| match raw {
-            "graph_name" => Some(ctx.graph_name.to_string()),
-            "workdir" => Some(ctx.workdir.to_string()),
-            "completed_specs" => Some(completed_specs_text.clone()),
-            "spec_name" => ctx.spec_name.map(str::to_string),
-            "spec_id" => ctx.spec_id.map(str::to_string),
-            "blocker" => ctx.blocker.map(str::to_string),
-            "node" => ctx.node_name.map(str::to_string),
+            "graph_name" => Some(shell_quote(ctx.graph_name)),
+            "workdir" => Some(shell_quote(ctx.workdir)),
+            "completed_specs" => Some(shell_quote(&completed_specs_text)),
+            "spec_name" => ctx.spec_name.map(shell_quote),
+            "spec_id" => ctx.spec_id.map(shell_quote),
+            "blocker" => ctx.blocker.map(shell_quote),
+            "node" => ctx.node_name.map(shell_quote),
             _ => None,
         },
     ))
@@ -7206,6 +7261,20 @@ fn resolve_spec_start(
 /// the daemon's own environment plus whatever env vars the engine explicitly
 /// sets on the `Command` before spawning — never a user's shell-startup PATH
 /// overrides or side effects.
+fn shell_quote(value: &str) -> String {
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('\'');
+    for character in value.chars() {
+        if character == '\'' {
+            quoted.push_str("'\\''");
+        } else {
+            quoted.push(character);
+        }
+    }
+    quoted.push('\'');
+    quoted
+}
+
 #[cfg(unix)]
 fn shell_command(command: &str) -> Command {
     let mut process = Command::new("sh");
@@ -7287,6 +7356,39 @@ mod tests {
     use super::*;
     use crate::application::notification_service::DefaultNotificationService;
     use tempfile::{tempdir, TempDir};
+
+    #[test]
+    fn shell_quote_handles_required_values() {
+        assert_eq!(shell_quote("plain"), "'plain'");
+        assert_eq!(shell_quote("a'b"), "'a'\\''b'");
+        assert_eq!(shell_quote("'"), "''\\'''");
+        assert_eq!(shell_quote(""), "''");
+        assert_eq!(shell_quote("$(rm -rf /)"), "'$(rm -rf /)'");
+        assert_eq!(shell_quote("a`b`c"), "'a`b`c'");
+    }
+
+    #[test]
+    fn command_hook_quotes_but_prompt_hook_stays_literal() {
+        let completed_specs = Vec::new();
+        let ctx = HookContext {
+            graph_name: "Graph",
+            workdir: "/tmp",
+            completed_specs: &completed_specs,
+            spec_name: Some("a'b"),
+            spec_id: Some("spec-id"),
+            blocker: None,
+            node_name: None,
+        };
+
+        assert_eq!(
+            render_hook_prompt(&GraphHookEvent::OnSpecCompleted, &ctx, "{{spec_name}}").unwrap(),
+            "a'b"
+        );
+        assert_eq!(
+            render_hook_command(&GraphHookEvent::OnSpecCompleted, &ctx, "{{spec_name}}").unwrap(),
+            "'a'\\''b'"
+        );
+    }
 
     fn graph_fixture() -> Result<(TempDir, Arc<Database>, GraphEngine, String, String)> {
         let dir = tempdir()?;
@@ -17193,7 +17295,7 @@ echo done
             model: None,
             effort: None,
             prompt: None,
-            command: Some("touch \"{{spec_name}}.marker\"".to_string()),
+            command: Some("touch {{spec_name}}.marker".to_string()),
             target_session_id: None,
             timeout_minutes: Some(1),
             target_graph_id: None,
@@ -17303,6 +17405,9 @@ echo done
     async fn command_hook_placeholder_substitution() {
         let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
 
+        db.update_graph_spec_details(&spec_id, Some("A live session's id"), None, None, None)
+            .unwrap();
+
         db.insert_graph_node(&GraphNode {
             id: "node-check".to_string(),
             spec_id: Some(spec_id.clone()),
@@ -17325,7 +17430,10 @@ echo done
             model: None,
             effort: None,
             prompt: None,
-            command: Some(format!("echo {{{{spec_name}}}} > \"{}\"", output_path)),
+            command: Some(format!(
+                "printf '%s' '{{{{spec_name}}}}' > \"{}\"",
+                output_path
+            )),
             target_session_id: None,
             timeout_minutes: Some(1),
             target_graph_id: None,
@@ -17346,7 +17454,67 @@ echo done
         result.unwrap();
 
         let content = std::fs::read_to_string(&output_file).unwrap();
-        assert_eq!(content.trim(), "Spec", "placeholder must be substituted");
+        assert_eq!(
+            content, "A live session's id",
+            "placeholder must be substituted"
+        );
+    }
+
+    #[tokio::test]
+    async fn command_hook_env_var_preserves_shell_metacharacters() {
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+        let spec_name = "x$(echo pwned)";
+        db.update_graph_spec_details(&spec_id, Some(spec_name), None, None, None)
+            .unwrap();
+
+        db.insert_graph_node(&GraphNode {
+            id: "node-check".to_string(),
+            spec_id: Some(spec_id.clone()),
+            graph_id: None,
+            name: "check".to_string(),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({
+                "command": "printf APPROVED",
+                "success_condition": "exit_code_0"
+            }),
+            position: 1,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+
+        let output_file = dir.path().join("env_output");
+        let output_path = output_file.to_string_lossy().to_string();
+        let hook = crate::domain::graphs::GraphCompletionHook {
+            platform: None,
+            model: None,
+            effort: None,
+            prompt: None,
+            command: Some(format!(
+                "printf '%s' \"$CANOPY_HOOK_SPEC_NAME\" > \"{}\"",
+                output_path
+            )),
+            target_session_id: None,
+            timeout_minutes: Some(1),
+            target_graph_id: None,
+            queue_id: None,
+            workdir_override: None,
+            idea: None,
+        };
+        let mut hooks = std::collections::BTreeMap::new();
+        hooks.insert(GraphHookEvent::OnSpecCompleted, vec![hook]);
+        db.update_graph_hooks(&graph_id, &hooks).unwrap();
+
+        engine
+            .run_graph(graph_id.clone(), None, None, None, None)
+            .await
+            .unwrap();
+
+        assert_eq!(std::fs::read_to_string(output_file).unwrap(), spec_name);
+        assert!(!dir.path().join("pwned").exists());
+        let hook_runs = db.list_graph_completion_hook_runs(&graph_id).unwrap();
+        assert_eq!(hook_runs.len(), 1);
+        assert_eq!(hook_runs[0].status, GraphRunStatus::Pass);
+        assert_eq!(hook_runs[0].output.as_ref().unwrap()["exit_code"], 0);
     }
 
     /// Process group children must die with the parent: spawn a check node
