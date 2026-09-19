@@ -2904,14 +2904,122 @@ impl GraphEngine {
             });
         }
 
-        // Wait-all (F1): drain every task before consolidating, regardless
-        // of arrival order, so the join can never fire while a member is
-        // still in flight.
+        // CM24: when `quorum_grace_minutes` is set on a parallel ensemble,
+        // the join resolves once the quorum is met plus a bounded grace —
+        // it does not wait for every member. `None` keeps the wait-all (F1)
+        // behaviour below exactly. Cascade/round_robin never reach here
+        // (early returns above), so the grace is parallel-only per spec.
+        let quorum_grace: Option<i64> = ensemble.quorum_grace_minutes;
         let mut results: HashMap<String, (String, NodeExecution)> = HashMap::new();
-        while let Some(joined) = set.join_next().await {
-            let (node_id, label, execution) =
-                joined.map_err(|error| anyhow!("Ensemble member task panicked: {error}"))?;
-            results.insert(node_id, (label, execution));
+        // Set only when the grace path actually fired (quorum reached while
+        // members were still pending); drives the `quorum_met_at` /
+        // `grace_minutes` join-output fields.
+        let mut quorum_met_at: Option<chrono::DateTime<chrono::Utc>> = None;
+        if let Some(grace) = quorum_grace {
+            let mut passed_so_far = 0i64;
+            let mut grace_deadline: Option<tokio::time::Instant> = None;
+            loop {
+                if results.len() >= details.members.len() {
+                    break;
+                }
+                let completed: Option<(String, String, NodeExecution)> =
+                    match grace_deadline {
+                        Some(deadline) => {
+                            tokio::select! {
+                                biased;
+                                joined = set.join_next() => match joined {
+                                    Some(done) => Some(done.map_err(|error| {
+                                        anyhow!("Ensemble member task panicked: {error}")
+                                    })?),
+                                    None => break,
+                                },
+                                _ = tokio::time::sleep_until(deadline) => break,
+                            }
+                        }
+                        None => match set.join_next().await {
+                            Some(done) => Some(done.map_err(|error| {
+                                anyhow!("Ensemble member task panicked: {error}")
+                            })?),
+                            None => break,
+                        },
+                    };
+                if let Some((node_id, label, execution)) = completed {
+                    if execution.status == GraphRunStatus::Pass {
+                        passed_so_far += 1;
+                    }
+                    results.insert(node_id, (label, execution));
+                    // The grace window is measured from the instant the
+                    // quorum is met, not from ensemble start.
+                    if grace_deadline.is_none() && passed_so_far >= ensemble.min_pass {
+                        quorum_met_at = Some(chrono::Utc::now());
+                        grace_deadline = Some(
+                            tokio::time::Instant::now()
+                                + std::time::Duration::from_secs(grace.max(0) as u64 * 60),
+                        );
+                    }
+                }
+            }
+            // Grace expired with members still in flight: terminate them via
+            // the same B12 path as the straggler kill (identical child-process
+            // cleanup), recorded as `fail` with a distinct reason so run
+            // history says why. Members that finished inside the grace are
+            // already in `results` and are consolidated as usual.
+            let mut terminated_any = false;
+            for member in &details.members {
+                if results.contains_key(&member.node_id) {
+                    continue;
+                }
+                terminated_any = true;
+                if let Ok(Some(run)) = self.db.get_active_graph_run_for_node(&member.node_id) {
+                    terminate_run_row(&self.db, &run, "quorum met");
+                }
+                let node_name = member_nodes
+                    .get(&member.node_id)
+                    .map(|node| node.name.clone())
+                    .unwrap_or_else(|| member.node_id.clone());
+                results.insert(
+                    member.node_id.clone(),
+                    (
+                        member_label(member),
+                        NodeExecution {
+                            status: GraphRunStatus::Fail,
+                            output: serde_json::json!({
+                                "terminated": true,
+                                "reason": "quorum met",
+                                "kind": "agent",
+                                "node_id": member.node_id,
+                            }),
+                            summary: format!(
+                                "Ensemble member '{node_name}' terminated: quorum met."
+                            ),
+                        },
+                    ),
+                );
+            }
+            if terminated_any {
+                // Stop awaiting the killed tasks; drain their cancellations
+                // without recording them (synthetic results above stand in).
+                set.abort_all();
+                while set.join_next().await.is_some() {}
+            } else {
+                // Quorum was met only when the last member finished (or was
+                // never exceeded early): drain normally. `quorum_met_at` was
+                // still set above, so the join output records the grace path.
+                while let Some(joined) = set.join_next().await {
+                    let (node_id, label, execution) = joined
+                        .map_err(|error| anyhow!("Ensemble member task panicked: {error}"))?;
+                    results.insert(node_id, (label, execution));
+                }
+            }
+        } else {
+            // Wait-all (F1): drain every task before consolidating,
+            // regardless of arrival order, so the join can never fire while
+            // a member is still in flight.
+            while let Some(joined) = set.join_next().await {
+                let (node_id, label, execution) =
+                    joined.map_err(|error| anyhow!("Ensemble member task panicked: {error}"))?;
+                results.insert(node_id, (label, execution));
+            }
         }
 
         let mut passed = 0i64;
@@ -2948,7 +3056,7 @@ impl GraphEngine {
         } else {
             GraphRunStatus::Fail
         };
-        let join_output = serde_json::json!({
+        let mut join_output = serde_json::json!({
             "kind": "quorum",
             "ensemble_id": ensemble.id,
             "members": member_summaries,
@@ -2956,6 +3064,12 @@ impl GraphEngine {
             "min_pass": ensemble.min_pass,
             "consolidated_doc": consolidated_doc,
         });
+        // CM24: when the grace path was taken, record when the quorum was
+        // met and how long the join waited afterwards.
+        if let Some(met_at) = quorum_met_at {
+            join_output["quorum_met_at"] = serde_json::json!(met_at.to_rfc3339());
+            join_output["grace_minutes"] = serde_json::json!(quorum_grace.unwrap_or(0));
+        }
 
         let mut execution = NodeExecution {
             status: join_status,
@@ -12291,6 +12405,7 @@ echo done
                 entry_condition: crate::domain::graphs::GraphEdgeCondition::Always,
                 min_pass: member_node_ids.len() as i64,
                 straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
                 timeout_minutes: 30,
                 on_pass_to: "arbiter".to_string(),
                 on_fail_to: None,
@@ -14922,6 +15037,7 @@ echo done
             &[("m-hang", "hang-member"), ("m-ok", "member-ok")],
             1,       // min_pass: only one member needs to pass
             Some(5), // generous straggler window — the member's own timeout must fire first
+            None,
             "on-pass",
             None,
         );
@@ -17635,6 +17751,7 @@ echo done
         members: &[(&str, &str)], // (node_id, cli_platform_name)
         min_pass: i64,
         straggler_timeout_minutes: Option<i64>,
+        quorum_grace_minutes: Option<i64>,
         on_pass_to: &str,
         on_fail_to: Option<&str>,
     ) {
@@ -17741,6 +17858,7 @@ echo done
             entry_condition: GraphEdgeCondition::Always,
             min_pass,
             straggler_timeout_minutes,
+            quorum_grace_minutes,
             timeout_minutes: 5,
             on_pass_to: on_pass_to.to_string(),
             on_fail_to: on_fail_to.map(str::to_string),
@@ -17834,6 +17952,7 @@ echo done
             &[("m-fast", "member-fast"), ("m-slow", "member-slow")],
             2,
             Some(1),
+            None,
             "on-pass",
             None,
         );
@@ -17909,6 +18028,7 @@ echo done
             ],
             3,
             Some(1),
+            None,
             "on-pass",
             None,
         );
@@ -17985,6 +18105,7 @@ echo done
             ],
             2,
             Some(1),
+            None,
             "on-pass",
             Some("on-fail"),
         );
@@ -18042,6 +18163,7 @@ echo done
             ],
             2,
             Some(1),
+            None,
             "on-pass",
             Some("on-fail"),
         );
@@ -18090,6 +18212,7 @@ echo done
             &[("m-a", "member-a-slow"), ("m-b", "member-b-fast")],
             2,
             Some(1),
+            None,
             "on-pass",
             None,
         );
@@ -18225,6 +18348,7 @@ echo done
             entry_condition: GraphEdgeCondition::Always,
             min_pass: 3,
             straggler_timeout_minutes: None,
+            quorum_grace_minutes: None,
             timeout_minutes: 5,
             on_pass_to: "on-pass".to_string(),
             on_fail_to: None,
@@ -18341,6 +18465,7 @@ echo done
             &[("m-a", "member-hang-a"), ("m-b", "member-hang-b")],
             1,
             Some(0),
+            None,
             "on-pass",
             Some("on-fail"),
         );
@@ -18375,6 +18500,277 @@ echo done
         );
     }
 
+    /// CM24: with `quorum_grace_minutes: Some(0)`, the join resolves the
+    /// instant the quorum is met instead of waiting for every member.
+    /// `m-ok` passes (its lingering script gives the `VerdictFiler` time to
+    /// file the self-report, then exits); the two hanging members are
+    /// terminated with reason `quorum met` — recorded as fail, distinct
+    /// from `ensemble straggler timeout` — and the join passes 1/3 with
+    /// `quorum_met_at`/`grace_minutes` in its output. The generous
+    /// 30-minute straggler window proves the fast resolution came from the
+    /// grace path: the straggler kill could not have fired in test time.
+    #[tokio::test]
+    async fn ensemble_quorum_grace_zero_terminates_stragglers_on_quorum_met() {
+        let (dir, db, engine, _graph_id, spec_id) = graph_fixture().unwrap();
+        let fake_home = setup_multi_cli_home(&[
+            (
+                "member-ok",
+                &write_member_script(dir.path(), "ok.sh", "sleep 2; printf OK"),
+            ),
+            (
+                "member-hang-a",
+                &write_member_script(dir.path(), "a.sh", "sleep 30"),
+            ),
+            (
+                "member-hang-b",
+                &write_member_script(dir.path(), "b.sh", "sleep 30"),
+            ),
+        ]);
+        let pass_marker = dir.path().join("pass.marker");
+        db.insert_graph_node(&touch_marker_node("on-pass", &spec_id, &pass_marker, 100))
+            .unwrap();
+        insert_test_ensemble(
+            &db,
+            &spec_id,
+            "kickoff",
+            "ens1",
+            "join1",
+            &[
+                ("m-ok", "member-ok"),
+                ("m-a", "member-hang-a"),
+                ("m-b", "member-hang-b"),
+            ],
+            1,
+            Some(30),
+            Some(0),
+            "on-pass",
+            None,
+        );
+
+        let _filer = VerdictFiler::spawn(&db, vec![("m-ok".to_string(), Some("OK".to_string()))]);
+
+        let _home = HomeGuard::set(fake_home.path());
+        let started = std::time::Instant::now();
+        engine
+            .run_graph("wf-test".to_string(), None, None, None, None)
+            .await
+            .unwrap();
+        let elapsed = started.elapsed();
+        drop(_home);
+        drop(_filer);
+
+        assert!(
+            pass_marker.exists(),
+            "join passed 1/3 -> must route to on_pass_to"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(120),
+            "grace 0 must resolve without waiting out the 30m straggler window (elapsed: {elapsed:?})"
+        );
+
+        let join = join_run(&db, &spec_id, "join1");
+        assert_eq!(join.status, GraphRunStatus::Pass);
+        let output = join.output.unwrap();
+        assert_eq!(output["passed"], 1);
+        assert_eq!(output["grace_minutes"], 0);
+        assert!(
+            output["quorum_met_at"].as_str().is_some(),
+            "grace path must record when the quorum was met"
+        );
+        let doc = output["consolidated_doc"].as_str().unwrap().to_string();
+        assert!(doc.contains("OK"), "passing member must be consolidated");
+        // A grace-0 join that waited for the stragglers instead of
+        // terminating them would record the straggler reason below; the
+        // quorum-met reason is what proves the grace path fired.
+        for node_id in ["m-a", "m-b"] {
+            let runs = member_runs(&db, &spec_id, node_id);
+            let terminated = runs
+                .iter()
+                .find(|r| r.status == GraphRunStatus::Fail)
+                .unwrap_or_else(|| panic!("{node_id} must have a fail run"));
+            let reason = terminated
+                .output
+                .as_ref()
+                .and_then(|o| o.get("reason"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            assert_eq!(
+                reason, "quorum met",
+                "{node_id} must be terminated with the quorum-met reason, got: {reason:?}"
+            );
+        }
+    }
+
+    /// CM24: a member that finishes after the quorum was met but inside the
+    /// grace window is consolidated normally — not terminated. `m-a` passes
+    /// fast; a chained thread files `m-b`/`m-c` passes a few seconds later
+    /// (both strictly after `m-a`'s verdict); all three land inside the
+    /// 1-minute grace, so the join passes 3/3 and resolves in seconds
+    /// rather than waiting out the window.
+    #[tokio::test]
+    async fn ensemble_quorum_grace_allows_member_finishing_inside_grace_to_be_consolidated() {
+        let (dir, db, engine, _graph_id, spec_id) = graph_fixture().unwrap();
+        let fake_home = setup_multi_cli_home(&[
+            (
+                "member-a",
+                &write_member_script(dir.path(), "a.sh", "sleep 2; printf A"),
+            ),
+            (
+                "member-b",
+                &write_member_script(dir.path(), "b.sh", "sleep 5; printf B"),
+            ),
+            (
+                "member-c",
+                &write_member_script(dir.path(), "c.sh", "sleep 8; printf C"),
+            ),
+        ]);
+        let pass_marker = dir.path().join("pass.marker");
+        db.insert_graph_node(&touch_marker_node("on-pass", &spec_id, &pass_marker, 100))
+            .unwrap();
+        insert_test_ensemble(
+            &db,
+            &spec_id,
+            "kickoff",
+            "ens1",
+            "join1",
+            &[
+                ("m-a", "member-a"),
+                ("m-b", "member-b"),
+                ("m-c", "member-c"),
+            ],
+            1,
+            Some(30),
+            Some(1),
+            "on-pass",
+            None,
+        );
+
+        let _filer_a = VerdictFiler::spawn(&db, vec![("m-a".to_string(), Some("A".to_string()))]);
+        // File m-b/m-c passes only after m-a has passed, so both finish
+        // strictly after the quorum was met but inside the grace window.
+        let db_child = Arc::clone(&db);
+        let spec_child = spec_id.clone();
+        let delayed = std::thread::spawn(move || {
+            for _ in 0..600 {
+                let a_passed = db_child
+                    .list_graph_runs_for_spec(&spec_child)
+                    .unwrap()
+                    .into_iter()
+                    .any(|r| r.node_id == "m-a" && r.status == GraphRunStatus::Pass);
+                if a_passed {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            for (node_id, stdout) in [("m-b", "B"), ("m-c", "C")] {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                for _ in 0..200 {
+                    if let Ok(Some(run)) = db_child.get_active_graph_run_for_node(node_id) {
+                        let _ = db_child.update_graph_run_result(
+                            &run.id,
+                            GraphRunStatus::Pass,
+                            Some(&serde_json::json!({
+                                "test_self_report": true,
+                                "stdout": stdout,
+                            })),
+                            Some(chrono::Utc::now()),
+                        );
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+            }
+        });
+
+        let _home = HomeGuard::set(fake_home.path());
+        let started = std::time::Instant::now();
+        engine
+            .run_graph("wf-test".to_string(), None, None, None, None)
+            .await
+            .unwrap();
+        let elapsed = started.elapsed();
+        drop(_home);
+        drop(_filer_a);
+        let _ = delayed.join();
+
+        assert!(
+            pass_marker.exists(),
+            "join passed 3/3 -> must route to on_pass_to"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(50),
+            "all members finished inside the 60s grace -> join must resolve early (elapsed: {elapsed:?})"
+        );
+        let join = join_run(&db, &spec_id, "join1");
+        assert_eq!(join.status, GraphRunStatus::Pass);
+        let output = join.output.unwrap();
+        assert_eq!(output["passed"], 3);
+        assert_eq!(output["grace_minutes"], 1);
+        assert!(
+            output["quorum_met_at"].as_str().is_some(),
+            "grace path must record when the quorum was met"
+        );
+        let doc = output["consolidated_doc"].as_str().unwrap().to_string();
+        assert!(
+            doc.contains('A') && doc.contains('B') && doc.contains('C'),
+            "every member finished inside the grace and must be consolidated: {doc}"
+        );
+    }
+
+    /// CM24: `quorum_grace_minutes` is ignored for cascade ensembles — the
+    /// walk still proceeds member by member. Set on the row directly (the
+    /// fixture helper builds parallel units); the first member's crash
+    /// falls through to the second, whose pass becomes the verdict, with
+    /// no `quorum met` termination anywhere.
+    #[tokio::test]
+    async fn ensemble_quorum_grace_ignored_for_cascade() {
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+        let fake_home = setup_multi_cli_home(&[
+            (
+                "m-crash",
+                &write_member_script(dir.path(), "crash.sh", "exit 1"),
+            ),
+            ("m-ok", &write_member_script(dir.path(), "ok.sh", "sleep 1")),
+        ]);
+        insert_kind_ensemble(
+            &db,
+            &spec_id,
+            crate::domain::graphs::EnsembleKind::Cascade,
+            &[("m-crash", "m-crash"), ("m-ok", "m-ok")],
+        );
+        db.update_ensemble_join_config("ens1", None, None, Some(Some(0)), None)
+            .unwrap();
+
+        let _filer = VerdictFiler::spawn(&db, vec![("m-ok".to_string(), None)]);
+
+        let _home = HomeGuard::set(fake_home.path());
+        engine
+            .run_graph(graph_id.clone(), None, None, None, None)
+            .await
+            .unwrap();
+        drop(_home);
+        drop(_filer);
+
+        let join = join_run(&db, &spec_id, "join1");
+        assert_eq!(
+            join.status,
+            GraphRunStatus::Pass,
+            "cascade must fall through the crashed first member to m-ok despite grace 0"
+        );
+        assert_eq!(join.output.as_ref().unwrap()["winner"]["node_id"], "m-ok");
+        let quorum_terminated = db
+            .list_graph_runs_for_spec(&spec_id)
+            .unwrap()
+            .into_iter()
+            .filter_map(|r| r.output)
+            .filter_map(|o| o.get("reason").and_then(|v| v.as_str()).map(str::to_string))
+            .any(|reason| reason == "quorum met");
+        assert!(
+            !quorum_terminated,
+            "cascade must never terminate with the quorum-met reason"
+        );
+    }
+
     // ── B26: ensemble member infra-crash retry ──────────────────────────
 
     /// Like [`insert_test_ensemble`], but merges `member_config` into every
@@ -18386,6 +18782,7 @@ echo done
         members: &[(&str, &str)],
         min_pass: i64,
         straggler_timeout_minutes: Option<i64>,
+        quorum_grace_minutes: Option<i64>,
         member_config: &Value,
     ) {
         let now = chrono::Utc::now();
@@ -18491,6 +18888,7 @@ echo done
             entry_condition: GraphEdgeCondition::Always,
             min_pass,
             straggler_timeout_minutes,
+            quorum_grace_minutes,
             timeout_minutes: 5,
             on_pass_to: "done".to_string(),
             on_fail_to: None,
@@ -18646,6 +19044,7 @@ echo done
             entry_condition: GraphEdgeCondition::Always,
             min_pass: 1,
             straggler_timeout_minutes: Some(1),
+            quorum_grace_minutes: None,
             timeout_minutes: 5,
             on_pass_to: "done-pass".to_string(),
             on_fail_to: Some("done-fail".to_string()),
@@ -18793,6 +19192,7 @@ echo done
             entry_condition: GraphEdgeCondition::Always,
             min_pass: 1,
             straggler_timeout_minutes: Some(1),
+            quorum_grace_minutes: None,
             timeout_minutes: 5,
             on_pass_to: "done-pass".to_string(),
             on_fail_to: Some("done-fail".to_string()),
@@ -19616,6 +20016,7 @@ echo done
             &[("m-flap", "member-flap"), ("m-ok", "member-ok")],
             2,
             Some(1),
+            None,
             &serde_json::json!({ "infra_backoff_seconds": 0 }),
         );
 
@@ -19678,6 +20079,7 @@ echo done
             &[("m-dead", "member-dead"), ("m-ok", "member-ok")],
             2,
             Some(1),
+            None,
             &serde_json::json!({ "infra_backoff_seconds": 0 }),
         );
 
@@ -19748,6 +20150,7 @@ echo done
             &[("m-no-output", "member-no-output"), ("m-ok", "member-ok")],
             2,
             Some(1),
+            None,
             &serde_json::json!({ "infra_backoff_seconds": 0 }),
         );
 
@@ -19818,6 +20221,7 @@ echo done
             ],
             1,
             Some(1),
+            None,
             &serde_json::json!({ "infra_backoff_seconds": 0, "require_report": true }),
         );
 
@@ -19905,6 +20309,7 @@ echo done
             &[("m-flap", "member-flap"), ("m-ok", "member-slow-ok")],
             1,
             Some(0), // zero-length window: expires before either member resolves
+            None,
             &serde_json::json!({ "infra_backoff_seconds": 0 }),
         );
 
@@ -20000,6 +20405,7 @@ echo done
             &[("m-a", "member-ok-a"), ("m-b", "member-ok-b")],
             2,
             Some(1),
+            None,
             "on-pass",
             None,
         );

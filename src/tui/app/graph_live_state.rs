@@ -85,6 +85,10 @@ pub(crate) struct EnsembleLiveInfo {
     pub join_node_id: String,
     /// Members in position order.
     pub members: Vec<EnsembleMemberLiveInfo>,
+    /// CM24: the join's straggler/grace config, so the node detail can show
+    /// them side by side without another DB lookup.
+    pub straggler_timeout_minutes: Option<i64>,
+    pub quorum_grace_minutes: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -202,6 +206,8 @@ fn resolve_ensembles_live_info(
                 name: details.ensemble.name,
                 join_node_id: details.ensemble.join_node_id,
                 members,
+                straggler_timeout_minutes: details.ensemble.straggler_timeout_minutes,
+                quorum_grace_minutes: details.ensemble.quorum_grace_minutes,
             }
         })
         .collect()
@@ -1055,6 +1061,7 @@ mod tests {
             entry_condition: GraphEdgeCondition::Always,
             min_pass: 3,
             straggler_timeout_minutes: None,
+            quorum_grace_minutes: None,
             timeout_minutes: 30,
             on_pass_to: "n2".to_string(),
             on_fail_to: None,

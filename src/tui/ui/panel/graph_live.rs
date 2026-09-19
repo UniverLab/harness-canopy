@@ -1093,6 +1093,31 @@ fn footer_lines(
                 .add_modifier(Modifier::BOLD),
         ));
     }
+    // CM24: when the highlighted node is ensemble-owned (a member or the
+    // join), show the join's straggler/grace config side by side — the only
+    // place the TUI surfaces ensemble quorum tuning.
+    if let Some(ensemble) = state.ensembles.iter().find(|ensemble| {
+        ensemble.join_node_id == node_id || ensemble.members.iter().any(|m| m.node_id == node_id)
+    }) {
+        if let Some(straggler) = ensemble.straggler_timeout_minutes {
+            meta.push(Span::raw("  "));
+            meta.push(Span::styled(
+                format!("straggler {straggler}m"),
+                Style::default().fg(theme.dim_text),
+            ));
+        }
+        if let Some(grace) = ensemble.quorum_grace_minutes {
+            meta.push(Span::raw("  "));
+            meta.push(Span::styled(
+                if grace == 0 {
+                    "grace immediate".to_string()
+                } else {
+                    format!("grace {grace}m")
+                },
+                Style::default().fg(theme.dim_text),
+            ));
+        }
+    }
     lines.push(Line::from(meta));
 
     if let Some(tail) = node_info.output_tail.as_deref() {
@@ -1742,6 +1767,8 @@ mod tests {
             ensemble_id: "ens1".to_string(),
             name: "Proposers".to_string(),
             join_node_id: "join1".to_string(),
+            straggler_timeout_minutes: None,
+            quorum_grace_minutes: None,
             members: vec![
                 crate::tui::app::graph_live_state::EnsembleMemberLiveInfo {
                     node_id: "m1".to_string(),

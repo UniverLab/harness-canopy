@@ -94,6 +94,8 @@ pub struct EnsembleBlueprint {
     /// Suggested `min_pass`. `None` means "every member" — the same default
     /// `graph_add_ensemble` uses when the caller doesn't pass `min_pass`.
     pub min_pass: Option<i64>,
+    /// CM24: suggested `quorum_grace_minutes`. `None` means wait-for-all.
+    pub quorum_grace_minutes: Option<i64>,
     pub builtin: bool,
     pub created_at: DateTime<Utc>,
 }
@@ -455,6 +457,7 @@ mod tests {
                 ),
             ],
             min_pass: Some(1),
+            quorum_grace_minutes: None,
             builtin: false,
             created_at: Utc::now(),
         };

@@ -827,6 +827,9 @@ pub struct GraphAddEnsembleParams {
     /// failed. Defaults to `timeout_minutes` (the members' own agent
     /// timeout).
     pub straggler_timeout_minutes: Option<i64>,
+    /// CM24: optional grace after quorum met before terminating stragglers.
+    /// None keeps wait-for-all. 0 = immediate. Only parallel ensembles honour it.
+    pub quorum_grace_minutes: Option<i64>,
     /// Shared agent timeout (minutes) applied to every member. Defaults to
     /// 30, matching an ordinary agent node.
     pub timeout_minutes: Option<i64>,
@@ -856,6 +859,9 @@ pub struct GraphUpdateEnsembleParams {
     /// New straggler timeout in minutes, or null to fall back to
     /// `timeout_minutes` again.
     pub straggler_timeout_minutes: Option<Option<i64>>,
+    /// CM24: new quorum grace in minutes, or null to clear back to
+    /// wait-for-all.
+    pub quorum_grace_minutes: Option<Option<i64>>,
     /// New shared member agent timeout in minutes.
     pub timeout_minutes: Option<i64>,
     /// New `pass` exit target node ID — or an ensemble ID to chain this
@@ -950,6 +956,8 @@ pub struct GraphCopyEnsembleParams {
     pub timeout_minutes: Option<i64>,
     /// New straggler timeout in minutes. Defaults to the source's.
     pub straggler_timeout_minutes: Option<i64>,
+    /// New quorum grace in minutes. Defaults to the source's.
+    pub quorum_grace_minutes: Option<i64>,
     /// Entry wiring override: the node the copy is wired from. Defaults to the
     /// source's entry node — required for a cross-graph copy where that node
     /// doesn't exist in the target.

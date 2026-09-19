@@ -110,7 +110,8 @@ rotation, on a graph that rotates many times a night.
 
 `graph_update_ensemble` changes the shared prompt
 (propagated to every member without its own override), the member list,
-quorum config (`min_pass`, `straggler_timeout_minutes`), exit wiring
+quorum config (`min_pass`, `straggler_timeout_minutes`,
+`quorum_grace_minutes`), exit wiring
 (`on_pass_to`/`on_fail_to` take a node id or another ensemble's id, chaining
 quorums with no intermediate node), and entry wiring (`from_node` replaces
 every entry; `add_entry_from`/`remove_entry_from` add or detach one source so
@@ -119,15 +120,26 @@ directly. `graph_delete_ensemble` removes the whole unit. `graph_get` returns th
 ensemble as one unit (`ensemble_id`, members, quorum config, every entry
 source) alongside its expanded nodes.
 
-The quorum fires only once every member branch has terminated
+The quorum's consolidated output is one document with a
+`## <platform/model> [pass|fail]` section per member, in member order. The
+quorum reports pass when at least `min_pass` members passed. Member
+execution is capped by a global concurrency limit (default 4) so an
+8-member ensemble queues rather than forking every member at once.
+
+By default the quorum waits for every member branch to terminate
 (pass, fail, or straggler timeout past
 `straggler_timeout_minutes`, which kills the still-running process
-and counts it as a fail) — it never fires early. Its consolidated
-output is one document with a `## <platform/model> [pass|fail]`
-section per member, in member order. The quorum reports pass when at
-least `min_pass` members passed. Member execution is capped by a
-global concurrency limit (default 4) so an 8-member ensemble queues
-rather than forking every member at once.
+and counts it as a fail) — it never fires early. A parallel ensemble
+may instead set `quorum_grace_minutes`: the moment `passed >=
+min_pass`, a timer of that many minutes starts; members finishing
+inside it are consolidated as usual, and when it expires the members
+still in flight are terminated with reason `quorum met` and counted
+as fail (distinct from `ensemble straggler timeout` in run history).
+`0` terminates stragglers immediately on quorum. The join output then
+carries `quorum_met_at` and `grace_minutes`. `None` (the default)
+keeps the wait-for-all behaviour; cascade and round-robin ensembles
+ignore the field. `straggler_timeout_minutes` still caps each member
+from its own start, independently of the grace window.
 
 Members are agent nodes only, and nested ensembles (an ensemble wired
 into another ensemble's members or quorum) are rejected. A bounce back

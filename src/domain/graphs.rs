@@ -1002,6 +1002,12 @@ pub struct Ensemble {
     /// as failed. `None` means "use `timeout_minutes`" (the members' own
     /// agent timeout) — see [`Self::effective_straggler_timeout_minutes`].
     pub straggler_timeout_minutes: Option<i64>,
+    /// CM24: when set and `kind == Parallel`, once `passed >= min_pass` wait
+    /// this many minutes for remaining members to finish before terminating
+    /// them with reason "quorum met". `None` keeps the old wait-for-every-member
+    /// behaviour. `0` means terminate immediately on quorum. Cascade and
+    /// round_robin ignore it.
+    pub quorum_grace_minutes: Option<i64>,
     /// Shared agent timeout (minutes) applied to every member's node config.
     pub timeout_minutes: i64,
     /// Join-node outgoing routing: where a `pass`/`fail` join result routes
@@ -1173,6 +1179,7 @@ mod tests {
             entry_condition: GraphEdgeCondition::Always,
             min_pass: 2,
             straggler_timeout_minutes: None,
+            quorum_grace_minutes: None,
             timeout_minutes: 30,
             on_pass_to: "arbiter".to_string(),
             on_fail_to: None,
@@ -1185,6 +1192,36 @@ mod tests {
         let mut overridden = ensemble;
         overridden.straggler_timeout_minutes = Some(5);
         assert_eq!(overridden.effective_straggler_timeout_minutes(), 5);
+    }
+
+    /// CM24: `quorum_grace_minutes` defaults to `None` (wait-for-all), and a
+    /// set value is carried verbatim — there is no `effective_*` helper.
+    #[test]
+    fn ensemble_quorum_grace_none_by_default() {
+        let ensemble = super::Ensemble {
+            id: "ens1".to_string(),
+            spec_id: Some("spec1".to_string()),
+            graph_id: None,
+            name: "Proposers".to_string(),
+            prompt_template: "{{spec_content}}".to_string(),
+            join_node_id: "join1".to_string(),
+            entry_from_node: "n0".to_string(),
+            entry_condition: GraphEdgeCondition::Always,
+            min_pass: 2,
+            straggler_timeout_minutes: None,
+            quorum_grace_minutes: None,
+            timeout_minutes: 30,
+            on_pass_to: "arbiter".to_string(),
+            on_fail_to: None,
+            kind: super::EnsembleKind::Parallel,
+            round_robin_index: None,
+            created_at: chrono::Utc::now(),
+        };
+        assert_eq!(ensemble.quorum_grace_minutes, None);
+
+        let mut with_grace = ensemble;
+        with_grace.quorum_grace_minutes = Some(0);
+        assert_eq!(with_grace.quorum_grace_minutes, Some(0));
     }
 
     #[test]

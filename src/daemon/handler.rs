@@ -541,6 +541,7 @@ struct EnsembleUnitSpec<'a> {
     min_pass: i64,
     timeout_minutes: i64,
     straggler_timeout_minutes: Option<i64>,
+    quorum_grace_minutes: Option<i64>,
     start_position: i64,
     kind: EnsembleKind,
 }
@@ -679,6 +680,7 @@ fn build_ensemble_unit(spec: &EnsembleUnitSpec) -> BuiltEnsembleUnit {
         entry_condition: spec.entry_condition.clone(),
         min_pass: spec.min_pass,
         straggler_timeout_minutes: spec.straggler_timeout_minutes,
+        quorum_grace_minutes: spec.quorum_grace_minutes,
         timeout_minutes: spec.timeout_minutes,
         on_pass_to: spec.on_pass_to.to_string(),
         on_fail_to: spec.on_fail_to.map(str::to_string),
@@ -2321,6 +2323,12 @@ fn plan_ensemble_copy(
             return Err("straggler_timeout_minutes must not be negative.".to_string());
         }
     }
+    let quorum_grace_minutes = params.quorum_grace_minutes.or(source.quorum_grace_minutes);
+    if let Some(grace) = quorum_grace_minutes {
+        if grace < 0 {
+            return Err("quorum_grace_minutes must not be negative.".to_string());
+        }
+    }
 
     let start_position = existing_nodes
         .last()
@@ -2341,6 +2349,7 @@ fn plan_ensemble_copy(
         min_pass,
         timeout_minutes,
         straggler_timeout_minutes,
+        quorum_grace_minutes,
         start_position,
         kind: copy_kind,
     });
@@ -6345,6 +6354,15 @@ impl TaskTriggerHandler {
                 ));
             }
         }
+        // CM24: refused for any kind on write; engine only honours it for parallel.
+        let quorum_grace_minutes = params
+            .quorum_grace_minutes
+            .or_else(|| blueprint.as_ref().and_then(|bp| bp.quorum_grace_minutes));
+        if let Some(grace) = quorum_grace_minutes {
+            if grace < 0 {
+                return Ok(error_result("quorum_grace_minutes must not be negative."));
+            }
+        }
 
         let (spec_id, graph_id) = match &target {
             GraphTarget::Spec(spec_id) => (Some(spec_id.clone()), None),
@@ -6381,6 +6399,7 @@ impl TaskTriggerHandler {
             min_pass,
             timeout_minutes,
             straggler_timeout_minutes: params.straggler_timeout_minutes,
+            quorum_grace_minutes,
             start_position,
             kind,
         });
@@ -6559,6 +6578,7 @@ impl TaskTriggerHandler {
                 params.members.is_some(),
                 params.min_pass.is_some(),
                 params.straggler_timeout_minutes.is_some(),
+                params.quorum_grace_minutes.is_some(),
                 params.timeout_minutes.is_some(),
                 params.on_pass_to.is_some(),
                 params.on_fail_to.is_some(),
@@ -6812,16 +6832,23 @@ impl TaskTriggerHandler {
                 .map_err(internal_error)?;
         }
 
-        // ── join config: min_pass / straggler_timeout_minutes / timeout_minutes ──
+        // ── join config: min_pass / straggler_timeout_minutes / quorum_grace_minutes / timeout_minutes ──
         if params.min_pass.is_some()
             || params.timeout_minutes.is_some()
             || params.straggler_timeout_minutes.is_some()
+            || params.quorum_grace_minutes.is_some()
         {
             if let Some(Some(straggler)) = params.straggler_timeout_minutes {
                 if straggler < 0 {
                     return Ok(error_result(
                         "straggler_timeout_minutes must not be negative.",
                     ));
+                }
+            }
+            // CM24: refused for any kind on write; engine only honours it for parallel.
+            if let Some(Some(grace)) = params.quorum_grace_minutes {
+                if grace < 0 {
+                    return Ok(error_result("quorum_grace_minutes must not be negative."));
                 }
             }
             if let Some(timeout_minutes) = params.timeout_minutes {
@@ -6834,6 +6861,7 @@ impl TaskTriggerHandler {
                     &ensemble_id,
                     params.min_pass,
                     params.straggler_timeout_minutes,
+                    params.quorum_grace_minutes,
                     params.timeout_minutes,
                 )
                 .map_err(internal_error)?;
@@ -10510,6 +10538,7 @@ fn ensemble_details_json(
         "min_pass": ensemble.min_pass,
         "straggler_timeout_minutes": ensemble.straggler_timeout_minutes,
         "effective_straggler_timeout_minutes": ensemble.effective_straggler_timeout_minutes(),
+        "quorum_grace_minutes": ensemble.quorum_grace_minutes,
         "timeout_minutes": ensemble.timeout_minutes,
         "on_pass_to": ensemble.on_pass_to,
         "on_fail_to": ensemble.on_fail_to,
@@ -11448,6 +11477,7 @@ mod tests {
             entry_condition: GraphEdgeCondition::Always,
             min_pass: 2,
             straggler_timeout_minutes: None,
+            quorum_grace_minutes: None,
             timeout_minutes: 30,
             on_pass_to: "arbiter".to_string(),
             on_fail_to: None,
@@ -13917,6 +13947,7 @@ mod tests {
             min_pass: 2,
             timeout_minutes: 30,
             straggler_timeout_minutes: None,
+            quorum_grace_minutes: None,
             start_position: 10,
             kind: EnsembleKind::Parallel,
         });
@@ -17607,6 +17638,7 @@ mod coverage_tests {
                 entry_condition: GraphEdgeCondition::Always,
                 min_pass: 2,
                 straggler_timeout_minutes: Some(10),
+                quorum_grace_minutes: None,
                 timeout_minutes: 30,
                 on_pass_to: "arbiter".into(),
                 on_fail_to: Some("cleanup".into()),
@@ -17665,6 +17697,7 @@ mod coverage_tests {
                 entry_condition: GraphEdgeCondition::Always,
                 min_pass: 1,
                 straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
                 timeout_minutes: 45,
                 on_pass_to: "to".into(),
                 on_fail_to: None,
@@ -17905,6 +17938,7 @@ mod coverage_tests {
             min_pass: 1,
             timeout_minutes: 30,
             straggler_timeout_minutes: Some(10),
+            quorum_grace_minutes: None,
             start_position: 1,
             kind: EnsembleKind::Parallel,
         });
@@ -17936,6 +17970,7 @@ mod coverage_tests {
             min_pass: 1,
             timeout_minutes: 15,
             straggler_timeout_minutes: None,
+            quorum_grace_minutes: None,
             start_position: 5,
             kind: EnsembleKind::Parallel,
         });
@@ -17970,6 +18005,7 @@ mod coverage_tests {
             min_pass: 3,
             timeout_minutes: 30,
             straggler_timeout_minutes: None,
+            quorum_grace_minutes: None,
             start_position: 10,
             kind: EnsembleKind::Parallel,
         });
@@ -20952,6 +20988,7 @@ mod endpoint_tests {
                 min_pass: None,
                 timeout_minutes: None,
                 straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
             }))
             .await
             .unwrap();
@@ -23354,6 +23391,7 @@ mod endpoint_tests {
                 condition: "always".to_string(),
                 min_pass: Some(2),
                 straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
                 timeout_minutes: None,
                 on_pass_to: arbiter.clone(),
                 on_fail_to: None,
@@ -23376,6 +23414,7 @@ mod endpoint_tests {
                 condition: "always".to_string(),
                 min_pass: None,
                 straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
                 timeout_minutes: None,
                 on_pass_to: arbiter.clone(),
                 on_fail_to: None,
@@ -23398,6 +23437,7 @@ mod endpoint_tests {
                 condition: "always".to_string(),
                 min_pass: Some(99),
                 straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
                 timeout_minutes: None,
                 on_pass_to: arbiter.clone(),
                 on_fail_to: None,
@@ -23420,6 +23460,7 @@ mod endpoint_tests {
                 condition: "always".to_string(),
                 min_pass: None,
                 straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
                 timeout_minutes: None,
                 on_pass_to: arbiter.clone(),
                 on_fail_to: None,
@@ -23442,6 +23483,7 @@ mod endpoint_tests {
                 condition: "always".to_string(),
                 min_pass: None,
                 straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
                 timeout_minutes: None,
                 on_pass_to: arbiter,
                 on_fail_to: None,
@@ -23449,6 +23491,165 @@ mod endpoint_tests {
             .await
             .unwrap();
         assert!(is_err(&too_few_members));
+    }
+
+    /// CM24: a negative `quorum_grace_minutes` is refused on add with the
+    /// same wording pattern as the existing `straggler_timeout_minutes`
+    /// check — while `0` (terminate immediately) is accepted and stored.
+    #[tokio::test]
+    async fn graph_add_ensemble_rejects_negative_quorum_grace() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let lp = insert_test_graph(&db, dir.path());
+        let spec = insert_test_spec(&db, &lp.id, 1);
+        let entry = add_agent_node(&handler, &spec.id, "Entry").await;
+        let arbiter = add_agent_node(&handler, &spec.id, "Arbiter").await;
+        let member = || crate::daemon::params::EnsembleMemberParams {
+            platform: "claude".to_string(),
+            model: None,
+            prompt_override: None,
+            timeout_minutes: None,
+        };
+
+        let negative = handler
+            .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                spec_id: Some(spec.id.clone()),
+                graph_id: None,
+                name: "Negative Grace".to_string(),
+                kind: None,
+                prompt_template: Some("Review".to_string()),
+                members: Some(vec![member(), member()]),
+                blueprint: None,
+                from_node: entry.clone(),
+                condition: "always".to_string(),
+                min_pass: None,
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: Some(-1),
+                timeout_minutes: None,
+                on_pass_to: arbiter.clone(),
+                on_fail_to: None,
+            }))
+            .await
+            .unwrap();
+        assert!(is_err(&negative));
+        assert!(
+            text(&negative).contains("quorum_grace_minutes must not be negative."),
+            "{}",
+            text(&negative)
+        );
+
+        let immediate = handler
+            .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                spec_id: Some(spec.id.clone()),
+                graph_id: None,
+                name: "Immediate Grace".to_string(),
+                kind: None,
+                prompt_template: Some("Review".to_string()),
+                members: Some(vec![member(), member()]),
+                blueprint: None,
+                from_node: entry,
+                condition: "always".to_string(),
+                min_pass: None,
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: Some(0),
+                timeout_minutes: None,
+                on_pass_to: arbiter,
+                on_fail_to: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&immediate), "{}", text(&immediate));
+        let ensemble_id = extract_id(&immediate, "ensemble_id");
+        let details = db.get_ensemble_details(&ensemble_id).unwrap().unwrap();
+        assert_eq!(details.ensemble.quorum_grace_minutes, Some(0));
+    }
+
+    /// CM24: `quorum_grace_minutes` can be set and cleared back to `None`
+    /// (wait-for-all) via `graph_update_ensemble`, mirroring the
+    /// `straggler_timeout_minutes` clear path.
+    #[tokio::test]
+    async fn graph_update_ensemble_sets_and_clears_quorum_grace() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let lp = insert_test_graph(&db, dir.path());
+        let spec = insert_test_spec(&db, &lp.id, 1);
+        let entry = add_agent_node(&handler, &spec.id, "Entry").await;
+        let arbiter = add_agent_node(&handler, &spec.id, "Arbiter").await;
+        let member = || crate::daemon::params::EnsembleMemberParams {
+            platform: "claude".to_string(),
+            model: None,
+            prompt_override: None,
+            timeout_minutes: None,
+        };
+        let created = handler
+            .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                spec_id: Some(spec.id.clone()),
+                graph_id: None,
+                name: "Grace Update".to_string(),
+                kind: None,
+                prompt_template: Some("Review".to_string()),
+                members: Some(vec![member(), member()]),
+                blueprint: None,
+                from_node: entry,
+                condition: "always".to_string(),
+                min_pass: None,
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
+                timeout_minutes: None,
+                on_pass_to: arbiter,
+                on_fail_to: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&created), "{}", text(&created));
+        let ensemble_id = extract_id(&created, "ensemble_id");
+
+        let negative = handler
+            .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+                ensemble_id: ensemble_id.clone(),
+                quorum_grace_minutes: Some(Some(-2)),
+                ..blank_ensemble_update(&ensemble_id)
+            }))
+            .await
+            .unwrap();
+        assert!(is_err(&negative));
+        assert!(
+            text(&negative).contains("quorum_grace_minutes must not be negative."),
+            "{}",
+            text(&negative)
+        );
+
+        let set = handler
+            .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+                ensemble_id: ensemble_id.clone(),
+                quorum_grace_minutes: Some(Some(5)),
+                ..blank_ensemble_update(&ensemble_id)
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&set), "{}", text(&set));
+        assert_eq!(
+            db.get_ensemble(&ensemble_id)
+                .unwrap()
+                .unwrap()
+                .quorum_grace_minutes,
+            Some(5)
+        );
+
+        let cleared = handler
+            .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+                ensemble_id: ensemble_id.clone(),
+                quorum_grace_minutes: Some(None),
+                ..blank_ensemble_update(&ensemble_id)
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&cleared), "{}", text(&cleared));
+        assert_eq!(
+            db.get_ensemble(&ensemble_id)
+                .unwrap()
+                .unwrap()
+                .quorum_grace_minutes,
+            None
+        );
     }
 
     // ── graph_get / graph_list ──────────────────────────────────────
@@ -24262,6 +24463,7 @@ mod endpoint_tests {
                 condition: "always".to_string(),
                 min_pass: None,
                 straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
                 timeout_minutes: None,
                 on_pass_to: arbiter,
                 on_fail_to: None,
@@ -24281,6 +24483,7 @@ mod endpoint_tests {
                 min_pass: None,
                 timeout_minutes: None,
                 straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
                 from_node: None,
                 condition: None,
                 on_pass_to: None,
@@ -24309,6 +24512,7 @@ mod endpoint_tests {
                 min_pass: None,
                 timeout_minutes: None,
                 straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
                 from_node: None,
                 condition: None,
                 on_pass_to: None,
@@ -24359,6 +24563,7 @@ mod endpoint_tests {
                 condition: "always".to_string(),
                 min_pass: Some(2),
                 straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
                 timeout_minutes: None,
                 on_pass_to: arbiter,
                 on_fail_to: None,
@@ -24422,6 +24627,7 @@ mod endpoint_tests {
                 min_pass: None,
                 timeout_minutes: None,
                 straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
                 from_node: None,
                 condition: None,
                 on_pass_to: None,
@@ -24479,6 +24685,7 @@ mod endpoint_tests {
                 condition: "always".to_string(),
                 min_pass: Some(2),
                 straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
                 timeout_minutes: None,
                 on_pass_to: arbiter,
                 on_fail_to: None,
@@ -24496,6 +24703,7 @@ mod endpoint_tests {
                 members: None,
                 min_pass: None,
                 straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
                 timeout_minutes: None,
                 on_pass_to: None,
                 on_fail_to: None,
@@ -24519,6 +24727,7 @@ mod endpoint_tests {
                 members: None,
                 min_pass: None,
                 straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
                 timeout_minutes: None,
                 on_pass_to: None,
                 on_fail_to: None,
@@ -24562,6 +24771,7 @@ mod endpoint_tests {
                 ]),
                 min_pass: None,
                 straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
                 timeout_minutes: None,
                 on_pass_to: None,
                 on_fail_to: None,
@@ -24619,6 +24829,7 @@ mod endpoint_tests {
                 ]),
                 min_pass: None,
                 straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
                 timeout_minutes: None,
                 on_pass_to: None,
                 on_fail_to: None,
@@ -24643,6 +24854,7 @@ mod endpoint_tests {
                 members: None,
                 min_pass: Some(99),
                 straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
                 timeout_minutes: None,
                 on_pass_to: None,
                 on_fail_to: None,
@@ -24665,6 +24877,7 @@ mod endpoint_tests {
                 members: None,
                 min_pass: None,
                 straggler_timeout_minutes: Some(Some(-1)),
+                quorum_grace_minutes: None,
                 timeout_minutes: None,
                 on_pass_to: None,
                 on_fail_to: None,
@@ -24687,6 +24900,7 @@ mod endpoint_tests {
                 members: None,
                 min_pass: Some(2),
                 straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
                 timeout_minutes: None,
                 on_pass_to: Some(alt_exit.clone()),
                 on_fail_to: None,
@@ -24711,6 +24925,7 @@ mod endpoint_tests {
                 members: None,
                 min_pass: None,
                 straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
                 timeout_minutes: None,
                 on_pass_to: Some("not-a-node".to_string()),
                 on_fail_to: None,
@@ -24732,6 +24947,7 @@ mod endpoint_tests {
                 members: None,
                 min_pass: None,
                 straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
                 timeout_minutes: None,
                 on_pass_to: None,
                 on_fail_to: None,
@@ -24785,6 +25001,7 @@ mod endpoint_tests {
                 condition: "always".to_string(),
                 min_pass: Some(2),
                 straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
                 timeout_minutes: Some(20),
                 on_pass_to: arbiter,
                 on_fail_to: None,
@@ -24814,6 +25031,7 @@ mod endpoint_tests {
                 ]),
                 min_pass: None,
                 straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
                 timeout_minutes: None,
                 on_pass_to: None,
                 on_fail_to: None,
@@ -24891,6 +25109,7 @@ mod endpoint_tests {
                 condition: "always".to_string(),
                 min_pass: None,
                 straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
                 timeout_minutes: None,
                 on_pass_to: on_pass_to.to_string(),
                 on_fail_to: None,
@@ -24909,6 +25128,7 @@ mod endpoint_tests {
             members: None,
             min_pass: None,
             straggler_timeout_minutes: None,
+            quorum_grace_minutes: None,
             timeout_minutes: None,
             on_pass_to: None,
             on_fail_to: None,
@@ -24949,6 +25169,7 @@ mod endpoint_tests {
                 condition: "always".to_string(),
                 min_pass: Some(3),
                 straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
                 timeout_minutes: None,
                 on_pass_to: arbiter,
                 on_fail_to: None,
@@ -24966,6 +25187,7 @@ mod endpoint_tests {
                 members: Some(vec![member(), member()]),
                 min_pass: None,
                 straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
                 timeout_minutes: None,
                 on_pass_to: None,
                 on_fail_to: None,
@@ -25015,6 +25237,7 @@ mod endpoint_tests {
                 condition: "always".to_string(),
                 min_pass: Some(2),
                 straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
                 timeout_minutes: None,
                 on_pass_to: arbiter,
                 on_fail_to: None,
@@ -25032,6 +25255,7 @@ mod endpoint_tests {
                 members: None,
                 min_pass: Some(99),
                 straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
                 timeout_minutes: None,
                 on_pass_to: None,
                 on_fail_to: None,
@@ -25081,6 +25305,7 @@ mod endpoint_tests {
                 condition: "always".to_string(),
                 min_pass: Some(2),
                 straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
                 timeout_minutes: None,
                 on_pass_to: arbiter,
                 on_fail_to: None,
@@ -25098,6 +25323,7 @@ mod endpoint_tests {
                 members: Some(vec![member(), member()]),
                 min_pass: Some(1),
                 straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
                 timeout_minutes: None,
                 on_pass_to: None,
                 on_fail_to: None,
@@ -25144,6 +25370,7 @@ mod endpoint_tests {
                 condition: "always".to_string(),
                 min_pass: Some(2),
                 straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
                 timeout_minutes: None,
                 on_pass_to: arbiter,
                 on_fail_to: None,
@@ -25152,7 +25379,7 @@ mod endpoint_tests {
             .unwrap();
         assert!(!is_err(&created), "{}", text(&created));
         let ensemble_id = extract_id(&created, "ensemble_id");
-        db.update_ensemble_join_config(&ensemble_id, Some(3), None, None)
+        db.update_ensemble_join_config(&ensemble_id, Some(3), None, None, None)
             .unwrap();
 
         let result = handler
@@ -28130,6 +28357,7 @@ mod endpoint_tests {
                 condition: "always".to_string(),
                 min_pass: None,
                 straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
                 timeout_minutes: None,
                 on_pass_to: arbiter.clone(),
                 on_fail_to: None,
@@ -28169,6 +28397,7 @@ mod endpoint_tests {
                 condition: "always".to_string(),
                 min_pass: None,
                 straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
                 timeout_minutes: None,
                 on_pass_to: arbiter.clone(),
                 on_fail_to: None,
@@ -28215,6 +28444,7 @@ mod endpoint_tests {
                 condition: "always".to_string(),
                 min_pass: None,
                 straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
                 timeout_minutes: None,
                 on_pass_to: arbiter.clone(),
                 on_fail_to: None,
@@ -28231,6 +28461,7 @@ mod endpoint_tests {
                 members: None,
                 min_pass: None,
                 straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
                 timeout_minutes: None,
                 on_pass_to: None,
                 on_fail_to: None,

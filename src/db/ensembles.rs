@@ -85,8 +85,8 @@ impl Database {
         }
 
         tx.execute(
-            "INSERT INTO ensembles (id, spec_id, graph_id, name, prompt_template, join_node_id, entry_from_node, entry_condition, min_pass, straggler_timeout_minutes, timeout_minutes, on_pass_to, on_fail_to, kind, round_robin_index, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+            "INSERT INTO ensembles (id, spec_id, graph_id, name, prompt_template, join_node_id, entry_from_node, entry_condition, min_pass, straggler_timeout_minutes, quorum_grace_minutes, timeout_minutes, on_pass_to, on_fail_to, kind, round_robin_index, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
                 &ensemble.id,
                 &ensemble.spec_id,
@@ -98,6 +98,7 @@ impl Database {
                 ensemble.entry_condition.as_str(),
                 ensemble.min_pass,
                 ensemble.straggler_timeout_minutes,
+                ensemble.quorum_grace_minutes,
                 ensemble.timeout_minutes,
                 &ensemble.on_pass_to,
                 &ensemble.on_fail_to,
@@ -133,7 +134,7 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, spec_id, graph_id, name, prompt_template, join_node_id, entry_from_node, entry_condition, min_pass, straggler_timeout_minutes, timeout_minutes, on_pass_to, on_fail_to, kind, round_robin_index, created_at
+            "SELECT id, spec_id, graph_id, name, prompt_template, join_node_id, entry_from_node, entry_condition, min_pass, straggler_timeout_minutes, quorum_grace_minutes, timeout_minutes, on_pass_to, on_fail_to, kind, round_robin_index, created_at
              FROM ensembles WHERE id = ?1",
         )?;
         stmt.query_row(params![ensemble_id], map_ensemble_row)
@@ -261,6 +262,7 @@ impl Database {
         ensemble_id: &str,
         min_pass: Option<i64>,
         straggler_timeout_minutes: Option<Option<i64>>,
+        quorum_grace_minutes: Option<Option<i64>>,
         timeout_minutes: Option<i64>,
     ) -> Result<bool> {
         let conn = self
@@ -271,12 +273,15 @@ impl Database {
             "UPDATE ensembles
              SET min_pass = COALESCE(?1, min_pass),
                  straggler_timeout_minutes = CASE WHEN ?2 IS NULL THEN straggler_timeout_minutes ELSE ?3 END,
-                 timeout_minutes = COALESCE(?4, timeout_minutes)
-             WHERE id = ?5",
+                 quorum_grace_minutes = CASE WHEN ?4 IS NULL THEN quorum_grace_minutes ELSE ?5 END,
+                 timeout_minutes = COALESCE(?6, timeout_minutes)
+             WHERE id = ?7",
             params![
                 min_pass,
                 straggler_timeout_minutes.map(|_| 1),
                 straggler_timeout_minutes.flatten(),
+                quorum_grace_minutes.map(|_| 1),
+                quorum_grace_minutes.flatten(),
                 timeout_minutes,
                 ensemble_id,
             ],
@@ -719,14 +724,15 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         conn.execute(
-            "INSERT INTO ensemble_blueprints (id, name, prompt_template, members, min_pass, builtin, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO ensemble_blueprints (id, name, prompt_template, members, min_pass, quorum_grace_minutes, builtin, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 &blueprint.id,
                 &blueprint.name,
                 &blueprint.prompt_template,
                 serde_json::to_string(&blueprint.members)?,
                 blueprint.min_pass,
+                blueprint.quorum_grace_minutes,
                 blueprint.builtin,
                 blueprint.created_at.timestamp(),
             ],
@@ -740,7 +746,7 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, name, prompt_template, members, min_pass, builtin, created_at
+            "SELECT id, name, prompt_template, members, min_pass, quorum_grace_minutes, builtin, created_at
              FROM ensemble_blueprints WHERE name = ?1",
         )?;
         stmt.query_row(params![name], map_ensemble_blueprint_row)
@@ -754,7 +760,7 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, name, prompt_template, members, min_pass, builtin, created_at
+            "SELECT id, name, prompt_template, members, min_pass, quorum_grace_minutes, builtin, created_at
              FROM ensemble_blueprints ORDER BY builtin DESC, name ASC",
         )?;
         let rows = stmt.query_map([], map_ensemble_blueprint_row)?;
@@ -789,17 +795,19 @@ impl Database {
         prompt_template: &str,
         members: &[EnsembleMemberSpec],
         min_pass: Option<i64>,
+        quorum_grace_minutes: Option<i64>,
     ) -> Result<()> {
         let conn = self
             .conn
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         conn.execute(
-            "UPDATE ensemble_blueprints SET prompt_template = ?1, members = ?2, min_pass = ?3 WHERE id = ?4",
+            "UPDATE ensemble_blueprints SET prompt_template = ?1, members = ?2, min_pass = ?3, quorum_grace_minutes = ?4 WHERE id = ?5",
             params![
                 prompt_template,
                 serde_json::to_string(members)?,
                 min_pass,
+                quorum_grace_minutes,
                 id,
             ],
         )?;
@@ -841,12 +849,14 @@ impl Database {
                     if existing.prompt_template != prompt_template
                         || existing.members != members
                         || existing.min_pass != min_pass
+                        || existing.quorum_grace_minutes.is_some()
                     {
                         self.update_builtin_ensemble_blueprint(
                             &existing.id,
                             prompt_template,
                             &members,
                             min_pass,
+                            None,
                         )?;
                     }
                 }
@@ -859,6 +869,7 @@ impl Database {
                         prompt_template: prompt_template.to_string(),
                         members,
                         min_pass,
+                        quorum_grace_minutes: None,
                         builtin: true,
                         created_at: Utc::now(),
                     })?;
@@ -913,8 +924,9 @@ fn map_ensemble_blueprint_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Ensem
         prompt_template: row.get(2)?,
         members,
         min_pass: row.get(4)?,
-        builtin: row.get(5)?,
-        created_at: from_timestamp(row.get(6)?)?,
+        quorum_grace_minutes: row.get(5)?,
+        builtin: row.get(6)?,
+        created_at: from_timestamp(row.get(7)?)?,
     })
 }
 
@@ -930,10 +942,10 @@ fn map_ensemble_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Ensemble> {
                 )),
             )
         })?;
-    let kind_str: String = row.get(13)?;
+    let kind_str: String = row.get(14)?;
     let kind = EnsembleKind::from_str(&kind_str).ok_or_else(|| {
         rusqlite::Error::FromSqlConversionFailure(
-            13,
+            14,
             rusqlite::types::Type::Text,
             Box::new(IoError::new(
                 ErrorKind::InvalidData,
@@ -952,12 +964,13 @@ fn map_ensemble_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Ensemble> {
         entry_condition,
         min_pass: row.get(8)?,
         straggler_timeout_minutes: row.get(9)?,
-        timeout_minutes: row.get(10)?,
-        on_pass_to: row.get(11)?,
-        on_fail_to: row.get(12)?,
+        quorum_grace_minutes: row.get(10)?,
+        timeout_minutes: row.get(11)?,
+        on_pass_to: row.get(12)?,
+        on_fail_to: row.get(13)?,
         kind,
-        round_robin_index: row.get(14)?,
-        created_at: from_timestamp(row.get(15)?)?,
+        round_robin_index: row.get(15)?,
+        created_at: from_timestamp(row.get(16)?)?,
     })
 }
 
@@ -1278,6 +1291,7 @@ mod tests {
             entry_condition: GraphEdgeCondition::Always,
             min_pass: 3,
             straggler_timeout_minutes: None,
+            quorum_grace_minutes: None,
             timeout_minutes: 30,
             on_pass_to: "arbiter".to_string(),
             on_fail_to: None,
@@ -1446,6 +1460,7 @@ mod tests {
             entry_condition: GraphEdgeCondition::Always,
             min_pass: 2,
             straggler_timeout_minutes: None,
+            quorum_grace_minutes: None,
             timeout_minutes: 30,
             on_pass_to: "arbiter".to_string(),
             on_fail_to: None,
@@ -1593,6 +1608,7 @@ mod tests {
             entry_condition: GraphEdgeCondition::Always,
             min_pass: 1,
             straggler_timeout_minutes: Some(15),
+            quorum_grace_minutes: None,
             timeout_minutes: 30,
             on_pass_to: "arbiter".to_string(),
             on_fail_to: None,
@@ -1613,7 +1629,7 @@ mod tests {
             .unwrap();
 
         // Only min_pass changes; straggler_timeout_minutes/timeout_minutes omitted.
-        db.update_ensemble_join_config("ens1", Some(1), None, None)
+        db.update_ensemble_join_config("ens1", Some(1), None, None, None)
             .unwrap();
         let after = db.get_ensemble("ens1").unwrap().unwrap();
         assert_eq!(after.min_pass, 1);
@@ -1621,7 +1637,7 @@ mod tests {
         assert_eq!(after.timeout_minutes, 30);
 
         // Explicitly clear straggler_timeout_minutes back to "defer to timeout_minutes".
-        db.update_ensemble_join_config("ens1", None, Some(None), None)
+        db.update_ensemble_join_config("ens1", None, Some(None), None, None)
             .unwrap();
         let cleared = db.get_ensemble("ens1").unwrap().unwrap();
         assert_eq!(cleared.straggler_timeout_minutes, None);
@@ -1724,6 +1740,7 @@ mod tests {
             entry_condition: GraphEdgeCondition::Always,
             min_pass: 2,
             straggler_timeout_minutes: None,
+            quorum_grace_minutes: None,
             timeout_minutes: 30,
             on_pass_to: "arbiter".to_string(),
             on_fail_to: None,
@@ -1886,6 +1903,7 @@ mod tests {
                 ),
             ],
             min_pass: None,
+            quorum_grace_minutes: None,
             builtin: true,
             created_at: Utc::now(),
         })
@@ -1927,6 +1945,7 @@ mod tests {
             prompt_template: "my own take".to_string(),
             members: vec![("claude".to_string(), None, None, None)],
             min_pass: Some(1),
+            quorum_grace_minutes: None,
             builtin: false,
             created_at: Utc::now(),
         };
@@ -2061,6 +2080,7 @@ mod tests {
             entry_condition: GraphEdgeCondition::Always,
             min_pass: 2,
             straggler_timeout_minutes: None,
+            quorum_grace_minutes: None,
             timeout_minutes: 30,
             on_pass_to: "arbiter".to_string(),
             on_fail_to: None,
@@ -2215,6 +2235,7 @@ mod tests {
             entry_condition: GraphEdgeCondition::Always,
             min_pass: 2,
             straggler_timeout_minutes: None,
+            quorum_grace_minutes: None,
             timeout_minutes: 30,
             on_pass_to: "arbiter".to_string(),
             on_fail_to: None,
@@ -2340,6 +2361,7 @@ mod tests {
             entry_condition: GraphEdgeCondition::Always,
             min_pass: 1,
             straggler_timeout_minutes: None,
+            quorum_grace_minutes: None,
             timeout_minutes: 30,
             on_pass_to: "arbiter".to_string(),
             on_fail_to: None,
@@ -2461,6 +2483,7 @@ mod tests {
             entry_condition: GraphEdgeCondition::Always,
             min_pass: 1,
             straggler_timeout_minutes: None,
+            quorum_grace_minutes: None,
             timeout_minutes: 30,
             on_pass_to: "arbiter".to_string(),
             on_fail_to: None,
@@ -2613,6 +2636,7 @@ mod tests {
             entry_condition: GraphEdgeCondition::Always,
             min_pass: 1,
             straggler_timeout_minutes: None,
+            quorum_grace_minutes: None,
             timeout_minutes: 30,
             on_pass_to: "arbiter".to_string(),
             on_fail_to: None,
@@ -2706,6 +2730,7 @@ mod tests {
             entry_condition: GraphEdgeCondition::Always,
             min_pass: 1,
             straggler_timeout_minutes: None,
+            quorum_grace_minutes: None,
             timeout_minutes: 30,
             on_pass_to: "arbiter".to_string(),
             on_fail_to: None,
@@ -2799,6 +2824,7 @@ mod tests {
             entry_condition: GraphEdgeCondition::Always,
             min_pass: 1,
             straggler_timeout_minutes: None,
+            quorum_grace_minutes: None,
             timeout_minutes: 30,
             on_pass_to: "arbiter".to_string(),
             on_fail_to: None,
@@ -2895,6 +2921,7 @@ mod tests {
             entry_condition: GraphEdgeCondition::Always,
             min_pass: 1,
             straggler_timeout_minutes: None,
+            quorum_grace_minutes: None,
             timeout_minutes: 30,
             on_pass_to: "arbiter".to_string(),
             on_fail_to: None,

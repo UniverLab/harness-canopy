@@ -693,6 +693,7 @@ impl Database {
                 entry_condition TEXT NOT NULL,
                 min_pass INTEGER NOT NULL,
                 straggler_timeout_minutes INTEGER,
+                quorum_grace_minutes INTEGER,
                 timeout_minutes INTEGER NOT NULL,
                 on_pass_to TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE,
                 on_fail_to TEXT REFERENCES graph_nodes(id) ON DELETE SET NULL,
@@ -729,6 +730,7 @@ impl Database {
                 prompt_template TEXT NOT NULL,
                 members TEXT NOT NULL,
                 min_pass INTEGER,
+                quorum_grace_minutes INTEGER,
                 builtin INTEGER NOT NULL DEFAULT 0,
                 created_at INTEGER NOT NULL
             );
@@ -1661,6 +1663,36 @@ impl Database {
         if !has_round_robin_index {
             conn.execute(
                 "ALTER TABLE ensembles ADD COLUMN round_robin_index INTEGER",
+                [],
+            )
+            .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
+        }
+
+        // CM24: quorum_grace_minutes — nullable, None = old behaviour.
+        let has_quorum_grace: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('ensembles') WHERE name = 'quorum_grace_minutes'",
+                [],
+                |row| Ok(row.get::<_, i32>(0)? > 0),
+            )
+            .unwrap_or(false);
+        if !has_quorum_grace {
+            conn.execute(
+                "ALTER TABLE ensembles ADD COLUMN quorum_grace_minutes INTEGER",
+                [],
+            )
+            .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
+        }
+        let has_bp_quorum_grace: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('ensemble_blueprints') WHERE name = 'quorum_grace_minutes'",
+                [],
+                |row| Ok(row.get::<_, i32>(0)? > 0),
+            )
+            .unwrap_or(false);
+        if !has_bp_quorum_grace {
+            conn.execute(
+                "ALTER TABLE ensemble_blueprints ADD COLUMN quorum_grace_minutes INTEGER",
                 [],
             )
             .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;

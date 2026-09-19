@@ -124,6 +124,8 @@ pub struct GraphExportEnsemble {
     pub timeout_minutes: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub straggler_timeout_minutes: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quorum_grace_minutes: Option<i64>,
     pub members: Vec<GraphExportEnsembleMember>,
 }
 
@@ -313,6 +315,7 @@ pub fn build_export_document(
             min_pass: ensemble.min_pass,
             timeout_minutes: ensemble.timeout_minutes,
             straggler_timeout_minutes: ensemble.straggler_timeout_minutes,
+            quorum_grace_minutes: ensemble.quorum_grace_minutes,
             members,
         });
     }
@@ -672,6 +675,17 @@ pub fn build_import_plan(
                 ));
             }
         }
+        // CM24: refuse negative grace on import (same wording pattern as
+        // straggler); refused for any kind on write, engine only honours it
+        // for parallel ensembles.
+        if let Some(grace) = doc_ensemble.quorum_grace_minutes {
+            if grace < 0 {
+                return Err(format!(
+                    "Ensemble '{}' has a negative quorum_grace_minutes.",
+                    doc_ensemble.name
+                ));
+            }
+        }
 
         let entry_from_node = resolve_target(
             &doc_ensemble.entry_from_node,
@@ -810,6 +824,7 @@ pub fn build_import_plan(
                 entry_condition: doc_ensemble.entry_condition.clone(),
                 min_pass: doc_ensemble.min_pass,
                 straggler_timeout_minutes: doc_ensemble.straggler_timeout_minutes,
+                quorum_grace_minutes: doc_ensemble.quorum_grace_minutes,
                 timeout_minutes: doc_ensemble.timeout_minutes,
                 on_pass_to,
                 on_fail_to,
@@ -1420,6 +1435,7 @@ mod tests {
             entry_condition: GraphEdgeCondition::Always,
             min_pass: member_ids.len() as i64,
             straggler_timeout_minutes: None,
+            quorum_grace_minutes: None,
             timeout_minutes: 30,
             on_pass_to: on_pass_to.to_string(),
             on_fail_to: None,
@@ -1715,6 +1731,7 @@ mod tests {
                 min_pass: 2,
                 timeout_minutes: 10,
                 straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
                 members: vec![
                     GraphExportEnsembleMember {
                         platform: Some("x".to_string()),
@@ -2024,6 +2041,7 @@ mod tests {
                 min_pass: 1,
                 timeout_minutes: 30,
                 straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
                 members: vec![GraphExportEnsembleMember {
                     platform: Some("claude".to_string()),
                     model: None,
@@ -2035,6 +2053,123 @@ mod tests {
         };
         let err = build_import_plan(&doc, "new-graph").unwrap_err();
         assert!(err.contains("2-8 members"));
+    }
+
+    /// CM24: a negative `quorum_grace_minutes` is refused on import with the
+    /// same wording pattern as the existing `straggler_timeout_minutes`
+    /// check — while `0` (terminate immediately) imports fine.
+    #[test]
+    fn import_plan_rejects_negative_quorum_grace() {
+        let doc = GraphExportDocument {
+            format_version: 1,
+            name: "x".to_string(),
+            description: None,
+            nodes: vec![
+                GraphExportNode {
+                    name: "kickoff".to_string(),
+                    kind: GraphNodeKind::Check,
+                    position: 1,
+                    config: serde_json::json!({"command": "true"}),
+                },
+                GraphExportNode {
+                    name: "next".to_string(),
+                    kind: GraphNodeKind::Check,
+                    position: 2,
+                    config: serde_json::json!({"command": "true"}),
+                },
+            ],
+            edges: vec![],
+            ensembles: vec![GraphExportEnsemble {
+                name: "team".to_string(),
+                kind: None,
+                prompt_template: "go".to_string(),
+                entry_from_node: GraphExportEnsembleTarget::Node("kickoff".to_string()),
+                entry_condition: GraphEdgeCondition::Always,
+                on_pass_to: GraphExportEnsembleTarget::Node("next".to_string()),
+                on_fail_to: None,
+                min_pass: 1,
+                timeout_minutes: 30,
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: Some(-1),
+                members: vec![
+                    GraphExportEnsembleMember {
+                        platform: Some("claude".to_string()),
+                        model: None,
+                        prompt_override: None,
+                        timeout_minutes: None,
+                    },
+                    GraphExportEnsembleMember {
+                        platform: Some("claude".to_string()),
+                        model: None,
+                        prompt_override: None,
+                        timeout_minutes: None,
+                    },
+                ],
+            }],
+            infra_node: None,
+        };
+        let err = build_import_plan(&doc, "new-graph").unwrap_err();
+        assert!(
+            err.contains("negative quorum_grace_minutes"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// CM24: `quorum_grace_minutes` survives the export→import round trip,
+    /// including `0`, and an absent field imports as `None` (old documents
+    /// keep the wait-for-all behaviour).
+    #[test]
+    fn import_plan_round_trips_quorum_grace_minutes() {
+        let doc = GraphExportDocument {
+            format_version: 1,
+            name: "x".to_string(),
+            description: None,
+            nodes: vec![
+                GraphExportNode {
+                    name: "kickoff".to_string(),
+                    kind: GraphNodeKind::Check,
+                    position: 1,
+                    config: serde_json::json!({"command": "true"}),
+                },
+                GraphExportNode {
+                    name: "next".to_string(),
+                    kind: GraphNodeKind::Check,
+                    position: 2,
+                    config: serde_json::json!({"command": "true"}),
+                },
+            ],
+            edges: vec![],
+            ensembles: vec![GraphExportEnsemble {
+                name: "team".to_string(),
+                kind: None,
+                prompt_template: "go".to_string(),
+                entry_from_node: GraphExportEnsembleTarget::Node("kickoff".to_string()),
+                entry_condition: GraphEdgeCondition::Always,
+                on_pass_to: GraphExportEnsembleTarget::Node("next".to_string()),
+                on_fail_to: None,
+                min_pass: 1,
+                timeout_minutes: 30,
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: Some(0),
+                members: vec![
+                    GraphExportEnsembleMember {
+                        platform: Some("claude".to_string()),
+                        model: None,
+                        prompt_override: None,
+                        timeout_minutes: None,
+                    },
+                    GraphExportEnsembleMember {
+                        platform: Some("claude".to_string()),
+                        model: None,
+                        prompt_override: None,
+                        timeout_minutes: None,
+                    },
+                ],
+            }],
+            infra_node: None,
+        };
+        let plan = build_import_plan(&doc, "new-graph").unwrap();
+        assert_eq!(plan.ensembles[0].ensemble.quorum_grace_minutes, Some(0));
     }
 
     /// CM23 (FR6, requirement 5's import half): a member's own exported
@@ -2073,6 +2208,7 @@ mod tests {
                 min_pass: 1,
                 timeout_minutes: 20,
                 straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
                 members: vec![
                     GraphExportEnsembleMember {
                         platform: Some("claude".to_string()),

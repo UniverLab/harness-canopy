@@ -66,8 +66,8 @@ impl Database {
         for ensemble_plan in &plan.ensembles {
             let ensemble = &ensemble_plan.ensemble;
             tx.execute(
-                "INSERT INTO ensembles (id, spec_id, graph_id, name, prompt_template, join_node_id, entry_from_node, entry_condition, min_pass, straggler_timeout_minutes, timeout_minutes, on_pass_to, on_fail_to, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                "INSERT INTO ensembles (id, spec_id, graph_id, name, prompt_template, join_node_id, entry_from_node, entry_condition, min_pass, straggler_timeout_minutes, quorum_grace_minutes, timeout_minutes, on_pass_to, on_fail_to, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                 params![
                     &ensemble.id,
                     &ensemble.spec_id,
@@ -79,6 +79,7 @@ impl Database {
                     ensemble.entry_condition.as_str(),
                     ensemble.min_pass,
                     ensemble.straggler_timeout_minutes,
+                    ensemble.quorum_grace_minutes,
                     ensemble.timeout_minutes,
                     &ensemble.on_pass_to,
                     &ensemble.on_fail_to,
@@ -290,6 +291,7 @@ mod tests {
                 min_pass: 2,
                 timeout_minutes: 30,
                 straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
                 members: vec![
                     GraphExportEnsembleMember {
                         platform: Some("openrouter".to_string()),
