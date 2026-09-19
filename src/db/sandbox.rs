@@ -91,7 +91,7 @@ impl Database {
     }
 
     /// Reconstruct the live [`Sandbox`] for a still-`active` run, so a
-    /// resumed loop (or a reopened session) keeps operating in its worktree
+    /// resumed graph (or a reopened session) keeps operating in its worktree
     /// instead of silently falling back to the user's real checkout.
     pub fn get_active_sandbox_for_owner(
         &self,
@@ -253,7 +253,8 @@ mod tests {
     fn test_sandbox_run_roundtrip() {
         let db = test_db();
         let sandbox = test_sandbox();
-        db.insert_sandbox_run(&sandbox, "loop", "loop-123").unwrap();
+        db.insert_sandbox_run(&sandbox, "graph", "graph-123")
+            .unwrap();
 
         let retrieved = db.get_sandbox_run("test-sandbox-id").unwrap().unwrap();
         assert_eq!(retrieved.id, "test-sandbox-id");
@@ -261,8 +262,8 @@ mod tests {
         assert_eq!(retrieved.base_branch, "main");
         assert_eq!(retrieved.sandbox_branch, "canopy/sandbox-test");
         assert_eq!(retrieved.cli_name, "opencode");
-        assert_eq!(retrieved.owner_type, "loop");
-        assert_eq!(retrieved.owner_id, "loop-123");
+        assert_eq!(retrieved.owner_type, "graph");
+        assert_eq!(retrieved.owner_id, "graph-123");
         assert_eq!(retrieved.status, "active");
     }
 
@@ -270,7 +271,8 @@ mod tests {
     fn test_sandbox_run_status_transitions() {
         let db = test_db();
         let sandbox = test_sandbox();
-        db.insert_sandbox_run(&sandbox, "loop", "loop-123").unwrap();
+        db.insert_sandbox_run(&sandbox, "graph", "graph-123")
+            .unwrap();
 
         db.update_sandbox_run_status("test-sandbox-id", "merging")
             .unwrap();
@@ -287,7 +289,8 @@ mod tests {
     fn test_abandoned_sandboxes_detected() {
         let db = test_db();
         let sandbox = test_sandbox();
-        db.insert_sandbox_run(&sandbox, "loop", "loop-123").unwrap();
+        db.insert_sandbox_run(&sandbox, "graph", "graph-123")
+            .unwrap();
 
         let active = db.list_active_sandbox_runs().unwrap();
         assert_eq!(active.len(), 1);
@@ -303,7 +306,8 @@ mod tests {
     fn test_cleanup_error_roundtrip_and_finished_list() {
         let db = test_db();
         let sandbox = test_sandbox();
-        db.insert_sandbox_run(&sandbox, "loop", "loop-123").unwrap();
+        db.insert_sandbox_run(&sandbox, "graph", "graph-123")
+            .unwrap();
 
         // A fresh row carries no error.
         let row = db.get_sandbox_run("test-sandbox-id").unwrap().unwrap();

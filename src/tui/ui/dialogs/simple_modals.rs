@@ -26,34 +26,37 @@ pub fn draw_delete_project_confirm(frame: &mut Frame, theme: &Theme) {
     );
 }
 
-pub fn draw_archive_loop_confirm(frame: &mut Frame, theme: &Theme) {
+pub fn draw_archive_graph_confirm(frame: &mut Frame, theme: &Theme) {
     draw_modal_confirm(
         frame,
-        " Archive Loop? ",
-        "Archive this loop? It leaves the main list but its specs and run history stay intact — restore it anytime from the archive.\nY/Enter = Confirm  N/Esc = Cancel",
+        " Archive Graph? ",
+        "Archive this graph? It leaves the main list but its specs and run history stay intact — restore it anytime from the archive.\nY/Enter = Confirm  N/Esc = Cancel",
         theme,
     );
 }
 
-pub fn draw_permanent_delete_loop_confirm(frame: &mut Frame, theme: &Theme) {
+pub fn draw_permanent_delete_graph_confirm(frame: &mut Frame, theme: &Theme) {
     draw_modal_confirm(
         frame,
-        " Permanently Delete Loop? ",
-        "Permanently delete this loop? This destroys its full run history — every node run, output, and session id — forever. This cannot be undone.\nY/Enter = Confirm  N/Esc = Cancel",
+        " Permanently Delete Graph? ",
+        "Permanently delete this graph? This destroys its full run history — every node run, output, and session id — forever. This cannot be undone.\nY/Enter = Confirm  N/Esc = Cancel",
         theme,
     );
 }
 
-/// Confirmation for `loop_reset` (`x` on a completed/failed loop) — same
-/// wording as the CLI's own prompt (`daemon::loop_cli::confirm_reset`), so
+/// Confirmation for `graph_reset` (`x` on a completed/failed graph) — same
+/// wording as the CLI's own prompt (`daemon::graph_cli::confirm_reset`), so
 /// the two surfaces never teach different levels of caution.
-pub fn draw_loop_reset_confirm(frame: &mut Frame, app: &App, theme: &Theme) {
-    let loop_name = app.selected_loop().map(|lp| lp.name.as_str()).unwrap_or("");
+pub fn draw_graph_reset_confirm(frame: &mut Frame, app: &App, theme: &Theme) {
+    let graph_name = app
+        .selected_graph()
+        .map(|lp| lp.name.as_str())
+        .unwrap_or("");
     draw_modal_confirm(
         frame,
-        " Reset Loop? ",
+        " Reset Graph? ",
         &format!(
-            "Reset loop '{loop_name}' back to pending? This clears progress on its non-completed specs.\ny: reset, n/Esc: abort"
+            "Reset graph '{graph_name}' back to pending? This clears progress on its non-completed specs.\ny: reset, n/Esc: abort"
         ),
         theme,
     );
@@ -106,7 +109,7 @@ fn category_label(category: &crate::domain::gamification::MissionCategory) -> &'
         MissionCategory::Environment => "Environment",
         MissionCategory::Intelligence => "Intelligence",
         MissionCategory::Projects => "Projects",
-        MissionCategory::Loop => "Loop",
+        MissionCategory::Graph => "Graph",
         MissionCategory::Seeds => "Seeds",
         MissionCategory::SysInfo => "System",
     }
@@ -179,7 +182,7 @@ mod tests {
             "Intelligence"
         );
         assert_eq!(category_label(&MissionCategory::Projects), "Projects");
-        assert_eq!(category_label(&MissionCategory::Loop), "Loop");
+        assert_eq!(category_label(&MissionCategory::Graph), "Graph");
         assert_eq!(category_label(&MissionCategory::Seeds), "Seeds");
         assert_eq!(category_label(&MissionCategory::SysInfo), "System");
     }
@@ -208,7 +211,7 @@ mod tests {
             MissionCategory::Environment,
             MissionCategory::Intelligence,
             MissionCategory::Projects,
-            MissionCategory::Loop,
+            MissionCategory::Graph,
             MissionCategory::Seeds,
             MissionCategory::SysInfo,
         ] {
@@ -269,7 +272,7 @@ mod tests {
     }
 
     #[test]
-    fn draw_archive_loop_confirm_renders_without_panic() {
+    fn draw_archive_graph_confirm_renders_without_panic() {
         use crate::db::Database;
         use crate::tui::app::types::App;
         use ratatui::backend::TestBackend;
@@ -288,13 +291,13 @@ mod tests {
         let theme = Theme::classic();
         terminal
             .draw(|frame| {
-                draw_archive_loop_confirm(frame, &theme);
+                draw_archive_graph_confirm(frame, &theme);
             })
             .unwrap();
     }
 
     #[test]
-    fn draw_permanent_delete_loop_confirm_renders_without_panic() {
+    fn draw_permanent_delete_graph_confirm_renders_without_panic() {
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
 
@@ -303,7 +306,7 @@ mod tests {
         let theme = Theme::classic();
         terminal
             .draw(|frame| {
-                draw_permanent_delete_loop_confirm(frame, &theme);
+                draw_permanent_delete_graph_confirm(frame, &theme);
             })
             .unwrap();
     }
@@ -397,7 +400,7 @@ mod tests {
     #[test]
     fn category_label_returns_correct_string_for_each_variant() {
         assert_eq!(category_label(&MissionCategory::Environment), "Environment");
-        assert_eq!(category_label(&MissionCategory::Loop), "Loop");
+        assert_eq!(category_label(&MissionCategory::Graph), "Graph");
     }
 
     #[test]
@@ -552,7 +555,7 @@ pub fn draw_legend(frame: &mut Frame, app: &mut App, theme: &Theme) {
             MissionCategory::Environment => Color::Rgb(100, 220, 100),
             MissionCategory::Intelligence => Color::Rgb(100, 180, 255),
             MissionCategory::Projects => Color::Rgb(255, 200, 80),
-            MissionCategory::Loop => Color::Rgb(220, 120, 255),
+            MissionCategory::Graph => Color::Rgb(220, 120, 255),
             MissionCategory::Seeds => Color::Rgb(80, 220, 180),
             MissionCategory::SysInfo => Color::Rgb(255, 130, 80),
         }

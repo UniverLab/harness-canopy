@@ -99,7 +99,7 @@ pub const TAB_RAW_LABEL: &str = " Raw ";
 /// Inline date-time picker state for the send control (U11). Opened with
 /// Enter on `send: date`, preseeded with the current local time. An alias
 /// for the shared picker ([`crate::tui::app::dialog::datetime_picker::DateTimeEdit`])
-/// also used by the loop autorun dialog (C18), so the two never diverge into
+/// also used by the graph autorun dialog (C18), so the two never diverge into
 /// separate widgets.
 pub type SendAtEdit = crate::tui::app::dialog::datetime_picker::DateTimeEdit;
 
@@ -2375,7 +2375,7 @@ mod tests {
 
     #[test]
     fn for_instruction_prompt_restores_into_a_normal_tab_dialog() {
-        let prompt = "Loop nightly failed: build broke";
+        let prompt = "Graph nightly failed: build broke";
         let state = PersistedBuilderState::for_instruction_prompt(prompt);
         let json = serde_json::to_string(&state).expect("serialize");
         let restored: PersistedBuilderState = serde_json::from_str(&json).expect("deserialize");
@@ -4532,7 +4532,7 @@ pub struct PersistedBuilderState {
 impl PersistedBuilderState {
     /// Canonical minimal structured state for a single instruction prompt —
     /// the same shape [`SimplePromptDialog::new`] produces, with
-    /// `instruction_1` holding `prompt`. Used by loop interactive hooks so a
+    /// `instruction_1` holding `prompt`. Used by graph interactive hooks so a
     /// hook-enqueued scheduled send carries the structured representation an
     /// equivalent promptbuilder message would have, rather than an ad-hoc
     /// JSON blob the builder cannot restore. The raw prompt itself is

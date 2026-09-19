@@ -249,15 +249,15 @@ impl App {
                     );
                     // A hook-originated message stays identifiable as such:
                     // the delivered prompt is exactly the promptbuilder text,
-                    // and the loop/event that sent it is surfaced here rather
+                    // and the graph/event that sent it is surfaced here rather
                     // than being buried in that text.
                     if let Some(provenance) = send.provenance.as_ref() {
                         if provenance.kind == "hook" {
                             crate::domain::notification::send_notification(
                                 "Hook message delivered",
                                 &format!(
-                                    "Loop '{}' sent a message to this session (event '{}').",
-                                    provenance.loop_id, provenance.event
+                                    "Graph '{}' sent a message to this session (event '{}').",
+                                    provenance.graph_id, provenance.event
                                 ),
                                 crate::domain::notification::NotificationLevel::Info,
                             );
@@ -443,11 +443,11 @@ mod tests {
         assert!(!app.scheduled_sends_restored);
         let fire_at = chrono::Utc::now() - chrono::Duration::minutes(5);
         let provenance =
-            crate::db::scheduled_sends::ScheduledSendProvenance::hook("loop-hook", "on_failed");
+            crate::db::scheduled_sends::ScheduledSendProvenance::hook("graph-hook", "on_failed");
         app.db
             .insert_scheduled_send(
                 "ss-hook-held",
-                "Loop Loop failed",
+                "Graph Graph failed",
                 "operator-session",
                 None,
                 fire_at,

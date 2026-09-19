@@ -44,7 +44,7 @@ pub struct CliConfig {
     pub session_resume_cmd: Option<String>,
     /// Flag that SETS the session id when spawning a NEW headless session,
     /// e.g. `"--session-id"` on claude/gemini/qwen/copilot. Canopy mints a
-    /// UUID, passes it after this flag, and records it on the loop run so
+    /// UUID, passes it after this flag, and records it on the graph run so
     /// the session can be resumed later. Preferred capture strategy: the id
     /// is known before the process even starts, so nothing has to be parsed
     /// from output or session listings.
@@ -193,7 +193,7 @@ pub struct EffortDeclaration {
 
 /// The one place the "why `effort = value` won't apply on `platform`" wording
 /// is produced. `None` means it WILL apply. Every surface that reports
-/// non-application — the loop run record, `loop_preflight`, the background
+/// non-application — the graph run record, `graph_preflight`, the background
 /// agent log — goes through this so the message can never drift between them
 /// (the CM7 pre-mortem: a notice that says one thing here and another there
 /// is a notice someone stops trusting).
@@ -219,7 +219,7 @@ pub fn effort_rejection_reason(
 /// platform never declared one) and a blank string (CB34 — antigravity's
 /// `model_flag = ""`, which was being emitted as a stray empty argv word the
 /// CLI rejects before the run starts) both mean "this platform cannot select
-/// a model explicitly". The invocation path, the probe and `loop_preflight`
+/// a model explicitly". The invocation path, the probe and `graph_preflight`
 /// all read this one function so they can never disagree.
 pub fn model_flag_selects_model(model_flag: Option<&str>) -> bool {
     matches!(model_flag, Some(f) if !f.trim().is_empty())

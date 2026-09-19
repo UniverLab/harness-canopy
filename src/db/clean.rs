@@ -98,8 +98,8 @@ impl Database {
     /// orphaned-project report.
     pub fn project_dependent_counts(&self, workdir: &str) -> Result<ProjectDependentCounts> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
-        let loops: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM loops WHERE workdir = ?1",
+        let graphs: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM graphs WHERE workdir = ?1",
             params![workdir],
             |row| row.get(0),
         )?;
@@ -114,7 +114,7 @@ impl Database {
             |row| row.get(0),
         )?;
         Ok(ProjectDependentCounts {
-            loops,
+            graphs,
             interactive_sessions,
             terminal_sessions,
         })
@@ -125,12 +125,12 @@ impl Database {
     /// `project_hash` column points at this project) and the FK-CASCADE
     /// follow-on rows that the database will auto-remove once the direct
     /// target is deleted. The follow-on counts are needed so the printed
-    /// plan can show the real blast radius (a loop with a 200-node graph
-    /// deletes 200 more rows than just the loop row itself).
+    /// plan can show the real blast radius (a graph with a 200-node graph
+    /// deletes 200 more rows than just the graph row itself).
     ///
     /// Single transaction at READ COMMITTED (no writes) so the counts are
-    /// internally consistent: a row counted in `loop_specs` here cannot
-    /// have disappeared from `loops` between the two queries.
+    /// internally consistent: a row counted in `graph_specs` here cannot
+    /// have disappeared from `graphs` between the two queries.
     ///
     /// `hash` is the project's `projects.hash` (what `intelligence_nodes.
     /// project_hash` stores) — distinct from `workdir`, which every other
@@ -159,9 +159,9 @@ impl Database {
     /// applies or none of it").
     ///
     /// `pragma foreign_keys=ON` is in effect (see `Database::new`), so
-    /// deleting `loops` cascades through `loop_specs` (loop-bound only) /
-    /// `loop_nodes` / `loop_edges` / `loop_runs` /
-    /// `loop_completion_hook_runs` / `ensembles` / `ensemble_members` /
+    /// deleting `graphs` cascades through `graph_specs` (graph-bound only) /
+    /// `graph_nodes` / `graph_edges` / `graph_runs` /
+    /// `graph_completion_hook_runs` / `ensembles` / `ensemble_members` /
     /// `queue_members`; deleting `interactive_sessions` cascades through
     /// `seed_sessions`; deleting `intelligence_nodes` cascades through
     /// `intelligence_edges`. Those follow-on rows are therefore never
@@ -209,12 +209,12 @@ impl Database {
             "DELETE FROM interactive_sessions WHERE working_dir = ?1",
             params![workdir],
         )?;
-        // CASCADEs to loop-bound loop_specs, which CASCADEs further to
-        // loop_nodes / loop_edges / ensembles / ensemble_members /
-        // queue_members / loop_runs; loop_completion_hook_runs CASCADEs
-        // directly off loop_id. Standalone specs (loop_id IS NULL) are
+        // CASCADEs to graph-bound graph_specs, which CASCADEs further to
+        // graph_nodes / graph_edges / ensembles / ensemble_members /
+        // queue_members / graph_runs; graph_completion_hook_runs CASCADEs
+        // directly off graph_id. Standalone specs (graph_id IS NULL) are
         // untouched, matching count_hard_cascade.
-        tx.execute("DELETE FROM loops WHERE workdir = ?1", params![workdir])?;
+        tx.execute("DELETE FROM graphs WHERE workdir = ?1", params![workdir])?;
         // CASCADEs to intelligence_edges.
         tx.execute(
             "DELETE FROM intelligence_nodes WHERE project_hash = ?1",
@@ -285,7 +285,7 @@ impl Database {
     }
 
     /// What's currently in flight that a `canopy clean --stop-daemon`
-    /// reclaim window must not interrupt: a running loop, or a live
+    /// reclaim window must not interrupt: a running graph, or a live
     /// interactive session (a human or TUI actively attached). Mirrors the
     /// same `status = 'running'` / `status IN ('active', 'resumed')` checks
     /// [`Self::project_hard_cascade_skip_reason`] already uses for "a human
@@ -295,13 +295,13 @@ impl Database {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
         let mut reasons = Vec::new();
 
-        let running_loops: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM loops WHERE status = 'running'",
+        let running_graphs: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM graphs WHERE status = 'running'",
             [],
             |row| row.get(0),
         )?;
-        if running_loops > 0 {
-            reasons.push(format!("{running_loops} loop(s) currently running"));
+        if running_graphs > 0 {
+            reasons.push(format!("{running_graphs} graph(s) currently running"));
         }
 
         let active_sessions: i64 = conn.query_row(
@@ -319,12 +319,12 @@ impl Database {
     }
 
     /// Why a project must be skipped by `--hard`, if any. Returns `Some` only
-    /// when the project has either a `Running` loop or an `active`/`resumed`
+    /// when the project has either a `Running` graph or an `active`/`resumed`
     /// interactive session, both of which are in-flight state the cascade
     /// MUST NOT touch.
     ///
     /// Active/resumed sessions are checked first: those are the most direct
-    /// "a human or TUI is looking at this right now" signal (a running loop
+    /// "a human or TUI is looking at this right now" signal (a running graph
     /// may also be reported separately as part of the project's history).
     pub fn project_hard_cascade_skip_reason(
         &self,
@@ -342,16 +342,16 @@ impl Database {
         if active_session {
             return Ok(Some(HardCascadeSkipReason::ActiveSession));
         }
-        let running_loop: bool = conn.query_row(
+        let running_graph: bool = conn.query_row(
             "SELECT EXISTS(
-                SELECT 1 FROM loops
+                SELECT 1 FROM graphs
                  WHERE workdir = ?1 AND status = 'running'
              )",
             params![workdir],
             |row| row.get::<_, i64>(0),
         )? != 0;
-        if running_loop {
-            return Ok(Some(HardCascadeSkipReason::RunningLoop));
+        if running_graph {
+            return Ok(Some(HardCascadeSkipReason::RunningGraph));
         }
         Ok(None)
     }
@@ -369,8 +369,8 @@ fn count_hard_cascade(
     workdir: &str,
 ) -> Result<HardCascadeCounts> {
     // Direct targets — rows whose own column references the project.
-    let loops: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM loops WHERE workdir = ?1",
+    let graphs: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM graphs WHERE workdir = ?1",
         params![workdir],
         |row| row.get(0),
     )?;
@@ -421,13 +421,13 @@ fn count_hard_cascade(
     )?;
 
     // Follow-on (FK CASCADE) targets: only count rows attached to *this*
-    // project's loops / interactive_sessions / intelligence_nodes.
+    // project's graphs / interactive_sessions / intelligence_nodes.
     // Counting everything in the table would over-report by
     // attributing other projects' rows to this one.
     //
-    // `loop_specs` (and everything keyed off it below) counts only
-    // *loop-bound* specs (`loop_id` set, pointing at one of this
-    // project's loops) — a standalone spec (`loop_id IS NULL`) is a
+    // `graph_specs` (and everything keyed off it below) counts only
+    // *graph-bound* specs (`graph_id` set, pointing at one of this
+    // project's graphs) — a standalone spec (`graph_id IS NULL`) is a
     // shared/backlog entity the cascade never deletes, even when its
     // own `workdir` column happens to match this project, so it must
     // never be counted here either (this count has to match exactly
@@ -436,47 +436,47 @@ fn count_hard_cascade(
     // Every placeholder below is `?1` reused, never `?2`/`?3` — passing
     // more than one bound value per query is a rusqlite parameter-count
     // mismatch, not "extra safety".
-    let loop_specs: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM loop_specs
-              WHERE loop_id IN (SELECT id FROM loops WHERE workdir = ?1)",
+    let graph_specs: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM graph_specs
+              WHERE graph_id IN (SELECT id FROM graphs WHERE workdir = ?1)",
         params![workdir],
         |row| row.get(0),
     )?;
-    let loop_nodes: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM loop_nodes ln
-              WHERE (ln.loop_id IS NOT NULL AND ln.loop_id IN (SELECT id FROM loops WHERE workdir = ?1))
+    let graph_nodes: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM graph_nodes ln
+              WHERE (ln.graph_id IS NOT NULL AND ln.graph_id IN (SELECT id FROM graphs WHERE workdir = ?1))
                  OR (ln.spec_id IS NOT NULL AND ln.spec_id IN (
-                      SELECT id FROM loop_specs WHERE loop_id IN (SELECT id FROM loops WHERE workdir = ?1)
+                      SELECT id FROM graph_specs WHERE graph_id IN (SELECT id FROM graphs WHERE workdir = ?1)
                  ))",
             params![workdir],
             |row| row.get(0),
         )?;
-    let loop_edges: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM loop_edges le
-              WHERE (le.loop_id IS NOT NULL AND le.loop_id IN (SELECT id FROM loops WHERE workdir = ?1))
+    let graph_edges: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM graph_edges le
+              WHERE (le.graph_id IS NOT NULL AND le.graph_id IN (SELECT id FROM graphs WHERE workdir = ?1))
                  OR (le.spec_id IS NOT NULL AND le.spec_id IN (
-                      SELECT id FROM loop_specs WHERE loop_id IN (SELECT id FROM loops WHERE workdir = ?1)
+                      SELECT id FROM graph_specs WHERE graph_id IN (SELECT id FROM graphs WHERE workdir = ?1)
                  ))",
             params![workdir],
             |row| row.get(0),
         )?;
-    let loop_runs: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM loop_runs
-              WHERE loop_id IN (SELECT id FROM loops WHERE workdir = ?1)",
+    let graph_runs: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM graph_runs
+              WHERE graph_id IN (SELECT id FROM graphs WHERE workdir = ?1)",
         params![workdir],
         |row| row.get(0),
     )?;
-    let loop_completion_hook_runs: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM loop_completion_hook_runs
-              WHERE loop_id IN (SELECT id FROM loops WHERE workdir = ?1)",
+    let graph_completion_hook_runs: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM graph_completion_hook_runs
+              WHERE graph_id IN (SELECT id FROM graphs WHERE workdir = ?1)",
         params![workdir],
         |row| row.get(0),
     )?;
     let ensembles: i64 = tx.query_row(
             "SELECT COUNT(*) FROM ensembles
-              WHERE (loop_id IS NOT NULL AND loop_id IN (SELECT id FROM loops WHERE workdir = ?1))
+              WHERE (graph_id IS NOT NULL AND graph_id IN (SELECT id FROM graphs WHERE workdir = ?1))
                  OR (spec_id IS NOT NULL AND spec_id IN (
-                      SELECT id FROM loop_specs WHERE loop_id IN (SELECT id FROM loops WHERE workdir = ?1)
+                      SELECT id FROM graph_specs WHERE graph_id IN (SELECT id FROM graphs WHERE workdir = ?1)
                  ))",
             params![workdir],
             |row| row.get(0),
@@ -484,10 +484,10 @@ fn count_hard_cascade(
     let ensemble_members: i64 = tx.query_row(
             "SELECT COUNT(*) FROM ensemble_members
               WHERE node_id IN (
-                  SELECT id FROM loop_nodes ln
-                   WHERE (ln.loop_id IS NOT NULL AND ln.loop_id IN (SELECT id FROM loops WHERE workdir = ?1))
+                  SELECT id FROM graph_nodes ln
+                   WHERE (ln.graph_id IS NOT NULL AND ln.graph_id IN (SELECT id FROM graphs WHERE workdir = ?1))
                       OR (ln.spec_id IS NOT NULL AND ln.spec_id IN (
-                           SELECT id FROM loop_specs WHERE loop_id IN (SELECT id FROM loops WHERE workdir = ?1)
+                           SELECT id FROM graph_specs WHERE graph_id IN (SELECT id FROM graphs WHERE workdir = ?1)
                       ))
               )",
             params![workdir],
@@ -496,7 +496,7 @@ fn count_hard_cascade(
     let queue_members: i64 = tx.query_row(
             "SELECT COUNT(*) FROM queue_members
               WHERE spec_id IN (
-                  SELECT id FROM loop_specs WHERE loop_id IN (SELECT id FROM loops WHERE workdir = ?1)
+                  SELECT id FROM graph_specs WHERE graph_id IN (SELECT id FROM graphs WHERE workdir = ?1)
               )",
             params![workdir],
             |row| row.get(0),
@@ -516,7 +516,7 @@ fn count_hard_cascade(
     )?;
 
     Ok(HardCascadeCounts {
-        loops,
+        graphs,
         interactive_sessions,
         terminal_sessions,
         last_prompts,
@@ -526,11 +526,11 @@ fn count_hard_cascade(
         sync_locks,
         intelligence_nodes,
         operational_sessions,
-        loop_specs,
-        loop_nodes,
-        loop_edges,
-        loop_runs,
-        loop_completion_hook_runs,
+        graph_specs,
+        graph_nodes,
+        graph_edges,
+        graph_runs,
+        graph_completion_hook_runs,
         ensembles,
         ensemble_members,
         queue_members,
@@ -542,7 +542,7 @@ fn count_hard_cascade(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::loops::{LoopSpecStatus, LoopStatus};
+    use crate::domain::graphs::{GraphSpecStatus, GraphStatus};
     use tempfile::tempdir;
 
     fn test_db() -> Database {
@@ -656,7 +656,7 @@ mod tests {
         let counts = db.project_dependent_counts("/proj").unwrap();
         assert_eq!(counts.interactive_sessions, 1);
         assert_eq!(counts.terminal_sessions, 1);
-        assert_eq!(counts.loops, 0);
+        assert_eq!(counts.graphs, 0);
 
         let counts_other = db.project_dependent_counts("/elsewhere").unwrap();
         assert_eq!(counts_other.interactive_sessions, 0);
@@ -684,17 +684,17 @@ mod tests {
         }
     }
 
-    fn make_loop(
+    fn make_graph(
         id: &str,
         workdir: &str,
-        status: crate::domain::loops::LoopStatus,
-    ) -> crate::domain::loops::Loop {
-        crate::domain::loops::Loop {
+        status: crate::domain::graphs::GraphStatus,
+    ) -> crate::domain::graphs::Graph {
+        crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
             infra_node_id: None,
             id: id.to_string(),
-            name: format!("loop-{id}"),
+            name: format!("graph-{id}"),
             description: None,
             workdir: workdir.to_string(),
             status,
@@ -717,7 +717,7 @@ mod tests {
         db.upsert_project(&make_project("hash-x", workdir)).unwrap();
 
         // Direct targets.
-        db.insert_loop(&make_loop("loop-1", workdir, LoopStatus::Completed))
+        db.insert_graph(&make_graph("graph-1", workdir, GraphStatus::Completed))
             .unwrap();
         db.insert_interactive_session(
             "s-old",
@@ -747,15 +747,15 @@ mod tests {
         })
         .unwrap();
 
-        // Cascade children attached to the loop.
-        let spec = crate::domain::loops::LoopSpec {
+        // Cascade children attached to the graph.
+        let spec = crate::domain::graphs::GraphSpec {
             id: "spec-1".to_string(),
-            loop_id: Some("loop-1".to_string()),
+            graph_id: Some("graph-1".to_string()),
             name: "spec".to_string(),
             description: None,
             position: 0,
             parallelizable: false,
-            status: LoopSpecStatus::Pending,
+            status: GraphSpecStatus::Pending,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
@@ -765,31 +765,31 @@ mod tests {
             completed_via_reason: None,
             completed_via_at: None,
         };
-        db.insert_loop_spec(&spec).unwrap();
-        let node = crate::domain::loops::LoopNode {
+        db.insert_graph_spec(&spec).unwrap();
+        let node = crate::domain::graphs::GraphNode {
             id: "node-1".to_string(),
             spec_id: Some("spec-1".to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "n1".to_string(),
-            kind: crate::domain::loops::LoopNodeKind::Agent,
+            kind: crate::domain::graphs::GraphNodeKind::Agent,
             config: serde_json::json!({}),
             position: 0,
             created_at: chrono::Utc::now(),
         };
-        db.insert_loop_node(&node).unwrap();
+        db.insert_graph_node(&node).unwrap();
 
-        // A standalone spec (no owning loop) whose own `workdir` happens to
+        // A standalone spec (no owning graph) whose own `workdir` happens to
         // match this project. It's a shared/backlog entity the cascade
         // never deletes (spec C2: "standalone specs ... are NOT deleted"),
         // so it must not inflate the printed plan either.
-        db.insert_loop_spec(&crate::domain::loops::LoopSpec {
+        db.insert_graph_spec(&crate::domain::graphs::GraphSpec {
             id: "spec-standalone".to_string(),
-            loop_id: None,
+            graph_id: None,
             name: "standalone".to_string(),
             description: None,
             position: 0,
             parallelizable: false,
-            status: LoopSpecStatus::Pending,
+            status: GraphSpecStatus::Pending,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
@@ -802,15 +802,15 @@ mod tests {
         .unwrap();
 
         let counts = db.project_hard_cascade_counts("hash-x", workdir).unwrap();
-        assert_eq!(counts.loops, 1);
+        assert_eq!(counts.graphs, 1);
         assert_eq!(counts.interactive_sessions, 1);
         assert_eq!(counts.terminal_sessions, 1);
         // `upsert_project` auto-creates a kind='project' intelligence root
         // node, so this is that root plus the fact node inserted above.
         assert_eq!(counts.intelligence_nodes, 2);
-        // Only the loop-bound spec is counted; the standalone spec is not.
-        assert_eq!(counts.loop_specs, 1);
-        assert_eq!(counts.loop_nodes, 1);
+        // Only the graph-bound spec is counted; the standalone spec is not.
+        assert_eq!(counts.graph_specs, 1);
+        assert_eq!(counts.graph_nodes, 1);
     }
 
     #[test]
@@ -823,15 +823,15 @@ mod tests {
     }
 
     #[test]
-    fn hard_cascade_skip_reason_detects_running_loop() {
+    fn hard_cascade_skip_reason_detects_running_graph() {
         let db = test_db();
         let workdir = "/proj-running";
         db.upsert_project(&make_project("hash-run", workdir))
             .unwrap();
-        db.insert_loop(&make_loop("loop-r", workdir, LoopStatus::Running))
+        db.insert_graph(&make_graph("graph-r", workdir, GraphStatus::Running))
             .unwrap();
         let reason = db.project_hard_cascade_skip_reason(workdir).unwrap();
-        assert_eq!(reason, Some(HardCascadeSkipReason::RunningLoop));
+        assert_eq!(reason, Some(HardCascadeSkipReason::RunningGraph));
     }
 
     #[test]
@@ -856,12 +856,12 @@ mod tests {
     }
 
     #[test]
-    fn hard_cascade_skip_reason_prefers_active_session_over_running_loop() {
+    fn hard_cascade_skip_reason_prefers_active_session_over_running_graph() {
         let db = test_db();
         let workdir = "/proj-both";
         db.upsert_project(&make_project("hash-both", workdir))
             .unwrap();
-        db.insert_loop(&make_loop("loop-b", workdir, LoopStatus::Running))
+        db.insert_graph(&make_graph("graph-b", workdir, GraphStatus::Running))
             .unwrap();
         db.insert_interactive_session(
             "s-both",
@@ -884,7 +884,7 @@ mod tests {
         let workdir = "/proj-clean";
         db.upsert_project(&make_project("hash-clean", workdir))
             .unwrap();
-        db.insert_loop(&make_loop("loop-c", workdir, LoopStatus::Completed))
+        db.insert_graph(&make_graph("graph-c", workdir, GraphStatus::Completed))
             .unwrap();
         db.insert_interactive_session(
             "s-finished",
@@ -908,16 +908,16 @@ mod tests {
         let workdir = "/proj-cascade";
         let hash = "hash-cascade";
         db.upsert_project(&make_project(hash, workdir)).unwrap();
-        db.insert_loop(&make_loop("loop-c", workdir, LoopStatus::Completed))
+        db.insert_graph(&make_graph("graph-c", workdir, GraphStatus::Completed))
             .unwrap();
-        let spec = crate::domain::loops::LoopSpec {
+        let spec = crate::domain::graphs::GraphSpec {
             id: "spec-c".to_string(),
-            loop_id: Some("loop-c".to_string()),
+            graph_id: Some("graph-c".to_string()),
             name: "spec".to_string(),
             description: None,
             position: 0,
             parallelizable: false,
-            status: LoopSpecStatus::Pending,
+            status: GraphSpecStatus::Pending,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
@@ -927,18 +927,18 @@ mod tests {
             completed_via_reason: None,
             completed_via_at: None,
         };
-        db.insert_loop_spec(&spec).unwrap();
-        let node = crate::domain::loops::LoopNode {
+        db.insert_graph_spec(&spec).unwrap();
+        let node = crate::domain::graphs::GraphNode {
             id: "node-c".to_string(),
             spec_id: Some("spec-c".to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "n1".to_string(),
-            kind: crate::domain::loops::LoopNodeKind::Agent,
+            kind: crate::domain::graphs::GraphNodeKind::Agent,
             config: serde_json::json!({}),
             position: 0,
             created_at: chrono::Utc::now(),
         };
-        db.insert_loop_node(&node).unwrap();
+        db.insert_graph_node(&node).unwrap();
         db.insert_interactive_session(
             "s-c",
             "s-c",
@@ -968,24 +968,24 @@ mod tests {
         .unwrap();
 
         let counts = db.cascade_delete_orphan_project(hash, workdir).unwrap();
-        assert_eq!(counts.loops, 1);
+        assert_eq!(counts.graphs, 1);
         assert_eq!(counts.interactive_sessions, 1);
         assert_eq!(counts.terminal_sessions, 1);
         // The project-root node `upsert_project` auto-creates, plus the
         // fact node inserted above.
         assert_eq!(counts.intelligence_nodes, 2);
-        // Removed only via the loop's FK CASCADE (no explicit DELETE
-        // touches loop_specs/loop_nodes) — asserting the exact count here
+        // Removed only via the graph's FK CASCADE (no explicit DELETE
+        // touches graph_specs/graph_nodes) — asserting the exact count here
         // is what catches a returned-count regression: an explicit
         // post-cascade "sweep" DELETE always affects zero rows once the
         // parent DELETE already cascaded the row away, which would
         // silently report 0 instead of 1.
-        assert_eq!(counts.loop_specs, 1);
-        assert_eq!(counts.loop_nodes, 1);
+        assert_eq!(counts.graph_specs, 1);
+        assert_eq!(counts.graph_nodes, 1);
 
         // The project row and every dependent must be gone.
         assert!(db.get_project(hash).unwrap().is_none());
-        assert_eq!(db.project_dependent_counts(workdir).unwrap().loops, 0);
+        assert_eq!(db.project_dependent_counts(workdir).unwrap().graphs, 0);
         assert_eq!(
             db.project_dependent_counts(workdir)
                 .unwrap()
@@ -998,9 +998,9 @@ mod tests {
                 .terminal_sessions,
             0
         );
-        // Spec was loop-bound, so it should be CASCADE-deleted with the loop.
-        assert!(db.get_loop_spec("spec-c").unwrap().is_none());
-        assert!(db.get_loop_node("node-c").unwrap().is_none());
+        // Spec was graph-bound, so it should be CASCADE-deleted with the graph.
+        assert!(db.get_graph_spec("spec-c").unwrap().is_none());
+        assert!(db.get_graph_node("node-c").unwrap().is_none());
     }
 
     #[test]
@@ -1010,9 +1010,9 @@ mod tests {
             .unwrap();
         db.upsert_project(&make_project("hash-b", "/proj-b"))
             .unwrap();
-        db.insert_loop(&make_loop("loop-a", "/proj-a", LoopStatus::Completed))
+        db.insert_graph(&make_graph("graph-a", "/proj-a", GraphStatus::Completed))
             .unwrap();
-        db.insert_loop(&make_loop("loop-b", "/proj-b", LoopStatus::Completed))
+        db.insert_graph(&make_graph("graph-b", "/proj-b", GraphStatus::Completed))
             .unwrap();
 
         db.cascade_delete_orphan_project("hash-a", "/proj-a")
@@ -1020,7 +1020,7 @@ mod tests {
 
         assert!(db.get_project("hash-a").unwrap().is_none());
         assert!(db.get_project("hash-b").unwrap().is_some());
-        assert!(db.get_loop("loop-b").unwrap().is_some());
+        assert!(db.get_graph("graph-b").unwrap().is_some());
     }
 
     #[test]
@@ -1069,8 +1069,8 @@ mod tests {
     #[test]
     fn hard_cascade_skip_reason_describe_texts() {
         assert_eq!(
-            HardCascadeSkipReason::RunningLoop.describe(),
-            "has a running loop"
+            HardCascadeSkipReason::RunningGraph.describe(),
+            "has a running graph"
         );
         assert_eq!(
             HardCascadeSkipReason::ActiveSession.describe(),
@@ -1096,7 +1096,7 @@ mod tests {
     #[test]
     fn hard_cascade_counts_is_empty_false_for_each_field() {
         let fields = [
-            "loops",
+            "graphs",
             "interactive_sessions",
             "terminal_sessions",
             "last_prompts",
@@ -1105,11 +1105,11 @@ mod tests {
             "sync_messages",
             "sync_locks",
             "intelligence_nodes",
-            "loop_specs",
-            "loop_nodes",
-            "loop_edges",
-            "loop_runs",
-            "loop_completion_hook_runs",
+            "graph_specs",
+            "graph_nodes",
+            "graph_edges",
+            "graph_runs",
+            "graph_completion_hook_runs",
             "ensembles",
             "ensemble_members",
             "queue_members",
@@ -1120,7 +1120,7 @@ mod tests {
             let mut counts = HardCascadeCounts::default();
             // Set each field to 1 individually
             match *field {
-                "loops" => counts.loops = 1,
+                "graphs" => counts.graphs = 1,
                 "interactive_sessions" => counts.interactive_sessions = 1,
                 "terminal_sessions" => counts.terminal_sessions = 1,
                 "last_prompts" => counts.last_prompts = 1,
@@ -1129,11 +1129,11 @@ mod tests {
                 "sync_messages" => counts.sync_messages = 1,
                 "sync_locks" => counts.sync_locks = 1,
                 "intelligence_nodes" => counts.intelligence_nodes = 1,
-                "loop_specs" => counts.loop_specs = 1,
-                "loop_nodes" => counts.loop_nodes = 1,
-                "loop_edges" => counts.loop_edges = 1,
-                "loop_runs" => counts.loop_runs = 1,
-                "loop_completion_hook_runs" => counts.loop_completion_hook_runs = 1,
+                "graph_specs" => counts.graph_specs = 1,
+                "graph_nodes" => counts.graph_nodes = 1,
+                "graph_edges" => counts.graph_edges = 1,
+                "graph_runs" => counts.graph_runs = 1,
+                "graph_completion_hook_runs" => counts.graph_completion_hook_runs = 1,
                 "ensembles" => counts.ensembles = 1,
                 "ensemble_members" => counts.ensemble_members = 1,
                 "queue_members" => counts.queue_members = 1,
@@ -1196,7 +1196,7 @@ mod tests {
     fn project_dependent_counts_empty_workdir() {
         let db = test_db();
         let counts = db.project_dependent_counts("").unwrap();
-        assert_eq!(counts.loops, 0);
+        assert_eq!(counts.graphs, 0);
         assert_eq!(counts.interactive_sessions, 0);
         assert_eq!(counts.terminal_sessions, 0);
     }
@@ -1206,18 +1206,18 @@ mod tests {
         let db = test_db();
         let workdir = "/proj-queue";
         db.upsert_project(&make_project("hash-p", workdir)).unwrap();
-        db.insert_loop(&make_loop("loop-p", workdir, LoopStatus::Completed))
+        db.insert_graph(&make_graph("graph-p", workdir, GraphStatus::Completed))
             .unwrap();
         let doomed_spec_id = "spec-p-1";
         let safe_spec_id = "spec-p-2";
-        db.insert_loop_spec(&crate::domain::loops::LoopSpec {
+        db.insert_graph_spec(&crate::domain::graphs::GraphSpec {
             id: doomed_spec_id.to_string(),
-            loop_id: Some("loop-p".to_string()),
+            graph_id: Some("graph-p".to_string()),
             name: "d".to_string(),
             description: None,
             position: 0,
             parallelizable: false,
-            status: LoopSpecStatus::Pending,
+            status: GraphSpecStatus::Pending,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
@@ -1228,14 +1228,14 @@ mod tests {
             completed_via_at: None,
         })
         .unwrap();
-        db.insert_loop_spec(&crate::domain::loops::LoopSpec {
+        db.insert_graph_spec(&crate::domain::graphs::GraphSpec {
             id: safe_spec_id.to_string(),
-            loop_id: None,
+            graph_id: None,
             name: "s".to_string(),
             description: None,
             position: 0,
             parallelizable: false,
-            status: LoopSpecStatus::Pending,
+            status: GraphSpecStatus::Pending,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
@@ -1261,10 +1261,10 @@ mod tests {
 
         // Queue itself remains (shared, not project-owned).
         assert!(db.get_queue(&queue.id).unwrap().is_some());
-        // The doomed spec is gone (loop-bound → CASCADE).
-        assert!(db.get_loop_spec(doomed_spec_id).unwrap().is_none());
+        // The doomed spec is gone (graph-bound → CASCADE).
+        assert!(db.get_graph_spec(doomed_spec_id).unwrap().is_none());
         // The standalone spec survives, and so does its queue membership.
-        assert!(db.get_loop_spec(safe_spec_id).unwrap().is_some());
+        assert!(db.get_graph_spec(safe_spec_id).unwrap().is_some());
         assert!(db.queue_has_member(&queue.id, safe_spec_id).unwrap());
         // The queue membership that pointed at the doomed spec is gone.
         assert!(!db.queue_has_member(&queue.id, doomed_spec_id).unwrap());
@@ -1375,7 +1375,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let db = Database::new(&dir.path().join("test.db")).unwrap();
         let counts = db.project_dependent_counts("/nonexistent").unwrap();
-        assert_eq!(counts.loops, 0);
+        assert_eq!(counts.graphs, 0);
         assert_eq!(counts.interactive_sessions, 0);
         assert_eq!(counts.terminal_sessions, 0);
     }
@@ -1440,9 +1440,9 @@ mod tests {
     }
 
     #[test]
-    fn busy_reasons_reports_a_running_loop() {
+    fn busy_reasons_reports_a_running_graph() {
         let db = test_db();
-        db.insert_loop(&make_loop("loop-1", "/tmp/proj", LoopStatus::Running))
+        db.insert_graph(&make_graph("graph-1", "/tmp/proj", GraphStatus::Running))
             .unwrap();
 
         let reasons = db.busy_reasons().unwrap();
@@ -1451,9 +1451,9 @@ mod tests {
     }
 
     #[test]
-    fn busy_reasons_ignores_a_completed_loop() {
+    fn busy_reasons_ignores_a_completed_graph() {
         let db = test_db();
-        db.insert_loop(&make_loop("loop-1", "/tmp/proj", LoopStatus::Completed))
+        db.insert_graph(&make_graph("graph-1", "/tmp/proj", GraphStatus::Completed))
             .unwrap();
 
         assert!(db.busy_reasons().unwrap().is_empty());

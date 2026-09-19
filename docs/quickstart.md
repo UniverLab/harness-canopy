@@ -64,5 +64,5 @@ canopy daemon logs     # tail the daemon log
 
 - [Agents](agents.md) — the three agent kinds and seed identities.
 - [Intelligence & Sync](intelligence-and-sync.md) — persistent knowledge.
-- [Loops](loops.md) — multi-step automation.
+- [Graphs](graphs.md) — multi-step automation.
 - [RAG Pipeline](rag.md) — index and search your documents.

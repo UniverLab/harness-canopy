@@ -157,20 +157,20 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         dialogs::draw_quit_confirm(frame, &theme);
     } else if app.delete_project_confirm {
         dialogs::draw_delete_project_confirm(frame, &theme);
-    } else if app.archive_loop_confirm {
-        dialogs::draw_archive_loop_confirm(frame, &theme);
-    } else if app.permanent_delete_loop_confirm {
-        dialogs::draw_permanent_delete_loop_confirm(frame, &theme);
-    } else if app.loop_reset_confirm {
-        dialogs::draw_loop_reset_confirm(frame, app, &theme);
+    } else if app.archive_graph_confirm {
+        dialogs::draw_archive_graph_confirm(frame, &theme);
+    } else if app.permanent_delete_graph_confirm {
+        dialogs::draw_permanent_delete_graph_confirm(frame, &theme);
+    } else if app.graph_reset_confirm {
+        dialogs::draw_graph_reset_confirm(frame, app, &theme);
     }
 
-    if app.loop_autorun_dialog.is_some() {
-        dialogs::draw_loop_autorun_dialog(frame, app, &theme);
+    if app.graph_autorun_dialog.is_some() {
+        dialogs::draw_graph_autorun_dialog(frame, app, &theme);
     }
 
-    if app.loop_action_message.is_some() {
-        dialogs::draw_loop_action_message(frame, app, &theme);
+    if app.graph_action_message.is_some() {
+        dialogs::draw_graph_action_message(frame, app, &theme);
     }
 
     if app.show_legend {
@@ -193,12 +193,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         }
     }
 
-    if app.loop_editor_dialog.is_some() {
-        dialogs::draw_loop_editor_dialog(frame, app, &theme);
+    if app.graph_editor_dialog.is_some() {
+        dialogs::draw_graph_editor_dialog(frame, app, &theme);
     }
 
-    if app.loop_form_dialog.is_some() {
-        dialogs::draw_loop_form_dialog(frame, app, &theme);
+    if app.graph_form_dialog.is_some() {
+        dialogs::draw_graph_form_dialog(frame, app, &theme);
     }
 
     if app.knowledge_dialog.is_some() {
@@ -568,7 +568,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let full = frame.area();
-                // Distinctive backdrop standing in for the loop graph /
+                // Distinctive backdrop standing in for the graph /
                 // interactive output / knowledge view the picker floats over.
                 let filler = vec!["#".repeat(width as usize); height as usize].join("\n");
                 frame.render_widget(

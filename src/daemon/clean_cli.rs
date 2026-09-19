@@ -23,7 +23,7 @@ use crate::domain::clean::{
     SandboxCandidate,
 };
 use crate::domain::db_paths::database_path;
-use crate::domain::loops::LoopStatus;
+use crate::domain::graphs::GraphStatus;
 
 pub async fn handle_clean_action(
     dry_run: bool,
@@ -200,22 +200,22 @@ fn build_clean_plan(
 
     // CB42: bulk sandbox path — req 3's rule with force=false. Every
     // finished sandbox row becomes a candidate; `run_over` is true when the
-    // owning loop is completed/failed (or its row is gone — nothing is left
+    // owning graph is completed/failed (or its row is gone — nothing is left
     // that could still need the sandbox) or the sandbox row itself is no
     // longer active. `plan_sandbox_cleanup` then keeps only provably-empty
     // branches; uncertain ones stay.
     let mut sandbox_candidates = Vec::new();
     for row in db.list_finished_sandbox_runs().unwrap_or_default() {
-        let loop_over = match db.get_loop(&row.owner_id) {
-            Ok(Some(lp)) => matches!(lp.status, LoopStatus::Completed | LoopStatus::Failed),
+        let graph_over = match db.get_graph(&row.owner_id) {
+            Ok(Some(lp)) => matches!(lp.status, GraphStatus::Completed | GraphStatus::Failed),
             Ok(None) | Err(_) => true,
         };
         sandbox_candidates.push(SandboxCandidate {
             id: row.id.clone(),
             path: std::path::PathBuf::from(&row.worktree_path),
-            loop_id: row.owner_id.clone(),
+            graph_id: row.owner_id.clone(),
             branch: row.sandbox_branch.clone(),
-            run_over: loop_over || row.status != "active",
+            run_over: graph_over || row.status != "active",
             has_unique_commits: crate::domain::sandbox::has_unique_commits(&row),
         });
     }
@@ -331,7 +331,7 @@ fn run_hard_cascade(db: &Database, dry_run: bool, yes: bool) -> Result<u64> {
 }
 
 fn direct_count(c: &clean::HardCascadeCounts) -> i64 {
-    c.loops
+    c.graphs
         + c.interactive_sessions
         + c.terminal_sessions
         + c.last_prompts
@@ -344,11 +344,11 @@ fn direct_count(c: &clean::HardCascadeCounts) -> i64 {
 }
 
 fn cascade_count(c: &clean::HardCascadeCounts) -> i64 {
-    c.loop_specs
-        + c.loop_nodes
-        + c.loop_edges
-        + c.loop_runs
-        + c.loop_completion_hook_runs
+    c.graph_specs
+        + c.graph_nodes
+        + c.graph_edges
+        + c.graph_runs
+        + c.graph_completion_hook_runs
         + c.ensembles
         + c.ensemble_members
         + c.queue_members
@@ -388,11 +388,11 @@ fn print_hard_cascade_plan(plan: &HardCascadePlan, dry_run: bool) {
         for t in &plan.targets {
             let c = &t.counts;
             println!(
-                "   {} ({})  missing: {}\n     [{} loop(s), {} interactive session(s), {} terminal session(s),\n      {} last prompt(s), {} scheduled send(s), {} failed send(s),\n      {} sync message(s), {} sync lock(s), {} intelligence node(s), {} operational session(s)]\n     + cascade: [{} loop_spec(s), {} loop_node(s), {} loop_edge(s),\n                 {} loop_run(s), {} completion_hook_run(s),\n                 {} ensemble(s), {} ensemble_member(s), {} queue_member(s),\n                 {} seed_session(s), {} intelligence_edge(s)]",
+                "   {} ({})  missing: {}\n     [{} graph(s), {} interactive session(s), {} terminal session(s),\n      {} last prompt(s), {} scheduled send(s), {} failed send(s),\n      {} sync message(s), {} sync lock(s), {} intelligence node(s), {} operational session(s)]\n     + cascade: [{} graph_spec(s), {} graph_node(s), {} graph_edge(s),\n                 {} graph_run(s), {} completion_hook_run(s),\n                 {} ensemble(s), {} ensemble_member(s), {} queue_member(s),\n                 {} seed_session(s), {} intelligence_edge(s)]",
                 t.name,
                 t.hash,
                 t.missing_path,
-                c.loops,
+                c.graphs,
                 c.interactive_sessions,
                 c.terminal_sessions,
                 c.last_prompts,
@@ -402,11 +402,11 @@ fn print_hard_cascade_plan(plan: &HardCascadePlan, dry_run: bool) {
                 c.sync_locks,
                 c.intelligence_nodes,
                 c.operational_sessions,
-                c.loop_specs,
-                c.loop_nodes,
-                c.loop_edges,
-                c.loop_runs,
-                c.loop_completion_hook_runs,
+                c.graph_specs,
+                c.graph_nodes,
+                c.graph_edges,
+                c.graph_runs,
+                c.graph_completion_hook_runs,
                 c.ensembles,
                 c.ensemble_members,
                 c.queue_members,
@@ -1231,11 +1231,11 @@ fn print_summary(plan: &CleanPlan, retention_days: u64, dry_run: bool) {
         );
         for p in &plan.orphaned_projects {
             println!(
-                "   {} ({})  missing: {}  [{} loop(s), {} interactive session(s), {} terminal session(s)]",
+                "   {} ({})  missing: {}  [{} graph(s), {} interactive session(s), {} terminal session(s)]",
                 p.name,
                 p.hash,
                 p.missing_path,
-                p.dependents.loops,
+                p.dependents.graphs,
                 p.dependents.interactive_sessions,
                 p.dependents.terminal_sessions
             );
@@ -1260,7 +1260,7 @@ fn print_summary(plan: &CleanPlan, retention_days: u64, dry_run: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::loops::LoopStatus;
+    use crate::domain::graphs::GraphStatus;
     use tempfile::tempdir;
 
     fn test_db(dir: &Path) -> Database {
@@ -1517,17 +1517,17 @@ mod tests {
         }
     }
 
-    fn make_loop(
+    fn make_graph(
         id: &str,
         workdir: &str,
-        status: crate::domain::loops::LoopStatus,
-    ) -> crate::domain::loops::Loop {
-        crate::domain::loops::Loop {
+        status: crate::domain::graphs::GraphStatus,
+    ) -> crate::domain::graphs::Graph {
+        crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
             infra_node_id: None,
             id: id.to_string(),
-            name: format!("loop-{id}"),
+            name: format!("graph-{id}"),
             description: None,
             workdir: workdir.to_string(),
             status,
@@ -1551,7 +1551,7 @@ mod tests {
         let workdir = "/definitely/does/not/exist";
         let hash = "hash-orphan";
         db.upsert_project(&make_project(hash, workdir)).unwrap();
-        db.insert_loop(&make_loop("loop-1", workdir, LoopStatus::Completed))
+        db.insert_graph(&make_graph("graph-1", workdir, GraphStatus::Completed))
             .unwrap();
         db.insert_interactive_session(
             "s-old",
@@ -1572,7 +1572,7 @@ mod tests {
         run_hard_cascade(&db, false, true).unwrap();
 
         assert!(db.get_project(hash).unwrap().is_none());
-        assert_eq!(db.project_dependent_counts(workdir).unwrap().loops, 0);
+        assert_eq!(db.project_dependent_counts(workdir).unwrap().graphs, 0);
         assert_eq!(
             db.project_dependent_counts(workdir)
                 .unwrap()
@@ -1595,7 +1595,7 @@ mod tests {
         let workdir = "/definitely/does/not/exist";
         let hash = "hash-orphan-dry";
         db.upsert_project(&make_project(hash, workdir)).unwrap();
-        db.insert_loop(&make_loop("loop-1", workdir, LoopStatus::Completed))
+        db.insert_graph(&make_graph("graph-1", workdir, GraphStatus::Completed))
             .unwrap();
         db.insert_interactive_session(
             "s-old",
@@ -1614,7 +1614,7 @@ mod tests {
         run_hard_cascade(&db, true, false).unwrap();
 
         assert!(db.get_project(hash).unwrap().is_some());
-        assert_eq!(db.project_dependent_counts(workdir).unwrap().loops, 1);
+        assert_eq!(db.project_dependent_counts(workdir).unwrap().graphs, 1);
         assert_eq!(
             db.project_dependent_counts(workdir)
                 .unwrap()
@@ -1634,7 +1634,7 @@ mod tests {
         let hash = "hash-keep";
         db.upsert_project(&make_project(hash, &workdir_str))
             .unwrap();
-        db.insert_loop(&make_loop("loop-1", &workdir_str, LoopStatus::Completed))
+        db.insert_graph(&make_graph("graph-1", &workdir_str, GraphStatus::Completed))
             .unwrap();
         db.insert_interactive_session(
             "s-1",
@@ -1653,25 +1653,25 @@ mod tests {
 
         // Project with an existing workdir is NEVER a target of --hard.
         assert!(db.get_project(hash).unwrap().is_some());
-        assert_eq!(db.project_dependent_counts(&workdir_str).unwrap().loops, 1);
+        assert_eq!(db.project_dependent_counts(&workdir_str).unwrap().graphs, 1);
     }
 
     #[test]
-    fn hard_cascade_skips_orphan_with_running_loop() {
+    fn hard_cascade_skips_orphan_with_running_graph() {
         let dir = tempdir().unwrap();
         let data_dir = dir.path();
         let db = test_db(data_dir);
-        let workdir = "/orphan/with/running/loop";
+        let workdir = "/orphan/with/running/graph";
         let hash = "hash-running";
         db.upsert_project(&make_project(hash, workdir)).unwrap();
-        db.insert_loop(&make_loop("loop-r", workdir, LoopStatus::Running))
+        db.insert_graph(&make_graph("graph-r", workdir, GraphStatus::Running))
             .unwrap();
 
         run_hard_cascade(&db, false, true).unwrap();
 
-        // Project survives because its loop is still running.
+        // Project survives because its graph is still running.
         assert!(db.get_project(hash).unwrap().is_some());
-        assert!(db.get_loop("loop-r").unwrap().is_some());
+        assert!(db.get_graph("graph-r").unwrap().is_some());
     }
 
     #[test]
@@ -1707,7 +1707,7 @@ mod tests {
 
     #[test]
     fn hard_cascade_processes_targets_and_skips_in_one_call() {
-        // Mixed: one deletable orphan, one skipped (running loop), one with
+        // Mixed: one deletable orphan, one skipped (running graph), one with
         // a real workdir. --hard should delete only the first.
         let dir = tempdir().unwrap();
         let data_dir = dir.path();
@@ -1724,18 +1724,18 @@ mod tests {
         db.upsert_project(&make_project("hash-skipped", "/orphan/skipped"))
             .unwrap();
 
-        db.insert_loop(&make_loop("loop-real", &real_str, LoopStatus::Completed))
+        db.insert_graph(&make_graph("graph-real", &real_str, GraphStatus::Completed))
             .unwrap();
-        db.insert_loop(&make_loop(
-            "loop-doomed",
+        db.insert_graph(&make_graph(
+            "graph-doomed",
             "/orphan/doomed",
-            LoopStatus::Completed,
+            GraphStatus::Completed,
         ))
         .unwrap();
-        db.insert_loop(&make_loop(
-            "loop-skipped",
+        db.insert_graph(&make_graph(
+            "graph-skipped",
             "/orphan/skipped",
-            LoopStatus::Running,
+            GraphStatus::Running,
         ))
         .unwrap();
 
@@ -1928,12 +1928,12 @@ mod tests {
     }
 
     #[test]
-    fn reclaim_window_refuses_when_a_loop_is_running() {
+    fn reclaim_window_refuses_when_a_graph_is_running() {
         let dir = tempdir().unwrap();
         let data_dir = dir.path();
         let db_path = data_dir.join("test.db");
         let db = Database::new(&db_path).unwrap();
-        db.insert_loop(&make_loop("loop-1", "/tmp", LoopStatus::Running))
+        db.insert_graph(&make_graph("graph-1", "/tmp", GraphStatus::Running))
             .unwrap();
 
         let ops = FakeDaemonOps::new();
@@ -2368,7 +2368,7 @@ mod tests {
 
         let workdir = "/definitely/does/not/exist/for/projection";
         db.upsert_project(&make_project("hash-x", workdir)).unwrap();
-        db.insert_loop(&make_loop("loop-x", workdir, LoopStatus::Completed))
+        db.insert_graph(&make_graph("graph-x", workdir, GraphStatus::Completed))
             .unwrap();
 
         let now_ts = chrono::Utc::now().timestamp() + 30 * 86_400;
@@ -2441,7 +2441,7 @@ mod tests {
         let data_dir = dir.path();
         let db = test_db(data_dir);
 
-        // No loop row for this owner: a missing loop means the run is over.
+        // No graph row for this owner: a missing graph means the run is over.
         let sandbox = crate::domain::sandbox::Sandbox {
             id: "sandbox-clean-fixture".to_string(),
             project_hash: "cleanhash".to_string(),
@@ -2452,7 +2452,7 @@ mod tests {
             original_workdir: repo_dir.path().to_string_lossy().to_string(),
             created_at: chrono::Utc::now(),
         };
-        db.insert_sandbox_run(&sandbox, "loop", "loop-gone")
+        db.insert_sandbox_run(&sandbox, "graph", "graph-gone")
             .unwrap();
         db.update_sandbox_run_status(&sandbox.id, "kept").unwrap();
 

@@ -1,7 +1,7 @@
 //! CT1 multi-face right panel: the switching rule.
 //!
-//! One panel, three faces — **activity**, **knowledge**, **loop** — with a
-//! strict priority: a pinned face always wins; otherwise a running loop is
+//! One panel, three faces — **activity**, **knowledge**, **graph** — with a
+//! strict priority: a pinned face always wins; otherwise a running graph is
 //! the resting face (a STATE); knowledge insertion and backlog change are
 //! EVENTS that take the panel for a 10-second dwell and then fall back.
 //! A newer event replaces the current dwell and restarts it; events never
@@ -17,7 +17,7 @@
 use std::time::{Duration, Instant};
 
 use super::types::{App, PanelFace};
-use crate::domain::loops::LoopStatus;
+use crate::domain::graphs::GraphStatus;
 
 /// How long a knowledge/backlog event holds the panel before it falls back
 /// to the resting face.
@@ -28,19 +28,21 @@ pub(crate) const PANEL_PICKER_OPTIONS: [Option<PanelFace>; 4] = [
     None,
     Some(PanelFace::Activity),
     Some(PanelFace::Knowledge),
-    Some(PanelFace::Loop),
+    Some(PanelFace::Graph),
 ];
 
 impl App {
-    /// STATE input: true while any loop is running, regardless of workdir.
-    pub(crate) fn panel_loop_running(&self) -> bool {
-        self.loops.iter().any(|lp| lp.status == LoopStatus::Running)
+    /// STATE input: true while any graph is running, regardless of workdir.
+    pub(crate) fn panel_graph_running(&self) -> bool {
+        self.graphs
+            .iter()
+            .any(|lp| lp.status == GraphStatus::Running)
     }
 
-    /// The resting face: Loop while a loop is running, Activity otherwise.
+    /// The resting face: Graph while a graph is running, Activity otherwise.
     pub(crate) fn panel_resting_face(&self) -> PanelFace {
-        if self.panel_loop_running() {
-            PanelFace::Loop
+        if self.panel_graph_running() {
+            PanelFace::Graph
         } else {
             PanelFace::Activity
         }
@@ -82,7 +84,7 @@ impl App {
     /// Recompute the visible face from the switching rule. Called once per
     /// refresh tick, after the data refreshes it reads have run.
     pub(crate) fn tick_panel_face(&mut self) {
-        let loop_running = self.panel_loop_running();
+        let graph_running = self.panel_graph_running();
         let project = self
             .selected_project()
             .map(|project| (project.hash.clone(), project.path.clone()));
@@ -101,7 +103,7 @@ impl App {
         if !self.panel_baselines_init {
             self.panel_last_knowledge_updated = knowledge_updated;
             self.panel_last_backlog_updated = backlog_updated;
-            self.panel_last_loop_running = loop_running;
+            self.panel_last_graph_running = graph_running;
             self.panel_baselines_init = true;
             self.panel_face = self
                 .panel_pinned
@@ -132,7 +134,7 @@ impl App {
         }
         self.panel_last_knowledge_updated = knowledge_updated;
         self.panel_last_backlog_updated = backlog_updated;
-        self.panel_last_loop_running = loop_running;
+        self.panel_last_graph_running = graph_running;
 
         if self
             .panel_dwell_until
@@ -163,11 +165,11 @@ impl App {
         }
         self.panel_interacting = false;
 
-        // States beat events: while a loop runs, Loop is the resting face
+        // States beat events: while a graph runs, Graph is the resting face
         // and any event dwell waits underneath it. The dwell keeps counting
         // down meanwhile, so a stale event never outlives its 10 seconds.
-        let (target, reason) = if loop_running {
-            (PanelFace::Loop, Some("loop running".to_string()))
+        let (target, reason) = if graph_running {
+            (PanelFace::Graph, Some("graph running".to_string()))
         } else if self.panel_dwell_valid() {
             let reason = self.panel_dwell_reason.clone();
             (
@@ -181,7 +183,7 @@ impl App {
         if self.panel_face != target {
             self.panel_face = target;
             self.panel_last_reason = reason;
-        } else if !self.panel_dwell_valid() && !loop_running {
+        } else if !self.panel_dwell_valid() && !graph_running {
             // Settled on the resting face with nothing driving it: no badge.
             self.panel_last_reason = None;
         }
@@ -216,7 +218,7 @@ impl App {
 
     /// Whether the right panel has anything to show for the current face.
     /// The Activity face keeps its existing visibility rule; Knowledge
-    /// needs a selected workdir; Loop needs a loop to look at.
+    /// needs a selected workdir; Graph needs a graph to look at.
     pub(crate) fn panel_face_visible(&self) -> bool {
         if self.panel_pinned.is_some() {
             return true;
@@ -226,9 +228,9 @@ impl App {
             PanelFace::Knowledge => {
                 self.selected_activity_workdir().is_some() || self.activity_panel_state().is_some()
             }
-            PanelFace::Loop => {
-                self.loop_live_state.is_some()
-                    || !self.loops.is_empty()
+            PanelFace::Graph => {
+                self.graph_live_state.is_some()
+                    || !self.graphs.is_empty()
                     || self.activity_panel_state().is_some()
             }
         }
@@ -320,7 +322,7 @@ mod tests {
     use super::*;
     use crate::db::intelligence::IntelligenceNodeInput;
     use crate::db::Database;
-    use crate::domain::loops::{Loop, LoopStatus};
+    use crate::domain::graphs::{Graph, GraphStatus};
     use crate::domain::models::{Agent, Cli};
     use crate::domain::project::Project;
     use crate::tui::app::types::{AgentEntry, Focus};
@@ -458,15 +460,15 @@ mod tests {
         assert_eq!(app.panel_dwell_reason.as_deref(), Some("new knowledge"));
     }
 
-    fn standalone_spec(id: &str, workdir: &str) -> crate::domain::loops::LoopSpec {
-        crate::domain::loops::LoopSpec {
+    fn standalone_spec(id: &str, workdir: &str) -> crate::domain::graphs::GraphSpec {
+        crate::domain::graphs::GraphSpec {
             id: id.to_string(),
-            loop_id: None,
+            graph_id: None,
             name: format!("Backlog {id}"),
             description: Some("stub".to_string()),
             position: 0,
             parallelizable: false,
-            status: crate::domain::loops::LoopSpecStatus::Pending,
+            status: crate::domain::graphs::GraphSpecStatus::Pending,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
@@ -496,7 +498,7 @@ mod tests {
         app.tick_panel_face();
         app.clear_panel_dwell();
 
-        db.insert_loop_spec(&standalone_spec("backlog-1", "/tmp/panel-project"))
+        db.insert_graph_spec(&standalone_spec("backlog-1", "/tmp/panel-project"))
             .unwrap();
         app.tick_panel_face();
         assert_eq!(app.panel_dwell_reason.as_deref(), Some("backlog changed"));
@@ -508,7 +510,7 @@ mod tests {
         assert_eq!(app.panel_dwell_reason.as_deref(), Some("backlog changed"));
         app.clear_panel_dwell();
 
-        db.delete_loop_spec("backlog-1").unwrap();
+        db.delete_graph_spec("backlog-1").unwrap();
         app.tick_panel_face();
         assert_eq!(app.panel_dwell_reason, None);
     }
@@ -535,10 +537,10 @@ mod tests {
         }
     }
 
-    fn make_loop(id: &str, status: LoopStatus) -> Loop {
-        Loop {
+    fn make_graph(id: &str, status: GraphStatus) -> Graph {
+        Graph {
             id: id.to_string(),
-            name: format!("loop {id}"),
+            name: format!("graph {id}"),
             description: None,
             workdir: "/tmp/project".to_string(),
             status,
@@ -564,7 +566,7 @@ mod tests {
     #[test]
     fn panel_face_priority_pinned_over_state() {
         let mut app = test_app();
-        app.loops = vec![make_loop("l1", LoopStatus::Running)];
+        app.graphs = vec![make_graph("l1", GraphStatus::Running)];
         app.panel_pinned = Some(PanelFace::Knowledge);
         app.panel_face = PanelFace::Knowledge;
         app.tick_panel_face();
@@ -576,18 +578,18 @@ mod tests {
     #[test]
     fn panel_face_priority_state_over_event() {
         let mut app = test_app();
-        app.loops = vec![make_loop("l1", LoopStatus::Running)];
+        app.graphs = vec![make_graph("l1", GraphStatus::Running)];
         app.tick_panel_face();
-        assert_eq!(app.panel_face, PanelFace::Loop);
+        assert_eq!(app.panel_face, PanelFace::Graph);
 
-        // A knowledge event fires while the loop runs: the loop (state)
+        // A knowledge event fires while the graph runs: the graph (state)
         // keeps the panel; the event dwell is recorded underneath.
         app.fire_panel_event(PanelFace::Knowledge, "new knowledge");
         app.tick_panel_face();
-        assert_eq!(app.panel_face, PanelFace::Loop);
+        assert_eq!(app.panel_face, PanelFace::Graph);
 
-        // When the loop ends, the pending event dwell takes the panel.
-        app.loops = vec![make_loop("l1", LoopStatus::Completed)];
+        // When the graph ends, the pending event dwell takes the panel.
+        app.graphs = vec![make_graph("l1", GraphStatus::Completed)];
         app.tick_panel_face();
         assert_eq!(app.panel_face, PanelFace::Knowledge);
     }
@@ -706,14 +708,14 @@ mod tests {
     fn panel_face_no_focus_steal() {
         let mut app = test_app();
         app.focus = Focus::Agent;
-        app.loops = vec![make_loop("l1", LoopStatus::Running)];
+        app.graphs = vec![make_graph("l1", GraphStatus::Running)];
         app.tick_panel_face();
 
-        assert_eq!(app.panel_face, PanelFace::Loop);
+        assert_eq!(app.panel_face, PanelFace::Graph);
         assert!(matches!(app.focus, Focus::Agent));
 
         app.fire_panel_event(PanelFace::Knowledge, "new knowledge");
-        app.loops = vec![make_loop("l1", LoopStatus::Completed)];
+        app.graphs = vec![make_graph("l1", GraphStatus::Completed)];
         app.tick_panel_face();
         assert!(matches!(app.focus, Focus::Agent));
     }
@@ -725,7 +727,7 @@ mod tests {
         // tests: restore automatic mode right away via the in-memory path.
         app.open_panel_picker();
         assert!(app.panel_picker_open);
-        // Options are [automatic, activity, knowledge, loop]; initial pin
+        // Options are [automatic, activity, knowledge, graph]; initial pin
         // is None so the cursor starts on automatic.
         assert_eq!(app.panel_picker_idx, 0);
         app.move_panel_picker(true);

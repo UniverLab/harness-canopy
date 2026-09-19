@@ -323,7 +323,7 @@ pub fn clear_notifications_on_exit() {
 ///
 /// On WSL, the title also doubles as the de-dup subject key (see `send_wsl`):
 /// every caller already passes a stable per-subject string as `title` (a task
-/// id, an agent id, a mission name, a loop name), so this needs no extra
+/// id, an agent id, a mission name, a graph name), so this needs no extra
 /// plumbing per call site.
 pub fn send_notification(title: &str, body: &str, level: NotificationLevel) {
     let tag = tag_for_subject(title);

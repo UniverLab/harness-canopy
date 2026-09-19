@@ -5,7 +5,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 use ratatui::Frame;
 
-use crate::domain::loops::LoopSpecStatus;
+use crate::domain::graphs::GraphSpecStatus;
 use crate::domain::sync::{MessageKind, MissionImpact, SyncMessage, WorkspaceStatus};
 use crate::tui::app::types::{App, PanelFace, SyncPanelState};
 use crate::tui::ui::theme::Theme;
@@ -43,7 +43,7 @@ pub(crate) fn draw_panel_face(frame: &mut Frame, area: Rect, app: &mut App, them
             }
         }
         PanelFace::Knowledge => draw_knowledge_face(frame, inner, app, theme),
-        PanelFace::Loop => draw_loop_face(frame, inner, app, theme),
+        PanelFace::Graph => draw_graph_face(frame, inner, app, theme),
     }
 }
 
@@ -192,23 +192,23 @@ fn draw_knowledge_list(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) 
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-/// Loop face (read-only first step): the running loop's name, status and
+/// Graph face (read-only first step): the running graph's name, status and
 /// CT5's spec strip — same spec-queue data and same done/current/pending
 /// markers the Automation view renders, without the live node output and
 /// without taking any keys.
-fn draw_loop_face(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+fn draw_graph_face(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let Some(target) = app
-        .selected_loop_id
+        .selected_graph_id
         .as_ref()
-        .and_then(|id| app.loops.iter().find(|lp| &lp.id == id))
+        .and_then(|id| app.graphs.iter().find(|lp| &lp.id == id))
         .or_else(|| {
-            app.loops
+            app.graphs
                 .iter()
-                .find(|lp| lp.status == crate::domain::loops::LoopStatus::Running)
+                .find(|lp| lp.status == crate::domain::graphs::GraphStatus::Running)
         })
-        .or_else(|| app.loops.first())
+        .or_else(|| app.graphs.first())
     else {
-        draw_panel_placeholder(frame, area, "no loops yet", theme);
+        draw_panel_placeholder(frame, area, "no graphs yet", theme);
         return;
     };
 
@@ -222,7 +222,7 @@ fn draw_loop_face(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
             ),
             Span::styled(
                 format!("  {}", target.status.as_str()),
-                Style::default().fg(loop_status_color(target.status)),
+                Style::default().fg(graph_status_color(target.status)),
             ),
         ]),
         Line::from(Span::styled(
@@ -236,11 +236,11 @@ fn draw_loop_face(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     ];
 
     let strip_known = app
-        .loop_live_state
+        .graph_live_state
         .as_ref()
-        .is_some_and(|live| live.loop_id == target.id);
+        .is_some_and(|live| live.graph_id == target.id);
     if strip_known {
-        let live = app.loop_live_state.as_ref().expect("checked above");
+        let live = app.graph_live_state.as_ref().expect("checked above");
         lines.push(Line::from(Span::styled(
             format!("specs {}/{}", live.done_count, live.total_count),
             Style::default().fg(theme.dim_text),
@@ -259,7 +259,7 @@ fn draw_loop_face(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
                 ),
             ]));
         }
-    } else if let Some(details) = app.loop_details.as_ref().filter(|d| d.lp.id == target.id) {
+    } else if let Some(details) = app.graph_details.as_ref().filter(|d| d.lp.id == target.id) {
         lines.push(Line::from(Span::styled(
             format!("specs ({})", details.specs.len()),
             Style::default().fg(theme.dim_text),
@@ -279,7 +279,7 @@ fn draw_loop_face(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         }
     } else {
         lines.push(Line::from(Span::styled(
-            "open Automation → Loops for specs",
+            "open Automation → Graphs for specs",
             Style::default().fg(theme.dim_text),
         )));
     }
@@ -289,26 +289,26 @@ fn draw_loop_face(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 
 /// CT5 spec-strip marker, shared convention: done / current / failed /
 /// pending. Pure so it is testable without constructing a full `App`.
-fn spec_strip_marker(status: LoopSpecStatus, current: bool) -> &'static str {
+fn spec_strip_marker(status: GraphSpecStatus, current: bool) -> &'static str {
     if current {
         return "▶";
     }
     match status {
-        LoopSpecStatus::Completed => "●",
-        LoopSpecStatus::Running => "▶",
-        LoopSpecStatus::Failed => "✗",
-        LoopSpecStatus::Skipped => "○",
-        LoopSpecStatus::Pending => "○",
+        GraphSpecStatus::Completed => "●",
+        GraphSpecStatus::Running => "▶",
+        GraphSpecStatus::Failed => "✗",
+        GraphSpecStatus::Skipped => "○",
+        GraphSpecStatus::Pending => "○",
         _ => "○",
     }
 }
 
-fn loop_status_color(status: crate::domain::loops::LoopStatus) -> Color {
+fn graph_status_color(status: crate::domain::graphs::GraphStatus) -> Color {
     match status {
-        crate::domain::loops::LoopStatus::Running => STATUS_OK,
-        crate::domain::loops::LoopStatus::Failed => ERROR_COLOR,
-        crate::domain::loops::LoopStatus::Pausing => Color::Yellow,
-        crate::domain::loops::LoopStatus::Paused => Color::Yellow,
+        crate::domain::graphs::GraphStatus::Running => STATUS_OK,
+        crate::domain::graphs::GraphStatus::Failed => ERROR_COLOR,
+        crate::domain::graphs::GraphStatus::Pausing => Color::Yellow,
+        crate::domain::graphs::GraphStatus::Paused => Color::Yellow,
         _ => Color::White,
     }
 }
@@ -541,14 +541,14 @@ mod tests {
 
     #[test]
     fn spec_strip_marker_distinguishes_done_current_failed_and_pending() {
-        assert_eq!(spec_strip_marker(LoopSpecStatus::Completed, false), "●");
-        assert_eq!(spec_strip_marker(LoopSpecStatus::Running, false), "▶");
-        assert_eq!(spec_strip_marker(LoopSpecStatus::Pending, false), "○");
-        assert_eq!(spec_strip_marker(LoopSpecStatus::Failed, false), "✗");
-        assert_eq!(spec_strip_marker(LoopSpecStatus::Skipped, false), "○");
+        assert_eq!(spec_strip_marker(GraphSpecStatus::Completed, false), "●");
+        assert_eq!(spec_strip_marker(GraphSpecStatus::Running, false), "▶");
+        assert_eq!(spec_strip_marker(GraphSpecStatus::Pending, false), "○");
+        assert_eq!(spec_strip_marker(GraphSpecStatus::Failed, false), "✗");
+        assert_eq!(spec_strip_marker(GraphSpecStatus::Skipped, false), "○");
         // The current spec reads as running even before its status flips.
-        assert_eq!(spec_strip_marker(LoopSpecStatus::Pending, true), "▶");
-        assert_eq!(spec_strip_marker(LoopSpecStatus::Completed, true), "▶");
+        assert_eq!(spec_strip_marker(GraphSpecStatus::Pending, true), "▶");
+        assert_eq!(spec_strip_marker(GraphSpecStatus::Completed, true), "▶");
     }
 
     #[test]

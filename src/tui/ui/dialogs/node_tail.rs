@@ -14,7 +14,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
-use crate::domain::loops::LoopRunStatus;
+use crate::domain::graphs::GraphRunStatus;
 use crate::tui::app::dialog::NodeTailDialog;
 use crate::tui::ui::theme::Theme;
 
@@ -39,7 +39,7 @@ pub(crate) fn tail_status_line(
         .num_seconds()
         .max(0);
     match dialog.status {
-        LoopRunStatus::Running => {
+        GraphRunStatus::Running => {
             let total = dialog.stdout_lines.len() + dialog.stderr_lines.len();
             if total == 0 {
                 format!("● LIVE — running {elapsed}s, no output yet (silent: working or hung)")
@@ -47,12 +47,12 @@ pub(crate) fn tail_status_line(
                 format!("● LIVE — running {elapsed}s, {total} lines (following)")
             }
         }
-        LoopRunStatus::Pass => "■ finished: passed — Esc/t to close".to_string(),
-        LoopRunStatus::Fail if dialog.timed_out => {
+        GraphRunStatus::Pass => "■ finished: passed — Esc/t to close".to_string(),
+        GraphRunStatus::Fail if dialog.timed_out => {
             "■ finished: TIMED OUT — output below ends at the kill point".to_string()
         }
-        LoopRunStatus::Fail => "■ finished: failed — Esc/t to close".to_string(),
-        LoopRunStatus::Interrupted => {
+        GraphRunStatus::Fail => "■ finished: failed — Esc/t to close".to_string(),
+        GraphRunStatus::Interrupted => {
             "■ finished: interrupted by operator — Esc/t to close".to_string()
         }
     }
@@ -114,11 +114,11 @@ pub(crate) fn draw_node_tail_dialog(
 
     let status = tail_status_line(dialog, now);
     let status_style = match dialog.status {
-        LoopRunStatus::Running => Style::default()
+        GraphRunStatus::Running => Style::default()
             .fg(theme.warning)
             .add_modifier(Modifier::BOLD),
-        LoopRunStatus::Pass => Style::default().fg(theme.header_color),
-        LoopRunStatus::Fail | LoopRunStatus::Interrupted => Style::default()
+        GraphRunStatus::Pass => Style::default().fg(theme.header_color),
+        GraphRunStatus::Fail | GraphRunStatus::Interrupted => Style::default()
             .fg(theme.error)
             .add_modifier(Modifier::BOLD),
     };
@@ -161,7 +161,7 @@ mod tests {
     use super::*;
     use chrono::Utc;
 
-    fn test_dialog(status: LoopRunStatus, stdout: usize, stderr: usize) -> NodeTailDialog {
+    fn test_dialog(status: GraphRunStatus, stdout: usize, stderr: usize) -> NodeTailDialog {
         NodeTailDialog {
             run_id: "run1".to_string(),
             node_id: "node1".to_string(),
@@ -177,7 +177,7 @@ mod tests {
 
     #[test]
     fn running_with_no_output_looks_hung_not_blank() {
-        let dialog = test_dialog(LoopRunStatus::Running, 0, 0);
+        let dialog = test_dialog(GraphRunStatus::Running, 0, 0);
         let status = tail_status_line(&dialog, Utc::now());
         assert!(status.contains("LIVE"), "status: {status}");
         assert!(status.contains("no output yet"), "status: {status}");
@@ -188,7 +188,7 @@ mod tests {
 
     #[test]
     fn running_with_output_shows_live_following() {
-        let dialog = test_dialog(LoopRunStatus::Running, 3, 0);
+        let dialog = test_dialog(GraphRunStatus::Running, 3, 0);
         let status = tail_status_line(&dialog, Utc::now());
         assert!(status.contains("LIVE"), "status: {status}");
         assert!(status.contains("following"), "status: {status}");
@@ -196,7 +196,7 @@ mod tests {
 
     #[test]
     fn timed_out_banner_names_the_kill_point() {
-        let mut dialog = test_dialog(LoopRunStatus::Fail, 2, 0);
+        let mut dialog = test_dialog(GraphRunStatus::Fail, 2, 0);
         dialog.timed_out = true;
         let status = tail_status_line(&dialog, Utc::now());
         assert!(status.contains("TIMED OUT"), "status: {status}");
@@ -205,7 +205,7 @@ mod tests {
 
     #[test]
     fn failed_without_timeout_says_failed() {
-        let dialog = test_dialog(LoopRunStatus::Fail, 2, 0);
+        let dialog = test_dialog(GraphRunStatus::Fail, 2, 0);
         let status = tail_status_line(&dialog, Utc::now());
         assert!(status.contains("failed"), "status: {status}");
         assert!(!status.contains("TIMED OUT"), "status: {status}");
@@ -213,7 +213,7 @@ mod tests {
 
     #[test]
     fn passed_banner_says_passed() {
-        let dialog = test_dialog(LoopRunStatus::Pass, 2, 0);
+        let dialog = test_dialog(GraphRunStatus::Pass, 2, 0);
         let status = tail_status_line(&dialog, Utc::now());
         assert!(status.contains("passed"), "status: {status}");
     }
@@ -222,7 +222,7 @@ mod tests {
     fn tail_renders_lines_capped() {
         // 5000 lines of mock output must be bounded on screen: the dialog
         // keeps the newest `max_body` rows, never the whole flood.
-        let dialog = test_dialog(LoopRunStatus::Running, 4000, 1000);
+        let dialog = test_dialog(GraphRunStatus::Running, 4000, 1000);
         let body = tail_visible_lines(&dialog, 20);
         assert_eq!(body.len(), 20);
         assert_eq!(body[19], "err 999");
@@ -230,14 +230,14 @@ mod tests {
 
     #[test]
     fn tail_without_cap_returns_everything_in_order() {
-        let dialog = test_dialog(LoopRunStatus::Running, 2, 1);
+        let dialog = test_dialog(GraphRunStatus::Running, 2, 1);
         let body = tail_visible_lines(&dialog, 100);
         assert_eq!(body, vec!["out 0", "out 1", "── stderr ──", "err 0"]);
     }
 
     #[test]
     fn scroll_holds_back_from_live_edge() {
-        let mut dialog = test_dialog(LoopRunStatus::Running, 10, 0);
+        let mut dialog = test_dialog(GraphRunStatus::Running, 10, 0);
         dialog.scroll = 4;
         let body = tail_visible_lines(&dialog, 100);
         assert_eq!(body.len(), 6);

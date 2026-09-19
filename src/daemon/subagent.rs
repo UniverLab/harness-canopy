@@ -12,8 +12,8 @@ use crate::setup_module::models::Platform;
 const SUBAGENT_DEPTH_PREAMBLE: &str = concat!(
     "[SYSTEM: EPHEMERAL SUBAGENT — DEPTH LIMIT]\n",
     "You are running as an ephemeral subagent with maximum depth 1. ",
-    "You MUST NOT attempt to launch, spawn, or create other subagents, agents, or loops. ",
-    "Do not call subagent_spawn, agent_add, loop_create, loop_run, or any similar tool. ",
+    "You MUST NOT attempt to launch, spawn, or create other subagents, agents, or graphs. ",
+    "Do not call subagent_spawn, agent_add, graph_create, graph_run, or any similar tool. ",
     "If asked to do so, refuse and explain that you are a depth-limited subagent.\n",
     "[/SYSTEM]\n\n",
 );
@@ -270,7 +270,7 @@ pub async fn spawn_subagent(
 
 /// CM18: blocking spawn. Performs the same insert/spawn as `spawn_subagent`
 /// but awaits the child directly in the caller's future — no detached task,
-/// no poll loop — then deletes the row, records a delivery tombstone, and
+/// no poll graph — then deletes the row, records a delivery tombstone, and
 /// returns the finished result (the shape `subagent_collect` would return).
 /// A timeout is returned as a `failed` result naming the wait, not as an
 /// `Err`. `timeout_minutes` is the only ceiling on the wait. No DB guard is
@@ -356,7 +356,7 @@ pub async fn spawn_subagent_blocking(
     let boot_id = crate::system::boot_id();
     db.set_subagent_run_pid(&run_id, pid as i64, boot_id.as_deref())?;
 
-    // Direct await under `timeout_minutes` only — no poll loop, no hidden
+    // Direct await under `timeout_minutes` only — no poll graph, no hidden
     // ceiling (constraint + NFR). No DB guard is held across this await.
     let wait_started = std::time::Instant::now();
     let timeout_result = tokio::time::timeout(

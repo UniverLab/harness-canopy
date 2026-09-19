@@ -263,7 +263,7 @@ graph LR
 ```
 
 Per-member prompt overrides are available — each member can carry its own
-`prompt_override` in `loop_add_ensemble`, so a specialist panel runs all
+`prompt_override` in `graph_add_ensemble`, so a specialist panel runs all
 four axes in parallel with one call instead of four sequential nodes.
 
 **`min_pass` means the wrong thing here.** With homogeneous members,

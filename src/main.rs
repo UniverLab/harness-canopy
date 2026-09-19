@@ -16,7 +16,7 @@ mod db;
 mod domain;
 mod dynamic_skills;
 mod executor;
-mod loop_engine;
+mod graph_engine;
 mod mcp_wizard_module;
 mod rag;
 mod scheduler;
@@ -34,7 +34,7 @@ use daemon::bridge::run_bridge;
 use daemon::clean_cli::handle_clean_action;
 use daemon::cli::{handle_daemon_action, DaemonAction};
 use daemon::doctor::run_doctor;
-use daemon::loop_cli::{handle_loop_action, LoopAction};
+use daemon::graph_cli::{handle_graph_action, GraphAction};
 use daemon::models_cli::{handle_models_action, ModelsAction};
 use daemon::project_cli::{handle_project_action, ProjectAction};
 use daemon::prompts_cli::{handle_prompts_action, PromptsAction};
@@ -98,11 +98,11 @@ enum Commands {
         #[command(subcommand)]
         action: RagAction,
     },
-    /// Inspect and control loop state (list/info are read-only;
+    /// Inspect and control graph state (list/info are read-only;
     /// run/pause/continue/reset/autorun delegate to the daemon).
-    Loop {
+    Graph {
         #[command(subcommand)]
-        action: LoopAction,
+        action: GraphAction,
     },
     /// Manage standalone specs.
     Spec {
@@ -162,7 +162,7 @@ enum Commands {
         #[command(subcommand)]
         action: SubagentAction,
     },
-    /// List, land, or discard canopy sandbox worktrees left by sandboxed loop runs.
+    /// List, land, or discard canopy sandbox worktrees left by sandboxed graph runs.
     Sandbox {
         #[command(subcommand)]
         action: SandboxAction,
@@ -219,7 +219,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Some(Commands::Rag { action }) => handle_rag_action(action).await,
-        Some(Commands::Loop { action }) => handle_loop_action(action, cli.port).await,
+        Some(Commands::Graph { action }) => handle_graph_action(action, cli.port).await,
         Some(Commands::Spec { action }) => handle_spec_action(action, cli.port).await,
         Some(Commands::Models { action }) => handle_models_action(action).await,
         Some(Commands::Project { action }) => handle_project_action(action).await,

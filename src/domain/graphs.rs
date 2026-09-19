@@ -11,7 +11,7 @@ pub use crate::domain::specs::validate_spec_description_template;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum LoopStatus {
+pub enum GraphStatus {
     Draft,
     Running,
     /// Pause requested, waiting for the current node to finish naturally.
@@ -21,7 +21,7 @@ pub enum LoopStatus {
     Failed,
 }
 
-impl LoopStatus {
+impl GraphStatus {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Draft => "draft",
@@ -45,14 +45,14 @@ impl LoopStatus {
     }
 }
 
-/// Result of [`crate::db::Database::reset_loop`] — the single state-transition
-/// path used by both the `loop_reset` MCP tool and the scheduler's
-/// auto-reset-and-resume of a `failed` loop on autorun.
+/// Result of [`crate::db::Database::reset_graph`] — the single state-transition
+/// path used by both the `graph_reset` MCP tool and the scheduler's
+/// auto-reset-and-resume of a `failed` graph on autorun.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LoopResetOutcome {
+pub enum GraphResetOutcome {
     NotFound,
-    /// A node run is still `running` under this loop, regardless of what the
-    /// loop's own `status` column says — resetting underneath it would
+    /// A node run is still `running` under this graph, regardless of what the
+    /// graph's own `status` column says — resetting underneath it would
     /// corrupt its in-flight state (or race a stale completion against the
     /// dispatch the reset launches). Named so the caller's next move is an
     /// informed wait or a deliberate kill, not a blind retry.
@@ -61,7 +61,7 @@ pub enum LoopResetOutcome {
         node_id: String,
         started_at: DateTime<Utc>,
     },
-    /// One of the explicitly requested `specs` doesn't belong to this loop.
+    /// One of the explicitly requested `specs` doesn't belong to this graph.
     InvalidSpec(String),
     Reset {
         spec_count: usize,
@@ -72,13 +72,13 @@ pub enum LoopResetOutcome {
     },
 }
 
-/// Outcome of [`crate::db::Database::archive_loop`] — mirrors
-/// [`LoopResetOutcome`]'s shape (an explicit outcome enum rather than a bare
+/// Outcome of [`crate::db::Database::archive_graph`] — mirrors
+/// [`GraphResetOutcome`]'s shape (an explicit outcome enum rather than a bare
 /// bool/error) so the caller can render a precise message for each refusal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ArchiveLoopOutcome {
+pub enum ArchiveGraphOutcome {
     NotFound,
-    /// A `running` loop must be paused first — archiving is for work that's
+    /// A `running` graph must be paused first — archiving is for work that's
     /// finished with.
     Running,
     AlreadyArchived,
@@ -89,19 +89,19 @@ pub enum ArchiveLoopOutcome {
 pub enum SpecAdminStatusOutcome {
     Success,
     NotFound,
-    /// Spec is bound to a loop (not standalone); spec_set_status only
+    /// Spec is bound to a graph (not standalone); spec_set_status only
     /// administers standalone specs.
     NotStandalone(String),
     /// Spec has an active run and cannot be administratively transitioned.
     ActiveRun {
-        loop_id: String,
+        graph_id: String,
         run_id: String,
     },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum LoopSpecStatus {
+pub enum GraphSpecStatus {
     Pending,
     Running,
     Completed,
@@ -118,7 +118,7 @@ pub enum LoopSpecStatus {
     Interrupted,
 }
 
-impl LoopSpecStatus {
+impl GraphSpecStatus {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Pending => "pending",
@@ -149,25 +149,25 @@ impl LoopSpecStatus {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum LoopNodeKind {
+pub enum GraphNodeKind {
     Agent,
     Check,
     Gate,
     /// Engine-managed quorum node for an ensemble (F1) — never created via
-    /// `loop_add_node` directly, only as part of `loop_add_ensemble`'s
+    /// `graph_add_node` directly, only as part of `graph_add_ensemble`'s
     /// one-call expansion. Waits for every member branch to terminate,
     /// consolidates their outputs, and routes onward. See
-    /// [`crate::loop_engine::LoopEngine`]'s ensemble fan-out handling.
+    /// [`crate::graph_engine::GraphEngine`]'s ensemble fan-out handling.
     Join,
     /// A branch point that declares 2-8 named routes (see [`RouterRoute`])
     /// instead of the binary pass/fail an agent/check/gate node produces.
     /// Model, persistence and validation only in this iteration — the engine
     /// never executes a router (see
-    /// [`crate::loop_engine::LoopEngine::execute_node`]'s `Router` arm).
+    /// [`crate::graph_engine::GraphEngine::execute_node`]'s `Router` arm).
     Router,
 }
 
-impl LoopNodeKind {
+impl GraphNodeKind {
     /// Serde/DB-safe kind string. Unchanged for all variants (keeps
     /// existing DB rows and `from_str` parsing intact).
     pub fn as_str(self) -> &'static str {
@@ -204,28 +204,29 @@ impl LoopNodeKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum LoopEdgeCondition {
+pub enum GraphEdgeCondition {
     Pass,
     Fail,
     Always,
     /// Router-only: this edge is taken when the router selects the named
     /// route. The label must match one of the router node's declared
     /// [`RouterRoute`]s — validated at edge add/update time (see
-    /// `daemon::handler`'s `loop_add_edge`/`loop_update_edge`), never
+    /// `daemon::handler`'s `graph_add_edge`/`graph_update_edge`), never
     /// accepted free-form.
     Route(String),
     /// The node produced no verdict (infrastructure failure — crash,
     /// timeout, empty response). Emitted by the engine itself after retry
     /// exhaustion, never by a router. Falls back to [`Self::Fail`] when no
-    /// `Break` edge exists, so graphs without one keep current behavior.
-    Break,
+    /// `Error` edge exists, so graphs without one keep current behavior.
+    #[serde(alias = "break")]
+    Error,
 }
 
-impl LoopEdgeCondition {
+impl GraphEdgeCondition {
     /// The DB/JSON tag for this condition. For `Route`, this is the fixed
     /// tag `"route"` — the label itself lives in [`Self::route_label`] (and,
     /// in storage, a sibling `route` column — see
-    /// [`crate::db::Database::insert_loop_edge`]) so this stays a cheap
+    /// [`crate::db::Database::insert_graph_edge`]) so this stays a cheap
     /// `&str` borrow rather than an allocation.
     pub fn as_str(&self) -> &str {
         match self {
@@ -233,7 +234,7 @@ impl LoopEdgeCondition {
             Self::Fail => "fail",
             Self::Always => "always",
             Self::Route(_) => "route",
-            Self::Break => "break",
+            Self::Error => "error",
         }
     }
 
@@ -249,12 +250,18 @@ impl LoopEdgeCondition {
     /// single string — unchanged from before `Route` existed. A `Route`
     /// condition instead round-trips through [`Self::from_parts`], since it
     /// needs the sibling `route` column's label.
+    ///
+    /// Deliberately does **not** accept the retired `break` spelling — that
+    /// only round-trips through serde's `#[serde(alias = "break")]` on
+    /// `Error`, scoped to reading a pre-existing exported document (see
+    /// `graph_transfer.rs`), never as a freshly-typed value on
+    /// `graph_add_edge`/`graph_update_edge` or any other write path.
     pub fn from_str(value: &str) -> Option<Self> {
         match value {
             "pass" => Some(Self::Pass),
             "fail" => Some(Self::Fail),
             "always" => Some(Self::Always),
-            "break" => Some(Self::Break),
+            "error" => Some(Self::Error),
             _ => None,
         }
     }
@@ -273,14 +280,14 @@ impl LoopEdgeCondition {
     }
 }
 
-/// Minimum/maximum number of routes a [`LoopNodeKind::Router`] node may
+/// Minimum/maximum number of routes a [`GraphNodeKind::Router`] node may
 /// declare.
 pub const ROUTER_MIN_ROUTES: usize = 2;
 pub const ROUTER_MAX_ROUTES: usize = 8;
 
 /// One route a router node can select: a short label plus a one-line
 /// description of when to take it. Declared in the node's `config` (the
-/// `routes` array) and referenced by an edge's [`LoopEdgeCondition::Route`]
+/// `routes` array) and referenced by an edge's [`GraphEdgeCondition::Route`]
 /// label — never persisted separately.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RouterRoute {
@@ -345,7 +352,7 @@ pub fn validate_router_routes(routes: &[RouterRoute], fallback: &str) -> Result<
 pub fn validate_router_edges_declared(
     routes: &[RouterRoute],
     node_id: &str,
-    edges: &[LoopEdge],
+    edges: &[GraphEdge],
 ) -> Result<(), String> {
     for edge in edges.iter().filter(|edge| edge.from_node == node_id) {
         if let Some(label) = edge.condition.route_label() {
@@ -368,9 +375,9 @@ pub fn validate_router_edges_declared(
 pub fn validate_router_route_coverage(
     routes: &[RouterRoute],
     node_id: &str,
-    edges: &[LoopEdge],
+    edges: &[GraphEdge],
 ) -> Result<(), String> {
-    let route_edges: Vec<&LoopEdge> = edges
+    let route_edges: Vec<&GraphEdge> = edges
         .iter()
         .filter(|edge| edge.from_node == node_id && edge.condition.route_label().is_some())
         .collect();
@@ -393,16 +400,16 @@ pub fn validate_router_route_coverage(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum LoopRunStatus {
+pub enum GraphRunStatus {
     Running,
     Pass,
     Fail,
     /// Operator-interrupted: the node was explicitly stopped by an operator
-    /// via `loop_pause(interrupt: true)`, not a failure of the node's work.
+    /// via `graph_pause(interrupt: true)`, not a failure of the node's work.
     Interrupted,
 }
 
-impl LoopRunStatus {
+impl GraphRunStatus {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Running => "running",
@@ -423,57 +430,57 @@ impl LoopRunStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Loop {
+pub struct Graph {
     pub id: String,
     pub name: String,
     pub description: Option<String>,
     pub workdir: String,
-    pub status: LoopStatus,
-    /// Optional automatic trigger. Reuses the agent [`Trigger`] model so a loop
+    pub status: GraphStatus,
+    /// Optional automatic trigger. Reuses the agent [`Trigger`] model so a graph
     /// can fire on a cron schedule or a file-system watch, exactly like an
-    /// agent. `None` means the loop is manual-only (`loop_run`).
+    /// agent. `None` means the graph is manual-only (`graph_run`).
     #[serde(default)]
     pub trigger: Option<Trigger>,
     pub created_at: DateTime<Utc>,
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
     /// One-shot resume schedule: when set and reached, the scheduler starts
-    /// this loop once (e.g. `run_loop`) and clears the field. Unlike
-    /// `trigger`'s cron, this never repeats — it exists so a loop that fails
+    /// this graph once (e.g. `run_graph`) and clears the field. Unlike
+    /// `trigger`'s cron, this never repeats — it exists so a graph that fails
     /// on a quota can reschedule its own resumption at the exact reset time
     /// instead of relying on a blindly polling cron.
     #[serde(default)]
     pub autorun_at: Option<DateTime<Utc>>,
-    /// One-shot deferred resume for a *paused* loop: when set and reached
-    /// while the loop is still `Paused`, the scheduler fires the equivalent
-    /// of `loop_continue` (see `auto_continue_action`) — preserving the
+    /// One-shot deferred resume for a *paused* graph: when set and reached
+    /// while the graph is still `Paused`, the scheduler fires the equivalent
+    /// of `graph_continue` (see `auto_continue_action`) — preserving the
     /// paused cursor/context — rather than `autorun_at`'s reset-and-relaunch.
-    /// Lets a user pause a loop to stop burning quota now and have it pick
+    /// Lets a user pause a graph to stop burning quota now and have it pick
     /// back up automatically at a later time, without a human calling
-    /// `loop_continue`. Deliberately a separate field from `autorun_at`
+    /// `graph_continue`. Deliberately a separate field from `autorun_at`
     /// rather than a shared one: the two fire through entirely different
     /// paths (`resume_background` alone vs. auto-reset-then-`resume_background`)
     /// and must never be conflated. See `is_auto_continue_due`.
     #[serde(default)]
     pub auto_continue_at: Option<DateTime<Utc>>,
-    /// The `loop_continue` action (`"retry_current_node"` or
+    /// The `graph_continue` action (`"retry_current_node"` or
     /// `"skip_next_spec"`) to apply when `auto_continue_at` fires. `None`
     /// (or any value other than `"skip_next_spec"`) defaults to
     /// `retry_current_node` — see [`crate::scheduler::cron_scheduler`]'s
     /// auto-continue fire branch.
     #[serde(default)]
     pub auto_continue_action: Option<String>,
-    /// The queue a run against this loop is currently — or most recently —
+    /// The queue a run against this graph is currently — or most recently —
     /// drew from, persisted the moment that run starts (`None` for a
     /// bound-spec run). Interrupted runs (a quota failure, a daemon restart)
-    /// leave this set so every resume path — scheduled autorun, `loop_reset`
-    /// — knows which queue to pick up rather than falling back to the loop's
+    /// leave this set so every resume path — scheduled autorun, `graph_reset`
+    /// — knows which queue to pick up rather than falling back to the graph's
     /// (often empty) bound specs. It survives genuine completion too (B31),
-    /// giving a finished queue-driven loop the only link back to the queue it
-    /// ran so `loop list` / `loop info` can render its real `n/n` progress
+    /// giving a finished queue-driven graph the only link back to the queue it
+    /// ran so `graph list` / `graph info` can render its real `n/n` progress
     /// instead of `0/0`. A stale value never pollutes a later run: every
     /// launch path overwrites this field before the first spec executes, so
-    /// a fresh `loop_run` against a different queue (or a bound-spec run,
+    /// a fresh `graph_run` against a different queue (or a bound-spec run,
     /// which writes `None`) replaces it.
     #[serde(default)]
     pub active_run_queue_id: Option<String>,
@@ -484,40 +491,40 @@ pub struct Loop {
     /// delivered asynchronously — due immediately, never waiting for a
     /// reply. An empty map preserves pre-N2 behavior exactly (no hooks
     /// fire). See
-    /// [`crate::loop_engine::LoopEngine`]'s `run_loop_dispatch` for where
+    /// [`crate::graph_engine::GraphEngine`]'s `run_graph_dispatch` for where
     /// events fire and `render_hook_prompt` for placeholders.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub hooks: BTreeMap<LoopHookEvent, Vec<LoopCompletionHook>>,
-    /// Archived loops leave every browsing listing (sidebar, `canopy loop
-    /// list`, MCP `loop_list`) but keep their row, specs, and full run
+    pub hooks: BTreeMap<GraphHookEvent, Vec<GraphCompletionHook>>,
+    /// Archived graphs leave every browsing listing (sidebar, `canopy graph
+    /// list`, MCP `graph_list`) but keep their row, specs, and full run
     /// history — a deliberate, reversible, always-counted alternative to
-    /// permanent deletion. `false` for every pre-existing loop after
-    /// migration. See `Database::{archive_loop, restore_loop}`.
+    /// permanent deletion. `false` for every pre-existing graph after
+    /// migration. See `Database::{archive_graph, restore_graph}`.
     #[serde(default)]
     pub archived: bool,
-    /// Set by `reconcile_orphaned_loops` (and only by it) the moment it pauses
-    /// a loop that was left `Running` by an unclean daemon exit — never by an
-    /// operator's `loop_pause`/`loop_report_blocker`, both of which go
-    /// through `Database::update_loop_status`, which clears this on every
+    /// Set by `reconcile_orphaned_graphs` (and only by it) the moment it pauses
+    /// a graph that was left `Running` by an unclean daemon exit — never by an
+    /// operator's `graph_pause`/`graph_report_blocker`, both of which go
+    /// through `Database::update_graph_status`, which clears this on every
     /// call. Lets [`Self::is_autorun_due`] tell the two kinds of `Paused`
     /// apart: a pending `autorun_at` must survive a reconciliation pause
-    /// (nobody asked for the loop to stop), but must not fire on a pause the
+    /// (nobody asked for the graph to stop), but must not fire on a pause the
     /// operator actually asked for.
     #[serde(default)]
     pub paused_by_reconciliation: bool,
-    /// Optional pre-wired target for infrastructure failures (`Break` edges).
-    /// When set, every new agent/check/gate node added to this loop
-    /// auto-creates a `Break` edge to this node, so a graph with no
+    /// Optional pre-wired target for infrastructure failures (`Error` edges).
+    /// When set, every new agent/check/gate node added to this graph
+    /// auto-creates a `Error` edge to this node, so a graph with no
     /// explicit infrastructure edge still has fail coverage by construction.
-    /// `None` preserves pre-CM2 behavior — no auto-wiring, no `Break` edges.
+    /// `None` preserves pre-CM2 behavior — no auto-wiring, no `Error` edges.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub infra_node_id: Option<String>,
 }
 
-/// Config for a loop completion hook — an agent payload
+/// Config for a graph completion hook — an agent payload
 /// (`platform`/`model`/`prompt`), a direct shell command (`command`), an
 /// interactive message into a live session (`prompt` + `target_session_id`),
-/// or a loop launch (`target_loop_id`). Exactly one mode must be configured;
+/// or a graph launch (`target_graph_id`). Exactly one mode must be configured;
 /// the engine validates this at creation time.
 ///
 /// An interactive hook is fire-and-forget: firing it enqueues one due-now
@@ -525,12 +532,12 @@ pub struct Loop {
 /// asynchronously by the TUI (which stays queued, not lost, while no TUI is
 /// running). It never reads or waits for a reply.
 ///
-/// A loop hook is fire-and-forget: firing it launches another loop in-process
-/// without waiting for it (CH4). The launched loop's outcome never changes the
-/// launching loop's status. Depth is capped at one: a loop launched by a hook
-/// cannot itself launch another loop via hooks.
+/// A graph hook is fire-and-forget: firing it launches another graph in-process
+/// without waiting for it (CH4). The launched graph's outcome never changes the
+/// launching graph's status. Depth is capped at one: a graph launched by a hook
+/// cannot itself launch another graph via hooks.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LoopCompletionHook {
+pub struct GraphCompletionHook {
     /// CLI platform for agent hooks (e.g. "mimo", "claude"). `None` for
     /// command and interactive hooks.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -545,7 +552,7 @@ pub struct LoopCompletionHook {
     /// `{{...}}` placeholders as the hook's event, substituted before
     /// execution. WARNING: do not configure a command that starts a canopy
     /// binary — it triggers daemon-startup recovery, which SIGTERMs live
-    /// loop runs including the run that spawned the hook.
+    /// graph runs including the run that spawned the hook.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
     /// Exact interactive session id an interactive hook delivers to
@@ -556,23 +563,23 @@ pub struct LoopCompletionHook {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_session_id: Option<String>,
     pub timeout_minutes: Option<u64>,
-    /// Target loop id to launch (loop hooks only). Mutually exclusive with
+    /// Target graph id to launch (graph hooks only). Mutually exclusive with
     /// platform/command/target_session_id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_loop_id: Option<String>,
-    /// Optional queue id for the launched loop (loop hooks only).
+    pub target_graph_id: Option<String>,
+    /// Optional queue id for the launched graph (graph hooks only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue_id: Option<String>,
-    /// Optional workdir override for the launched loop (loop hooks only).
+    /// Optional workdir override for the launched graph (graph hooks only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workdir_override: Option<String>,
-    /// Optional idea text for the launched loop (loop hooks only). Mutually
+    /// Optional idea text for the launched graph (graph hooks only). Mutually
     /// exclusive with queue_id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idea: Option<String>,
 }
 
-impl LoopCompletionHook {
+impl GraphCompletionHook {
     /// Whether this is a command hook (runs a shell command directly).
     pub fn is_command(&self) -> bool {
         self.command.is_some()
@@ -596,16 +603,16 @@ impl LoopCompletionHook {
             && self.command.as_deref().is_none_or(|s| s.trim().is_empty())
     }
 
-    /// Whether this is a loop hook (launches another loop in-process).
-    pub fn is_loop(&self) -> bool {
-        self.target_loop_id
+    /// Whether this is a graph hook (launches another graph in-process).
+    pub fn is_graph(&self) -> bool {
+        self.target_graph_id
             .as_deref()
             .is_some_and(|s| !s.trim().is_empty())
     }
 }
 
-impl Loop {
-    /// Short label for the loop's trigger: `"cron"`, `"watch"`, or `"manual"`.
+impl Graph {
+    /// Short label for the graph's trigger: `"cron"`, `"watch"`, or `"manual"`.
     pub fn trigger_type_label(&self) -> &'static str {
         match &self.trigger {
             Some(Trigger::Cron { .. }) => "cron",
@@ -614,7 +621,7 @@ impl Loop {
         }
     }
 
-    /// The cron expression when this loop is cron-triggered.
+    /// The cron expression when this graph is cron-triggered.
     pub fn schedule_expr(&self) -> Option<&str> {
         match &self.trigger {
             Some(Trigger::Cron { schedule_expr }) => Some(schedule_expr),
@@ -622,7 +629,7 @@ impl Loop {
         }
     }
 
-    /// The watched path when this loop is watch-triggered.
+    /// The watched path when this graph is watch-triggered.
     pub fn watch_path(&self) -> Option<&str> {
         match &self.trigger {
             Some(Trigger::Watch { path, .. }) => Some(path),
@@ -646,75 +653,75 @@ impl Loop {
         matches!(&self.trigger, Some(Trigger::Watch { .. }))
     }
 
-    /// Whether a triggered loop is currently eligible to start a fresh run.
+    /// Whether a triggered graph is currently eligible to start a fresh run.
     ///
-    /// A loop that is already `Running` or `Paused` must not be re-launched by
+    /// A graph that is already `Running` or `Paused` must not be re-launched by
     /// its trigger — that would spawn a duplicate execution over the same
-    /// graph. Draft/Completed/Failed loops are fireable (a scheduled loop
+    /// graph. Draft/Completed/Failed graphs are fireable (a scheduled graph
     /// re-runs its graph on each cron slot / watch event).
     pub fn is_fireable(&self) -> bool {
         !matches!(
             self.status,
-            LoopStatus::Running | LoopStatus::Pausing | LoopStatus::Paused
+            GraphStatus::Running | GraphStatus::Pausing | GraphStatus::Paused
         )
     }
 
-    /// Whether this loop's one-shot `autorun_at` schedule is due at `now`.
+    /// Whether this graph's one-shot `autorun_at` schedule is due at `now`.
     ///
     /// True when `autorun_at` is set, `now` has reached it, and either the
-    /// loop is fireable (not `Running`/`Paused`) or it is `Paused` *because
-    /// `reconcile_orphaned_loops` put it there* after an unclean daemon exit.
+    /// graph is fireable (not `Running`/`Paused`) or it is `Paused` *because
+    /// `reconcile_orphaned_graphs` put it there* after an unclean daemon exit.
     /// That second branch is deliberate and narrow: an operator-requested
-    /// pause (`loop_pause`, `loop_report_blocker`) must still block the
+    /// pause (`graph_pause`, `graph_report_blocker`) must still block the
     /// schedule — [`Self::is_fireable`] is unchanged and still says so for
-    /// every other caller — but a pause reconciliation imposed on the loop's
+    /// every other caller — but a pause reconciliation imposed on the graph's
     /// behalf must not silently swallow a schedule nobody asked to cancel.
     /// Firing must clear `autorun_at` so it never fires twice.
     pub fn is_autorun_due(&self, now: DateTime<Utc>) -> bool {
         self.autorun_at.is_some_and(|at| now >= at)
             && (self.is_fireable()
-                || (self.status == LoopStatus::Paused && self.paused_by_reconciliation))
+                || (self.status == GraphStatus::Paused && self.paused_by_reconciliation))
     }
 
     /// Whether `auto_continue_at` has been reached at `now`, independent of
     /// status. Used by the scheduler to decide when a schedule is stale (the
-    /// loop left `Paused` some other way before firing) and must be cleared
-    /// even though it won't actually resume the loop — see
+    /// graph left `Paused` some other way before firing) and must be cleared
+    /// even though it won't actually resume the graph — see
     /// [`Self::is_auto_continue_due`] for the status-gated check that decides
     /// whether to fire.
     pub fn is_auto_continue_time_reached(&self, now: DateTime<Utc>) -> bool {
         self.auto_continue_at.is_some_and(|at| now >= at)
     }
 
-    /// Whether this loop's one-shot `auto_continue_at` schedule should
-    /// actually fire a deferred `loop_continue` at `now`.
+    /// Whether this graph's one-shot `auto_continue_at` schedule should
+    /// actually fire a deferred `graph_continue` at `now`.
     ///
     /// Deliberately Paused-only — unlike [`Self::is_autorun_due`], which is
     /// due on any *fireable* (non-`Running`/`Paused`) status. Deferring a
-    /// resume only makes sense while the loop is sitting `Paused`; if it left
-    /// that state some other way (manual `loop_continue`, failure) before the
+    /// resume only makes sense while the graph is sitting `Paused`; if it left
+    /// that state some other way (manual `graph_continue`, failure) before the
     /// scheduled time, the schedule is stale — the scheduler clears it
     /// without firing rather than waiting here for `Paused` to recur.
     pub fn is_auto_continue_due(&self, now: DateTime<Utc>) -> bool {
-        self.auto_continue_at.is_some_and(|at| now >= at) && self.status == LoopStatus::Paused
+        self.auto_continue_at.is_some_and(|at| now >= at) && self.status == GraphStatus::Paused
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LoopSpec {
+pub struct GraphSpec {
     pub id: String,
-    /// The loop this spec has been assigned to. `None` means the spec is a
+    /// The graph this spec has been assigned to. `None` means the spec is a
     /// standalone backlog item — authored ahead of time, not yet queued into
-    /// any loop's run.
-    pub loop_id: Option<String>,
+    /// any graph's run.
+    pub graph_id: Option<String>,
     pub name: String,
     pub description: Option<String>,
     pub position: i64,
     pub parallelizable: bool,
-    pub status: LoopSpecStatus,
+    pub status: GraphSpecStatus,
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
-    /// The loop's workdir `git rev-parse HEAD`, captured once when this spec
+    /// The graph's workdir `git rev-parse HEAD`, captured once when this spec
     /// starts running (not per node). Lets `check` nodes verify "did this
     /// spec commit anything?" via `{{spec_start_head}}` without relying on
     /// state outside the spec row (e.g. a file marker) that would survive a
@@ -738,7 +745,7 @@ pub struct LoopSpec {
     pub spec_committed_head: Option<String>,
     /// Optional workdir tag for backlog filtering only (`spec_list`). It does
     /// not drive execution — the run that eventually assigns this spec to a
-    /// loop decides the actual workdir.
+    /// graph decides the actual workdir.
     #[serde(default)]
     pub workdir: Option<String>,
     /// How the spec was last transitioned to its current status (`admin` for
@@ -754,44 +761,44 @@ pub struct LoopSpec {
     pub completed_via_at: Option<DateTime<Utc>>,
 }
 
-/// A node in either a spec's graph or a loop's top-level graph.
+/// A node in either a spec's graph or a graph's top-level graph.
 ///
-/// Exactly one of `spec_id`/`loop_id` is set — enforced by the DB layer (see
-/// [`crate::db::Database::insert_loop_node`]) rather than by this type, since
-/// callers build a `LoopNode` before it has been validated against the DB.
+/// Exactly one of `spec_id`/`graph_id` is set — enforced by the DB layer (see
+/// [`crate::db::Database::insert_graph_node`]) rather than by this type, since
+/// callers build a `GraphNode` before it has been validated against the DB.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LoopNode {
+pub struct GraphNode {
     pub id: String,
     pub spec_id: Option<String>,
-    pub loop_id: Option<String>,
+    pub graph_id: Option<String>,
     pub name: String,
-    pub kind: LoopNodeKind,
+    pub kind: GraphNodeKind,
     pub config: Value,
     pub position: i64,
     pub created_at: DateTime<Utc>,
 }
 
-/// An edge in either a spec's graph or a loop's top-level graph.
+/// An edge in either a spec's graph or a graph's top-level graph.
 ///
-/// Exactly one of `spec_id`/`loop_id` is set — same invariant as
-/// [`LoopNode`].
+/// Exactly one of `spec_id`/`graph_id` is set — same invariant as
+/// [`GraphNode`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LoopEdge {
+pub struct GraphEdge {
     pub id: String,
     pub spec_id: Option<String>,
-    pub loop_id: Option<String>,
+    pub graph_id: Option<String>,
     pub from_node: String,
     pub to_node: String,
-    pub condition: LoopEdgeCondition,
+    pub condition: GraphEdgeCondition,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LoopNodeRun {
+pub struct GraphNodeRun {
     pub id: String,
-    pub loop_id: String,
+    pub graph_id: String,
     pub spec_id: String,
     pub node_id: String,
-    pub status: LoopRunStatus,
+    pub status: GraphRunStatus,
     pub input: Option<Value>,
     pub output: Option<Value>,
     pub started_at: DateTime<Utc>,
@@ -829,25 +836,25 @@ pub struct LoopNodeRun {
     pub executed_model: Option<String>,
 }
 
-/// One firing of a loop hook. Deliberately its own table/type rather than
-/// a `LoopNodeRun` — a hook run belongs to no spec and no graph node
-/// (`loop_runs.spec_id`/`node_id` are `NOT NULL` FKs into exactly those),
+/// One firing of a graph hook. Deliberately its own table/type rather than
+/// a `GraphNodeRun` — a hook run belongs to no spec and no graph node
+/// (`graph_runs.spec_id`/`node_id` are `NOT NULL` FKs into exactly those),
 /// and its outcome must never feed back into the run's routing or final
 /// status the way a node run's does.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LoopCompletionHookRun {
+pub struct GraphCompletionHookRun {
     pub id: String,
-    pub loop_id: String,
+    pub graph_id: String,
     /// Which event produced this run.
-    pub event: LoopHookEvent,
+    pub event: GraphHookEvent,
     /// Zero-based index within the event's hook list (declaration order).
     pub hook_index: i64,
-    pub status: LoopRunStatus,
+    pub status: GraphRunStatus,
     pub output: Option<Value>,
     pub summary: Option<String>,
     pub started_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
-    /// Same B12 kill-on-abnormal-end treatment as [`LoopNodeRun::pid`].
+    /// Same B12 kill-on-abnormal-end treatment as [`GraphNodeRun::pid`].
     pub pid: Option<i64>,
     pub boot_id: Option<String>,
     /// CB43: platform/model resolved at dispatch for agent hooks
@@ -860,24 +867,24 @@ pub struct LoopCompletionHookRun {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LoopSpecDetails {
-    pub spec: LoopSpec,
-    pub nodes: Vec<LoopNode>,
-    pub edges: Vec<LoopEdge>,
+pub struct GraphSpecDetails {
+    pub spec: GraphSpec,
+    pub nodes: Vec<GraphNode>,
+    pub edges: Vec<GraphEdge>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LoopDetails {
-    pub lp: Loop,
-    /// The loop-level graph: nodes/edges that target the loop directly
-    /// (`loop_id`) rather than any one spec. Defined once per loop instead of
+pub struct GraphDetails {
+    pub lp: Graph,
+    /// The top-level graph: nodes/edges that target the graph directly
+    /// (`graph_id`) rather than any one spec. Defined once per graph instead of
     /// being repeated across every spec.
-    pub graph_nodes: Vec<LoopNode>,
-    pub graph_edges: Vec<LoopEdge>,
-    pub specs: Vec<LoopSpecDetails>,
-    /// Every past hook firing (oldest first) — populated only when the loop
+    pub graph_nodes: Vec<GraphNode>,
+    pub graph_edges: Vec<GraphEdge>,
+    pub specs: Vec<GraphSpecDetails>,
+    /// Every past hook firing (oldest first) — populated only when the graph
     /// has fired at least one hook.
-    pub completion_hook_runs: Vec<LoopCompletionHookRun>,
+    pub completion_hook_runs: Vec<GraphCompletionHookRun>,
 }
 
 /// An ensemble (F1): a group of agent-node members, run in parallel, plus
@@ -886,11 +893,11 @@ pub struct LoopDetails {
 /// their own `prompt_override` (see [`EnsembleMember::prompt_override`]) so a
 /// panel can review the same input from several angles at once instead of
 /// just several models. Persisted as
-/// its own row so `loop_get`/`loop_update_ensemble` can address the whole
-/// unit — the members and join themselves are ordinary [`LoopNode`] rows
-/// (see [`EnsembleMember`]), wired with ordinary [`LoopEdge`] rows, so the
+/// its own row so `graph_get`/`graph_update_ensemble` can address the whole
+/// unit — the members and join themselves are ordinary [`GraphNode`] rows
+/// (see [`EnsembleMember`]), wired with ordinary [`GraphEdge`] rows, so the
 /// engine's existing graph-walking code needs only the ensemble-aware
-/// fan-out/fan-in added in `loop_engine`.
+/// fan-out/fan-in added in `graph_engine`.
 ///
 /// The execution strategy for an ensemble — how members are selected and
 /// how the ensemble's own pass/fail is determined from their results.
@@ -930,26 +937,26 @@ impl EnsembleKind {
     }
 }
 
-/// The four events a loop hook can fire on. Key name for the event-keyed
-/// hooks map on [`Loop`]. Event names are the public vocabulary of the
+/// The four events a graph hook can fire on. Key name for the event-keyed
+/// hooks map on [`Graph`]. Event names are the public vocabulary of the
 /// hooks feature — chosen once here; CH2, CH3 and CH4 reuse them without
 /// renaming.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[allow(clippy::enum_variant_names)]
-pub enum LoopHookEvent {
-    /// Fires when a loop transitions to `Completed`.
+pub enum GraphHookEvent {
+    /// Fires when a graph transitions to `Completed`.
     OnCompleted,
-    /// Fires when a loop transitions to `Failed`.
+    /// Fires when a graph transitions to `Failed`.
     OnFailed,
-    /// Fires when a loop stops with a blocker set (transition to `Paused`).
+    /// Fires when a graph stops with a blocker set (transition to `Paused`).
     OnBlocked,
     /// Fires once per spec reaching `completed`, whether from bound specs
     /// or from a queue.
     OnSpecCompleted,
 }
 
-impl LoopHookEvent {
+impl GraphHookEvent {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::OnCompleted => "on_completed",
@@ -970,24 +977,24 @@ impl LoopHookEvent {
     }
 }
 
-/// Exactly one of `spec_id`/`loop_id` is set — same invariant as
-/// [`LoopNode`]/[`LoopEdge`].
+/// Exactly one of `spec_id`/`graph_id` is set — same invariant as
+/// [`GraphNode`]/[`GraphEdge`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Ensemble {
     pub id: String,
     pub spec_id: Option<String>,
-    pub loop_id: Option<String>,
+    pub graph_id: Option<String>,
     pub name: String,
     /// The one shared prompt every member renders against — supports the
     /// same placeholders as an agent node's `prompt_template`.
     pub prompt_template: String,
-    /// The engine-executed [`LoopNodeKind::Join`] node that waits for every
+    /// The engine-executed [`GraphNodeKind::Join`] node that waits for every
     /// member and consolidates their outputs.
     pub join_node_id: String,
     /// The node this ensemble is wired from — every member gets an incoming
     /// edge from this node with `entry_condition`.
     pub entry_from_node: String,
-    pub entry_condition: LoopEdgeCondition,
+    pub entry_condition: GraphEdgeCondition,
     /// Members required to pass for the join to report `pass`. Defaults to
     /// every member (set at creation to `members.len()`).
     pub min_pass: i64,
@@ -1018,8 +1025,8 @@ impl Ensemble {
 }
 
 /// `(platform, model, prompt_override)` — the normalized shape of one
-/// ensemble member's identity, shared by `loop_add_ensemble`/
-/// `loop_update_ensemble`'s validated input, [`EnsembleBlueprint`]'s stored
+/// ensemble member's identity, shared by `graph_add_ensemble`/
+/// `graph_update_ensemble`'s validated input, [`EnsembleBlueprint`]'s stored
 /// members, and [`EnsembleMember`] itself.
 ///
 /// [`EnsembleBlueprint`]: crate::domain::blueprints::EnsembleBlueprint
@@ -1027,14 +1034,14 @@ pub type EnsembleMemberSpec = (String, Option<String>, Option<String>);
 
 /// One member of an [`Ensemble`] — differs from its siblings in
 /// `platform`/`model` and, optionally, its own prompt; `node_id` points at
-/// the underlying [`LoopNodeKind::Agent`] row that actually executes.
+/// the underlying [`GraphNodeKind::Agent`] row that actually executes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnsembleMember {
     pub ensemble_id: String,
     pub node_id: String,
     /// Position within the ensemble (0-based) — the deterministic order used
     /// for consolidation and for keying resize diffs in
-    /// `loop_update_ensemble`.
+    /// `graph_update_ensemble`.
     pub position: i64,
     pub platform: String,
     pub model: Option<String>,
@@ -1051,7 +1058,7 @@ pub struct EnsembleMember {
 pub struct EnsembleDetails {
     pub ensemble: Ensemble,
     /// Members in `position` order — the order consolidation and
-    /// `loop_update_ensemble` resize diffs rely on.
+    /// `graph_update_ensemble` resize diffs rely on.
     pub members: Vec<EnsembleMember>,
 }
 
@@ -1059,82 +1066,91 @@ pub struct EnsembleDetails {
 mod tests {
     use super::{
         validate_router_edges_declared, validate_router_route_coverage, validate_router_routes,
-        LoopEdge, LoopEdgeCondition, LoopNodeKind, LoopResetOutcome, LoopRunStatus, LoopSpecStatus,
-        LoopStatus, RouterRoute, SpecAdminStatusOutcome,
+        GraphEdge, GraphEdgeCondition, GraphNodeKind, GraphResetOutcome, GraphRunStatus,
+        GraphSpecStatus, GraphStatus, RouterRoute, SpecAdminStatusOutcome,
     };
 
     #[test]
-    fn loop_status_as_str_roundtrip() {
-        assert_eq!(LoopStatus::Draft.as_str(), "draft");
-        assert_eq!(LoopStatus::Running.as_str(), "running");
-        assert_eq!(LoopStatus::Pausing.as_str(), "pausing");
-        assert_eq!(LoopStatus::Paused.as_str(), "paused");
-        assert_eq!(LoopStatus::Completed.as_str(), "completed");
-        assert_eq!(LoopStatus::Failed.as_str(), "failed");
+    fn graph_status_as_str_roundtrip() {
+        assert_eq!(GraphStatus::Draft.as_str(), "draft");
+        assert_eq!(GraphStatus::Running.as_str(), "running");
+        assert_eq!(GraphStatus::Pausing.as_str(), "pausing");
+        assert_eq!(GraphStatus::Paused.as_str(), "paused");
+        assert_eq!(GraphStatus::Completed.as_str(), "completed");
+        assert_eq!(GraphStatus::Failed.as_str(), "failed");
     }
 
     #[test]
-    fn loop_status_from_str() {
-        assert_eq!(LoopStatus::from_str("running"), LoopStatus::Running);
-        assert_eq!(LoopStatus::from_str("pausing"), LoopStatus::Pausing);
-        assert_eq!(LoopStatus::from_str("paused"), LoopStatus::Paused);
-        assert_eq!(LoopStatus::from_str("completed"), LoopStatus::Completed);
-        assert_eq!(LoopStatus::from_str("failed"), LoopStatus::Failed);
-        assert_eq!(LoopStatus::from_str("invalid"), LoopStatus::Draft);
+    fn graph_status_from_str() {
+        assert_eq!(GraphStatus::from_str("running"), GraphStatus::Running);
+        assert_eq!(GraphStatus::from_str("pausing"), GraphStatus::Pausing);
+        assert_eq!(GraphStatus::from_str("paused"), GraphStatus::Paused);
+        assert_eq!(GraphStatus::from_str("completed"), GraphStatus::Completed);
+        assert_eq!(GraphStatus::from_str("failed"), GraphStatus::Failed);
+        assert_eq!(GraphStatus::from_str("invalid"), GraphStatus::Draft);
     }
 
     #[test]
-    fn loop_spec_status_as_str() {
-        assert_eq!(LoopSpecStatus::Pending.as_str(), "pending");
-        assert_eq!(LoopSpecStatus::Running.as_str(), "running");
-        assert_eq!(LoopSpecStatus::Completed.as_str(), "completed");
-        assert_eq!(LoopSpecStatus::Failed.as_str(), "failed");
-        assert_eq!(LoopSpecStatus::Skipped.as_str(), "skipped");
-        assert_eq!(LoopSpecStatus::Interrupted.as_str(), "interrupted");
+    fn graph_spec_status_as_str() {
+        assert_eq!(GraphSpecStatus::Pending.as_str(), "pending");
+        assert_eq!(GraphSpecStatus::Running.as_str(), "running");
+        assert_eq!(GraphSpecStatus::Completed.as_str(), "completed");
+        assert_eq!(GraphSpecStatus::Failed.as_str(), "failed");
+        assert_eq!(GraphSpecStatus::Skipped.as_str(), "skipped");
+        assert_eq!(GraphSpecStatus::Interrupted.as_str(), "interrupted");
     }
 
     #[test]
-    fn loop_spec_status_from_str() {
-        assert_eq!(LoopSpecStatus::from_str("running"), LoopSpecStatus::Running);
+    fn graph_spec_status_from_str() {
         assert_eq!(
-            LoopSpecStatus::from_str("completed"),
-            LoopSpecStatus::Completed
+            GraphSpecStatus::from_str("running"),
+            GraphSpecStatus::Running
         );
-        assert_eq!(LoopSpecStatus::from_str("failed"), LoopSpecStatus::Failed);
-        assert_eq!(LoopSpecStatus::from_str("skipped"), LoopSpecStatus::Skipped);
         assert_eq!(
-            LoopSpecStatus::from_str("interrupted"),
-            LoopSpecStatus::Interrupted
+            GraphSpecStatus::from_str("completed"),
+            GraphSpecStatus::Completed
+        );
+        assert_eq!(GraphSpecStatus::from_str("failed"), GraphSpecStatus::Failed);
+        assert_eq!(
+            GraphSpecStatus::from_str("skipped"),
+            GraphSpecStatus::Skipped
+        );
+        assert_eq!(
+            GraphSpecStatus::from_str("interrupted"),
+            GraphSpecStatus::Interrupted
         );
         // An unknown status (e.g. written by a newer binary) must never
         // silently read as `Completed` — that would skip work that hasn't
         // actually run. `Pending` is the only safe fallback.
-        assert_eq!(LoopSpecStatus::from_str("invalid"), LoopSpecStatus::Pending);
+        assert_eq!(
+            GraphSpecStatus::from_str("invalid"),
+            GraphSpecStatus::Pending
+        );
     }
 
     #[test]
-    fn loop_node_kind_as_str() {
-        assert_eq!(LoopNodeKind::Agent.as_str(), "agent");
-        assert_eq!(LoopNodeKind::Check.as_str(), "check");
-        assert_eq!(LoopNodeKind::Gate.as_str(), "gate");
-        assert_eq!(LoopNodeKind::Join.as_str(), "join");
+    fn graph_node_kind_as_str() {
+        assert_eq!(GraphNodeKind::Agent.as_str(), "agent");
+        assert_eq!(GraphNodeKind::Check.as_str(), "check");
+        assert_eq!(GraphNodeKind::Gate.as_str(), "gate");
+        assert_eq!(GraphNodeKind::Join.as_str(), "join");
     }
 
     #[test]
-    fn loop_node_kind_from_str() {
-        assert_eq!(LoopNodeKind::from_str("agent"), Some(LoopNodeKind::Agent));
-        assert_eq!(LoopNodeKind::from_str("check"), Some(LoopNodeKind::Check));
-        assert_eq!(LoopNodeKind::from_str("gate"), Some(LoopNodeKind::Gate));
-        assert_eq!(LoopNodeKind::from_str("join"), Some(LoopNodeKind::Join));
-        assert!(LoopNodeKind::from_str("invalid").is_none());
+    fn graph_node_kind_from_str() {
+        assert_eq!(GraphNodeKind::from_str("agent"), Some(GraphNodeKind::Agent));
+        assert_eq!(GraphNodeKind::from_str("check"), Some(GraphNodeKind::Check));
+        assert_eq!(GraphNodeKind::from_str("gate"), Some(GraphNodeKind::Gate));
+        assert_eq!(GraphNodeKind::from_str("join"), Some(GraphNodeKind::Join));
+        assert!(GraphNodeKind::from_str("invalid").is_none());
     }
 
     #[test]
-    fn loop_node_kind_display_str() {
-        assert_eq!(LoopNodeKind::Agent.display_str(), "agent");
-        assert_eq!(LoopNodeKind::Check.display_str(), "check");
-        assert_eq!(LoopNodeKind::Gate.display_str(), "gate");
-        assert_eq!(LoopNodeKind::Join.display_str(), "quorum");
+    fn graph_node_kind_display_str() {
+        assert_eq!(GraphNodeKind::Agent.display_str(), "agent");
+        assert_eq!(GraphNodeKind::Check.display_str(), "check");
+        assert_eq!(GraphNodeKind::Gate.display_str(), "gate");
+        assert_eq!(GraphNodeKind::Join.display_str(), "quorum");
     }
 
     #[test]
@@ -1142,12 +1158,12 @@ mod tests {
         let ensemble = super::Ensemble {
             id: "ens1".to_string(),
             spec_id: Some("spec1".to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "Proposers".to_string(),
             prompt_template: "{{spec_content}}".to_string(),
             join_node_id: "join1".to_string(),
             entry_from_node: "n0".to_string(),
-            entry_condition: LoopEdgeCondition::Always,
+            entry_condition: GraphEdgeCondition::Always,
             min_pass: 2,
             straggler_timeout_minutes: None,
             timeout_minutes: 30,
@@ -1165,55 +1181,55 @@ mod tests {
     }
 
     #[test]
-    fn loop_edge_condition_as_str() {
-        assert_eq!(LoopEdgeCondition::Pass.as_str(), "pass");
-        assert_eq!(LoopEdgeCondition::Fail.as_str(), "fail");
-        assert_eq!(LoopEdgeCondition::Always.as_str(), "always");
+    fn graph_edge_condition_as_str() {
+        assert_eq!(GraphEdgeCondition::Pass.as_str(), "pass");
+        assert_eq!(GraphEdgeCondition::Fail.as_str(), "fail");
+        assert_eq!(GraphEdgeCondition::Always.as_str(), "always");
     }
 
     #[test]
-    fn loop_edge_condition_from_str() {
+    fn graph_edge_condition_from_str() {
         assert_eq!(
-            LoopEdgeCondition::from_str("pass"),
-            Some(LoopEdgeCondition::Pass)
+            GraphEdgeCondition::from_str("pass"),
+            Some(GraphEdgeCondition::Pass)
         );
         assert_eq!(
-            LoopEdgeCondition::from_str("fail"),
-            Some(LoopEdgeCondition::Fail)
+            GraphEdgeCondition::from_str("fail"),
+            Some(GraphEdgeCondition::Fail)
         );
         assert_eq!(
-            LoopEdgeCondition::from_str("always"),
-            Some(LoopEdgeCondition::Always)
+            GraphEdgeCondition::from_str("always"),
+            Some(GraphEdgeCondition::Always)
         );
-        assert!(LoopEdgeCondition::from_str("invalid").is_none());
+        assert!(GraphEdgeCondition::from_str("invalid").is_none());
     }
 
     #[test]
-    fn loop_run_status_as_str() {
-        assert_eq!(LoopRunStatus::Running.as_str(), "running");
-        assert_eq!(LoopRunStatus::Pass.as_str(), "pass");
-        assert_eq!(LoopRunStatus::Fail.as_str(), "fail");
-        assert_eq!(LoopRunStatus::Interrupted.as_str(), "interrupted");
+    fn graph_run_status_as_str() {
+        assert_eq!(GraphRunStatus::Running.as_str(), "running");
+        assert_eq!(GraphRunStatus::Pass.as_str(), "pass");
+        assert_eq!(GraphRunStatus::Fail.as_str(), "fail");
+        assert_eq!(GraphRunStatus::Interrupted.as_str(), "interrupted");
     }
 
     #[test]
-    fn loop_run_status_from_str() {
-        assert_eq!(LoopRunStatus::from_str("pass"), LoopRunStatus::Pass);
-        assert_eq!(LoopRunStatus::from_str("fail"), LoopRunStatus::Fail);
+    fn graph_run_status_from_str() {
+        assert_eq!(GraphRunStatus::from_str("pass"), GraphRunStatus::Pass);
+        assert_eq!(GraphRunStatus::from_str("fail"), GraphRunStatus::Fail);
         assert_eq!(
-            LoopRunStatus::from_str("interrupted"),
-            LoopRunStatus::Interrupted
+            GraphRunStatus::from_str("interrupted"),
+            GraphRunStatus::Interrupted
         );
-        assert_eq!(LoopRunStatus::from_str("invalid"), LoopRunStatus::Running);
+        assert_eq!(GraphRunStatus::from_str("invalid"), GraphRunStatus::Running);
     }
 
-    fn loop_with_trigger(status: LoopStatus, trigger: Option<super::Trigger>) -> super::Loop {
-        super::Loop {
+    fn graph_with_trigger(status: GraphStatus, trigger: Option<super::Trigger>) -> super::Graph {
+        super::Graph {
             archived: false,
             paused_by_reconciliation: false,
             infra_node_id: None,
             id: "wf".to_string(),
-            name: "Loop".to_string(),
+            name: "Graph".to_string(),
             description: None,
             workdir: "/tmp".to_string(),
             status,
@@ -1230,8 +1246,8 @@ mod tests {
     }
 
     #[test]
-    fn manual_loop_has_no_schedule_and_is_not_cron_or_watch() {
-        let lp = loop_with_trigger(LoopStatus::Draft, None);
+    fn manual_graph_has_no_schedule_and_is_not_cron_or_watch() {
+        let lp = graph_with_trigger(GraphStatus::Draft, None);
         assert_eq!(lp.trigger_type_label(), "manual");
         assert_eq!(lp.schedule_expr(), None);
         assert!(!lp.is_cron());
@@ -1240,9 +1256,9 @@ mod tests {
     }
 
     #[test]
-    fn cron_loop_exposes_schedule_expr() {
-        let lp = loop_with_trigger(
-            LoopStatus::Draft,
+    fn cron_graph_exposes_schedule_expr() {
+        let lp = graph_with_trigger(
+            GraphStatus::Draft,
             Some(super::Trigger::Cron {
                 schedule_expr: "30 8 * * *".to_string(),
             }),
@@ -1254,9 +1270,9 @@ mod tests {
     }
 
     #[test]
-    fn watch_loop_exposes_path_and_events() {
-        let lp = loop_with_trigger(
-            LoopStatus::Draft,
+    fn watch_graph_exposes_path_and_events() {
+        let lp = graph_with_trigger(
+            GraphStatus::Draft,
             Some(super::Trigger::Watch {
                 path: "/tmp/watch".to_string(),
                 events: vec![super::WatchEvent::Create],
@@ -1271,54 +1287,54 @@ mod tests {
     }
 
     #[test]
-    fn running_or_paused_loop_is_not_fireable() {
-        // A trigger must not relaunch a loop that is already executing.
-        assert!(!loop_with_trigger(LoopStatus::Running, None).is_fireable());
-        assert!(!loop_with_trigger(LoopStatus::Paused, None).is_fireable());
-        assert!(loop_with_trigger(LoopStatus::Draft, None).is_fireable());
-        assert!(loop_with_trigger(LoopStatus::Completed, None).is_fireable());
-        assert!(loop_with_trigger(LoopStatus::Failed, None).is_fireable());
+    fn running_or_paused_graph_is_not_fireable() {
+        // A trigger must not relaunch a graph that is already executing.
+        assert!(!graph_with_trigger(GraphStatus::Running, None).is_fireable());
+        assert!(!graph_with_trigger(GraphStatus::Paused, None).is_fireable());
+        assert!(graph_with_trigger(GraphStatus::Draft, None).is_fireable());
+        assert!(graph_with_trigger(GraphStatus::Completed, None).is_fireable());
+        assert!(graph_with_trigger(GraphStatus::Failed, None).is_fireable());
     }
 
     #[test]
     fn future_autorun_at_is_not_due() {
-        let mut lp = loop_with_trigger(LoopStatus::Failed, None);
+        let mut lp = graph_with_trigger(GraphStatus::Failed, None);
         lp.autorun_at = Some(chrono::Utc::now() + chrono::Duration::hours(1));
         assert!(!lp.is_autorun_due(chrono::Utc::now()));
     }
 
     #[test]
-    fn past_autorun_at_is_due_on_a_fireable_loop() {
-        let mut lp = loop_with_trigger(LoopStatus::Failed, None);
+    fn past_autorun_at_is_due_on_a_fireable_graph() {
+        let mut lp = graph_with_trigger(GraphStatus::Failed, None);
         lp.autorun_at = Some(chrono::Utc::now() - chrono::Duration::minutes(1));
         assert!(lp.is_autorun_due(chrono::Utc::now()));
     }
 
     #[test]
     fn no_autorun_at_is_never_due() {
-        let lp = loop_with_trigger(LoopStatus::Failed, None);
+        let lp = graph_with_trigger(GraphStatus::Failed, None);
         assert!(!lp.is_autorun_due(chrono::Utc::now()));
     }
 
     #[test]
     fn past_autorun_at_is_not_due_while_running_or_paused() {
-        for status in [LoopStatus::Running, LoopStatus::Paused] {
-            let mut lp = loop_with_trigger(status, None);
+        for status in [GraphStatus::Running, GraphStatus::Paused] {
+            let mut lp = graph_with_trigger(status, None);
             lp.autorun_at = Some(chrono::Utc::now() - chrono::Duration::minutes(1));
             assert!(
                 !lp.is_autorun_due(chrono::Utc::now()),
-                "{status:?} loop must not fire autorun_at"
+                "{status:?} graph must not fire autorun_at"
             );
         }
     }
 
-    /// C1: a loop reconciliation paused after an unclean daemon exit must
+    /// C1: a graph reconciliation paused after an unclean daemon exit must
     /// still fire its pending, due `autorun_at` — that schedule is the
     /// resilience node's one shot at an unattended quota-reset resume, and
-    /// nobody asked for the loop to stop.
+    /// nobody asked for the graph to stop.
     #[test]
-    fn past_autorun_at_is_due_on_a_reconciliation_paused_loop() {
-        let mut lp = loop_with_trigger(LoopStatus::Paused, None);
+    fn past_autorun_at_is_due_on_a_reconciliation_paused_graph() {
+        let mut lp = graph_with_trigger(GraphStatus::Paused, None);
         lp.paused_by_reconciliation = true;
         lp.autorun_at = Some(chrono::Utc::now() - chrono::Duration::minutes(1));
         assert!(lp.is_autorun_due(chrono::Utc::now()));
@@ -1328,8 +1344,8 @@ mod tests {
     /// though a reconciliation pause no longer does — `paused_by_reconciliation`
     /// is what tells the two apart, not `Paused` alone.
     #[test]
-    fn past_autorun_at_is_not_due_on_an_operator_paused_loop() {
-        let mut lp = loop_with_trigger(LoopStatus::Paused, None);
+    fn past_autorun_at_is_not_due_on_an_operator_paused_graph() {
+        let mut lp = graph_with_trigger(GraphStatus::Paused, None);
         lp.paused_by_reconciliation = false;
         lp.autorun_at = Some(chrono::Utc::now() - chrono::Duration::minutes(1));
         assert!(!lp.is_autorun_due(chrono::Utc::now()));
@@ -1337,61 +1353,61 @@ mod tests {
 
     #[test]
     fn past_auto_continue_at_is_due_while_paused() {
-        let mut lp = loop_with_trigger(LoopStatus::Paused, None);
+        let mut lp = graph_with_trigger(GraphStatus::Paused, None);
         lp.auto_continue_at = Some(chrono::Utc::now() - chrono::Duration::minutes(1));
         assert!(lp.is_auto_continue_due(chrono::Utc::now()));
     }
 
     #[test]
     fn future_auto_continue_at_is_not_due() {
-        let mut lp = loop_with_trigger(LoopStatus::Paused, None);
+        let mut lp = graph_with_trigger(GraphStatus::Paused, None);
         lp.auto_continue_at = Some(chrono::Utc::now() + chrono::Duration::hours(1));
         assert!(!lp.is_auto_continue_due(chrono::Utc::now()));
     }
 
     #[test]
     fn no_auto_continue_at_is_never_due() {
-        let lp = loop_with_trigger(LoopStatus::Paused, None);
+        let lp = graph_with_trigger(GraphStatus::Paused, None);
         assert!(!lp.is_auto_continue_due(chrono::Utc::now()));
     }
 
     #[test]
     fn past_auto_continue_at_is_not_due_while_not_paused() {
         for status in [
-            LoopStatus::Draft,
-            LoopStatus::Running,
-            LoopStatus::Completed,
-            LoopStatus::Failed,
+            GraphStatus::Draft,
+            GraphStatus::Running,
+            GraphStatus::Completed,
+            GraphStatus::Failed,
         ] {
-            let mut lp = loop_with_trigger(status, None);
+            let mut lp = graph_with_trigger(status, None);
             lp.auto_continue_at = Some(chrono::Utc::now() - chrono::Duration::minutes(1));
             assert!(
                 !lp.is_auto_continue_due(chrono::Utc::now()),
-                "{status:?} loop must not fire auto_continue_at"
+                "{status:?} graph must not fire auto_continue_at"
             );
             assert!(
                 lp.is_auto_continue_time_reached(chrono::Utc::now()),
-                "{status:?} loop's auto_continue_at time itself must still register as reached \
+                "{status:?} graph's auto_continue_at time itself must still register as reached \
                  so the scheduler can clear the stale schedule"
             );
         }
     }
 
-    // ── LoopStatus: as_str / from_str roundtrip ─────────────────────────
+    // ── GraphStatus: as_str / from_str roundtrip ─────────────────────────
 
     #[test]
-    fn loop_status_as_str_from_str_roundtrip() {
+    fn graph_status_as_str_from_str_roundtrip() {
         let statuses = [
-            LoopStatus::Draft,
-            LoopStatus::Running,
-            LoopStatus::Paused,
-            LoopStatus::Completed,
-            LoopStatus::Failed,
+            GraphStatus::Draft,
+            GraphStatus::Running,
+            GraphStatus::Paused,
+            GraphStatus::Completed,
+            GraphStatus::Failed,
         ];
         for s in statuses {
             let s_str = s.as_str();
             assert_eq!(
-                LoopStatus::from_str(s_str),
+                GraphStatus::from_str(s_str),
                 s,
                 "roundtrip failed for {s_str}"
             );
@@ -1399,46 +1415,46 @@ mod tests {
     }
 
     #[test]
-    fn loop_status_from_str_unknown_defaults_to_draft() {
+    fn graph_status_from_str_unknown_defaults_to_draft() {
         let unknowns = ["", "DRAFT", "Running", "PENDING", "unknown", "123"];
         for input in unknowns {
             assert_eq!(
-                LoopStatus::from_str(input),
-                LoopStatus::Draft,
+                GraphStatus::from_str(input),
+                GraphStatus::Draft,
                 "expected Draft for {input:?}"
             );
         }
     }
 
     #[test]
-    fn loop_status_as_str_returns_lowercase() {
+    fn graph_status_as_str_returns_lowercase() {
         for s in [
-            LoopStatus::Draft,
-            LoopStatus::Running,
-            LoopStatus::Paused,
-            LoopStatus::Completed,
-            LoopStatus::Failed,
+            GraphStatus::Draft,
+            GraphStatus::Running,
+            GraphStatus::Paused,
+            GraphStatus::Completed,
+            GraphStatus::Failed,
         ] {
             assert_eq!(s.as_str(), s.as_str().to_lowercase());
         }
     }
 
-    // ── LoopSpecStatus: as_str / from_str roundtrip ─────────────────────
+    // ── GraphSpecStatus: as_str / from_str roundtrip ─────────────────────
 
     #[test]
-    fn loop_spec_status_as_str_from_str_roundtrip() {
+    fn graph_spec_status_as_str_from_str_roundtrip() {
         let statuses = [
-            LoopSpecStatus::Pending,
-            LoopSpecStatus::Running,
-            LoopSpecStatus::Completed,
-            LoopSpecStatus::Failed,
-            LoopSpecStatus::Skipped,
-            LoopSpecStatus::Interrupted,
+            GraphSpecStatus::Pending,
+            GraphSpecStatus::Running,
+            GraphSpecStatus::Completed,
+            GraphSpecStatus::Failed,
+            GraphSpecStatus::Skipped,
+            GraphSpecStatus::Interrupted,
         ];
         for s in statuses {
             let s_str = s.as_str();
             assert_eq!(
-                LoopSpecStatus::from_str(s_str),
+                GraphSpecStatus::from_str(s_str),
                 s,
                 "roundtrip failed for {s_str}"
             );
@@ -1446,53 +1462,53 @@ mod tests {
     }
 
     #[test]
-    fn loop_spec_status_from_str_unknown_defaults_to_pending() {
+    fn graph_spec_status_from_str_unknown_defaults_to_pending() {
         let unknowns = ["", "PENDING", "Running", "DONE", "unknown", "xyz"];
         for input in unknowns {
             assert_eq!(
-                LoopSpecStatus::from_str(input),
-                LoopSpecStatus::Pending,
+                GraphSpecStatus::from_str(input),
+                GraphSpecStatus::Pending,
                 "expected Pending for {input:?}"
             );
         }
     }
 
     #[test]
-    fn loop_spec_status_as_str_returns_lowercase() {
+    fn graph_spec_status_as_str_returns_lowercase() {
         for s in [
-            LoopSpecStatus::Pending,
-            LoopSpecStatus::Running,
-            LoopSpecStatus::Completed,
-            LoopSpecStatus::Failed,
-            LoopSpecStatus::Skipped,
-            LoopSpecStatus::Interrupted,
+            GraphSpecStatus::Pending,
+            GraphSpecStatus::Running,
+            GraphSpecStatus::Completed,
+            GraphSpecStatus::Failed,
+            GraphSpecStatus::Skipped,
+            GraphSpecStatus::Interrupted,
         ] {
             assert_eq!(s.as_str(), s.as_str().to_lowercase());
         }
     }
 
     #[test]
-    fn loop_spec_status_pending_is_distinct_from_running() {
+    fn graph_spec_status_pending_is_distinct_from_running() {
         assert_ne!(
-            LoopSpecStatus::Pending.as_str(),
-            LoopSpecStatus::Running.as_str()
+            GraphSpecStatus::Pending.as_str(),
+            GraphSpecStatus::Running.as_str()
         );
     }
 
-    // ── LoopNodeKind: as_str / from_str / display_str roundtrip ─────────
+    // ── GraphNodeKind: as_str / from_str / display_str roundtrip ─────────
 
     #[test]
-    fn loop_node_kind_as_str_from_str_roundtrip() {
+    fn graph_node_kind_as_str_from_str_roundtrip() {
         let kinds = [
-            LoopNodeKind::Agent,
-            LoopNodeKind::Check,
-            LoopNodeKind::Gate,
-            LoopNodeKind::Join,
+            GraphNodeKind::Agent,
+            GraphNodeKind::Check,
+            GraphNodeKind::Gate,
+            GraphNodeKind::Join,
         ];
         for k in kinds {
             let k_str = k.as_str();
             assert_eq!(
-                LoopNodeKind::from_str(k_str),
+                GraphNodeKind::from_str(k_str),
                 Some(k),
                 "roundtrip failed for {k_str}"
             );
@@ -1500,11 +1516,11 @@ mod tests {
     }
 
     #[test]
-    fn loop_node_kind_from_str_invalid_returns_none() {
+    fn graph_node_kind_from_str_invalid_returns_none() {
         let invalids = ["", "AGENT", "Agent", "ensemble", "unknown", "workflow"];
         for input in invalids {
             assert_eq!(
-                LoopNodeKind::from_str(input),
+                GraphNodeKind::from_str(input),
                 None,
                 "expected None for {input:?}"
             );
@@ -1512,42 +1528,46 @@ mod tests {
     }
 
     #[test]
-    fn loop_node_kind_display_str_matches_as_str_except_join() {
-        for k in [LoopNodeKind::Agent, LoopNodeKind::Check, LoopNodeKind::Gate] {
+    fn graph_node_kind_display_str_matches_as_str_except_join() {
+        for k in [
+            GraphNodeKind::Agent,
+            GraphNodeKind::Check,
+            GraphNodeKind::Gate,
+        ] {
             assert_eq!(k.display_str(), k.as_str());
         }
-        assert_eq!(LoopNodeKind::Join.display_str(), "quorum");
+        assert_eq!(GraphNodeKind::Join.display_str(), "quorum");
         assert_ne!(
-            LoopNodeKind::Join.display_str(),
-            LoopNodeKind::Join.as_str()
+            GraphNodeKind::Join.display_str(),
+            GraphNodeKind::Join.as_str()
         );
     }
 
     #[test]
-    fn loop_node_kind_as_str_returns_lowercase() {
+    fn graph_node_kind_as_str_returns_lowercase() {
         for k in [
-            LoopNodeKind::Agent,
-            LoopNodeKind::Check,
-            LoopNodeKind::Gate,
-            LoopNodeKind::Join,
+            GraphNodeKind::Agent,
+            GraphNodeKind::Check,
+            GraphNodeKind::Gate,
+            GraphNodeKind::Join,
         ] {
             assert_eq!(k.as_str(), k.as_str().to_lowercase());
         }
     }
 
-    // ── LoopEdgeCondition: as_str / from_str roundtrip ──────────────────
+    // ── GraphEdgeCondition: as_str / from_str roundtrip ──────────────────
 
     #[test]
-    fn loop_edge_condition_as_str_from_str_roundtrip() {
+    fn graph_edge_condition_as_str_from_str_roundtrip() {
         let conds = [
-            LoopEdgeCondition::Pass,
-            LoopEdgeCondition::Fail,
-            LoopEdgeCondition::Always,
+            GraphEdgeCondition::Pass,
+            GraphEdgeCondition::Fail,
+            GraphEdgeCondition::Always,
         ];
         for c in conds {
             let c_str = c.as_str().to_string();
             assert_eq!(
-                LoopEdgeCondition::from_str(&c_str),
+                GraphEdgeCondition::from_str(&c_str),
                 Some(c.clone()),
                 "roundtrip failed for {c_str}"
             );
@@ -1555,11 +1575,11 @@ mod tests {
     }
 
     #[test]
-    fn loop_edge_condition_from_str_invalid_returns_none() {
+    fn graph_edge_condition_from_str_invalid_returns_none() {
         let invalids = ["", "PASS", "Pass", "never", "sometimes", "123"];
         for input in invalids {
             assert_eq!(
-                LoopEdgeCondition::from_str(input),
+                GraphEdgeCondition::from_str(input),
                 None,
                 "expected None for {input:?}"
             );
@@ -1567,29 +1587,29 @@ mod tests {
     }
 
     #[test]
-    fn loop_edge_condition_as_str_returns_lowercase() {
+    fn graph_edge_condition_as_str_returns_lowercase() {
         for c in [
-            LoopEdgeCondition::Pass,
-            LoopEdgeCondition::Fail,
-            LoopEdgeCondition::Always,
+            GraphEdgeCondition::Pass,
+            GraphEdgeCondition::Fail,
+            GraphEdgeCondition::Always,
         ] {
             assert_eq!(c.as_str(), c.as_str().to_lowercase());
         }
     }
 
-    // ── LoopRunStatus: as_str / from_str roundtrip ──────────────────────
+    // ── GraphRunStatus: as_str / from_str roundtrip ──────────────────────
 
     #[test]
-    fn loop_run_status_as_str_from_str_roundtrip() {
+    fn graph_run_status_as_str_from_str_roundtrip() {
         let statuses = [
-            LoopRunStatus::Running,
-            LoopRunStatus::Pass,
-            LoopRunStatus::Fail,
+            GraphRunStatus::Running,
+            GraphRunStatus::Pass,
+            GraphRunStatus::Fail,
         ];
         for s in statuses {
             let s_str = s.as_str();
             assert_eq!(
-                LoopRunStatus::from_str(s_str),
+                GraphRunStatus::from_str(s_str),
                 s,
                 "roundtrip failed for {s_str}"
             );
@@ -1597,23 +1617,23 @@ mod tests {
     }
 
     #[test]
-    fn loop_run_status_from_str_unknown_defaults_to_running() {
+    fn graph_run_status_from_str_unknown_defaults_to_running() {
         let unknowns = ["", "RUNNING", "Running", "done", "unknown", "42"];
         for input in unknowns {
             assert_eq!(
-                LoopRunStatus::from_str(input),
-                LoopRunStatus::Running,
+                GraphRunStatus::from_str(input),
+                GraphRunStatus::Running,
                 "expected Running for {input:?}"
             );
         }
     }
 
     #[test]
-    fn loop_run_status_as_str_returns_lowercase() {
+    fn graph_run_status_as_str_returns_lowercase() {
         for s in [
-            LoopRunStatus::Running,
-            LoopRunStatus::Pass,
-            LoopRunStatus::Fail,
+            GraphRunStatus::Running,
+            GraphRunStatus::Pass,
+            GraphRunStatus::Fail,
         ] {
             assert_eq!(s.as_str(), s.as_str().to_lowercase());
         }
@@ -1645,12 +1665,12 @@ mod tests {
     #[test]
     fn spec_admin_status_outcome_active_run_carries_ids() {
         let outcome = SpecAdminStatusOutcome::ActiveRun {
-            loop_id: "loop-1".to_string(),
+            graph_id: "graph-1".to_string(),
             run_id: "run-2".to_string(),
         };
         match outcome {
-            SpecAdminStatusOutcome::ActiveRun { loop_id, run_id } => {
-                assert_eq!(loop_id, "loop-1");
+            SpecAdminStatusOutcome::ActiveRun { graph_id, run_id } => {
+                assert_eq!(graph_id, "graph-1");
                 assert_eq!(run_id, "run-2");
             }
             _ => panic!("expected ActiveRun"),
@@ -1663,31 +1683,31 @@ mod tests {
         let not_found = SpecAdminStatusOutcome::NotFound;
         let not_standalone = SpecAdminStatusOutcome::NotStandalone("x".to_string());
         let active_run = SpecAdminStatusOutcome::ActiveRun {
-            loop_id: "a".to_string(),
+            graph_id: "a".to_string(),
             run_id: "b".to_string(),
         };
         assert_ne!(format!("{success:?}"), format!("{not_found:?}"));
         assert_ne!(format!("{not_standalone:?}"), format!("{active_run:?}"));
     }
 
-    // ── LoopResetOutcome: variant construction & equality ───────────────
+    // ── GraphResetOutcome: variant construction & equality ───────────────
 
     #[test]
-    fn loop_reset_outcome_not_found() {
-        let a = LoopResetOutcome::NotFound;
-        assert!(matches!(a, LoopResetOutcome::NotFound));
+    fn graph_reset_outcome_not_found() {
+        let a = GraphResetOutcome::NotFound;
+        assert!(matches!(a, GraphResetOutcome::NotFound));
     }
 
     #[test]
-    fn loop_reset_outcome_in_flight_carries_run_info() {
+    fn graph_reset_outcome_in_flight_carries_run_info() {
         let started_at = chrono::Utc::now();
-        let a = LoopResetOutcome::InFlight {
+        let a = GraphResetOutcome::InFlight {
             run_id: "run-1".to_string(),
             node_id: "node-1".to_string(),
             started_at,
         };
         match a {
-            LoopResetOutcome::InFlight {
+            GraphResetOutcome::InFlight {
                 run_id,
                 node_id,
                 started_at: at,
@@ -1701,22 +1721,22 @@ mod tests {
     }
 
     #[test]
-    fn loop_reset_outcome_invalid_spec_carries_id() {
-        let outcome = LoopResetOutcome::InvalidSpec("bad-spec".to_string());
+    fn graph_reset_outcome_invalid_spec_carries_id() {
+        let outcome = GraphResetOutcome::InvalidSpec("bad-spec".to_string());
         match outcome {
-            LoopResetOutcome::InvalidSpec(id) => assert_eq!(id, "bad-spec"),
+            GraphResetOutcome::InvalidSpec(id) => assert_eq!(id, "bad-spec"),
             _ => panic!("expected InvalidSpec"),
         }
     }
 
     #[test]
-    fn loop_reset_outcome_reset_carries_count() {
-        let outcome = LoopResetOutcome::Reset {
+    fn graph_reset_outcome_reset_carries_count() {
+        let outcome = GraphResetOutcome::Reset {
             spec_count: 5,
             skipped_count: 0,
         };
         match outcome {
-            LoopResetOutcome::Reset {
+            GraphResetOutcome::Reset {
                 spec_count,
                 skipped_count: _,
             } => assert_eq!(spec_count, 5),
@@ -1725,15 +1745,15 @@ mod tests {
     }
 
     #[test]
-    fn loop_reset_outcome_variants_are_distinct() {
-        let not_found = LoopResetOutcome::NotFound;
-        let in_flight = LoopResetOutcome::InFlight {
+    fn graph_reset_outcome_variants_are_distinct() {
+        let not_found = GraphResetOutcome::NotFound;
+        let in_flight = GraphResetOutcome::InFlight {
             run_id: "run-1".to_string(),
             node_id: "node-1".to_string(),
             started_at: chrono::Utc::now(),
         };
-        let invalid = LoopResetOutcome::InvalidSpec("x".to_string());
-        let reset = LoopResetOutcome::Reset {
+        let invalid = GraphResetOutcome::InvalidSpec("x".to_string());
+        let reset = GraphResetOutcome::Reset {
             spec_count: 0,
             skipped_count: 0,
         };
@@ -1741,16 +1761,16 @@ mod tests {
         assert_ne!(format!("{invalid:?}"), format!("{reset:?}"));
     }
 
-    // ── LoopStatus: equality & Debug ────────────────────────────────────
+    // ── GraphStatus: equality & Debug ────────────────────────────────────
 
     #[test]
-    fn loop_status_variants_are_distinct() {
+    fn graph_status_variants_are_distinct() {
         let all = [
-            LoopStatus::Draft,
-            LoopStatus::Running,
-            LoopStatus::Paused,
-            LoopStatus::Completed,
-            LoopStatus::Failed,
+            GraphStatus::Draft,
+            GraphStatus::Running,
+            GraphStatus::Paused,
+            GraphStatus::Completed,
+            GraphStatus::Failed,
         ];
         for i in 0..all.len() {
             for j in (i + 1)..all.len() {
@@ -1762,25 +1782,25 @@ mod tests {
     }
 
     #[test]
-    fn loop_status_debug_format_matches_variant_name() {
-        assert_eq!(format!("{:?}", LoopStatus::Draft), "Draft");
-        assert_eq!(format!("{:?}", LoopStatus::Running), "Running");
-        assert_eq!(format!("{:?}", LoopStatus::Paused), "Paused");
-        assert_eq!(format!("{:?}", LoopStatus::Completed), "Completed");
-        assert_eq!(format!("{:?}", LoopStatus::Failed), "Failed");
+    fn graph_status_debug_format_matches_variant_name() {
+        assert_eq!(format!("{:?}", GraphStatus::Draft), "Draft");
+        assert_eq!(format!("{:?}", GraphStatus::Running), "Running");
+        assert_eq!(format!("{:?}", GraphStatus::Paused), "Paused");
+        assert_eq!(format!("{:?}", GraphStatus::Completed), "Completed");
+        assert_eq!(format!("{:?}", GraphStatus::Failed), "Failed");
     }
 
-    // ── LoopSpecStatus: equality & Debug ────────────────────────────────
+    // ── GraphSpecStatus: equality & Debug ────────────────────────────────
 
     #[test]
-    fn loop_spec_status_variants_are_distinct() {
+    fn graph_spec_status_variants_are_distinct() {
         let all = [
-            LoopSpecStatus::Pending,
-            LoopSpecStatus::Running,
-            LoopSpecStatus::Completed,
-            LoopSpecStatus::Failed,
-            LoopSpecStatus::Skipped,
-            LoopSpecStatus::Interrupted,
+            GraphSpecStatus::Pending,
+            GraphSpecStatus::Running,
+            GraphSpecStatus::Completed,
+            GraphSpecStatus::Failed,
+            GraphSpecStatus::Skipped,
+            GraphSpecStatus::Interrupted,
         ];
         for i in 0..all.len() {
             for j in (i + 1)..all.len() {
@@ -1791,15 +1811,15 @@ mod tests {
         }
     }
 
-    // ── LoopNodeKind: equality & Debug ──────────────────────────────────
+    // ── GraphNodeKind: equality & Debug ──────────────────────────────────
 
     #[test]
-    fn loop_node_kind_variants_are_distinct() {
+    fn graph_node_kind_variants_are_distinct() {
         let all = [
-            LoopNodeKind::Agent,
-            LoopNodeKind::Check,
-            LoopNodeKind::Gate,
-            LoopNodeKind::Join,
+            GraphNodeKind::Agent,
+            GraphNodeKind::Check,
+            GraphNodeKind::Gate,
+            GraphNodeKind::Join,
         ];
         for i in 0..all.len() {
             for j in (i + 1)..all.len() {
@@ -1810,14 +1830,14 @@ mod tests {
         }
     }
 
-    // ── LoopEdgeCondition: equality & Debug ─────────────────────────────
+    // ── GraphEdgeCondition: equality & Debug ─────────────────────────────
 
     #[test]
-    fn loop_edge_condition_variants_are_distinct() {
+    fn graph_edge_condition_variants_are_distinct() {
         let all = [
-            LoopEdgeCondition::Pass,
-            LoopEdgeCondition::Fail,
-            LoopEdgeCondition::Always,
+            GraphEdgeCondition::Pass,
+            GraphEdgeCondition::Fail,
+            GraphEdgeCondition::Always,
         ];
         for i in 0..all.len() {
             for j in (i + 1)..all.len() {
@@ -1828,14 +1848,14 @@ mod tests {
         }
     }
 
-    // ── LoopRunStatus: equality & Debug ─────────────────────────────────
+    // ── GraphRunStatus: equality & Debug ─────────────────────────────────
 
     #[test]
-    fn loop_run_status_variants_are_distinct() {
+    fn graph_run_status_variants_are_distinct() {
         let all = [
-            LoopRunStatus::Running,
-            LoopRunStatus::Pass,
-            LoopRunStatus::Fail,
+            GraphRunStatus::Running,
+            GraphRunStatus::Pass,
+            GraphRunStatus::Fail,
         ];
         for i in 0..all.len() {
             for j in (i + 1)..all.len() {
@@ -1849,54 +1869,54 @@ mod tests {
     // ── Clone: all status enums are Clone ───────────────────────────────
 
     #[test]
-    fn loop_status_is_clone() {
-        let s = LoopStatus::Running;
+    fn graph_status_is_clone() {
+        let s = GraphStatus::Running;
         let cloned = s;
         assert_eq!(s, cloned);
     }
 
     #[test]
-    fn loop_spec_status_is_clone() {
-        let s = LoopSpecStatus::Failed;
+    fn graph_spec_status_is_clone() {
+        let s = GraphSpecStatus::Failed;
         let cloned = s;
         assert_eq!(s, cloned);
     }
 
     #[test]
-    fn loop_node_kind_is_clone() {
-        let k = LoopNodeKind::Join;
+    fn graph_node_kind_is_clone() {
+        let k = GraphNodeKind::Join;
         let cloned = k;
         assert_eq!(k, cloned);
     }
 
     #[test]
-    fn loop_edge_condition_is_clone() {
-        let c = LoopEdgeCondition::Always;
+    fn graph_edge_condition_is_clone() {
+        let c = GraphEdgeCondition::Always;
         let cloned = c.clone();
         assert_eq!(c, cloned);
     }
 
     #[test]
-    fn loop_run_status_is_clone() {
-        let s = LoopRunStatus::Pass;
+    fn graph_run_status_is_clone() {
+        let s = GraphRunStatus::Pass;
         let cloned = s;
         assert_eq!(s, cloned);
     }
 
-    // ── Loop: is_fireable exhaustive coverage ───────────────────────────
+    // ── Graph: is_fireable exhaustive coverage ───────────────────────────
 
     #[test]
-    fn loop_is_fireable_exhaustive() {
+    fn graph_is_fireable_exhaustive() {
         let expected_fireable = [
-            (LoopStatus::Draft, true),
-            (LoopStatus::Running, false),
-            (LoopStatus::Pausing, false),
-            (LoopStatus::Paused, false),
-            (LoopStatus::Completed, true),
-            (LoopStatus::Failed, true),
+            (GraphStatus::Draft, true),
+            (GraphStatus::Running, false),
+            (GraphStatus::Pausing, false),
+            (GraphStatus::Paused, false),
+            (GraphStatus::Completed, true),
+            (GraphStatus::Failed, true),
         ];
         for (status, expected) in expected_fireable {
-            let lp = loop_with_trigger(status, None);
+            let lp = graph_with_trigger(status, None);
             assert_eq!(
                 lp.is_fireable(),
                 expected,
@@ -1905,23 +1925,23 @@ mod tests {
         }
     }
 
-    // ── Loop: trigger_type_label exhaustive ─────────────────────────────
+    // ── Graph: trigger_type_label exhaustive ─────────────────────────────
 
     #[test]
-    fn loop_trigger_type_label_exhaustive() {
-        let lp_manual = loop_with_trigger(LoopStatus::Draft, None);
+    fn graph_trigger_type_label_exhaustive() {
+        let lp_manual = graph_with_trigger(GraphStatus::Draft, None);
         assert_eq!(lp_manual.trigger_type_label(), "manual");
 
-        let lp_cron = loop_with_trigger(
-            LoopStatus::Draft,
+        let lp_cron = graph_with_trigger(
+            GraphStatus::Draft,
             Some(super::Trigger::Cron {
                 schedule_expr: "* * * * *".to_string(),
             }),
         );
         assert_eq!(lp_cron.trigger_type_label(), "cron");
 
-        let lp_watch = loop_with_trigger(
-            LoopStatus::Draft,
+        let lp_watch = graph_with_trigger(
+            GraphStatus::Draft,
             Some(super::Trigger::Watch {
                 path: "/tmp".to_string(),
                 events: vec![],
@@ -1932,23 +1952,23 @@ mod tests {
         assert_eq!(lp_watch.trigger_type_label(), "watch");
     }
 
-    // ── Loop: schedule_expr / watch_path exhaustive ─────────────────────
+    // ── Graph: schedule_expr / watch_path exhaustive ─────────────────────
 
     #[test]
-    fn loop_schedule_expr_only_some_for_cron() {
-        let cron = loop_with_trigger(
-            LoopStatus::Draft,
+    fn graph_schedule_expr_only_some_for_cron() {
+        let cron = graph_with_trigger(
+            GraphStatus::Draft,
             Some(super::Trigger::Cron {
                 schedule_expr: "0 9 * * 1-5".to_string(),
             }),
         );
         assert_eq!(cron.schedule_expr(), Some("0 9 * * 1-5"));
 
-        let manual = loop_with_trigger(LoopStatus::Draft, None);
+        let manual = graph_with_trigger(GraphStatus::Draft, None);
         assert_eq!(manual.schedule_expr(), None);
 
-        let watch = loop_with_trigger(
-            LoopStatus::Draft,
+        let watch = graph_with_trigger(
+            GraphStatus::Draft,
             Some(super::Trigger::Watch {
                 path: "/src".to_string(),
                 events: vec![],
@@ -1960,9 +1980,9 @@ mod tests {
     }
 
     #[test]
-    fn loop_watch_path_only_some_for_watch() {
-        let watch = loop_with_trigger(
-            LoopStatus::Draft,
+    fn graph_watch_path_only_some_for_watch() {
+        let watch = graph_with_trigger(
+            GraphStatus::Draft,
             Some(super::Trigger::Watch {
                 path: "/data".to_string(),
                 events: vec![super::WatchEvent::Modify],
@@ -1972,65 +1992,65 @@ mod tests {
         );
         assert_eq!(watch.watch_path(), Some("/data"));
 
-        let cron = loop_with_trigger(
-            LoopStatus::Draft,
+        let cron = graph_with_trigger(
+            GraphStatus::Draft,
             Some(super::Trigger::Cron {
                 schedule_expr: "* * * * *".to_string(),
             }),
         );
         assert_eq!(cron.watch_path(), None);
 
-        let manual = loop_with_trigger(LoopStatus::Draft, None);
+        let manual = graph_with_trigger(GraphStatus::Draft, None);
         assert_eq!(manual.watch_path(), None);
     }
 
-    // ── Loop: is_autorun_due edge cases ─────────────────────────────────
+    // ── Graph: is_autorun_due edge cases ─────────────────────────────────
 
     #[test]
-    fn loop_autorun_due_exactly_at_threshold() {
+    fn graph_autorun_due_exactly_at_threshold() {
         let now = chrono::Utc::now();
-        let mut lp = loop_with_trigger(LoopStatus::Completed, None);
+        let mut lp = graph_with_trigger(GraphStatus::Completed, None);
         lp.autorun_at = Some(now);
         assert!(lp.is_autorun_due(now));
     }
 
     #[test]
-    fn loop_autorun_not_due_one_second_before() {
+    fn graph_autorun_not_due_one_second_before() {
         let now = chrono::Utc::now();
-        let mut lp = loop_with_trigger(LoopStatus::Completed, None);
+        let mut lp = graph_with_trigger(GraphStatus::Completed, None);
         lp.autorun_at = Some(now + chrono::Duration::seconds(1));
         assert!(!lp.is_autorun_due(now));
     }
 
-    // ── Loop: is_auto_continue_due edge cases ───────────────────────────
+    // ── Graph: is_auto_continue_due edge cases ───────────────────────────
 
     #[test]
-    fn loop_auto_continue_due_exactly_at_threshold() {
+    fn graph_auto_continue_due_exactly_at_threshold() {
         let now = chrono::Utc::now();
-        let mut lp = loop_with_trigger(LoopStatus::Paused, None);
+        let mut lp = graph_with_trigger(GraphStatus::Paused, None);
         lp.auto_continue_at = Some(now);
         assert!(lp.is_auto_continue_due(now));
     }
 
     #[test]
-    fn loop_auto_continue_not_due_one_second_before() {
+    fn graph_auto_continue_not_due_one_second_before() {
         let now = chrono::Utc::now();
-        let mut lp = loop_with_trigger(LoopStatus::Paused, None);
+        let mut lp = graph_with_trigger(GraphStatus::Paused, None);
         lp.auto_continue_at = Some(now + chrono::Duration::seconds(1));
         assert!(!lp.is_auto_continue_due(now));
     }
 
     #[test]
-    fn loop_auto_continue_time_reached_independent_of_status() {
+    fn graph_auto_continue_time_reached_independent_of_status() {
         let now = chrono::Utc::now();
         for status in [
-            LoopStatus::Draft,
-            LoopStatus::Running,
-            LoopStatus::Paused,
-            LoopStatus::Completed,
-            LoopStatus::Failed,
+            GraphStatus::Draft,
+            GraphStatus::Running,
+            GraphStatus::Paused,
+            GraphStatus::Completed,
+            GraphStatus::Failed,
         ] {
-            let mut lp = loop_with_trigger(status, None);
+            let mut lp = graph_with_trigger(status, None);
             lp.auto_continue_at = Some(now - chrono::Duration::seconds(1));
             assert!(
                 lp.is_auto_continue_time_reached(now),
@@ -2040,29 +2060,29 @@ mod tests {
     }
 
     #[test]
-    fn loop_auto_continue_time_not_reached_in_future() {
+    fn graph_auto_continue_time_not_reached_in_future() {
         let now = chrono::Utc::now();
-        let mut lp = loop_with_trigger(LoopStatus::Paused, None);
+        let mut lp = graph_with_trigger(GraphStatus::Paused, None);
         lp.auto_continue_at = Some(now + chrono::Duration::hours(1));
         assert!(!lp.is_auto_continue_time_reached(now));
     }
 
     #[test]
-    fn loop_auto_continue_time_not_reached_when_none() {
-        let lp = loop_with_trigger(LoopStatus::Paused, None);
+    fn graph_auto_continue_time_not_reached_when_none() {
+        let lp = graph_with_trigger(GraphStatus::Paused, None);
         assert!(!lp.is_auto_continue_time_reached(chrono::Utc::now()));
     }
 
-    // ── Loop: is_cron / is_watch exhaustive ─────────────────────────────
+    // ── Graph: is_cron / is_watch exhaustive ─────────────────────────────
 
     #[test]
-    fn loop_is_cron_and_is_watch_exhaustive() {
-        let manual = loop_with_trigger(LoopStatus::Draft, None);
+    fn graph_is_cron_and_is_watch_exhaustive() {
+        let manual = graph_with_trigger(GraphStatus::Draft, None);
         assert!(!manual.is_cron());
         assert!(!manual.is_watch());
 
-        let cron = loop_with_trigger(
-            LoopStatus::Draft,
+        let cron = graph_with_trigger(
+            GraphStatus::Draft,
             Some(super::Trigger::Cron {
                 schedule_expr: "* * * * *".to_string(),
             }),
@@ -2070,8 +2090,8 @@ mod tests {
         assert!(cron.is_cron());
         assert!(!cron.is_watch());
 
-        let watch = loop_with_trigger(
-            LoopStatus::Draft,
+        let watch = graph_with_trigger(
+            GraphStatus::Draft,
             Some(super::Trigger::Watch {
                 path: "/x".to_string(),
                 events: vec![],
@@ -2083,156 +2103,156 @@ mod tests {
         assert!(watch.is_watch());
     }
 
-    // ── serde: LoopStatus roundtrip ─────────────────────────────────────
+    // ── serde: GraphStatus roundtrip ─────────────────────────────────────
 
     #[test]
-    fn loop_status_serde_roundtrip() {
+    fn graph_status_serde_roundtrip() {
         let statuses = [
-            LoopStatus::Draft,
-            LoopStatus::Running,
-            LoopStatus::Paused,
-            LoopStatus::Completed,
-            LoopStatus::Failed,
+            GraphStatus::Draft,
+            GraphStatus::Running,
+            GraphStatus::Paused,
+            GraphStatus::Completed,
+            GraphStatus::Failed,
         ];
         for s in statuses {
             let json = serde_json::to_string(&s).unwrap();
-            let deserialized: LoopStatus = serde_json::from_str(&json).unwrap();
+            let deserialized: GraphStatus = serde_json::from_str(&json).unwrap();
             assert_eq!(deserialized, s, "serde roundtrip failed for {json}");
         }
     }
 
     #[test]
-    fn loop_status_serde_uses_snake_case() {
+    fn graph_status_serde_uses_snake_case() {
         assert_eq!(
-            serde_json::to_string(&LoopStatus::Draft).unwrap(),
+            serde_json::to_string(&GraphStatus::Draft).unwrap(),
             "\"draft\""
         );
         assert_eq!(
-            serde_json::to_string(&LoopStatus::Running).unwrap(),
+            serde_json::to_string(&GraphStatus::Running).unwrap(),
             "\"running\""
         );
         assert_eq!(
-            serde_json::to_string(&LoopStatus::Completed).unwrap(),
+            serde_json::to_string(&GraphStatus::Completed).unwrap(),
             "\"completed\""
         );
     }
 
-    // ── serde: LoopSpecStatus roundtrip ─────────────────────────────────
+    // ── serde: GraphSpecStatus roundtrip ─────────────────────────────────
 
     #[test]
-    fn loop_spec_status_serde_roundtrip() {
+    fn graph_spec_status_serde_roundtrip() {
         let statuses = [
-            LoopSpecStatus::Pending,
-            LoopSpecStatus::Running,
-            LoopSpecStatus::Completed,
-            LoopSpecStatus::Failed,
-            LoopSpecStatus::Skipped,
-            LoopSpecStatus::Interrupted,
+            GraphSpecStatus::Pending,
+            GraphSpecStatus::Running,
+            GraphSpecStatus::Completed,
+            GraphSpecStatus::Failed,
+            GraphSpecStatus::Skipped,
+            GraphSpecStatus::Interrupted,
         ];
         for s in statuses {
             let json = serde_json::to_string(&s).unwrap();
-            let deserialized: LoopSpecStatus = serde_json::from_str(&json).unwrap();
+            let deserialized: GraphSpecStatus = serde_json::from_str(&json).unwrap();
             assert_eq!(deserialized, s, "serde roundtrip failed for {json}");
         }
     }
 
     #[test]
-    fn loop_spec_status_serde_uses_snake_case() {
+    fn graph_spec_status_serde_uses_snake_case() {
         assert_eq!(
-            serde_json::to_string(&LoopSpecStatus::Pending).unwrap(),
+            serde_json::to_string(&GraphSpecStatus::Pending).unwrap(),
             "\"pending\""
         );
         assert_eq!(
-            serde_json::to_string(&LoopSpecStatus::Skipped).unwrap(),
+            serde_json::to_string(&GraphSpecStatus::Skipped).unwrap(),
             "\"skipped\""
         );
         assert_eq!(
-            serde_json::to_string(&LoopSpecStatus::Interrupted).unwrap(),
+            serde_json::to_string(&GraphSpecStatus::Interrupted).unwrap(),
             "\"interrupted\""
         );
     }
 
-    // ── serde: LoopNodeKind roundtrip ───────────────────────────────────
+    // ── serde: GraphNodeKind roundtrip ───────────────────────────────────
 
     #[test]
-    fn loop_node_kind_serde_roundtrip() {
+    fn graph_node_kind_serde_roundtrip() {
         let kinds = [
-            LoopNodeKind::Agent,
-            LoopNodeKind::Check,
-            LoopNodeKind::Gate,
-            LoopNodeKind::Join,
+            GraphNodeKind::Agent,
+            GraphNodeKind::Check,
+            GraphNodeKind::Gate,
+            GraphNodeKind::Join,
         ];
         for k in kinds {
             let json = serde_json::to_string(&k).unwrap();
-            let deserialized: LoopNodeKind = serde_json::from_str(&json).unwrap();
+            let deserialized: GraphNodeKind = serde_json::from_str(&json).unwrap();
             assert_eq!(deserialized, k, "serde roundtrip failed for {json}");
         }
     }
 
     #[test]
-    fn loop_node_kind_serde_uses_snake_case() {
+    fn graph_node_kind_serde_uses_snake_case() {
         assert_eq!(
-            serde_json::to_string(&LoopNodeKind::Agent).unwrap(),
+            serde_json::to_string(&GraphNodeKind::Agent).unwrap(),
             "\"agent\""
         );
         assert_eq!(
-            serde_json::to_string(&LoopNodeKind::Gate).unwrap(),
+            serde_json::to_string(&GraphNodeKind::Gate).unwrap(),
             "\"gate\""
         );
     }
 
-    // ── serde: LoopEdgeCondition roundtrip ──────────────────────────────
+    // ── serde: GraphEdgeCondition roundtrip ──────────────────────────────
 
     #[test]
-    fn loop_edge_condition_serde_roundtrip() {
+    fn graph_edge_condition_serde_roundtrip() {
         let conds = [
-            LoopEdgeCondition::Pass,
-            LoopEdgeCondition::Fail,
-            LoopEdgeCondition::Always,
+            GraphEdgeCondition::Pass,
+            GraphEdgeCondition::Fail,
+            GraphEdgeCondition::Always,
         ];
         for c in conds {
             let json = serde_json::to_string(&c).unwrap();
-            let deserialized: LoopEdgeCondition = serde_json::from_str(&json).unwrap();
+            let deserialized: GraphEdgeCondition = serde_json::from_str(&json).unwrap();
             assert_eq!(deserialized, c, "serde roundtrip failed for {json}");
         }
     }
 
     #[test]
-    fn loop_edge_condition_serde_uses_snake_case() {
+    fn graph_edge_condition_serde_uses_snake_case() {
         assert_eq!(
-            serde_json::to_string(&LoopEdgeCondition::Pass).unwrap(),
+            serde_json::to_string(&GraphEdgeCondition::Pass).unwrap(),
             "\"pass\""
         );
         assert_eq!(
-            serde_json::to_string(&LoopEdgeCondition::Always).unwrap(),
+            serde_json::to_string(&GraphEdgeCondition::Always).unwrap(),
             "\"always\""
         );
     }
 
-    // ── serde: LoopRunStatus roundtrip ──────────────────────────────────
+    // ── serde: GraphRunStatus roundtrip ──────────────────────────────────
 
     #[test]
-    fn loop_run_status_serde_roundtrip() {
+    fn graph_run_status_serde_roundtrip() {
         let statuses = [
-            LoopRunStatus::Running,
-            LoopRunStatus::Pass,
-            LoopRunStatus::Fail,
+            GraphRunStatus::Running,
+            GraphRunStatus::Pass,
+            GraphRunStatus::Fail,
         ];
         for s in statuses {
             let json = serde_json::to_string(&s).unwrap();
-            let deserialized: LoopRunStatus = serde_json::from_str(&json).unwrap();
+            let deserialized: GraphRunStatus = serde_json::from_str(&json).unwrap();
             assert_eq!(deserialized, s, "serde roundtrip failed for {json}");
         }
     }
 
     #[test]
-    fn loop_run_status_serde_uses_snake_case() {
+    fn graph_run_status_serde_uses_snake_case() {
         assert_eq!(
-            serde_json::to_string(&LoopRunStatus::Running).unwrap(),
+            serde_json::to_string(&GraphRunStatus::Running).unwrap(),
             "\"running\""
         );
         assert_eq!(
-            serde_json::to_string(&LoopRunStatus::Pass).unwrap(),
+            serde_json::to_string(&GraphRunStatus::Pass).unwrap(),
             "\"pass\""
         );
     }
@@ -2240,38 +2260,38 @@ mod tests {
     // ── serde: deserialization from string variants ─────────────────────
 
     #[test]
-    fn loop_status_deserialize_from_json_string() {
+    fn graph_status_deserialize_from_json_string() {
         let input = "\"completed\"";
-        let s: LoopStatus = serde_json::from_str(input).unwrap();
-        assert_eq!(s, LoopStatus::Completed);
+        let s: GraphStatus = serde_json::from_str(input).unwrap();
+        assert_eq!(s, GraphStatus::Completed);
     }
 
     #[test]
-    fn loop_spec_status_deserialize_from_json_string() {
+    fn graph_spec_status_deserialize_from_json_string() {
         let input = "\"skipped\"";
-        let s: LoopSpecStatus = serde_json::from_str(input).unwrap();
-        assert_eq!(s, LoopSpecStatus::Skipped);
+        let s: GraphSpecStatus = serde_json::from_str(input).unwrap();
+        assert_eq!(s, GraphSpecStatus::Skipped);
     }
 
     #[test]
-    fn loop_node_kind_deserialize_from_json_string() {
+    fn graph_node_kind_deserialize_from_json_string() {
         let input = "\"join\"";
-        let k: LoopNodeKind = serde_json::from_str(input).unwrap();
-        assert_eq!(k, LoopNodeKind::Join);
+        let k: GraphNodeKind = serde_json::from_str(input).unwrap();
+        assert_eq!(k, GraphNodeKind::Join);
     }
 
     #[test]
-    fn loop_edge_condition_deserialize_from_json_string() {
+    fn graph_edge_condition_deserialize_from_json_string() {
         let input = "\"always\"";
-        let c: LoopEdgeCondition = serde_json::from_str(input).unwrap();
-        assert_eq!(c, LoopEdgeCondition::Always);
+        let c: GraphEdgeCondition = serde_json::from_str(input).unwrap();
+        assert_eq!(c, GraphEdgeCondition::Always);
     }
 
     #[test]
-    fn loop_run_status_deserialize_from_json_string() {
+    fn graph_run_status_deserialize_from_json_string() {
         let input = "\"fail\"";
-        let s: LoopRunStatus = serde_json::from_str(input).unwrap();
-        assert_eq!(s, LoopRunStatus::Fail);
+        let s: GraphRunStatus = serde_json::from_str(input).unwrap();
+        assert_eq!(s, GraphRunStatus::Fail);
     }
 
     // ── SpecAdminStatusOutcome: clone & Debug ───────────────────────────
@@ -2313,18 +2333,18 @@ mod tests {
     #[test]
     fn spec_admin_status_outcome_active_run_is_clone() {
         let a = SpecAdminStatusOutcome::ActiveRun {
-            loop_id: "l1".to_string(),
+            graph_id: "l1".to_string(),
             run_id: "r1".to_string(),
         };
         let b = a.clone();
         match (&a, &b) {
             (
                 SpecAdminStatusOutcome::ActiveRun {
-                    loop_id: al,
+                    graph_id: al,
                     run_id: ar,
                 },
                 SpecAdminStatusOutcome::ActiveRun {
-                    loop_id: bl,
+                    graph_id: bl,
                     run_id: br,
                 },
             ) => {
@@ -2337,19 +2357,19 @@ mod tests {
         }
     }
 
-    // ── LoopResetOutcome: clone & Debug ─────────────────────────────────
+    // ── GraphResetOutcome: clone & Debug ─────────────────────────────────
 
     #[test]
-    fn loop_reset_outcome_is_clone() {
+    fn graph_reset_outcome_is_clone() {
         let outcomes = [
-            LoopResetOutcome::NotFound,
-            LoopResetOutcome::InFlight {
+            GraphResetOutcome::NotFound,
+            GraphResetOutcome::InFlight {
                 run_id: "run-1".to_string(),
                 node_id: "node-1".to_string(),
                 started_at: chrono::Utc::now(),
             },
-            LoopResetOutcome::InvalidSpec("x".to_string()),
-            LoopResetOutcome::Reset {
+            GraphResetOutcome::InvalidSpec("x".to_string()),
+            GraphResetOutcome::Reset {
                 spec_count: 3,
                 skipped_count: 0,
             },
@@ -2360,86 +2380,89 @@ mod tests {
         }
     }
 
-    // ── LoopNodeKind::Router: as_str / from_str / display_str ───────────
+    // ── GraphNodeKind::Router: as_str / from_str / display_str ───────────
 
     #[test]
-    fn loop_node_kind_router_as_str() {
-        assert_eq!(LoopNodeKind::Router.as_str(), "router");
+    fn graph_node_kind_router_as_str() {
+        assert_eq!(GraphNodeKind::Router.as_str(), "router");
     }
 
     #[test]
-    fn loop_node_kind_router_from_str_roundtrip() {
-        assert_eq!(LoopNodeKind::from_str("router"), Some(LoopNodeKind::Router));
+    fn graph_node_kind_router_from_str_roundtrip() {
         assert_eq!(
-            LoopNodeKind::from_str(LoopNodeKind::Router.as_str()),
-            Some(LoopNodeKind::Router)
+            GraphNodeKind::from_str("router"),
+            Some(GraphNodeKind::Router)
+        );
+        assert_eq!(
+            GraphNodeKind::from_str(GraphNodeKind::Router.as_str()),
+            Some(GraphNodeKind::Router)
         );
     }
 
     #[test]
-    fn loop_node_kind_router_display_str_matches_as_str() {
-        assert_eq!(LoopNodeKind::Router.display_str(), "router");
+    fn graph_node_kind_router_display_str_matches_as_str() {
+        assert_eq!(GraphNodeKind::Router.display_str(), "router");
     }
 
     #[test]
-    fn loop_node_kind_router_serde_roundtrip() {
-        let json = serde_json::to_string(&LoopNodeKind::Router).unwrap();
+    fn graph_node_kind_router_serde_roundtrip() {
+        let json = serde_json::to_string(&GraphNodeKind::Router).unwrap();
         assert_eq!(json, "\"router\"");
-        let deserialized: LoopNodeKind = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized, LoopNodeKind::Router);
+        let deserialized: GraphNodeKind = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, GraphNodeKind::Router);
     }
 
-    // ── LoopEdgeCondition::Route: as_str / route_label / from_parts ─────
+    // ── GraphEdgeCondition::Route: as_str / route_label / from_parts ─────
 
     #[test]
-    fn loop_edge_condition_route_as_str_is_fixed_tag() {
-        let c = LoopEdgeCondition::Route("escalate".to_string());
+    fn graph_edge_condition_route_as_str_is_fixed_tag() {
+        let c = GraphEdgeCondition::Route("escalate".to_string());
         assert_eq!(c.as_str(), "route");
     }
 
     #[test]
-    fn loop_edge_condition_route_label_returns_the_label() {
-        let c = LoopEdgeCondition::Route("escalate".to_string());
+    fn graph_edge_condition_route_label_returns_the_label() {
+        let c = GraphEdgeCondition::Route("escalate".to_string());
         assert_eq!(c.route_label(), Some("escalate"));
     }
 
     #[test]
-    fn loop_edge_condition_non_route_has_no_route_label() {
-        assert_eq!(LoopEdgeCondition::Pass.route_label(), None);
-        assert_eq!(LoopEdgeCondition::Fail.route_label(), None);
-        assert_eq!(LoopEdgeCondition::Always.route_label(), None);
+    fn graph_edge_condition_non_route_has_no_route_label() {
+        assert_eq!(GraphEdgeCondition::Pass.route_label(), None);
+        assert_eq!(GraphEdgeCondition::Fail.route_label(), None);
+        assert_eq!(GraphEdgeCondition::Always.route_label(), None);
     }
 
     #[test]
-    fn loop_edge_condition_from_str_does_not_parse_route() {
+    fn graph_edge_condition_from_str_does_not_parse_route() {
         // `Route` needs the sibling label, which a bare string can't carry —
         // only `from_parts` (DB round trip) or the `route:` MCP param path
         // can construct it.
-        assert_eq!(LoopEdgeCondition::from_str("route"), None);
+        assert_eq!(GraphEdgeCondition::from_str("route"), None);
     }
 
     #[test]
-    fn loop_edge_condition_from_parts_reconstructs_route() {
-        let c = LoopEdgeCondition::from_parts("route", Some("escalate".to_string()));
-        assert_eq!(c, Some(LoopEdgeCondition::Route("escalate".to_string())));
+    fn graph_edge_condition_from_parts_reconstructs_route() {
+        let c = GraphEdgeCondition::from_parts("route", Some("escalate".to_string()));
+        assert_eq!(c, Some(GraphEdgeCondition::Route("escalate".to_string())));
     }
 
     #[test]
-    fn loop_edge_condition_from_parts_route_without_label_is_none() {
-        assert_eq!(LoopEdgeCondition::from_parts("route", None), None);
+    fn graph_edge_condition_from_parts_route_without_label_is_none() {
+        assert_eq!(GraphEdgeCondition::from_parts("route", None), None);
         assert_eq!(
-            LoopEdgeCondition::from_parts("route", Some("".to_string())),
+            GraphEdgeCondition::from_parts("route", Some("".to_string())),
             None
         );
     }
 
     #[test]
-    fn loop_edge_condition_from_parts_falls_back_to_from_str() {
+    fn graph_edge_condition_from_parts_falls_back_to_from_str() {
         assert_eq!(
-            LoopEdgeCondition::from_parts("pass", None),
-            Some(LoopEdgeCondition::Pass)
+            GraphEdgeCondition::from_parts("pass", None),
+            Some(GraphEdgeCondition::Pass)
         );
-        assert_eq!(LoopEdgeCondition::from_parts("bogus", None), None);
+        assert_eq!(GraphEdgeCondition::from_parts("bogus", None), None);
     }
 
     // ── validate_router_routes ───────────────────────────────────────────
@@ -2546,14 +2569,14 @@ mod tests {
 
     // ── validate_router_edges_declared ───────────────────────────────────
 
-    fn route_edge(id: &str, from_node: &str, label: &str) -> LoopEdge {
-        LoopEdge {
+    fn route_edge(id: &str, from_node: &str, label: &str) -> GraphEdge {
+        GraphEdge {
             id: id.to_string(),
             spec_id: Some("spec-1".to_string()),
-            loop_id: None,
+            graph_id: None,
             from_node: from_node.to_string(),
             to_node: "target".to_string(),
-            condition: LoopEdgeCondition::Route(label.to_string()),
+            condition: GraphEdgeCondition::Route(label.to_string()),
         }
     }
 
@@ -2578,13 +2601,13 @@ mod tests {
 
     #[test]
     fn validate_router_edges_declared_ignores_non_route_edges() {
-        let edges = vec![LoopEdge {
+        let edges = vec![GraphEdge {
             id: "e1".to_string(),
             spec_id: Some("spec-1".to_string()),
-            loop_id: None,
+            graph_id: None,
             from_node: "router-1".to_string(),
             to_node: "target".to_string(),
-            condition: LoopEdgeCondition::Always,
+            condition: GraphEdgeCondition::Always,
         }];
         assert!(validate_router_edges_declared(&two_routes(), "router-1", &edges).is_ok());
     }
@@ -2625,49 +2648,69 @@ mod tests {
     }
 
     #[test]
-    fn loop_hook_event_as_str_roundtrip() {
-        assert_eq!(super::LoopHookEvent::OnCompleted.as_str(), "on_completed");
-        assert_eq!(super::LoopHookEvent::OnFailed.as_str(), "on_failed");
-        assert_eq!(super::LoopHookEvent::OnBlocked.as_str(), "on_blocked");
+    fn graph_hook_event_as_str_roundtrip() {
+        assert_eq!(super::GraphHookEvent::OnCompleted.as_str(), "on_completed");
+        assert_eq!(super::GraphHookEvent::OnFailed.as_str(), "on_failed");
+        assert_eq!(super::GraphHookEvent::OnBlocked.as_str(), "on_blocked");
         assert_eq!(
-            super::LoopHookEvent::OnSpecCompleted.as_str(),
+            super::GraphHookEvent::OnSpecCompleted.as_str(),
             "on_spec_completed"
         );
     }
 
     #[test]
-    fn loop_hook_event_from_str() {
+    fn graph_hook_event_from_str() {
         assert_eq!(
-            super::LoopHookEvent::from_str("on_completed"),
-            Some(super::LoopHookEvent::OnCompleted)
+            super::GraphHookEvent::from_str("on_completed"),
+            Some(super::GraphHookEvent::OnCompleted)
         );
         assert_eq!(
-            super::LoopHookEvent::from_str("on_failed"),
-            Some(super::LoopHookEvent::OnFailed)
+            super::GraphHookEvent::from_str("on_failed"),
+            Some(super::GraphHookEvent::OnFailed)
         );
         assert_eq!(
-            super::LoopHookEvent::from_str("on_blocked"),
-            Some(super::LoopHookEvent::OnBlocked)
+            super::GraphHookEvent::from_str("on_blocked"),
+            Some(super::GraphHookEvent::OnBlocked)
         );
         assert_eq!(
-            super::LoopHookEvent::from_str("on_spec_completed"),
-            Some(super::LoopHookEvent::OnSpecCompleted)
+            super::GraphHookEvent::from_str("on_spec_completed"),
+            Some(super::GraphHookEvent::OnSpecCompleted)
         );
-        assert_eq!(super::LoopHookEvent::from_str("invalid"), None);
+        assert_eq!(super::GraphHookEvent::from_str("invalid"), None);
     }
 
     #[test]
-    fn loop_hook_event_serde_roundtrip() {
+    fn graph_hook_event_serde_roundtrip() {
         let events = [
-            super::LoopHookEvent::OnCompleted,
-            super::LoopHookEvent::OnFailed,
-            super::LoopHookEvent::OnBlocked,
-            super::LoopHookEvent::OnSpecCompleted,
+            super::GraphHookEvent::OnCompleted,
+            super::GraphHookEvent::OnFailed,
+            super::GraphHookEvent::OnBlocked,
+            super::GraphHookEvent::OnSpecCompleted,
         ];
         for event in events {
             let json = serde_json::to_string(&event).unwrap();
-            let deserialized: super::LoopHookEvent = serde_json::from_str(&json).unwrap();
+            let deserialized: super::GraphHookEvent = serde_json::from_str(&json).unwrap();
             assert_eq!(event, deserialized);
         }
+    }
+
+    #[test]
+    fn graph_edge_condition_from_str_rejects_legacy_break() {
+        assert_eq!(GraphEdgeCondition::from_str("break"), None);
+        assert_eq!(
+            GraphEdgeCondition::from_str("error"),
+            Some(GraphEdgeCondition::Error)
+        );
+        assert_eq!(GraphEdgeCondition::Error.as_str(), "error");
+    }
+
+    #[test]
+    fn graph_edge_condition_serde_still_reads_legacy_break_for_import() {
+        let parsed: GraphEdgeCondition = serde_json::from_str("\"break\"").unwrap();
+        assert_eq!(parsed, GraphEdgeCondition::Error);
+        assert_eq!(
+            serde_json::to_string(&GraphEdgeCondition::Error).unwrap(),
+            "\"error\""
+        );
     }
 }

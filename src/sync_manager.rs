@@ -176,7 +176,7 @@ impl SyncManager {
             .db
             .insert_sync_message(workdir, agent_id, agent_name, kind, message, payload)?;
         // Bitácora: mirror every published event into the durable activity
-        // log, off the hot path. Spawned rather than awaited so a loop
+        // log, off the hot path. Spawned rather than awaited so a graph
         // node's status report isn't slowed by its own log line (NFR:
         // writing must not block the producer); best-effort — a full or
         // locked activity table must never break the live broadcast path.

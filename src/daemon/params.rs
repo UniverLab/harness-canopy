@@ -417,15 +417,15 @@ pub struct RagSearchParams {
     pub limit: Option<usize>,
 }
 
-// ── Loop tool parameter types ────────────────────────────────────────
+// ── Graph tool parameter types ────────────────────────────────────────
 
-/// Optional automatic trigger for a loop, mirroring agent triggers. A loop can
-/// fire on a cron schedule or a file-system watch instead of only `loop_run`.
-/// Also `Serialize` so the TUI's loop form can send it over MCP verbatim.
+/// Optional automatic trigger for a graph, mirroring agent triggers. A graph can
+/// fire on a cron schedule or a file-system watch instead of only `graph_run`.
+/// Also `Serialize` so the TUI's graph form can send it over MCP verbatim.
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct LoopTriggerParams {
+pub struct GraphTriggerParams {
     /// Trigger kind: "cron", "watch", or "manual". "manual" (the default)
-    /// clears any existing trigger, so the loop only runs via loop_run.
+    /// clears any existing trigger, so the graph only runs via graph_run.
     pub kind: String,
     /// 5-field cron expression (required when kind = "cron").
     pub schedule: Option<String>,
@@ -440,29 +440,29 @@ pub struct LoopTriggerParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct LoopCreateParams {
-    /// Human-readable loop name.
+pub struct GraphCreateParams {
+    /// Human-readable graph name.
     pub name: String,
-    /// Optional loop description.
+    /// Optional graph description.
     pub description: Option<String>,
-    /// Absolute working directory for the loop.
+    /// Absolute working directory for the graph.
     pub workdir: String,
-    /// Optional automatic trigger (cron/watch). Omit for a manual loop.
-    pub trigger: Option<LoopTriggerParams>,
-    /// Optional pre-wired target for infrastructure failures (`Break` edges).
-    /// When set, every new agent/check/gate node auto-creates a `Break` edge
+    /// Optional automatic trigger (cron/watch). Omit for a manual graph.
+    pub trigger: Option<GraphTriggerParams>,
+    /// Optional pre-wired target for infrastructure failures (`Error` edges).
+    /// When set, every new agent/check/gate node auto-creates a `Error` edge
     /// to this node.
     pub infra_node_id: Option<String>,
 }
 
-/// Config for a loop hook — an agent-node-style payload
+/// Config for a graph hook — an agent-node-style payload
 /// (platform/model/prompt), a direct shell command, or an interactive
 /// message into a live session (prompt + target_session_id). Exactly one
 /// mode must be configured; the engine refuses hooks that specify more than
 /// one mode or none.
-/// Used for every event via the `hooks` map on `loop_update`.
+/// Used for every event via the `hooks` map on `graph_update`.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct LoopCompletionHookParams {
+pub struct GraphCompletionHookParams {
     /// CLI platform to run the hook with (e.g. "mimo", "claude").
     /// Required for agent hooks; must be omitted for command and
     /// interactive hooks.
@@ -471,7 +471,7 @@ pub struct LoopCompletionHookParams {
     pub model: Option<String>,
     /// Optional effort level (agent hooks only).
     pub effort: Option<String>,
-    /// Hook prompt template (agent and interactive hooks). Supports {{loop_name}} and
+    /// Hook prompt template (agent and interactive hooks). Supports {{graph_name}} and
     /// {{workdir}} on every event, plus event-specific markers:
     /// {{completed_specs}} on on_completed, {{spec_name}} and {{spec_id}} on
     /// on_spec_completed, {{blocker}} and {{node}} on on_failed and
@@ -481,11 +481,11 @@ pub struct LoopCompletionHookParams {
     /// Shell command to run directly (command hooks only). Mutually exclusive
     /// with platform/prompt. Supports the same `{{...}}` placeholders as the
     /// hook's event, substituted before execution. WARNING: do not configure a
-    /// command that starts a canopy binary (e.g. `canopy loop run`). A
+    /// command that starts a canopy binary (e.g. `canopy graph run`). A
     /// process that starts canopy triggers daemon-startup recovery, which
-    /// SIGTERMs live loop runs including the run that spawned the hook.
-    /// `on_spec_completed` fires while the loop is still running, so this is
-    /// not hypothetical. Use the native `loop_run` action instead.
+    /// SIGTERMs live graph runs including the run that spawned the hook.
+    /// `on_spec_completed` fires while the graph is still running, so this is
+    /// not hypothetical. Use the native `graph_run` action instead.
     pub command: Option<String>,
     /// Exact interactive session id to deliver to (interactive hooks only).
     /// Mutually exclusive with platform/model/effort/command. Requires
@@ -498,38 +498,38 @@ pub struct LoopCompletionHookParams {
     /// Timeout in minutes for the hook's process (default: 30, same default
     /// as an agent node).
     pub timeout_minutes: Option<u64>,
-    /// Target loop id to launch (loop hooks only). Mutually exclusive with
+    /// Target graph id to launch (graph hooks only). Mutually exclusive with
     /// platform/command/target_session_id. When set, this hook launches
-    /// another loop in-process instead of spawning a CLI process.
-    pub target_loop_id: Option<String>,
-    /// Optional queue id for the launched loop (loop hooks only).
+    /// another graph in-process instead of spawning a CLI process.
+    pub target_graph_id: Option<String>,
+    /// Optional queue id for the launched graph (graph hooks only).
     pub queue_id: Option<String>,
-    /// Optional workdir override for the launched loop (loop hooks only).
+    /// Optional workdir override for the launched graph (graph hooks only).
     pub workdir_override: Option<String>,
-    /// Optional idea text for the launched loop (loop hooks only). Mutually
+    /// Optional idea text for the launched graph (graph hooks only). Mutually
     /// exclusive with queue_id. Supports the same `{{...}}` placeholders as
     /// the hook's event.
     pub idea: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct LoopUpdateParams {
-    /// Loop ID.
-    pub loop_id: String,
-    /// New human-readable loop name.
+pub struct GraphUpdateParams {
+    /// Graph ID.
+    pub graph_id: String,
+    /// New human-readable graph name.
     pub name: Option<String>,
-    /// New loop description, or null to clear.
+    /// New graph description, or null to clear.
     pub description: Option<Option<String>>,
-    /// New absolute workdir for the loop.
+    /// New absolute workdir for the graph.
     pub workdir: Option<String>,
     /// New automatic trigger. Provide kind = "manual" to clear it. Omit to
     /// leave the current trigger unchanged.
-    pub trigger: Option<LoopTriggerParams>,
+    pub trigger: Option<GraphTriggerParams>,
     /// New `on_completed` post-completion hook config, or null to clear it.
     /// Omit to leave the current hook unchanged. This is a compatibility
     /// alias — prefer `hooks` for event-keyed hook management. Legacy update
     /// replaces/registers only `on_completed` and does not clear other events.
-    pub on_completed: Option<Option<LoopCompletionHookParams>>,
+    pub on_completed: Option<Option<GraphCompletionHookParams>>,
     /// Event-keyed hooks. Replace the full hooks map with this map. Each key
     /// is an event name (`on_completed`, `on_failed`, `on_blocked`,
     /// `on_spec_completed`), and each value is an ordered array of hook
@@ -537,16 +537,16 @@ pub struct LoopUpdateParams {
     /// event has already happened does not fire. Omit to leave unchanged.
     /// When `on_completed` is also provided, it is merged into this map
     /// under the `on_completed` key.
-    pub hooks: Option<std::collections::BTreeMap<String, Vec<LoopCompletionHookParams>>>,
-    /// New pre-wired target for infrastructure failures (`Break` edges), or
+    pub hooks: Option<std::collections::BTreeMap<String, Vec<GraphCompletionHookParams>>>,
+    /// New pre-wired target for infrastructure failures (`Error` edges), or
     /// null to clear. Omit to leave unchanged.
     pub infra_node_id: Option<Option<String>>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct LoopAddSpecParams {
-    /// Existing loop ID.
-    pub loop_id: String,
+pub struct GraphAddSpecParams {
+    /// Existing graph ID.
+    pub graph_id: String,
     /// Human-readable spec name.
     pub name: String,
     /// Optional spec description. Must use the tagged `<spec>` format.
@@ -554,14 +554,14 @@ pub struct LoopAddSpecParams {
     /// Optional: `<non_functional_requirements>`, `<constraints>`, `<in_scope>`,
     /// `<out_of_scope>`. Markdown is allowed inside each section.
     pub description: Option<String>,
-    /// Execution order within the loop.
+    /// Execution order within the graph.
     pub position: i64,
     /// Whether the spec is allowed to run in parallel in future engine phases.
     pub parallelizable: bool,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct LoopUpdateSpecParams {
+pub struct GraphUpdateSpecParams {
     /// Existing spec ID.
     pub spec_id: String,
     /// New human-readable spec name.
@@ -570,7 +570,7 @@ pub struct LoopUpdateSpecParams {
     /// `<objective>`, `<functional_requirements>`, `<guidelines>`; four more
     /// are optional. Markdown is allowed inside each section.
     pub description: Option<String>,
-    /// New execution order within the loop.
+    /// New execution order within the graph.
     pub position: Option<i64>,
     /// Whether the spec is allowed to run in parallel.
     pub parallelizable: Option<bool>,
@@ -596,9 +596,9 @@ pub struct SpecListParams {
     pub workdir: Option<String>,
     /// Filter to specs in this status (pending, running, completed, failed, skipped).
     pub status: Option<String>,
-    /// Only return specs not yet assigned to any loop.
+    /// Only return specs not yet assigned to any graph.
     pub unassigned_only: Option<bool>,
-    /// Include full spec descriptions in the output. Default: false (compact — id, name, status, workdir, loop_id only).
+    /// Include full spec descriptions in the output. Default: false (compact — id, name, status, workdir, graph_id only).
     pub include_descriptions: Option<bool>,
     /// Maximum number of specs to return. Defaults to a value that fits the
     /// result budget, clamped to [1, 200].
@@ -648,12 +648,12 @@ pub struct SpecSectionGetParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct LoopAddNodeParams {
-    /// Existing spec ID. Provide exactly one of `spec_id`/`loop_id`.
+pub struct GraphAddNodeParams {
+    /// Existing spec ID. Provide exactly one of `spec_id`/`graph_id`.
     pub spec_id: Option<String>,
-    /// Existing loop ID, to add this node to the loop's top-level graph
-    /// instead of a spec's graph. Provide exactly one of `spec_id`/`loop_id`.
-    pub loop_id: Option<String>,
+    /// Existing graph ID, to add this node to the graph's top-level graph
+    /// instead of a spec's graph. Provide exactly one of `spec_id`/`graph_id`.
+    pub graph_id: Option<String>,
     /// Human-readable node name.
     pub name: String,
     /// Node kind: agent, check, or gate. Optional when `blueprint` is given —
@@ -677,7 +677,7 @@ pub struct BlueprintCreateParams {
     pub name: String,
     /// Node kind: agent, check, or gate.
     pub kind: String,
-    /// Config template. `loop_add_node` uses this as the node's config,
+    /// Config template. `graph_add_node` uses this as the node's config,
     /// optionally shallow-merged with `config_overrides`.
     pub config: serde_json::Map<String, serde_json::Value>,
 }
@@ -689,7 +689,7 @@ pub struct BlueprintDeleteParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct LoopUpdateNodeParams {
+pub struct GraphUpdateNodeParams {
     /// Existing node ID.
     pub node_id: String,
     /// New human-readable node name.
@@ -708,12 +708,12 @@ pub struct LoopUpdateNodeParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct LoopAddEdgeParams {
-    /// Existing spec ID. Provide exactly one of `spec_id`/`loop_id`.
+pub struct GraphAddEdgeParams {
+    /// Existing spec ID. Provide exactly one of `spec_id`/`graph_id`.
     pub spec_id: Option<String>,
-    /// Existing loop ID, to add this edge to the loop's top-level graph
-    /// instead of a spec's graph. Provide exactly one of `spec_id`/`loop_id`.
-    pub loop_id: Option<String>,
+    /// Existing graph ID, to add this edge to the graph's top-level graph
+    /// instead of a spec's graph. Provide exactly one of `spec_id`/`graph_id`.
+    pub graph_id: Option<String>,
     /// Source node ID.
     pub from_node: String,
     /// Destination node ID.
@@ -722,12 +722,12 @@ pub struct LoopAddEdgeParams {
     pub condition: String,
     /// Route label this edge serves — required when `condition` is
     /// `"route"`, and must name one of `from_node`'s declared routes (see
-    /// `loop_add_node`'s router `config.routes`). Ignored otherwise.
+    /// `graph_add_node`'s router `config.routes`). Ignored otherwise.
     pub route: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct LoopUpdateEdgeParams {
+pub struct GraphUpdateEdgeParams {
     /// Existing edge ID.
     pub edge_id: String,
     /// New routing condition: pass, fail, always, or route.
@@ -738,19 +738,19 @@ pub struct LoopUpdateEdgeParams {
     pub route: Option<String>,
     /// New destination node ID — retargets the edge instead of recreating
     /// it, preserving its `edge_id` and any run history keyed against it.
-    /// Must belong to the same spec/loop graph as the edge. Omit to leave
+    /// Must belong to the same spec/graph as the edge. Omit to leave
     /// the edge's target unchanged.
     pub to_node: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct LoopDeleteEdgeParams {
+pub struct GraphDeleteEdgeParams {
     /// Existing edge ID to delete.
     pub edge_id: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct LoopDeleteNodeParams {
+pub struct GraphDeleteNodeParams {
     /// Existing node ID to delete. Cascades to every edge naming it as
     /// `from_node` or `to_node`. Rejected if the node is the graph's entry
     /// point.
@@ -758,7 +758,7 @@ pub struct LoopDeleteNodeParams {
 }
 
 /// One ensemble member: differs from its siblings by platform/model and,
-/// optionally, its own prompt — see `loop_add_ensemble`.
+/// optionally, its own prompt — see `graph_add_ensemble`.
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 pub struct EnsembleMemberParams {
     /// CLI platform for this member (e.g. "claude", "openrouter").
@@ -776,12 +776,12 @@ pub struct EnsembleMemberParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct LoopAddEnsembleParams {
-    /// Existing spec ID. Provide exactly one of `spec_id`/`loop_id`.
+pub struct GraphAddEnsembleParams {
+    /// Existing spec ID. Provide exactly one of `spec_id`/`graph_id`.
     pub spec_id: Option<String>,
-    /// Existing loop ID, to add this ensemble to the loop's top-level graph
-    /// instead of a spec's graph. Provide exactly one of `spec_id`/`loop_id`.
-    pub loop_id: Option<String>,
+    /// Existing graph ID, to add this ensemble to the graph's top-level graph
+    /// instead of a spec's graph. Provide exactly one of `spec_id`/`graph_id`.
+    pub graph_id: Option<String>,
     /// Human-readable ensemble name.
     pub name: String,
     /// Ensemble execution strategy: "parallel" (default), "cascade", or
@@ -824,7 +824,7 @@ pub struct LoopAddEnsembleParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct LoopUpdateEnsembleParams {
+pub struct GraphUpdateEnsembleParams {
     /// Existing ensemble ID.
     pub ensemble_id: String,
     /// New ensemble kind (parallel/cascade/round_robin), or omit to leave unchanged.
@@ -872,26 +872,26 @@ pub struct LoopUpdateEnsembleParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct LoopDeleteEnsembleParams {
+pub struct GraphDeleteEnsembleParams {
     /// Existing ensemble ID. Removes the ensemble as one unit — its member
     /// nodes, its quorum node, and every edge naming any of them. Refused
-    /// while the owning loop is running, like the other topology tools.
+    /// while the owning graph is running, like the other topology tools.
     pub ensemble_id: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct LoopCopyNodeParams {
+pub struct GraphCopyNodeParams {
     /// Node to copy. Only its config is copied — never any runtime state
     /// (runs, iterations, statuses). Cannot be an ensemble member/quorum node
-    /// (copy those with loop_copy_ensemble).
+    /// (copy those with graph_copy_ensemble).
     pub source_node_id: String,
-    /// Target spec ID for the copy. Provide at most one of spec_id/loop_id;
+    /// Target spec ID for the copy. Provide at most one of spec_id/graph_id;
     /// omit both to copy into the source node's own graph.
     pub spec_id: Option<String>,
-    /// Target loop ID (the loop's top-level graph). Cross-loop copy is
-    /// allowed. Provide at most one of spec_id/loop_id; omit both to copy into
+    /// Target graph ID (the graph's top-level graph). Cross-graph copy is
+    /// allowed. Provide at most one of spec_id/graph_id; omit both to copy into
     /// the source node's own graph.
-    pub loop_id: Option<String>,
+    pub graph_id: Option<String>,
     /// New node name. Defaults to the source node's name.
     pub name: Option<String>,
     /// Config keys to shallow-merge over the copied config — e.g. swap an
@@ -911,17 +911,17 @@ pub struct LoopCopyNodeParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct LoopCopyEnsembleParams {
+pub struct GraphCopyEnsembleParams {
     /// Ensemble to copy. Members, join config, and shared prompt are copied
     /// (config only — never runtime state). Every id in the copy is new.
     pub source_ensemble_id: String,
-    /// Target spec ID for the copy. Provide at most one of spec_id/loop_id;
+    /// Target spec ID for the copy. Provide at most one of spec_id/graph_id;
     /// omit both to copy into the source ensemble's own graph.
     pub spec_id: Option<String>,
-    /// Target loop ID (the loop's top-level graph). Cross-loop copy is
-    /// allowed. Provide at most one of spec_id/loop_id; omit both to copy into
+    /// Target graph ID (the graph's top-level graph). Cross-graph copy is
+    /// allowed. Provide at most one of spec_id/graph_id; omit both to copy into
     /// the source ensemble's own graph.
-    pub loop_id: Option<String>,
+    pub graph_id: Option<String>,
     /// New ensemble name. Defaults to the source name with a " (copy)" suffix.
     pub name: Option<String>,
     /// New shared prompt for every member — e.g. swap a proposer prompt for a
@@ -988,10 +988,10 @@ pub struct QueueRemoveSpecParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct LoopRemoveSpecParams {
-    /// Existing loop ID.
-    pub loop_id: String,
-    /// Spec ID to unbind from the loop.
+pub struct GraphRemoveSpecParams {
+    /// Existing graph ID.
+    pub graph_id: String,
+    /// Spec ID to unbind from the graph.
     pub spec_id: String,
 }
 
@@ -1006,32 +1006,32 @@ pub struct QueueReorderParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct LoopGetParams {
-    /// Loop ID.
-    pub loop_id: String,
+pub struct GraphGetParams {
+    /// Graph ID.
+    pub graph_id: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct LoopExportParams {
-    /// Loop ID to export.
-    pub loop_id: String,
+pub struct GraphExportParams {
+    /// Graph ID to export.
+    pub graph_id: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct LoopImportParams {
-    /// The exported loop document (the object `loop_export` returns).
+pub struct GraphImportParams {
+    /// The exported graph document (the object `graph_export` returns).
     #[schemars(schema_with = "arbitrary_json_value_schema")]
     pub document: serde_json::Value,
-    /// Absolute workdir for the new loop.
+    /// Absolute workdir for the new graph.
     pub workdir: String,
-    /// Loop name to use instead of the document's own `name`.
+    /// Graph name to use instead of the document's own `name`.
     pub name: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct LoopNodeRunsListParams {
-    /// Loop ID whose node runs to list.
-    pub loop_id: String,
+pub struct GraphNodeRunsListParams {
+    /// Graph ID whose node runs to list.
+    pub graph_id: String,
     /// Narrow to one spec's runs.
     pub spec_id: Option<String>,
     /// Narrow to one node's runs.
@@ -1048,8 +1048,8 @@ pub struct LoopNodeRunsListParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct LoopNodeRunGetParams {
-    /// The node run ID (the `id` field from loop_node_runs_list's results).
+pub struct GraphNodeRunGetParams {
+    /// The node run ID (the `id` field from graph_node_runs_list's results).
     pub run_id: String,
 }
 
@@ -1060,7 +1060,7 @@ pub struct AgentProbeParams {
     #[serde(default)]
     pub platform: Option<String>,
     /// Model to probe for `platform` — validates the exact platform+model
-    /// pair a loop node would use, instead of the platform's default.
+    /// pair a graph node would use, instead of the platform's default.
     /// Requires `platform`; omit both to sweep every configured platform.
     #[serde(default)]
     pub model: Option<String>,
@@ -1072,8 +1072,19 @@ pub struct AgentProbeParams {
     pub timeout_seconds: Option<u64>,
 }
 
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+pub struct AgentProbeRecentParams {
+    /// Seconds to wait for each response. Defaults to 30, clamped to [5, 120].
+    #[serde(default)]
+    pub timeout_seconds: Option<u64>,
+    /// Maximum number of distinct recent pairs to probe. Defaults to 15,
+    /// clamped to [1, 50].
+    #[serde(default)]
+    pub max_pairs: Option<u32>,
+}
+
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct LoopPreflightReviewer {
+pub struct GraphPreflightReviewer {
     /// CLI platform to run the reviewer with (e.g. "opencode", "claude").
     pub platform: String,
     /// Optional model for that platform. Omitted = platform default.
@@ -1082,36 +1093,36 @@ pub struct LoopPreflightReviewer {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct LoopPreflightParams {
-    /// Loop ID to preflight.
-    pub loop_id: String,
+pub struct GraphPreflightParams {
+    /// Graph ID to preflight.
+    pub graph_id: String,
     /// Seconds to wait for each probe's response before reporting a
     /// timeout. Defaults to 30, clamped to [5, 120].
     #[serde(default)]
     pub timeout_seconds: Option<u64>,
     /// Optional background design-review agent: when set, names the
-    /// platform+model pair that audits the loop's design. The review runs
+    /// platform+model pair that audits the graph's design. The review runs
     /// in the background and never blocks or fails the probe results.
     #[serde(default)]
-    pub reviewer: Option<LoopPreflightReviewer>,
+    pub reviewer: Option<GraphPreflightReviewer>,
 }
 
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
-pub struct LoopListParams {
+pub struct GraphListParams {
     /// Optional absolute workdir filter.
     pub workdir: Option<String>,
-    /// Include archived loops in the results. Defaults to `false` — the
-    /// same "browsing" view as the TUI's main Loops list, which excludes
-    /// archived loops. An archived loop is still reachable directly by id
-    /// via `loop_get` regardless of this flag.
+    /// Include archived graphs in the results. Defaults to `false` — the
+    /// same "browsing" view as the TUI's main Graphs list, which excludes
+    /// archived graphs. An archived graph is still reachable directly by id
+    /// via `graph_get` regardless of this flag.
     #[serde(default)]
     pub include_archived: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct LoopArchiveParams {
-    /// Loop ID to archive.
-    pub loop_id: String,
+pub struct GraphArchiveParams {
+    /// Graph ID to archive.
+    pub graph_id: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -1148,36 +1159,36 @@ pub struct ScheduledSendCancelParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct LoopRestoreParams {
-    /// Loop ID to restore from the archive back to the main list.
-    pub loop_id: String,
+pub struct GraphRestoreParams {
+    /// Graph ID to restore from the archive back to the main list.
+    pub graph_id: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct LoopRunParams {
-    /// Loop ID.
-    pub loop_id: String,
-    /// Optional queue ID. When set, the loop runs the queue's pending specs (in
-    /// queue order) through the loop's graph instead of its own bound specs.
+pub struct GraphRunParams {
+    /// Graph ID.
+    pub graph_id: String,
+    /// Optional queue ID. When set, the graph runs the queue's pending specs (in
+    /// queue order) through the graph instead of its own bound specs.
     /// Queue membership is unaffected — specs stay standalone.
     pub queue_id: Option<String>,
     /// Optional absolute workdir override for this run only. Wins over the
-    /// loop's own `workdir`; the loop's `workdir` is left unchanged.
+    /// graph's own `workdir`; the graph's `workdir` is left unchanged.
     pub workdir: Option<String>,
-    /// Optional free-form text fed to nodes as `{{spec_content}}` when the loop
-    /// has no bound specs and no queue. The loop must still have a top-level
+    /// Optional free-form text fed to nodes as `{{spec_content}}` when the graph
+    /// has no bound specs and no queue. The graph must still have a top-level
     /// graph. Mutually exclusive with `queue_id`.
     pub idea: Option<String>,
-    /// When true, run this loop in a sandbox (temporary worktree with
+    /// When true, run this graph in a sandbox (temporary worktree with
     /// instruction file). The protocol is materialized in the worktree's
     /// instruction file instead of being injected into the prompt.
     pub sandbox: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct LoopPauseParams {
-    /// Loop ID.
-    pub loop_id: String,
+pub struct GraphPauseParams {
+    /// Graph ID.
+    pub graph_id: String,
     /// If true, immediately terminate the running node and mark it as
     /// interrupted. If false (default), wait for the running node to
     /// complete naturally before pausing.
@@ -1186,28 +1197,28 @@ pub struct LoopPauseParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct LoopResetParams {
-    /// Loop ID.
-    pub loop_id: String,
+pub struct GraphResetParams {
+    /// Graph ID.
+    pub graph_id: String,
     /// Specific spec IDs to reset to pending, even if already completed.
     /// Omit to reset every spec that isn't already completed, leaving
-    /// completed specs untouched so loop_run resumes at the first pending one.
+    /// completed specs untouched so graph_run resumes at the first pending one.
     pub specs: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct LoopContinueParams {
-    /// Loop ID.
-    pub loop_id: String,
+pub struct GraphContinueParams {
+    /// Graph ID.
+    pub graph_id: String,
     /// Continue mode: retry_current_node or skip_next_spec.
     pub action: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct LoopScheduleAutorunParams {
-    /// Loop ID.
-    pub loop_id: String,
-    /// ISO 8601 timestamp at which the loop should resume, e.g.
+pub struct GraphScheduleAutorunParams {
+    /// Graph ID.
+    pub graph_id: String,
+    /// ISO 8601 timestamp at which the graph should resume, e.g.
     /// "2026-07-10T09:00:00Z". Fires once, then the schedule is cleared.
     /// Omit (or pass null) to cancel any pending autorun schedule instead of
     /// setting a new one. Mutually exclusive with `quota_reset_message` —
@@ -1224,26 +1235,26 @@ pub struct LoopScheduleAutorunParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct LoopScheduleContinueParams {
-    /// Loop ID.
-    pub loop_id: String,
-    /// ISO 8601 timestamp at which a still-paused loop should auto-continue,
+pub struct GraphScheduleContinueParams {
+    /// Graph ID.
+    pub graph_id: String,
+    /// ISO 8601 timestamp at which a still-paused graph should auto-continue,
     /// e.g. "2026-07-10T09:00:00Z". Fires once, then the schedule is
     /// cleared. Omit (or pass null) to cancel any pending auto-continue
     /// schedule instead of setting a new one.
     pub at: Option<String>,
-    /// `loop_continue` action to apply when it fires: retry_current_node or
+    /// `graph_continue` action to apply when it fires: retry_current_node or
     /// skip_next_spec. Defaults to retry_current_node when omitted.
     pub action: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct LoopCompleteNodeParams {
+pub struct GraphCompleteNodeParams {
     /// The exact node run ID this report belongs to (given to you in the
     /// [REPORTING] section of your prompt). Required so a report can never
     /// be misattributed to a different, newer attempt at the same node.
     pub run_id: String,
-    /// Loop node ID.
+    /// Graph node ID.
     pub node_id: String,
     /// pass or fail.
     pub status: String,
@@ -1254,12 +1265,12 @@ pub struct LoopCompleteNodeParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct LoopReportBlockerParams {
+pub struct GraphReportBlockerParams {
     /// The exact node run ID this report belongs to (given to you in the
     /// [REPORTING] section of your prompt). Required so a report can never
     /// be misattributed to a different, newer attempt at the same node.
     pub run_id: String,
-    /// Loop node ID.
+    /// Graph node ID.
     pub node_id: String,
     /// Human-readable blocker description.
     pub description: String,
@@ -1396,8 +1407,8 @@ mod tests {
     /// instead of an object. Pin that the generated schema now declares
     /// `config` as an object.
     #[test]
-    fn loop_add_node_params_schema_declares_config_as_object() {
-        let schema = schemars::schema_for!(LoopAddNodeParams);
+    fn graph_add_node_params_schema_declares_config_as_object() {
+        let schema = schemars::schema_for!(GraphAddNodeParams);
         let value = serde_json::to_value(&schema).expect("schema should serialize");
         let config_schema = &value["properties"]["config"];
         // `config` is now optional (an alternative to `blueprint`), so the
@@ -1411,8 +1422,8 @@ mod tests {
     }
 
     #[test]
-    fn loop_update_node_params_schema_declares_config_as_object() {
-        let schema = schemars::schema_for!(LoopUpdateNodeParams);
+    fn graph_update_node_params_schema_declares_config_as_object() {
+        let schema = schemars::schema_for!(GraphUpdateNodeParams);
         let value = serde_json::to_value(&schema).expect("schema should serialize");
         let config_schema = &value["properties"]["config"];
         // Optional fields are wrapped, so the "object" type may appear either
@@ -1425,7 +1436,7 @@ mod tests {
     }
 
     #[test]
-    fn loop_add_node_params_rejects_string_config() {
+    fn graph_add_node_params_rejects_string_config() {
         let value = serde_json::json!({
             "spec_id": "spec-1",
             "name": "n",
@@ -1433,7 +1444,7 @@ mod tests {
             "config": "{\"platform\": \"claude\"}"
         });
 
-        let error = serde_json::from_value::<LoopAddNodeParams>(value).unwrap_err();
+        let error = serde_json::from_value::<GraphAddNodeParams>(value).unwrap_err();
         assert!(
             error.to_string().contains("invalid type"),
             "expected a type error, got: {error}"
@@ -1441,7 +1452,7 @@ mod tests {
     }
 
     #[test]
-    fn loop_add_node_params_accepts_object_config() {
+    fn graph_add_node_params_accepts_object_config() {
         let value = serde_json::json!({
             "spec_id": "spec-1",
             "name": "n",
@@ -1449,7 +1460,7 @@ mod tests {
             "config": { "platform": "claude" }
         });
 
-        let params: LoopAddNodeParams =
+        let params: GraphAddNodeParams =
             serde_json::from_value(value).expect("object config should deserialize");
         assert_eq!(
             params
@@ -1462,38 +1473,38 @@ mod tests {
     }
 
     #[test]
-    fn loop_update_node_params_rejects_string_config() {
+    fn graph_update_node_params_rejects_string_config() {
         let value = serde_json::json!({
             "node_id": "node-1",
             "config": "{\"platform\": \"claude\"}"
         });
 
-        let error = serde_json::from_value::<LoopUpdateNodeParams>(value).unwrap_err();
+        let error = serde_json::from_value::<GraphUpdateNodeParams>(value).unwrap_err();
         assert!(
             error.to_string().contains("invalid type"),
             "expected a type error, got: {error}"
         );
     }
 
-    /// (CB25) `LoopPreflightParams` deserializes identically with and
+    /// (CB25) `GraphPreflightParams` deserializes identically with and
     /// without the optional `reviewer` field — omitting it must leave
     /// `reviewer` as `None` (probe behaviour unchanged, never an
     /// implicit review), and a platform-only reviewer defaults its
     /// model to `None` (platform default).
     #[test]
-    fn loop_preflight_params_deserializes_without_reviewer() {
-        let bare: LoopPreflightParams = serde_json::from_value(serde_json::json!({
-            "loop_id": "x",
+    fn graph_preflight_params_deserializes_without_reviewer() {
+        let bare: GraphPreflightParams = serde_json::from_value(serde_json::json!({
+            "graph_id": "x",
         }))
         .expect("should deserialize without reviewer");
-        assert_eq!(bare.loop_id, "x");
+        assert_eq!(bare.graph_id, "x");
         assert!(
             bare.reviewer.is_none(),
             "omitted reviewer must deserialize to None"
         );
 
-        let with_reviewer: LoopPreflightParams = serde_json::from_value(serde_json::json!({
-            "loop_id": "x",
+        let with_reviewer: GraphPreflightParams = serde_json::from_value(serde_json::json!({
+            "graph_id": "x",
             "reviewer": { "platform": "claude" },
         }))
         .expect("should deserialize with reviewer");

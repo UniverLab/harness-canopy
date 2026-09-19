@@ -96,8 +96,8 @@ fn print_counts(counts: &crate::domain::project::RemapCounts, dry_run: bool) {
     let rows: &[(&str, i64)] = &[
         ("interactive session(s)", counts.interactive_sessions),
         ("terminal session(s)", counts.terminal_sessions),
-        ("loop(s)", counts.loops),
-        ("standalone spec(s)", counts.loop_specs),
+        ("graph(s)", counts.graphs),
+        ("standalone spec(s)", counts.graph_specs),
         ("sync message(s)", counts.sync_messages),
         ("sync lock(s)", counts.sync_locks),
         ("prompt history row(s)", counts.last_prompts),

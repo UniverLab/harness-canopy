@@ -270,7 +270,7 @@ pub(crate) async fn run_doctor() -> Result<()> {
 
     // ── Service Unit ──────────────────────────────────────────────
     // A unit that exists but points at a deleted/stale binary makes
-    // systemd/launchd retry-loop the daemon forever with nothing on the
+    // systemd/launchd retry-graph the daemon forever with nothing on the
     // port — from here that's indistinguishable from "never started" unless
     // doctor reads the unit itself and says so.
     report_service_unit(&home, &mut issues);

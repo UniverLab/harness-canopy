@@ -33,7 +33,7 @@ use crate::daemon::handler::redact_secrets;
 use crate::daemon::process::{terminate_process_group_async, KILL_GRACE};
 use crate::domain::canopy_config::CanopyConfig;
 use crate::domain::cli_strategy::CliStrategy;
-use crate::domain::loops::{LoopDetails, LoopNodeKind};
+use crate::domain::graphs::{GraphDetails, GraphNodeKind};
 
 /// Default bound on how long a single probe waits for a response — this is a
 /// liveness check, not a capability benchmark, so it stays short.
@@ -226,11 +226,11 @@ fn detect_model_rejection(stdout: &str, stderr: &str) -> Option<String> {
 /// Probe one platform+model pair by actually invoking it: build the
 /// platform's real headless command from its registry config
 /// (`headless_mode`/`model_flag`/etc, via [`CliStrategy::from_cli_config`] —
-/// the same path a real loop node uses), spawn it, and judge the captured
+/// the same path a real graph node uses), spawn it, and judge the captured
 /// response rather than the exit code.
 ///
 /// `workdir` is passed straight to [`CliStrategy::build_command`]; pass the
-/// loop's workdir when probing on a loop's behalf, `None` for a standalone
+/// graph's workdir when probing on a graph's behalf, `None` for a standalone
 /// probe with no project context.
 pub(crate) async fn probe_target(
     config: &CanopyConfig,
@@ -441,7 +441,7 @@ pub(crate) async fn probe_target(
 /// except `Reachable` and `Unknown`. Deliberately excludes `Unknown`: a pair
 /// whose validity could not be determined is not a confirmed failure, and
 /// folding it in here would make `would_fail` claim more certainty than the
-/// probe actually has. Shared by `agent_probe` and `loop_preflight` so the
+/// probe actually has. Shared by `agent_probe` and `graph_preflight` so the
 /// two tools can never disagree about what counts as "would fail".
 pub(crate) fn would_fail_count(reports: &[ProbeReport]) -> usize {
     reports
@@ -478,24 +478,24 @@ pub(crate) async fn probe_targets(
     futures::future::join_all(futures).await
 }
 
-/// One distinct platform+model pair referenced somewhere in a loop, plus the
+/// One distinct platform+model pair referenced somewhere in a graph, plus the
 /// human-readable list of nodes/hooks that reference it — so a caller who
 /// sees a pair fail knows which node(s) that affects, without probing the
 /// same pair twice.
 #[derive(Debug, Clone)]
-pub(crate) struct LoopProbeTarget {
+pub(crate) struct GraphProbeTarget {
     pub target: ProbeTarget,
     pub used_by: Vec<String>,
 }
 
-/// Walk a loop's agent nodes (loop-level graph and every spec's graph —
-/// ensemble members are themselves ordinary [`LoopNodeKind::Agent`] rows, so
+/// Walk a graph's agent nodes (top-level graph and every spec's graph —
+/// ensemble members are themselves ordinary [`GraphNodeKind::Agent`] rows, so
 /// no separate ensemble query is needed) plus every hook in every event, and
 /// return the distinct platform+model pairs they reference. A platform used
 /// by five nodes appears once, with all five names attached.
-pub(crate) fn distinct_targets_for_loop(details: &LoopDetails) -> Vec<LoopProbeTarget> {
+pub(crate) fn distinct_targets_for_graph(details: &GraphDetails) -> Vec<GraphProbeTarget> {
     let mut by_key: HashMap<(String, Option<String>, Option<String>), usize> = HashMap::new();
-    let mut result: Vec<LoopProbeTarget> = Vec::new();
+    let mut result: Vec<GraphProbeTarget> = Vec::new();
 
     let mut record =
         |platform: Option<&str>, model: Option<&str>, effort: Option<&str>, label: String| {
@@ -509,7 +509,7 @@ pub(crate) fn distinct_targets_for_loop(details: &LoopDetails) -> Vec<LoopProbeT
                 result[idx].used_by.push(label);
             } else {
                 by_key.insert(key.clone(), result.len());
-                result.push(LoopProbeTarget {
+                result.push(GraphProbeTarget {
                     target: ProbeTarget {
                         platform: key.0,
                         model: key.1,
@@ -537,7 +537,7 @@ pub(crate) fn distinct_targets_for_loop(details: &LoopDetails) -> Vec<LoopProbeT
         .iter()
         .chain(details.specs.iter().flat_map(|spec| spec.nodes.iter()));
     for node in all_nodes {
-        if node.kind != LoopNodeKind::Agent {
+        if node.kind != GraphNodeKind::Agent {
             continue;
         }
         let platform = node
@@ -551,6 +551,84 @@ pub(crate) fn distinct_targets_for_loop(details: &LoopDetails) -> Vec<LoopProbeT
     }
 
     result
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RecentProbeTarget {
+    pub target: ProbeTarget,
+    pub used_by: Vec<String>,
+    pub last_run: chrono::DateTime<chrono::Utc>,
+    pub run_count: i64,
+    pub last_outcome: String,
+}
+
+fn recent_source_label(source: &crate::db::graphs::RecentPairSourceKind) -> String {
+    use crate::db::graphs::RecentPairSourceKind::*;
+    match source {
+        GraphNode {
+            graph_id,
+            graph_name,
+            node_id,
+            node_name,
+        } => format!("graph '{graph_name}' ({graph_id}) — node '{node_name}' ({node_id})"),
+        CompletionHook {
+            graph_id,
+            graph_name,
+            event,
+            hook_index,
+        } => format!("graph '{graph_name}' ({graph_id}) — {event} hook {hook_index}"),
+        BackgroundAgent { agent_id, prompt } => {
+            let preview: String = prompt.chars().take(80).collect();
+            let suffix = if preview.chars().count() < prompt.chars().count() {
+                "..."
+            } else {
+                ""
+            };
+            format!("agent {agent_id} (prompt: \"{preview}{suffix}\")")
+        }
+        SubagentSpawn { workdir } => format!("subagent spawn in workdir '{workdir}'"),
+    }
+}
+
+pub(crate) fn group_recent_usage(
+    rows: &[crate::db::graphs::RecentPairSource],
+) -> Vec<RecentProbeTarget> {
+    let mut indexes: HashMap<(String, Option<String>), usize> = HashMap::new();
+    let mut grouped = Vec::new();
+    for row in rows {
+        let key = (row.platform.clone(), row.model.clone());
+        let index = match indexes.get(&key) {
+            Some(index) => *index,
+            None => {
+                let index = grouped.len();
+                indexes.insert(key.clone(), index);
+                grouped.push(RecentProbeTarget {
+                    target: ProbeTarget {
+                        platform: key.0,
+                        model: key.1,
+                        effort: None,
+                    },
+                    used_by: Vec::new(),
+                    last_run: row.started_at,
+                    run_count: 0,
+                    last_outcome: row.status.clone(),
+                });
+                index
+            }
+        };
+        let target = &mut grouped[index];
+        target.run_count += 1;
+        if row.started_at > target.last_run {
+            target.last_run = row.started_at;
+            target.last_outcome = row.status.clone();
+        }
+        let label = recent_source_label(&row.source);
+        if !target.used_by.contains(&label) {
+            target.used_by.push(label);
+        }
+    }
+    grouped.sort_by_key(|target| std::cmp::Reverse(target.last_run));
+    grouped
 }
 
 #[cfg(test)]
@@ -576,7 +654,7 @@ mod tests {
 
     /// Same as [`config_with_cli`] but with `--model` configured as the
     /// model flag — for exercising the `platform`+`model` path the way a
-    /// real loop node (e.g. codex) does, as opposed to platforms like
+    /// real graph node (e.g. codex) does, as opposed to platforms like
     /// `mistral` that have no model flag at all.
     fn config_with_cli_and_model_flag(name: &str, script_path: &std::path::Path) -> CanopyConfig {
         CanopyConfig {
@@ -1131,35 +1209,38 @@ mod tests {
         );
     }
 
-    fn agent_node(name: &str, config: Value) -> crate::domain::loops::LoopNode {
-        crate::domain::loops::LoopNode {
+    fn agent_node(name: &str, config: Value) -> crate::domain::graphs::GraphNode {
+        crate::domain::graphs::GraphNode {
             id: uuid::Uuid::new_v4().to_string(),
             spec_id: None,
-            loop_id: Some("loop-1".to_string()),
+            graph_id: Some("graph-1".to_string()),
             name: name.to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config,
             position: 0,
             created_at: chrono::Utc::now(),
         }
     }
 
-    fn sample_loop(
-        on_completed: Option<crate::domain::loops::LoopCompletionHook>,
-    ) -> crate::domain::loops::Loop {
+    fn sample_graph(
+        on_completed: Option<crate::domain::graphs::GraphCompletionHook>,
+    ) -> crate::domain::graphs::Graph {
         let mut hooks = std::collections::BTreeMap::new();
         if let Some(hook) = on_completed {
-            hooks.insert(crate::domain::loops::LoopHookEvent::OnCompleted, vec![hook]);
+            hooks.insert(
+                crate::domain::graphs::GraphHookEvent::OnCompleted,
+                vec![hook],
+            );
         }
-        crate::domain::loops::Loop {
+        crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
             infra_node_id: None,
-            id: "loop-1".to_string(),
+            id: "graph-1".to_string(),
             name: "sample".to_string(),
             description: None,
             workdir: "/tmp".to_string(),
-            status: crate::domain::loops::LoopStatus::Draft,
+            status: crate::domain::graphs::GraphStatus::Draft,
             trigger: None,
             created_at: chrono::Utc::now(),
             started_at: None,
@@ -1173,9 +1254,9 @@ mod tests {
     }
 
     #[test]
-    fn distinct_targets_for_loop_dedupes_same_pair_across_nodes() {
-        let details = LoopDetails {
-            lp: sample_loop(None),
+    fn distinct_targets_for_graph_dedupes_same_pair_across_nodes() {
+        let details = GraphDetails {
+            lp: sample_graph(None),
             graph_nodes: vec![
                 agent_node(
                     "node-a",
@@ -1195,7 +1276,7 @@ mod tests {
             completion_hook_runs: vec![],
         };
 
-        let targets = distinct_targets_for_loop(&details);
+        let targets = distinct_targets_for_graph(&details);
         assert_eq!(targets.len(), 2);
         let claude = targets
             .iter()
@@ -1211,8 +1292,8 @@ mod tests {
     }
 
     #[test]
-    fn distinct_targets_for_loop_includes_on_completed_hook() {
-        let hook = crate::domain::loops::LoopCompletionHook {
+    fn distinct_targets_for_graph_includes_on_completed_hook() {
+        let hook = crate::domain::graphs::GraphCompletionHook {
             platform: Some("mimo".to_string()),
             model: None,
             effort: None,
@@ -1220,33 +1301,33 @@ mod tests {
             command: None,
             target_session_id: None,
             timeout_minutes: None,
-            target_loop_id: None,
+            target_graph_id: None,
             queue_id: None,
             workdir_override: None,
             idea: None,
         };
-        let details = LoopDetails {
-            lp: sample_loop(Some(hook)),
+        let details = GraphDetails {
+            lp: sample_graph(Some(hook)),
             graph_nodes: vec![],
             graph_edges: vec![],
             specs: vec![],
             completion_hook_runs: vec![],
         };
 
-        let targets = distinct_targets_for_loop(&details);
+        let targets = distinct_targets_for_graph(&details);
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].target.platform, "mimo");
         assert_eq!(targets[0].used_by, vec!["on_completed hook 0"]);
     }
 
     #[test]
-    fn distinct_targets_for_loop_includes_all_hook_events_and_dedups() {
-        use crate::domain::loops::{LoopCompletionHook, LoopHookEvent};
+    fn distinct_targets_for_graph_includes_all_hook_events_and_dedups() {
+        use crate::domain::graphs::{GraphCompletionHook, GraphHookEvent};
         use std::collections::BTreeMap;
-        let mut hooks: BTreeMap<LoopHookEvent, Vec<LoopCompletionHook>> = BTreeMap::new();
+        let mut hooks: BTreeMap<GraphHookEvent, Vec<GraphCompletionHook>> = BTreeMap::new();
         hooks.insert(
-            LoopHookEvent::OnCompleted,
-            vec![LoopCompletionHook {
+            GraphHookEvent::OnCompleted,
+            vec![GraphCompletionHook {
                 platform: Some("mimo".to_string()),
                 model: None,
                 effort: None,
@@ -1254,15 +1335,15 @@ mod tests {
                 command: None,
                 target_session_id: None,
                 timeout_minutes: None,
-                target_loop_id: None,
+                target_graph_id: None,
                 queue_id: None,
                 workdir_override: None,
                 idea: None,
             }],
         );
         hooks.insert(
-            LoopHookEvent::OnFailed,
-            vec![LoopCompletionHook {
+            GraphHookEvent::OnFailed,
+            vec![GraphCompletionHook {
                 platform: Some("mimo".to_string()),
                 model: None,
                 effort: None,
@@ -1270,15 +1351,15 @@ mod tests {
                 command: None,
                 target_session_id: None,
                 timeout_minutes: None,
-                target_loop_id: None,
+                target_graph_id: None,
                 queue_id: None,
                 workdir_override: None,
                 idea: None,
             }],
         );
         hooks.insert(
-            LoopHookEvent::OnSpecCompleted,
-            vec![LoopCompletionHook {
+            GraphHookEvent::OnSpecCompleted,
+            vec![GraphCompletionHook {
                 platform: Some("other-cli".to_string()),
                 model: None,
                 effort: None,
@@ -1286,15 +1367,15 @@ mod tests {
                 command: None,
                 target_session_id: None,
                 timeout_minutes: None,
-                target_loop_id: None,
+                target_graph_id: None,
                 queue_id: None,
                 workdir_override: None,
                 idea: None,
             }],
         );
-        let mut lp = sample_loop(None);
+        let mut lp = sample_graph(None);
         lp.hooks = hooks;
-        let details = LoopDetails {
+        let details = GraphDetails {
             lp,
             graph_nodes: vec![],
             graph_edges: vec![],
@@ -1302,7 +1383,7 @@ mod tests {
             completion_hook_runs: vec![],
         };
 
-        let targets = distinct_targets_for_loop(&details);
+        let targets = distinct_targets_for_graph(&details);
         assert_eq!(targets.len(), 2);
         let mimo = targets
             .iter()
@@ -1320,12 +1401,12 @@ mod tests {
     }
 
     #[test]
-    fn distinct_targets_for_loop_skips_non_agent_nodes() {
-        let details = LoopDetails {
-            lp: sample_loop(None),
+    fn distinct_targets_for_graph_skips_non_agent_nodes() {
+        let details = GraphDetails {
+            lp: sample_graph(None),
             graph_nodes: vec![{
                 let mut node = agent_node("gate-1", serde_json::json!({"platform": "claude"}));
-                node.kind = LoopNodeKind::Gate;
+                node.kind = GraphNodeKind::Gate;
                 node
             }],
             graph_edges: vec![],
@@ -1333,7 +1414,7 @@ mod tests {
             completion_hook_runs: vec![],
         };
 
-        assert!(distinct_targets_for_loop(&details).is_empty());
+        assert!(distinct_targets_for_graph(&details).is_empty());
     }
 
     fn report(outcome: ProbeOutcome) -> ProbeReport {
@@ -1395,7 +1476,7 @@ mod tests {
         assert_eq!(unknown_count(&reports), 0);
     }
 
-    /// `agent_probe` and `loop_preflight` (handler.rs) both build their JSON
+    /// `agent_probe` and `graph_preflight` (handler.rs) both build their JSON
     /// response exclusively from `ProbeReport::to_json()` and this module's
     /// `would_fail_count`/`unknown_count` — there is no second copy of the
     /// outcome vocabulary for either tool to drift from. This test pins the
@@ -1427,5 +1508,70 @@ mod tests {
         );
         // Only `Reachable` is ever a pass.
         assert_eq!(all.iter().filter(|o| o.reachable()).count(), 1);
+    }
+
+    fn recent_source(
+        platform: &str,
+        model: Option<&str>,
+        started_at: chrono::DateTime<chrono::Utc>,
+        source: crate::db::graphs::RecentPairSourceKind,
+    ) -> crate::db::graphs::RecentPairSource {
+        crate::db::graphs::RecentPairSource {
+            platform: platform.to_string(),
+            model: model.map(str::to_string),
+            started_at,
+            status: "pass".to_string(),
+            source,
+        }
+    }
+
+    #[test]
+    fn recent_usage_groups_once_and_deduplicates_repeated_sources() {
+        let now = chrono::Utc::now();
+        let source = |id: &str| crate::db::graphs::RecentPairSourceKind::GraphNode {
+            graph_id: "g1".into(),
+            graph_name: "Graph".into(),
+            node_id: id.into(),
+            node_name: format!("Node {id}"),
+        };
+        let rows = vec![
+            recent_source("claude", Some("opus"), now, source("one")),
+            recent_source(
+                "claude",
+                Some("opus"),
+                now - chrono::Duration::minutes(1),
+                source("one"),
+            ),
+            recent_source(
+                "claude",
+                Some("opus"),
+                now - chrono::Duration::minutes(2),
+                source("two"),
+            ),
+        ];
+        let grouped = group_recent_usage(&rows);
+        assert_eq!(grouped.len(), 1);
+        assert_eq!(grouped[0].run_count, 3);
+        assert_eq!(grouped[0].used_by.len(), 2);
+        assert_eq!(grouped[0].last_run, now);
+    }
+
+    #[test]
+    fn recent_usage_orders_pairs_by_last_run() {
+        let now = chrono::Utc::now();
+        let source = crate::db::graphs::RecentPairSourceKind::SubagentSpawn {
+            workdir: "/tmp".into(),
+        };
+        let rows = vec![
+            recent_source(
+                "old",
+                None,
+                now - chrono::Duration::hours(1),
+                source.clone(),
+            ),
+            recent_source("new", None, now, source),
+        ];
+        let grouped = group_recent_usage(&rows);
+        assert_eq!(grouped[0].target.platform, "new");
     }
 }

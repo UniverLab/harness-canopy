@@ -103,9 +103,9 @@ impl NotificationService for RecordingNotifier {
         self.push(&format!("agent_failed:{id}"));
     }
     fn notify_nursery_failed(&self, _error_msg: &str) {}
-    fn notify_loop_started(
+    fn notify_graph_started(
         &self,
-        _loop_name: &str,
+        _graph_name: &str,
         _spec_count: usize,
         _resumed: bool,
         _first_pending: Option<&str>,
@@ -113,20 +113,20 @@ impl NotificationService for RecordingNotifier {
     }
     fn notify_spec_completed(
         &self,
-        _loop_name: &str,
+        _graph_name: &str,
         _spec_name: &str,
         _done: usize,
         _total: usize,
         _next_pending: Option<&str>,
     ) {
     }
-    fn notify_loop_finished(
+    fn notify_graph_finished(
         &self,
-        _loop_name: &str,
-        _outcome: crate::application::notification_service::LoopFinishOutcome<'_>,
+        _graph_name: &str,
+        _outcome: crate::application::notification_service::GraphFinishOutcome<'_>,
     ) {
     }
-    fn notify_loop_completion_hook_failed(&self, _loop_name: &str, _error: &str) {}
+    fn notify_graph_completion_hook_failed(&self, _graph_name: &str, _error: &str) {}
     fn notify_announcement(&self, _title: &str, _body: &str) {}
 }
 

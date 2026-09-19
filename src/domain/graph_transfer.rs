@@ -1,19 +1,19 @@
-//! Loop export/import: a loop's design — name, description, nodes, edges,
+//! Graph export/import: a graph's design — name, description, nodes, edges,
 //! and ensembles — serialized to and from one portable JSON document, so a
-//! loop can leave one machine as a file and be recreated on another (spec
-//! f0be8c66's successor: "a loop is worth sharing, not just narrating").
+//! graph can leave one machine as a file and be recreated on another (spec
+//! f0be8c66's successor: "a graph is worth sharing, not just narrating").
 //!
-//! Deliberately excludes ids, workdir, specs, and run/status state (a loop
+//! Deliberately excludes ids, workdir, specs, and run/status state (a graph
 //! design carrying someone else's backlog or run history would be a
 //! surprise on arrival), and always includes `platform`/`model` (v2) so an
 //! exported document round-trips its harness bindings.
 //!
 //! This module is pure — it never touches the database. `daemon::handler`'s
-//! `loop_export`/`loop_import` MCP tools (and their `canopy loop
+//! `graph_export`/`graph_import` MCP tools (and their `canopy graph
 //! export`/`import` CLI counterparts) fetch/persist the surrounding data and
 //! call into here for the document shape and structural validation, so
-//! import is built on the same node/edge/ensemble shapes `loop_add_node`/
-//! `loop_add_edge`/`loop_add_ensemble` produce rather than a second,
+//! import is built on the same node/edge/ensemble shapes `graph_add_node`/
+//! `graph_add_edge`/`graph_add_ensemble` produce rather than a second,
 //! divergent write path.
 
 use std::collections::HashMap;
@@ -21,52 +21,53 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::domain::loops::{
-    Ensemble, EnsembleDetails, EnsembleKind, EnsembleMember, Loop, LoopEdge, LoopEdgeCondition,
-    LoopNode, LoopNodeKind,
+use crate::domain::graphs::{
+    Ensemble, EnsembleDetails, EnsembleKind, EnsembleMember, Graph, GraphEdge, GraphEdgeCondition,
+    GraphNode, GraphNodeKind,
 };
 use crate::domain::validation::{
-    validate_ensemble_min_pass, validate_ensembles_in_graph, validate_loop_graph, GraphEdgeView,
+    validate_ensemble_min_pass, validate_ensembles_in_graph, validate_graph, GraphEdgeView,
     GraphNodeView,
 };
 
-/// The latest `format_version` this build writes. `loop_import` accepts both
-/// `1` (members with no binding) and `2` (bindings included). An
+/// The latest `format_version` this build writes. `graph_import` accepts `1`
+/// (members with no binding), `2` (bindings included), and `3` (current:
+/// graph/error vocabulary, `break` still read as `error` on import). An
 /// unrecognized or missing version is a refusal, never a best-effort parse
 /// (decision 6).
-pub const LOOP_EXPORT_FORMAT_VERSION: i64 = 2;
+pub const GRAPH_EXPORT_FORMAT_VERSION: i64 = 3;
 
 /// Ensemble member count bounds — mirrors `daemon::handler`'s
-/// `ENSEMBLE_MIN_MEMBERS`/`ENSEMBLE_MAX_MEMBERS` (`loop_add_ensemble`'s own
+/// `ENSEMBLE_MIN_MEMBERS`/`ENSEMBLE_MAX_MEMBERS` (`graph_add_ensemble`'s own
 /// authoring-time bounds). Duplicated rather than shared across the
 /// domain/daemon boundary: the two numbers are part of the ensemble
 /// contract itself, not an implementation detail either side owns alone.
 const ENSEMBLE_MIN_MEMBERS: usize = 2;
 const ENSEMBLE_MAX_MEMBERS: usize = 8;
 
-/// A loop's design, portable across machines/installations. Key order is
-/// deliberate (struct field order) — see `docs/loops.md` for the documented,
+/// A graph's design, portable across machines/installations. Key order is
+/// deliberate (struct field order) — see `docs/graphs.md` for the documented,
 /// hand-writable contract this type is the source of truth for.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct LoopExportDocument {
+pub struct GraphExportDocument {
     pub format_version: i64,
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    pub nodes: Vec<LoopExportNode>,
-    pub edges: Vec<LoopExportEdge>,
+    pub nodes: Vec<GraphExportNode>,
+    pub edges: Vec<GraphExportEdge>,
     #[serde(default)]
-    pub ensembles: Vec<LoopExportEnsemble>,
+    pub ensembles: Vec<GraphExportEnsemble>,
     /// CM2: optional pre-wired target for infrastructure failures, referenced
-    /// by node name (not id) — `None` when the loop has no infra node.
+    /// by node name (not id) — `None` when the graph has no infra node.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub infra_node: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct LoopExportNode {
+pub struct GraphExportNode {
     pub name: String,
-    pub kind: LoopNodeKind,
+    pub kind: GraphNodeKind,
     pub position: i64,
     pub config: Value,
 }
@@ -74,14 +75,14 @@ pub struct LoopExportNode {
 /// References nodes by `name`, never by id (decision 2) — what makes the
 /// file reviewable, hand-editable, and diffable.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct LoopExportEdge {
+pub struct GraphExportEdge {
     pub from_node: String,
     pub to_node: String,
-    pub condition: LoopEdgeCondition,
+    pub condition: GraphEdgeCondition,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct LoopExportEnsembleMember {
+pub struct GraphExportEnsembleMember {
     #[serde(default)]
     pub platform: Option<String>,
     #[serde(default)]
@@ -91,13 +92,13 @@ pub struct LoopExportEnsembleMember {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct LoopExportEnsemble {
+pub struct GraphExportEnsemble {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     pub prompt_template: String,
     pub entry_from_node: String,
-    pub entry_condition: LoopEdgeCondition,
+    pub entry_condition: GraphEdgeCondition,
     pub on_pass_to: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_fail_to: Option<String>,
@@ -105,25 +106,25 @@ pub struct LoopExportEnsemble {
     pub timeout_minutes: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub straggler_timeout_minutes: Option<i64>,
-    pub members: Vec<LoopExportEnsembleMember>,
+    pub members: Vec<GraphExportEnsembleMember>,
 }
 
-/// Build a [`LoopExportDocument`] from a loop's already-fetched graph.
+/// Build a [`GraphExportDocument`] from a graph's already-fetched graph.
 ///
-/// `graph_nodes`/`graph_edges` are the loop's *entire* top-level graph — the
-/// same rows `list_loop_nodes_for_loop`/`list_loop_edges_for_loop` return,
+/// `graph_nodes`/`graph_edges` are the graph's *entire* top-level graph — the
+/// same rows `list_graph_nodes_for_graph`/`list_graph_edges_for_graph` return,
 /// including ensemble member/join nodes and their wiring edges. This
 /// function is what tells the two apart: every node/edge owned by an
 /// ensemble (a member node, the join node, and the edges wiring them) is
 /// excluded from `nodes`/`edges` and represented instead as one
-/// [`LoopExportEnsemble`] entry, so an ensemble survives the round trip as
+/// [`GraphExportEnsemble`] entry, so an ensemble survives the round trip as
 /// an ensemble, not as expanded member nodes.
 pub fn build_export_document(
-    lp: &Loop,
-    graph_nodes: &[LoopNode],
-    graph_edges: &[LoopEdge],
+    lp: &Graph,
+    graph_nodes: &[GraphNode],
+    graph_edges: &[GraphEdge],
     ensembles: &[EnsembleDetails],
-) -> Result<LoopExportDocument, String> {
+) -> Result<GraphExportDocument, String> {
     let owned_ids: std::collections::HashSet<&str> = ensembles
         .iter()
         .flat_map(|details| {
@@ -135,7 +136,7 @@ pub fn build_export_document(
         })
         .collect();
 
-    let mut plain_nodes: Vec<&LoopNode> = graph_nodes
+    let mut plain_nodes: Vec<&GraphNode> = graph_nodes
         .iter()
         .filter(|node| !owned_ids.contains(node.id.as_str()))
         .collect();
@@ -156,7 +157,7 @@ pub fn build_export_document(
     if !duplicate_names.is_empty() {
         duplicate_names.sort_unstable();
         return Err(format!(
-            "Loop '{}' has duplicate node name(s): {}. Export requires unique node names, since the exported file references nodes by name — rename before exporting.",
+            "Graph '{}' has duplicate node name(s): {}. Export requires unique node names, since the exported file references nodes by name — rename before exporting.",
             lp.name,
             duplicate_names.join(", ")
         ));
@@ -172,7 +173,7 @@ pub fn build_export_document(
             .map(|name| (*name).to_string())
             .ok_or_else(|| {
                 format!(
-                    "Loop '{}' references node '{node_id}' that is not part of its own graph.",
+                    "Graph '{}' references node '{node_id}' that is not part of its own graph.",
                     lp.name
                 )
             })
@@ -180,7 +181,7 @@ pub fn build_export_document(
 
     let export_nodes = plain_nodes
         .iter()
-        .map(|node| LoopExportNode {
+        .map(|node| GraphExportNode {
             name: node.name.clone(),
             kind: node.kind,
             position: node.position,
@@ -194,7 +195,7 @@ pub fn build_export_document(
         {
             continue;
         }
-        export_edges.push(LoopExportEdge {
+        export_edges.push(GraphExportEdge {
             from_node: resolve_name(&edge.from_node)?,
             to_node: resolve_name(&edge.to_node)?,
             condition: edge.condition.clone(),
@@ -224,7 +225,7 @@ pub fn build_export_document(
         sorted_members.sort_by_key(|m| m.position);
         let members = sorted_members
             .iter()
-            .map(|member| LoopExportEnsembleMember {
+            .map(|member| GraphExportEnsembleMember {
                 platform: if member.platform.is_empty() {
                     None
                 } else {
@@ -235,7 +236,7 @@ pub fn build_export_document(
             })
             .collect();
 
-        export_ensembles.push(LoopExportEnsemble {
+        export_ensembles.push(GraphExportEnsemble {
             name: ensemble.name.clone(),
             kind: if ensemble.kind == EnsembleKind::Parallel {
                 None
@@ -256,8 +257,8 @@ pub fn build_export_document(
 
     let infra_node = lp.infra_node_id.as_deref().map(resolve_name).transpose()?;
 
-    Ok(LoopExportDocument {
-        format_version: LOOP_EXPORT_FORMAT_VERSION,
+    Ok(GraphExportDocument {
+        format_version: GRAPH_EXPORT_FORMAT_VERSION,
         name: lp.name.clone(),
         description: lp.description.clone(),
         nodes: export_nodes,
@@ -269,10 +270,10 @@ pub fn build_export_document(
 
 /// An agent node's config passes through untouched, except that a missing
 /// `model` key is injected as `null` so the export states "platform
-/// default" explicitly, field-for-field with `loop_get`. Every other kind's
+/// default" explicitly, field-for-field with `graph_get`. Every other kind's
 /// config passes through verbatim.
-fn export_node_config(kind: LoopNodeKind, config: &Value) -> Value {
-    if kind != LoopNodeKind::Agent {
+fn export_node_config(kind: GraphNodeKind, config: &Value) -> Value {
+    if kind != GraphNodeKind::Agent {
         return config.clone();
     }
     if let Some(map) = config.as_object() {
@@ -303,7 +304,7 @@ fn extract_router_labels(config: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn edge_sort_key(edge: &LoopExportEdge) -> String {
+fn edge_sort_key(edge: &GraphExportEdge) -> String {
     format!(
         "{}\u{0}{}\u{0}{}\u{0}{}",
         edge.from_node,
@@ -317,53 +318,54 @@ fn edge_sort_key(edge: &LoopExportEdge) -> String {
 /// deserialization, so a missing/unsupported version is refused with its
 /// own clear message rather than falling through to a generic serde error
 /// (decision 6).
-pub fn parse_export_document_value(value: &Value) -> Result<LoopExportDocument, String> {
+pub fn parse_export_document_value(value: &Value) -> Result<GraphExportDocument, String> {
     match value.get("format_version").and_then(Value::as_i64) {
-        Some(1) | Some(2) => {}
+        Some(1) | Some(2) | Some(3) => {}
         Some(other) => {
             return Err(format!(
-                "Loop export document has format_version {other}, but this build only supports 1 and {LOOP_EXPORT_FORMAT_VERSION}."
+                "Graph export document has format_version {other}, but this build only supports 1, 2 and {GRAPH_EXPORT_FORMAT_VERSION}."
             ))
         }
         None => {
             return Err(
-                "Loop export document is missing format_version; refusing to guess. Expected format_version: 2."
+                "Graph export document is missing format_version; refusing to guess. Expected format_version: 3."
                     .to_string(),
             )
         }
     }
-    serde_json::from_value(value.clone()).map_err(|e| format!("Invalid loop export document: {e}."))
+    serde_json::from_value(value.clone())
+        .map_err(|e| format!("Invalid graph export document: {e}."))
 }
 
 /// [`parse_export_document_value`] from raw JSON text — the CLI's entry
 /// point for a file's (or stdin's) contents.
-pub fn parse_export_document_str(raw: &str) -> Result<LoopExportDocument, String> {
+pub fn parse_export_document_str(raw: &str) -> Result<GraphExportDocument, String> {
     let value: Value = serde_json::from_str(raw)
-        .map_err(|e| format!("Invalid loop export file: not valid JSON ({e})."))?;
+        .map_err(|e| format!("Invalid graph export file: not valid JSON ({e})."))?;
     parse_export_document_value(&value)
 }
 
 /// One ensemble unit built by [`build_import_plan`] — the join node, every
 /// member node, the `ensembles`/`ensemble_members` rows — mirroring the
 /// shape `daemon::handler::build_ensemble_unit` assembles for
-/// `loop_add_ensemble`, so the two authoring paths can never drift.
+/// `graph_add_ensemble`, so the two authoring paths can never drift.
 #[derive(Debug, Clone)]
-pub struct LoopImportEnsemblePlan {
+pub struct GraphImportEnsemblePlan {
     pub ensemble: Ensemble,
     pub members: Vec<EnsembleMember>,
-    pub member_nodes: Vec<LoopNode>,
-    pub join_node: LoopNode,
+    pub member_nodes: Vec<GraphNode>,
+    pub join_node: GraphNode,
 }
 
 /// Every fresh-id graph piece [`build_import_plan`] assembles for one
-/// `loop_import` call — ready to persist as-is (decision 5: import is
+/// `graph_import` call — ready to persist as-is (decision 5: import is
 /// all-or-nothing, so the caller persists every field here in one
 /// transaction or none at all).
 #[derive(Debug, Clone)]
-pub struct LoopImportPlan {
-    pub nodes: Vec<LoopNode>,
-    pub edges: Vec<LoopEdge>,
-    pub ensembles: Vec<LoopImportEnsemblePlan>,
+pub struct GraphImportPlan {
+    pub nodes: Vec<GraphNode>,
+    pub edges: Vec<GraphEdge>,
+    pub ensembles: Vec<GraphImportEnsemblePlan>,
     /// Terminal exits reported by structural validation, formatted for
     /// operators with the node name and id.
     pub terminals: Vec<String>,
@@ -372,13 +374,13 @@ pub struct LoopImportPlan {
     pub infra_node_id: Option<String>,
 }
 
-/// Build a validated [`LoopImportPlan`] for `loop_id` from a parsed
-/// [`LoopExportDocument`] — every node/edge/ensemble gets a fresh id, names
-/// resolve to those ids, and every rule `loop_add_node`/`loop_add_edge`/
-/// `loop_add_ensemble` would enforce at authoring time is enforced here too
+/// Build a validated [`GraphImportPlan`] for `graph_id` from a parsed
+/// [`GraphExportDocument`] — every node/edge/ensemble gets a fresh id, names
+/// resolve to those ids, and every rule `graph_add_node`/`graph_add_edge`/
+/// `graph_add_ensemble` would enforce at authoring time is enforced here too
 /// (decision 5), with one deliberate carve-out: an agent node's missing
 /// `platform`/`cli` is *not* rejected — decision 3 means a shared design may
-/// legitimately arrive without one, and the caller (`loop_import`) reports
+/// legitimately arrive without one, and the caller (`graph_import`) reports
 /// exactly which nodes still need it rather than refusing the whole import.
 ///
 /// Returns `Err` (with nothing to persist) on: an unsupported/missing
@@ -386,13 +388,13 @@ pub struct LoopImportPlan {
 /// a node absent from `document.nodes`, an ensemble with 2-8 members
 /// violated, or `min_pass`/timeout fields out of range.
 pub fn build_import_plan(
-    document: &LoopExportDocument,
-    loop_id: &str,
-) -> Result<LoopImportPlan, String> {
-    if document.format_version != 1 && document.format_version != LOOP_EXPORT_FORMAT_VERSION {
+    document: &GraphExportDocument,
+    graph_id: &str,
+) -> Result<GraphImportPlan, String> {
+    if !matches!(document.format_version, 1..=3) {
         return Err(format!(
-            "Loop export document has format_version {}, but this build only supports 1 and {}.",
-            document.format_version, LOOP_EXPORT_FORMAT_VERSION
+            "Graph export document has format_version {}, but this build only supports 1, 2 and {}.",
+            document.format_version, GRAPH_EXPORT_FORMAT_VERSION
         ));
     }
 
@@ -408,7 +410,7 @@ pub fn build_import_plan(
     if !duplicate_names.is_empty() {
         duplicate_names.sort_unstable();
         return Err(format!(
-            "Loop export document has duplicate node name(s): {}.",
+            "Graph export document has duplicate node name(s): {}.",
             duplicate_names.join(", ")
         ));
     }
@@ -417,7 +419,7 @@ pub fn build_import_plan(
     let mut name_to_id: HashMap<&str, String> = HashMap::new();
     let mut nodes = Vec::with_capacity(document.nodes.len());
     for doc_node in &document.nodes {
-        if doc_node.kind == LoopNodeKind::Join {
+        if doc_node.kind == GraphNodeKind::Join {
             return Err(format!(
                 "Node '{}' has kind 'join', which is engine-managed and can only be created via an ensemble — it can never be authored directly.",
                 doc_node.name
@@ -425,10 +427,10 @@ pub fn build_import_plan(
         }
         let id = uuid::Uuid::new_v4().to_string();
         name_to_id.insert(doc_node.name.as_str(), id.clone());
-        nodes.push(LoopNode {
+        nodes.push(GraphNode {
             id,
             spec_id: None,
-            loop_id: Some(loop_id.to_string()),
+            graph_id: Some(graph_id.to_string()),
             name: doc_node.name.clone(),
             kind: doc_node.kind,
             config: doc_node.config.clone(),
@@ -483,10 +485,10 @@ pub fn build_import_plan(
                 doc_edge.from_node, doc_edge.to_node
             )
         })?;
-        edges.push(LoopEdge {
+        edges.push(GraphEdge {
             id: uuid::Uuid::new_v4().to_string(),
             spec_id: None,
-            loop_id: Some(loop_id.to_string()),
+            graph_id: Some(graph_id.to_string()),
             from_node: from_id,
             to_node: to_id,
             condition: doc_edge.condition.clone(),
@@ -495,7 +497,7 @@ pub fn build_import_plan(
 
     // Ensemble-owned nodes continue the position sequence after every plain
     // node — the same "append after existing nodes" convention
-    // `loop_add_ensemble`'s `start_position` uses.
+    // `graph_add_ensemble`'s `start_position` uses.
     let mut next_position = nodes
         .iter()
         .map(|node| node.position)
@@ -567,12 +569,12 @@ pub fn build_import_plan(
                 .prompt_override
                 .as_deref()
                 .unwrap_or(doc_ensemble.prompt_template.as_str());
-            member_nodes.push(LoopNode {
+            member_nodes.push(GraphNode {
                 id: node_id.clone(),
                 spec_id: None,
-                loop_id: Some(loop_id.to_string()),
+                graph_id: Some(graph_id.to_string()),
                 name: format!("{} [{}]", doc_ensemble.name, index + 1),
-                kind: LoopNodeKind::Agent,
+                kind: GraphNodeKind::Agent,
                 // A member's platform may legitimately be absent (see this
                 // function's doc comment) — an empty string here is exactly
                 // what `agent_nodes_missing_platform` looks for downstream.
@@ -585,21 +587,21 @@ pub fn build_import_plan(
                 position: next_position,
                 created_at: now,
             });
-            edges.push(LoopEdge {
+            edges.push(GraphEdge {
                 id: uuid::Uuid::new_v4().to_string(),
                 spec_id: None,
-                loop_id: Some(loop_id.to_string()),
+                graph_id: Some(graph_id.to_string()),
                 from_node: entry_from_node.clone(),
                 to_node: node_id.clone(),
                 condition: doc_ensemble.entry_condition.clone(),
             });
-            edges.push(LoopEdge {
+            edges.push(GraphEdge {
                 id: uuid::Uuid::new_v4().to_string(),
                 spec_id: None,
-                loop_id: Some(loop_id.to_string()),
+                graph_id: Some(graph_id.to_string()),
                 from_node: node_id.clone(),
                 to_node: join_node_id.clone(),
-                condition: LoopEdgeCondition::Always,
+                condition: GraphEdgeCondition::Always,
             });
             members.push(EnsembleMember {
                 ensemble_id: ensemble_id.clone(),
@@ -612,34 +614,34 @@ pub fn build_import_plan(
             next_position += 1;
         }
 
-        let join_node = LoopNode {
+        let join_node = GraphNode {
             id: join_node_id.clone(),
             spec_id: None,
-            loop_id: Some(loop_id.to_string()),
+            graph_id: Some(graph_id.to_string()),
             name: format!("{} (quorum)", doc_ensemble.name),
-            kind: LoopNodeKind::Join,
+            kind: GraphNodeKind::Join,
             config: serde_json::json!({ "ensemble_id": ensemble_id }),
             position: next_position,
             created_at: now,
         };
         next_position += 1;
 
-        edges.push(LoopEdge {
+        edges.push(GraphEdge {
             id: uuid::Uuid::new_v4().to_string(),
             spec_id: None,
-            loop_id: Some(loop_id.to_string()),
+            graph_id: Some(graph_id.to_string()),
             from_node: join_node_id.clone(),
             to_node: on_pass_to.clone(),
-            condition: LoopEdgeCondition::Pass,
+            condition: GraphEdgeCondition::Pass,
         });
         if let Some(on_fail_to) = &on_fail_to {
-            edges.push(LoopEdge {
+            edges.push(GraphEdge {
                 id: uuid::Uuid::new_v4().to_string(),
                 spec_id: None,
-                loop_id: Some(loop_id.to_string()),
+                graph_id: Some(graph_id.to_string()),
                 from_node: join_node_id.clone(),
                 to_node: on_fail_to.clone(),
-                condition: LoopEdgeCondition::Fail,
+                condition: GraphEdgeCondition::Fail,
             });
         }
 
@@ -649,11 +651,11 @@ pub fn build_import_plan(
             .and_then(EnsembleKind::from_str)
             .unwrap_or(EnsembleKind::Parallel);
 
-        ensembles.push(LoopImportEnsemblePlan {
+        ensembles.push(GraphImportEnsemblePlan {
             ensemble: Ensemble {
                 id: ensemble_id,
                 spec_id: None,
-                loop_id: Some(loop_id.to_string()),
+                graph_id: Some(graph_id.to_string()),
                 name: doc_ensemble.name.clone(),
                 prompt_template: doc_ensemble.prompt_template.clone(),
                 join_node_id,
@@ -678,7 +680,7 @@ pub fn build_import_plan(
         });
     }
 
-    // Defense in depth: the same structural check `loop_run` runs on every
+    // Defense in depth: the same structural check `graph_run` runs on every
     // ensemble reachable from a live graph (see `validate_ensembles_in_graph`)
     // confirms the plan's wiring is internally consistent before anything is
     // persisted — nothing above should ever be able to trip it, but a
@@ -706,7 +708,7 @@ pub fn build_import_plan(
         let router_labels: Vec<Vec<String>> = all_nodes
             .iter()
             .map(|n| {
-                if n.kind == LoopNodeKind::Router {
+                if n.kind == GraphNodeKind::Router {
                     extract_router_labels(&n.config)
                 } else {
                     Vec::new()
@@ -730,7 +732,7 @@ pub fn build_import_plan(
                 condition: &e.condition,
             })
             .collect();
-        match validate_loop_graph(&node_views, &edge_views) {
+        match validate_graph(&node_views, &edge_views) {
             Ok(report) => report
                 .terminals
                 .into_iter()
@@ -764,7 +766,7 @@ pub fn build_import_plan(
 
     let infra_node_id = document.infra_node.as_deref().map(resolve).transpose()?;
 
-    Ok(LoopImportPlan {
+    Ok(GraphImportPlan {
         nodes,
         edges,
         ensembles,
@@ -775,14 +777,14 @@ pub fn build_import_plan(
 
 /// Names of every agent node (plain or ensemble member) left without a
 /// `platform`/`cli` after import — a v1 document (or a hand-written one)
-/// may legitimately arrive without one, so `loop_import`'s response calls
-/// out exactly which nodes need one filled in before the loop can run
+/// may legitimately arrive without one, so `graph_import`'s response calls
+/// out exactly which nodes need one filled in before the graph can run
 /// (requirement 4).
-pub fn agent_nodes_missing_platform(plan: &LoopImportPlan) -> Vec<String> {
+pub fn agent_nodes_missing_platform(plan: &GraphImportPlan) -> Vec<String> {
     let plain = plan
         .nodes
         .iter()
-        .filter(|node| node.kind == LoopNodeKind::Agent)
+        .filter(|node| node.kind == GraphNodeKind::Agent)
         .filter(|node| !node_config_has_harness(&node.config));
     let members = plan
         .ensembles
@@ -804,11 +806,11 @@ fn node_config_has_harness(config: &Value) -> bool {
     has_non_empty_str("platform") || has_non_empty_str("cli")
 }
 
-/// Resolve a desired loop name against names already taken in the target
+/// Resolve a desired graph name against names already taken in the target
 /// workdir: the name itself if free, else `"{name} (2)"`, `"{name} (3)"`,
-/// etc. — decision 4's "import always creates a new loop" never overwrites,
+/// etc. — decision 4's "import always creates a new graph" never overwrites,
 /// so a taken name gets a suffix instead of a refusal.
-pub fn resolve_unique_loop_name(existing_names: &[String], desired: &str) -> String {
+pub fn resolve_unique_graph_name(existing_names: &[String], desired: &str) -> String {
     if !existing_names.iter().any(|name| name == desired) {
         return desired.to_string();
     }
@@ -827,16 +829,16 @@ mod tests {
     use super::*;
     use chrono::Utc;
 
-    fn make_loop(name: &str) -> Loop {
-        Loop {
+    fn make_graph(name: &str) -> Graph {
+        Graph {
             archived: false,
             paused_by_reconciliation: false,
             infra_node_id: None,
-            id: "loop-1".to_string(),
+            id: "graph-1".to_string(),
             name: name.to_string(),
-            description: Some("A test loop".to_string()),
+            description: Some("A test graph".to_string()),
             workdir: "/tmp/project".to_string(),
-            status: crate::domain::loops::LoopStatus::Draft,
+            status: crate::domain::graphs::GraphStatus::Draft,
             trigger: None,
             created_at: Utc::now(),
             started_at: None,
@@ -852,14 +854,14 @@ mod tests {
     fn make_node(
         id: &str,
         name: &str,
-        kind: LoopNodeKind,
+        kind: GraphNodeKind,
         config: Value,
         position: i64,
-    ) -> LoopNode {
-        LoopNode {
+    ) -> GraphNode {
+        GraphNode {
             id: id.to_string(),
             spec_id: None,
-            loop_id: Some("loop-1".to_string()),
+            graph_id: Some("graph-1".to_string()),
             name: name.to_string(),
             kind,
             config,
@@ -868,11 +870,11 @@ mod tests {
         }
     }
 
-    fn make_edge(id: &str, from: &str, to: &str, condition: LoopEdgeCondition) -> LoopEdge {
-        LoopEdge {
+    fn make_edge(id: &str, from: &str, to: &str, condition: GraphEdgeCondition) -> GraphEdge {
+        GraphEdge {
             id: id.to_string(),
             spec_id: None,
-            loop_id: Some("loop-1".to_string()),
+            graph_id: Some("graph-1".to_string()),
             from_node: from.to_string(),
             to_node: to.to_string(),
             condition,
@@ -881,34 +883,34 @@ mod tests {
 
     /// A simple 3-node chain (implementer -> gate -> committer), no
     /// ensembles: the base case every other test builds on.
-    fn simple_graph() -> (Loop, Vec<LoopNode>, Vec<LoopEdge>) {
-        let lp = make_loop("simple-loop");
+    fn simple_graph() -> (Graph, Vec<GraphNode>, Vec<GraphEdge>) {
+        let lp = make_graph("simple-graph");
         let nodes = vec![
             make_node(
                 "n1",
                 "implementer",
-                LoopNodeKind::Agent,
+                GraphNodeKind::Agent,
                 serde_json::json!({"platform": "claude", "model": "opus", "prompt_template": "implement it"}),
                 1,
             ),
             make_node(
                 "n2",
                 "gate",
-                LoopNodeKind::Check,
+                GraphNodeKind::Check,
                 serde_json::json!({"command": "cargo test"}),
                 2,
             ),
             make_node(
                 "n3",
                 "committer",
-                LoopNodeKind::Agent,
+                GraphNodeKind::Agent,
                 serde_json::json!({"platform": "claude", "prompt_template": "commit it"}),
                 3,
             ),
         ];
         let edges = vec![
-            make_edge("e1", "n1", "n2", LoopEdgeCondition::Always),
-            make_edge("e2", "n2", "n3", LoopEdgeCondition::Always),
+            make_edge("e1", "n1", "n2", GraphEdgeCondition::Always),
+            make_edge("e2", "n2", "n3", GraphEdgeCondition::Always),
         ];
         (lp, nodes, edges)
     }
@@ -917,7 +919,7 @@ mod tests {
     fn export_v2_always_includes_agent_bindings_and_null_model() {
         let (lp, nodes, edges) = simple_graph();
         let doc = build_export_document(&lp, &nodes, &edges, &[]).unwrap();
-        assert_eq!(doc.format_version, LOOP_EXPORT_FORMAT_VERSION);
+        assert_eq!(doc.format_version, GRAPH_EXPORT_FORMAT_VERSION);
         let implementer = doc.nodes.iter().find(|n| n.name == "implementer").unwrap();
         assert_eq!(implementer.config["platform"], "claude");
         assert_eq!(implementer.config["model"], "opus");
@@ -934,58 +936,58 @@ mod tests {
 
     #[test]
     fn export_v2_members_carry_bindings_in_position_order() {
-        let lp = make_loop("member-order-loop");
+        let lp = make_graph("member-order-graph");
         let kickoff = make_node(
             "kickoff",
             "kickoff",
-            LoopNodeKind::Check,
+            GraphNodeKind::Check,
             serde_json::json!({"command": "true"}),
             1,
         );
         let downstream = make_node(
             "downstream",
             "downstream",
-            LoopNodeKind::Agent,
+            GraphNodeKind::Agent,
             serde_json::json!({"platform": "claude", "prompt_template": "wrap up"}),
             10,
         );
         let member1 = make_node(
             "m1",
             "Team [1]",
-            LoopNodeKind::Agent,
+            GraphNodeKind::Agent,
             serde_json::json!({"platform": "copilot", "prompt_template": "draft it", "timeout_minutes": 30}),
             2,
         );
         let member2 = make_node(
             "m2",
             "Team [2]",
-            LoopNodeKind::Agent,
+            GraphNodeKind::Agent,
             serde_json::json!({"platform": "opencode", "model": "opencode-go/qwen3.7-plus", "prompt_template": "draft it", "timeout_minutes": 30}),
             3,
         );
         let member3 = make_node(
             "m3",
             "Team [3]",
-            LoopNodeKind::Agent,
+            GraphNodeKind::Agent,
             serde_json::json!({"platform": "opencode", "model": "opencode/muse-spark", "prompt_template": "custom", "timeout_minutes": 30}),
             4,
         );
         let join = make_node(
             "join1",
             "Team (quorum)",
-            LoopNodeKind::Join,
+            GraphNodeKind::Join,
             serde_json::json!({"ensemble_id": "ens1"}),
             5,
         );
         let nodes = vec![kickoff, downstream, member1, member2, member3, join];
         let edges = vec![
-            make_edge("e1", "kickoff", "m1", LoopEdgeCondition::Always),
-            make_edge("e2", "kickoff", "m2", LoopEdgeCondition::Always),
-            make_edge("e3", "kickoff", "m3", LoopEdgeCondition::Always),
-            make_edge("e4", "m1", "join1", LoopEdgeCondition::Always),
-            make_edge("e5", "m2", "join1", LoopEdgeCondition::Always),
-            make_edge("e6", "m3", "join1", LoopEdgeCondition::Always),
-            make_edge("e7", "join1", "downstream", LoopEdgeCondition::Pass),
+            make_edge("e1", "kickoff", "m1", GraphEdgeCondition::Always),
+            make_edge("e2", "kickoff", "m2", GraphEdgeCondition::Always),
+            make_edge("e3", "kickoff", "m3", GraphEdgeCondition::Always),
+            make_edge("e4", "m1", "join1", GraphEdgeCondition::Always),
+            make_edge("e5", "m2", "join1", GraphEdgeCondition::Always),
+            make_edge("e6", "m3", "join1", GraphEdgeCondition::Always),
+            make_edge("e7", "join1", "downstream", GraphEdgeCondition::Pass),
         ];
         // Members stored out of position order on purpose: export must
         // still emit them in position order.
@@ -1061,7 +1063,7 @@ mod tests {
         let doc = build_export_document(&lp, &nodes, &edges, &[]).unwrap();
         let raw = serde_json::to_string(&doc).unwrap();
         // struct field order drives serde_json's key order.
-        assert!(raw.starts_with("{\"format_version\":2"));
+        assert!(raw.starts_with("{\"format_version\":3"));
     }
 
     #[test]
@@ -1083,8 +1085,8 @@ mod tests {
     }
 
     #[test]
-    fn import_accepts_format_version_1_and_2() {
-        for version in [1, 2] {
+    fn import_accepts_format_versions_1_2_and_3() {
+        for version in [1, 2, 3] {
             let value = serde_json::json!({
                 "format_version": version, "name": "x", "nodes": [], "edges": [], "ensembles": []
             });
@@ -1095,38 +1097,61 @@ mod tests {
     }
 
     #[test]
+    fn import_v2_break_condition_is_error() {
+        let value = serde_json::json!({
+            "format_version": 2,
+            "name": "legacy",
+            "nodes": [
+                {"name": "a", "kind": "check", "position": 1, "config": {"command": "true"}},
+                {"name": "b", "kind": "check", "position": 2, "config": {"command": "true"}}
+            ],
+            "edges": [{"from_node": "a", "to_node": "b", "condition": "break"}],
+            "ensembles": []
+        });
+        let document = parse_export_document_value(&value).unwrap();
+        assert_eq!(document.edges[0].condition, GraphEdgeCondition::Error);
+        let exported = serde_json::to_value(GraphExportDocument {
+            format_version: GRAPH_EXPORT_FORMAT_VERSION,
+            ..document
+        })
+        .unwrap();
+        assert_eq!(exported["format_version"], 3);
+        assert_eq!(exported["edges"][0]["condition"], "error");
+    }
+
+    #[test]
     fn import_plan_rejects_edge_naming_nonexistent_node() {
-        let doc = LoopExportDocument {
+        let doc = GraphExportDocument {
             format_version: 1,
             name: "x".to_string(),
             description: None,
-            nodes: vec![LoopExportNode {
+            nodes: vec![GraphExportNode {
                 name: "only".to_string(),
-                kind: LoopNodeKind::Check,
+                kind: GraphNodeKind::Check,
                 position: 1,
                 config: serde_json::json!({"command": "true"}),
             }],
-            edges: vec![LoopExportEdge {
+            edges: vec![GraphExportEdge {
                 from_node: "only".to_string(),
                 to_node: "ghost".to_string(),
-                condition: LoopEdgeCondition::Always,
+                condition: GraphEdgeCondition::Always,
             }],
             ensembles: vec![],
             infra_node: None,
         };
-        let err = build_import_plan(&doc, "new-loop").unwrap_err();
+        let err = build_import_plan(&doc, "new-graph").unwrap_err();
         assert!(err.contains("ghost"));
     }
 
     #[test]
     fn import_plan_rejects_join_kind_node() {
-        let doc = LoopExportDocument {
+        let doc = GraphExportDocument {
             format_version: 1,
             name: "x".to_string(),
             description: None,
-            nodes: vec![LoopExportNode {
+            nodes: vec![GraphExportNode {
                 name: "sneaky".to_string(),
-                kind: LoopNodeKind::Join,
+                kind: GraphNodeKind::Join,
                 position: 1,
                 config: serde_json::json!({}),
             }],
@@ -1134,18 +1159,18 @@ mod tests {
             ensembles: vec![],
             infra_node: None,
         };
-        let err = build_import_plan(&doc, "new-loop").unwrap_err();
+        let err = build_import_plan(&doc, "new-graph").unwrap_err();
         assert!(err.contains("join"));
     }
 
     #[test]
-    fn import_plan_assigns_fresh_ids_and_loop_id() {
+    fn import_plan_assigns_fresh_ids_and_graph_id() {
         let (lp, nodes, edges) = simple_graph();
         let doc = build_export_document(&lp, &nodes, &edges, &[]).unwrap();
-        let plan = build_import_plan(&doc, "brand-new-loop-id").unwrap();
+        let plan = build_import_plan(&doc, "brand-new-graph-id").unwrap();
         assert_eq!(plan.nodes.len(), 3);
         for node in &plan.nodes {
-            assert_eq!(node.loop_id.as_deref(), Some("brand-new-loop-id"));
+            assert_eq!(node.graph_id.as_deref(), Some("brand-new-graph-id"));
             assert!(node.spec_id.is_none());
             assert!(!nodes.iter().any(|n| n.id == node.id), "id must be fresh");
         }
@@ -1156,46 +1181,46 @@ mod tests {
     fn agent_nodes_missing_platform_reports_unbound_v1_nodes() {
         // A v1-style document carries no bindings: every agent node is
         // reported. Built by hand (not via export, which always binds).
-        let doc = LoopExportDocument {
+        let doc = GraphExportDocument {
             format_version: 1,
             name: "x".to_string(),
             description: None,
             nodes: vec![
-                LoopExportNode {
+                GraphExportNode {
                     name: "implementer".to_string(),
-                    kind: LoopNodeKind::Agent,
+                    kind: GraphNodeKind::Agent,
                     position: 1,
                     config: serde_json::json!({"prompt_template": "implement it"}),
                 },
-                LoopExportNode {
+                GraphExportNode {
                     name: "gate".to_string(),
-                    kind: LoopNodeKind::Check,
+                    kind: GraphNodeKind::Check,
                     position: 2,
                     config: serde_json::json!({"command": "cargo test"}),
                 },
-                LoopExportNode {
+                GraphExportNode {
                     name: "committer".to_string(),
-                    kind: LoopNodeKind::Agent,
+                    kind: GraphNodeKind::Agent,
                     position: 3,
                     config: serde_json::json!({"prompt_template": "commit it"}),
                 },
             ],
             edges: vec![
-                LoopExportEdge {
+                GraphExportEdge {
                     from_node: "implementer".to_string(),
                     to_node: "gate".to_string(),
-                    condition: LoopEdgeCondition::Always,
+                    condition: GraphEdgeCondition::Always,
                 },
-                LoopExportEdge {
+                GraphExportEdge {
                     from_node: "gate".to_string(),
                     to_node: "committer".to_string(),
-                    condition: LoopEdgeCondition::Always,
+                    condition: GraphEdgeCondition::Always,
                 },
             ],
             ensembles: vec![],
             infra_node: None,
         };
-        let plan = build_import_plan(&doc, "loop-2").unwrap();
+        let plan = build_import_plan(&doc, "graph-2").unwrap();
         let missing = agent_nodes_missing_platform(&plan);
         assert_eq!(missing.len(), 2);
         assert!(missing.contains(&"implementer".to_string()));
@@ -1206,22 +1231,22 @@ mod tests {
     fn agent_nodes_missing_platform_empty_for_v2_export() {
         let (lp, nodes, edges) = simple_graph();
         let doc = build_export_document(&lp, &nodes, &edges, &[]).unwrap();
-        let plan = build_import_plan(&doc, "loop-2").unwrap();
+        let plan = build_import_plan(&doc, "graph-2").unwrap();
         assert!(agent_nodes_missing_platform(&plan).is_empty());
     }
 
     #[test]
-    fn resolve_unique_loop_name_returns_desired_when_free() {
+    fn resolve_unique_graph_name_returns_desired_when_free() {
         let existing = vec!["other".to_string()];
-        assert_eq!(resolve_unique_loop_name(&existing, "my-loop"), "my-loop");
+        assert_eq!(resolve_unique_graph_name(&existing, "my-graph"), "my-graph");
     }
 
     #[test]
-    fn resolve_unique_loop_name_suffixes_on_collision() {
-        let existing = vec!["my-loop".to_string(), "my-loop (2)".to_string()];
+    fn resolve_unique_graph_name_suffixes_on_collision() {
+        let existing = vec!["my-graph".to_string(), "my-graph (2)".to_string()];
         assert_eq!(
-            resolve_unique_loop_name(&existing, "my-loop"),
-            "my-loop (3)"
+            resolve_unique_graph_name(&existing, "my-graph"),
+            "my-graph (3)"
         );
     }
 
@@ -1235,12 +1260,12 @@ mod tests {
         let ensemble = Ensemble {
             id: ensemble_id.to_string(),
             spec_id: None,
-            loop_id: Some("loop-1".to_string()),
+            graph_id: Some("graph-1".to_string()),
             name: "Proposers".to_string(),
             prompt_template: "draft it".to_string(),
             join_node_id: join_id.to_string(),
             entry_from_node: entry_from.to_string(),
-            entry_condition: LoopEdgeCondition::Always,
+            entry_condition: GraphEdgeCondition::Always,
             min_pass: member_ids.len() as i64,
             straggler_timeout_minutes: None,
             timeout_minutes: 30,
@@ -1267,55 +1292,55 @@ mod tests {
 
     /// The full ensemble round trip: build a graph with a kickoff node, a
     /// 2-member ensemble, and a downstream node; export it, import it under
-    /// a new loop id, and export the result again. Requirement 5 (round
+    /// a new graph id, and export the result again. Requirement 5 (round
     /// trip, with bindings included on both ends) and the acceptance
     /// criterion ("an ensemble survives the round trip as an ensemble, not
     /// as expanded member nodes") both pin on this.
     #[test]
     fn ensemble_round_trips_as_an_ensemble_not_expanded_nodes() {
-        let lp = make_loop("ensemble-loop");
+        let lp = make_graph("ensemble-graph");
         let kickoff = make_node(
             "kickoff",
             "kickoff",
-            LoopNodeKind::Check,
+            GraphNodeKind::Check,
             serde_json::json!({"command": "true"}),
             1,
         );
         let downstream = make_node(
             "downstream",
             "downstream",
-            LoopNodeKind::Agent,
+            GraphNodeKind::Agent,
             serde_json::json!({"platform": "claude", "prompt_template": "wrap up"}),
             10,
         );
         let member1 = make_node(
             "m1",
             "Proposers [1]",
-            LoopNodeKind::Agent,
+            GraphNodeKind::Agent,
             serde_json::json!({"platform": "openrouter", "model": "model-0", "prompt_template": "draft it", "timeout_minutes": 30}),
             2,
         );
         let member2 = make_node(
             "m2",
             "Proposers [2]",
-            LoopNodeKind::Agent,
+            GraphNodeKind::Agent,
             serde_json::json!({"platform": "openrouter", "model": "model-1", "prompt_template": "draft it", "timeout_minutes": 30}),
             3,
         );
         let join = make_node(
             "join1",
             "Proposers (quorum)",
-            LoopNodeKind::Join,
+            GraphNodeKind::Join,
             serde_json::json!({"ensemble_id": "ens1"}),
             4,
         );
         let nodes = vec![kickoff, downstream, member1, member2, join];
         let edges = vec![
-            make_edge("e1", "kickoff", "m1", LoopEdgeCondition::Always),
-            make_edge("e2", "kickoff", "m2", LoopEdgeCondition::Always),
-            make_edge("e3", "m1", "join1", LoopEdgeCondition::Always),
-            make_edge("e4", "m2", "join1", LoopEdgeCondition::Always),
-            make_edge("e5", "join1", "downstream", LoopEdgeCondition::Pass),
+            make_edge("e1", "kickoff", "m1", GraphEdgeCondition::Always),
+            make_edge("e2", "kickoff", "m2", GraphEdgeCondition::Always),
+            make_edge("e3", "m1", "join1", GraphEdgeCondition::Always),
+            make_edge("e4", "m2", "join1", GraphEdgeCondition::Always),
+            make_edge("e5", "join1", "downstream", GraphEdgeCondition::Pass),
         ];
         let ensembles = vec![make_ensemble_details(
             "ens1",
@@ -1337,11 +1362,11 @@ mod tests {
             .any(|n| n.name.contains("Proposers")));
         assert_eq!(first_export.ensembles[0].members.len(), 2);
 
-        let plan = build_import_plan(&first_export, "loop-2").unwrap();
+        let plan = build_import_plan(&first_export, "graph-2").unwrap();
         assert_eq!(plan.ensembles.len(), 1);
         assert_eq!(plan.ensembles[0].member_nodes.len(), 2);
 
-        // Re-export the imported plan under a Loop with the same name as
+        // Re-export the imported plan under a Graph with the same name as
         // the original (import always renames on collision, but here we
         // simulate "no collision" so the round trip is name-for-name) and
         // assert the document is identical except for the name change we
@@ -1356,8 +1381,8 @@ mod tests {
                 members: ens.members.clone(),
             });
         }
-        let mut lp2 = make_loop("ensemble-loop");
-        lp2.id = "loop-2".to_string();
+        let mut lp2 = make_graph("ensemble-graph");
+        lp2.id = "graph-2".to_string();
         let second_export = build_export_document(
             &lp2,
             &imported_all_nodes,
@@ -1381,9 +1406,9 @@ mod tests {
         let (lp, nodes, edges) = simple_graph();
         let first_export = build_export_document(&lp, &nodes, &edges, &[]).unwrap();
 
-        let plan = build_import_plan(&first_export, "loop-2").unwrap();
-        let mut lp2 = make_loop("renamed-on-import");
-        lp2.id = "loop-2".to_string();
+        let plan = build_import_plan(&first_export, "graph-2").unwrap();
+        let mut lp2 = make_graph("renamed-on-import");
+        lp2.id = "graph-2".to_string();
         let second_export = build_export_document(&lp2, &plan.nodes, &plan.edges, &[]).unwrap();
 
         assert_ne!(first_export.name, second_export.name);
@@ -1394,54 +1419,54 @@ mod tests {
         assert_eq!(first_export.ensembles, second_export.ensembles);
     }
 
-    /// Export → import → export of a loop holding one multi-member ensemble
+    /// Export → import → export of a graph holding one multi-member ensemble
     /// with distinct platform/model per member plus a solo agent node:
     /// every harness binding must survive identically.
     #[test]
     fn v2_export_import_export_preserves_bindings() {
-        let lp = make_loop("bindings-loop");
+        let lp = make_graph("bindings-graph");
         let solo = make_node(
             "solo",
             "solo",
-            LoopNodeKind::Agent,
+            GraphNodeKind::Agent,
             serde_json::json!({"platform": "opencode", "model": "opencode/muse-spark", "prompt_template": "go solo", "timeout_minutes": 15}),
             1,
         );
         let downstream = make_node(
             "downstream",
             "downstream",
-            LoopNodeKind::Check,
+            GraphNodeKind::Check,
             serde_json::json!({"command": "true"}),
             10,
         );
         let member1 = make_node(
             "m1",
             "Crew [1]",
-            LoopNodeKind::Agent,
+            GraphNodeKind::Agent,
             serde_json::json!({"platform": "copilot", "prompt_template": "draft it", "timeout_minutes": 30}),
             2,
         );
         let member2 = make_node(
             "m2",
             "Crew [2]",
-            LoopNodeKind::Agent,
+            GraphNodeKind::Agent,
             serde_json::json!({"platform": "opencode", "model": "opencode-go/qwen3.7-plus", "prompt_template": "draft it", "timeout_minutes": 30}),
             3,
         );
         let join = make_node(
             "join1",
             "Crew (quorum)",
-            LoopNodeKind::Join,
+            GraphNodeKind::Join,
             serde_json::json!({"ensemble_id": "ens1"}),
             4,
         );
         let nodes = vec![solo, downstream, member1, member2, join];
         let edges = vec![
-            make_edge("e1", "solo", "m1", LoopEdgeCondition::Always),
-            make_edge("e2", "solo", "m2", LoopEdgeCondition::Always),
-            make_edge("e3", "m1", "join1", LoopEdgeCondition::Always),
-            make_edge("e4", "m2", "join1", LoopEdgeCondition::Always),
-            make_edge("e5", "join1", "downstream", LoopEdgeCondition::Pass),
+            make_edge("e1", "solo", "m1", GraphEdgeCondition::Always),
+            make_edge("e2", "solo", "m2", GraphEdgeCondition::Always),
+            make_edge("e3", "m1", "join1", GraphEdgeCondition::Always),
+            make_edge("e4", "m2", "join1", GraphEdgeCondition::Always),
+            make_edge("e5", "join1", "downstream", GraphEdgeCondition::Pass),
         ];
         let mut details =
             make_ensemble_details("ens1", "join1", "solo", "downstream", &["m1", "m2"]);
@@ -1453,7 +1478,7 @@ mod tests {
         details.members[1].model = Some("opencode-go/qwen3.7-plus".to_string());
 
         let first = build_export_document(&lp, &nodes, &edges, &[details]).unwrap();
-        let plan = build_import_plan(&first, "loop-2").unwrap();
+        let plan = build_import_plan(&first, "graph-2").unwrap();
         assert!(agent_nodes_missing_platform(&plan).is_empty());
 
         let mut imported_all_nodes = plan.nodes.clone();
@@ -1466,8 +1491,8 @@ mod tests {
                 members: ens.members.clone(),
             });
         }
-        let mut lp2 = make_loop("bindings-loop");
-        lp2.id = "loop-2".to_string();
+        let mut lp2 = make_graph("bindings-graph");
+        lp2.id = "graph-2".to_string();
         let second =
             build_export_document(&lp2, &imported_all_nodes, &plan.edges, &imported_details)
                 .unwrap();
@@ -1486,17 +1511,17 @@ mod tests {
 
     /// Import must not fail when the document names a platform the importing
     /// machine has not configured: the node is created as written, and
-    /// reporting an unusable pair belongs to `loop_preflight`.
+    /// reporting an unusable pair belongs to `graph_preflight`.
     #[test]
     fn import_v2_with_unconfigured_platform_succeeds() {
-        let doc = LoopExportDocument {
+        let doc = GraphExportDocument {
             format_version: 2,
             name: "x".to_string(),
             description: None,
             nodes: vec![
-                LoopExportNode {
+                GraphExportNode {
                     name: "odd".to_string(),
-                    kind: LoopNodeKind::Agent,
+                    kind: GraphNodeKind::Agent,
                     position: 1,
                     config: serde_json::json!({
                         "platform": "never-configured-xyz",
@@ -1504,22 +1529,22 @@ mod tests {
                         "prompt_template": "go",
                     }),
                 },
-                LoopExportNode {
+                GraphExportNode {
                     name: "next".to_string(),
-                    kind: LoopNodeKind::Check,
+                    kind: GraphNodeKind::Check,
                     position: 2,
                     config: serde_json::json!({"command": "true"}),
                 },
             ],
-            edges: vec![LoopExportEdge {
+            edges: vec![GraphExportEdge {
                 from_node: "odd".to_string(),
                 to_node: "next".to_string(),
-                condition: LoopEdgeCondition::Always,
+                condition: GraphEdgeCondition::Always,
             }],
             ensembles: vec![],
             infra_node: None,
         };
-        let plan = build_import_plan(&doc, "new-loop")
+        let plan = build_import_plan(&doc, "new-graph")
             .expect("unconfigured platform must import, not error");
         let odd = plan.nodes.iter().find(|n| n.name == "odd").unwrap();
         assert_eq!(odd.config["platform"], "never-configured-xyz");
@@ -1533,7 +1558,7 @@ mod tests {
     fn unknown_fields_are_ignored() {
         let value = serde_json::json!({
             "format_version": 2,
-            "name": "future-loop",
+            "name": "future-graph",
             "future_field": 123,
             "nodes": [
                 {"name": "a", "kind": "check", "position": 1, "config": {"command": "true"}, "future_node_field": "x"},
@@ -1560,14 +1585,14 @@ mod tests {
         });
         let document = parse_export_document_value(&value)
             .expect("unknown future fields must not break parsing");
-        let plan = build_import_plan(&document, "new-loop")
+        let plan = build_import_plan(&document, "new-graph")
             .expect("unknown future fields must not break import");
         assert_eq!(plan.nodes.len(), 2);
         assert_eq!(plan.ensembles.len(), 1);
         assert_eq!(plan.ensembles[0].members[1].model.as_deref(), Some("opus"));
     }
 
-    /// Pins `docs/loops.md`'s worked example to the actual format: if this
+    /// Pins `docs/graphs.md`'s worked example to the actual format: if this
     /// test ever fails to parse/import, the doc's example has drifted from
     /// what the code accepts and needs updating alongside it.
     #[test]
@@ -1616,7 +1641,8 @@ mod tests {
         }"#;
 
         let document = parse_export_document_str(raw).expect("doc example must parse");
-        let plan = build_import_plan(&document, "loop-from-docs").expect("doc example must import");
+        let plan =
+            build_import_plan(&document, "graph-from-docs").expect("doc example must import");
         assert_eq!(plan.nodes.len(), 2);
         assert_eq!(plan.ensembles.len(), 1);
         assert_eq!(plan.ensembles[0].member_nodes.len(), 2);
@@ -1630,37 +1656,37 @@ mod tests {
 
     #[test]
     fn import_plan_rejects_ensemble_with_too_few_members() {
-        let doc = LoopExportDocument {
+        let doc = GraphExportDocument {
             format_version: 1,
             name: "x".to_string(),
             description: None,
             nodes: vec![
-                LoopExportNode {
+                GraphExportNode {
                     name: "kickoff".to_string(),
-                    kind: LoopNodeKind::Check,
+                    kind: GraphNodeKind::Check,
                     position: 1,
                     config: serde_json::json!({"command": "true"}),
                 },
-                LoopExportNode {
+                GraphExportNode {
                     name: "next".to_string(),
-                    kind: LoopNodeKind::Check,
+                    kind: GraphNodeKind::Check,
                     position: 2,
                     config: serde_json::json!({"command": "true"}),
                 },
             ],
             edges: vec![],
-            ensembles: vec![LoopExportEnsemble {
+            ensembles: vec![GraphExportEnsemble {
                 name: "solo".to_string(),
                 kind: None,
                 prompt_template: "go".to_string(),
                 entry_from_node: "kickoff".to_string(),
-                entry_condition: LoopEdgeCondition::Always,
+                entry_condition: GraphEdgeCondition::Always,
                 on_pass_to: "next".to_string(),
                 on_fail_to: None,
                 min_pass: 1,
                 timeout_minutes: 30,
                 straggler_timeout_minutes: None,
-                members: vec![LoopExportEnsembleMember {
+                members: vec![GraphExportEnsembleMember {
                     platform: Some("claude".to_string()),
                     model: None,
                     prompt_override: None,
@@ -1668,53 +1694,53 @@ mod tests {
             }],
             infra_node: None,
         };
-        let err = build_import_plan(&doc, "new-loop").unwrap_err();
+        let err = build_import_plan(&doc, "new-graph").unwrap_err();
         assert!(err.contains("2-8 members"));
     }
 
     #[test]
     fn import_plan_rejects_unreachable_node() {
-        // A -> B, C self-loop (single entry A, C unreachable)
-        let doc = LoopExportDocument {
+        // A -> B, C self-graph (single entry A, C unreachable)
+        let doc = GraphExportDocument {
             format_version: 1,
             name: "x".to_string(),
             description: None,
             nodes: vec![
-                LoopExportNode {
+                GraphExportNode {
                     name: "A".to_string(),
-                    kind: LoopNodeKind::Agent,
+                    kind: GraphNodeKind::Agent,
                     position: 1,
                     config: serde_json::json!({"platform": "claude", "prompt_template": "a"}),
                 },
-                LoopExportNode {
+                GraphExportNode {
                     name: "B".to_string(),
-                    kind: LoopNodeKind::Agent,
+                    kind: GraphNodeKind::Agent,
                     position: 2,
                     config: serde_json::json!({"platform": "claude", "prompt_template": "b"}),
                 },
-                LoopExportNode {
+                GraphExportNode {
                     name: "C".to_string(),
-                    kind: LoopNodeKind::Agent,
+                    kind: GraphNodeKind::Agent,
                     position: 3,
                     config: serde_json::json!({"platform": "claude", "prompt_template": "c"}),
                 },
             ],
             edges: vec![
-                LoopExportEdge {
+                GraphExportEdge {
                     from_node: "A".to_string(),
                     to_node: "B".to_string(),
-                    condition: LoopEdgeCondition::Always,
+                    condition: GraphEdgeCondition::Always,
                 },
-                LoopExportEdge {
+                GraphExportEdge {
                     from_node: "C".to_string(),
                     to_node: "C".to_string(),
-                    condition: LoopEdgeCondition::Always,
+                    condition: GraphEdgeCondition::Always,
                 },
             ],
             ensembles: vec![],
             infra_node: None,
         };
-        let err = build_import_plan(&doc, "new-loop").unwrap_err();
+        let err = build_import_plan(&doc, "new-graph").unwrap_err();
         assert!(err.contains('C'), "err should name C: {err}");
         assert!(
             err.to_lowercase().contains("unreachable"),
@@ -1725,39 +1751,39 @@ mod tests {
     #[test]
     fn import_plan_rejects_multiple_entry_points() {
         // A and B both with no incoming => multiple entries
-        let doc = LoopExportDocument {
+        let doc = GraphExportDocument {
             format_version: 1,
             name: "x".to_string(),
             description: None,
             nodes: vec![
-                LoopExportNode {
+                GraphExportNode {
                     name: "A".to_string(),
-                    kind: LoopNodeKind::Agent,
+                    kind: GraphNodeKind::Agent,
                     position: 1,
                     config: serde_json::json!({"platform": "claude", "prompt_template": "a"}),
                 },
-                LoopExportNode {
+                GraphExportNode {
                     name: "B".to_string(),
-                    kind: LoopNodeKind::Agent,
+                    kind: GraphNodeKind::Agent,
                     position: 2,
                     config: serde_json::json!({"platform": "claude", "prompt_template": "b"}),
                 },
-                LoopExportNode {
+                GraphExportNode {
                     name: "C".to_string(),
-                    kind: LoopNodeKind::Agent,
+                    kind: GraphNodeKind::Agent,
                     position: 3,
                     config: serde_json::json!({"platform": "claude", "prompt_template": "c"}),
                 },
             ],
-            edges: vec![LoopExportEdge {
+            edges: vec![GraphExportEdge {
                 from_node: "A".to_string(),
                 to_node: "C".to_string(),
-                condition: LoopEdgeCondition::Always,
+                condition: GraphEdgeCondition::Always,
             }],
             ensembles: vec![],
             infra_node: None,
         };
-        let err = build_import_plan(&doc, "new-loop").unwrap_err();
+        let err = build_import_plan(&doc, "new-graph").unwrap_err();
         assert!(err.to_lowercase().contains("entry"), "err: {err}");
         assert!(err.contains('A'), "err should name A: {err}");
         assert!(err.contains('B'), "err should name B: {err}");
@@ -1766,35 +1792,35 @@ mod tests {
     #[test]
     fn import_plan_accepts_agent_missing_fail_edge_as_terminal() {
         // Resilience node with only pass edge -> fail is a terminal exit,
-        // not an error (same verdict as loop_preflight).
-        let doc = LoopExportDocument {
+        // not an error (same verdict as graph_preflight).
+        let doc = GraphExportDocument {
             format_version: 1,
             name: "x".to_string(),
             description: None,
             nodes: vec![
-                LoopExportNode {
+                GraphExportNode {
                     name: "resilience".to_string(),
-                    kind: LoopNodeKind::Agent,
+                    kind: GraphNodeKind::Agent,
                     position: 1,
                     config: serde_json::json!({"platform": "claude", "prompt_template": "go"}),
                 },
-                LoopExportNode {
+                GraphExportNode {
                     name: "next".to_string(),
-                    kind: LoopNodeKind::Agent,
+                    kind: GraphNodeKind::Agent,
                     position: 2,
                     config: serde_json::json!({"platform": "claude", "prompt_template": "next"}),
                 },
             ],
-            edges: vec![LoopExportEdge {
+            edges: vec![GraphExportEdge {
                 from_node: "resilience".to_string(),
                 to_node: "next".to_string(),
-                condition: LoopEdgeCondition::Pass,
+                condition: GraphEdgeCondition::Pass,
             }],
             ensembles: vec![],
             infra_node: None,
         };
         let plan =
-            build_import_plan(&doc, "new-loop").expect("missing fail is a terminal, not an error");
+            build_import_plan(&doc, "new-graph").expect("missing fail is a terminal, not an error");
         assert_eq!(plan.nodes.len(), 2);
         assert_eq!(plan.terminals.len(), 3);
         assert!(plan
@@ -1806,13 +1832,13 @@ mod tests {
 
     #[test]
     fn build_import_plan_rejects_unknown_node_reference() {
-        let doc = LoopExportDocument {
-            format_version: LOOP_EXPORT_FORMAT_VERSION,
+        let doc = GraphExportDocument {
+            format_version: GRAPH_EXPORT_FORMAT_VERSION,
             name: "test".to_string(),
             description: None,
-            nodes: vec![LoopExportNode {
+            nodes: vec![GraphExportNode {
                 name: "Worker".to_string(),
-                kind: LoopNodeKind::Agent,
+                kind: GraphNodeKind::Agent,
                 config: serde_json::json!({
                     "platform": "test",
                     "prompt_template": "See {{output:Nonexistent}}"
@@ -1823,7 +1849,7 @@ mod tests {
             ensembles: vec![],
             infra_node: None,
         };
-        let err = build_import_plan(&doc, "new-loop").unwrap_err();
+        let err = build_import_plan(&doc, "new-graph").unwrap_err();
         assert!(
             err.contains("references unknown node 'Nonexistent'"),
             "err: {err}"
@@ -1832,59 +1858,59 @@ mod tests {
 
     #[test]
     fn build_import_plan_accepts_valid_node_reference() {
-        let doc = LoopExportDocument {
-            format_version: LOOP_EXPORT_FORMAT_VERSION,
+        let doc = GraphExportDocument {
+            format_version: GRAPH_EXPORT_FORMAT_VERSION,
             name: "test".to_string(),
             description: None,
             nodes: vec![
-                LoopExportNode {
+                GraphExportNode {
                     name: "Architect".to_string(),
-                    kind: LoopNodeKind::Agent,
+                    kind: GraphNodeKind::Agent,
                     config: serde_json::json!({"platform": "test"}),
                     position: 1,
                 },
-                LoopExportNode {
+                GraphExportNode {
                     name: "Implementer".to_string(),
-                    kind: LoopNodeKind::Agent,
+                    kind: GraphNodeKind::Agent,
                     config: serde_json::json!({
                         "platform": "test",
                         "prompt_template": "Follow {{output:Architect}}"
                     }),
                     position: 2,
                 },
-                LoopExportNode {
+                GraphExportNode {
                     name: "Resilience".to_string(),
-                    kind: LoopNodeKind::Agent,
+                    kind: GraphNodeKind::Agent,
                     config: serde_json::json!({"platform": "test"}),
                     position: 3,
                 },
             ],
             edges: vec![
-                LoopExportEdge {
+                GraphExportEdge {
                     from_node: "Architect".to_string(),
                     to_node: "Implementer".to_string(),
-                    condition: LoopEdgeCondition::Pass,
+                    condition: GraphEdgeCondition::Pass,
                 },
-                LoopExportEdge {
+                GraphExportEdge {
                     from_node: "Architect".to_string(),
                     to_node: "Resilience".to_string(),
-                    condition: LoopEdgeCondition::Fail,
+                    condition: GraphEdgeCondition::Fail,
                 },
-                LoopExportEdge {
+                GraphExportEdge {
                     from_node: "Implementer".to_string(),
                     to_node: "Resilience".to_string(),
-                    condition: LoopEdgeCondition::Pass,
+                    condition: GraphEdgeCondition::Pass,
                 },
-                LoopExportEdge {
+                GraphExportEdge {
                     from_node: "Implementer".to_string(),
                     to_node: "Resilience".to_string(),
-                    condition: LoopEdgeCondition::Fail,
+                    condition: GraphEdgeCondition::Fail,
                 },
             ],
             ensembles: vec![],
             infra_node: None,
         };
-        let result = build_import_plan(&doc, "new-loop");
+        let result = build_import_plan(&doc, "new-graph");
         assert!(
             result.is_ok(),
             "valid {{output:NodeName}} reference must be accepted: {:?}",

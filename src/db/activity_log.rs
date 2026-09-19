@@ -24,7 +24,7 @@ pub const MAX_ACTIVITY_ENTRIES_PER_WORKDIR: i64 = 500;
 
 /// One persisted activity event.
 ///
-/// `source` is a plain field (`loop`, `agent`, `hook`, `sync`, `user`) —
+/// `source` is a plain field (`graph`, `agent`, `hook`, `sync`, `user`) —
 /// attribution is structural, never a prefix parsed out of `message`.
 #[derive(Debug, Clone)]
 pub struct ActivityLogEntry {
@@ -344,8 +344,8 @@ mod tests {
         let workdir = "/tmp/bitacora-search";
         db.insert_activity_log_entry(
             workdir,
-            "loop",
-            Some("loop-1"),
+            "graph",
+            Some("graph-1"),
             "info",
             "deploy finished green",
             None,
@@ -386,17 +386,17 @@ mod tests {
         let entry = db
             .insert_activity_log_entry(
                 workdir,
-                "loop",
-                Some("loop-42"),
+                "graph",
+                Some("graph-42"),
                 "status",
-                "loop finished",
+                "graph finished",
                 None,
             )
             .unwrap();
-        assert_eq!(entry.source, "loop");
-        assert_eq!(entry.source_id.as_deref(), Some("loop-42"));
+        assert_eq!(entry.source, "graph");
+        assert_eq!(entry.source_id.as_deref(), Some("graph-42"));
         let entries = db.list_activity_log_entries(workdir, 10).unwrap();
-        assert_eq!(entries[0].source, "loop");
-        assert_eq!(entries[0].source_id.as_deref(), Some("loop-42"));
+        assert_eq!(entries[0].source, "graph");
+        assert_eq!(entries[0].source_id.as_deref(), Some("graph-42"));
     }
 }

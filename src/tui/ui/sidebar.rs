@@ -11,16 +11,16 @@ use ratatui::Frame;
 use super::theme::Theme;
 use super::{borders_for, last_two_segments, truncate_str, BG_HOVER, INTERACTIVE_COLOR};
 use super::{STATUS_DISABLED, STATUS_FAIL, STATUS_OK, STATUS_RUNNING};
-use crate::domain::loops::{Loop, LoopStatus};
+use crate::domain::graphs::{Graph, GraphStatus};
 use crate::tui::agent::AgentStatus;
 use crate::tui::app::types::{
-    AgentEntry, AgentSectionFocus, App, AutomationKind, Focus, LoopSidebarMeta, SidebarLayer,
+    AgentEntry, AgentSectionFocus, App, AutomationKind, Focus, GraphSidebarMeta, SidebarLayer,
 };
 use ratatui::style::Color;
 
 pub(super) fn draw_sidebar(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     app.sidebar_click_map.clear();
-    app.automation_loop_click_map.clear();
+    app.automation_graph_click_map.clear();
     app.project_click_map.clear();
     app.sidebar_tab_click_map.clear();
     app.sidebar_visible_capacity = 0;
@@ -507,7 +507,7 @@ fn fair_section_heights(
     alloc
 }
 
-/// Rows needed for a card-style sub-list (agent cards, loop cards): 0 when
+/// Rows needed for a card-style sub-list (agent cards, graph cards): 0 when
 /// empty, else `count*4+2` (3-row cards + 1-row gap + 2-row border).
 fn card_list_demand(count: usize) -> u16 {
     if count == 0 {
@@ -587,26 +587,26 @@ pub(crate) fn live_section_floor_index(
 }
 
 /// CT14: like [`live_section_floor_index`], the Automation floor tracks the
-/// entry holding the cursor — a valid loop selection means the Loops section,
+/// entry holding the cursor — a valid graph selection means the Graphs section,
 /// a background-agent `selected` means Agents — falling back to the stored
 /// `automation_kind` only when neither resolves (both sub-lists empty).
 pub(crate) fn automation_section_floor_index(
     app: &App,
     background_indices: &[usize],
 ) -> Option<usize> {
-    let loop_active = app
-        .selected_loop_id
+    let graph_active = app
+        .selected_graph_id
         .as_deref()
-        .is_some_and(|id| app.sidebar_loops().iter().any(|lp| lp.id == id));
+        .is_some_and(|id| app.sidebar_graphs().iter().any(|lp| lp.id == id));
     let agent_active = background_indices.contains(&app.selected);
-    if loop_active {
+    if graph_active {
         Some(1)
     } else if agent_active {
         Some(0)
     } else {
         match app.automation_kind {
             AutomationKind::Agent => Some(0),
-            AutomationKind::Loop => Some(1),
+            AutomationKind::Graph => Some(1),
         }
     }
 }
@@ -670,10 +670,10 @@ fn draw_automation_body(
     background_indices: &[usize],
     theme: &Theme,
 ) -> Rect {
-    let loop_count = app.sidebar_loops().len();
+    let graph_count = app.sidebar_graphs().len();
     let demands = [
         card_list_demand(background_indices.len()),
-        card_list_demand(loop_count),
+        card_list_demand(graph_count),
     ];
     // CT14: like `draw_live_body` above, the floor tracks the entry holding
     // the cursor — see `automation_section_floor_index`.
@@ -700,21 +700,21 @@ fn draw_automation_body(
         // The archived count is always shown here — even while browsing the
         // main list — so the archive is never an invisible state; see the
         // F4-archive spec's "always-visible count" requirement.
-        let title = if app.loop_view_archived {
-            format!(" archived loops ({}) ", app.archived_loop_count)
-        } else if app.archived_loop_count > 0 {
-            format!(" loops · {} archived ", app.archived_loop_count)
+        let title = if app.graph_view_archived {
+            format!(" archived graphs ({}) ", app.archived_graph_count)
+        } else if app.archived_graph_count > 0 {
+            format!(" graphs · {} archived ", app.archived_graph_count)
         } else {
-            " loops ".to_string()
+            " graphs ".to_string()
         };
         render_titled_panel(
             frame,
             sub,
             &title,
             Style::default().fg(theme.dim_text),
-            automation_border_style(app, AutomationKind::Loop, theme),
+            automation_border_style(app, AutomationKind::Graph, theme),
             theme,
-            |frame, inner| draw_automation_loops_list(frame, inner, app, theme),
+            |frame, inner| draw_automation_graphs_list(frame, inner, app, theme),
         );
     }
 
@@ -896,8 +896,8 @@ fn draw_projects_list(frame: &mut Frame, area: Rect, app: &mut App, theme: &Them
     let row_h = 4u16;
 
     // Collected up front (rather than iterating `app.projects` directly) so
-    // the loop body can also push into `app.project_click_map` — mirrors
-    // `draw_automation_loops_list`'s `loop_ids_and_meta` pattern, since both
+    // the graph body can also push into `app.project_click_map` — mirrors
+    // `draw_automation_graphs_list`'s `graph_ids_and_meta` pattern, since both
     // borrow `app` mutably for the click map alongside the data being drawn.
     let visible: Vec<(usize, String, String, String)> = app
         .projects
@@ -919,7 +919,7 @@ fn draw_projects_list(frame: &mut Frame, area: Rect, app: &mut App, theme: &Them
         if y + 3 > area.y + area.height {
             break;
         }
-        draw_project_loop_card(
+        draw_project_graph_card(
             frame,
             Rect::new(area.x, y, area.width, 3),
             *idx == app.selected_project,
@@ -941,7 +941,7 @@ fn knowledge_border_style_is_focused(app: &App) -> bool {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn draw_project_loop_card(
+fn draw_project_graph_card(
     frame: &mut Frame,
     area: Rect,
     selected: bool,
@@ -984,33 +984,33 @@ fn draw_project_loop_card(
     );
 }
 
-// ── Automation layer: loops sub-list ────────────────────────────────
+// ── Automation layer: graphs sub-list ────────────────────────────────
 
-/// Status icon shown on a loop's card. Every one of the five statuses gets
-/// its own icon/color pair so a listed loop is identifiable at a glance
+/// Status icon shown on a graph's card. Every one of the five statuses gets
+/// its own icon/color pair so a listed graph is identifiable at a glance
 /// without hiding any of them (running/paused/draft/failed/completed are
 /// listed side by side now that the sidebar no longer filters by status);
 /// `blocked` is a `Paused` sub-state (its latest run recorded a
-/// `loop_report_blocker` description) that borrows `Failed`'s color to flag
+/// `graph_report_blocker` description) that borrows `Failed`'s color to flag
 /// it needs the same attention, distinguished from `Failed` by icon.
-fn loop_status_icon(lp: &Loop, meta: &LoopSidebarMeta, theme: &Theme) -> (&'static str, Color) {
+fn graph_status_icon(lp: &Graph, meta: &GraphSidebarMeta, theme: &Theme) -> (&'static str, Color) {
     match lp.status {
-        LoopStatus::Running => ("▶", STATUS_RUNNING),
-        LoopStatus::Pausing => ("⏸", theme.warning),
-        LoopStatus::Paused if meta.blocked => ("⛔", STATUS_FAIL),
-        LoopStatus::Paused => ("⏸", theme.warning),
-        LoopStatus::Draft => ("○", theme.dim_text),
-        LoopStatus::Completed => ("✓", STATUS_OK),
-        LoopStatus::Failed => ("✗", STATUS_FAIL),
+        GraphStatus::Running => ("▶", STATUS_RUNNING),
+        GraphStatus::Pausing => ("⏸", theme.warning),
+        GraphStatus::Paused if meta.blocked => ("⛔", STATUS_FAIL),
+        GraphStatus::Paused => ("⏸", theme.warning),
+        GraphStatus::Draft => ("○", theme.dim_text),
+        GraphStatus::Completed => ("✓", STATUS_OK),
+        GraphStatus::Failed => ("✗", STATUS_FAIL),
     }
 }
 
-fn draw_active_loop_card(
+fn draw_active_graph_card(
     frame: &mut Frame,
     area: Rect,
     selected: bool,
-    lp: &Loop,
-    meta: &LoopSidebarMeta,
+    lp: &Graph,
+    meta: &GraphSidebarMeta,
     panel_focused: bool,
     theme: &Theme,
 ) {
@@ -1021,7 +1021,7 @@ fn draw_active_loop_card(
     };
     let title_style = project_title_style(selected, panel_focused, theme);
     let meta_style = project_meta_style(selected, theme);
-    let (icon, icon_color) = loop_status_icon(lp, meta, theme);
+    let (icon, icon_color) = graph_status_icon(lp, meta, theme);
 
     frame.render_widget(
         Paragraph::new(Line::from(vec![
@@ -1036,7 +1036,7 @@ fn draw_active_loop_card(
         Rect::new(area.x, area.y, area.width, 1),
     );
 
-    let last_run_style = if lp.status == LoopStatus::Running {
+    let last_run_style = if lp.status == GraphStatus::Running {
         Style::default().fg(STATUS_RUNNING)
     } else {
         meta_style
@@ -1063,12 +1063,12 @@ fn draw_active_loop_card(
     );
 }
 
-fn draw_automation_loops_list(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
-    let loops = app.sidebar_loops();
-    if loops.is_empty() {
+fn draw_automation_graphs_list(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
+    let graphs = app.sidebar_graphs();
+    if graphs.is_empty() {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                "No loops",
+                "No graphs",
                 Style::default().fg(theme.muted_text),
             ))),
             area,
@@ -1077,29 +1077,29 @@ fn draw_automation_loops_list(frame: &mut Frame, area: Rect, app: &mut App, them
     }
 
     let selected_index = app
-        .selected_loop_id
+        .selected_graph_id
         .as_deref()
-        .and_then(|id| loops.iter().position(|lp| lp.id == id));
+        .and_then(|id| graphs.iter().position(|lp| lp.id == id));
     let scroll = scroll_state(
-        loops.len(),
+        graphs.len(),
         selected_index,
         // CT14 (FR5): visible-row count recomputed from the current height
         // every frame — never remembered from when the list was last drawn.
         ((area.height + 1) / 4).max(1) as usize,
     );
-    let panel_focused =
-        layer_focused(app, SidebarLayer::Automation) && app.automation_kind == AutomationKind::Loop;
+    let panel_focused = layer_focused(app, SidebarLayer::Automation)
+        && app.automation_kind == AutomationKind::Graph;
     let mut y = area.y;
     let row_h = 4u16;
 
-    let loop_ids_and_meta: Vec<(String, Loop, LoopSidebarMeta)> = loops
+    let graph_ids_and_meta: Vec<(String, Graph, GraphSidebarMeta)> = graphs
         .iter()
         .copied()
         .skip(scroll.start)
         .take(scroll.max_visible)
         .map(|lp| {
             let meta = app
-                .loop_sidebar_meta
+                .graph_sidebar_meta
                 .get(&lp.id)
                 .cloned()
                 .unwrap_or_default();
@@ -1107,14 +1107,14 @@ fn draw_automation_loops_list(frame: &mut Frame, area: Rect, app: &mut App, them
         })
         .collect();
 
-    for (id, lp, meta) in &loop_ids_and_meta {
+    for (id, lp, meta) in &graph_ids_and_meta {
         if y + 3 > area.y + area.height {
             break;
         }
         let card_area = Rect::new(area.x, y, area.width, 3);
-        let selected = app.selected_loop_id.as_deref() == Some(id.as_str());
-        draw_active_loop_card(frame, card_area, selected, lp, meta, panel_focused, theme);
-        app.automation_loop_click_map.push((id.clone(), y, y + 3));
+        let selected = app.selected_graph_id.as_deref() == Some(id.as_str());
+        draw_active_graph_card(frame, card_area, selected, lp, meta, panel_focused, theme);
+        app.automation_graph_click_map.push((id.clone(), y, y + 3));
         y += row_h;
     }
 
@@ -1947,7 +1947,7 @@ mod tests {
     }
 
     /// Builds an App backed by a fresh temp DB with `project_count` registered
-    /// projects and one loop named "Probe Loop", then renders the sidebar into
+    /// projects and one graph named "Probe Graph", then renders the sidebar into
     /// a `width`x`height` TestBackend and returns the screen contents as a
     /// flat string for substring assertions. The `Live` tab is active by
     /// default (matching `App::new`) — use `render_sidebar_text_on_tab` to
@@ -1988,7 +1988,7 @@ mod tests {
         prepare: impl FnOnce(&mut App),
     ) -> String {
         use crate::db::Database;
-        use crate::domain::loops::{Loop, LoopStatus};
+        use crate::domain::graphs::{Graph, GraphStatus};
         use crate::domain::project::Project;
         use crate::tui::app::App;
         use ratatui::backend::TestBackend;
@@ -2011,15 +2011,15 @@ mod tests {
             })
             .unwrap();
         }
-        db.insert_loop(&Loop {
+        db.insert_graph(&Graph {
             archived: false,
             paused_by_reconciliation: false,
             infra_node_id: None,
             id: "wf-probe".to_string(),
-            name: "Probe Loop".to_string(),
+            name: "Probe Graph".to_string(),
             description: None,
             workdir: "/tmp/probe".to_string(),
-            status: LoopStatus::Running,
+            status: GraphStatus::Running,
             trigger: None,
             created_at: chrono::Utc::now(),
             started_at: None,
@@ -2036,8 +2036,8 @@ mod tests {
         let mut app = App::new(Arc::clone(&db), data_dir.path()).unwrap();
         app.sidebar_layer = active_layer;
         assert!(
-            !app.sidebar_loops().is_empty(),
-            "loop should be loaded from db"
+            !app.sidebar_graphs().is_empty(),
+            "graph should be loaded from db"
         );
         prepare(&mut app);
 
@@ -2085,7 +2085,7 @@ mod tests {
     }
 
     /// The active tab's sub-sections are each capped at their own demand, so a
-    /// tall sidebar holding one loop and no sessions leaves rows unclaimed.
+    /// tall sidebar holding one graph and no sessions leaves rows unclaimed.
     /// Those rows belong to the brain. `draw_sidebar_tabs` used to hand back a
     /// hardcoded zero-height rect instead, which made the brain unreachable no
     /// matter how `split_brain_or_graph` later divided it.
@@ -2136,22 +2136,22 @@ mod tests {
     }
 
     #[test]
-    fn automation_layer_shows_running_loop() {
+    fn automation_layer_shows_running_graph() {
         let text =
             render_sidebar_text_on_tab(1, 45, 40, &Theme::classic(), SidebarLayer::Automation);
-        assert!(text.contains("Probe Loop"), "expected loop name visible");
+        assert!(text.contains("Probe Graph"), "expected graph name visible");
     }
 
     // ── Last-run sidebar meta (replaces the old done/total spec count) ──
 
-    /// Builds an App around a caller-supplied `Loop` plus whatever the `seed`
+    /// Builds an App around a caller-supplied `Graph` plus whatever the `seed`
     /// closure inserts into the same DB, renders the Automation tab into a
     /// TestBackend, and returns the screen text. Unlike
     /// `render_sidebar_text_on_tab` (a fixed `Running`, spec-less "Probe
-    /// Loop"), this lets each last-run test control the loop's status and
-    /// `loop_runs` history directly.
+    /// Graph"), this lets each last-run test control the graph's status and
+    /// `graph_runs` history directly.
     fn render_automation_text_for(
-        lp: &crate::domain::loops::Loop,
+        lp: &crate::domain::graphs::Graph,
         seed: impl FnOnce(&crate::db::Database),
     ) -> String {
         use crate::db::Database;
@@ -2163,7 +2163,7 @@ mod tests {
         let path = tmp.path().to_path_buf();
         std::mem::forget(tmp);
         let db = Arc::new(Database::new(&path).unwrap());
-        db.insert_loop(lp).unwrap();
+        db.insert_graph(lp).unwrap();
         seed(&db);
 
         let data_dir = tempfile::tempdir().unwrap();
@@ -2182,13 +2182,13 @@ mod tests {
         buffer_to_text(terminal.backend().buffer())
     }
 
-    fn bare_loop(id: &str, status: LoopStatus) -> Loop {
-        Loop {
+    fn bare_graph(id: &str, status: GraphStatus) -> Graph {
+        Graph {
             archived: false,
             paused_by_reconciliation: false,
             infra_node_id: None,
             id: id.to_string(),
-            name: format!("Loop {id}"),
+            name: format!("Graph {id}"),
             description: None,
             workdir: "/tmp/probe".to_string(),
             status,
@@ -2204,31 +2204,31 @@ mod tests {
         }
     }
 
-    /// Records one node run against `loop_id` via a queue-driven spec — the
-    /// spec's own `loop_id` is `None` (never bound to this loop, so
-    /// `list_loop_specs(loop_id)` stays empty, exactly like a queue-driven
-    /// run), but `loop_runs.loop_id` is set, which is what the sidebar's
+    /// Records one node run against `graph_id` via a queue-driven spec — the
+    /// spec's own `graph_id` is `None` (never bound to this graph, so
+    /// `list_graph_specs(graph_id)` stays empty, exactly like a queue-driven
+    /// run), but `graph_runs.graph_id` is set, which is what the sidebar's
     /// last-run query reads.
     fn seed_queue_driven_run(
         db: &crate::db::Database,
-        loop_id: &str,
+        graph_id: &str,
         started_at: chrono::DateTime<chrono::Utc>,
         output: Option<serde_json::Value>,
     ) {
-        use crate::domain::loops::{
-            LoopNode, LoopNodeKind, LoopNodeRun, LoopRunStatus, LoopSpec, LoopSpecStatus,
+        use crate::domain::graphs::{
+            GraphNode, GraphNodeKind, GraphNodeRun, GraphRunStatus, GraphSpec, GraphSpecStatus,
         };
 
-        let spec_id = format!("{loop_id}-spec");
-        let node_id = format!("{loop_id}-node");
-        db.insert_loop_spec(&LoopSpec {
+        let spec_id = format!("{graph_id}-spec");
+        let node_id = format!("{graph_id}-node");
+        db.insert_graph_spec(&GraphSpec {
             id: spec_id.clone(),
-            loop_id: None,
+            graph_id: None,
             name: "queued spec".to_string(),
             description: None,
             position: 0,
             parallelizable: false,
-            status: LoopSpecStatus::Completed,
+            status: GraphSpecStatus::Completed,
             started_at: Some(started_at),
             completed_at: Some(started_at),
             spec_start_head: None,
@@ -2239,23 +2239,23 @@ mod tests {
             completed_via_at: None,
         })
         .unwrap();
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: node_id.clone(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "node".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({}),
             position: 0,
             created_at: started_at,
         })
         .unwrap();
-        db.insert_loop_run(&LoopNodeRun {
-            id: format!("{loop_id}-run"),
-            loop_id: loop_id.to_string(),
+        db.insert_graph_run(&GraphNodeRun {
+            id: format!("{graph_id}-run"),
+            graph_id: graph_id.to_string(),
             spec_id,
             node_id,
-            status: LoopRunStatus::Pass,
+            status: GraphRunStatus::Pass,
             input: None,
             output,
             started_at,
@@ -2271,14 +2271,14 @@ mod tests {
     }
 
     #[test]
-    fn queue_driven_loop_shows_last_run_time_not_zero_zero() {
+    fn queue_driven_graph_shows_last_run_time_not_zero_zero() {
         let started_at = chrono::Utc::now() - chrono::Duration::minutes(2);
-        let text = render_automation_text_for(&bare_loop("q1", LoopStatus::Draft), |db| {
+        let text = render_automation_text_for(&bare_graph("q1", GraphStatus::Draft), |db| {
             seed_queue_driven_run(db, "q1", started_at, None);
         });
         assert!(
             !text.contains("0/0"),
-            "queue-driven loop must not fall back to the old done/total count: {text}"
+            "queue-driven graph must not fall back to the old done/total count: {text}"
         );
         assert!(
             text.contains("2m"),
@@ -2287,19 +2287,19 @@ mod tests {
     }
 
     #[test]
-    fn never_run_loop_shows_plainly_not_blank_or_zero() {
-        let text = render_automation_text_for(&bare_loop("never1", LoopStatus::Draft), |_db| {});
+    fn never_run_graph_shows_plainly_not_blank_or_zero() {
+        let text = render_automation_text_for(&bare_graph("never1", GraphStatus::Draft), |_db| {});
         assert!(
             !text.contains("0/0"),
-            "a never-run loop must not show a misleading zero: {text}"
+            "a never-run graph must not show a misleading zero: {text}"
         );
         assert!(
             text.contains("never"),
-            "a never-run loop must say so plainly: {text}"
+            "a never-run graph must say so plainly: {text}"
         );
     }
 
-    /// Scans row `y` for the first cell matching one of `loop_status_icon`'s
+    /// Scans row `y` for the first cell matching one of `graph_status_icon`'s
     /// glyphs, returning its `(symbol, fg color)` — used to check that every
     /// status renders a visually distinct card without depending on the
     /// inner panel's exact border offset.
@@ -2326,34 +2326,34 @@ mod tests {
         let db = Arc::new(Database::new(&path).unwrap());
 
         // Staggered `created_at`, oldest first, so recency ordering is
-        // unambiguous once sorted (none of these loops have run, so
+        // unambiguous once sorted (none of these graphs have run, so
         // `last_activity` falls back to `created_at`).
         let base = chrono::Utc::now() - chrono::Duration::hours(10);
-        let mut draft = bare_loop("s-draft", LoopStatus::Draft);
+        let mut draft = bare_graph("s-draft", GraphStatus::Draft);
         draft.created_at = base;
-        db.insert_loop(&draft).unwrap();
+        db.insert_graph(&draft).unwrap();
 
-        let mut failed = bare_loop("s-failed", LoopStatus::Failed);
+        let mut failed = bare_graph("s-failed", GraphStatus::Failed);
         failed.created_at = base + chrono::Duration::minutes(10);
         failed.autorun_at = Some(chrono::Utc::now() + chrono::Duration::minutes(20));
-        db.insert_loop(&failed).unwrap();
+        db.insert_graph(&failed).unwrap();
 
-        let mut completed = bare_loop("s-completed", LoopStatus::Completed);
+        let mut completed = bare_graph("s-completed", GraphStatus::Completed);
         completed.created_at = base + chrono::Duration::minutes(20);
-        db.insert_loop(&completed).unwrap();
+        db.insert_graph(&completed).unwrap();
 
-        let mut paused = bare_loop("s-paused", LoopStatus::Paused);
+        let mut paused = bare_graph("s-paused", GraphStatus::Paused);
         paused.created_at = base + chrono::Duration::minutes(30);
-        db.insert_loop(&paused).unwrap();
+        db.insert_graph(&paused).unwrap();
 
-        let mut running = bare_loop("s-running", LoopStatus::Running);
+        let mut running = bare_graph("s-running", GraphStatus::Running);
         running.created_at = base + chrono::Duration::minutes(40);
-        db.insert_loop(&running).unwrap();
+        db.insert_graph(&running).unwrap();
 
         let data_dir = tempfile::tempdir().unwrap();
         let mut app = App::new(Arc::clone(&db), data_dir.path()).unwrap();
         app.sidebar_layer = SidebarLayer::Automation;
-        app.automation_kind = AutomationKind::Loop;
+        app.automation_kind = AutomationKind::Graph;
 
         let theme = Theme::classic();
         let backend = TestBackend::new(50, 60);
@@ -2368,16 +2368,16 @@ mod tests {
         let text = buffer_to_text(&buffer);
 
         for name in [
-            "Loop s-draft",
-            "Loop s-failed",
-            "Loop s-completed",
-            "Loop s-paused",
-            "Loop s-running",
+            "Graph s-draft",
+            "Graph s-failed",
+            "Graph s-completed",
+            "Graph s-paused",
+            "Graph s-running",
         ] {
             assert!(text.contains(name), "expected {name} listed: {text}");
         }
 
-        let click_map = app.automation_loop_click_map.clone();
+        let click_map = app.automation_graph_click_map.clone();
         let ids: Vec<&str> = click_map.iter().map(|(id, _, _)| id.as_str()).collect();
         assert_eq!(
             ids,
@@ -2404,26 +2404,26 @@ mod tests {
 
         assert!(
             text.contains("resumes"),
-            "a pending autorun must be visible on its loop's sidebar entry: {text}"
+            "a pending autorun must be visible on its graph's sidebar entry: {text}"
         );
     }
 
     #[test]
-    fn running_loop_shows_running_not_a_relative_time() {
+    fn running_graph_shows_running_not_a_relative_time() {
         let started_at = chrono::Utc::now() - chrono::Duration::minutes(2);
-        let text = render_automation_text_for(&bare_loop("run1", LoopStatus::Running), |db| {
+        let text = render_automation_text_for(&bare_graph("run1", GraphStatus::Running), |db| {
             seed_queue_driven_run(db, "run1", started_at, None);
         });
         assert!(
             text.contains("running"),
-            "an actively-running loop must say 'running', not its stale last-run time: {text}"
+            "an actively-running graph must say 'running', not its stale last-run time: {text}"
         );
     }
 
     #[test]
-    fn blocked_indicator_still_renders_for_paused_loop_with_blocker() {
+    fn blocked_indicator_still_renders_for_paused_graph_with_blocker() {
         let started_at = chrono::Utc::now() - chrono::Duration::minutes(5);
-        let text = render_automation_text_for(&bare_loop("blocked1", LoopStatus::Paused), |db| {
+        let text = render_automation_text_for(&bare_graph("blocked1", GraphStatus::Paused), |db| {
             seed_queue_driven_run(
                 db,
                 "blocked1",
@@ -2433,7 +2433,7 @@ mod tests {
         });
         assert!(
             text.contains('⛔'),
-            "a paused loop with a reported blocker must still show the blocked icon: {text}"
+            "a paused graph with a reported blocker must still show the blocked icon: {text}"
         );
     }
 
@@ -2441,12 +2441,12 @@ mod tests {
     fn inactive_tabs_bodies_are_not_rendered() {
         // The whole point of tabs over stacked layers: exactly one body is
         // visible at a time. A project ("only-in-knowledge") and the
-        // always-present "Probe Loop" (Automation) must not leak into the
+        // always-present "Probe Graph" (Automation) must not leak into the
         // Live tab's render, and vice versa.
         let live_text =
             render_sidebar_text_on_tab(1, 45, 40, &Theme::classic(), SidebarLayer::Live);
         assert!(
-            !live_text.contains("Probe Loop"),
+            !live_text.contains("Probe Graph"),
             "Automation's body must not render while Live is active"
         );
         assert!(
@@ -2461,7 +2461,7 @@ mod tests {
             "Knowledge's body must render while Knowledge is active"
         );
         assert!(
-            !knowledge_text.contains("Probe Loop"),
+            !knowledge_text.contains("Probe Graph"),
             "Automation's body must not render while Knowledge is active"
         );
     }
@@ -3680,7 +3680,7 @@ mod tests {
         );
 
         // Automation mirror: cursor on a background agent while the stored
-        // kind claims Loops (whose list is empty here).
+        // kind claims Graphs (whose list is empty here).
         app.agents = vec![AgentEntry::Agent(crate::domain::models::Agent {
             id: "bg-1".to_string(),
             prompt: String::new(),
@@ -3701,12 +3701,12 @@ mod tests {
             trigger_count: 0,
         })];
         app.selected = 0;
-        app.selected_loop_id = None;
-        app.automation_kind = AutomationKind::Loop;
+        app.selected_graph_id = None;
+        app.automation_kind = AutomationKind::Graph;
         assert_eq!(
             super::automation_section_floor_index(&app, &[0]),
             Some(0),
-            "floor must track the agent cursor, not the stored Loop kind"
+            "floor must track the agent cursor, not the stored Graph kind"
         );
     }
 }

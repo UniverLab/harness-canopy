@@ -20,7 +20,7 @@ mod ui;
 mod whimsg;
 
 pub(crate) use ui::truncate_str_keep_tail;
-// CH3: the loop engine enqueues interactive hook messages with a canonical
+// CH3: the graph engine enqueues interactive hook messages with a canonical
 // promptbuilder-equivalent state — the builder types live here, so they are
 // re-exported for that one non-TUI consumer rather than making `app` public.
 pub(crate) use app::dialog::PersistedBuilderState;
@@ -46,7 +46,7 @@ use crate::db::Database;
 use crate::domain::db_paths::database_path;
 
 use crate::tui::app::types::App;
-use event::run_event_loop;
+use event::run_event_graph;
 
 /// Entry point for `canopy tui`.
 pub fn run_tui() -> Result<()> {
@@ -115,7 +115,7 @@ pub fn run_tui() -> Result<()> {
     let mut terminal = ratatui::Terminal::new(backend)?;
 
     // Run
-    let result = run_event_loop(&mut terminal, &mut app);
+    let result = run_event_graph(&mut terminal, &mut app);
 
     // Restore terminal — always, even on error
     disable_raw_mode()?;

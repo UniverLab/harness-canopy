@@ -1,11 +1,11 @@
 //! CLI handler for `canopy sandbox list|land|discard` — consolidation for
-//! the worktrees sandboxed loop runs leave behind (CB42).
+//! the worktrees sandboxed graph runs leave behind (CB42).
 //!
 //! - `list` is read-only: it never checks out, fetches, or modifies
 //!   anything. It also shows untracked directories under canopy's worktrees
 //!   root (no `sandbox_runs` row) as `untracked` so anonymous leftovers stay
 //!   visible — and untouched.
-//! - `land` merges one sandbox's branch onto the loop's base branch,
+//! - `land` merges one sandbox's branch onto the graph's base branch,
 //!   refusing (with the conflicting paths) rather than forcing when the
 //!   merge is not clean.
 //! - `discard` removes one sandbox's worktree (via git's own worktree
@@ -25,7 +25,7 @@ use crate::domain::sandbox::{self, SandboxInfo};
 
 #[derive(Subcommand)]
 pub(crate) enum SandboxAction {
-    /// List every sandbox worktree canopy created: its path, the loop and
+    /// List every sandbox worktree canopy created: its path, the graph and
     /// run that made it, its branch, whether the branch holds commits that
     /// exist nowhere else, and how far behind the base ref it is.
     List {
@@ -33,7 +33,7 @@ pub(crate) enum SandboxAction {
         #[arg(long)]
         json: bool,
     },
-    /// Land one sandbox's work onto the loop's base branch. Refuses rather
+    /// Land one sandbox's work onto the graph's base branch. Refuses rather
     /// than forcing when the merge is not clean, and names the conflicting
     /// paths.
     Land {
@@ -70,7 +70,7 @@ fn enrich(row: &SandboxRun) -> SandboxInfo {
     SandboxInfo {
         id: row.id.clone(),
         path: PathBuf::from(&row.worktree_path),
-        loop_id: if row.owner_type == "loop" {
+        graph_id: if row.owner_type == "graph" {
             row.owner_id.clone()
         } else {
             format!("{}:{}", row.owner_type, row.owner_id)
@@ -145,7 +145,7 @@ fn untracked_info(path: &Path) -> SandboxInfo {
     SandboxInfo {
         id,
         path: path.to_path_buf(),
-        loop_id: String::new(),
+        graph_id: String::new(),
         branch: "unknown".to_string(),
         base_branch: "unknown".to_string(),
         original_workdir: "unknown".to_string(),
@@ -173,7 +173,7 @@ fn handle_list(db: &Database, json: bool) -> Result<()> {
 
     println!(
         "{:<38} {:<52} {:<18} {:<26} {:<14} {:<8} STATUS",
-        "ID", "PATH", "LOOP/RUN", "BRANCH", "UNIQUE-COMMITS", "BEHIND"
+        "ID", "PATH", "GRAPH/RUN", "BRANCH", "UNIQUE-COMMITS", "BEHIND"
     );
     for info in &infos {
         let unique = match info.has_unique_commits {
@@ -185,10 +185,10 @@ fn handle_list(db: &Database, json: bool) -> Result<()> {
             Some(n) => n.to_string(),
             None => "unknown".to_string(),
         };
-        let owner = if info.loop_id.is_empty() {
+        let owner = if info.graph_id.is_empty() {
             "—".to_string()
         } else {
-            info.loop_id.clone()
+            info.graph_id.clone()
         };
         println!(
             "{:<38} {:<52} {:<18} {:<26} {:<14} {:<8} {}",

@@ -1,6 +1,6 @@
 //! CT3: live tail dialog for a running check node.
 //!
-//! Diagnostic-only viewer over the `loop_run_output` chunks the engine
+//! Diagnostic-only viewer over the `graph_run_output` chunks the engine
 //! streams while the node runs (see `spawn_check_output_reader`). Opening
 //! and closing the dialog never touches the run row — closing cannot affect
 //! execution by construction, since every dialog read is a `SELECT`.
@@ -18,7 +18,7 @@
 
 use chrono::{DateTime, Utc};
 
-use crate::domain::loops::LoopRunStatus;
+use crate::domain::graphs::GraphRunStatus;
 use crate::tui::app::types::App;
 
 /// Lines retained per stream in the dialog — bounds TUI memory when
@@ -36,7 +36,7 @@ pub(crate) struct NodeTailDialog {
     pub node_name: String,
     pub stdout_lines: Vec<String>,
     pub stderr_lines: Vec<String>,
-    pub status: LoopRunStatus,
+    pub status: GraphRunStatus,
     /// True when the finished run's output JSON carries `"error": "timed
     /// out"` — distinguishes a silent-timeout hang from a plain failure.
     pub timed_out: bool,
@@ -50,14 +50,14 @@ impl App {
     /// a `Running` run row — i.e. it is actually executing right now.
     /// Returns `false` for pending/finished/unknown nodes (no empty panes).
     pub fn open_node_tail_dialog(&mut self, node_id: &str) -> bool {
-        let Ok(Some(run)) = self.db.get_active_loop_run_for_node(node_id) else {
+        let Ok(Some(run)) = self.db.get_active_graph_run_for_node(node_id) else {
             return false;
         };
-        if run.status != LoopRunStatus::Running {
+        if run.status != GraphRunStatus::Running {
             return false;
         }
         let node_name = self
-            .loop_live_state
+            .graph_live_state
             .as_ref()
             .and_then(|state| {
                 state
@@ -115,8 +115,11 @@ impl App {
             Some(dialog) => dialog.run_id.clone(),
             None => return,
         };
-        let tail = self.db.get_loop_run_tail(&run_id, NODE_TAIL_MAX_LINES).ok();
-        let run = self.db.get_loop_run(&run_id).ok().flatten();
+        let tail = self
+            .db
+            .get_graph_run_tail(&run_id, NODE_TAIL_MAX_LINES)
+            .ok();
+        let run = self.db.get_graph_run(&run_id).ok().flatten();
         if let Some(dialog) = self.node_tail_dialog.as_mut() {
             if let Some((stdout, stderr)) = tail {
                 dialog.stdout_lines = stdout.lines().map(str::to_string).collect();
@@ -139,9 +142,9 @@ impl App {
 mod tests {
     use super::*;
     use crate::db::Database;
-    use crate::domain::loops::{
-        Loop, LoopNode, LoopNodeKind, LoopNodeRun, LoopRunStatus, LoopSpec, LoopSpecStatus,
-        LoopStatus,
+    use crate::domain::graphs::{
+        Graph, GraphNode, GraphNodeKind, GraphNodeRun, GraphRunStatus, GraphSpec, GraphSpecStatus,
+        GraphStatus,
     };
     use chrono::Utc;
     use std::sync::Arc;
@@ -155,15 +158,15 @@ mod tests {
     }
 
     fn seed_running_node(db: &Database) {
-        db.insert_loop(&Loop {
+        db.insert_graph(&Graph {
             archived: false,
             paused_by_reconciliation: false,
             infra_node_id: None,
             id: "lp-tail".to_string(),
-            name: "Loop lp-tail".to_string(),
+            name: "Graph lp-tail".to_string(),
             description: None,
             workdir: "/tmp/test".to_string(),
-            status: LoopStatus::Running,
+            status: GraphStatus::Running,
             trigger: None,
             created_at: Utc::now(),
             started_at: None,
@@ -175,14 +178,14 @@ mod tests {
             hooks: std::collections::BTreeMap::new(),
         })
         .unwrap();
-        db.insert_loop_spec(&LoopSpec {
+        db.insert_graph_spec(&GraphSpec {
             id: "spec-tail".to_string(),
-            loop_id: Some("lp-tail".to_string()),
+            graph_id: Some("lp-tail".to_string()),
             name: "Spec".to_string(),
             description: None,
             position: 0,
             parallelizable: false,
-            status: LoopSpecStatus::Running,
+            status: GraphSpecStatus::Running,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
@@ -193,23 +196,23 @@ mod tests {
             completed_via_at: None,
         })
         .unwrap();
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-tail".to_string(),
             spec_id: Some("spec-tail".to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "Tail node".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({"command": "true"}),
             position: 0,
             created_at: Utc::now(),
         })
         .unwrap();
-        db.insert_loop_run(&LoopNodeRun {
+        db.insert_graph_run(&GraphNodeRun {
             id: "run-tail".to_string(),
-            loop_id: "lp-tail".to_string(),
+            graph_id: "lp-tail".to_string(),
             spec_id: "spec-tail".to_string(),
             node_id: "node-tail".to_string(),
-            status: LoopRunStatus::Running,
+            status: GraphRunStatus::Running,
             input: None,
             output: None,
             started_at: Utc::now(),
@@ -246,9 +249,9 @@ mod tests {
 
         // Finish the run: the gate closes — no tail for finished nodes.
         app.close_node_tail_dialog();
-        db.update_loop_run_result(
+        db.update_graph_run_result(
             "run-tail",
-            LoopRunStatus::Fail,
+            GraphRunStatus::Fail,
             Some(&serde_json::json!({"kind": "check", "passed": false})),
             Some(Utc::now()),
         )
@@ -267,14 +270,14 @@ mod tests {
         let mut app = test_app(Arc::clone(&db));
 
         assert!(app.open_node_tail_dialog("node-tail"));
-        db.append_loop_run_output("run-tail", "stdout", "work in progress\n")
+        db.append_graph_run_output("run-tail", "stdout", "work in progress\n")
             .unwrap();
         app.close_node_tail_dialog();
 
         assert!(!app.node_tail_dialog_active());
-        let run = db.get_loop_run("run-tail").unwrap().unwrap();
-        assert_eq!(run.status, LoopRunStatus::Running);
-        let (stdout, _) = db.get_loop_run_tail("run-tail", 1000).unwrap();
+        let run = db.get_graph_run("run-tail").unwrap().unwrap();
+        assert_eq!(run.status, GraphRunStatus::Running);
+        let (stdout, _) = db.get_graph_run_tail("run-tail", 1000).unwrap();
         assert!(stdout.contains("work in progress"));
     }
 
@@ -285,7 +288,7 @@ mod tests {
         let mut app = test_app(Arc::clone(&db));
 
         assert!(app.open_node_tail_dialog("node-tail"));
-        db.append_loop_run_output("run-tail", "stdout", "hello\n")
+        db.append_graph_run_output("run-tail", "stdout", "hello\n")
             .unwrap();
         app.poll_node_tail_dialog();
         assert_eq!(
@@ -294,21 +297,21 @@ mod tests {
         );
         assert_eq!(
             app.node_tail_dialog.as_ref().unwrap().status,
-            LoopRunStatus::Running
+            GraphRunStatus::Running
         );
 
         // Node finishes (timeout): the open dialog flips to the final
         // banner instead of going stale.
-        db.update_loop_run_result(
+        db.update_graph_run_result(
             "run-tail",
-            LoopRunStatus::Fail,
+            GraphRunStatus::Fail,
             Some(&serde_json::json!({"kind": "check", "error": "timed out"})),
             Some(Utc::now()),
         )
         .unwrap();
         app.poll_node_tail_dialog();
         let dialog = app.node_tail_dialog.as_ref().unwrap();
-        assert_eq!(dialog.status, LoopRunStatus::Fail);
+        assert_eq!(dialog.status, GraphRunStatus::Fail);
         assert!(dialog.timed_out);
         // Still open — the user dismisses it, not the engine.
         assert!(app.node_tail_dialog_active());

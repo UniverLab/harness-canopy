@@ -1949,7 +1949,7 @@ impl Database {
 
     /// Seed the four known cross-project `depends_on` edges (best-effort).
     /// Each side resolves by `path.contains(substr)` against registered
-    /// projects (falling back to loop/spec workdirs for ticket-tagged
+    /// projects (falling back to graph/spec workdirs for ticket-tagged
     /// from-sides); missing or ambiguous sides are skipped with a warning and
     /// never fail. `link_projects` dedup makes this idempotent.
     pub fn seed_cm9_project_dependencies(&self) -> Result<usize> {
@@ -1986,7 +1986,7 @@ impl Database {
 
     /// Resolve one seed endpoint: first registered project whose path contains
     /// any of `substrs` (exactly one match required); else the workdir of a
-    /// loop/spec whose name mentions `ticket`.
+    /// graph/spec whose name mentions `ticket`.
     fn resolve_seed_project(&self, substrs: &[&str], ticket: &str) -> Option<String> {
         let projects = self.list_projects().ok()?;
         let mut matches: Vec<String> = Vec::new();
@@ -1999,12 +1999,12 @@ impl Database {
             return Some(matches.into_iter().next().unwrap());
         }
         if !ticket.is_empty() {
-            // Fall back to loop/spec workdirs tagged with the ticket id.
+            // Fall back to graph/spec workdirs tagged with the ticket id.
             let workdir: Option<String> = {
                 let conn = self.conn.lock().ok()?;
                 let mut stmt = conn
                     .prepare(
-                        "SELECT workdir FROM loop_specs WHERE name LIKE ?1 AND workdir IS NOT NULL LIMIT 1",
+                        "SELECT workdir FROM graph_specs WHERE name LIKE ?1 AND workdir IS NOT NULL LIMIT 1",
                     )
                     .ok()?;
                 let pattern = format!("%{ticket}%");

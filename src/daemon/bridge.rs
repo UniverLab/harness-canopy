@@ -114,7 +114,7 @@ fn reconnect_backoff(attempt: u32, policy: &ReconnectPolicy) -> Duration {
 
 /// The daemon's `/mcp` endpoint could not be reached at all (connection refused,
 /// reset, or timed out) — as opposed to reachable but returning an HTTP error.
-/// This is the signal the reconnect loop backs off on.
+/// This is the signal the reconnect graph backs off on.
 #[derive(Debug)]
 struct DaemonUnreachable {
     detail: String,
@@ -155,7 +155,7 @@ pub(crate) async fn run_bridge(
     }
 
     let result = if daemon_reachable(port).await {
-        run_proxy_loop(port, &identity.agent_id).await
+        run_proxy_graph(port, &identity.agent_id).await
     } else {
         eprintln!(
             "canopy bridge: daemon not reachable on port {port}; \
@@ -259,7 +259,7 @@ async fn daemon_reachable(port: u16) -> bool {
     .unwrap_or(false)
 }
 
-/// Everything `run_proxy_loop` must remember across requests so it can re-create
+/// Everything `run_proxy_graph` must remember across requests so it can re-create
 /// a daemon-side MCP session on its own after a restart — without the client
 /// re-initializing.
 #[derive(Default)]
@@ -285,7 +285,7 @@ enum ServeError {
     Other(anyhow::Error),
 }
 
-async fn run_proxy_loop(port: u16, agent_id: &str) -> Result<()> {
+async fn run_proxy_graph(port: u16, agent_id: &str) -> Result<()> {
     let endpoint = format!("http://127.0.0.1:{port}/mcp");
     let client = Client::new();
     let seed_id = non_empty_env(CANOPY_SEED_ID_ENV);
@@ -736,7 +736,7 @@ fn resolve_workdir(workdir_arg: Option<PathBuf>) -> Result<String> {
 
 /// Daemon port discovery: `--port` → `CANOPY_PORT` → daemon state in DB → 7755.
 ///
-/// Shared with the state-changing `canopy loop`/`canopy spec` subcommands
+/// Shared with the state-changing `canopy graph`/`canopy spec` subcommands
 /// (`daemon::cli_daemon`) so every CLI path that talks to the daemon's MCP
 /// endpoint resolves the port the same way the bridge does — reading the
 /// daemon's own reported port from the database rather than assuming the
@@ -1137,7 +1137,7 @@ mod tests {
         let endpoint = format!("http://127.0.0.1:{port}/mcp");
         let client = Client::new();
 
-        // Same request, retried the way run_proxy_loop does: no session header.
+        // Same request, retried the way run_proxy_graph does: no session header.
         let reply = forward_request(
             &client,
             &endpoint,
@@ -1864,7 +1864,7 @@ mod tests {
             ),
         )
         .await
-        .expect("serve_one_request must return, not loop forever")
+        .expect("serve_one_request must return, not graph forever")
         .expect_err("must fail");
 
         let msg = match err {
@@ -1908,7 +1908,7 @@ mod tests {
         );
     }
 
-    /// Test E: reconnect attempts are spaced by backoff, not tight loop
+    /// Test E: reconnect attempts are spaced by backoff, not tight graph
     /// Covers spec guideline test #5.
     #[tokio::test]
     async fn bridge_backs_off_between_reconnect_attempts() {

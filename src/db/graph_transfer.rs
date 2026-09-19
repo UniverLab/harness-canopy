@@ -1,24 +1,24 @@
-//! DB layer for `loop_import`: persist an entire
-//! [`LoopImportPlan`](crate::domain::loop_transfer::LoopImportPlan) — the
-//! loop row, every plain node/edge, and every ensemble unit (join + member
+//! DB layer for `graph_import`: persist an entire
+//! [`GraphImportPlan`](crate::domain::graph_transfer::GraphImportPlan) — the
+//! graph row, every plain node/edge, and every ensemble unit (join + member
 //! nodes, the wiring edges, the `ensembles`/`ensemble_members` rows) — in
-//! one transaction, so an import can never leave a half-created loop behind
-//! (spec decision 5: "no partially-created loop is ever left behind").
+//! one transaction, so an import can never leave a half-created graph behind
+//! (spec decision 5: "no partially-created graph is ever left behind").
 //!
-//! An imported loop never carries a trigger or any hooks (all four hook
+//! An imported graph never carries a trigger or any hooks (all four hook
 //! events — the export document has no field for either — see spec
-//! decision 1), so unlike [`Database::insert_loop`] this never needs to
+//! decision 1), so unlike [`Database::insert_graph`] this never needs to
 //! encode one.
 
 use anyhow::{anyhow, Result};
 use rusqlite::{params, Transaction};
 
 use crate::db::Database;
-use crate::domain::loop_transfer::LoopImportPlan;
-use crate::domain::loops::{Loop, LoopEdge, LoopNode};
+use crate::domain::graph_transfer::GraphImportPlan;
+use crate::domain::graphs::{Graph, GraphEdge, GraphNode};
 
 impl Database {
-    pub fn import_loop_graph(&self, lp: &Loop, plan: &LoopImportPlan) -> Result<()> {
+    pub fn import_graph(&self, lp: &Graph, plan: &GraphImportPlan) -> Result<()> {
         let mut conn = self
             .conn
             .lock()
@@ -26,7 +26,7 @@ impl Database {
         let tx = conn.transaction()?;
 
         tx.execute(
-            "INSERT INTO loops (id, name, description, workdir, status, trigger_type, trigger_config, created_at, started_at, completed_at, autorun_at, active_run_queue_id, on_completed, auto_continue_at, auto_continue_action, archived, paused_by_reconciliation, infra_node_id, hooks)
+            "INSERT INTO graphs (id, name, description, workdir, status, trigger_type, trigger_config, created_at, started_at, completed_at, autorun_at, active_run_queue_id, on_completed, auto_continue_at, auto_continue_action, archived, paused_by_reconciliation, infra_node_id, hooks)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             params![
                 &lp.id,
@@ -52,26 +52,26 @@ impl Database {
         )?;
 
         for node in &plan.nodes {
-            insert_loop_node_tx(&tx, node)?;
+            insert_graph_node_tx(&tx, node)?;
         }
         for ensemble_plan in &plan.ensembles {
-            insert_loop_node_tx(&tx, &ensemble_plan.join_node)?;
+            insert_graph_node_tx(&tx, &ensemble_plan.join_node)?;
             for node in &ensemble_plan.member_nodes {
-                insert_loop_node_tx(&tx, node)?;
+                insert_graph_node_tx(&tx, node)?;
             }
         }
         for edge in &plan.edges {
-            insert_loop_edge_tx(&tx, edge)?;
+            insert_graph_edge_tx(&tx, edge)?;
         }
         for ensemble_plan in &plan.ensembles {
             let ensemble = &ensemble_plan.ensemble;
             tx.execute(
-                "INSERT INTO ensembles (id, spec_id, loop_id, name, prompt_template, join_node_id, entry_from_node, entry_condition, min_pass, straggler_timeout_minutes, timeout_minutes, on_pass_to, on_fail_to, created_at)
+                "INSERT INTO ensembles (id, spec_id, graph_id, name, prompt_template, join_node_id, entry_from_node, entry_condition, min_pass, straggler_timeout_minutes, timeout_minutes, on_pass_to, on_fail_to, created_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                 params![
                     &ensemble.id,
                     &ensemble.spec_id,
-                    &ensemble.loop_id,
+                    &ensemble.graph_id,
                     &ensemble.name,
                     &ensemble.prompt_template,
                     &ensemble.join_node_id,
@@ -106,14 +106,14 @@ impl Database {
     }
 }
 
-fn insert_loop_node_tx(tx: &Transaction, node: &LoopNode) -> Result<()> {
+fn insert_graph_node_tx(tx: &Transaction, node: &GraphNode) -> Result<()> {
     tx.execute(
-        "INSERT INTO loop_nodes (id, spec_id, loop_id, name, kind, config, position, created_at)
+        "INSERT INTO graph_nodes (id, spec_id, graph_id, name, kind, config, position, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             &node.id,
             &node.spec_id,
-            &node.loop_id,
+            &node.graph_id,
             &node.name,
             node.kind.as_str(),
             serde_json::to_string(&node.config)?,
@@ -124,14 +124,14 @@ fn insert_loop_node_tx(tx: &Transaction, node: &LoopNode) -> Result<()> {
     Ok(())
 }
 
-fn insert_loop_edge_tx(tx: &Transaction, edge: &LoopEdge) -> Result<()> {
+fn insert_graph_edge_tx(tx: &Transaction, edge: &GraphEdge) -> Result<()> {
     tx.execute(
-        "INSERT INTO loop_edges (id, spec_id, loop_id, from_node, to_node, condition, route)
+        "INSERT INTO graph_edges (id, spec_id, graph_id, from_node, to_node, condition, route)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![
             &edge.id,
             &edge.spec_id,
-            &edge.loop_id,
+            &edge.graph_id,
             &edge.from_node,
             &edge.to_node,
             edge.condition.as_str(),
@@ -144,10 +144,10 @@ fn insert_loop_edge_tx(tx: &Transaction, edge: &LoopEdge) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::loop_transfer::{
-        build_export_document, build_import_plan, LoopExportDocument,
+    use crate::domain::graph_transfer::{
+        build_export_document, build_import_plan, GraphExportDocument,
     };
-    use crate::domain::loops::{LoopEdgeCondition, LoopNodeKind, LoopStatus};
+    use crate::domain::graphs::{GraphEdgeCondition, GraphNodeKind, GraphStatus};
     use chrono::Utc;
     use tempfile::tempdir;
 
@@ -156,8 +156,8 @@ mod tests {
         Database::new(&dir.path().join("test.db")).unwrap()
     }
 
-    fn draft_loop(id: &str, name: &str, workdir: &str) -> Loop {
-        Loop {
+    fn draft_graph(id: &str, name: &str, workdir: &str) -> Graph {
+        Graph {
             archived: false,
             paused_by_reconciliation: false,
             infra_node_id: None,
@@ -165,7 +165,7 @@ mod tests {
             name: name.to_string(),
             description: Some("imported".to_string()),
             workdir: workdir.to_string(),
-            status: LoopStatus::Draft,
+            status: GraphStatus::Draft,
             trigger: None,
             created_at: Utc::now(),
             started_at: None,
@@ -178,30 +178,30 @@ mod tests {
         }
     }
 
-    fn simple_document() -> LoopExportDocument {
-        use crate::domain::loop_transfer::{LoopExportEdge, LoopExportNode};
-        LoopExportDocument {
+    fn simple_document() -> GraphExportDocument {
+        use crate::domain::graph_transfer::{GraphExportEdge, GraphExportNode};
+        GraphExportDocument {
             format_version: 2,
-            name: "shared-loop".to_string(),
+            name: "shared-graph".to_string(),
             description: Some("A shared design".to_string()),
             nodes: vec![
-                LoopExportNode {
+                GraphExportNode {
                     name: "implementer".to_string(),
-                    kind: LoopNodeKind::Agent,
+                    kind: GraphNodeKind::Agent,
                     position: 1,
                     config: serde_json::json!({"prompt_template": "implement it"}),
                 },
-                LoopExportNode {
+                GraphExportNode {
                     name: "gate".to_string(),
-                    kind: LoopNodeKind::Check,
+                    kind: GraphNodeKind::Check,
                     position: 2,
                     config: serde_json::json!({"command": "cargo test"}),
                 },
             ],
-            edges: vec![LoopExportEdge {
+            edges: vec![GraphExportEdge {
                 from_node: "implementer".to_string(),
                 to_node: "gate".to_string(),
-                condition: LoopEdgeCondition::Always,
+                condition: GraphEdgeCondition::Always,
             }],
             ensembles: vec![],
             infra_node: None,
@@ -209,92 +209,92 @@ mod tests {
     }
 
     /// The DB-layer half of decision 5's all-or-nothing contract: one
-    /// `import_loop_graph` call persists the loop row, every node, and
+    /// `import_graph` call persists the graph row, every node, and
     /// every edge together.
     #[test]
-    fn import_loop_graph_persists_loop_nodes_and_edges_atomically() {
+    fn import_graph_persists_graph_nodes_and_edges_atomically() {
         let db = test_db();
         let document = simple_document();
-        let lp = draft_loop("loop-1", "shared-loop", "/tmp/project");
+        let lp = draft_graph("graph-1", "shared-graph", "/tmp/project");
         let plan = build_import_plan(&document, &lp.id).unwrap();
 
-        db.import_loop_graph(&lp, &plan).unwrap();
+        db.import_graph(&lp, &plan).unwrap();
 
-        assert!(db.get_loop("loop-1").unwrap().is_some());
-        let nodes = db.list_loop_nodes_for_loop("loop-1").unwrap();
+        assert!(db.get_graph("graph-1").unwrap().is_some());
+        let nodes = db.list_graph_nodes_for_graph("graph-1").unwrap();
         assert_eq!(nodes.len(), 2);
-        let edges = db.list_loop_edges_for_loop("loop-1").unwrap();
+        let edges = db.list_graph_edges_for_graph("graph-1").unwrap();
         assert_eq!(edges.len(), 1);
     }
 
-    /// A second import of the same document under a different loop id must
-    /// create an entirely independent loop rather than colliding with (or
+    /// A second import of the same document under a different graph id must
+    /// create an entirely independent graph rather than colliding with (or
     /// overwriting) the first — decision 4: import never updates/merges.
     #[test]
-    fn import_loop_graph_never_collides_across_two_imports() {
+    fn import_graph_never_collides_across_two_imports() {
         let db = test_db();
         let document = simple_document();
 
-        let lp1 = draft_loop("loop-1", "shared-loop", "/tmp/project");
+        let lp1 = draft_graph("graph-1", "shared-graph", "/tmp/project");
         let plan1 = build_import_plan(&document, &lp1.id).unwrap();
-        db.import_loop_graph(&lp1, &plan1).unwrap();
+        db.import_graph(&lp1, &plan1).unwrap();
 
-        let lp2 = draft_loop("loop-2", "shared-loop (2)", "/tmp/project");
+        let lp2 = draft_graph("graph-2", "shared-graph (2)", "/tmp/project");
         let plan2 = build_import_plan(&document, &lp2.id).unwrap();
-        db.import_loop_graph(&lp2, &plan2).unwrap();
+        db.import_graph(&lp2, &plan2).unwrap();
 
-        let all = db.list_loops(Some("/tmp/project"), true).unwrap();
+        let all = db.list_graphs(Some("/tmp/project"), true).unwrap();
         assert_eq!(all.len(), 2);
-        assert_eq!(db.list_loop_nodes_for_loop("loop-1").unwrap().len(), 2);
-        assert_eq!(db.list_loop_nodes_for_loop("loop-2").unwrap().len(), 2);
+        assert_eq!(db.list_graph_nodes_for_graph("graph-1").unwrap().len(), 2);
+        assert_eq!(db.list_graph_nodes_for_graph("graph-2").unwrap().len(), 2);
     }
 
     /// Ensemble import persists the join node, every member node, and the
     /// `ensembles`/`ensemble_members` rows in the same transaction as the
     /// rest of the graph.
     #[test]
-    fn import_loop_graph_persists_ensemble_unit() {
-        use crate::domain::loop_transfer::{
-            LoopExportEnsemble, LoopExportEnsembleMember, LoopExportNode,
+    fn import_graph_persists_ensemble_unit() {
+        use crate::domain::graph_transfer::{
+            GraphExportEnsemble, GraphExportEnsembleMember, GraphExportNode,
         };
         let db = test_db();
-        let document = LoopExportDocument {
+        let document = GraphExportDocument {
             format_version: 2,
-            name: "ensemble-loop".to_string(),
+            name: "ensemble-graph".to_string(),
             description: None,
             nodes: vec![
-                LoopExportNode {
+                GraphExportNode {
                     name: "kickoff".to_string(),
-                    kind: LoopNodeKind::Check,
+                    kind: GraphNodeKind::Check,
                     position: 1,
                     config: serde_json::json!({"command": "true"}),
                 },
-                LoopExportNode {
+                GraphExportNode {
                     name: "downstream".to_string(),
-                    kind: LoopNodeKind::Agent,
+                    kind: GraphNodeKind::Agent,
                     position: 2,
                     config: serde_json::json!({"prompt_template": "wrap up"}),
                 },
             ],
             edges: vec![],
-            ensembles: vec![LoopExportEnsemble {
+            ensembles: vec![GraphExportEnsemble {
                 name: "Proposers".to_string(),
                 kind: None,
                 prompt_template: "draft it".to_string(),
                 entry_from_node: "kickoff".to_string(),
-                entry_condition: LoopEdgeCondition::Always,
+                entry_condition: GraphEdgeCondition::Always,
                 on_pass_to: "downstream".to_string(),
                 on_fail_to: None,
                 min_pass: 2,
                 timeout_minutes: 30,
                 straggler_timeout_minutes: None,
                 members: vec![
-                    LoopExportEnsembleMember {
+                    GraphExportEnsembleMember {
                         platform: Some("openrouter".to_string()),
                         model: None,
                         prompt_override: None,
                     },
-                    LoopExportEnsembleMember {
+                    GraphExportEnsembleMember {
                         platform: Some("openrouter".to_string()),
                         model: None,
                         prompt_override: None,
@@ -303,24 +303,24 @@ mod tests {
             }],
             infra_node: None,
         };
-        let lp = draft_loop("loop-1", "ensemble-loop", "/tmp/project");
+        let lp = draft_graph("graph-1", "ensemble-graph", "/tmp/project");
         let plan = build_import_plan(&document, &lp.id).unwrap();
 
-        db.import_loop_graph(&lp, &plan).unwrap();
+        db.import_graph(&lp, &plan).unwrap();
 
         // 2 plain nodes + 2 members + 1 join = 5.
-        let nodes = db.list_loop_nodes_for_loop("loop-1").unwrap();
+        let nodes = db.list_graph_nodes_for_graph("graph-1").unwrap();
         assert_eq!(nodes.len(), 5);
-        let ensembles = db.list_ensembles_for_loop("loop-1").unwrap();
+        let ensembles = db.list_ensembles_for_graph("graph-1").unwrap();
         assert_eq!(ensembles.len(), 1);
         assert_eq!(ensembles[0].members.len(), 2);
 
         // Re-exporting from the DB's own view must reconstruct the same
         // ensemble shape (round trip through actual persistence, not just
         // the in-memory plan).
-        let graph_nodes = db.list_loop_nodes_for_loop("loop-1").unwrap();
-        let graph_edges = db.list_loop_edges_for_loop("loop-1").unwrap();
-        let lp_row = db.get_loop("loop-1").unwrap().unwrap();
+        let graph_nodes = db.list_graph_nodes_for_graph("graph-1").unwrap();
+        let graph_edges = db.list_graph_edges_for_graph("graph-1").unwrap();
+        let lp_row = db.get_graph("graph-1").unwrap().unwrap();
         let redone =
             build_export_document(&lp_row, &graph_nodes, &graph_edges, &ensembles).unwrap();
         assert_eq!(redone.ensembles.len(), 1);
@@ -328,38 +328,38 @@ mod tests {
     }
 
     /// CM2: importing a document with `infra_node` set must persist the
-    /// resolved node id on the loop row — not silently drop it.
+    /// resolved node id on the graph row — not silently drop it.
     #[test]
-    fn import_loop_graph_persists_infra_node_id() {
-        use crate::domain::loop_transfer::{LoopExportEdge, LoopExportNode};
+    fn import_graph_persists_infra_node_id() {
+        use crate::domain::graph_transfer::{GraphExportEdge, GraphExportNode};
         let db = test_db();
-        let document = LoopExportDocument {
+        let document = GraphExportDocument {
             format_version: 2,
-            name: "infra-loop".to_string(),
+            name: "infra-graph".to_string(),
             description: None,
             nodes: vec![
-                LoopExportNode {
+                GraphExportNode {
                     name: "A".to_string(),
-                    kind: LoopNodeKind::Agent,
+                    kind: GraphNodeKind::Agent,
                     position: 1,
                     config: serde_json::json!({"prompt_template": "do it"}),
                 },
-                LoopExportNode {
+                GraphExportNode {
                     name: "B".to_string(),
-                    kind: LoopNodeKind::Check,
+                    kind: GraphNodeKind::Check,
                     position: 2,
                     config: serde_json::json!({"command": "true"}),
                 },
             ],
-            edges: vec![LoopExportEdge {
+            edges: vec![GraphExportEdge {
                 from_node: "A".to_string(),
                 to_node: "B".to_string(),
-                condition: LoopEdgeCondition::Always,
+                condition: GraphEdgeCondition::Always,
             }],
             ensembles: vec![],
             infra_node: Some("B".to_string()),
         };
-        let mut lp = draft_loop("loop-1", "infra-loop", "/tmp/project");
+        let mut lp = draft_graph("graph-1", "infra-graph", "/tmp/project");
         let plan = build_import_plan(&document, &lp.id).unwrap();
         let expected_infra_id = plan
             .infra_node_id
@@ -367,13 +367,13 @@ mod tests {
             .expect("plan resolved infra node");
         lp.infra_node_id = Some(expected_infra_id.clone());
 
-        db.import_loop_graph(&lp, &plan).unwrap();
+        db.import_graph(&lp, &plan).unwrap();
 
-        let stored = db.get_loop("loop-1").unwrap().expect("loop exists");
+        let stored = db.get_graph("graph-1").unwrap().expect("graph exists");
         assert_eq!(
             stored.infra_node_id,
             Some(expected_infra_id),
-            "imported loop must persist infra_node_id"
+            "imported graph must persist infra_node_id"
         );
     }
 }

@@ -60,7 +60,7 @@ pub fn canopy_protocol_block() -> &'static str {
      verify-before-reporting, security, resourcefulness, token efficiency) and applies to \
      every task. Reach for `architect-mindset` when designing or writing specs, \
      `code-engineering` for code work, and Canopy's own tooling skills \
-     (`canopy-intelligence`, `canopy-sync`, `canopy-loop-design`, `canopy-capabilities`) \
+     (`canopy-intelligence`, `canopy-sync`, `canopy-graph-design`, `canopy-capabilities`) \
      when working this MCP surface. Apply the skills directly — they are the source of \
      truth, not this summary."
 }
@@ -121,7 +121,7 @@ pub async fn create_sandbox(
     // instruction file straight off disk, so an untracked file is enough — and
     // it is the only thing that keeps the protocol out of the merge and out of
     // the user's repository (the whole point of CM6). A per-worktree
-    // `info/exclude` entry keeps a broad `git add -A` in a loop node from
+    // `info/exclude` entry keeps a broad `git add -A` in a graph node from
     // sweeping it into a commit.
     exclude_from_worktree(&worktree_path, instr_filename).await;
 
@@ -240,7 +240,7 @@ pub async fn merge_sandbox(sandbox: &Sandbox) -> Result<MergeOutcome> {
 }
 
 /// Append `pattern` to the worktree's git exclude file so a broad `git add`
-/// in a loop/session node cannot pull the (uncommitted) instruction file into
+/// in a graph/session node cannot pull the (uncommitted) instruction file into
 /// a commit. Best-effort: a failure here just loses that one safeguard.
 async fn exclude_from_worktree(worktree_path: &std::path::Path, pattern: &str) {
     let Ok(output) = tokio::process::Command::new("git")
@@ -314,7 +314,7 @@ async fn resolve_merge_conflicts(sandbox: &Sandbox) -> Result<()> {
     let strategy = cli.strategy();
 
     // Resolve the conflict in the user's checkout (where the merge is in
-    // progress), but bound it: a hung agent must not wedge the loop dispatch
+    // progress), but bound it: a hung agent must not wedge the graph dispatch
     // forever with the repo stuck mid-merge.
     let mut cmd = strategy.build_command(&prompt, None, Some(&sandbox.original_workdir))?;
     let output = tokio::time::timeout(std::time::Duration::from_secs(15 * 60), cmd.output())
@@ -372,7 +372,7 @@ fn get_current_branch(workdir: &str) -> Result<String> {
 pub struct SandboxInfo {
     pub id: String,
     pub path: PathBuf,
-    pub loop_id: String,
+    pub graph_id: String,
     pub branch: String,
     pub base_branch: String,
     pub original_workdir: String,
@@ -432,14 +432,14 @@ fn rev_list_count(workdir: &str, lhs: &str, rhs: &str) -> Option<u64> {
 }
 
 /// Whether the sandbox branch holds commits that exist nowhere else
-/// (compared against the loop's base ref). Any error or unparseable output
+/// (compared against the graph's base ref). Any error or unparseable output
 /// yields `None` — uncertain means keep. Read-only: never fetches, checks
 /// out, or modifies anything.
 pub fn has_unique_commits(run: &SandboxRun) -> Option<bool> {
     rev_list_count(&run.original_workdir, &run.sandbox_branch, &run.base_branch).map(|n| n > 0)
 }
 
-/// How far behind the loop's base ref the sandbox branch is. `None` means
+/// How far behind the graph's base ref the sandbox branch is. `None` means
 /// unknown — informational only, never fails the listing.
 pub fn behind_count(run: &SandboxRun) -> Option<u64> {
     rev_list_count(&run.original_workdir, &run.base_branch, &run.sandbox_branch)
@@ -541,7 +541,7 @@ fn prune_empty_project_dir(project_hash: &str) {
     }
 }
 
-/// Land one sandbox's work onto the loop's base branch. Refuses rather than
+/// Land one sandbox's work onto the graph's base branch. Refuses rather than
 /// forcing when the merge is not clean, and names the conflicting paths.
 /// Never calls the agent auto-resolver; never force-deletes the branch
 /// (a merged branch always deletes cleanly with `-d`).
@@ -939,7 +939,7 @@ mod tests {
         sandbox: &Sandbox,
         owner_id: &str,
     ) -> crate::db::sandbox::SandboxRun {
-        db.insert_sandbox_run(sandbox, "loop", owner_id)
+        db.insert_sandbox_run(sandbox, "graph", owner_id)
             .expect("insert sandbox run");
         db.get_sandbox_run(&sandbox.id)
             .expect("get sandbox run")
@@ -964,7 +964,7 @@ mod tests {
             .expect("create sandbox");
 
         let (_dbdir, db) = test_db();
-        let row = insert_test_row(&db, &sandbox, "loop-1");
+        let row = insert_test_row(&db, &sandbox, "graph-1");
         assert_eq!(has_unique_commits(&row), Some(false));
 
         teardown_sandbox_at_end(&db, &row, "completed").await;
@@ -1000,7 +1000,7 @@ mod tests {
         );
 
         let (_dbdir, db) = test_db();
-        let row = insert_test_row(&db, &sandbox, "loop-2");
+        let row = insert_test_row(&db, &sandbox, "graph-2");
         assert_eq!(has_unique_commits(&row), Some(true));
 
         teardown_sandbox_at_end(&db, &row, "completed").await;
@@ -1023,7 +1023,7 @@ mod tests {
             .await
             .expect("create clean sandbox");
         let (_dbdir, db) = test_db();
-        let clean_row = insert_test_row(&db, &clean_sb, "loop-clean");
+        let clean_row = insert_test_row(&db, &clean_sb, "graph-clean");
         assert_eq!(has_unique_commits(&clean_row), Some(false));
         assert_eq!(behind_count(&clean_row), Some(0));
 
@@ -1036,7 +1036,7 @@ mod tests {
             "real work",
             "add real work",
         );
-        let work_row = insert_test_row(&db, &work_sb, "loop-work");
+        let work_row = insert_test_row(&db, &work_sb, "graph-work");
         assert_eq!(has_unique_commits(&work_row), Some(true));
         assert!(behind_count(&work_row).is_some());
 
@@ -1062,7 +1062,7 @@ mod tests {
         commit_file(repo.path(), "file.txt", "base change\n", "base-side change");
 
         let (_dbdir, db) = test_db();
-        let row = insert_test_row(&db, &sandbox, "loop-land");
+        let row = insert_test_row(&db, &sandbox, "graph-land");
 
         let outcome = land_sandbox(&row).await.expect("land sandbox");
         match outcome {
@@ -1099,7 +1099,7 @@ mod tests {
         );
 
         let (_dbdir, db) = test_db();
-        let row = insert_test_row(&db, &sandbox, "loop-discard");
+        let row = insert_test_row(&db, &sandbox, "graph-discard");
 
         let outcome = discard_sandbox(&row, false).await.expect("discard");
         assert_eq!(outcome, DiscardOutcome::RefusedUniqueCommits);
@@ -1122,7 +1122,7 @@ mod tests {
         let worktree_path = sandbox.worktree_path.to_string_lossy().to_string();
 
         let (_dbdir, db) = test_db();
-        let row = insert_test_row(&db, &sandbox, "loop-fail");
+        let row = insert_test_row(&db, &sandbox, "graph-fail");
 
         std::fs::remove_dir_all(repo.path()).expect("delete original workdir");
 

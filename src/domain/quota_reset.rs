@@ -16,7 +16,7 @@ use regex::Regex;
 use std::str::FromStr;
 use std::sync::LazyLock;
 
-/// Safety margin added after the stated reset time, so a resumed loop never
+/// Safety margin added after the stated reset time, so a resumed graph never
 /// races the provider's own clock (a resume attempted exactly at the stated
 /// instant can still find the quota not yet actually reset).
 pub const DEFAULT_SAFETY_MARGIN: ChronoDuration = ChronoDuration::minutes(2);

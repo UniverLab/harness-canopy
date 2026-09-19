@@ -53,9 +53,9 @@ pub struct RagQueueItem {
     pub queued_at: i64,
 }
 
-/// One row in a project's persisted History tab: a finished loop or a past
+/// One row in a project's persisted History tab: a finished graph or a past
 /// (no longer live) interactive/terminal session, scoped to the project's
-/// workdir and ordered newest-first. Unlike the live agent/loop providers
+/// workdir and ordered newest-first. Unlike the live agent/graph providers
 /// (which only know about what's running in *this* TUI process), this reads
 /// straight from SQLite so history survives a restart.
 #[derive(Debug, Clone)]
@@ -69,7 +69,7 @@ pub struct ProjectHistoryEntry {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProjectHistoryKind {
-    Loop,
+    Graph,
     InteractiveSession,
     TerminalSession,
 }
@@ -346,7 +346,7 @@ impl Database {
     }
 
     /// Remap a project registered at `old_hash` onto `new_canonical_path`:
-    /// re-key every dependent row (interactive/terminal sessions, loops,
+    /// re-key every dependent row (interactive/terminal sessions, graphs,
     /// standalone specs, sync state, prompts, scheduled sends, agents,
     /// intelligence nodes) from the old path/hash to the new one, in a
     /// single transaction. If no project is registered at the new path
@@ -401,11 +401,11 @@ impl Database {
                 params![old_path, new_canonical_path],
             )?;
             tx.execute(
-                "UPDATE loops SET workdir = ?2 WHERE workdir = ?1",
+                "UPDATE graphs SET workdir = ?2 WHERE workdir = ?1",
                 params![old_path, new_canonical_path],
             )?;
             tx.execute(
-                "UPDATE loop_specs SET workdir = ?2, updated_at = ?3 WHERE workdir = ?1",
+                "UPDATE graph_specs SET workdir = ?2, updated_at = ?3 WHERE workdir = ?1",
                 params![
                     old_path,
                     new_canonical_path,
@@ -650,13 +650,13 @@ fn count_remap_targets(
         params![old_path],
         |row| row.get(0),
     )?;
-    let loops: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM loops WHERE workdir = ?1",
+    let graphs: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM graphs WHERE workdir = ?1",
         params![old_path],
         |row| row.get(0),
     )?;
-    let loop_specs: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM loop_specs WHERE workdir = ?1",
+    let graph_specs: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM graph_specs WHERE workdir = ?1",
         params![old_path],
         |row| row.get(0),
     )?;
@@ -699,8 +699,8 @@ fn count_remap_targets(
     Ok(RemapCounts {
         interactive_sessions,
         terminal_sessions,
-        loops,
-        loop_specs,
+        graphs,
+        graph_specs,
         sync_messages,
         sync_locks,
         last_prompts,
@@ -833,7 +833,7 @@ impl Database {
             .lock()
             .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
         // Keep the last successful index timestamp per file unless a later delete
-        // exists. This avoids full startup re-index loops after transient errors.
+        // exists. This avoids full startup re-index graphs after transient errors.
         let mut stmt = conn.prepare(
             "SELECT s.file_path, s.last_indexed_at
                FROM (
@@ -981,11 +981,11 @@ fn parse_rfc3339_timestamp(value: &str) -> i64 {
 
 impl Database {
     /// Persisted history for a project's `Focus → History` tab: finished
-    /// loops plus past (exited/finished) interactive and terminal sessions,
+    /// graphs plus past (exited/finished) interactive and terminal sessions,
     /// all scoped to `workdir` and merged newest-first. Reads straight from
-    /// SQLite (via the `idx_loops_workdir_created`,
+    /// SQLite (via the `idx_graphs_workdir_created`,
     /// `idx_interactive_sessions_workdir`, and `idx_terminal_sessions_workdir`
-    /// indices) rather than the live agent/loop providers, which only know
+    /// indices) rather than the live agent/graph providers, which only know
     /// about state observed since this TUI process started.
     pub fn list_project_history(
         &self,
@@ -999,22 +999,22 @@ impl Database {
 
         let mut entries = Vec::new();
 
-        let mut loop_stmt = conn.prepare(
+        let mut graph_stmt = conn.prepare(
             "SELECT name, status, COALESCE(completed_at, created_at)
-             FROM loops
+             FROM graphs
              WHERE workdir = ?1 AND status IN ('completed', 'failed')
              ORDER BY COALESCE(completed_at, created_at) DESC
              LIMIT ?2",
         )?;
-        let loop_rows = loop_stmt.query_map(rusqlite::params![workdir, limit as i64], |row| {
+        let graph_rows = graph_stmt.query_map(rusqlite::params![workdir, limit as i64], |row| {
             Ok(ProjectHistoryEntry {
-                kind: ProjectHistoryKind::Loop,
+                kind: ProjectHistoryKind::Graph,
                 name: row.get(0)?,
                 status: row.get(1)?,
                 at: row.get(2)?,
             })
         })?;
-        for row in loop_rows {
+        for row in graph_rows {
             entries.push(row?);
         }
 
@@ -1255,15 +1255,15 @@ mod tests {
         .unwrap();
         db.insert_terminal_session("term-1", "term-1", "bash", workdir)
             .unwrap();
-        db.insert_loop(&crate::domain::loops::Loop {
+        db.insert_graph(&crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
             infra_node_id: None,
-            id: "loop-1".to_string(),
-            name: "loop-1".to_string(),
+            id: "graph-1".to_string(),
+            name: "graph-1".to_string(),
             description: None,
             workdir: workdir.to_string(),
-            status: crate::domain::loops::LoopStatus::Completed,
+            status: crate::domain::graphs::GraphStatus::Completed,
             trigger: None,
             created_at: chrono::Utc::now(),
             started_at: None,
@@ -1275,14 +1275,14 @@ mod tests {
             hooks: std::collections::BTreeMap::new(),
         })
         .unwrap();
-        db.insert_loop_spec(&crate::domain::loops::LoopSpec {
+        db.insert_graph_spec(&crate::domain::graphs::GraphSpec {
             id: "spec-standalone-1".to_string(),
-            loop_id: None,
+            graph_id: None,
             name: "standalone".to_string(),
             description: None,
             position: 0,
             parallelizable: false,
-            status: crate::domain::loops::LoopSpecStatus::Pending,
+            status: crate::domain::graphs::GraphSpecStatus::Pending,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
@@ -1385,8 +1385,8 @@ mod tests {
         // Every seeded table contributed exactly one dependent row.
         assert_eq!(outcome.counts.interactive_sessions, 1);
         assert_eq!(outcome.counts.terminal_sessions, 1);
-        assert_eq!(outcome.counts.loops, 1);
-        assert_eq!(outcome.counts.loop_specs, 1);
+        assert_eq!(outcome.counts.graphs, 1);
+        assert_eq!(outcome.counts.graph_specs, 1);
         assert_eq!(outcome.counts.sync_messages, 1);
         assert_eq!(outcome.counts.sync_locks, 1);
         assert_eq!(outcome.counts.last_prompts, 1);
@@ -1405,8 +1405,8 @@ mod tests {
 
         // Every dependent now points at the new path/hash, and nothing is
         // left behind at the old one.
-        assert_eq!(db.project_dependent_counts(old_path).unwrap().loops, 0);
-        assert_eq!(db.project_dependent_counts(new_path).unwrap().loops, 1);
+        assert_eq!(db.project_dependent_counts(old_path).unwrap().graphs, 0);
+        assert_eq!(db.project_dependent_counts(new_path).unwrap().graphs, 1);
         assert_eq!(
             db.project_dependent_counts(new_path)
                 .unwrap()
@@ -1459,8 +1459,8 @@ mod tests {
         );
 
         // Dependents were reassigned to the new path/hash.
-        assert_eq!(db.project_dependent_counts(new_path).unwrap().loops, 1);
-        assert_eq!(db.project_dependent_counts(old_path).unwrap().loops, 0);
+        assert_eq!(db.project_dependent_counts(new_path).unwrap().graphs, 1);
+        assert_eq!(db.project_dependent_counts(old_path).unwrap().graphs, 0);
     }
 
     #[test]
@@ -1470,15 +1470,15 @@ mod tests {
             .unwrap();
         db.upsert_project(&sample_project_at("hash-b", "/proj-b"))
             .unwrap();
-        db.insert_loop(&crate::domain::loops::Loop {
+        db.insert_graph(&crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
             infra_node_id: None,
-            id: "loop-b".to_string(),
-            name: "loop-b".to_string(),
+            id: "graph-b".to_string(),
+            name: "graph-b".to_string(),
             description: None,
             workdir: "/proj-b".to_string(),
-            status: crate::domain::loops::LoopStatus::Completed,
+            status: crate::domain::graphs::GraphStatus::Completed,
             trigger: None,
             created_at: chrono::Utc::now(),
             started_at: None,
@@ -1494,7 +1494,7 @@ mod tests {
         db.remap_project("hash-a", "/proj-a-moved").unwrap();
 
         assert!(db.get_project("hash-b").unwrap().is_some());
-        assert_eq!(db.project_dependent_counts("/proj-b").unwrap().loops, 1);
+        assert_eq!(db.project_dependent_counts("/proj-b").unwrap().graphs, 1);
     }
 
     #[test]
@@ -1533,8 +1533,8 @@ mod tests {
         // Nothing actually moved.
         assert!(db.get_project(old_hash).unwrap().is_some());
         assert!(db.get_project(&workdir_hash(new_path)).unwrap().is_none());
-        assert_eq!(db.project_dependent_counts(old_path).unwrap().loops, 1);
-        assert_eq!(db.project_dependent_counts(new_path).unwrap().loops, 0);
+        assert_eq!(db.project_dependent_counts(old_path).unwrap().graphs, 1);
+        assert_eq!(db.project_dependent_counts(new_path).unwrap().graphs, 0);
 
         // A real remap right after reports the same counts.
         let applied = db.remap_project(old_hash, new_path).unwrap();

@@ -13,7 +13,7 @@ use crate::daemon::TaskTriggerHandler;
 use crate::db::Database;
 use crate::domain::db_paths::database_path;
 use crate::executor::Executor;
-use crate::loop_engine::LoopEngine;
+use crate::graph_engine::GraphEngine;
 use crate::rag::ingestion::IngestionManager;
 use crate::scheduler::cron_scheduler::CronScheduler;
 use crate::sync_manager::SyncManager;
@@ -42,8 +42,8 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
         &data_dir,
         &canopy_config.skills,
     ));
-    let loop_engine = Arc::new(
-        LoopEngine::new(Arc::clone(&db), Arc::clone(&notification_service))
+    let graph_engine = Arc::new(
+        GraphEngine::new(Arc::clone(&db), Arc::clone(&notification_service))
             .with_ensemble_concurrency_cap(canopy_config.ensemble_concurrency_cap)
             .with_spec_attempt_limit(canopy_config.spec_attempt_limit)
             .with_dynamic_skills(Arc::clone(&dynamic_skills)),
@@ -51,7 +51,7 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
     let watcher_engine = Arc::new(WatcherEngine::new(
         Arc::clone(&db),
         Arc::clone(&executor),
-        Arc::clone(&loop_engine),
+        Arc::clone(&graph_engine),
     ));
 
     let ingestion = Arc::new(IngestionManager::new(Arc::clone(&db), data_dir.clone()));
@@ -69,15 +69,15 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
     db.set_state("version", env!("CARGO_PKG_VERSION"))?;
     db.set_state("last_start", &chrono::Utc::now().to_rfc3339())?;
 
-    match db.reconcile_orphaned_loops(&data_dir) {
+    match db.reconcile_orphaned_graphs(&data_dir) {
         Ok(count) if count > 0 => {
             tracing::warn!(
-                "Reconciled {} loop(s) left running by a previous daemon",
+                "Reconciled {} graph(s) left running by a previous daemon",
                 count
             );
         }
         Ok(_) => {}
-        Err(e) => tracing::error!("Failed to reconcile orphaned loops: {}", e),
+        Err(e) => tracing::error!("Failed to reconcile orphaned graphs: {}", e),
     }
 
     match db.reconcile_stranded_queue_specs() {
@@ -97,10 +97,10 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
 
     startup_personal_rag(Arc::clone(&ingestion), &data_dir).await;
 
-    let cron_scheduler = Arc::new(CronScheduler::with_loops(
+    let cron_scheduler = Arc::new(CronScheduler::with_graphs(
         Arc::clone(&db),
         Arc::clone(&executor),
-        Arc::clone(&loop_engine),
+        Arc::clone(&graph_engine),
     ));
     let scheduler_notify = cron_scheduler.notifier();
     let scheduler_cancel = Arc::clone(&cron_scheduler).start();
@@ -123,7 +123,7 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
     let handler_watcher_engine = Arc::clone(&watcher_engine);
     let handler_scheduler_notify = Arc::clone(&scheduler_notify);
     let handler_sync_manager = Arc::clone(&sync_manager);
-    let handler_loop_engine = Arc::clone(&loop_engine);
+    let handler_graph_engine = Arc::clone(&graph_engine);
     let handler_ingestion = Arc::clone(&ingestion);
     let handler_dynamic_skills = Arc::clone(&dynamic_skills);
 
@@ -136,7 +136,7 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
                 Arc::clone(&handler_executor),
                 Arc::clone(&handler_watcher_engine),
                 Arc::clone(&handler_scheduler_notify),
-                Arc::clone(&handler_loop_engine),
+                Arc::clone(&handler_graph_engine),
                 Arc::clone(&notification_service),
                 Arc::clone(&handler_sync_manager),
                 Arc::clone(&handler_ingestion),
@@ -221,7 +221,7 @@ async fn log_mcp_error_responses(
     response
 }
 
-/// Terminate every loop node run's process on the machine (B12), so a
+/// Terminate every graph node run's process on the machine (B12), so a
 /// graceful daemon shutdown never leaves a `mimo run`/check process behind
 /// the way an abandoned timeout used to. Correct only because it is called
 /// exactly once, at daemon shutdown, from the sole process that ever holds
@@ -239,7 +239,7 @@ async fn log_mcp_error_responses(
 /// multiply the shutdown delay by the number of processes instead of
 /// bounding it by one grace period total.
 async fn terminate_all_running_node_processes_at_shutdown(db: &Database) {
-    let Ok(runs) = db.list_all_running_loop_runs() else {
+    let Ok(runs) = db.list_all_running_graph_runs() else {
         return;
     };
     if runs.is_empty() {
@@ -263,9 +263,9 @@ async fn terminate_all_running_node_processes_at_shutdown(db: &Database) {
     }
 
     for run in &runs {
-        let _ = db.update_loop_run_result(
+        let _ = db.update_graph_run_result(
             &run.id,
-            crate::domain::loops::LoopRunStatus::Fail,
+            crate::domain::graphs::GraphRunStatus::Fail,
             Some(&serde_json::json!({ "terminated": true, "reason": "daemon shutdown" })),
             Some(chrono::Utc::now()),
         );
@@ -285,7 +285,7 @@ pub(crate) async fn run_stdio_server() -> Result<()> {
         Arc::clone(&startup.executor),
         Arc::clone(&startup.watcher_engine),
         startup.scheduler_notify,
-        Arc::clone(&startup.loop_engine),
+        Arc::clone(&startup.graph_engine),
         Arc::clone(&startup.notification_service),
         Arc::clone(&startup.sync_manager),
         Arc::clone(&startup.ingestion),
@@ -309,11 +309,11 @@ pub(crate) async fn run_stdio_server() -> Result<()> {
 
 /// Everything `run_stdio_server` needs beyond `db` itself: the handler's
 /// dependencies plus the background-task guards that must outlive the serve
-/// loop. Split out from `run_stdio_server` so a test can drive this
+/// graph. Split out from `run_stdio_server` so a test can drive this
 /// DB-touching startup sequence directly, without a real stdio transport, and
-/// assert it never mutates loop state — see the doc comment on
-/// `Database::reconcile_orphaned_loops` for the incident this guards
-/// against: this function deliberately does not call `reconcile_orphaned_loops`
+/// assert it never mutates graph state — see the doc comment on
+/// `Database::reconcile_orphaned_graphs` for the incident this guards
+/// against: this function deliberately does not call `reconcile_orphaned_graphs`
 /// or `reconcile_stranded_queue_specs`. A stdio server is not the daemon and
 /// must never perform daemon-lifecycle graph recovery.
 struct StdioServerStartup {
@@ -321,7 +321,7 @@ struct StdioServerStartup {
     watcher_engine: Arc<WatcherEngine>,
     notification_service: Arc<dyn NotificationService>,
     sync_manager: Arc<SyncManager>,
-    loop_engine: Arc<LoopEngine>,
+    graph_engine: Arc<GraphEngine>,
     ingestion: Arc<IngestionManager>,
     dynamic_skills: Arc<crate::dynamic_skills::SkillStore>,
     cron_scheduler: Arc<CronScheduler>,
@@ -346,8 +346,8 @@ async fn stdio_server_startup(db: Arc<Database>, data_dir: &std::path::Path) -> 
         data_dir,
         &canopy_config.skills,
     ));
-    let loop_engine = Arc::new(
-        LoopEngine::new(Arc::clone(&db), Arc::clone(&notification_service))
+    let graph_engine = Arc::new(
+        GraphEngine::new(Arc::clone(&db), Arc::clone(&notification_service))
             .with_ensemble_concurrency_cap(canopy_config.ensemble_concurrency_cap)
             .with_spec_attempt_limit(canopy_config.spec_attempt_limit)
             .with_dynamic_skills(Arc::clone(&dynamic_skills)),
@@ -355,7 +355,7 @@ async fn stdio_server_startup(db: Arc<Database>, data_dir: &std::path::Path) -> 
     let watcher_engine = Arc::new(WatcherEngine::new(
         Arc::clone(&db),
         Arc::clone(&executor),
-        Arc::clone(&loop_engine),
+        Arc::clone(&graph_engine),
     ));
 
     let ingestion = Arc::new(IngestionManager::new(
@@ -364,10 +364,10 @@ async fn stdio_server_startup(db: Arc<Database>, data_dir: &std::path::Path) -> 
     ));
     let ingestion_cancel = Arc::clone(&ingestion).start();
 
-    // No `reconcile_orphaned_loops` / `reconcile_stranded_queue_specs` call
+    // No `reconcile_orphaned_graphs` / `reconcile_stranded_queue_specs` call
     // here: this is a stdio MCP server, not the daemon, and it must never
     // perform daemon-lifecycle graph recovery — see the doc comment on
-    // `Database::reconcile_orphaned_loops` for the incident this guards
+    // `Database::reconcile_orphaned_graphs` for the incident this guards
     // against.
     // No announcements client here: this is a stdio MCP server, not the
     // daemon, and the announcements WebSocket is a daemon-only background task.
@@ -377,10 +377,10 @@ async fn stdio_server_startup(db: Arc<Database>, data_dir: &std::path::Path) -> 
         tracing::error!("Failed to reload watchers: {}", e);
     }
 
-    let cron_scheduler = Arc::new(CronScheduler::with_loops(
+    let cron_scheduler = Arc::new(CronScheduler::with_graphs(
         Arc::clone(&db),
         Arc::clone(&executor),
-        Arc::clone(&loop_engine),
+        Arc::clone(&graph_engine),
     ));
     let scheduler_notify = cron_scheduler.notifier();
     let scheduler_cancel = Arc::clone(&cron_scheduler).start();
@@ -393,7 +393,7 @@ async fn stdio_server_startup(db: Arc<Database>, data_dir: &std::path::Path) -> 
         watcher_engine,
         notification_service,
         sync_manager,
-        loop_engine,
+        graph_engine,
         ingestion,
         dynamic_skills,
         cron_scheduler,
@@ -633,7 +633,7 @@ fn init_tracing() {
 /// transport a node actually uses — a Streamable HTTP POST that goes through
 /// `rmcp`'s `LocalSessionManager`/SSE machinery, not a direct in-process call
 /// into `TaskTriggerHandler` (which the `diag_concurrent_db_write_during_dispatch`
-/// test in `loop_engine.rs` already proved returns in milliseconds even mid-
+/// test in `graph_engine.rs` already proved returns in milliseconds even mid-
 /// dispatch). Isolates whether the hang lives in the HTTP/session layer.
 #[cfg(test)]
 mod hang_repro {
@@ -642,11 +642,11 @@ mod hang_repro {
         DefaultNotificationService, NotificationService,
     };
     use crate::daemon::TaskTriggerHandler;
-    use crate::domain::loops::{
-        Loop, LoopNode, LoopNodeKind, LoopSpec, LoopSpecStatus, LoopStatus,
+    use crate::domain::graphs::{
+        Graph, GraphNode, GraphNodeKind, GraphSpec, GraphSpecStatus, GraphStatus,
     };
     use crate::executor::Executor;
-    use crate::loop_engine::LoopEngine;
+    use crate::graph_engine::GraphEngine;
     use crate::rag::ingestion::IngestionManager;
     use crate::sync_manager::SyncManager;
     use crate::watchers::WatcherEngine;
@@ -654,7 +654,7 @@ mod hang_repro {
 
     /// Serializes tests in this module that touch `CANOPY_HOME_OVERRIDE`
     /// (process-wide env var) against each other. Mirrors the `HomeGuard`
-    /// pattern in `loop_engine.rs`'s test module (a distinct static — this is
+    /// pattern in `graph_engine.rs`'s test module (a distinct static — this is
     /// a diagnostic test run in isolation, not meant to coexist with the
     /// wider suite's parallelism).
     static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -701,15 +701,15 @@ mod hang_repro {
     /// `run_http_server`, minus pid-file/daemon-lock/graceful-shutdown
     /// machinery) bound to an OS-chosen port. Returns the bound port and the
     /// pieces the test needs to drive a concurrent dispatch directly.
-    async fn spawn_test_server(db: Arc<Database>) -> (u16, Arc<LoopEngine>) {
+    async fn spawn_test_server(db: Arc<Database>) -> (u16, Arc<GraphEngine>) {
         let notif: Arc<dyn NotificationService> = Arc::new(DefaultNotificationService);
         let executor = Arc::new(Executor::new(Arc::clone(&db), Arc::clone(&notif)));
         let sync_manager = Arc::new(SyncManager::new(Arc::clone(&db)));
-        let loop_engine = Arc::new(LoopEngine::new(Arc::clone(&db), Arc::clone(&notif)));
+        let graph_engine = Arc::new(GraphEngine::new(Arc::clone(&db), Arc::clone(&notif)));
         let watcher_engine = Arc::new(WatcherEngine::new(
             Arc::clone(&db),
             Arc::clone(&executor),
-            Arc::clone(&loop_engine),
+            Arc::clone(&graph_engine),
         ));
         let tmp = tempfile::tempdir().unwrap();
         let ingestion = Arc::new(IngestionManager::new(
@@ -721,11 +721,13 @@ mod hang_repro {
             Vec::new(),
             15,
         ));
-        let cron_scheduler = Arc::new(crate::scheduler::cron_scheduler::CronScheduler::with_loops(
-            Arc::clone(&db),
-            Arc::clone(&executor),
-            Arc::clone(&loop_engine),
-        ));
+        let cron_scheduler = Arc::new(
+            crate::scheduler::cron_scheduler::CronScheduler::with_graphs(
+                Arc::clone(&db),
+                Arc::clone(&executor),
+                Arc::clone(&graph_engine),
+            ),
+        );
         let scheduler_notify = cron_scheduler.notifier();
         let _scheduler_cancel = Arc::clone(&cron_scheduler).start();
 
@@ -734,7 +736,7 @@ mod hang_repro {
         let handler_watcher_engine = Arc::clone(&watcher_engine);
         let handler_scheduler_notify = Arc::clone(&scheduler_notify);
         let handler_sync_manager = Arc::clone(&sync_manager);
-        let handler_loop_engine = Arc::clone(&loop_engine);
+        let handler_graph_engine = Arc::clone(&graph_engine);
         let handler_notif = Arc::clone(&notif);
         let handler_ingestion = Arc::clone(&ingestion);
         let handler_dynamic_skills = Arc::clone(&dynamic_skills);
@@ -746,7 +748,7 @@ mod hang_repro {
                     Arc::clone(&handler_executor),
                     Arc::clone(&handler_watcher_engine),
                     Arc::clone(&handler_scheduler_notify),
-                    Arc::clone(&handler_loop_engine),
+                    Arc::clone(&handler_graph_engine),
                     Arc::clone(&handler_notif),
                     Arc::clone(&handler_sync_manager),
                     Arc::clone(&handler_ingestion),
@@ -766,7 +768,7 @@ mod hang_repro {
         });
         // give the listener a beat to start accepting
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        (port, loop_engine)
+        (port, graph_engine)
     }
 
     struct McpClient {
@@ -849,18 +851,18 @@ mod hang_repro {
         }
     }
 
-    fn insert_loop_and_sleeping_node(db: &Database, workdir: &str) -> (String, String) {
-        let loop_id = "wf-hang-repro".to_string();
+    fn insert_graph_and_sleeping_node(db: &Database, workdir: &str) -> (String, String) {
+        let graph_id = "wf-hang-repro".to_string();
         let spec_id = "spec-hang-repro".to_string();
-        db.insert_loop(&Loop {
+        db.insert_graph(&Graph {
             archived: false,
             paused_by_reconciliation: false,
             infra_node_id: None,
-            id: loop_id.clone(),
-            name: "Repro Loop".to_string(),
+            id: graph_id.clone(),
+            name: "Repro Graph".to_string(),
             description: None,
             workdir: workdir.to_string(),
-            status: LoopStatus::Draft,
+            status: GraphStatus::Draft,
             trigger: None,
             created_at: chrono::Utc::now(),
             started_at: None,
@@ -872,14 +874,14 @@ mod hang_repro {
             hooks: std::collections::BTreeMap::new(),
         })
         .unwrap();
-        db.insert_loop_spec(&LoopSpec {
+        db.insert_graph_spec(&GraphSpec {
             id: spec_id.clone(),
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             name: "Spec".to_string(),
             description: Some("desc".to_string()),
             position: 1,
             parallelizable: false,
-            status: LoopSpecStatus::Pending,
+            status: GraphSpecStatus::Pending,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
@@ -890,12 +892,12 @@ mod hang_repro {
             completed_via_at: None,
         })
         .unwrap();
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-sleep".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "sleep".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({
                 "platform": "sleep-cli",
                 "timeout_minutes": 1,
@@ -904,22 +906,22 @@ mod hang_repro {
             created_at: chrono::Utc::now(),
         })
         .unwrap();
-        (loop_id, spec_id)
+        (graph_id, spec_id)
     }
 
-    /// Regression (a): while a node is mid-dispatch on loop L (agent process
-    /// running, loop status == `Running`), a *second*, independent MCP
+    /// Regression (a): while a node is mid-dispatch on graph L (agent process
+    /// running, graph status == `Running`), a *second*, independent MCP
     /// session — standing in for that node's own bridge connection calling
-    /// back into the daemon — calls `loop_schedule_autorun` for the SAME
-    /// loop L over real Streamable HTTP, exactly as a resilience node
-    /// scheduling its own loop's resume does in production. The response
+    /// back into the daemon — calls `graph_schedule_autorun` for the SAME
+    /// graph L over real Streamable HTTP, exactly as a resilience node
+    /// scheduling its own graph's resume does in production. The response
     /// must arrive promptly (well under any node timeout) and the schedule
     /// must be durably persisted.
     ///
-    /// Also covers requirement 3 (fast-fail): `loop_run` and `loop_reset`
-    /// against the SAME loop, mid-dispatch, must reject immediately with an
+    /// Also covers requirement 3 (fast-fail): `graph_run` and `graph_reset`
+    /// against the SAME graph, mid-dispatch, must reject immediately with an
     /// explanatory error rather than blocking — proven here under a real
-    /// concurrent dispatch, not just against a synthetic `LoopStatus::Running`
+    /// concurrent dispatch, not just against a synthetic `GraphStatus::Running`
     /// value.
     #[tokio::test]
     // The HOME_LOCK guard is held for the entire test lifetime so concurrent
@@ -940,27 +942,28 @@ mod hang_repro {
 
         let dir = tempfile::tempdir().unwrap();
         let db = Arc::new(Database::new(&dir.path().join("test.db")).unwrap());
-        let (loop_id, _spec_id) = insert_loop_and_sleeping_node(&db, &dir.path().to_string_lossy());
+        let (graph_id, _spec_id) =
+            insert_graph_and_sleeping_node(&db, &dir.path().to_string_lossy());
 
-        let (port, loop_engine) = spawn_test_server(Arc::clone(&db)).await;
+        let (port, graph_engine) = spawn_test_server(Arc::clone(&db)).await;
 
-        let dispatch_loop_id = loop_id.clone();
+        let dispatch_graph_id = graph_id.clone();
         let dispatch = tokio::spawn(async move {
-            loop_engine
-                .run_loop(dispatch_loop_id, None, None, None, None)
+            graph_engine
+                .run_graph(dispatch_graph_id, None, None, None, None)
                 .await
         });
 
-        // Wait until the loop is actually Running (node process spawned).
+        // Wait until the graph is actually Running (node process spawned).
         for _ in 0..50 {
-            if db.get_loop(&loop_id).unwrap().unwrap().status == LoopStatus::Running {
+            if db.get_graph(&graph_id).unwrap().unwrap().status == GraphStatus::Running {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
         assert_eq!(
-            db.get_loop(&loop_id).unwrap().unwrap().status,
-            LoopStatus::Running,
+            db.get_graph(&graph_id).unwrap().unwrap().status,
+            GraphStatus::Running,
             "dispatch never reached Running before the repro call"
         );
 
@@ -973,16 +976,16 @@ mod hang_repro {
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(10),
             client.call_tool(
-                "loop_schedule_autorun",
-                serde_json::json!({"loop_id": loop_id, "at": at}),
+                "graph_schedule_autorun",
+                serde_json::json!({"graph_id": graph_id, "at": at}),
             ),
         )
         .await;
         let elapsed = start.elapsed();
 
         let schedule_response = result
-            .expect("node-initiated loop_schedule_autorun must respond promptly mid-dispatch")
-            .expect("loop_schedule_autorun call must succeed");
+            .expect("node-initiated graph_schedule_autorun must respond promptly mid-dispatch")
+            .expect("graph_schedule_autorun call must succeed");
         assert!(
             schedule_response.contains("scheduled to autorun"),
             "{schedule_response}"
@@ -992,21 +995,21 @@ mod hang_repro {
             "response took {elapsed:?}, expected well under the node timeout"
         );
 
-        let persisted = db.get_loop(&loop_id).unwrap().unwrap().autorun_at;
+        let persisted = db.get_graph(&graph_id).unwrap().unwrap().autorun_at;
         assert_eq!(
             persisted.map(|v| v.timestamp()),
             Some(at_dt.timestamp()),
             "schedule must be durably persisted at the requested instant"
         );
 
-        // Requirement 3: loop_run / loop_reset against the SAME loop, still
+        // Requirement 3: graph_run / graph_reset against the SAME graph, still
         // mid-dispatch, must fail fast (not hang, not queue).
         let run_result = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            client.call_tool("loop_run", serde_json::json!({"loop_id": loop_id})),
+            client.call_tool("graph_run", serde_json::json!({"graph_id": graph_id})),
         )
         .await
-        .expect("loop_run must respond promptly against a running loop")
+        .expect("graph_run must respond promptly against a running graph")
         .unwrap();
         assert!(
             run_result.contains("already running"),
@@ -1015,15 +1018,15 @@ mod hang_repro {
 
         let reset_result = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            client.call_tool("loop_reset", serde_json::json!({"loop_id": loop_id})),
+            client.call_tool("graph_reset", serde_json::json!({"graph_id": graph_id})),
         )
         .await
-        .expect("loop_reset must respond promptly against a running loop")
+        .expect("graph_reset must respond promptly against a running graph")
         .unwrap();
-        // The ground truth is the `loop_runs` table, not loop status (see
-        // `Database::reset_loop`'s `InFlight` guard) — the refusal now names
+        // The ground truth is the `graph_runs` table, not graph status (see
+        // `Database::reset_graph`'s `InFlight` guard) — the refusal now names
         // the node and run still executing rather than just pointing at
-        // `loop_pause`.
+        // `graph_pause`.
         assert!(
             reset_result.contains("sleep") && reset_result.contains("still executing"),
             "expected fast-fail error, got: {reset_result}"
@@ -1047,20 +1050,26 @@ mod hang_repro {
     async fn quota_shaped_failure_schedules_correct_autorun_instant() {
         let dir = tempfile::tempdir().unwrap();
         let db = Arc::new(Database::new(&dir.path().join("test.db")).unwrap());
-        let (loop_id, _spec_id) = insert_loop_and_sleeping_node(&db, &dir.path().to_string_lossy());
-        db.update_loop_status(&loop_id, LoopStatus::Failed, None, Some(chrono::Utc::now()))
-            .unwrap();
+        let (graph_id, _spec_id) =
+            insert_graph_and_sleeping_node(&db, &dir.path().to_string_lossy());
+        db.update_graph_status(
+            &graph_id,
+            GraphStatus::Failed,
+            None,
+            Some(chrono::Utc::now()),
+        )
+        .unwrap();
 
-        let (port, _loop_engine) = spawn_test_server(Arc::clone(&db)).await;
+        let (port, _graph_engine) = spawn_test_server(Arc::clone(&db)).await;
         let mut client = McpClient::new(port);
         client.initialize().await.unwrap();
 
         let before = chrono::Utc::now();
         let result = client
             .call_tool(
-                "loop_schedule_autorun",
+                "graph_schedule_autorun",
                 serde_json::json!({
-                    "loop_id": loop_id,
+                    "graph_id": graph_id,
                     "quota_reset_message":
                         "You've hit your session limit · resets 1pm (America/Bogota)"
                 }),
@@ -1071,7 +1080,7 @@ mod hang_repro {
         assert!(result.contains("scheduled to autorun"), "{result}");
 
         let persisted = db
-            .get_loop(&loop_id)
+            .get_graph(&graph_id)
             .unwrap()
             .unwrap()
             .autorun_at
@@ -1100,17 +1109,18 @@ mod hang_repro {
     async fn at_and_quota_reset_message_are_mutually_exclusive() {
         let dir = tempfile::tempdir().unwrap();
         let db = Arc::new(Database::new(&dir.path().join("test.db")).unwrap());
-        let (loop_id, _spec_id) = insert_loop_and_sleeping_node(&db, &dir.path().to_string_lossy());
+        let (graph_id, _spec_id) =
+            insert_graph_and_sleeping_node(&db, &dir.path().to_string_lossy());
 
-        let (port, _loop_engine) = spawn_test_server(Arc::clone(&db)).await;
+        let (port, _graph_engine) = spawn_test_server(Arc::clone(&db)).await;
         let mut client = McpClient::new(port);
         client.initialize().await.unwrap();
 
         let result = client
             .call_tool(
-                "loop_schedule_autorun",
+                "graph_schedule_autorun",
                 serde_json::json!({
-                    "loop_id": loop_id,
+                    "graph_id": graph_id,
                     "at": chrono::Utc::now().to_rfc3339(),
                     "quota_reset_message": "resets 1pm (America/Bogota)",
                 }),
@@ -1119,22 +1129,27 @@ mod hang_repro {
             .unwrap();
         assert!(result.contains("not both"), "{result}");
         assert!(
-            db.get_loop(&loop_id).unwrap().unwrap().autorun_at.is_none(),
+            db.get_graph(&graph_id)
+                .unwrap()
+                .unwrap()
+                .autorun_at
+                .is_none(),
             "rejected call must not have scheduled anything"
         );
     }
 
-    /// Requirement 4: a retried `loop_schedule_autorun` (simulating a lost
+    /// Requirement 4: a retried `graph_schedule_autorun` (simulating a lost
     /// ack whose write already committed) must not double-schedule — the
-    /// second call with the same loop id + target instant leaves exactly one
+    /// second call with the same graph id + target instant leaves exactly one
     /// pending schedule, at that instant, not a queued second one.
     #[tokio::test]
     async fn retried_schedule_call_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
         let db = Arc::new(Database::new(&dir.path().join("test.db")).unwrap());
-        let (loop_id, _spec_id) = insert_loop_and_sleeping_node(&db, &dir.path().to_string_lossy());
+        let (graph_id, _spec_id) =
+            insert_graph_and_sleeping_node(&db, &dir.path().to_string_lossy());
 
-        let (port, _loop_engine) = spawn_test_server(Arc::clone(&db)).await;
+        let (port, _graph_engine) = spawn_test_server(Arc::clone(&db)).await;
         let mut client = McpClient::new(port);
         client.initialize().await.unwrap();
 
@@ -1142,15 +1157,15 @@ mod hang_repro {
         for _ in 0..2 {
             let result = client
                 .call_tool(
-                    "loop_schedule_autorun",
-                    serde_json::json!({"loop_id": loop_id, "at": at.to_rfc3339()}),
+                    "graph_schedule_autorun",
+                    serde_json::json!({"graph_id": graph_id, "at": at.to_rfc3339()}),
                 )
                 .await
                 .unwrap();
             assert!(result.contains("scheduled to autorun"), "{result}");
         }
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
         assert_eq!(lp.autorun_at.map(|v| v.timestamp()), Some(at.timestamp()));
     }
 }
@@ -1305,9 +1320,9 @@ mod mcp_error_logging_tests {
 #[cfg(test)]
 mod stdio_startup_reconciliation_tests {
     use super::*;
-    use crate::domain::loops::{
-        Loop, LoopNode, LoopNodeKind, LoopNodeRun, LoopRunStatus, LoopSpec, LoopSpecStatus,
-        LoopStatus,
+    use crate::domain::graphs::{
+        Graph, GraphNode, GraphNodeKind, GraphNodeRun, GraphRunStatus, GraphSpec, GraphSpecStatus,
+        GraphStatus,
     };
     use tempfile::{tempdir, NamedTempFile};
 
@@ -1358,15 +1373,15 @@ mod stdio_startup_reconciliation_tests {
         output.stdout.is_empty()
     }
 
-    /// Seeds a `Running` loop with a dangling `running` node run over a dirty
-    /// git worktree — exactly the shape `reconcile_orphaned_loops` (called
+    /// Seeds a `Running` graph with a dangling `running` node run over a dirty
+    /// git worktree — exactly the shape `reconcile_orphaned_graphs` (called
     /// from a real daemon boot) would pause, interrupt, and mark `Interrupted`
-    /// without touching git. Returns the loop id, run id, and the workdir
+    /// without touching git. Returns the graph id, run id, and the workdir
     /// (kept alive for the caller via the returned `TempDir`). `suffix`
     /// distinguishes multiple graphs seeded into the same database (each
     /// gets its own tempdir workdir, so two calls never collide on ids or
     /// worktree).
-    fn seed_running_loop_with_dirty_worktree(
+    fn seed_running_graph_with_dirty_worktree(
         db: &Database,
         suffix: &str,
     ) -> (String, String, tempfile::TempDir) {
@@ -1375,7 +1390,7 @@ mod stdio_startup_reconciliation_tests {
         let head = git_head(dir.path());
         std::fs::write(dir.path().join("truncated.rs"), "fn broken(").unwrap();
 
-        let lp = Loop {
+        let lp = Graph {
             archived: false,
             paused_by_reconciliation: false,
             infra_node_id: None,
@@ -1383,7 +1398,7 @@ mod stdio_startup_reconciliation_tests {
             name: format!("Stdio startup test loop {suffix}"),
             description: None,
             workdir: dir.path().to_string_lossy().to_string(),
-            status: LoopStatus::Running,
+            status: GraphStatus::Running,
             trigger: None,
             created_at: chrono::Utc::now(),
             started_at: None,
@@ -1394,14 +1409,14 @@ mod stdio_startup_reconciliation_tests {
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
         };
-        let spec = LoopSpec {
+        let spec = GraphSpec {
             id: format!("spec-stdio-startup-{suffix}"),
-            loop_id: Some(lp.id.clone()),
+            graph_id: Some(lp.id.clone()),
             name: "Spec".to_string(),
             description: None,
             position: 1,
             parallelizable: false,
-            status: LoopSpecStatus::Running,
+            status: GraphSpecStatus::Running,
             started_at: None,
             completed_at: None,
             spec_start_head: Some(head),
@@ -1411,22 +1426,22 @@ mod stdio_startup_reconciliation_tests {
             completed_via_at: None,
             spec_committed_head: None,
         };
-        let node = LoopNode {
+        let node = GraphNode {
             id: format!("node-stdio-startup-{suffix}"),
             spec_id: Some(spec.id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "Node".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({"command": "true", "success_condition": "exit_code_0"}),
             position: 1,
             created_at: chrono::Utc::now(),
         };
-        let run = LoopNodeRun {
+        let run = GraphNodeRun {
             id: format!("run-stdio-startup-{suffix}"),
-            loop_id: lp.id.clone(),
+            graph_id: lp.id.clone(),
             spec_id: spec.id.clone(),
             node_id: node.id.clone(),
-            status: LoopRunStatus::Running,
+            status: GraphRunStatus::Running,
             input: None,
             output: None,
             started_at: chrono::Utc::now(),
@@ -1439,10 +1454,10 @@ mod stdio_startup_reconciliation_tests {
             executed_model: None,
         };
 
-        db.insert_loop(&lp).unwrap();
-        db.insert_loop_spec(&spec).unwrap();
-        db.insert_loop_node(&node).unwrap();
-        db.insert_loop_run(&run).unwrap();
+        db.insert_graph(&lp).unwrap();
+        db.insert_graph_spec(&spec).unwrap();
+        db.insert_graph_node(&node).unwrap();
+        db.insert_graph_run(&run).unwrap();
 
         (lp.id, run.id, dir)
     }
@@ -1451,26 +1466,26 @@ mod stdio_startup_reconciliation_tests {
     /// startup sequence (`stdio_server_startup` — the same DB-touching setup
     /// a `canopy bridge` embedded-stdio fallback runs) must never reconcile a
     /// `Running` graph, even though the daemon's own startup path
-    /// (`run_http_server`) calls `reconcile_orphaned_loops` at the equivalent
+    /// (`run_http_server`) calls `reconcile_orphaned_graphs` at the equivalent
     /// point in its own sequence.
     #[tokio::test]
     async fn stdio_startup_never_reconciles_running_graph() {
         let db = Arc::new(test_db());
-        let (loop_id, run_id, dir) = seed_running_loop_with_dirty_worktree(&db, "solo");
+        let (graph_id, run_id, dir) = seed_running_graph_with_dirty_worktree(&db, "solo");
         let data_dir = tempdir().unwrap();
 
         let _startup = stdio_server_startup(Arc::clone(&db), data_dir.path()).await;
 
-        let lp_after = db.get_loop(&loop_id).unwrap().unwrap();
+        let lp_after = db.get_graph(&graph_id).unwrap().unwrap();
         assert_eq!(
             lp_after.status,
-            LoopStatus::Running,
+            GraphStatus::Running,
             "stdio startup must not pause a graph the daemon still owns"
         );
-        let run_after = db.get_loop_run(&run_id).unwrap().unwrap();
+        let run_after = db.get_graph_run(&run_id).unwrap().unwrap();
         assert_eq!(
             run_after.status,
-            LoopRunStatus::Running,
+            GraphRunStatus::Running,
             "stdio startup must not mark the run interrupted"
         );
         assert!(
@@ -1488,28 +1503,28 @@ mod stdio_startup_reconciliation_tests {
     #[tokio::test]
     async fn stdio_startup_leaves_two_concurrent_graphs_in_different_workdirs_untouched() {
         let db = Arc::new(test_db());
-        let (loop_a, run_a, dir_a) = seed_running_loop_with_dirty_worktree(&db, "a");
-        let (loop_b, run_b, dir_b) = seed_running_loop_with_dirty_worktree(&db, "b");
+        let (graph_a, run_a, dir_a) = seed_running_graph_with_dirty_worktree(&db, "a");
+        let (graph_b, run_b, dir_b) = seed_running_graph_with_dirty_worktree(&db, "b");
         let data_dir = tempdir().unwrap();
 
         let _startup = stdio_server_startup(Arc::clone(&db), data_dir.path()).await;
 
-        for (loop_id, run_id, dir) in [(&loop_a, &run_a, &dir_a), (&loop_b, &run_b, &dir_b)] {
-            let lp_after = db.get_loop(loop_id).unwrap().unwrap();
+        for (graph_id, run_id, dir) in [(&graph_a, &run_a, &dir_a), (&graph_b, &run_b, &dir_b)] {
+            let lp_after = db.get_graph(graph_id).unwrap().unwrap();
             assert_eq!(
                 lp_after.status,
-                LoopStatus::Running,
-                "stdio startup must not pause graph '{loop_id}' just because another graph is also live"
+                GraphStatus::Running,
+                "stdio startup must not pause graph '{graph_id}' just because another graph is also live"
             );
-            let run_after = db.get_loop_run(run_id).unwrap().unwrap();
+            let run_after = db.get_graph_run(run_id).unwrap().unwrap();
             assert_eq!(
                 run_after.status,
-                LoopRunStatus::Running,
-                "stdio startup must not mark graph '{loop_id}''s run interrupted"
+                GraphRunStatus::Running,
+                "stdio startup must not mark graph '{graph_id}''s run interrupted"
             );
             assert!(
                 !git_is_clean(dir.path()),
-                "stdio startup must not touch graph '{loop_id}''s uncommitted changes"
+                "stdio startup must not touch graph '{graph_id}''s uncommitted changes"
             );
         }
     }

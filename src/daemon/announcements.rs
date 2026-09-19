@@ -56,13 +56,13 @@ impl AnnouncementsClient {
         let client = Arc::clone(&self);
         tokio::spawn(async move {
             tracing::info!("Announcements client started");
-            client.run_loop(cancel_run).await;
+            client.run_graph(cancel_run).await;
             tracing::info!("Announcements client stopped");
         });
         cancel
     }
 
-    async fn run_loop(&self, cancel: CancellationToken) {
+    async fn run_graph(&self, cancel: CancellationToken) {
         let mut backoff = INITIAL_BACKOFF;
         loop {
             let result = tokio::select! {
@@ -80,7 +80,7 @@ impl AnnouncementsClient {
                     // healthy: drop back to the initial delay. We still wait it
                     // out rather than reconnecting instantly, so a server that
                     // closes the socket right after each message cannot push us
-                    // into a tight reconnect loop.
+                    // into a tight reconnect graph.
                     backoff = INITIAL_BACKOFF;
                     tracing::info!(
                         "Announcements client disconnected, reconnecting in {backoff:?}"
@@ -193,7 +193,7 @@ impl AnnouncementsClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::notification_service::{LoopFinishOutcome, NotificationService};
+    use crate::application::notification_service::{GraphFinishOutcome, NotificationService};
     use crate::db::Database;
     use std::sync::Mutex;
     use tempfile::tempdir;
@@ -220,7 +220,7 @@ mod tests {
         fn notify_watcher_triggered(&self, _w: &str, _p: &str, _e: &str) {}
         fn notify_agent_failed(&self, _a: &str, _c: &str, _e: i32, _o: &str) {}
         fn notify_nursery_failed(&self, _e: &str) {}
-        fn notify_loop_started(&self, _l: &str, _s: usize, _r: bool, _f: Option<&str>) {}
+        fn notify_graph_started(&self, _l: &str, _s: usize, _r: bool, _f: Option<&str>) {}
         fn notify_spec_completed(
             &self,
             _l: &str,
@@ -230,8 +230,8 @@ mod tests {
             _n: Option<&str>,
         ) {
         }
-        fn notify_loop_finished(&self, _l: &str, _o: LoopFinishOutcome<'_>) {}
-        fn notify_loop_completion_hook_failed(&self, _l: &str, _e: &str) {}
+        fn notify_graph_finished(&self, _l: &str, _o: GraphFinishOutcome<'_>) {}
+        fn notify_graph_completion_hook_failed(&self, _l: &str, _e: &str) {}
         fn notify_announcement(&self, title: &str, body: &str) {
             self.announcements
                 .lock()

@@ -1,6 +1,6 @@
 //! Daily database health routine: full `integrity_check` and
 //! `foreign_key_check`, plus a verified single-backup replacement via
-//! `VACUUM INTO`, run inside the daemon only while it's idle (no loop
+//! `VACUUM INTO`, run inside the daemon only while it's idle (no graph
 //! running, no TUI attached).
 //!
 //! Reuses the same `tokio::spawn` + interval-poll pattern the internal cron
@@ -15,10 +15,10 @@
 //!   function over a `Database` and two paths. No idle/cadence decision, no
 //!   tokio — directly callable from tests and from the on-demand trigger
 //!   (`canopy daemon health-check`, see `daemon::cli`) without spinning up
-//!   the daemon's background loop.
+//!   the daemon's background graph.
 //! - [`HealthRoutine`] is the daemon-side wrapper: decides *when* to call
 //!   it (idle + due), runs it off the async runtime via `spawn_blocking` (a
-//!   long `integrity_check` on a large database must not stall loop
+//!   long `integrity_check` on a large database must not stall graph
 //!   execution or MCP requests), and persists the result.
 
 use std::path::{Path, PathBuf};
@@ -76,13 +76,13 @@ impl HealthRoutine {
         let routine = Arc::clone(&self);
         tokio::spawn(async move {
             tracing::info!("Database health routine started");
-            routine.run_loop(cancel_run).await;
+            routine.run_graph(cancel_run).await;
             tracing::info!("Database health routine stopped");
         });
         cancel
     }
 
-    async fn run_loop(&self, cancel: CancellationToken) {
+    async fn run_graph(&self, cancel: CancellationToken) {
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => break,
@@ -384,19 +384,19 @@ fn available_space(path: &Path) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::loops::{Loop, LoopStatus};
+    use crate::domain::graphs::{Graph, GraphStatus};
     use tempfile::tempdir;
 
-    fn make_running_loop(id: &str) -> Loop {
-        Loop {
+    fn make_running_graph(id: &str) -> Graph {
+        Graph {
             archived: false,
             paused_by_reconciliation: false,
             infra_node_id: None,
             id: id.to_string(),
-            name: format!("loop-{id}"),
+            name: format!("graph-{id}"),
             description: None,
             workdir: "/tmp/proj".to_string(),
-            status: LoopStatus::Running,
+            status: GraphStatus::Running,
             trigger: None,
             created_at: Utc::now(),
             started_at: None,
@@ -573,7 +573,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let db_path = database_path(dir.path());
         let db = Arc::new(Database::new(&db_path).unwrap());
-        db.insert_loop(&make_running_loop("loop-1")).unwrap();
+        db.insert_graph(&make_running_graph("graph-1")).unwrap();
 
         let routine = HealthRoutine::new(Arc::clone(&db), dir.path().to_path_buf());
         routine.maybe_run().await;

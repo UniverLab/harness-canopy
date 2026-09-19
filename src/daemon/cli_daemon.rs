@@ -1,4 +1,4 @@
-//! Shared daemon-call plumbing for the state-changing `canopy loop`/`canopy
+//! Shared daemon-call plumbing for the state-changing `canopy graph`/`canopy
 //! spec` subcommands (run, pause, continue, reset, autorun, spec create).
 //!
 //! Every one of these reaches the exact same MCP tool the daemon already
@@ -17,9 +17,9 @@ use crate::tui::mcp_client::call_daemon_tool;
 /// Call one daemon MCP tool and return its result text on success.
 ///
 /// A transport failure (the daemon isn't listening on the resolved port) and
-/// a tool-level rejection (e.g. "Loop not found") surface as distinct error
+/// a tool-level rejection (e.g. "Graph not found") surface as distinct error
 /// messages, so a caller can never mistake "the daemon is unreachable" for
-/// "the loop doesn't exist" — the ambiguity that made the 2026-07-29
+/// "the graph doesn't exist" — the ambiguity that made the 2026-07-29
 /// port-hijack incident hard to diagnose from the read-only CLI alone.
 pub(crate) fn call_tool(
     port_override: Option<u16>,
@@ -48,28 +48,37 @@ mod tests {
     #[test]
     fn call_tool_returns_text_on_success() {
         let fake = spawn_fake_daemon(serde_json::json!({
-            "content": [{"type": "text", "text": "Loop 'x' launched in background."}],
+            "content": [{"type": "text", "text": "Graph 'x' launched in background."}],
             "isError": false
         }));
         let port: u16 = fake.port.parse().unwrap();
 
-        let text = call_tool(Some(port), "loop_run", &serde_json::json!({"loop_id": "x"})).unwrap();
+        let text = call_tool(
+            Some(port),
+            "graph_run",
+            &serde_json::json!({"graph_id": "x"}),
+        )
+        .unwrap();
 
-        assert_eq!(text, "Loop 'x' launched in background.");
+        assert_eq!(text, "Graph 'x' launched in background.");
         let calls = fake.recorded_calls();
-        assert_eq!(calls[0]["name"], "loop_run");
+        assert_eq!(calls[0]["name"], "graph_run");
     }
 
     #[test]
     fn call_tool_surfaces_tool_level_errors_distinctly() {
         let fake = spawn_fake_daemon(serde_json::json!({
-            "content": [{"type": "text", "text": "Loop 'x' not found."}],
+            "content": [{"type": "text", "text": "Graph 'x' not found."}],
             "isError": true
         }));
         let port: u16 = fake.port.parse().unwrap();
 
-        let err =
-            call_tool(Some(port), "loop_run", &serde_json::json!({"loop_id": "x"})).unwrap_err();
+        let err = call_tool(
+            Some(port),
+            "graph_run",
+            &serde_json::json!({"graph_id": "x"}),
+        )
+        .unwrap_err();
 
         assert!(err.to_string().contains("not found"));
         // A tool-level rejection must never be dressed up as an unreachable
@@ -84,7 +93,11 @@ mod tests {
         // Retry with a fresh port on the rare miss instead of flaking.
         for _ in 0..5 {
             let port: u16 = unused_port().parse().unwrap();
-            match call_tool(Some(port), "loop_run", &serde_json::json!({"loop_id": "x"})) {
+            match call_tool(
+                Some(port),
+                "graph_run",
+                &serde_json::json!({"graph_id": "x"}),
+            ) {
                 Err(err) => {
                     let chain: Vec<String> = err.chain().map(ToString::to_string).collect();
                     assert!(chain

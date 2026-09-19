@@ -1,6 +1,6 @@
-//! Renderers for the loop run-time controls' two overlays: the autorun
+//! Renderers for the graph run-time controls' two overlays: the autorun
 //! scheduling input and the last action's result banner (see
-//! `app::dialog::loop_control`).
+//! `app::dialog::graph_control`).
 
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -9,26 +9,26 @@ use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
 use super::centered_rect;
-use crate::tui::app::dialog::{LoopAutorunDialog, LoopAutorunMode};
+use crate::tui::app::dialog::{GraphAutorunDialog, GraphAutorunMode};
 use crate::tui::app::types::App;
 use crate::tui::ui::theme::Theme;
 
-/// The autorun-scheduling dialog (`a` on a focused loop): [`LoopAutorunMode::Picker`]
+/// The autorun-scheduling dialog (`a` on a focused graph): [`GraphAutorunMode::Picker`]
 /// (the default) reuses the same inline date-time picker as the prompt
 /// builder's scheduled-send control, shown alongside the local timezone and
 /// the resulting UTC instant so the conversion is visible before
-/// submission; Tab switches to [`LoopAutorunMode::QuotaMessage`], a
+/// submission; Tab switches to [`GraphAutorunMode::QuotaMessage`], a
 /// free-text field sent verbatim to the daemon — empty cancels any pending
 /// autorun.
-pub fn draw_loop_autorun_dialog(frame: &mut Frame, app: &App, theme: &Theme) {
-    let Some(dialog) = &app.loop_autorun_dialog else {
+pub fn draw_graph_autorun_dialog(frame: &mut Frame, app: &App, theme: &Theme) {
+    let Some(dialog) = &app.graph_autorun_dialog else {
         return;
     };
 
     let area = centered_rect(60, 11, frame.area());
     frame.render_widget(Clear, area);
 
-    let title = format!(" Autorun: {} ", dialog.loop_name);
+    let title = format!(" Autorun: {} ", dialog.graph_name);
     let block = Block::default()
         .title(title)
         .borders(crate::tui::ui::borders_for(theme))
@@ -39,7 +39,7 @@ pub fn draw_loop_autorun_dialog(frame: &mut Frame, app: &App, theme: &Theme) {
 
     let mut lines = Vec::new();
     match dialog.mode {
-        LoopAutorunMode::Picker => {
+        GraphAutorunMode::Picker => {
             let offset = chrono::Local::now().format("%:z").to_string();
             lines.push(Line::from(Span::styled(
                 format!("Pick a local time — your timezone is UTC{offset}"),
@@ -59,7 +59,7 @@ pub fn draw_loop_autorun_dialog(frame: &mut Frame, app: &App, theme: &Theme) {
                 ),
             ]));
         }
-        LoopAutorunMode::QuotaMessage => {
+        GraphAutorunMode::QuotaMessage => {
             lines.push(Line::from(Span::styled(
                 "Quota-reset text for the engine to parse (empty = cancel pending)",
                 Style::default().fg(theme.dim_text),
@@ -99,7 +99,7 @@ pub fn draw_loop_autorun_dialog(frame: &mut Frame, app: &App, theme: &Theme) {
 /// Render the picker's year/month/day/hour/minute fields with the currently
 /// focused one highlighted, mirroring the prompt builder's inline send-at
 /// picker rendering.
-fn picker_line(dialog: &LoopAutorunDialog, theme: &Theme) -> Line<'static> {
+fn picker_line(dialog: &GraphAutorunDialog, theme: &Theme) -> Line<'static> {
     use chrono::{Datelike, Timelike};
     let v = dialog.picker.value;
     let fields = [
@@ -123,12 +123,12 @@ fn picker_line(dialog: &LoopAutorunDialog, theme: &Theme) -> Line<'static> {
     Line::from(spans)
 }
 
-/// The daemon's verbatim result from the last loop-control action
+/// The daemon's verbatim result from the last graph-control action
 /// (run/pause/continue/reset/autorun) — success or error, shown until
-/// dismissed by `App::dismiss_loop_action_message`'s TTL or superseded by
+/// dismissed by `App::dismiss_graph_action_message`'s TTL or superseded by
 /// the next dispatch. Never swallowed into a silent no-op.
-pub fn draw_loop_action_message(frame: &mut Frame, app: &App, theme: &Theme) {
-    let Some(message) = &app.loop_action_message else {
+pub fn draw_graph_action_message(frame: &mut Frame, app: &App, theme: &Theme) {
+    let Some(message) = &app.graph_action_message else {
         return;
     };
 
@@ -138,9 +138,9 @@ pub fn draw_loop_action_message(frame: &mut Frame, app: &App, theme: &Theme) {
         theme.header_color
     };
     let title = if message.is_error {
-        " Loop action failed "
+        " Graph action failed "
     } else {
-        " Loop action "
+        " Graph action "
     };
 
     let dialog_width = frame.area().width * 50 / 100;
@@ -185,7 +185,7 @@ pub fn draw_loop_action_message(frame: &mut Frame, app: &App, theme: &Theme) {
 mod tests {
     use super::*;
     use crate::db::Database;
-    use crate::tui::app::dialog::LoopActionMessage;
+    use crate::tui::app::dialog::GraphActionMessage;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use std::sync::Arc;
@@ -215,14 +215,14 @@ mod tests {
     #[test]
     fn autorun_dialog_picker_mode_renders_fields_and_resulting_utc() {
         let (mut app, _dir) = test_app();
-        let dialog = LoopAutorunDialog::new("lp1".to_string(), "Nightly review".to_string(), None);
-        app.loop_autorun_dialog = Some(dialog);
+        let dialog = GraphAutorunDialog::new("lp1".to_string(), "Nightly review".to_string(), None);
+        app.graph_autorun_dialog = Some(dialog);
 
         let theme = Theme::classic();
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| draw_loop_autorun_dialog(frame, &app, &theme))
+            .draw(|frame| draw_graph_autorun_dialog(frame, &app, &theme))
             .unwrap();
 
         let text = buffer_text(&terminal);
@@ -236,16 +236,16 @@ mod tests {
     fn autorun_dialog_quota_message_mode_renders_typed_text() {
         let (mut app, _dir) = test_app();
         let mut dialog =
-            LoopAutorunDialog::new("lp1".to_string(), "Nightly review".to_string(), None);
-        dialog.mode = LoopAutorunMode::QuotaMessage;
+            GraphAutorunDialog::new("lp1".to_string(), "Nightly review".to_string(), None);
+        dialog.mode = GraphAutorunMode::QuotaMessage;
         dialog.quota_input = "resets 1pm".to_string();
-        app.loop_autorun_dialog = Some(dialog);
+        app.graph_autorun_dialog = Some(dialog);
 
         let theme = Theme::classic();
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| draw_loop_autorun_dialog(frame, &app, &theme))
+            .draw(|frame| draw_graph_autorun_dialog(frame, &app, &theme))
             .unwrap();
 
         let text = buffer_text(&terminal);
@@ -258,15 +258,15 @@ mod tests {
     fn autorun_dialog_shows_inline_error() {
         let (mut app, _dir) = test_app();
         let mut dialog =
-            LoopAutorunDialog::new("lp1".to_string(), "Nightly review".to_string(), None);
+            GraphAutorunDialog::new("lp1".to_string(), "Nightly review".to_string(), None);
         dialog.error = Some("picked time is in the past".to_string());
-        app.loop_autorun_dialog = Some(dialog);
+        app.graph_autorun_dialog = Some(dialog);
 
         let theme = Theme::classic();
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| draw_loop_autorun_dialog(frame, &app, &theme))
+            .draw(|frame| draw_graph_autorun_dialog(frame, &app, &theme))
             .unwrap();
 
         let text = buffer_text(&terminal);
@@ -280,23 +280,23 @@ mod tests {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| draw_loop_autorun_dialog(frame, &app, &theme))
+            .draw(|frame| draw_graph_autorun_dialog(frame, &app, &theme))
             .unwrap();
     }
 
     #[test]
     fn action_message_shows_daemon_success_text() {
         let (mut app, _dir) = test_app();
-        app.loop_action_message = Some(LoopActionMessage {
+        app.graph_action_message = Some(GraphActionMessage {
             is_error: false,
-            text: "Loop 'lp1' launched in background.".to_string(),
+            text: "Graph 'lp1' launched in background.".to_string(),
         });
 
         let theme = Theme::classic();
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| draw_loop_action_message(frame, &app, &theme))
+            .draw(|frame| draw_graph_action_message(frame, &app, &theme))
             .unwrap();
 
         let buffer = terminal.backend().buffer().clone();
@@ -313,16 +313,16 @@ mod tests {
     #[test]
     fn action_message_shows_daemon_error_text() {
         let (mut app, _dir) = test_app();
-        app.loop_action_message = Some(LoopActionMessage {
+        app.graph_action_message = Some(GraphActionMessage {
             is_error: true,
-            text: "Loop 'lp1' is not paused.".to_string(),
+            text: "Graph 'lp1' is not paused.".to_string(),
         });
 
         let theme = Theme::classic();
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| draw_loop_action_message(frame, &app, &theme))
+            .draw(|frame| draw_graph_action_message(frame, &app, &theme))
             .unwrap();
 
         let buffer = terminal.backend().buffer().clone();
@@ -344,7 +344,7 @@ mod tests {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| draw_loop_action_message(frame, &app, &theme))
+            .draw(|frame| draw_graph_action_message(frame, &app, &theme))
             .unwrap();
     }
 }

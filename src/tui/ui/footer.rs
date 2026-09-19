@@ -43,19 +43,21 @@ pub(super) fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Them
                 h.push(("Esc", "home"));
                 h
             } else {
-                let on_loop = app.sidebar_layer == SidebarLayer::Automation
-                    && app.automation_kind == AutomationKind::Loop;
+                let on_graph = app.sidebar_layer == SidebarLayer::Automation
+                    && app.automation_kind == AutomationKind::Graph;
                 let is_bg = matches!(app.selected_agent(), Some(AgentEntry::Agent(_)));
                 let mut h = vec![("↑↓", "nav"), ("Enter", "focus"), ("Shift+←→", "tab")];
-                if on_loop && app.loop_live_focus == crate::tui::app::types::LoopLiveFocus::Graph {
+                if on_graph && app.graph_live_focus == crate::tui::app::types::GraphLiveFocus::Graph
+                {
                     h.push(("←→", "graph ↑↓"));
                 }
-                if on_loop {
+                if on_graph {
                     // Run-time controls apply only to the live (non-archived)
-                    // list — an archived loop is inert until restored.
-                    if !app.loop_view_archived {
-                        if let Some(lp) = app.selected_loop() {
-                            for action in crate::tui::app::dialog::available_loop_actions(lp.status)
+                    // list — an archived graph is inert until restored.
+                    if !app.graph_view_archived {
+                        if let Some(lp) = app.selected_graph() {
+                            for action in
+                                crate::tui::app::dialog::available_graph_actions(lp.status)
                             {
                                 h.push((action.key(), action.label()));
                             }
@@ -63,7 +65,7 @@ pub(super) fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Them
                         }
                     }
                     h.push(("e", "edit"));
-                    if app.loop_view_archived {
+                    if app.graph_view_archived {
                         h.push(("R", "restore"));
                         h.push(("F4", "delete forever"));
                     } else {
@@ -71,9 +73,9 @@ pub(super) fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Them
                     }
                     h.push((
                         "A",
-                        if app.loop_view_archived {
-                            "loops"
-                        } else if app.archived_loop_count > 0 {
+                        if app.graph_view_archived {
+                            "graphs"
+                        } else if app.archived_graph_count > 0 {
                             "archived"
                         } else {
                             "archive"
@@ -211,14 +213,14 @@ pub(super) fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Them
             ("Ctrl+L", "recall last"),
             ("Esc", "cancel"),
         ],
-        Focus::LoopEditorDialog => vec![
+        Focus::GraphEditorDialog => vec![
             ("type", "edit"),
             ("←→", "cursor"),
             ("Enter", "newline"),
             ("Ctrl+S", "save"),
             ("Esc", "cancel"),
         ],
-        Focus::LoopFormDialog => vec![
+        Focus::GraphFormDialog => vec![
             ("Tab/↑↓", "field"),
             ("←→", "trigger"),
             ("Enter", "save"),
@@ -524,30 +526,30 @@ mod tests {
     }
 
     #[test]
-    fn footer_renders_in_loop_editor_dialog() {
+    fn footer_renders_in_graph_editor_dialog() {
         let mut app = make_app();
-        app.focus = Focus::LoopEditorDialog;
+        app.focus = Focus::GraphEditorDialog;
         let theme = Theme::classic();
         let text = render_footer_to_text(80, 1, |frame, area| {
             draw_footer(frame, area, &app, &theme);
         });
         assert!(
             text.contains("save"),
-            "LoopEditorDialog footer should show 'save': {text}"
+            "GraphEditorDialog footer should show 'save': {text}"
         );
     }
 
     #[test]
-    fn footer_renders_in_loop_form_dialog() {
+    fn footer_renders_in_graph_form_dialog() {
         let mut app = make_app();
-        app.focus = Focus::LoopFormDialog;
+        app.focus = Focus::GraphFormDialog;
         let theme = Theme::classic();
         let text = render_footer_to_text(80, 1, |frame, area| {
             draw_footer(frame, area, &app, &theme);
         });
         assert!(
             text.contains("field"),
-            "LoopFormDialog footer should show 'field': {text}"
+            "GraphFormDialog footer should show 'field': {text}"
         );
     }
 
@@ -874,8 +876,10 @@ mod tests {
         );
     }
 
-    fn loop_with_status(status: crate::domain::loops::LoopStatus) -> crate::domain::loops::Loop {
-        crate::domain::loops::Loop {
+    fn graph_with_status(
+        status: crate::domain::graphs::GraphStatus,
+    ) -> crate::domain::graphs::Graph {
+        crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
             infra_node_id: None,
@@ -896,19 +900,19 @@ mod tests {
         }
     }
 
-    fn app_on_loop(status: crate::domain::loops::LoopStatus) -> App {
+    fn app_on_graph(status: crate::domain::graphs::GraphStatus) -> App {
         let mut app = make_app();
         app.focus = Focus::Preview;
         app.sidebar_layer = SidebarLayer::Automation;
-        app.automation_kind = crate::tui::app::AutomationKind::Loop;
-        app.loops = vec![loop_with_status(status)];
-        app.selected_loop_id = Some("lp1".to_string());
+        app.automation_kind = crate::tui::app::AutomationKind::Graph;
+        app.graphs = vec![graph_with_status(status)];
+        app.selected_graph_id = Some("lp1".to_string());
         app
     }
 
     #[test]
-    fn footer_on_a_running_loop_offers_only_pause() {
-        let app = app_on_loop(crate::domain::loops::LoopStatus::Running);
+    fn footer_on_a_running_graph_offers_only_pause() {
+        let app = app_on_graph(crate::domain::graphs::GraphStatus::Running);
         let theme = Theme::classic();
         let text = render_footer_to_text(200, 1, |frame, area| {
             draw_footer(frame, area, &app, &theme);
@@ -923,8 +927,8 @@ mod tests {
     }
 
     #[test]
-    fn footer_on_a_paused_loop_offers_both_continue_modes() {
-        let app = app_on_loop(crate::domain::loops::LoopStatus::Paused);
+    fn footer_on_a_paused_graph_offers_both_continue_modes() {
+        let app = app_on_graph(crate::domain::graphs::GraphStatus::Paused);
         let theme = Theme::classic();
         let text = render_footer_to_text(200, 1, |frame, area| {
             draw_footer(frame, area, &app, &theme);
@@ -935,8 +939,8 @@ mod tests {
     }
 
     #[test]
-    fn footer_on_a_completed_loop_offers_reset_and_run() {
-        let app = app_on_loop(crate::domain::loops::LoopStatus::Completed);
+    fn footer_on_a_completed_graph_offers_reset_and_run() {
+        let app = app_on_graph(crate::domain::graphs::GraphStatus::Completed);
         let theme = Theme::classic();
         let text = render_footer_to_text(200, 1, |frame, area| {
             draw_footer(frame, area, &app, &theme);
@@ -947,15 +951,15 @@ mod tests {
     }
 
     #[test]
-    fn footer_always_offers_autorun_for_a_selected_live_loop() {
+    fn footer_always_offers_autorun_for_a_selected_live_graph() {
         for status in [
-            crate::domain::loops::LoopStatus::Draft,
-            crate::domain::loops::LoopStatus::Running,
-            crate::domain::loops::LoopStatus::Paused,
-            crate::domain::loops::LoopStatus::Completed,
-            crate::domain::loops::LoopStatus::Failed,
+            crate::domain::graphs::GraphStatus::Draft,
+            crate::domain::graphs::GraphStatus::Running,
+            crate::domain::graphs::GraphStatus::Paused,
+            crate::domain::graphs::GraphStatus::Completed,
+            crate::domain::graphs::GraphStatus::Failed,
         ] {
-            let app = app_on_loop(status);
+            let app = app_on_graph(status);
             let theme = Theme::classic();
             let text = render_footer_to_text(200, 1, |frame, area| {
                 draw_footer(frame, area, &app, &theme);
@@ -966,8 +970,8 @@ mod tests {
 
     #[test]
     fn footer_omits_run_time_controls_in_the_archived_view() {
-        let mut app = app_on_loop(crate::domain::loops::LoopStatus::Completed);
-        app.loop_view_archived = true;
+        let mut app = app_on_graph(crate::domain::graphs::GraphStatus::Completed);
+        app.graph_view_archived = true;
         let theme = Theme::classic();
         let text = render_footer_to_text(200, 1, |frame, area| {
             draw_footer(frame, area, &app, &theme);

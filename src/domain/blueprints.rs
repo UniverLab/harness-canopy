@@ -1,4 +1,4 @@
-//! Node blueprints — predesigned, reusable node templates that let loops be
+//! Node blueprints — predesigned, reusable node templates that let graphs be
 //! assembled by connecting known modules instead of pasting full configs.
 //!
 //! A blueprint is just a name plus a node `kind` and a config template; the
@@ -10,14 +10,14 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::domain::loops::{EnsembleMemberSpec, LoopNodeKind};
+use crate::domain::graphs::{EnsembleMemberSpec, GraphNodeKind};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Blueprint {
     pub id: String,
     pub name: String,
-    pub kind: LoopNodeKind,
-    /// Config template. `loop_add_node` uses this as-is, or shallow-merges
+    pub kind: GraphNodeKind,
+    /// Config template. `graph_add_node` uses this as-is, or shallow-merges
     /// `config_overrides` on top of it (override keys win).
     pub config: Value,
     /// Builtins are seeded automatically and can't be deleted — see
@@ -34,43 +34,43 @@ pub struct Blueprint {
 /// None of these carry a `platform`/`cli`/`model`: a blueprint describes the
 /// *role* a node plays (its kind and its prompt), not which harness runs it.
 /// Which harness executes a node is a per-installation, per-budget decision
-/// that belongs to whoever assembles the loop, supplied via `loop_add_node`'s
+/// that belongs to whoever assembles the graph, supplied via `graph_add_node`'s
 /// `config_overrides` — never a default baked into the blueprint. See the
 /// module doc and `validate_node_config`'s `Agent` arm, which is what
 /// actually enforces this at node-creation time.
-pub fn builtin_blueprint_specs() -> Vec<(&'static str, LoopNodeKind, Value)> {
+pub fn builtin_blueprint_specs() -> Vec<(&'static str, GraphNodeKind, Value)> {
     vec![
         (
             "implementer",
-            LoopNodeKind::Agent,
+            GraphNodeKind::Agent,
             serde_json::json!({
                 "prompt_preset": "implementer"
             }),
         ),
         (
             "cargo-gates",
-            LoopNodeKind::Check,
+            GraphNodeKind::Check,
             serde_json::json!({
                 "command": "cargo fmt --all && cargo clippy --all-targets -- -D warnings && cargo test"
             }),
         ),
         (
             "reviewer-committer",
-            LoopNodeKind::Agent,
+            GraphNodeKind::Agent,
             serde_json::json!({
                 "prompt_preset": "reviewer"
             }),
         ),
         (
             "commit-check",
-            LoopNodeKind::Check,
+            GraphNodeKind::Check,
             serde_json::json!({
                 "command": "test \"$(git rev-parse HEAD)\" != \"{{spec_start_head}}\""
             }),
         ),
         (
             "resilience",
-            LoopNodeKind::Agent,
+            GraphNodeKind::Agent,
             serde_json::json!({
                 "prompt_preset": "resilience"
             }),
@@ -80,7 +80,7 @@ pub fn builtin_blueprint_specs() -> Vec<(&'static str, LoopNodeKind, Value)> {
 
 /// An ensemble blueprint (F1): unlike [`Blueprint`] (a single node's
 /// kind+config), this is a whole ensemble's shared prompt + member list, the
-/// pieces `loop_add_ensemble`'s `blueprint` param fills in when the caller
+/// pieces `graph_add_ensemble`'s `blueprint` param fills in when the caller
 /// omits `prompt_template`/`members` explicitly.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnsembleBlueprint {
@@ -92,7 +92,7 @@ pub struct EnsembleBlueprint {
     /// member only — same convention as `EnsembleMember::prompt_override`.
     pub members: Vec<EnsembleMemberSpec>,
     /// Suggested `min_pass`. `None` means "every member" — the same default
-    /// `loop_add_ensemble` uses when the caller doesn't pass `min_pass`.
+    /// `graph_add_ensemble` uses when the caller doesn't pass `min_pass`.
     pub min_pass: Option<i64>,
     pub builtin: bool,
     pub created_at: DateTime<Utc>,
@@ -120,7 +120,7 @@ pub type EnsembleBlueprintSpec = (
 /// `deepseek/deepseek-chat-v3.1:free`) can be renamed, deprecated, or
 /// rate-limited out from under a blueprint that hardcodes it, exactly like
 /// pinning a harness in a single-node blueprint would; `model: None` lets
-/// OpenRouter (or whoever assembles the loop, via `loop_add_ensemble`'s
+/// OpenRouter (or whoever assembles the graph, via `graph_add_ensemble`'s
 /// `members` param) pick one.
 pub fn builtin_ensemble_blueprint_specs() -> Vec<EnsembleBlueprintSpec> {
     vec![(
@@ -278,7 +278,7 @@ mod tests {
     fn builtin_agent_blueprints_carry_prompt_preset_not_inline_prompt() {
         let agent_specs: Vec<(&str, Value)> = builtin_blueprint_specs()
             .into_iter()
-            .filter(|(_, kind, _)| *kind == LoopNodeKind::Agent)
+            .filter(|(_, kind, _)| *kind == GraphNodeKind::Agent)
             .map(|(name, _, config)| (name, config))
             .collect();
 
@@ -300,7 +300,7 @@ mod tests {
         let bp = Blueprint {
             id: "1".to_string(),
             name: "implementer".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({}),
             builtin: true,
             created_at: Utc::now(),
@@ -344,7 +344,7 @@ mod tests {
         let bp = Blueprint {
             id: "1".to_string(),
             name: "my-custom".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({}),
             builtin: false,
             created_at: Utc::now(),
@@ -374,7 +374,7 @@ mod tests {
     fn builtin_blueprint_specs_kinds_are_agent_or_check() {
         for (name, kind, _) in builtin_blueprint_specs() {
             assert!(
-                kind == LoopNodeKind::Agent || kind == LoopNodeKind::Check,
+                kind == GraphNodeKind::Agent || kind == GraphNodeKind::Check,
                 "blueprint '{name}' kind must be Agent or Check, got {kind:?}"
             );
         }
@@ -418,7 +418,7 @@ mod tests {
         let bp = Blueprint {
             id: "test-id".to_string(),
             name: "test-bp".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({ "platform": "claude", "prompt_preset": "implementer" }),
             builtin: true,
             created_at: Utc::now(),
@@ -468,7 +468,7 @@ mod tests {
     fn builtin_blueprint_specs_check_blueprints_have_command() {
         let mut count = 0;
         for (name, kind, config) in builtin_blueprint_specs() {
-            if kind == LoopNodeKind::Check {
+            if kind == GraphNodeKind::Check {
                 count += 1;
                 assert!(
                     config.get("command").is_some(),

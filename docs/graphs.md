@@ -1,23 +1,23 @@
 ---
-title: Loops
-description: The DAG loop engine — specs, nodes, edges, gates and lifecycle.
+title: Graphs
+description: The DAG graph engine — specs, nodes, edges, gates and lifecycle.
 order: 7
 ---
 
-# Loops
+# Graphs
 
-The loop engine runs multi-step processes as a DAG, combining agent
+The graph engine runs multi-step processes as a DAG, combining agent
 invocations, shell checks and validation gates.
 
 ## Structure
 
 ```
-Loop
+Graph
 └── Spec (ordered)
     └── Node ──Edge(pass/fail/always)──▶ Node
 ```
 
-- **Specs** — ordered units of work inside a loop.
+- **Specs** — ordered units of work inside a graph.
 - **Nodes** — five kinds:
   - `agent` — invokes a CLI tool with a prompt template.
   - `check` — executes a shell command.
@@ -34,8 +34,8 @@ Agent node prompts support these placeholders:
 
 | Variable | Expands to |
 |---|---|
-| `{{loop_name}}` | The loop's name |
-| `{{workdir}}` | The loop's working directory |
+| `{{graph_name}}` | The graph's name |
+| `{{workdir}}` | The graph's working directory |
 | `{{spec_id}}` | The spec's unique ID |
 | `{{spec_name}}` | The spec's name |
 | `{{spec_content}}` | The spec's description (falls back to name) |
@@ -72,12 +72,12 @@ a concurrent commit from outside this run isn't a concern.
 An **ensemble** is a group of 2-8 `agent` nodes that receive the same
 prompt in parallel, plus a quorum that waits for every member
 before routing onward. It replaces what would otherwise be N member
-nodes, N prompts, and 2N+2 edges wired by hand — `loop_add_ensemble`
+nodes, N prompts, and 2N+2 edges wired by hand — `graph_add_ensemble`
 creates the whole unit in one call:
 
 ```json
-loop_add_ensemble {
-  loop_id, name: "proposers",
+graph_add_ensemble {
+  graph_id, name: "proposers",
   prompt_template: "...",              # one prompt, shared by every member
   members: [
     { platform: "opencode", model: "mimo-v2.5-free" },
@@ -99,14 +99,14 @@ consolidates their findings into one verdict.
 
 Members differ by `platform`/`model`, and each may set its own
 `prompt_override` to review the same input from a different angle instead
-of sharing the template. `loop_update_ensemble` changes the shared prompt
+of sharing the template. `graph_update_ensemble` changes the shared prompt
 (propagated to every member without its own override), the member list,
 quorum config (`min_pass`, `straggler_timeout_minutes`), exit wiring
 (`on_pass_to`/`on_fail_to` take a node id or another ensemble's id, chaining
 quorums with no intermediate node), and entry wiring (`from_node` replaces
 every entry; `add_entry_from`/`remove_entry_from` add or detach one source so
 several nodes can enter with no relay), all without touching member nodes
-directly. `loop_delete_ensemble` removes the whole unit. `loop_get` returns the
+directly. `graph_delete_ensemble` removes the whole unit. `graph_get` returns the
 ensemble as one unit (`ensemble_id`, members, quorum config, every entry
 source) alongside its expanded nodes.
 
@@ -123,7 +123,7 @@ rather than forking every member at once.
 Members are agent nodes only, and nested ensembles (an ensemble wired
 into another ensemble's members or quorum) are rejected. A bounce back
 into an ensemble re-runs every member and costs one iteration against
-the ensemble's shared budget. The TUI loop view renders an ensemble
+the ensemble's shared budget. The TUI graph view renders an ensemble
 collapsed as one box (`name [N models]` + quorum) with live per-member
 state while running, expandable on inspect.
 
@@ -148,7 +148,7 @@ runs and compares the two. A node without `commit_rights` that moved
 HEAD is a deterministic **fail**, whatever the node itself reported —
 it routes through the `fail` edge like any other failure, and the
 reason (`Node 'X' committed but has no commit rights: HEAD moved
-a1b2c3 -> d4e5f6`) lands in the run output, in `canopy loop info`, and
+a1b2c3 -> d4e5f6`) lands in the run output, in `canopy graph info`, and
 in the next node's `{{previous_feedback}}`.
 
 Three things are deliberate:
@@ -183,18 +183,18 @@ merely that HEAD differs from wherever the spec started — see
 
 **Editing the recommended check command text here does not retroactively
 touch any graph.** A node's `command` is whatever text was written into
-its config when the graph was authored (`loop_add_node`, or copied from
+its config when the graph was authored (`graph_add_node`, or copied from
 a blueprint) — the engine reads it fresh at execution time but never
 rewrites it. A spec already using the old `{{spec_start_head}}`-only
 comparison keeps using it until someone explicitly runs
-`loop_update_node` on it; only graphs authored or edited after adopting
+`graph_update_node` on it; only graphs authored or edited after adopting
 `{{spec_committed_head}}` get the stronger check.
 
 ## Self-report requirement
 
 A harness can exit 0 having done nothing: every tool call refused,
 a quota exhausted, a provider outage — the process still ends cleanly
-and the loop engine sees a clean exit code. By default that is
+and the graph engine sees a clean exit code. By default that is
 recorded as `Pass` if the process also produced output, exactly as it
 always has. Set `require_report: true` in an agent node's config to
 close that gap for a node whose graph depends on being able to tell:
@@ -204,14 +204,14 @@ require_report: true
 ```
 
 With the flag set, an agent run that exits 0 but never calls
-`loop_complete_node` itself is recorded as a deterministic **fail**
+`graph_complete_node` itself is recorded as a deterministic **fail**
 (`failure_kind: "no_report"`) and routes down the node's `fail` edge —
 it is never retried as an infra crash, since nothing actually crashed.
 An explicit self-report always wins regardless of this flag, pass or
 fail; `require_report` only judges the case where none was ever made.
 
 Whether or not the flag is set, every agent run that finishes without
-calling `loop_complete_node` carries `"unreported": true` in its output
+calling `graph_complete_node` carries `"unreported": true` in its output
 — this is unconditional, so a resilience node downstream can always
 tell "the harness ran and chose not to report" apart from "the harness
 never ran," without needing `require_report` itself. Ensemble members
@@ -219,37 +219,37 @@ are judged individually, exactly like a lone node.
 
 ## Lifecycle
 
-Create → run → (pause / continue) → complete. `loop_continue`
+Create → run → (pause / continue) → complete. `graph_continue`
 supports **retry** and **skip** strategies for stuck nodes, and
-`loop_report_blocker` escalates to a human when intervention is
-needed. Iteration limits prevent infinite retry loops. `loop_reset`
-returns a completed/failed loop to pending so `loop_run` can restart
-it, and `loop_schedule_autorun` sets a future time at which the loop
-auto-resumes (useful for quota-limited loops that fail and need to
+`graph_report_blocker` escalates to a human when intervention is
+needed. Iteration limits prevent infinite retry graphs. `graph_reset`
+returns a completed/failed graph to pending so `graph_run` can restart
+it, and `graph_schedule_autorun` sets a future time at which the graph
+auto-resumes (useful for quota-limited graphs that fail and need to
 wait before retrying). Call it again with `at` omitted to cancel a
 pending schedule.
 
 ## Concurrency
 
-Running many loops at once, against different working directories, is
+Running many graphs at once, against different working directories, is
 a supported capability — not an accident of the implementation. Start,
-run, pause, resume, or finish one loop, and no other loop's status,
+run, pause, resume, or finish one graph, and no other graph's status,
 specs, node runs, or worktree are affected. There is no cap on how
-many loops can run concurrently, and nothing needs to be configured to
+many graphs can run concurrently, and nothing needs to be configured to
 enable it: it is the default behavior of the daemon.
 
-The one boundary: **two loops must not share a workdir.** Two loops
+The one boundary: **two graphs must not share a workdir.** Two graphs
 racing to commit, check out, or edit files in the same working tree
 will fight over it — the engine does nothing to make that safe, and
-doing so is deliberately out of scope. Point concurrent loops at
+doing so is deliberately out of scope. Point concurrent graphs at
 different working directories (or at worktrees of the same repo) and
 they run independently with no coordination required from you.
 
 ## Event-keyed hooks
 
-A loop carries hooks keyed by event, over four events: `on_completed`,
+A graph carries hooks keyed by event, over four events: `on_completed`,
 `on_failed`, `on_blocked`, `on_spec_completed`. More than one hook may be
-registered for a single event, via `loop_update`'s `hooks` map (each key is
+registered for a single event, via `graph_update`'s `hooks` map (each key is
 an event name, each value is an ordered array of hook configs). Hooks
 registered for one event run in declaration order. There are three hook
 modes — exactly one per hook:
@@ -265,24 +265,24 @@ modes — exactly one per hook:
 
 - `on_completed` fires exactly once when a run transitions to `completed`
   (only when the dispatch completed at least one spec). A completed →
-  `loop_reset` → completed cycle fires it again, once per completing run.
-- `on_failed` fires when the loop reaches `failed`.
+  `graph_reset` → completed cycle fires it again, once per completing run.
+- `on_failed` fires when the graph reaches `failed`.
 - `on_blocked` fires when it stops with a blocker set (transition to
   `paused` with blocker data).
 - `on_spec_completed` fires once per spec reaching `completed`, whether the
-  specs come from the loop's own bound specs or from a queue.
+  specs come from the graph's own bound specs or from a queue.
 
 **Hooks are not retroactive** — a hook registered after its event has
 already happened does not fire. A hook that fails is recorded and never
-changes the loop's own status, and never stops the remaining hooks of that
+changes the graph's own status, and never stops the remaining hooks of that
 event from running.
 
 Every hook run records the event it served and which hook of that event it
-was (`event`, `hook_index`), and is readable from `loop_get`'s
-`completion_hook_runs` and `canopy loop info`'s hook-runs listing alongside
+was (`event`, `hook_index`), and is readable from `graph_get`'s
+`completion_hook_runs` and `canopy graph info`'s hook-runs listing alongside
 the graph's node runs.
 
-Each event exposes what its consumer needs, in addition to `{{loop_name}}`
+Each event exposes what its consumer needs, in addition to `{{graph_name}}`
 and `{{workdir}}`: `on_completed` keeps `{{completed_specs}}` (name +
 one-line summary of each spec this run completed, one per line, `(none)` if
 the run completed zero specs); `on_spec_completed` gets `{{spec_name}}` and
@@ -291,8 +291,8 @@ the run completed zero specs); `on_spec_completed` gets `{{spec_name}}` and
 event cannot bind is refused and recorded as a failed hook run.
 
 The existing configuration keeps working, unchanged and unattended:
-whatever a loop has in its `on_completed` column becomes a hook on the
-`on_completed` event with no user action and no loss, and a `loop_update`
+whatever a graph has in its `on_completed` column becomes a hook on the
+`on_completed` event with no user action and no loss, and a `graph_update`
 call passing today's `on_completed` shape still registers that hook.
 
 The first intended use is a documentation-maintenance agent: on
@@ -301,7 +301,7 @@ completion, review the specs this run closed, the resulting code, and
 
 An interactive hook targets the exact session id in its own config, and
 supports the same event placeholders as the other modes, rendered before
-enqueueing. The message carries its provenance — loop id and event — as
+enqueueing. The message carries its provenance — graph id and event — as
 structure alongside the prompt, so the recipient can tell it came from a
 hook without that origin being buried in the prompt text. A session id is
 not stable over time: a hook configured with one will eventually point at
@@ -313,7 +313,7 @@ pending and is delivered when a TUI later starts.
 
 ## Standalone spec backlog
 
-Specs don't have to belong to a loop. The spec backlog lets you create,
+Specs don't have to belong to a graph. The spec backlog lets you create,
 list, update and delete specs independently, optionally tagging each to
 a workdir for filtering:
 
@@ -342,8 +342,8 @@ filtered to the selected project's workdir.
 ## Spec queues
 
 A **queue** is an ordered list of existing specs decoupled from any one
-loop. When a loop runs against a queue, it drains the queue's pending
-specs (in queue order) through the loop's graph instead of its own
+graph. When a graph runs against a queue, it drains the queue's pending
+specs (in queue order) through the graph instead of its own
 bound specs:
 
 | Tool | Description |
@@ -354,60 +354,60 @@ bound specs:
 | `queue_remove_spec` | Remove a spec from a queue |
 | `queue_reorder` | Full replacement of a queue's order |
 
-Pass a queue to `loop_run` via `queue_id`.
+Pass a queue to `graph_run` via `queue_id`.
 
-Queue membership is unaffected by `loop_run` — specs stay standalone.
-The `loop info` CLI and `loop_get` MCP tool show queue-driven progress
+Queue membership is unaffected by `graph_run` — specs stay standalone.
+The `graph info` CLI and `graph_get` MCP tool show queue-driven progress
 by reconstructing what ran from the run history.
 
 ## The 32 MCP tools
 
 | Stage | Tools |
 |---|---|
-| Authoring | `loop_create`, `loop_update`, `loop_add_spec`, `loop_update_spec`, `loop_add_node`, `loop_update_node`, `loop_add_edge`, `loop_update_edge`, `loop_delete_edge`, `loop_delete_node`, `loop_add_ensemble`, `loop_update_ensemble`, `loop_delete_ensemble`, `loop_copy_node`, `loop_copy_ensemble`, `loop_audit_node_configs` |
-| Sharing | `loop_export`, `loop_import`, `loop_archive`, `loop_restore` |
-| Inspection | `loop_get`, `loop_list`, `loop_node_runs_list`, `loop_node_run_get` |
-| Runtime | `loop_run`, `loop_reset`, `loop_schedule_autorun`, `loop_schedule_continue`, `loop_pause`, `loop_continue`, `loop_complete_node`, `loop_report_blocker`, `loop_preflight` |
+| Authoring | `graph_create`, `graph_update`, `graph_add_spec`, `graph_update_spec`, `graph_add_node`, `graph_update_node`, `graph_add_edge`, `graph_update_edge`, `graph_delete_edge`, `graph_delete_node`, `graph_add_ensemble`, `graph_update_ensemble`, `graph_delete_ensemble`, `graph_copy_node`, `graph_copy_ensemble`, `graph_audit_node_configs` |
+| Sharing | `graph_export`, `graph_import`, `graph_archive`, `graph_restore` |
+| Inspection | `graph_get`, `graph_list`, `graph_node_runs_list`, `graph_node_run_get` |
+| Runtime | `graph_run`, `graph_reset`, `graph_schedule_autorun`, `graph_schedule_continue`, `graph_pause`, `graph_continue`, `graph_complete_node`, `graph_report_blocker`, `graph_preflight` |
 
-Loops can be authored programmatically by agents through these tools,
-or edited in the [TUI loop editor](tui.md) with inline JSON config
-validation. The `canopy loop` CLI subcommands mirror the runtime tools
+Graphs can be authored programmatically by agents through these tools,
+or edited in the [TUI graph editor](tui.md) with inline JSON config
+validation. The `canopy graph` CLI subcommands mirror the runtime tools
 from the terminal: `list`/`info`/`export` are read-only inspection, and
 `import`/`run`/`pause`/`continue`/`reset`/`autorun` delegate the
-matching MCP tool to the daemon — a second way to drive a loop when an
+matching MCP tool to the daemon — a second way to drive a graph when an
 MCP client can't reach it. See the
-[CLI reference](cli-reference.md#loop-control).
+[CLI reference](cli-reference.md#graph-control).
 
 ## Export and import
 
-A loop's design — its name, description, nodes, edges, and ensembles —
+A graph's design — its name, description, nodes, edges, and ensembles —
 can leave one machine as a single JSON file and be recreated on
-another. Sharing a loop becomes sending a file, not narrating the
-`loop_add_node`/`loop_add_edge`/`loop_add_ensemble` calls that built
-it, and the file is also a diff: review a change to a loop, or keep
+another. Sharing a graph becomes sending a file, not narrating the
+`graph_add_node`/`graph_add_edge`/`graph_add_ensemble` calls that built
+it, and the file is also a diff: review a change to a graph, or keep
 one in a repo next to the code it operates on.
 
 ```
-canopy loop export <loop_id> [--output <path>]
-canopy loop import <path> [--workdir <dir>] [--name <name>]
+canopy graph export <graph_id> [--output <path>]
+canopy graph import <path> [--workdir <dir>] [--name <name>]
 ```
 
 `export` writes to `--output`, or to stdout (so it can be piped) when
-omitted. `import` always creates a **new** loop — it never updates,
+omitted. `import` always creates a **new** graph — it never updates,
 merges, or overwrites an existing one; `--workdir` defaults to the
 current directory, and `--name` overrides the file's own name. If the
 resolved name is already taken in the target workdir, import still
-succeeds under a numeric suffix (`"My Loop (2)"`) and reports which
+succeeds under a numeric suffix (`"My Graph (2)"`) and reports which
 name it used. The same two operations exist as MCP tools,
-`loop_export { loop_id }` and
-`loop_import { document, workdir?, name? }`, so a loop is drivable end
+`graph_export { graph_id }` and
+`graph_import { document, workdir?, name? }`, so a graph is drivable end
 to end through MCP as well as the CLI.
 
 What the file **excludes** is deliberate: no ids (edges reference
 nodes by `name`, which is what makes the file reviewable and
 hand-editable — node names must therefore be unique within an exported
-loop, or export refuses with the names it found), no `workdir`, no
-specs, and no run/status state. A loop file is a shape and a set of
+graph, or export refuses with the names it found), no `workdir`, no
+specs, and no run/status state. A graph file is a shape and a set of
 instructions, not somebody else's backlog or history.
 
 `platform`/`model` are always included for every agent node and
@@ -419,9 +419,9 @@ for the unset fields. Import accepts both `format_version: 1`
 (members with no binding, reported as missing a platform) and `2`
 (bindings restored verbatim); it never rejects a platform the
 importing machine has not configured — validating that a pair is
-usable belongs to `loop_preflight`. `import`'s response always lists
+usable belongs to `graph_preflight`. `import`'s response always lists
 every agent node left without a platform, so there's exactly one
-thing to check before running an imported loop:
+thing to check before running an imported graph:
 `nodes_missing_platform` in the MCP response, or the same list
 printed by the CLI.
 
@@ -490,33 +490,33 @@ with `{}` members still imports, with every unbound node reported as
 
 ## Archive and restore
 
-Loops can be archived instead of deleted — they leave the main
-`loop_list`/sidebar view but their row, specs, and full run history
+Graphs can be archived instead of deleted — they leave the main
+`graph_list`/sidebar view but their row, specs, and full run history
 are untouched and can be restored at any time:
 
 ```
-canopy loop archive <loop_id>
-canopy loop restore <loop_id>
+canopy graph archive <graph_id>
+canopy graph restore <graph_id>
 ```
 
-Over MCP: `loop_archive { loop_id }` and `loop_restore { loop_id }`.
-Archiving refuses a `running` loop — pause it first. The archived loop
-is still reachable directly by id via `loop_get` regardless of
+Over MCP: `graph_archive { graph_id }` and `graph_restore { graph_id }`.
+Archiving refuses a `running` graph — pause it first. The archived graph
+is still reachable directly by id via `graph_get` regardless of
 archived state. Restoring is a plain flag flip — no data is lost or
 moved.
 
 ## Node run history
 
-When a loop fails, the node run history lets you diagnose exactly what
+When a graph fails, the node run history lets you diagnose exactly what
 happened:
 
 ```
-canopy loop runs <loop_id> [--node <node_id>] [--limit <n>]
+canopy graph runs <graph_id> [--node <node_id>] [--limit <n>]
 ```
 
-Over MCP: `loop_node_runs_list { loop_id, node_id?, spec_id?, limit? }`
+Over MCP: `graph_node_runs_list { graph_id, node_id?, spec_id?, limit? }`
 returns the most recent runs first (default 20, capped at 200).
-`loop_node_run_get { run_id }` fetches one run's full stored input and
+`graph_node_run_get { run_id }` fetches one run's full stored input and
 output, including `infra_attempt`/`infra_crash` markers when present.
 Secret-shaped substrings are redacted before the output crosses the
 boundary.
@@ -527,13 +527,13 @@ reported_output the engine recorded.
 
 ## Node blueprints
 
-Rather than pasting a full `config` into every `loop_add_node` call, a
+Rather than pasting a full `config` into every `graph_add_node` call, a
 node can reference a **blueprint** — a reusable `{name, kind, config}`
 template — by name:
 
 ```
-loop_add_node { spec_id, name, blueprint: "cargo-gates" }
-loop_add_node { spec_id, name, blueprint: "implementer-claude", config_overrides: { "model": "opus" } }
+graph_add_node { spec_id, name, blueprint: "cargo-gates" }
+graph_add_node { spec_id, name, blueprint: "implementer-claude", config_overrides: { "model": "opus" } }
 ```
 
 `config_overrides` is a shallow merge on top of the blueprint's config
@@ -546,5 +546,5 @@ Five builtins are seeded automatically at daemon startup if missing
 `cargo-gates`, `reviewer-committer-mimo`, `commit-check`,
 `resilience-mimo`. Builtins can't be deleted. Manage blueprints with
 `blueprint_list`, `blueprint_create`, and `blueprint_delete` (custom
-only). The TUI sidebar lists available blueprints, and the loop editor
+only). The TUI sidebar lists available blueprints, and the graph editor
 validates blueprint references inline.

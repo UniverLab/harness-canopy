@@ -63,17 +63,17 @@ pub struct CanopyConfig {
     pub embeddings_idle_unload_secs: u64,
 
     /// Global cap (F1) on how many ensemble members run concurrently across
-    /// every loop run, shared by the whole daemon so one ensemble can't
+    /// every graph run, shared by the whole daemon so one ensemble can't
     /// starve another's. An 8-member ensemble queues past this rather than
     /// fork-bombing the host.
     #[serde(default = "default_ensemble_concurrency_cap")]
     pub ensemble_concurrency_cap: usize,
 
-    /// Cross-run attempt budget (C19): how many separate loop executions a
-    /// single spec may fail with a genuine verdict before the loop is marked
+    /// Cross-run attempt budget (C19): how many separate graph executions a
+    /// single spec may fail with a genuine verdict before the graph is marked
     /// blocked instead of being left to burn another quota window on a
-    /// relaunch. Persisted per spec (`loop_specs.cross_run_attempts`) so it
-    /// survives `loop_reset`, a relaunch, and a daemon restart — unlike the
+    /// relaunch. Persisted per spec (`graph_specs.cross_run_attempts`) so it
+    /// survives `graph_reset`, a relaunch, and a daemon restart — unlike the
     /// per-node in-run iteration budget, which resets with every execution.
     /// Lower than that per-node budget by design: these are whole attempts,
     /// not node cycles.
@@ -129,7 +129,7 @@ pub struct CanopyConfig {
     #[serde(default)]
     pub announcements_enabled: bool,
 
-    /// Pinned right-panel face (`"activity"`, `"knowledge"` or `"loop"`).
+    /// Pinned right-panel face (`"activity"`, `"knowledge"` or `"graph"`).
     /// `None` means automatic mode (the default; a fresh install is
     /// unpinned). Stored as a plain string — rather than the TUI's
     /// `PanelFace` enum — so this domain crate never depends on the TUI.

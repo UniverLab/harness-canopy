@@ -57,7 +57,7 @@ pub struct CliStrategy {
     /// Flag that non-interactively trusts the run's working directory for
     /// this invocation, e.g. mistral's `--trust`. See
     /// [`CliConfig::trust_flag`]. Only applied by a caller that has opted in
-    /// (the loop engine, per `node.config["trust_workdir"]`) — never appended
+    /// (the graph engine, per `node.config["trust_workdir"]`) — never appended
     /// unconditionally by this struct's own command builders.
     ///
     /// [`CliConfig::trust_flag`]: super::cli_config::CliConfig::trust_flag
@@ -71,7 +71,7 @@ pub struct CliStrategy {
 ///
 /// Typed (rather than a bare `anyhow!` string) so callers can tell this
 /// apart from every other command-build failure without matching on the
-/// rendered message: a missing binary is *permanent*, so the loop engine's
+/// rendered message: a missing binary is *permanent*, so the graph engine's
 /// infra-crash retry must not spend attempts and backoff waiting for it to
 /// appear (B39).
 #[derive(Debug, thiserror::Error)]
@@ -440,7 +440,7 @@ impl CliStrategy {
     }
 
     /// Return a copy of this strategy with `prompt_via_stdin` forced to
-    /// `true`. Used by the loop engine when the composed prompt exceeds
+    /// `true`. Used by the graph engine when the composed prompt exceeds
     /// the OS argv size limit — delivering via stdin avoids E2BIG
     /// regardless of what the CLI's registered capability says.
     pub fn with_stdin_forced(&self) -> Self {
@@ -2065,14 +2065,14 @@ mod tests {
     /// CB44 constraint 3: the identity check is diagnosis-only
     /// (probe/doctor), never a per-dispatch tax. Dispatch builds every
     /// command through `CliStrategy::from_cli_config`, which deliberately
-    /// drops `identity_check` — and neither the executor nor the loop
+    /// drops `identity_check` — and neither the executor nor the graph
     /// engine may reference the check or its helper directly. Greps their
     /// production code the way doctor's glyph test greps its own.
     #[test]
     fn agent_dispatch_never_runs_identity_check() {
         for (name, source) in [
             ("executor", include_str!("../executor/mod.rs")),
-            ("loop_engine", include_str!("../loop_engine.rs")),
+            ("graph_engine", include_str!("../graph_engine.rs")),
         ] {
             let production_code = source.split("mod tests {").next().unwrap_or(source);
             for marker in ["verify_identity", "identity_check"] {

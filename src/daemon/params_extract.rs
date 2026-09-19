@@ -171,7 +171,7 @@ fn schema_defs(root: &Value) -> Map<String, Value> {
 
 /// Resolves a `$ref` chain (if any) against `defs`, returning the concrete
 /// schema. Bounded so a (currently impossible, but future) cyclic ref can't
-/// loop forever.
+/// graph forever.
 fn resolve_schema(schema: &Value, defs: &Map<String, Value>) -> Value {
     let mut current = schema.clone();
     for _ in 0..16 {

@@ -1,7 +1,7 @@
 //! F1: DB layer for ensembles — a group of agent-node members (each
 //! optionally carrying its own prompt override) plus their quorum gate,
 //! persisted as one [`Ensemble`] row on top of ordinary
-//! `loop_nodes`/`loop_edges` rows (see `src/domain/loops.rs` for why).
+//! `graph_nodes`/`graph_edges` rows (see `src/domain/graphs.rs` for why).
 
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
@@ -10,9 +10,9 @@ use std::io::{Error as IoError, ErrorKind};
 
 use crate::db::Database;
 use crate::domain::blueprints::{builtin_ensemble_blueprint_specs, EnsembleBlueprint};
-use crate::domain::loops::{
-    Ensemble, EnsembleDetails, EnsembleKind, EnsembleMember, EnsembleMemberSpec, LoopEdge,
-    LoopEdgeCondition, LoopNode,
+use crate::domain::graphs::{
+    Ensemble, EnsembleDetails, EnsembleKind, EnsembleMember, EnsembleMemberSpec, GraphEdge,
+    GraphEdgeCondition, GraphNode,
 };
 
 impl Database {
@@ -20,16 +20,16 @@ impl Database {
     /// every wiring edge (entry fan-out, member→join fan-in, join exit
     /// routing), the `ensembles` row, and every `ensemble_members` row — in
     /// one transaction. This is the DB-layer half of the "one MCP call"
-    /// contract: `loop_add_ensemble` builds all these pieces and hands them
+    /// contract: `graph_add_ensemble` builds all these pieces and hands them
     /// here so a crash mid-creation can never leave a half-expanded ensemble.
     #[allow(clippy::too_many_arguments)]
     pub fn insert_ensemble_unit(
         &self,
         ensemble: &Ensemble,
         members: &[EnsembleMember],
-        member_nodes: &[LoopNode],
-        join_node: &LoopNode,
-        edges: &[LoopEdge],
+        member_nodes: &[GraphNode],
+        join_node: &GraphNode,
+        edges: &[GraphEdge],
     ) -> Result<()> {
         let mut conn = self
             .conn
@@ -38,12 +38,12 @@ impl Database {
         let tx = conn.transaction()?;
 
         tx.execute(
-            "INSERT INTO loop_nodes (id, spec_id, loop_id, name, kind, config, position, created_at)
+            "INSERT INTO graph_nodes (id, spec_id, graph_id, name, kind, config, position, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 &join_node.id,
                 &join_node.spec_id,
-                &join_node.loop_id,
+                &join_node.graph_id,
                 &join_node.name,
                 join_node.kind.as_str(),
                 serde_json::to_string(&join_node.config)?,
@@ -54,12 +54,12 @@ impl Database {
 
         for node in member_nodes {
             tx.execute(
-                "INSERT INTO loop_nodes (id, spec_id, loop_id, name, kind, config, position, created_at)
+                "INSERT INTO graph_nodes (id, spec_id, graph_id, name, kind, config, position, created_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     &node.id,
                     &node.spec_id,
-                    &node.loop_id,
+                    &node.graph_id,
                     &node.name,
                     node.kind.as_str(),
                     serde_json::to_string(&node.config)?,
@@ -71,12 +71,12 @@ impl Database {
 
         for edge in edges {
             tx.execute(
-                "INSERT INTO loop_edges (id, spec_id, loop_id, from_node, to_node, condition)
+                "INSERT INTO graph_edges (id, spec_id, graph_id, from_node, to_node, condition)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
                     &edge.id,
                     &edge.spec_id,
-                    &edge.loop_id,
+                    &edge.graph_id,
                     &edge.from_node,
                     &edge.to_node,
                     edge.condition.as_str(),
@@ -85,12 +85,12 @@ impl Database {
         }
 
         tx.execute(
-            "INSERT INTO ensembles (id, spec_id, loop_id, name, prompt_template, join_node_id, entry_from_node, entry_condition, min_pass, straggler_timeout_minutes, timeout_minutes, on_pass_to, on_fail_to, kind, round_robin_index, created_at)
+            "INSERT INTO ensembles (id, spec_id, graph_id, name, prompt_template, join_node_id, entry_from_node, entry_condition, min_pass, straggler_timeout_minutes, timeout_minutes, on_pass_to, on_fail_to, kind, round_robin_index, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 &ensemble.id,
                 &ensemble.spec_id,
-                &ensemble.loop_id,
+                &ensemble.graph_id,
                 &ensemble.name,
                 &ensemble.prompt_template,
                 &ensemble.join_node_id,
@@ -132,7 +132,7 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, spec_id, loop_id, name, prompt_template, join_node_id, entry_from_node, entry_condition, min_pass, straggler_timeout_minutes, timeout_minutes, on_pass_to, on_fail_to, kind, round_robin_index, created_at
+            "SELECT id, spec_id, graph_id, name, prompt_template, join_node_id, entry_from_node, entry_condition, min_pass, straggler_timeout_minutes, timeout_minutes, on_pass_to, on_fail_to, kind, round_robin_index, created_at
              FROM ensembles WHERE id = ?1",
         )?;
         stmt.query_row(params![ensemble_id], map_ensemble_row)
@@ -178,15 +178,15 @@ impl Database {
             .collect()
     }
 
-    /// Every ensemble defined on a loop's top-level graph.
-    pub fn list_ensembles_for_loop(&self, loop_id: &str) -> Result<Vec<EnsembleDetails>> {
+    /// Every ensemble defined on a graph's top-level graph.
+    pub fn list_ensembles_for_graph(&self, graph_id: &str) -> Result<Vec<EnsembleDetails>> {
         let ids = {
             let conn = self
                 .conn
                 .lock()
                 .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
-            let mut stmt = conn.prepare("SELECT id FROM ensembles WHERE loop_id = ?1")?;
-            let rows = stmt.query_map(params![loop_id], |row| row.get::<_, String>(0))?;
+            let mut stmt = conn.prepare("SELECT id FROM ensembles WHERE graph_id = ?1")?;
+            let rows = stmt.query_map(params![graph_id], |row| row.get::<_, String>(0))?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
         ids.iter()
@@ -238,8 +238,8 @@ impl Database {
 
     /// Update the shared prompt on the `ensembles` row itself. Propagating it
     /// onto every member node's `config` is the caller's job (via
-    /// `update_loop_node_details`) — this only updates the source-of-truth
-    /// row `loop_get` reads back.
+    /// `update_graph_node_details`) — this only updates the source-of-truth
+    /// row `graph_get` reads back.
     pub fn update_ensemble_prompt(&self, ensemble_id: &str, prompt_template: &str) -> Result<bool> {
         let conn = self
             .conn
@@ -254,7 +254,7 @@ impl Database {
 
     /// Update the join's own config: pass threshold, straggler timeout, and
     /// shared member timeout. `None` means "leave unchanged" for each field —
-    /// same convention as [`Self::update_loop_node_details`].
+    /// same convention as [`Self::update_graph_node_details`].
     pub fn update_ensemble_join_config(
         &self,
         ensemble_id: &str,
@@ -284,8 +284,8 @@ impl Database {
     }
 
     /// Update the join's exit routing (`on_pass_to`/`on_fail_to`) on the
-    /// `ensembles` row. Recreating the underlying `loop_edges` rows is the
-    /// caller's job (`loop_update_ensemble`) — this only updates the
+    /// `ensembles` row. Recreating the underlying `graph_edges` rows is the
+    /// caller's job (`graph_update_ensemble`) — this only updates the
     /// source-of-truth columns.
     pub fn update_ensemble_exit_wiring(
         &self,
@@ -339,14 +339,14 @@ impl Database {
 
     /// Add one new member — its node, `ensemble_members` row, entry edge
     /// (from the ensemble's own `entry_from_node`/`entry_condition`), and
-    /// join edge — in one transaction. Used by `loop_update_ensemble` when
+    /// join edge — in one transaction. Used by `graph_update_ensemble` when
     /// growing the member list.
     pub fn add_ensemble_member(
         &self,
         member: &EnsembleMember,
-        node: &LoopNode,
-        entry_edge: &LoopEdge,
-        join_edge: &LoopEdge,
+        node: &GraphNode,
+        entry_edge: &GraphEdge,
+        join_edge: &GraphEdge,
     ) -> Result<()> {
         let mut conn = self
             .conn
@@ -355,12 +355,12 @@ impl Database {
         let tx = conn.transaction()?;
 
         tx.execute(
-            "INSERT INTO loop_nodes (id, spec_id, loop_id, name, kind, config, position, created_at)
+            "INSERT INTO graph_nodes (id, spec_id, graph_id, name, kind, config, position, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 &node.id,
                 &node.spec_id,
-                &node.loop_id,
+                &node.graph_id,
                 &node.name,
                 node.kind.as_str(),
                 serde_json::to_string(&node.config)?,
@@ -371,12 +371,12 @@ impl Database {
 
         for edge in [entry_edge, join_edge] {
             tx.execute(
-                "INSERT INTO loop_edges (id, spec_id, loop_id, from_node, to_node, condition)
+                "INSERT INTO graph_edges (id, spec_id, graph_id, from_node, to_node, condition)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
                     &edge.id,
                     &edge.spec_id,
-                    &edge.loop_id,
+                    &edge.graph_id,
                     &edge.from_node,
                     &edge.to_node,
                     edge.condition.as_str(),
@@ -401,21 +401,21 @@ impl Database {
         Ok(())
     }
 
-    /// Remove a member outright: deletes its `loop_nodes` row, which cascades
+    /// Remove a member outright: deletes its `graph_nodes` row, which cascades
     /// away its `ensemble_members` row and both wiring edges (entry, join) —
     /// every one of those FKs is `ON DELETE CASCADE`. Used by
-    /// `loop_update_ensemble` when shrinking the member list.
+    /// `graph_update_ensemble` when shrinking the member list.
     pub fn remove_ensemble_member(&self, node_id: &str) -> Result<bool> {
-        self.delete_loop_node(node_id)
+        self.delete_graph_node(node_id)
     }
 
     /// Update an existing member's `platform`/`model`/`prompt_override` in
-    /// place — used by `loop_update_ensemble` when the member count is
+    /// place — used by `graph_update_ensemble` when the member count is
     /// unchanged (only the fields at a given position changed). Always sets
     /// `prompt_override` outright (never "leave unchanged") since a
     /// replacement member list is always given in full. The caller separately
     /// updates the member node's own `config` via
-    /// [`Self::update_loop_node_details`].
+    /// [`Self::update_graph_node_details`].
     pub fn update_ensemble_member(
         &self,
         ensemble_id: &str,
@@ -435,33 +435,33 @@ impl Database {
         Ok(rows > 0)
     }
 
-    /// Delete a loop node outright — cascades away its edges (both
+    /// Delete a graph node outright — cascades away its edges (both
     /// directions) and, if it was an ensemble member, its `ensemble_members`
     /// row too. General-purpose (not ensemble-specific); callers own any
     /// "is this safe to delete" guard.
-    pub fn delete_loop_node(&self, node_id: &str) -> Result<bool> {
+    pub fn delete_graph_node(&self, node_id: &str) -> Result<bool> {
         let conn = self
             .conn
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
-        let rows = conn.execute("DELETE FROM loop_nodes WHERE id = ?1", params![node_id])?;
+        let rows = conn.execute("DELETE FROM graph_nodes WHERE id = ?1", params![node_id])?;
         Ok(rows > 0)
     }
 
     /// Delete every edge from `node_id` with the given `condition` — used by
-    /// `loop_update_ensemble` to retarget the join's exit routing (delete the
+    /// `graph_update_ensemble` to retarget the join's exit routing (delete the
     /// old pass/fail edge, then insert the new one).
-    pub fn delete_loop_edges_from_node_with_condition(
+    pub fn delete_graph_edges_from_node_with_condition(
         &self,
         node_id: &str,
-        condition: &LoopEdgeCondition,
+        condition: &GraphEdgeCondition,
     ) -> Result<()> {
         let conn = self
             .conn
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         conn.execute(
-            "DELETE FROM loop_edges WHERE from_node = ?1 AND condition = ?2",
+            "DELETE FROM graph_edges WHERE from_node = ?1 AND condition = ?2",
             params![node_id, condition.as_str()],
         )?;
         Ok(())
@@ -473,27 +473,27 @@ impl Database {
     /// inserted, and the `ensembles` row's `entry_from_node`/`entry_condition`
     /// follows — all in one transaction, so a failure leaves the previous
     /// edges intact rather than an ensemble with no entry. The caller
-    /// (`loop_update_ensemble`) owns validation: `new_from_node` exists in
+    /// (`graph_update_ensemble`) owns validation: `new_from_node` exists in
     /// the ensemble's graph and is not ensemble-owned.
     pub fn rewire_ensemble_entry(
         &self,
         ensemble_id: &str,
         new_from_node: &str,
-        new_condition: &LoopEdgeCondition,
+        new_condition: &GraphEdgeCondition,
     ) -> Result<()> {
         let mut conn = self
             .conn
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let tx = conn.transaction()?;
-        let (spec_id, loop_id, join_node_id, member_ids) =
+        let (spec_id, graph_id, join_node_id, member_ids) =
             tx_ensemble_graph_scope(&tx, ensemble_id)?;
 
         delete_entry_edges(&tx, &member_ids, &join_node_id)?;
         insert_entry_fan_out(
             &tx,
             spec_id.as_deref(),
-            loop_id.as_deref(),
+            graph_id.as_deref(),
             new_from_node,
             new_condition,
             &member_ids,
@@ -515,17 +515,17 @@ impl Database {
         &self,
         ensemble_id: &str,
         from_node: &str,
-        condition: &LoopEdgeCondition,
+        condition: &GraphEdgeCondition,
     ) -> Result<()> {
         let mut conn = self
             .conn
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let tx = conn.transaction()?;
-        let (spec_id, loop_id, _, member_ids) = tx_ensemble_graph_scope(&tx, ensemble_id)?;
+        let (spec_id, graph_id, _, member_ids) = tx_ensemble_graph_scope(&tx, ensemble_id)?;
 
         let already: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM loop_edges WHERE from_node = ?1 AND to_node IN (
+            "SELECT COUNT(*) FROM graph_edges WHERE from_node = ?1 AND to_node IN (
                  SELECT node_id FROM ensemble_members WHERE ensemble_id = ?2
              )",
             params![from_node, ensemble_id],
@@ -540,7 +540,7 @@ impl Database {
         insert_entry_fan_out(
             &tx,
             spec_id.as_deref(),
-            loop_id.as_deref(),
+            graph_id.as_deref(),
             from_node,
             condition,
             &member_ids,
@@ -568,12 +568,12 @@ impl Database {
         }
         if sources.len() < 2 {
             anyhow::bail!(
-                "Cannot detach '{from_node}': it is the last entry source of ensemble '{ensemble_id}'. Rewire it with from_node instead, or delete the whole unit with loop_delete_ensemble."
+                "Cannot detach '{from_node}': it is the last entry source of ensemble '{ensemble_id}'. Rewire it with from_node instead, or delete the whole unit with graph_delete_ensemble."
             );
         }
 
         tx.execute(
-            "DELETE FROM loop_edges WHERE from_node = ?1 AND to_node IN (
+            "DELETE FROM graph_edges WHERE from_node = ?1 AND to_node IN (
                  SELECT node_id FROM ensemble_members WHERE ensemble_id = ?2
              )",
             params![from_node, ensemble_id],
@@ -610,7 +610,7 @@ impl Database {
     pub fn retarget_ensemble_exit(
         &self,
         ensemble_id: &str,
-        condition: &LoopEdgeCondition,
+        condition: &GraphEdgeCondition,
         to_nodes: &[String],
         row_target: Option<&str>,
     ) -> Result<()> {
@@ -622,20 +622,20 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let tx = conn.transaction()?;
-        let (spec_id, loop_id, join_node_id, _) = tx_ensemble_graph_scope(&tx, ensemble_id)?;
+        let (spec_id, graph_id, join_node_id, _) = tx_ensemble_graph_scope(&tx, ensemble_id)?;
 
         tx.execute(
-            "DELETE FROM loop_edges WHERE from_node = ?1 AND condition = ?2",
+            "DELETE FROM graph_edges WHERE from_node = ?1 AND condition = ?2",
             params![join_node_id, condition.as_str()],
         )?;
         for to_node in to_nodes {
             tx.execute(
-                "INSERT INTO loop_edges (id, spec_id, loop_id, from_node, to_node, condition)
+                "INSERT INTO graph_edges (id, spec_id, graph_id, from_node, to_node, condition)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
                     uuid::Uuid::new_v4().to_string(),
                     spec_id,
-                    loop_id,
+                    graph_id,
                     join_node_id,
                     to_node,
                     condition.as_str(),
@@ -643,7 +643,7 @@ impl Database {
             )?;
         }
         match condition {
-            LoopEdgeCondition::Pass => {
+            GraphEdgeCondition::Pass => {
                 let Some(target) = row_target else {
                     anyhow::bail!("A pass exit always has a target.");
                 };
@@ -652,7 +652,7 @@ impl Database {
                     params![target, ensemble_id],
                 )?;
             }
-            LoopEdgeCondition::Fail => {
+            GraphEdgeCondition::Fail => {
                 tx.execute(
                     "UPDATE ensembles SET on_fail_to = ?1 WHERE id = ?2",
                     params![row_target, ensemble_id],
@@ -670,7 +670,7 @@ impl Database {
     /// and every edge naming any of them (entry fan-out, member→join fan-in,
     /// join exits), plus the `ensembles`/`ensemble_members` rows (via `ON
     /// DELETE CASCADE`) — in one transaction. The caller
-    /// (`loop_delete_ensemble`) owns the guards: loop not running, and no
+    /// (`graph_delete_ensemble`) owns the guards: graph not running, and no
     /// other ensemble's exit chained into this one.
     pub fn delete_ensemble_unit(&self, ensemble_id: &str) -> Result<DeletedEnsembleUnit> {
         let mut conn = self
@@ -685,14 +685,14 @@ impl Database {
         let placeholders = all_owned.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let deleted_edges: i64 = tx.query_row(
             &format!(
-                "SELECT COUNT(*) FROM loop_edges WHERE from_node IN ({placeholders}) OR to_node IN ({placeholders})"
+                "SELECT COUNT(*) FROM graph_edges WHERE from_node IN ({placeholders}) OR to_node IN ({placeholders})"
             ),
             rusqlite::params_from_iter(all_owned.iter().chain(all_owned.iter())),
             |row| row.get(0),
         )?;
 
         for node_id in &all_owned {
-            tx.execute("DELETE FROM loop_nodes WHERE id = ?1", params![node_id])?;
+            tx.execute("DELETE FROM graph_nodes WHERE id = ?1", params![node_id])?;
         }
         // The `ensembles` row is typically already gone here: its
         // `join_node_id`/`entry_from_node`/`on_pass_to` foreign keys are all
@@ -914,7 +914,7 @@ fn map_ensemble_blueprint_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Ensem
 
 fn map_ensemble_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Ensemble> {
     let entry_condition =
-        LoopEdgeCondition::from_str(&row.get::<_, String>(7)?).ok_or_else(|| {
+        GraphEdgeCondition::from_str(&row.get::<_, String>(7)?).ok_or_else(|| {
             rusqlite::Error::FromSqlConversionFailure(
                 7,
                 rusqlite::types::Type::Text,
@@ -938,7 +938,7 @@ fn map_ensemble_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Ensemble> {
     Ok(Ensemble {
         id: row.get(0)?,
         spec_id: row.get(1)?,
-        loop_id: row.get(2)?,
+        graph_id: row.get(2)?,
         name: row.get(3)?,
         prompt_template: row.get(4)?,
         join_node_id: row.get(5)?,
@@ -1000,8 +1000,8 @@ pub struct DeletedEnsembleUnit {
 pub fn ensemble_entry_sources(
     members: &[EnsembleMember],
     join_node_id: &str,
-    edges: &[LoopEdge],
-) -> Vec<(String, LoopEdgeCondition)> {
+    edges: &[GraphEdge],
+) -> Vec<(String, GraphEdgeCondition)> {
     let member_ids: std::collections::HashSet<&str> = members
         .iter()
         .map(|member| member.node_id.as_str())
@@ -1024,7 +1024,7 @@ pub fn ensemble_entry_sources(
 }
 
 /// The graph scope plus unit membership every entry/exit transaction needs:
-/// `(spec_id, loop_id, join_node_id, member_ids in position order)`. Bails
+/// `(spec_id, graph_id, join_node_id, member_ids in position order)`. Bails
 /// when the ensemble does not exist.
 type EnsembleGraphScope = (Option<String>, Option<String>, String, Vec<String>);
 
@@ -1032,9 +1032,9 @@ fn tx_ensemble_graph_scope(
     tx: &rusqlite::Transaction<'_>,
     ensemble_id: &str,
 ) -> Result<EnsembleGraphScope> {
-    let (spec_id, loop_id, join_node_id): (Option<String>, Option<String>, String) = tx
+    let (spec_id, graph_id, join_node_id): (Option<String>, Option<String>, String) = tx
         .query_row(
-            "SELECT spec_id, loop_id, join_node_id FROM ensembles WHERE id = ?1",
+            "SELECT spec_id, graph_id, join_node_id FROM ensembles WHERE id = ?1",
             params![ensemble_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
@@ -1046,7 +1046,7 @@ fn tx_ensemble_graph_scope(
     let member_ids = stmt
         .query_map(params![ensemble_id], |row| row.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok((spec_id, loop_id, join_node_id, member_ids))
+    Ok((spec_id, graph_id, join_node_id, member_ids))
 }
 
 /// Entry sources read inside a transaction — same shape as
@@ -1057,11 +1057,11 @@ fn tx_entry_sources(
     ensemble_id: &str,
     member_ids: &[String],
     join_node_id: &str,
-) -> Result<Vec<(String, LoopEdgeCondition)>> {
+) -> Result<Vec<(String, GraphEdgeCondition)>> {
     let mut sources = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let mut stmt = tx.prepare(
-        "SELECT DISTINCT from_node, condition FROM loop_edges WHERE to_node IN (
+        "SELECT DISTINCT from_node, condition FROM graph_edges WHERE to_node IN (
              SELECT node_id FROM ensemble_members WHERE ensemble_id = ?1
          )",
     )?;
@@ -1073,7 +1073,7 @@ fn tx_entry_sources(
         if member_ids.iter().any(|id| id == &from_node) || from_node == join_node_id {
             continue;
         }
-        let Some(condition) = LoopEdgeCondition::from_str(&condition_raw) else {
+        let Some(condition) = GraphEdgeCondition::from_str(&condition_raw) else {
             continue;
         };
         if seen.insert((from_node.clone(), condition.clone())) {
@@ -1096,7 +1096,7 @@ fn delete_entry_edges(
     }
     let placeholders = member_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
     let sql = format!(
-        "DELETE FROM loop_edges WHERE to_node IN ({placeholders})
+        "DELETE FROM graph_edges WHERE to_node IN ({placeholders})
          AND from_node NOT IN ({placeholders}) AND from_node <> ?"
     );
     let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(member_ids.len() * 2 + 1);
@@ -1115,19 +1115,19 @@ fn delete_entry_edges(
 fn insert_entry_fan_out(
     tx: &rusqlite::Transaction<'_>,
     spec_id: Option<&str>,
-    loop_id: Option<&str>,
+    graph_id: Option<&str>,
     from_node: &str,
-    condition: &LoopEdgeCondition,
+    condition: &GraphEdgeCondition,
     member_ids: &[String],
 ) -> Result<()> {
     for member_id in member_ids {
         tx.execute(
-            "INSERT INTO loop_edges (id, spec_id, loop_id, from_node, to_node, condition)
+            "INSERT INTO graph_edges (id, spec_id, graph_id, from_node, to_node, condition)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 uuid::Uuid::new_v4().to_string(),
                 spec_id,
-                loop_id,
+                graph_id,
                 from_node,
                 member_id,
                 condition.as_str(),
@@ -1140,7 +1140,7 @@ fn insert_entry_fan_out(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::loops::{LoopNodeKind, LoopSpec, LoopSpecStatus};
+    use crate::domain::graphs::{GraphNodeKind, GraphSpec, GraphSpecStatus};
     use tempfile::{tempdir, NamedTempFile};
 
     fn test_db() -> Database {
@@ -1151,14 +1151,14 @@ mod tests {
     }
 
     fn insert_spec(db: &Database, id: &str) {
-        db.insert_loop_spec(&LoopSpec {
+        db.insert_graph_spec(&GraphSpec {
             id: id.to_string(),
-            loop_id: None,
+            graph_id: None,
             name: id.to_string(),
             description: Some("Do the thing".to_string()),
             position: 1,
             parallelizable: false,
-            status: LoopSpecStatus::Pending,
+            status: GraphSpecStatus::Pending,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
@@ -1172,32 +1172,32 @@ mod tests {
     }
 
     /// The DB-layer half of the "one call -> N+1 nodes" contract: given the
-    /// exact node/edge/ensemble shape `loop_add_ensemble` assembles for 3
+    /// exact node/edge/ensemble shape `graph_add_ensemble` assembles for 3
     /// members, one `insert_ensemble_unit` transaction must leave behind 1
-    /// join node + 3 member nodes (4 new `loop_nodes` rows total), the
+    /// join node + 3 member nodes (4 new `graph_nodes` rows total), the
     /// entry fan-out edge per member, the member->join fan-in edge per
     /// member, and the join's own pass edge — all in one shot.
     #[test]
     fn insert_ensemble_unit_creates_join_and_member_nodes_with_correct_wiring() {
         let db = test_db();
         insert_spec(&db, "spec-1");
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "kickoff".to_string(),
             spec_id: Some("spec-1".to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "kickoff".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({"command": "true", "success_condition": "exit_code_0"}),
             position: 1,
             created_at: Utc::now(),
         })
         .unwrap();
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "arbiter".to_string(),
             spec_id: Some("spec-1".to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "arbiter".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({}),
             position: 10,
             created_at: Utc::now(),
@@ -1206,15 +1206,15 @@ mod tests {
 
         let now = Utc::now();
         let member_ids = ["m1", "m2", "m3"];
-        let member_nodes: Vec<LoopNode> = member_ids
+        let member_nodes: Vec<GraphNode> = member_ids
             .iter()
             .enumerate()
-            .map(|(i, id)| LoopNode {
+            .map(|(i, id)| GraphNode {
                 id: id.to_string(),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 name: format!("member-{}", i + 1),
-                kind: LoopNodeKind::Agent,
+                kind: GraphNodeKind::Agent,
                 config: serde_json::json!({
                     "platform": "openrouter",
                     "prompt_template": "draft it",
@@ -1223,52 +1223,52 @@ mod tests {
                 created_at: now,
             })
             .collect();
-        let join_node = LoopNode {
+        let join_node = GraphNode {
             id: "join1".to_string(),
             spec_id: Some("spec-1".to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "quorum".to_string(),
-            kind: LoopNodeKind::Join,
+            kind: GraphNodeKind::Join,
             config: serde_json::json!({"ensemble_id": "ens1"}),
             position: 5,
             created_at: now,
         };
         let mut edges = Vec::new();
         for id in &member_ids {
-            edges.push(LoopEdge {
+            edges.push(GraphEdge {
                 id: format!("kickoff->{id}"),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 from_node: "kickoff".to_string(),
                 to_node: id.to_string(),
-                condition: LoopEdgeCondition::Always,
+                condition: GraphEdgeCondition::Always,
             });
-            edges.push(LoopEdge {
+            edges.push(GraphEdge {
                 id: format!("{id}->join1"),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 from_node: id.to_string(),
                 to_node: "join1".to_string(),
-                condition: LoopEdgeCondition::Always,
+                condition: GraphEdgeCondition::Always,
             });
         }
-        edges.push(LoopEdge {
+        edges.push(GraphEdge {
             id: "join1->arbiter".to_string(),
             spec_id: Some("spec-1".to_string()),
-            loop_id: None,
+            graph_id: None,
             from_node: "join1".to_string(),
             to_node: "arbiter".to_string(),
-            condition: LoopEdgeCondition::Pass,
+            condition: GraphEdgeCondition::Pass,
         });
         let ensemble = Ensemble {
             id: "ens1".to_string(),
             spec_id: Some("spec-1".to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "Proposers".to_string(),
             prompt_template: "draft it".to_string(),
             join_node_id: "join1".to_string(),
             entry_from_node: "kickoff".to_string(),
-            entry_condition: LoopEdgeCondition::Always,
+            entry_condition: GraphEdgeCondition::Always,
             min_pass: 3,
             straggler_timeout_minutes: None,
             timeout_minutes: 30,
@@ -1296,14 +1296,14 @@ mod tests {
 
         // 1 call -> N+1 new graph nodes (join + 3 members), on top of the 2
         // pre-existing (kickoff, arbiter).
-        let all_nodes = db.list_loop_nodes("spec-1").unwrap();
+        let all_nodes = db.list_graph_nodes("spec-1").unwrap();
         assert_eq!(all_nodes.len(), 6);
-        assert!(db.get_loop_node("join1").unwrap().is_some());
+        assert!(db.get_graph_node("join1").unwrap().is_some());
         for id in &member_ids {
-            assert!(db.get_loop_node(id).unwrap().is_some());
+            assert!(db.get_graph_node(id).unwrap().is_some());
         }
 
-        let all_edges = db.list_loop_edges("spec-1").unwrap();
+        let all_edges = db.list_graph_edges("spec-1").unwrap();
         // 2 wiring edges per member (entry + join) + 1 join exit edge.
         assert_eq!(all_edges.len(), member_ids.len() * 2 + 1);
 
@@ -1320,33 +1320,33 @@ mod tests {
         );
     }
 
-    /// `loop_update_ensemble`'s prompt-propagation contract: updating the
+    /// `graph_update_ensemble`'s prompt-propagation contract: updating the
     /// ensemble's shared prompt must land on the `ensembles` row (the
-    /// source of truth `loop_get` reads) *and* on every member node's own
+    /// source of truth `graph_get` reads) *and* on every member node's own
     /// `config.prompt_template` — exercising the exact two-step sequence
-    /// (`update_loop_node_details` per member, then `update_ensemble_prompt`)
+    /// (`update_graph_node_details` per member, then `update_ensemble_prompt`)
     /// the handler performs.
     #[test]
     fn update_ensemble_prompt_propagates_to_every_member_config() {
         let db = test_db();
         insert_spec(&db, "spec-1");
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "kickoff".to_string(),
             spec_id: Some("spec-1".to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "kickoff".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({"command": "true", "success_condition": "exit_code_0"}),
             position: 1,
             created_at: Utc::now(),
         })
         .unwrap();
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "arbiter".to_string(),
             spec_id: Some("spec-1".to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "arbiter".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({}),
             position: 10,
             created_at: Utc::now(),
@@ -1354,88 +1354,88 @@ mod tests {
         .unwrap();
         let now = Utc::now();
         let member_nodes = vec![
-            LoopNode {
+            GraphNode {
                 id: "m1".to_string(),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 name: "member-1".to_string(),
-                kind: LoopNodeKind::Agent,
+                kind: GraphNodeKind::Agent,
                 config: serde_json::json!({"platform": "openrouter", "prompt_template": "old prompt"}),
                 position: 2,
                 created_at: now,
             },
-            LoopNode {
+            GraphNode {
                 id: "m2".to_string(),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 name: "member-2".to_string(),
-                kind: LoopNodeKind::Agent,
+                kind: GraphNodeKind::Agent,
                 config: serde_json::json!({"platform": "claude", "prompt_template": "old prompt"}),
                 position: 3,
                 created_at: now,
             },
         ];
-        let join_node = LoopNode {
+        let join_node = GraphNode {
             id: "join1".to_string(),
             spec_id: Some("spec-1".to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "quorum".to_string(),
-            kind: LoopNodeKind::Join,
+            kind: GraphNodeKind::Join,
             config: serde_json::json!({"ensemble_id": "ens1"}),
             position: 4,
             created_at: now,
         };
         let edges = vec![
-            LoopEdge {
+            GraphEdge {
                 id: "kickoff->m1".to_string(),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 from_node: "kickoff".to_string(),
                 to_node: "m1".to_string(),
-                condition: LoopEdgeCondition::Always,
+                condition: GraphEdgeCondition::Always,
             },
-            LoopEdge {
+            GraphEdge {
                 id: "kickoff->m2".to_string(),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 from_node: "kickoff".to_string(),
                 to_node: "m2".to_string(),
-                condition: LoopEdgeCondition::Always,
+                condition: GraphEdgeCondition::Always,
             },
-            LoopEdge {
+            GraphEdge {
                 id: "m1->join1".to_string(),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 from_node: "m1".to_string(),
                 to_node: "join1".to_string(),
-                condition: LoopEdgeCondition::Always,
+                condition: GraphEdgeCondition::Always,
             },
-            LoopEdge {
+            GraphEdge {
                 id: "m2->join1".to_string(),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 from_node: "m2".to_string(),
                 to_node: "join1".to_string(),
-                condition: LoopEdgeCondition::Always,
+                condition: GraphEdgeCondition::Always,
             },
-            LoopEdge {
+            GraphEdge {
                 id: "join1->arbiter".to_string(),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 from_node: "join1".to_string(),
                 to_node: "arbiter".to_string(),
-                condition: LoopEdgeCondition::Pass,
+                condition: GraphEdgeCondition::Pass,
             },
         ];
         let ensemble = Ensemble {
             id: "ens1".to_string(),
             spec_id: Some("spec-1".to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "Proposers".to_string(),
             prompt_template: "old prompt".to_string(),
             join_node_id: "join1".to_string(),
             entry_from_node: "kickoff".to_string(),
-            entry_condition: LoopEdgeCondition::Always,
+            entry_condition: GraphEdgeCondition::Always,
             min_pass: 2,
             straggler_timeout_minutes: None,
             timeout_minutes: 30,
@@ -1466,7 +1466,7 @@ mod tests {
         db.insert_ensemble_unit(&ensemble, &members, &member_nodes, &join_node, &edges)
             .unwrap();
 
-        // Simulates `loop_update_ensemble`'s propagate-without-resize path:
+        // Simulates `graph_update_ensemble`'s propagate-without-resize path:
         // rewrite every member's config with the new prompt (preserving its
         // own platform/model), then update the ensemble row itself.
         for member in &members {
@@ -1474,7 +1474,7 @@ mod tests {
                 "platform": member.platform,
                 "prompt_template": "new prompt",
             });
-            db.update_loop_node_details(&member.node_id, None, None, Some(&config), None)
+            db.update_graph_node_details(&member.node_id, None, None, Some(&config), None)
                 .unwrap();
         }
         db.update_ensemble_prompt("ens1", "new prompt").unwrap();
@@ -1484,7 +1484,7 @@ mod tests {
             "new prompt"
         );
         for member in &members {
-            let node = db.get_loop_node(&member.node_id).unwrap().unwrap();
+            let node = db.get_graph_node(&member.node_id).unwrap().unwrap();
             assert_eq!(
                 node.config.get("prompt_template").and_then(|v| v.as_str()),
                 Some("new prompt"),
@@ -1503,84 +1503,84 @@ mod tests {
     fn update_ensemble_join_config_leaves_omitted_fields_unchanged() {
         let db = test_db();
         insert_spec(&db, "spec-1");
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "kickoff".to_string(),
             spec_id: Some("spec-1".to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "kickoff".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({"command": "true", "success_condition": "exit_code_0"}),
             position: 1,
             created_at: Utc::now(),
         })
         .unwrap();
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "arbiter".to_string(),
             spec_id: Some("spec-1".to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "arbiter".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({}),
             position: 10,
             created_at: Utc::now(),
         })
         .unwrap();
         let now = Utc::now();
-        let member_nodes = vec![LoopNode {
+        let member_nodes = vec![GraphNode {
             id: "m1".to_string(),
             spec_id: Some("spec-1".to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "member-1".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({"platform": "openrouter"}),
             position: 2,
             created_at: now,
         }];
-        let join_node = LoopNode {
+        let join_node = GraphNode {
             id: "join1".to_string(),
             spec_id: Some("spec-1".to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "quorum".to_string(),
-            kind: LoopNodeKind::Join,
+            kind: GraphNodeKind::Join,
             config: serde_json::json!({"ensemble_id": "ens1"}),
             position: 3,
             created_at: now,
         };
         let edges = vec![
-            LoopEdge {
+            GraphEdge {
                 id: "kickoff->m1".to_string(),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 from_node: "kickoff".to_string(),
                 to_node: "m1".to_string(),
-                condition: LoopEdgeCondition::Always,
+                condition: GraphEdgeCondition::Always,
             },
-            LoopEdge {
+            GraphEdge {
                 id: "m1->join1".to_string(),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 from_node: "m1".to_string(),
                 to_node: "join1".to_string(),
-                condition: LoopEdgeCondition::Always,
+                condition: GraphEdgeCondition::Always,
             },
-            LoopEdge {
+            GraphEdge {
                 id: "join1->arbiter".to_string(),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 from_node: "join1".to_string(),
                 to_node: "arbiter".to_string(),
-                condition: LoopEdgeCondition::Pass,
+                condition: GraphEdgeCondition::Pass,
             },
         ];
         let ensemble = Ensemble {
             id: "ens1".to_string(),
             spec_id: Some("spec-1".to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "Solo".to_string(),
             prompt_template: "draft it".to_string(),
             join_node_id: "join1".to_string(),
             entry_from_node: "kickoff".to_string(),
-            entry_condition: LoopEdgeCondition::Always,
+            entry_condition: GraphEdgeCondition::Always,
             min_pass: 1,
             straggler_timeout_minutes: Some(15),
             timeout_minutes: 30,
@@ -1627,23 +1627,23 @@ mod tests {
     fn remove_ensemble_member_cascades_node_and_edges() {
         let db = test_db();
         insert_spec(&db, "spec-1");
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "kickoff".to_string(),
             spec_id: Some("spec-1".to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "kickoff".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({"command": "true", "success_condition": "exit_code_0"}),
             position: 1,
             created_at: Utc::now(),
         })
         .unwrap();
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "arbiter".to_string(),
             spec_id: Some("spec-1".to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "arbiter".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({}),
             position: 10,
             created_at: Utc::now(),
@@ -1651,66 +1651,66 @@ mod tests {
         .unwrap();
         let now = Utc::now();
         let member_ids = ["m1", "m2"];
-        let member_nodes: Vec<LoopNode> = member_ids
+        let member_nodes: Vec<GraphNode> = member_ids
             .iter()
             .enumerate()
-            .map(|(i, id)| LoopNode {
+            .map(|(i, id)| GraphNode {
                 id: id.to_string(),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 name: format!("member-{}", i + 1),
-                kind: LoopNodeKind::Agent,
+                kind: GraphNodeKind::Agent,
                 config: serde_json::json!({"platform": "openrouter"}),
                 position: 2 + i as i64,
                 created_at: now,
             })
             .collect();
-        let join_node = LoopNode {
+        let join_node = GraphNode {
             id: "join1".to_string(),
             spec_id: Some("spec-1".to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "quorum".to_string(),
-            kind: LoopNodeKind::Join,
+            kind: GraphNodeKind::Join,
             config: serde_json::json!({"ensemble_id": "ens1"}),
             position: 4,
             created_at: now,
         };
         let mut edges = Vec::new();
         for id in &member_ids {
-            edges.push(LoopEdge {
+            edges.push(GraphEdge {
                 id: format!("kickoff->{id}"),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 from_node: "kickoff".to_string(),
                 to_node: id.to_string(),
-                condition: LoopEdgeCondition::Always,
+                condition: GraphEdgeCondition::Always,
             });
-            edges.push(LoopEdge {
+            edges.push(GraphEdge {
                 id: format!("{id}->join1"),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 from_node: id.to_string(),
                 to_node: "join1".to_string(),
-                condition: LoopEdgeCondition::Always,
+                condition: GraphEdgeCondition::Always,
             });
         }
-        edges.push(LoopEdge {
+        edges.push(GraphEdge {
             id: "join1->arbiter".to_string(),
             spec_id: Some("spec-1".to_string()),
-            loop_id: None,
+            graph_id: None,
             from_node: "join1".to_string(),
             to_node: "arbiter".to_string(),
-            condition: LoopEdgeCondition::Pass,
+            condition: GraphEdgeCondition::Pass,
         });
         let ensemble = Ensemble {
             id: "ens1".to_string(),
             spec_id: Some("spec-1".to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "Proposers".to_string(),
             prompt_template: "draft it".to_string(),
             join_node_id: "join1".to_string(),
             entry_from_node: "kickoff".to_string(),
-            entry_condition: LoopEdgeCondition::Always,
+            entry_condition: GraphEdgeCondition::Always,
             min_pass: 2,
             straggler_timeout_minutes: None,
             timeout_minutes: 30,
@@ -1737,8 +1737,8 @@ mod tests {
 
         assert!(db.remove_ensemble_member("m2").unwrap());
 
-        assert!(db.get_loop_node("m2").unwrap().is_none());
-        let remaining_edges = db.list_loop_edges("spec-1").unwrap();
+        assert!(db.get_graph_node("m2").unwrap().is_none());
+        let remaining_edges = db.list_graph_edges("spec-1").unwrap();
         assert!(!remaining_edges
             .iter()
             .any(|edge| edge.from_node == "m2" || edge.to_node == "m2"));
@@ -1752,8 +1752,8 @@ mod tests {
             vec!["m1"]
         );
         // The surviving member and the join itself are unaffected.
-        assert!(db.get_loop_node("m1").unwrap().is_some());
-        assert!(db.get_loop_node("join1").unwrap().is_some());
+        assert!(db.get_graph_node("m1").unwrap().is_some());
+        assert!(db.get_graph_node("join1").unwrap().is_some());
     }
 
     #[test]
@@ -1789,10 +1789,10 @@ mod tests {
     }
 
     #[test]
-    fn list_ensembles_for_loop_empty() {
+    fn list_ensembles_for_graph_empty() {
         let dir = tempdir().unwrap();
         let db = Database::new(&dir.path().join("test.db")).unwrap();
-        let ensembles = db.list_ensembles_for_loop("nonexistent").unwrap();
+        let ensembles = db.list_ensembles_for_graph("nonexistent").unwrap();
         assert!(ensembles.is_empty());
     }
 
@@ -1938,23 +1938,23 @@ mod tests {
     fn insert_ensemble_unit_round_trips_member_prompt_override() {
         let db = test_db();
         insert_spec(&db, "spec-1");
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "kickoff".to_string(),
             spec_id: Some("spec-1".to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "kickoff".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({"command": "true", "success_condition": "exit_code_0"}),
             position: 1,
             created_at: Utc::now(),
         })
         .unwrap();
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "arbiter".to_string(),
             spec_id: Some("spec-1".to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "arbiter".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({}),
             position: 10,
             created_at: Utc::now(),
@@ -1962,88 +1962,88 @@ mod tests {
         .unwrap();
         let now = Utc::now();
         let member_nodes = vec![
-            LoopNode {
+            GraphNode {
                 id: "m1".to_string(),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 name: "member-1".to_string(),
-                kind: LoopNodeKind::Agent,
+                kind: GraphNodeKind::Agent,
                 config: serde_json::json!({"platform": "claude", "prompt_template": "review for security"}),
                 position: 2,
                 created_at: now,
             },
-            LoopNode {
+            GraphNode {
                 id: "m2".to_string(),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 name: "member-2".to_string(),
-                kind: LoopNodeKind::Agent,
+                kind: GraphNodeKind::Agent,
                 config: serde_json::json!({"platform": "claude", "prompt_template": "draft it"}),
                 position: 3,
                 created_at: now,
             },
         ];
-        let join_node = LoopNode {
+        let join_node = GraphNode {
             id: "join1".to_string(),
             spec_id: Some("spec-1".to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "quorum".to_string(),
-            kind: LoopNodeKind::Join,
+            kind: GraphNodeKind::Join,
             config: serde_json::json!({"ensemble_id": "ens1"}),
             position: 4,
             created_at: now,
         };
         let edges = vec![
-            LoopEdge {
+            GraphEdge {
                 id: "kickoff->m1".to_string(),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 from_node: "kickoff".to_string(),
                 to_node: "m1".to_string(),
-                condition: LoopEdgeCondition::Always,
+                condition: GraphEdgeCondition::Always,
             },
-            LoopEdge {
+            GraphEdge {
                 id: "kickoff->m2".to_string(),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 from_node: "kickoff".to_string(),
                 to_node: "m2".to_string(),
-                condition: LoopEdgeCondition::Always,
+                condition: GraphEdgeCondition::Always,
             },
-            LoopEdge {
+            GraphEdge {
                 id: "m1->join1".to_string(),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 from_node: "m1".to_string(),
                 to_node: "join1".to_string(),
-                condition: LoopEdgeCondition::Always,
+                condition: GraphEdgeCondition::Always,
             },
-            LoopEdge {
+            GraphEdge {
                 id: "m2->join1".to_string(),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 from_node: "m2".to_string(),
                 to_node: "join1".to_string(),
-                condition: LoopEdgeCondition::Always,
+                condition: GraphEdgeCondition::Always,
             },
-            LoopEdge {
+            GraphEdge {
                 id: "join1->arbiter".to_string(),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 from_node: "join1".to_string(),
                 to_node: "arbiter".to_string(),
-                condition: LoopEdgeCondition::Pass,
+                condition: GraphEdgeCondition::Pass,
             },
         ];
         let ensemble = Ensemble {
             id: "ens1".to_string(),
             spec_id: Some("spec-1".to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "Proposers".to_string(),
             prompt_template: "draft it".to_string(),
             join_node_id: "join1".to_string(),
             entry_from_node: "kickoff".to_string(),
-            entry_condition: LoopEdgeCondition::Always,
+            entry_condition: GraphEdgeCondition::Always,
             min_pass: 2,
             straggler_timeout_minutes: None,
             timeout_minutes: 30,
@@ -2092,84 +2092,84 @@ mod tests {
     fn update_ensemble_member_sets_and_clears_prompt_override() {
         let db = test_db();
         insert_spec(&db, "spec-1");
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "kickoff".to_string(),
             spec_id: Some("spec-1".to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "kickoff".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({"command": "true", "success_condition": "exit_code_0"}),
             position: 1,
             created_at: Utc::now(),
         })
         .unwrap();
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "arbiter".to_string(),
             spec_id: Some("spec-1".to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "arbiter".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({}),
             position: 10,
             created_at: Utc::now(),
         })
         .unwrap();
         let now = Utc::now();
-        let member_nodes = vec![LoopNode {
+        let member_nodes = vec![GraphNode {
             id: "m1".to_string(),
             spec_id: Some("spec-1".to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "member-1".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({"platform": "claude", "prompt_template": "draft it"}),
             position: 2,
             created_at: now,
         }];
-        let join_node = LoopNode {
+        let join_node = GraphNode {
             id: "join1".to_string(),
             spec_id: Some("spec-1".to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "quorum".to_string(),
-            kind: LoopNodeKind::Join,
+            kind: GraphNodeKind::Join,
             config: serde_json::json!({"ensemble_id": "ens1"}),
             position: 3,
             created_at: now,
         };
         let edges = vec![
-            LoopEdge {
+            GraphEdge {
                 id: "kickoff->m1".to_string(),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 from_node: "kickoff".to_string(),
                 to_node: "m1".to_string(),
-                condition: LoopEdgeCondition::Always,
+                condition: GraphEdgeCondition::Always,
             },
-            LoopEdge {
+            GraphEdge {
                 id: "m1->join1".to_string(),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 from_node: "m1".to_string(),
                 to_node: "join1".to_string(),
-                condition: LoopEdgeCondition::Always,
+                condition: GraphEdgeCondition::Always,
             },
-            LoopEdge {
+            GraphEdge {
                 id: "join1->arbiter".to_string(),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 from_node: "join1".to_string(),
                 to_node: "arbiter".to_string(),
-                condition: LoopEdgeCondition::Pass,
+                condition: GraphEdgeCondition::Pass,
             },
         ];
         let ensemble = Ensemble {
             id: "ens1".to_string(),
             spec_id: Some("spec-1".to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "Solo".to_string(),
             prompt_template: "draft it".to_string(),
             join_node_id: "join1".to_string(),
             entry_from_node: "kickoff".to_string(),
-            entry_condition: LoopEdgeCondition::Always,
+            entry_condition: GraphEdgeCondition::Always,
             min_pass: 1,
             straggler_timeout_minutes: None,
             timeout_minutes: 30,
@@ -2245,23 +2245,23 @@ mod tests {
         let db = test_db();
         let spec_id = "spec-1".to_string();
         insert_spec(&db, &spec_id);
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "kickoff".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "kickoff".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({"command": "true", "success_condition": "exit_code_0"}),
             position: 1,
             created_at: chrono::Utc::now(),
         })
         .unwrap();
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "arbiter".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "arbiter".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({}),
             position: 10,
             created_at: chrono::Utc::now(),
@@ -2269,43 +2269,43 @@ mod tests {
         .unwrap();
         let now = chrono::Utc::now();
 
-        let join_node = LoopNode {
+        let join_node = GraphNode {
             id: "join1".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "join".to_string(),
-            kind: LoopNodeKind::Join,
+            kind: GraphNodeKind::Join,
             config: serde_json::json!({}),
             position: 100,
             created_at: now,
         };
-        let member_node = LoopNode {
+        let member_node = GraphNode {
             id: "m1".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "member".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({"platform": "claude"}),
             position: 50,
             created_at: now,
         };
-        let edge = LoopEdge {
+        let edge = GraphEdge {
             id: "e1".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             from_node: "kickoff".to_string(),
             to_node: "m1".to_string(),
-            condition: LoopEdgeCondition::Always,
+            condition: GraphEdgeCondition::Always,
         };
         let ensemble = Ensemble {
             id: "ens1".to_string(),
             spec_id: Some(spec_id),
-            loop_id: None,
+            graph_id: None,
             name: "Cascade".to_string(),
             prompt_template: "draft it".to_string(),
             join_node_id: "join1".to_string(),
             entry_from_node: "kickoff".to_string(),
-            entry_condition: LoopEdgeCondition::Always,
+            entry_condition: GraphEdgeCondition::Always,
             min_pass: 1,
             straggler_timeout_minutes: None,
             timeout_minutes: 30,
@@ -2337,23 +2337,23 @@ mod tests {
         let db = test_db();
         let spec_id = "spec-1".to_string();
         insert_spec(&db, &spec_id);
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "kickoff".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "kickoff".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({"command": "true", "success_condition": "exit_code_0"}),
             position: 1,
             created_at: chrono::Utc::now(),
         })
         .unwrap();
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "arbiter".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "arbiter".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({}),
             position: 10,
             created_at: chrono::Utc::now(),
@@ -2361,43 +2361,43 @@ mod tests {
         .unwrap();
         let now = chrono::Utc::now();
 
-        let join_node = LoopNode {
+        let join_node = GraphNode {
             id: "join1".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "join".to_string(),
-            kind: LoopNodeKind::Join,
+            kind: GraphNodeKind::Join,
             config: serde_json::json!({}),
             position: 100,
             created_at: now,
         };
-        let member_node = LoopNode {
+        let member_node = GraphNode {
             id: "m1".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "member".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({"platform": "claude"}),
             position: 50,
             created_at: now,
         };
-        let edge = LoopEdge {
+        let edge = GraphEdge {
             id: "e1".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             from_node: "kickoff".to_string(),
             to_node: "m1".to_string(),
-            condition: LoopEdgeCondition::Always,
+            condition: GraphEdgeCondition::Always,
         };
         let ensemble = Ensemble {
             id: "ens1".to_string(),
             spec_id: Some(spec_id),
-            loop_id: None,
+            graph_id: None,
             name: "RoundRobin".to_string(),
             prompt_template: "draft it".to_string(),
             join_node_id: "join1".to_string(),
             entry_from_node: "kickoff".to_string(),
-            entry_condition: LoopEdgeCondition::Always,
+            entry_condition: GraphEdgeCondition::Always,
             min_pass: 1,
             straggler_timeout_minutes: None,
             timeout_minutes: 30,
@@ -2429,23 +2429,23 @@ mod tests {
         let db = test_db();
         let spec_id = "spec-1".to_string();
         insert_spec(&db, &spec_id);
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "kickoff".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "kickoff".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({"command": "true", "success_condition": "exit_code_0"}),
             position: 1,
             created_at: chrono::Utc::now(),
         })
         .unwrap();
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "arbiter".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "arbiter".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({}),
             position: 10,
             created_at: chrono::Utc::now(),
@@ -2453,43 +2453,43 @@ mod tests {
         .unwrap();
         let now = chrono::Utc::now();
 
-        let join_node = LoopNode {
+        let join_node = GraphNode {
             id: "join1".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "join".to_string(),
-            kind: LoopNodeKind::Join,
+            kind: GraphNodeKind::Join,
             config: serde_json::json!({}),
             position: 100,
             created_at: now,
         };
-        let member_node = LoopNode {
+        let member_node = GraphNode {
             id: "m1".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "member".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({"platform": "claude"}),
             position: 50,
             created_at: now,
         };
-        let edge = LoopEdge {
+        let edge = GraphEdge {
             id: "e1".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             from_node: "kickoff".to_string(),
             to_node: "m1".to_string(),
-            condition: LoopEdgeCondition::Always,
+            condition: GraphEdgeCondition::Always,
         };
         let ensemble = Ensemble {
             id: "ens1".to_string(),
             spec_id: Some(spec_id),
-            loop_id: None,
+            graph_id: None,
             name: "RR".to_string(),
             prompt_template: "draft it".to_string(),
             join_node_id: "join1".to_string(),
             entry_from_node: "kickoff".to_string(),
-            entry_condition: LoopEdgeCondition::Always,
+            entry_condition: GraphEdgeCondition::Always,
             min_pass: 1,
             straggler_timeout_minutes: None,
             timeout_minutes: 30,
@@ -2524,23 +2524,23 @@ mod tests {
         let db = test_db();
         let spec_id = "spec-1".to_string();
         insert_spec(&db, &spec_id);
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "kickoff".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "kickoff".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({"command": "true", "success_condition": "exit_code_0"}),
             position: 1,
             created_at: chrono::Utc::now(),
         })
         .unwrap();
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "arbiter".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "arbiter".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({}),
             position: 10,
             created_at: chrono::Utc::now(),
@@ -2548,43 +2548,43 @@ mod tests {
         .unwrap();
         let now = chrono::Utc::now();
 
-        let join_node = LoopNode {
+        let join_node = GraphNode {
             id: "join1".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "join".to_string(),
-            kind: LoopNodeKind::Join,
+            kind: GraphNodeKind::Join,
             config: serde_json::json!({}),
             position: 100,
             created_at: now,
         };
-        let member_node = LoopNode {
+        let member_node = GraphNode {
             id: "m1".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "member".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({"platform": "claude"}),
             position: 50,
             created_at: now,
         };
-        let edge = LoopEdge {
+        let edge = GraphEdge {
             id: "e1".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             from_node: "kickoff".to_string(),
             to_node: "m1".to_string(),
-            condition: LoopEdgeCondition::Always,
+            condition: GraphEdgeCondition::Always,
         };
         let ensemble = Ensemble {
             id: "ens1".to_string(),
             spec_id: Some(spec_id),
-            loop_id: None,
+            graph_id: None,
             name: "RR".to_string(),
             prompt_template: "draft it".to_string(),
             join_node_id: "join1".to_string(),
             entry_from_node: "kickoff".to_string(),
-            entry_condition: LoopEdgeCondition::Always,
+            entry_condition: GraphEdgeCondition::Always,
             min_pass: 1,
             straggler_timeout_minutes: None,
             timeout_minutes: 30,

@@ -156,7 +156,7 @@ mod tests {
             let conn = db.conn.lock().unwrap();
             conn.execute_batch(
                 "PRAGMA foreign_keys=OFF;
-                 INSERT INTO loop_specs (id, loop_id, name, position, status)
+                 INSERT INTO graph_specs (id, graph_id, name, position, status)
                      VALUES ('orphan-spec', 'does-not-exist', 'orphan', 0, 'pending');
                  PRAGMA foreign_keys=ON;",
             )
@@ -164,7 +164,7 @@ mod tests {
         }
         let violations = db.foreign_key_check().unwrap();
         assert_eq!(violations.len(), 1);
-        assert!(violations[0].contains("loop_specs"));
+        assert!(violations[0].contains("graph_specs"));
     }
 
     // ── backup_into / integrity_check_file ─────────────────────────────

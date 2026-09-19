@@ -57,7 +57,7 @@ pub struct DbHealthStatus {
     /// The most recent time the routine was due but skipped because the
     /// daemon wasn't idle.
     pub last_skip_at: Option<DateTime<Utc>>,
-    /// Why it was skipped (the busy reasons, e.g. "1 loop(s) currently
+    /// Why it was skipped (the busy reasons, e.g. "1 graph(s) currently
     /// running").
     pub last_skip_reason: Option<String>,
 }
@@ -130,7 +130,7 @@ mod tests {
             last_run_at: Some(Utc::now()),
             outcome: Some(DbHealthOutcome::Passed),
             integrity_result: Some("ok".to_string()),
-            foreign_key_violations: vec!["loop_specs rowid=1 -> loops".to_string()],
+            foreign_key_violations: vec!["graph_specs rowid=1 -> graphs".to_string()],
             backup_path: Some("/home/user/.canopy/background_agents.db.backup".to_string()),
             last_skip_at: None,
             last_skip_reason: None,

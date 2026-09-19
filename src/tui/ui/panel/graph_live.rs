@@ -1,9 +1,9 @@
-//! The live loop view: a read-only render of [`LoopLiveState`] for the
+//! The live graph view: a read-only render of [`GraphLiveState`] for the
 //! main panel — header, spec queue, current-spec graph (auto-following the
 //! engine's current node, or a manually-highlighted one), and a detail
 //! footer. Pure over the snapshot; the only I/O is the `App` glue in
-//! [`draw_loop_live_view`], which assembles plain values before handing off
-//! to [`render_loop_live_view`].
+//! [`draw_graph_live_view`], which assembles plain values before handing off
+//! to [`render_graph_live_view`].
 
 use std::collections::HashMap;
 
@@ -16,45 +16,45 @@ use ratatui::Frame;
 
 use super::super::theme::Theme;
 use super::{compact_cwd, truncate_str};
-use crate::domain::loops::{
-    LoopEdgeCondition, LoopNode, LoopNodeKind, LoopRunStatus, LoopSpecStatus, LoopStatus,
+use crate::domain::graphs::{
+    GraphEdgeCondition, GraphNode, GraphNodeKind, GraphRunStatus, GraphSpecStatus, GraphStatus,
 };
-use crate::tui::app::loop_live_state::{
-    EnsembleLiveInfo, LoopLiveState, NodeRunInfo, SpecQueueEntry,
+use crate::tui::app::graph_live_state::{
+    EnsembleLiveInfo, GraphLiveState, NodeRunInfo, SpecQueueEntry,
 };
 use crate::tui::app::types::App;
 use crate::tui::ui::sidebar::draw_scroll_indicators;
 
-pub(crate) fn draw_loop_live_view(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
+pub(crate) fn draw_graph_live_view(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     if area.width == 0 || area.height == 0 {
-        app.loop_spec_strip_click_map.clear();
+        app.graph_spec_strip_click_map.clear();
         return;
     }
-    let Some(state) = app.loop_live_state.as_ref() else {
-        app.loop_spec_strip_click_map.clear();
+    let Some(state) = app.graph_live_state.as_ref() else {
+        app.graph_spec_strip_click_map.clear();
         frame.render_widget(
-            Paragraph::new("No loop selected").style(Style::default().fg(theme.dim_text)),
+            Paragraph::new("No graph selected").style(Style::default().fg(theme.dim_text)),
             area,
         );
         return;
     };
 
     let blocked = app
-        .loop_sidebar_meta
-        .get(&state.loop_id)
+        .graph_sidebar_meta
+        .get(&state.graph_id)
         .is_some_and(|meta| meta.blocked);
-    let highlighted = app.loop_graph_highlighted_node_id().map(str::to_string);
-    let node_info = app.loop_graph_highlighted_node_run_info();
-    let selected_spec_id = app.loop_spec_strip_selected.clone();
-    let spec_scroll = app.loop_spec_strip_scroll;
+    let highlighted = app.graph_live_highlighted_node_id().map(str::to_string);
+    let node_info = app.graph_live_highlighted_node_run_info();
+    let selected_spec_id = app.graph_spec_strip_selected.clone();
+    let spec_scroll = app.graph_spec_strip_scroll;
 
-    let result = render_loop_live_view(
+    let result = render_graph_live_view(
         frame,
         area,
         &LiveViewContext {
             state,
-            follow: app.loop_graph_follow,
-            follow_anchor: app.loop_graph_follow_anchor.as_deref(),
+            follow: app.graph_live_follow,
+            follow_anchor: app.graph_live_follow_anchor.as_deref(),
             highlighted_node_id: highlighted.as_deref(),
             node_info: &node_info,
             blocked,
@@ -62,15 +62,15 @@ pub(crate) fn draw_loop_live_view(frame: &mut Frame, area: Rect, app: &mut App, 
             theme,
             selected_spec_id: selected_spec_id.as_deref(),
             spec_scroll,
-            scroll: app.loop_live_view_scroll,
+            scroll: app.graph_live_view_scroll,
         },
     );
 
-    app.loop_spec_strip_click_map = result.click_map;
-    app.loop_spec_strip_capacity = result.capacity;
-    app.loop_live_view_total_lines = result.total_lines;
-    app.loop_live_view_scroll = result.clamped_scroll;
-    app.loop_graph_follow_anchor = result.follow_anchor;
+    app.graph_spec_strip_click_map = result.click_map;
+    app.graph_spec_strip_capacity = result.capacity;
+    app.graph_live_view_total_lines = result.total_lines;
+    app.graph_live_view_scroll = result.clamped_scroll;
+    app.graph_live_follow_anchor = result.follow_anchor;
 
     // CT3: live-tail overlay renders last so it sits above the graph and
     // detail content. Viewer only — no input state is touched here.
@@ -79,15 +79,15 @@ pub(crate) fn draw_loop_live_view(frame: &mut Frame, area: Rect, app: &mut App, 
     }
 }
 
-/// Everything the pure renderer needs, gathered by [`draw_loop_live_view`]
+/// Everything the pure renderer needs, gathered by [`draw_graph_live_view`]
 /// so the render itself stays a plain function of already-computed values
 /// (no `Database`/`App` access), which is what makes it testable without a
 /// full `App`.
 struct LiveViewContext<'a> {
-    state: &'a LoopLiveState,
+    state: &'a GraphLiveState,
     follow: bool,
     /// CT8: the node id the graph last re-centred on while auto-following
-    /// (mirrors `App::loop_graph_follow_anchor`). Compared against
+    /// (mirrors `App::graph_live_follow_anchor`). Compared against
     /// `highlighted_node_id` — which equals the engine's current node id
     /// whenever `follow` is true — to decide whether this frame is a real
     /// node transition that should re-centre the scroll.
@@ -106,7 +106,7 @@ struct LiveViewContext<'a> {
     scroll: u16,
 }
 
-/// What [`render_loop_live_view`] hands back to its `App`-owning caller:
+/// What [`render_graph_live_view`] hands back to its `App`-owning caller:
 /// where the marker strip's chips actually landed on screen, for mouse
 /// hit-testing next frame (mirrors `sidebar_tab_click_map`'s shape).
 struct LiveViewRenderResult {
@@ -120,7 +120,7 @@ struct LiveViewRenderResult {
     follow_anchor: Option<String>,
 }
 
-fn render_loop_live_view(
+fn render_graph_live_view(
     frame: &mut Frame,
     area: Rect,
     ctx: &LiveViewContext,
@@ -187,7 +187,7 @@ fn render_loop_live_view(
     // a real node-to-node transition and on nothing else — not a status
     // change, not elapsed time, not the user scrolling. Every other redraw
     // keeps `clamped_from_input`, the user's own scroll, so the whole graph
-    // of a running loop can be read.
+    // of a running graph can be read.
     //
     // Manual navigation: the scroll always chases the selection with the same
     // margin `ensure_visible` uses, so the highlight can never leave the panel.
@@ -270,7 +270,7 @@ fn ensure_visible(start: u16, span: u16, scroll: u16, height: u16) -> u16 {
 }
 
 fn status_icon_and_label(
-    state: &LoopLiveState,
+    state: &GraphLiveState,
     blocked: bool,
     theme: &Theme,
 ) -> (&'static str, String, Color) {
@@ -285,24 +285,24 @@ fn status_icon_and_label(
     if blocked {
         return ("⛔", "blocked".to_string(), theme.status_fail);
     }
-    match state.loop_status {
-        LoopStatus::Running => ("▶", "running".to_string(), theme.status_running),
-        LoopStatus::Pausing => ("⏸", "pausing".to_string(), Color::Yellow),
-        LoopStatus::Paused => ("⏸", "paused".to_string(), Color::Yellow),
-        LoopStatus::Completed => ("✓", "completed".to_string(), theme.status_ok),
-        LoopStatus::Failed => ("✗", "failed".to_string(), theme.status_fail),
-        LoopStatus::Draft => ("·", "draft".to_string(), theme.dim_text),
+    match state.graph_status {
+        GraphStatus::Running => ("▶", "running".to_string(), theme.status_running),
+        GraphStatus::Pausing => ("⏸", "pausing".to_string(), Color::Yellow),
+        GraphStatus::Paused => ("⏸", "paused".to_string(), Color::Yellow),
+        GraphStatus::Completed => ("✓", "completed".to_string(), theme.status_ok),
+        GraphStatus::Failed => ("✗", "failed".to_string(), theme.status_fail),
+        GraphStatus::Draft => ("·", "draft".to_string(), theme.dim_text),
     }
 }
 
-fn header_lines(state: &LoopLiveState, blocked: bool, theme: &Theme) -> Vec<Line<'static>> {
+fn header_lines(state: &GraphLiveState, blocked: bool, theme: &Theme) -> Vec<Line<'static>> {
     let (icon, label, color) = status_icon_and_label(state, blocked, theme);
     vec![
         Line::from(vec![
             Span::styled(icon, Style::default().fg(color)),
             Span::raw(" "),
             Span::styled(
-                state.loop_name.clone(),
+                state.graph_name.clone(),
                 Style::default()
                     .fg(theme.header_color)
                     .add_modifier(Modifier::BOLD),
@@ -324,7 +324,7 @@ fn header_lines(state: &LoopLiveState, blocked: bool, theme: &Theme) -> Vec<Line
 
 /// Chip glyph for a queue entry: the current spec always shows `▶`
 /// regardless of its underlying status (running or the next pending one —
-/// see `assemble_loop_live_state`'s `current_spec_id` rule); otherwise the
+/// see `assemble_graph_live_state`'s `current_spec_id` rule); otherwise the
 /// glyph reflects the terminal status directly, since that's exactly the
 /// case a user goes looking for (which spec failed vs. was skipped).
 fn spec_chip(
@@ -336,12 +336,12 @@ fn spec_chip(
         return ("▶", theme.status_running);
     }
     match entry.status {
-        LoopSpecStatus::Pending => ("○", theme.dim_text),
-        LoopSpecStatus::Running => ("▶", theme.status_running),
-        LoopSpecStatus::Completed => ("✓", theme.status_ok),
-        LoopSpecStatus::Failed => ("✗", theme.status_fail),
-        LoopSpecStatus::Skipped => ("⊘", theme.status_disabled),
-        LoopSpecStatus::Interrupted => ("⚑", theme.status_interrupted),
+        GraphSpecStatus::Pending => ("○", theme.dim_text),
+        GraphSpecStatus::Running => ("▶", theme.status_running),
+        GraphSpecStatus::Completed => ("✓", theme.status_ok),
+        GraphSpecStatus::Failed => ("✗", theme.status_fail),
+        GraphSpecStatus::Skipped => ("⊘", theme.status_disabled),
+        GraphSpecStatus::Interrupted => ("⚑", theme.status_interrupted),
     }
 }
 
@@ -372,7 +372,7 @@ struct SpecStripLayout {
 /// specs — followed by the selected spec's detail, falling back to the
 /// running/next-pending spec when nothing is manually selected.
 fn spec_strip_layout(
-    state: &LoopLiveState,
+    state: &GraphLiveState,
     selected_spec_id: Option<&str>,
     scroll: usize,
     area_width: u16,
@@ -471,7 +471,7 @@ fn spec_strip_layout(
 /// there is one, else the running/next-pending spec — the same fallback
 /// the strip's detail line always showed before selection existed.
 fn spec_detail_lines(
-    state: &LoopLiveState,
+    state: &GraphLiveState,
     selected_spec_id: Option<&str>,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
@@ -510,14 +510,14 @@ fn spec_detail_lines(
     lines
 }
 
-fn spec_status_label(status: LoopSpecStatus) -> &'static str {
+fn spec_status_label(status: GraphSpecStatus) -> &'static str {
     match status {
-        LoopSpecStatus::Pending => "pending",
-        LoopSpecStatus::Running => "running",
-        LoopSpecStatus::Completed => "completed",
-        LoopSpecStatus::Failed => "failed",
-        LoopSpecStatus::Skipped => "skipped",
-        LoopSpecStatus::Interrupted => "interrupted",
+        GraphSpecStatus::Pending => "pending",
+        GraphSpecStatus::Running => "running",
+        GraphSpecStatus::Completed => "completed",
+        GraphSpecStatus::Failed => "failed",
+        GraphSpecStatus::Skipped => "skipped",
+        GraphSpecStatus::Interrupted => "interrupted",
     }
 }
 
@@ -557,18 +557,18 @@ fn depth_prefix(depth: usize) -> String {
     "   ".repeat(depth.min(3))
 }
 
-fn edge_condition_priority(condition: &LoopEdgeCondition) -> (u8, Option<String>) {
+fn edge_condition_priority(condition: &GraphEdgeCondition) -> (u8, Option<String>) {
     match condition {
-        LoopEdgeCondition::Pass => (0, None),
-        LoopEdgeCondition::Fail => (1, None),
-        LoopEdgeCondition::Always => (2, None),
-        LoopEdgeCondition::Route(label) => (3, Some(label.clone())),
-        LoopEdgeCondition::Break => (4, None),
+        GraphEdgeCondition::Pass => (0, None),
+        GraphEdgeCondition::Fail => (1, None),
+        GraphEdgeCondition::Always => (2, None),
+        GraphEdgeCondition::Route(label) => (3, Some(label.clone())),
+        GraphEdgeCondition::Error => (4, None),
     }
 }
 
 fn node_box_lines(
-    node: &LoopNode,
+    node: &GraphNode,
     is_highlighted: bool,
     follow: bool,
     inner: usize,
@@ -581,7 +581,7 @@ fn node_box_lines(
     let max_name = inner.saturating_sub(2 + kind_tag.len());
     let name_display = truncate_str(&node.name, max_name);
     let spaces = inner.saturating_sub(2 + name_display.len() + kind_tag.len());
-    let kind_tag_style = if node.kind == LoopNodeKind::Router {
+    let kind_tag_style = if node.kind == GraphNodeKind::Router {
         Style::default()
             .fg(theme.kind_router)
             .add_modifier(Modifier::BOLD)
@@ -665,14 +665,14 @@ fn ensemble_box_lines(
 }
 
 fn ensemble_member_status_tag(
-    status: Option<LoopRunStatus>,
+    status: Option<GraphRunStatus>,
     theme: &Theme,
 ) -> (&'static str, Color) {
     match status {
-        Some(LoopRunStatus::Pass) => ("[pass]", theme.status_ok),
-        Some(LoopRunStatus::Fail) => ("[fail]", theme.status_fail),
-        Some(LoopRunStatus::Interrupted) => ("[interrupted]", theme.status_fail),
-        Some(LoopRunStatus::Running) => ("[running]", theme.status_running),
+        Some(GraphRunStatus::Pass) => ("[pass]", theme.status_ok),
+        Some(GraphRunStatus::Fail) => ("[fail]", theme.status_fail),
+        Some(GraphRunStatus::Interrupted) => ("[interrupted]", theme.status_fail),
+        Some(GraphRunStatus::Running) => ("[running]", theme.status_running),
         None => ("[pending]", theme.dim_text),
     }
 }
@@ -689,7 +689,7 @@ struct GraphLinesResult<'a> {
 }
 
 fn graph_lines(
-    state: &LoopLiveState,
+    state: &GraphLiveState,
     highlighted_node_id: Option<&str>,
     follow: bool,
     area_width: u16,
@@ -716,7 +716,7 @@ fn graph_lines(
 
     // --- Collapsed node map (key -> renderable) ---
     enum Collapsed<'a> {
-        Node(&'a LoopNode),
+        Node(&'a GraphNode),
         Ensemble(&'a EnsembleLiveInfo),
     }
     // Position for ordering fallback entry selection.
@@ -746,7 +746,7 @@ fn graph_lines(
     }
 
     // --- Collapsed edges (deduped, sorted later per DFS) ---
-    let mut collapsed_edges: HashMap<String, Vec<(String, LoopEdgeCondition)>> = HashMap::new();
+    let mut collapsed_edges: HashMap<String, Vec<(String, GraphEdgeCondition)>> = HashMap::new();
     for edge in &state.effective_edges {
         let from_raw = edge.from_node.as_str();
         let to_raw = edge.to_node.as_str();
@@ -776,7 +776,7 @@ fn graph_lines(
         };
         if let (Some(fk), Some(tk)) = (from_key, to_key) {
             if fk == tk {
-                // self-loop: keep as edge but DFS will treat it as back-ref
+                // self-graph: keep as edge but DFS will treat it as back-ref
             }
             let entry = collapsed_edges.entry(fk).or_default();
             if !entry
@@ -787,7 +787,7 @@ fn graph_lines(
             }
         }
     }
-    // Sort each adjacency by pass > fail > always > route(alpha) > break
+    // Sort each adjacency by pass > fail > always > route(alpha) > error
     for edges in collapsed_edges.values_mut() {
         edges.sort_by(|a, b| {
             let (pa, la) = edge_condition_priority(&a.1);
@@ -826,8 +826,8 @@ fn graph_lines(
         key: &str,
         depth: usize,
         collapsed_nodes: &HashMap<String, Collapsed>,
-        collapsed_edges: &HashMap<String, Vec<(String, LoopEdgeCondition)>>,
-        state: &LoopLiveState,
+        collapsed_edges: &HashMap<String, Vec<(String, GraphEdgeCondition)>>,
+        state: &GraphLiveState,
         follow: bool,
         inner: usize,
         theme: &Theme,
@@ -1014,14 +1014,14 @@ fn format_elapsed(started_at: DateTime<Utc>, now: DateTime<Utc>) -> String {
     }
 }
 
-fn run_status_span(status: Option<LoopRunStatus>, theme: &Theme) -> Span<'static> {
+fn run_status_span(status: Option<GraphRunStatus>, theme: &Theme) -> Span<'static> {
     match status {
-        Some(LoopRunStatus::Running) => {
+        Some(GraphRunStatus::Running) => {
             Span::styled("running", Style::default().fg(theme.status_running))
         }
-        Some(LoopRunStatus::Pass) => Span::styled("pass", Style::default().fg(theme.status_ok)),
-        Some(LoopRunStatus::Fail) => Span::styled("fail", Style::default().fg(theme.status_fail)),
-        Some(LoopRunStatus::Interrupted) => {
+        Some(GraphRunStatus::Pass) => Span::styled("pass", Style::default().fg(theme.status_ok)),
+        Some(GraphRunStatus::Fail) => Span::styled("fail", Style::default().fg(theme.status_fail)),
+        Some(GraphRunStatus::Interrupted) => {
             Span::styled("interrupted", Style::default().fg(theme.status_fail))
         }
         None => Span::styled("(no runs yet)", Style::default().fg(theme.dim_text)),
@@ -1029,7 +1029,7 @@ fn run_status_span(status: Option<LoopRunStatus>, theme: &Theme) -> Span<'static
 }
 
 fn footer_lines(
-    state: &LoopLiveState,
+    state: &GraphLiveState,
     highlighted_node_id: Option<&str>,
     node_info: &NodeRunInfo,
     follow: bool,
@@ -1112,8 +1112,8 @@ fn footer_lines(
 mod tests {
     use super::*;
     use crate::db::Database;
-    use crate::domain::loops::{
-        LoopEdge, LoopNode, LoopNodeKind, LoopSpecStatus, LoopStatus as DomainLoopStatus,
+    use crate::domain::graphs::{
+        GraphEdge, GraphNode, GraphNodeKind, GraphSpecStatus, GraphStatus as DomainGraphStatus,
     };
     use crate::tui::app::types::App;
     use ratatui::backend::TestBackend;
@@ -1142,21 +1142,21 @@ mod tests {
         text
     }
 
-    fn team_nodes() -> Vec<LoopNode> {
+    fn team_nodes() -> Vec<GraphNode> {
         let kinds = [
-            ("Implement", LoopNodeKind::Agent),
-            ("Cargo gates", LoopNodeKind::Check),
-            ("Review + commit", LoopNodeKind::Agent),
-            ("Check committed", LoopNodeKind::Check),
-            ("Resilience", LoopNodeKind::Agent),
+            ("Implement", GraphNodeKind::Agent),
+            ("Cargo gates", GraphNodeKind::Check),
+            ("Review + commit", GraphNodeKind::Agent),
+            ("Check committed", GraphNodeKind::Check),
+            ("Resilience", GraphNodeKind::Agent),
         ];
         kinds
             .iter()
             .enumerate()
-            .map(|(i, (name, kind))| LoopNode {
+            .map(|(i, (name, kind))| GraphNode {
                 id: format!("n{i}"),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 name: name.to_string(),
                 kind: *kind,
                 config: json!({}),
@@ -1166,26 +1166,26 @@ mod tests {
             .collect()
     }
 
-    fn team_edges() -> Vec<LoopEdge> {
+    fn team_edges() -> Vec<GraphEdge> {
         // Mirrors the real 5-node team graph: cycles back to Implement (n0)
-        // on failure at any later stage, and Resilience (n4) loops back to
+        // on failure at any later stage, and Resilience (n4) graphs back to
         // Implement on its own pass.
         vec![
-            ("n0", "n1", LoopEdgeCondition::Pass),
-            ("n0", "n4", LoopEdgeCondition::Fail),
-            ("n4", "n0", LoopEdgeCondition::Pass),
-            ("n1", "n2", LoopEdgeCondition::Pass),
-            ("n1", "n0", LoopEdgeCondition::Fail),
-            ("n2", "n3", LoopEdgeCondition::Pass),
-            ("n2", "n0", LoopEdgeCondition::Fail),
-            ("n3", "n2", LoopEdgeCondition::Fail),
+            ("n0", "n1", GraphEdgeCondition::Pass),
+            ("n0", "n4", GraphEdgeCondition::Fail),
+            ("n4", "n0", GraphEdgeCondition::Pass),
+            ("n1", "n2", GraphEdgeCondition::Pass),
+            ("n1", "n0", GraphEdgeCondition::Fail),
+            ("n2", "n3", GraphEdgeCondition::Pass),
+            ("n2", "n0", GraphEdgeCondition::Fail),
+            ("n3", "n2", GraphEdgeCondition::Fail),
         ]
         .into_iter()
         .enumerate()
-        .map(|(i, (from, to, condition))| LoopEdge {
+        .map(|(i, (from, to, condition))| GraphEdge {
             id: format!("e{i}"),
             spec_id: Some("spec-1".to_string()),
-            loop_id: None,
+            graph_id: None,
             from_node: from.to_string(),
             to_node: to.to_string(),
             condition,
@@ -1193,11 +1193,11 @@ mod tests {
         .collect()
     }
 
-    fn running_state() -> LoopLiveState {
-        LoopLiveState {
-            loop_id: "lp1".to_string(),
-            loop_name: "canopy-ux-notifications".to_string(),
-            loop_status: DomainLoopStatus::Running,
+    fn running_state() -> GraphLiveState {
+        GraphLiveState {
+            graph_id: "lp1".to_string(),
+            graph_name: "canopy-ux-notifications".to_string(),
+            graph_status: DomainGraphStatus::Running,
             workdir: "/home/user/Projects/harness-canopy".to_string(),
             trigger_type: "manual".to_string(),
             schedule_expr: None,
@@ -1207,19 +1207,19 @@ mod tests {
                 SpecQueueEntry {
                     spec_id: "s1".to_string(),
                     spec_name: "B1 fix".to_string(),
-                    status: LoopSpecStatus::Completed,
+                    status: GraphSpecStatus::Completed,
                     failure_reason: None,
                 },
                 SpecQueueEntry {
                     spec_id: "s2".to_string(),
                     spec_name: "U1b live view".to_string(),
-                    status: LoopSpecStatus::Running,
+                    status: GraphSpecStatus::Running,
                     failure_reason: None,
                 },
                 SpecQueueEntry {
                     spec_id: "s3".to_string(),
                     spec_name: "T1 theme".to_string(),
-                    status: LoopSpecStatus::Pending,
+                    status: GraphSpecStatus::Pending,
                     failure_reason: None,
                 },
             ],
@@ -1231,7 +1231,7 @@ mod tests {
             ensembles: Vec::new(),
             router_taken_routes: HashMap::new(),
             current_node_id: Some("n0".to_string()),
-            current_node_status: Some(LoopRunStatus::Running),
+            current_node_status: Some(GraphRunStatus::Running),
             current_node_started_at: Some(Utc::now() - chrono::Duration::seconds(75)),
             current_node_iteration: Some(2),
             current_node_output_tail: Some("implementing the graph render...".to_string()),
@@ -1239,7 +1239,7 @@ mod tests {
     }
 
     #[test]
-    fn running_loop_renders_header_queue_graph_and_footer_with_current_node_highlighted() {
+    fn running_graph_renders_header_queue_graph_and_footer_with_current_node_highlighted() {
         let state = running_state();
         let node_info = NodeRunInfo {
             status: state.current_node_status,
@@ -1250,7 +1250,7 @@ mod tests {
         };
 
         let text = render_to_text(80, 40, |frame, area| {
-            render_loop_live_view(
+            render_graph_live_view(
                 frame,
                 area,
                 &LiveViewContext {
@@ -1302,14 +1302,14 @@ mod tests {
         let state = running_state();
 
         let node_info = NodeRunInfo {
-            status: Some(LoopRunStatus::Pass),
+            status: Some(GraphRunStatus::Pass),
             started_at: Some(Utc::now() - chrono::Duration::seconds(10)),
             iteration: Some(1),
             output_tail: Some("reviewed and committed".to_string()),
             chosen_route: None,
         };
         let text = render_to_text(80, 40, |frame, area| {
-            render_loop_live_view(
+            render_graph_live_view(
                 frame,
                 area,
                 &LiveViewContext {
@@ -1340,18 +1340,18 @@ mod tests {
         // s1 stays Completed (✓); make s3 Failed with a recorded reason and
         // add a fourth, Skipped spec — before this, Failed/Skipped/Completed
         // all rendered the same `✓`.
-        state.spec_queue[2].status = LoopSpecStatus::Failed;
+        state.spec_queue[2].status = GraphSpecStatus::Failed;
         state.spec_queue[2].failure_reason = Some("cargo test failed: 3 tests failing".to_string());
         state.spec_queue.push(SpecQueueEntry {
             spec_id: "s4".to_string(),
             spec_name: "T2 skipped thing".to_string(),
-            status: LoopSpecStatus::Skipped,
+            status: GraphSpecStatus::Skipped,
             failure_reason: Some("superseded by s5".to_string()),
         });
 
         let node_info = NodeRunInfo::default();
         let text = render_to_text(80, 40, |frame, area| {
-            render_loop_live_view(
+            render_graph_live_view(
                 frame,
                 area,
                 &LiveViewContext {
@@ -1397,7 +1397,7 @@ mod tests {
             .map(|i| SpecQueueEntry {
                 spec_id: format!("s{i}"),
                 spec_name: format!("Spec {i}"),
-                status: LoopSpecStatus::Pending,
+                status: GraphSpecStatus::Pending,
                 failure_reason: None,
             })
             .collect();
@@ -1406,7 +1406,7 @@ mod tests {
 
         let node_info = NodeRunInfo::default();
         let text = render_to_text(40, 40, |frame, area| {
-            render_loop_live_view(
+            render_graph_live_view(
                 frame,
                 area,
                 &LiveViewContext {
@@ -1443,7 +1443,7 @@ mod tests {
             .map(|i| SpecQueueEntry {
                 spec_id: format!("s{i}"),
                 spec_name: format!("Spec {i}"),
-                status: LoopSpecStatus::Pending,
+                status: GraphSpecStatus::Pending,
                 failure_reason: None,
             })
             .collect();
@@ -1483,7 +1483,7 @@ mod tests {
         // Also visible in rendered text with no range indicator.
         let node_info = NodeRunInfo::default();
         let text = render_to_text(40, 40, |frame, area| {
-            render_loop_live_view(
+            render_graph_live_view(
                 frame,
                 area,
                 &LiveViewContext {
@@ -1518,7 +1518,7 @@ mod tests {
             .map(|i| SpecQueueEntry {
                 spec_id: format!("s{i}"),
                 spec_name: format!("Spec {i}"),
-                status: LoopSpecStatus::Pending,
+                status: GraphSpecStatus::Pending,
                 failure_reason: None,
             })
             .collect();
@@ -1537,7 +1537,7 @@ mod tests {
 
         let node_info = NodeRunInfo::default();
         let text = render_to_text(40, 10, |frame, area| {
-            render_loop_live_view(
+            render_graph_live_view(
                 frame,
                 area,
                 &LiveViewContext {
@@ -1582,7 +1582,7 @@ mod tests {
 
         let node_info = NodeRunInfo::default();
         let text = render_to_text(80, 40, |frame, area| {
-            render_loop_live_view(
+            render_graph_live_view(
                 frame,
                 area,
                 &LiveViewContext {
@@ -1613,7 +1613,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = frame.area();
-                result_holder = Some(render_loop_live_view(
+                result_holder = Some(render_graph_live_view(
                     frame,
                     area,
                     &LiveViewContext {
@@ -1653,21 +1653,21 @@ mod tests {
     #[test]
     fn esc_restores_follow_via_app_state() {
         let (db, data_dir) = test_db_and_dir();
-        seed_running_loop(&db);
+        seed_running_graph(&db);
 
         let mut app = App::new(Arc::clone(&db), data_dir.path()).unwrap();
-        let auto_node = app.loop_graph_highlighted_node_id().map(str::to_string);
-        assert!(app.loop_graph_follow);
+        let auto_node = app.graph_live_highlighted_node_id().map(str::to_string);
+        assert!(app.graph_live_follow);
 
-        app.loop_graph_move_highlight(true);
-        assert!(!app.loop_graph_follow);
-        let manual_node = app.loop_graph_highlighted_node_id().map(str::to_string);
+        app.graph_live_move_highlight(true);
+        assert!(!app.graph_live_follow);
+        let manual_node = app.graph_live_highlighted_node_id().map(str::to_string);
         assert_ne!(auto_node, manual_node);
 
-        app.loop_graph_reset_follow();
-        assert!(app.loop_graph_follow);
+        app.graph_live_reset_follow();
+        assert!(app.graph_live_follow);
         assert_eq!(
-            app.loop_graph_highlighted_node_id().map(str::to_string),
+            app.graph_live_highlighted_node_id().map(str::to_string),
             auto_node
         );
     }
@@ -1690,18 +1690,18 @@ mod tests {
             scroll: 0,
         };
         render_to_text(1, 5, |frame, area| {
-            render_loop_live_view(frame, area, &ctx);
+            render_graph_live_view(frame, area, &ctx);
         });
         render_to_text(0, 0, |frame, area| {
-            render_loop_live_view(frame, area, &ctx);
+            render_graph_live_view(frame, area, &ctx);
         });
     }
 
     #[test]
-    fn completed_loop_renders_statically_with_completed_icon() {
+    fn completed_graph_renders_statically_with_completed_icon() {
         let mut state = running_state();
-        state.loop_status = DomainLoopStatus::Completed;
-        state.current_node_status = Some(LoopRunStatus::Pass);
+        state.graph_status = DomainGraphStatus::Completed;
+        state.current_node_status = Some(GraphRunStatus::Pass);
         state.done_count = 3;
         state.current_spec_id = None;
 
@@ -1714,7 +1714,7 @@ mod tests {
         };
 
         let text = render_to_text(80, 40, |frame, area| {
-            render_loop_live_view(
+            render_graph_live_view(
                 frame,
                 area,
                 &LiveViewContext {
@@ -1743,17 +1743,17 @@ mod tests {
             name: "Proposers".to_string(),
             join_node_id: "join1".to_string(),
             members: vec![
-                crate::tui::app::loop_live_state::EnsembleMemberLiveInfo {
+                crate::tui::app::graph_live_state::EnsembleMemberLiveInfo {
                     node_id: "m1".to_string(),
                     label: "openrouter/deepseek".to_string(),
-                    status: Some(LoopRunStatus::Pass),
+                    status: Some(GraphRunStatus::Pass),
                 },
-                crate::tui::app::loop_live_state::EnsembleMemberLiveInfo {
+                crate::tui::app::graph_live_state::EnsembleMemberLiveInfo {
                     node_id: "m2".to_string(),
                     label: "openrouter/qwen".to_string(),
-                    status: Some(LoopRunStatus::Running),
+                    status: Some(GraphRunStatus::Running),
                 },
-                crate::tui::app::loop_live_state::EnsembleMemberLiveInfo {
+                crate::tui::app::graph_live_state::EnsembleMemberLiveInfo {
                     node_id: "m3".to_string(),
                     label: "openrouter/llama".to_string(),
                     status: None,
@@ -1768,82 +1768,82 @@ mod tests {
         // kickoff -> {m1, m2, m3} -> join -> arbiter, replacing the plain
         // team graph so the ensemble is the only thing on screen.
         state.effective_nodes = vec![
-            LoopNode {
+            GraphNode {
                 id: "kickoff".to_string(),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 name: "Kickoff".to_string(),
-                kind: LoopNodeKind::Agent,
+                kind: GraphNodeKind::Agent,
                 config: json!({}),
                 position: 0,
                 created_at: Utc::now(),
             },
-            LoopNode {
+            GraphNode {
                 id: "m1".to_string(),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 name: "Proposers [1]".to_string(),
-                kind: LoopNodeKind::Agent,
+                kind: GraphNodeKind::Agent,
                 config: json!({}),
                 position: 1,
                 created_at: Utc::now(),
             },
-            LoopNode {
+            GraphNode {
                 id: "m2".to_string(),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 name: "Proposers [2]".to_string(),
-                kind: LoopNodeKind::Agent,
+                kind: GraphNodeKind::Agent,
                 config: json!({}),
                 position: 2,
                 created_at: Utc::now(),
             },
-            LoopNode {
+            GraphNode {
                 id: "m3".to_string(),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 name: "Proposers [3]".to_string(),
-                kind: LoopNodeKind::Agent,
+                kind: GraphNodeKind::Agent,
                 config: json!({}),
                 position: 3,
                 created_at: Utc::now(),
             },
-            LoopNode {
+            GraphNode {
                 id: "join1".to_string(),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 name: "Proposers (quorum)".to_string(),
-                kind: LoopNodeKind::Join,
+                kind: GraphNodeKind::Join,
                 config: json!({}),
                 position: 4,
                 created_at: Utc::now(),
             },
-            LoopNode {
+            GraphNode {
                 id: "arbiter".to_string(),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 name: "Arbiter".to_string(),
-                kind: LoopNodeKind::Agent,
+                kind: GraphNodeKind::Agent,
                 config: json!({}),
                 position: 5,
                 created_at: Utc::now(),
             },
         ];
         state.effective_edges = vec![
-            ("kickoff", "m1", LoopEdgeCondition::Always),
-            ("kickoff", "m2", LoopEdgeCondition::Always),
-            ("kickoff", "m3", LoopEdgeCondition::Always),
-            ("m1", "join1", LoopEdgeCondition::Always),
-            ("m2", "join1", LoopEdgeCondition::Always),
-            ("m3", "join1", LoopEdgeCondition::Always),
-            ("join1", "arbiter", LoopEdgeCondition::Pass),
+            ("kickoff", "m1", GraphEdgeCondition::Always),
+            ("kickoff", "m2", GraphEdgeCondition::Always),
+            ("kickoff", "m3", GraphEdgeCondition::Always),
+            ("m1", "join1", GraphEdgeCondition::Always),
+            ("m2", "join1", GraphEdgeCondition::Always),
+            ("m3", "join1", GraphEdgeCondition::Always),
+            ("join1", "arbiter", GraphEdgeCondition::Pass),
         ]
         .into_iter()
         .enumerate()
-        .map(|(i, (from, to, condition))| LoopEdge {
+        .map(|(i, (from, to, condition))| GraphEdge {
             id: format!("ee{i}"),
             spec_id: Some("spec-1".to_string()),
-            loop_id: None,
+            graph_id: None,
             from_node: from.to_string(),
             to_node: to.to_string(),
             condition,
@@ -1854,7 +1854,7 @@ mod tests {
 
         let node_info = NodeRunInfo::default();
         let text = render_to_text(80, 40, |frame, area| {
-            render_loop_live_view(
+            render_graph_live_view(
                 frame,
                 area,
                 &LiveViewContext {
@@ -1893,52 +1893,52 @@ mod tests {
     fn router_node_renders_distinctly_with_every_route_legible_at_real_width() {
         let mut state = running_state();
         state.effective_nodes = vec![
-            LoopNode {
+            GraphNode {
                 id: "router".to_string(),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 name: "Classify request".to_string(),
-                kind: LoopNodeKind::Router,
+                kind: GraphNodeKind::Router,
                 config: json!({}),
                 position: 0,
                 created_at: Utc::now(),
             },
-            LoopNode {
+            GraphNode {
                 id: "billing".to_string(),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 name: "Billing specialist".to_string(),
-                kind: LoopNodeKind::Agent,
+                kind: GraphNodeKind::Agent,
                 config: json!({}),
                 position: 1,
                 created_at: Utc::now(),
             },
-            LoopNode {
+            GraphNode {
                 id: "technical".to_string(),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 name: "Technical specialist".to_string(),
-                kind: LoopNodeKind::Agent,
+                kind: GraphNodeKind::Agent,
                 config: json!({}),
                 position: 2,
                 created_at: Utc::now(),
             },
-            LoopNode {
+            GraphNode {
                 id: "sales".to_string(),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 name: "Sales specialist".to_string(),
-                kind: LoopNodeKind::Agent,
+                kind: GraphNodeKind::Agent,
                 config: json!({}),
                 position: 3,
                 created_at: Utc::now(),
             },
-            LoopNode {
+            GraphNode {
                 id: "escalation".to_string(),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 name: "Human escalation".to_string(),
-                kind: LoopNodeKind::Agent,
+                kind: GraphNodeKind::Agent,
                 config: json!({}),
                 position: 4,
                 created_at: Utc::now(),
@@ -1948,30 +1948,30 @@ mod tests {
             (
                 "router",
                 "billing",
-                LoopEdgeCondition::Route("billing".to_string()),
+                GraphEdgeCondition::Route("billing".to_string()),
             ),
             (
                 "router",
                 "technical",
-                LoopEdgeCondition::Route("technical".to_string()),
+                GraphEdgeCondition::Route("technical".to_string()),
             ),
             (
                 "router",
                 "sales",
-                LoopEdgeCondition::Route("sales".to_string()),
+                GraphEdgeCondition::Route("sales".to_string()),
             ),
             (
                 "router",
                 "escalation",
-                LoopEdgeCondition::Route("escalation".to_string()),
+                GraphEdgeCondition::Route("escalation".to_string()),
             ),
         ]
         .into_iter()
         .enumerate()
-        .map(|(i, (from, to, condition))| LoopEdge {
+        .map(|(i, (from, to, condition))| GraphEdge {
             id: format!("re{i}"),
             spec_id: Some("spec-1".to_string()),
-            loop_id: None,
+            graph_id: None,
             from_node: from.to_string(),
             to_node: to.to_string(),
             condition,
@@ -1990,7 +1990,7 @@ mod tests {
         // router with 4 routes has plenty of room; nothing here should ever
         // need to wrap or truncate.
         let text = render_to_text(100, 40, |frame, area| {
-            render_loop_live_view(
+            render_graph_live_view(
                 frame,
                 area,
                 &LiveViewContext {
@@ -2043,18 +2043,18 @@ mod tests {
         (db, data_dir)
     }
 
-    fn seed_running_loop(db: &Database) {
-        use crate::domain::loops::{Loop, LoopNodeRun, LoopSpec};
+    fn seed_running_graph(db: &Database) {
+        use crate::domain::graphs::{Graph, GraphNodeRun, GraphSpec};
 
-        let lp = Loop {
+        let lp = Graph {
             archived: false,
             paused_by_reconciliation: false,
             infra_node_id: None,
             id: "lp1".to_string(),
-            name: "team loop".to_string(),
+            name: "team graph".to_string(),
             description: None,
             workdir: "/tmp/test".to_string(),
-            status: DomainLoopStatus::Running,
+            status: DomainGraphStatus::Running,
             trigger: None,
             created_at: Utc::now(),
             started_at: None,
@@ -2065,16 +2065,16 @@ mod tests {
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
         };
-        db.insert_loop(&lp).unwrap();
+        db.insert_graph(&lp).unwrap();
 
-        db.insert_loop_spec(&LoopSpec {
+        db.insert_graph_spec(&GraphSpec {
             id: "s1".to_string(),
-            loop_id: Some("lp1".to_string()),
+            graph_id: Some("lp1".to_string()),
             name: "spec one".to_string(),
             description: None,
             position: 1,
             parallelizable: false,
-            status: LoopSpecStatus::Running,
+            status: GraphSpecStatus::Running,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
@@ -2087,26 +2087,26 @@ mod tests {
         .unwrap();
 
         for node in team_nodes() {
-            db.insert_loop_node(&LoopNode {
+            db.insert_graph_node(&GraphNode {
                 spec_id: Some("s1".to_string()),
                 ..node
             })
             .unwrap();
         }
         for edge in team_edges() {
-            db.insert_loop_edge(&LoopEdge {
+            db.insert_graph_edge(&GraphEdge {
                 spec_id: Some("s1".to_string()),
                 ..edge
             })
             .unwrap();
         }
 
-        db.insert_loop_run(&LoopNodeRun {
+        db.insert_graph_run(&GraphNodeRun {
             id: "run1".to_string(),
-            loop_id: "lp1".to_string(),
+            graph_id: "lp1".to_string(),
             spec_id: "s1".to_string(),
             node_id: "n0".to_string(),
-            status: LoopRunStatus::Running,
+            status: GraphRunStatus::Running,
             input: None,
             output: None,
             started_at: Utc::now(),
@@ -2121,14 +2121,14 @@ mod tests {
         .unwrap();
     }
 
-    fn many_nodes(count: usize) -> Vec<LoopNode> {
+    fn many_nodes(count: usize) -> Vec<GraphNode> {
         (0..count)
-            .map(|i| LoopNode {
+            .map(|i| GraphNode {
                 id: format!("m{i}"),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 name: format!("Node {i}"),
-                kind: LoopNodeKind::Agent,
+                kind: GraphNodeKind::Agent,
                 config: json!({}),
                 position: i as i64,
                 created_at: Utc::now(),
@@ -2136,15 +2136,15 @@ mod tests {
             .collect()
     }
 
-    fn many_edges(count: usize) -> Vec<LoopEdge> {
+    fn many_edges(count: usize) -> Vec<GraphEdge> {
         (0..count.saturating_sub(1))
-            .map(|i| LoopEdge {
+            .map(|i| GraphEdge {
                 id: format!("me{i}"),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 from_node: format!("m{i}"),
                 to_node: format!("m{}", i + 1),
-                condition: LoopEdgeCondition::Pass,
+                condition: GraphEdgeCondition::Pass,
             })
             .collect()
     }
@@ -2160,7 +2160,7 @@ mod tests {
 
         // At top, only ▼ should show.
         let text_top = render_to_text(80, 15, |frame, area| {
-            render_loop_live_view(
+            render_graph_live_view(
                 frame,
                 area,
                 &LiveViewContext {
@@ -2189,7 +2189,7 @@ mod tests {
 
         // Scrolled mid-way, both indicators.
         let text_mid = render_to_text(80, 15, |frame, area| {
-            render_loop_live_view(
+            render_graph_live_view(
                 frame,
                 area,
                 &LiveViewContext {
@@ -2222,7 +2222,7 @@ mod tests {
         let state = running_state();
         let node_info = NodeRunInfo::default();
         let text = render_to_text(80, 60, |frame, area| {
-            render_loop_live_view(
+            render_graph_live_view(
                 frame,
                 area,
                 &LiveViewContext {
@@ -2256,7 +2256,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = frame.area();
-                let result = render_loop_live_view(
+                let result = render_graph_live_view(
                     frame,
                     area,
                     &LiveViewContext {
@@ -2292,13 +2292,13 @@ mod tests {
         state.effective_edges = many_edges(15);
         state.current_node_id = Some("m14".to_string());
         let node_info = NodeRunInfo {
-            status: Some(LoopRunStatus::Running),
+            status: Some(GraphRunStatus::Running),
             ..NodeRunInfo::default()
         };
         // Render with scroll=0 but follow=true — the highlighted last node
         // must be auto-scrolled into the 15-row viewport.
         let text = render_to_text(80, 15, |frame, area| {
-            render_loop_live_view(
+            render_graph_live_view(
                 frame,
                 area,
                 &LiveViewContext {
@@ -2326,60 +2326,60 @@ mod tests {
         // A pass-> B pass-> C : DFS order should be A,B,C with B box immediately after A's edges
         let mut state = running_state();
         state.effective_nodes = vec![
-            LoopNode {
+            GraphNode {
                 id: "a".to_string(),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 name: "A".to_string(),
-                kind: LoopNodeKind::Agent,
+                kind: GraphNodeKind::Agent,
                 config: json!({}),
                 position: 0,
                 created_at: Utc::now(),
             },
-            LoopNode {
+            GraphNode {
                 id: "b".to_string(),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 name: "B".to_string(),
-                kind: LoopNodeKind::Agent,
+                kind: GraphNodeKind::Agent,
                 config: json!({}),
                 position: 1,
                 created_at: Utc::now(),
             },
-            LoopNode {
+            GraphNode {
                 id: "c".to_string(),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 name: "C".to_string(),
-                kind: LoopNodeKind::Agent,
+                kind: GraphNodeKind::Agent,
                 config: json!({}),
                 position: 2,
                 created_at: Utc::now(),
             },
         ];
         state.effective_edges = vec![
-            LoopEdge {
+            GraphEdge {
                 id: "e0".to_string(),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 from_node: "a".to_string(),
                 to_node: "b".to_string(),
-                condition: LoopEdgeCondition::Pass,
+                condition: GraphEdgeCondition::Pass,
             },
-            LoopEdge {
+            GraphEdge {
                 id: "e1".to_string(),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 from_node: "b".to_string(),
                 to_node: "c".to_string(),
-                condition: LoopEdgeCondition::Pass,
+                condition: GraphEdgeCondition::Pass,
             },
         ];
         state.ensembles = Vec::new();
         state.current_node_id = Some("a".to_string());
         let node_info = NodeRunInfo::default();
         let text = render_to_text(80, 40, |frame, area| {
-            render_loop_live_view(
+            render_graph_live_view(
                 frame,
                 area,
                 &LiveViewContext {
@@ -2422,50 +2422,50 @@ mod tests {
     fn dfs_layout_shows_back_reference_for_cycles() {
         let mut state = running_state();
         state.effective_nodes = vec![
-            LoopNode {
+            GraphNode {
                 id: "a".to_string(),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 name: "A".to_string(),
-                kind: LoopNodeKind::Agent,
+                kind: GraphNodeKind::Agent,
                 config: json!({}),
                 position: 0,
                 created_at: Utc::now(),
             },
-            LoopNode {
+            GraphNode {
                 id: "b".to_string(),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 name: "B".to_string(),
-                kind: LoopNodeKind::Agent,
+                kind: GraphNodeKind::Agent,
                 config: json!({}),
                 position: 1,
                 created_at: Utc::now(),
             },
         ];
         state.effective_edges = vec![
-            LoopEdge {
+            GraphEdge {
                 id: "e0".to_string(),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 from_node: "a".to_string(),
                 to_node: "b".to_string(),
-                condition: LoopEdgeCondition::Pass,
+                condition: GraphEdgeCondition::Pass,
             },
-            LoopEdge {
+            GraphEdge {
                 id: "e1".to_string(),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 from_node: "b".to_string(),
                 to_node: "a".to_string(),
-                condition: LoopEdgeCondition::Pass,
+                condition: GraphEdgeCondition::Pass,
             },
         ];
         state.ensembles = Vec::new();
         state.current_node_id = Some("a".to_string());
         let node_info = NodeRunInfo::default();
         let text = render_to_text(80, 40, |frame, area| {
-            render_loop_live_view(
+            render_graph_live_view(
                 frame,
                 area,
                 &LiveViewContext {
@@ -2496,60 +2496,60 @@ mod tests {
     fn dfs_layout_pass_before_fail() {
         let mut state = running_state();
         state.effective_nodes = vec![
-            LoopNode {
+            GraphNode {
                 id: "a".to_string(),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 name: "A".to_string(),
-                kind: LoopNodeKind::Agent,
+                kind: GraphNodeKind::Agent,
                 config: json!({}),
                 position: 0,
                 created_at: Utc::now(),
             },
-            LoopNode {
+            GraphNode {
                 id: "b".to_string(),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 name: "B".to_string(),
-                kind: LoopNodeKind::Agent,
+                kind: GraphNodeKind::Agent,
                 config: json!({}),
                 position: 1,
                 created_at: Utc::now(),
             },
-            LoopNode {
+            GraphNode {
                 id: "c".to_string(),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 name: "C".to_string(),
-                kind: LoopNodeKind::Agent,
+                kind: GraphNodeKind::Agent,
                 config: json!({}),
                 position: 2,
                 created_at: Utc::now(),
             },
         ];
         state.effective_edges = vec![
-            LoopEdge {
+            GraphEdge {
                 id: "e0".to_string(),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 from_node: "a".to_string(),
                 to_node: "c".to_string(),
-                condition: LoopEdgeCondition::Fail,
+                condition: GraphEdgeCondition::Fail,
             },
-            LoopEdge {
+            GraphEdge {
                 id: "e1".to_string(),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 from_node: "a".to_string(),
                 to_node: "b".to_string(),
-                condition: LoopEdgeCondition::Pass,
+                condition: GraphEdgeCondition::Pass,
             },
         ];
         state.ensembles = Vec::new();
         state.current_node_id = Some("a".to_string());
         let node_info = NodeRunInfo::default();
         let text = render_to_text(80, 40, |frame, area| {
-            render_loop_live_view(
+            render_graph_live_view(
                 frame,
                 area,
                 &LiveViewContext {
@@ -2587,34 +2587,34 @@ mod tests {
         };
         let mut state = running_state();
         state.effective_nodes = vec![
-            LoopNode {
+            GraphNode {
                 id: "r".to_string(),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 name: "Router".to_string(),
-                kind: LoopNodeKind::Router,
+                kind: GraphNodeKind::Router,
                 config: json!({}),
                 position: 0,
                 created_at: Utc::now(),
             },
-            LoopNode {
+            GraphNode {
                 id: "t".to_string(),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 name: "Target".to_string(),
-                kind: LoopNodeKind::Agent,
+                kind: GraphNodeKind::Agent,
                 config: json!({}),
                 position: 1,
                 created_at: Utc::now(),
             },
         ];
-        state.effective_edges = vec![LoopEdge {
+        state.effective_edges = vec![GraphEdge {
             id: "e0".to_string(),
             spec_id: Some("spec-1".to_string()),
-            loop_id: None,
+            graph_id: None,
             from_node: "r".to_string(),
             to_node: "t".to_string(),
-            condition: LoopEdgeCondition::Route("myroute".to_string()),
+            condition: GraphEdgeCondition::Route("myroute".to_string()),
         }];
         state.ensembles = Vec::new();
         state.router_taken_routes = [("r".to_string(), "myroute".to_string())]
@@ -2659,43 +2659,43 @@ mod tests {
     fn back_reference_uses_theme_dim_text() {
         let mut state = running_state();
         state.effective_nodes = vec![
-            LoopNode {
+            GraphNode {
                 id: "a".to_string(),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 name: "A".to_string(),
-                kind: LoopNodeKind::Agent,
+                kind: GraphNodeKind::Agent,
                 config: json!({}),
                 position: 0,
                 created_at: Utc::now(),
             },
-            LoopNode {
+            GraphNode {
                 id: "b".to_string(),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 name: "B".to_string(),
-                kind: LoopNodeKind::Agent,
+                kind: GraphNodeKind::Agent,
                 config: json!({}),
                 position: 1,
                 created_at: Utc::now(),
             },
         ];
         state.effective_edges = vec![
-            LoopEdge {
+            GraphEdge {
                 id: "e0".to_string(),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 from_node: "a".to_string(),
                 to_node: "b".to_string(),
-                condition: LoopEdgeCondition::Pass,
+                condition: GraphEdgeCondition::Pass,
             },
-            LoopEdge {
+            GraphEdge {
                 id: "e1".to_string(),
                 spec_id: Some("spec-1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 from_node: "b".to_string(),
                 to_node: "a".to_string(),
-                condition: LoopEdgeCondition::Pass,
+                condition: GraphEdgeCondition::Pass,
             },
         ];
         state.ensembles = Vec::new();
@@ -2720,7 +2720,7 @@ mod tests {
 
     #[test]
     fn ct8_auto_follow_user_scroll_survives_when_current_node_unchanged() {
-        // The measured bug: reading a big graph of a running loop, scrolling
+        // The measured bug: reading a big graph of a running graph, scrolling
         // down, and being yanked back to the running node every frame.
         let mut state = running_state();
         state.effective_nodes = many_nodes(30);
@@ -2736,7 +2736,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = frame.area();
-                let r = render_loop_live_view(
+                let r = render_graph_live_view(
                     frame,
                     area,
                     &LiveViewContext {
@@ -2767,7 +2767,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = frame.area();
-                let r = render_loop_live_view(
+                let r = render_graph_live_view(
                     frame,
                     area,
                     &LiveViewContext {
@@ -2807,7 +2807,7 @@ mod tests {
         // User had scrolled far away (anchor still on "m0"); the engine's
         // current node has moved to "m25". The view must jump to it.
         let text = render_to_text(80, 20, |frame, area| {
-            render_loop_live_view(
+            render_graph_live_view(
                 frame,
                 area,
                 &LiveViewContext {
@@ -2844,7 +2844,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
 
         let running = NodeRunInfo {
-            status: Some(LoopRunStatus::Running),
+            status: Some(GraphRunStatus::Running),
             started_at: Some(Utc::now() - chrono::Duration::seconds(5)),
             ..NodeRunInfo::default()
         };
@@ -2852,7 +2852,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = frame.area();
-                render_loop_live_view(
+                render_graph_live_view(
                     frame,
                     area,
                     &LiveViewContext {
@@ -2875,7 +2875,7 @@ mod tests {
         // Frame 2: same node "m1", user scrolled to 12, but the node's status
         // flipped to Pass and elapsed time advanced. Scroll must not move.
         let passed = NodeRunInfo {
-            status: Some(LoopRunStatus::Pass),
+            status: Some(GraphRunStatus::Pass),
             started_at: Some(Utc::now() - chrono::Duration::seconds(600)),
             ..NodeRunInfo::default()
         };
@@ -2883,7 +2883,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = frame.area();
-                let r = render_loop_live_view(
+                let r = render_graph_live_view(
                     frame,
                     area,
                     &LiveViewContext {
@@ -2921,7 +2921,7 @@ mod tests {
 
         // Manual mode, selection near the bottom, user scroll still at the top.
         let text = render_to_text(80, 20, |frame, area| {
-            render_loop_live_view(
+            render_graph_live_view(
                 frame,
                 area,
                 &LiveViewContext {
@@ -2957,7 +2957,7 @@ mod tests {
 
         // Manual mode, selection back at the top, but user scroll left far down.
         let text = render_to_text(80, 20, |frame, area| {
-            render_loop_live_view(
+            render_graph_live_view(
                 frame,
                 area,
                 &LiveViewContext {
@@ -2988,7 +2988,7 @@ mod tests {
         let node_info = NodeRunInfo::default();
 
         let follow_text = render_to_text(80, 30, |frame, area| {
-            render_loop_live_view(
+            render_graph_live_view(
                 frame,
                 area,
                 &LiveViewContext {
@@ -3012,7 +3012,7 @@ mod tests {
         );
 
         let manual_text = render_to_text(80, 30, |frame, area| {
-            render_loop_live_view(
+            render_graph_live_view(
                 frame,
                 area,
                 &LiveViewContext {

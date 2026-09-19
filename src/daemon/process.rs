@@ -2,7 +2,7 @@ use anyhow::Result;
 
 /// Grace period between `SIGTERM` and `SIGKILL` when terminating a node
 /// run's process group (B12): timeout, iteration-budget exhaustion,
-/// `loop_pause`, `loop_reset`, run failure elsewhere, and daemon shutdown
+/// `graph_pause`, `graph_reset`, run failure elsewhere, and daemon shutdown
 /// all go through [`terminate_process_group_async`] with this grace.
 pub(crate) const KILL_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -131,7 +131,7 @@ pub(crate) fn send_signal_to_group(pid: i32, signal: i32) -> std::io::Result<()>
 
 /// Best-effort termination (B12) of the process group led by `pid`: `SIGTERM`
 /// now, `SIGKILL` after `grace` if the group is still alive. The grace wait
-/// runs on a detached task so the caller (e.g. `loop_pause`, an iteration
+/// runs on a detached task so the caller (e.g. `graph_pause`, an iteration
 /// budget check) never blocks on it — the killed process's own
 /// `wait()`/`wait_with_output()` elsewhere unblocks as soon as it actually
 /// dies, whether that's from the `SIGTERM` or the follow-up `SIGKILL`.

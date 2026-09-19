@@ -457,23 +457,23 @@ mod tests {
     #[test]
     fn call_daemon_tool_round_trips_with_session_handshake() {
         let fake = spawn_fake_daemon(serde_json::json!({
-            "content": [{"type": "text", "text": "{\"loop_id\":\"abc\"}"}],
+            "content": [{"type": "text", "text": "{\"graph_id\":\"abc\"}"}],
             "isError": false
         }));
 
         let outcome = call_daemon_tool(
             &fake.port,
-            "loop_create",
-            &serde_json::json!({"name": "My Loop", "workdir": "/tmp"}),
+            "graph_create",
+            &serde_json::json!({"name": "My Graph", "workdir": "/tmp"}),
         )
         .expect("call should succeed");
 
         assert!(!outcome.is_error);
-        assert!(outcome.text.contains("loop_id"));
+        assert!(outcome.text.contains("graph_id"));
         let calls = fake.recorded_calls();
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0]["name"], "loop_create");
-        assert_eq!(calls[0]["arguments"]["name"], "My Loop");
+        assert_eq!(calls[0]["name"], "graph_create");
+        assert_eq!(calls[0]["arguments"]["name"], "My Graph");
     }
 
     #[test]
@@ -483,8 +483,8 @@ mod tests {
             "isError": true
         }));
 
-        let outcome =
-            call_daemon_tool(&fake.port, "loop_create", &serde_json::json!({})).expect("transport");
+        let outcome = call_daemon_tool(&fake.port, "graph_create", &serde_json::json!({}))
+            .expect("transport");
 
         assert!(outcome.is_error);
         assert!(outcome.text.contains("Invalid cron expression"));
@@ -498,7 +498,7 @@ mod tests {
         // fresh port on the rare miss instead of flaking the whole suite.
         for _ in 0..5 {
             let port = unused_port();
-            match call_daemon_tool(&port, "loop_create", &serde_json::json!({})) {
+            match call_daemon_tool(&port, "graph_create", &serde_json::json!({})) {
                 Err(err) => {
                     assert!(err.to_string().contains("not reachable"));
                     return;

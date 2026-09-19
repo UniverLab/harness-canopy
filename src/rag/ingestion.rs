@@ -96,7 +96,7 @@ pub struct IngestionManager {
     _personal_watcher: std::sync::Mutex<Option<RecommendedWatcher>>,
     /// Cached embedding client keyed by model id so we load the ONNX model once.
     /// Dropped after `embeddings_idle_unload_secs` of inactivity (see
-    /// `idle_unload_loop`) and reloaded transparently on next use.
+    /// `idle_unload_graph`) and reloaded transparently on next use.
     cached_client: Mutex<Option<CachedClient>>,
 }
 
@@ -289,13 +289,13 @@ impl IngestionManager {
         let ct_idle = ct.child_token();
         let mgr_idle = Arc::clone(&self);
         tokio::spawn(async move {
-            mgr_idle.idle_unload_loop(ct_idle).await;
+            mgr_idle.idle_unload_graph(ct_idle).await;
         });
 
         let ct_acquire = ct.child_token();
         let mgr_acquire = Arc::clone(&self);
         tokio::spawn(async move {
-            mgr_acquire.model_acquisition_loop(ct_acquire).await;
+            mgr_acquire.model_acquisition_graph(ct_acquire).await;
         });
 
         ct
@@ -308,7 +308,7 @@ impl IngestionManager {
     /// once right away and then on a slow poll — the poll (rather than a
     /// one-shot at startup) is what picks up a model chosen by a `canopy
     /// setup` run against an already-running daemon.
-    async fn model_acquisition_loop(&self, ct: tokio_util::sync::CancellationToken) {
+    async fn model_acquisition_graph(&self, ct: tokio_util::sync::CancellationToken) {
         self.ensure_configured_model_acquired().await;
         loop {
             tokio::select! {
@@ -364,7 +364,7 @@ impl IngestionManager {
 
     /// Periodically checks whether the cached embedding client has been idle
     /// long enough to drop, freeing the model's RAM until it's needed again.
-    async fn idle_unload_loop(&self, ct: tokio_util::sync::CancellationToken) {
+    async fn idle_unload_graph(&self, ct: tokio_util::sync::CancellationToken) {
         loop {
             tokio::select! {
                 _ = ct.cancelled() => break,
@@ -1642,7 +1642,7 @@ mod tests {
 
     /// (1b) A local model being *configured* isn't enough to load it: the
     /// proactive acquisition path (`ensure_configured_model_acquired`, run
-    /// by `model_acquisition_loop` right after `start()`) must also see an
+    /// by `model_acquisition_graph` right after `start()`) must also see an
     /// empty queue and skip, or a daemon that never indexes anything would
     /// still eagerly load the model — reintroducing the exact startup load
     /// this spec removes, just from a different call site than

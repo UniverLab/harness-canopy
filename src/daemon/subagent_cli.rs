@@ -39,7 +39,7 @@ pub(crate) async fn handle_subagent_action(
 ) -> Result<()> {
     // The subagent process and its completion writer are owned by the daemon,
     // not this short-lived CLI — otherwise the result would never be written
-    // back for `collect` to find. Same routing every other loop/spec CLI
+    // back for `collect` to find. Same routing every other graph/spec CLI
     // subcommand uses.
     match action {
         SubagentAction::Spawn {

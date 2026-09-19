@@ -514,7 +514,7 @@ fn pop_preset_picker_filter(dialog: &mut SimplePromptDialog) {
 /// so the preset becomes a normal, freely-editable field — never a locked
 /// reference — and closes the picker either way.
 ///
-/// Presets under `~/.canopy/prompts/` also serve the loop engine's own role
+/// Presets under `~/.canopy/prompts/` also serve the graph engine's own role
 /// templates (implementer/reviewer/resilience), which carry `{{spec_content}}`/
 /// `{{previous_feedback}}` placeholders meant to be filled at agent-spawn
 /// time. This TUI composes ad hoc prompts with no such bindings to offer, so
@@ -1734,7 +1734,7 @@ mod preset_picker_tests {
 
     #[test]
     fn enter_refuses_a_preset_with_an_unfilled_placeholder_and_inserts_nothing() {
-        // Mirrors the observed C11 incident: picking a loop-engine role
+        // Mirrors the observed C11 incident: picking a graph-engine role
         // preset (carrying {{spec_content}}) from the TUI's ad hoc composer,
         // which has no such binding to offer.
         let mut dialog = dialog_with_presets(vec![(

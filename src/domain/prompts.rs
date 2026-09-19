@@ -108,7 +108,7 @@ fn implementer_preset() -> String {
 }
 
 fn reviewer_preset() -> String {
-    let mut out = wrapped_section(&ROLE, "You are the reviewer and committer for this loop.");
+    let mut out = wrapped_section(&ROLE, "You are the reviewer and committer for this graph.");
     out.push_str(&itemized_section(&PROCEDURE, &[
         "Review the current diff strictly against this spec — nothing else:\n\n{{spec_content}}",
         "If the diff correctly and completely implements the spec, make EXACTLY ONE commit covering ONLY this spec's work. Use a concise, descriptive commit message with NO trailers of any kind (no Co-Authored-By, no issue references, no generated-by footers).",
@@ -131,11 +131,11 @@ fn reviewer_preset() -> String {
 fn resilience_preset() -> String {
     let mut out = wrapped_section(
         &ROLE,
-        "You are the on-call medic for this loop. A node just failed or reported a blocker. Your only job is to diagnose why and route to the right next step — you do not fix the underlying work yourself.",
+        "You are the on-call medic for this graph. A node just failed or reported a blocker. Your only job is to diagnose why and route to the right next step — you do not fix the underlying work yourself.",
     );
     out.push_str(&itemized_section(&PROCEDURE, &[
         "Read the failure/blocker context below (`{{previous_feedback}}`) and pick exactly ONE diagnosis: QUOTA, GLITCH, or OTHER.",
-        "QUOTA — the failure is a rate limit, quota exhaustion, or \"try again later\" from the platform/API itself. Action: call `loop_schedule_autorun` with `loop_id` set to this loop's ID and `quota_reset_message` set to the ENTIRE failure text below, copied verbatim — do NOT extract, truncate, reformat, or translate any part of it; the engine parses the raw text itself. Then report FAIL.",
+        "QUOTA — the failure is a rate limit, quota exhaustion, or \"try again later\" from the platform/API itself. Action: call `graph_schedule_autorun` with `graph_id` set to this graph's ID and `quota_reset_message` set to the ENTIRE failure text below, copied verbatim — do NOT extract, truncate, reformat, or translate any part of it; the engine parses the raw text itself. Then report FAIL.",
         "GLITCH — the failure is a transient infrastructure hiccup (network blip, spurious timeout, a flaky check unrelated to the spec) with no sign of a real defect. Action: report GLITCH and recommend a plain retry of the same node.",
         "OTHER — the failure reflects a genuine problem with the work itself (wrong code, an unmet spec, a missing dependency, a decision only a human can make). Action: report OTHER with a precise, actionable explanation of what's wrong so a human or the next agent can address it.",
         "State your diagnosis and its one action clearly in your report; do not hedge between diagnoses.",
@@ -143,7 +143,7 @@ fn resilience_preset() -> String {
     out.push_str(&itemized_section(&ALLOWED, &[
         "Reading files, logs, git history, and process/job status.",
         "Checking scheduling/queue state (e.g. `git status`, `git log`, `ps`, reading CI/log output).",
-        "Reporting your diagnosis and recommended action via loop_complete_node / loop_report_blocker.",
+        "Reporting your diagnosis and recommended action via graph_complete_node / graph_report_blocker.",
     ]));
     out.push_str(&itemized_section(
         &PROHIBITED,
@@ -633,7 +633,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let prompts = prompts_dir(dir.path());
         std::fs::create_dir_all(&prompts).unwrap();
-        let old_style = "You are the reviewer and committer for this loop.\n\n\
+        let old_style = "You are the reviewer and committer for this graph.\n\n\
              Review the current diff strictly against this spec — nothing else:\n\n{{spec_content}}\n";
         std::fs::write(prompts.join("reviewer.md"), old_style).unwrap();
 
@@ -654,7 +654,7 @@ mod tests {
         std::fs::create_dir_all(&prompts).unwrap();
         // Simulate an existing installation: an operator-edited reviewer.md
         // in the pre-tagged format, predating this change.
-        let old_style = "You are the reviewer and committer for this loop.\n{{spec_content}}\n";
+        let old_style = "You are the reviewer and committer for this graph.\n{{spec_content}}\n";
         std::fs::write(prompts.join("reviewer.md"), old_style).unwrap();
 
         // A daemon startup on the new binary reseeds missing files only.
@@ -866,12 +866,12 @@ mod tests {
     }
 
     #[test]
-    fn resilience_preset_includes_loop_schedule_autorun_instruction() {
+    fn resilience_preset_includes_graph_schedule_autorun_instruction() {
         let specs = builtin_prompt_preset_specs();
         let (_, content) = specs.iter().find(|(n, _)| *n == "resilience").unwrap();
         assert!(
-            content.contains("loop_schedule_autorun"),
-            "resilience preset must instruct calling loop_schedule_autorun for quota failures"
+            content.contains("graph_schedule_autorun"),
+            "resilience preset must instruct calling graph_schedule_autorun for quota failures"
         );
         assert!(
             content.contains("quota_reset_message"),

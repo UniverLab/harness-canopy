@@ -701,7 +701,7 @@ mod tests {
         assert_eq!(cli.headless_mode, "--new-headless");
     }
 
-    /// CB44: the generic `merge_cli_fields` loop must carry the new
+    /// CB44: the generic `merge_cli_fields` graph must carry the new
     /// `identity_check` field — a platform whose check the user never
     /// touched gets the registry's updated check on refresh.
     #[test]

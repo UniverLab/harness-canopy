@@ -719,7 +719,7 @@ mod tests {
         assert!(matches!(w.ambient, WhimContext::Busy));
     }
 
-    /// Celebration loop properly decrements counter during celebration phase
+    /// Celebration graph properly decrements counter during celebration phase
     #[test]
     fn celebration_sets_and_eventually_uses_title() {
         let mut w = Whimsg::new();

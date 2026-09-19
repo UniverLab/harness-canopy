@@ -4,19 +4,19 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 use crate::db::Database;
-use crate::domain::loops::{
-    LoopEdge, LoopNode, LoopNodeKind, LoopRunStatus, LoopSpecStatus, LoopStatus,
+use crate::domain::graphs::{
+    GraphEdge, GraphNode, GraphNodeKind, GraphRunStatus, GraphSpecStatus, GraphStatus,
 };
 
-/// A snapshot of the currently-selected loop's runtime state, assembled
+/// A snapshot of the currently-selected graph's runtime state, assembled
 /// fresh on every TUI tick. Renderer-agnostic (no ratatui types).
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
-pub(crate) struct LoopLiveState {
-    // ── Loop metadata ───────────────────────────────────────────
-    pub loop_id: String,
-    pub loop_name: String,
-    pub loop_status: LoopStatus,
+pub(crate) struct GraphLiveState {
+    // ── Graph metadata ───────────────────────────────────────────
+    pub graph_id: String,
+    pub graph_name: String,
+    pub graph_status: GraphStatus,
     pub workdir: String,
     /// `"cron"` / `"watch"` / `"manual"`.
     pub trigger_type: String,
@@ -36,15 +36,15 @@ pub(crate) struct LoopLiveState {
     pub current_spec_id: Option<String>,
 
     // ── Effective graph for the current spec ────────────────────
-    /// Spec's own graph if it has nodes, else the loop-level graph.
-    pub effective_nodes: Vec<LoopNode>,
-    pub effective_edges: Vec<LoopEdge>,
+    /// Spec's own graph if it has nodes, else the top-level graph.
+    pub effective_nodes: Vec<GraphNode>,
+    pub effective_edges: Vec<GraphEdge>,
     /// Every ensemble (F1) whose join lives in `effective_nodes` — lets the
     /// graph view collapse its N member boxes + join into one "name [N
     /// models]" box with live per-member state, instead of drawing N+1
     /// separate boxes.
     pub ensembles: Vec<EnsembleLiveInfo>,
-    /// For every [`LoopNodeKind::Router`] node in `effective_nodes` with a
+    /// For every [`GraphNodeKind::Router`] node in `effective_nodes` with a
     /// completed run, the route label it selected — lets the graph view mark
     /// which of a router's N edges a run actually took, not just list them.
     pub router_taken_routes: HashMap<String, String>,
@@ -53,7 +53,7 @@ pub(crate) struct LoopLiveState {
     /// Id of the node currently executing, or the most recent completed node.
     pub current_node_id: Option<String>,
     /// Latest run status for the current node.
-    pub current_node_status: Option<LoopRunStatus>,
+    pub current_node_status: Option<GraphRunStatus>,
     /// When the current node's latest run started.
     pub current_node_started_at: Option<DateTime<Utc>>,
     /// Iteration counter for the current node's latest run.
@@ -67,7 +67,7 @@ pub(crate) struct LoopLiveState {
 pub(crate) struct SpecQueueEntry {
     pub spec_id: String,
     pub spec_name: String,
-    pub status: LoopSpecStatus,
+    pub status: GraphSpecStatus,
     /// Why this spec ended up `Failed`/`Skipped`: the admin-recorded reason
     /// if it was administratively transitioned, else the output tail of its
     /// last run. `None` for every other status.
@@ -93,17 +93,17 @@ pub(crate) struct EnsembleMemberLiveInfo {
     pub node_id: String,
     /// `"platform"` or `"platform/model"`.
     pub label: String,
-    pub status: Option<LoopRunStatus>,
+    pub status: Option<GraphRunStatus>,
 }
 
 const OUTPUT_TAIL_LINES: usize = 15;
 
-/// Assemble a [`LoopLiveState`] for the given loop. Returns `None` when
-/// `details` is `None` (no loop selected / mid-migration).
-pub(crate) fn assemble_loop_live_state(
+/// Assemble a [`GraphLiveState`] for the given graph. Returns `None` when
+/// `details` is `None` (no graph selected / mid-migration).
+pub(crate) fn assemble_graph_live_state(
     db: &Database,
-    details: &crate::domain::loops::LoopDetails,
-) -> Option<LoopLiveState> {
+    details: &crate::domain::graphs::GraphDetails,
+) -> Option<GraphLiveState> {
     let lp = &details.lp;
 
     // ── Spec queue ──────────────────────────────────────────────
@@ -111,7 +111,7 @@ pub(crate) fn assemble_loop_live_state(
 
     let done_count = spec_queue
         .iter()
-        .filter(|e| e.status == LoopSpecStatus::Completed)
+        .filter(|e| e.status == GraphSpecStatus::Completed)
         .count();
     let total_count = spec_queue.len();
 
@@ -119,12 +119,12 @@ pub(crate) fn assemble_loop_live_state(
     // runnable — see `Database::queue_next_pending_spec_id`).
     let current_spec_id = spec_queue
         .iter()
-        .find(|e| e.status == LoopSpecStatus::Running)
+        .find(|e| e.status == GraphSpecStatus::Running)
         .or_else(|| {
             spec_queue.iter().find(|e| {
                 matches!(
                     e.status,
-                    LoopSpecStatus::Pending | LoopSpecStatus::Interrupted
+                    GraphSpecStatus::Pending | GraphSpecStatus::Interrupted
                 )
             })
         })
@@ -140,10 +140,10 @@ pub(crate) fn assemble_loop_live_state(
     // ── Current node + output tail ──────────────────────────────
     let (current_node_id, current_node_info) = resolve_current_node(db, current_spec_id.as_deref());
 
-    Some(LoopLiveState {
-        loop_id: lp.id.clone(),
-        loop_name: lp.name.clone(),
-        loop_status: lp.status,
+    Some(GraphLiveState {
+        graph_id: lp.id.clone(),
+        graph_name: lp.name.clone(),
+        graph_status: lp.status,
         workdir: lp.workdir.clone(),
         trigger_type: lp.trigger_type_label().to_string(),
         schedule_expr: lp.schedule_expr().map(String::from),
@@ -169,12 +169,12 @@ pub(crate) fn assemble_loop_live_state(
 /// alongside each member's live run status (if a spec is selected).
 fn resolve_ensembles_live_info(
     db: &Database,
-    effective_nodes: &[LoopNode],
+    effective_nodes: &[GraphNode],
     current_spec_id: Option<&str>,
 ) -> Vec<EnsembleLiveInfo> {
     effective_nodes
         .iter()
-        .filter(|node| node.kind == crate::domain::loops::LoopNodeKind::Join)
+        .filter(|node| node.kind == crate::domain::graphs::GraphNodeKind::Join)
         .filter_map(|node| db.get_ensemble_by_join_node(&node.id).ok().flatten())
         .map(|details| {
             let members = details
@@ -207,7 +207,7 @@ fn resolve_ensembles_live_info(
         .collect()
 }
 
-/// For every [`LoopNodeKind::Router`] node in `effective_nodes`, resolve the
+/// For every [`GraphNodeKind::Router`] node in `effective_nodes`, resolve the
 /// route its latest run selected (if it has completed one) — the graph view
 /// uses this to mark which of a router's several edges was actually taken,
 /// per the live view's "shows which route a completed run took" contract.
@@ -215,7 +215,7 @@ fn resolve_ensembles_live_info(
 /// (still running), are simply absent from the map.
 fn resolve_router_taken_routes(
     db: &Database,
-    effective_nodes: &[LoopNode],
+    effective_nodes: &[GraphNode],
     current_spec_id: Option<&str>,
 ) -> HashMap<String, String> {
     let Some(spec_id) = current_spec_id else {
@@ -223,7 +223,7 @@ fn resolve_router_taken_routes(
     };
     effective_nodes
         .iter()
-        .filter(|node| node.kind == LoopNodeKind::Router)
+        .filter(|node| node.kind == GraphNodeKind::Router)
         .filter_map(|node| {
             let info = resolve_node_run_info(db, spec_id, &node.id);
             info.chosen_route.map(|route| (node.id.clone(), route))
@@ -237,18 +237,18 @@ fn resolve_router_taken_routes(
 #[derive(Debug, Clone, Default)]
 #[allow(dead_code)]
 pub(crate) struct NodeRunInfo {
-    pub status: Option<LoopRunStatus>,
+    pub status: Option<GraphRunStatus>,
     pub started_at: Option<DateTime<Utc>>,
     pub iteration: Option<i64>,
     pub output_tail: Option<String>,
     /// The route label a router node's run selected, if this run is a
-    /// router's (see `loop_engine::execute_router_node`'s `"route"` output
+    /// router's (see `graph_engine::execute_router_node`'s `"route"` output
     /// field). `None` for every other node kind.
     pub chosen_route: Option<String>,
 }
 
 impl NodeRunInfo {
-    fn from_run(run: &crate::domain::loops::LoopNodeRun) -> Self {
+    fn from_run(run: &crate::domain::graphs::GraphNodeRun) -> Self {
         NodeRunInfo {
             status: Some(run.status),
             started_at: Some(run.started_at),
@@ -260,7 +260,7 @@ impl NodeRunInfo {
 }
 
 /// Pull the `"route"` field out of a router run's output JSON (see
-/// `loop_engine::execute_router_node`'s `NodeExecution::output`) — `None` for
+/// `graph_engine::execute_router_node`'s `NodeExecution::output`) — `None` for
 /// any run whose output isn't shaped like a router's (every other node
 /// kind).
 fn extract_chosen_route(output: &Option<Value>) -> Option<String> {
@@ -278,12 +278,12 @@ fn extract_chosen_route(output: &Option<Value>) -> Option<String> {
 /// snapshot's auto-detected current one.
 #[allow(dead_code)]
 pub(crate) fn resolve_node_run_info(db: &Database, spec_id: &str, node_id: &str) -> NodeRunInfo {
-    if let Ok(Some(run)) = db.get_active_loop_run_for_node(node_id) {
+    if let Ok(Some(run)) = db.get_active_graph_run_for_node(node_id) {
         if run.spec_id == spec_id {
             return NodeRunInfo::from_run(&run);
         }
     }
-    db.list_loop_runs_for_spec(spec_id)
+    db.list_graph_runs_for_spec(spec_id)
         .unwrap_or_default()
         .iter()
         .rev()
@@ -295,12 +295,12 @@ pub(crate) fn resolve_node_run_info(db: &Database, spec_id: &str, node_id: &str)
 // ── Internal helpers ──────────────────────────────────────────────────
 
 /// Build the ordered spec queue from either the active queue's members or
-/// the loop's bound specs.
-fn build_spec_queue(db: &Database, lp: &crate::domain::loops::Loop) -> Vec<SpecQueueEntry> {
+/// the graph's bound specs.
+fn build_spec_queue(db: &Database, lp: &crate::domain::graphs::Graph) -> Vec<SpecQueueEntry> {
     let spec_ids = if let Some(ref queue_id) = lp.active_run_queue_id {
         db.list_queue_member_spec_ids(queue_id).unwrap_or_default()
     } else {
-        db.list_loop_specs(&lp.id)
+        db.list_graph_specs(&lp.id)
             .unwrap_or_default()
             .into_iter()
             .map(|s| s.id)
@@ -310,7 +310,7 @@ fn build_spec_queue(db: &Database, lp: &crate::domain::loops::Loop) -> Vec<SpecQ
     spec_ids
         .into_iter()
         .filter_map(|spec_id| {
-            let spec = db.get_loop_spec(&spec_id).ok().flatten()?;
+            let spec = db.get_graph_spec(&spec_id).ok().flatten()?;
             let failure_reason = spec_failure_reason(db, &spec);
             Some(SpecQueueEntry {
                 spec_id: spec.id,
@@ -328,17 +328,17 @@ fn build_spec_queue(db: &Database, lp: &crate::domain::loops::Loop) -> Vec<SpecQ
 /// run — the best available proxy for an engine-driven failure, which
 /// doesn't persist a reason on the spec row itself. `None` for every other
 /// status, and when neither source has anything.
-fn spec_failure_reason(db: &Database, spec: &crate::domain::loops::LoopSpec) -> Option<String> {
+fn spec_failure_reason(db: &Database, spec: &crate::domain::graphs::GraphSpec) -> Option<String> {
     if !matches!(
         spec.status,
-        LoopSpecStatus::Failed | LoopSpecStatus::Skipped
+        GraphSpecStatus::Failed | GraphSpecStatus::Skipped
     ) {
         return None;
     }
     if let Some(reason) = spec.completed_via_reason.clone() {
         return Some(reason);
     }
-    db.list_loop_runs_for_spec(&spec.id)
+    db.list_graph_runs_for_spec(&spec.id)
         .unwrap_or_default()
         .iter()
         .rev()
@@ -346,28 +346,28 @@ fn spec_failure_reason(db: &Database, spec: &crate::domain::loops::LoopSpec) -> 
 }
 
 /// Resolve the effective graph: spec's own graph if it has nodes, else the
-/// loop-level graph. Same precedence rule as `LoopEngine::run_spec`.
+/// top-level graph. Same precedence rule as `GraphEngine::run_spec`.
 fn resolve_effective_graph(
     db: &Database,
-    details: &crate::domain::loops::LoopDetails,
+    details: &crate::domain::graphs::GraphDetails,
     current_spec_id: Option<&str>,
-) -> (Vec<LoopNode>, Vec<LoopEdge>) {
+) -> (Vec<GraphNode>, Vec<GraphEdge>) {
     if let Some(spec_id) = current_spec_id {
-        // Check if the current spec has its own graph via LoopDetails.
+        // Check if the current spec has its own graph via GraphDetails.
         if let Some(spec_detail) = details.specs.iter().find(|s| s.spec.id == spec_id) {
             if !spec_detail.nodes.is_empty() {
                 return (spec_detail.nodes.clone(), spec_detail.edges.clone());
             }
         }
         // Fallback: try direct DB lookup (queue specs not in details).
-        if let Ok(Some(detail)) = db.get_loop_spec_details(spec_id) {
+        if let Ok(Some(detail)) = db.get_graph_spec_details(spec_id) {
             if !detail.nodes.is_empty() {
                 return (detail.nodes, detail.edges);
             }
         }
     }
 
-    // Fall back to loop-level graph.
+    // Fall back to top-level graph.
     (details.graph_nodes.clone(), details.graph_edges.clone())
 }
 
@@ -384,13 +384,13 @@ fn resolve_current_node(
     };
 
     // Try active (running) run first.
-    if let Ok(Some(run)) = db.get_active_loop_run_for_spec(spec_id) {
+    if let Ok(Some(run)) = db.get_active_graph_run_for_spec(spec_id) {
         let node_id = run.node_id.clone();
         return (Some(node_id), NodeRunInfo::from_run(&run));
     }
 
     // Fall back to most recent run for this spec.
-    let runs = db.list_loop_runs_for_spec(spec_id).unwrap_or_default();
+    let runs = db.list_graph_runs_for_spec(spec_id).unwrap_or_default();
     if let Some(run) = runs.last() {
         return (Some(run.node_id.clone()), NodeRunInfo::from_run(run));
     }
@@ -449,9 +449,9 @@ fn tail_lines(content: &str, n: usize) -> String {
 mod tests {
     use super::*;
     use crate::db::Database;
-    use crate::domain::loops::{
-        Loop, LoopEdge, LoopEdgeCondition, LoopNode, LoopNodeKind, LoopNodeRun, LoopRunStatus,
-        LoopSpec, LoopSpecStatus, LoopStatus,
+    use crate::domain::graphs::{
+        Graph, GraphEdge, GraphEdgeCondition, GraphNode, GraphNodeKind, GraphNodeRun,
+        GraphRunStatus, GraphSpec, GraphSpecStatus, GraphStatus,
     };
     use crate::domain::queues::Queue;
     use chrono::Utc;
@@ -465,13 +465,13 @@ mod tests {
         Database::new(&path).expect("create test db")
     }
 
-    fn make_loop(id: &str, status: LoopStatus) -> Loop {
-        Loop {
+    fn make_graph(id: &str, status: GraphStatus) -> Graph {
+        Graph {
             archived: false,
             paused_by_reconciliation: false,
             infra_node_id: None,
             id: id.to_string(),
-            name: format!("Loop {id}"),
+            name: format!("Graph {id}"),
             description: None,
             workdir: "/tmp/test".to_string(),
             status,
@@ -487,10 +487,10 @@ mod tests {
         }
     }
 
-    fn make_spec(id: &str, loop_id: &str, status: LoopSpecStatus, position: i64) -> LoopSpec {
-        LoopSpec {
+    fn make_spec(id: &str, graph_id: &str, status: GraphSpecStatus, position: i64) -> GraphSpec {
+        GraphSpec {
             id: id.to_string(),
-            loop_id: Some(loop_id.to_string()),
+            graph_id: Some(graph_id.to_string()),
             name: format!("Spec {id}"),
             description: None,
             position,
@@ -507,11 +507,11 @@ mod tests {
         }
     }
 
-    fn make_node(id: &str, spec_id: &str, kind: LoopNodeKind, position: i64) -> LoopNode {
-        LoopNode {
+    fn make_node(id: &str, spec_id: &str, kind: GraphNodeKind, position: i64) -> GraphNode {
+        GraphNode {
             id: id.to_string(),
             spec_id: Some(spec_id.to_string()),
-            loop_id: None,
+            graph_id: None,
             name: format!("Node {id}"),
             kind,
             config: json!({}),
@@ -525,12 +525,12 @@ mod tests {
         spec_id: &str,
         from: &str,
         to: &str,
-        condition: LoopEdgeCondition,
-    ) -> LoopEdge {
-        LoopEdge {
+        condition: GraphEdgeCondition,
+    ) -> GraphEdge {
+        GraphEdge {
             id: id.to_string(),
             spec_id: Some(spec_id.to_string()),
-            loop_id: None,
+            graph_id: None,
             from_node: from.to_string(),
             to_node: to.to_string(),
             condition,
@@ -538,16 +538,16 @@ mod tests {
     }
 
     fn make_run(
-        loop_id: &str,
+        graph_id: &str,
         spec_id: &str,
         node_id: &str,
-        status: LoopRunStatus,
+        status: GraphRunStatus,
         iteration: i64,
         output: Option<Value>,
-    ) -> LoopNodeRun {
-        LoopNodeRun {
+    ) -> GraphNodeRun {
+        GraphNodeRun {
             id: uuid::Uuid::new_v4().to_string(),
-            loop_id: loop_id.to_string(),
+            graph_id: graph_id.to_string(),
             spec_id: spec_id.to_string(),
             node_id: node_id.to_string(),
             status,
@@ -564,19 +564,19 @@ mod tests {
         }
     }
 
-    fn details_from_loop(db: &Database, lp: &Loop) -> crate::domain::loops::LoopDetails {
-        let specs_with_details: Vec<crate::domain::loops::LoopSpecDetails> = db
-            .list_loop_specs(&lp.id)
+    fn details_from_graph(db: &Database, lp: &Graph) -> crate::domain::graphs::GraphDetails {
+        let specs_with_details: Vec<crate::domain::graphs::GraphSpecDetails> = db
+            .list_graph_specs(&lp.id)
             .unwrap_or_default()
             .into_iter()
-            .filter_map(|s| db.get_loop_spec_details(&s.id).ok().flatten())
+            .filter_map(|s| db.get_graph_spec_details(&s.id).ok().flatten())
             .collect();
-        let graph_nodes = db.list_loop_nodes_for_loop(&lp.id).unwrap_or_default();
-        let graph_edges = db.list_loop_edges_for_loop(&lp.id).unwrap_or_default();
+        let graph_nodes = db.list_graph_nodes_for_graph(&lp.id).unwrap_or_default();
+        let graph_edges = db.list_graph_edges_for_graph(&lp.id).unwrap_or_default();
         let completion_hook_runs = db
-            .list_loop_completion_hook_runs(&lp.id)
+            .list_graph_completion_hook_runs(&lp.id)
             .unwrap_or_default();
-        crate::domain::loops::LoopDetails {
+        crate::domain::graphs::GraphDetails {
             lp: lp.clone(),
             graph_nodes,
             graph_edges,
@@ -588,16 +588,16 @@ mod tests {
     // ── Tests ───────────────────────────────────────────────────
 
     #[test]
-    fn empty_loop_yields_well_formed_snapshot() {
+    fn empty_graph_yields_well_formed_snapshot() {
         let db = test_db();
-        let lp = make_loop("lp1", LoopStatus::Draft);
-        db.insert_loop(&lp).unwrap();
+        let lp = make_graph("lp1", GraphStatus::Draft);
+        db.insert_graph(&lp).unwrap();
 
-        let details = details_from_loop(&db, &lp);
-        let state = assemble_loop_live_state(&db, &details).unwrap();
+        let details = details_from_graph(&db, &lp);
+        let state = assemble_graph_live_state(&db, &details).unwrap();
 
-        assert_eq!(state.loop_id, "lp1");
-        assert_eq!(state.loop_status, LoopStatus::Draft);
+        assert_eq!(state.graph_id, "lp1");
+        assert_eq!(state.graph_status, GraphStatus::Draft);
         assert!(state.spec_queue.is_empty());
         assert_eq!(state.done_count, 0);
         assert_eq!(state.total_count, 0);
@@ -606,28 +606,28 @@ mod tests {
     }
 
     #[test]
-    fn running_loop_with_bound_specs_queue_order_and_progress() {
+    fn running_graph_with_bound_specs_queue_order_and_progress() {
         let db = test_db();
-        let lp = make_loop("lp1", LoopStatus::Running);
-        db.insert_loop(&lp).unwrap();
+        let lp = make_graph("lp1", GraphStatus::Running);
+        db.insert_graph(&lp).unwrap();
 
-        db.insert_loop_spec(&make_spec("s1", "lp1", LoopSpecStatus::Completed, 1))
+        db.insert_graph_spec(&make_spec("s1", "lp1", GraphSpecStatus::Completed, 1))
             .unwrap();
-        db.insert_loop_spec(&make_spec("s2", "lp1", LoopSpecStatus::Running, 2))
+        db.insert_graph_spec(&make_spec("s2", "lp1", GraphSpecStatus::Running, 2))
             .unwrap();
-        db.insert_loop_spec(&make_spec("s3", "lp1", LoopSpecStatus::Pending, 3))
+        db.insert_graph_spec(&make_spec("s3", "lp1", GraphSpecStatus::Pending, 3))
             .unwrap();
 
-        let details = details_from_loop(&db, &lp);
-        let state = assemble_loop_live_state(&db, &details).unwrap();
+        let details = details_from_graph(&db, &lp);
+        let state = assemble_graph_live_state(&db, &details).unwrap();
 
         assert_eq!(state.spec_queue.len(), 3);
         assert_eq!(state.spec_queue[0].spec_id, "s1");
-        assert_eq!(state.spec_queue[0].status, LoopSpecStatus::Completed);
+        assert_eq!(state.spec_queue[0].status, GraphSpecStatus::Completed);
         assert_eq!(state.spec_queue[1].spec_id, "s2");
-        assert_eq!(state.spec_queue[1].status, LoopSpecStatus::Running);
+        assert_eq!(state.spec_queue[1].status, GraphSpecStatus::Running);
         assert_eq!(state.spec_queue[2].spec_id, "s3");
-        assert_eq!(state.spec_queue[2].status, LoopSpecStatus::Pending);
+        assert_eq!(state.spec_queue[2].status, GraphSpecStatus::Pending);
 
         assert_eq!(state.done_count, 1);
         assert_eq!(state.total_count, 3);
@@ -637,7 +637,7 @@ mod tests {
     #[test]
     fn queue_run_queue_uses_queue_member_order() {
         let db = test_db();
-        let lp = make_loop("lp1", LoopStatus::Running);
+        let lp = make_graph("lp1", GraphStatus::Running);
 
         // Create a queue and add specs to it.
         let queue = Queue {
@@ -647,15 +647,15 @@ mod tests {
         };
         db.insert_queue(&queue).unwrap();
 
-        // Specs are NOT bound to the loop (loop_id = None) — they're queue members.
-        let ps1 = LoopSpec {
+        // Specs are NOT bound to the graph (graph_id = None) — they're queue members.
+        let ps1 = GraphSpec {
             id: "ps1".to_string(),
-            loop_id: None,
+            graph_id: None,
             name: "Queue Spec 1".to_string(),
             description: None,
             position: 1,
             parallelizable: false,
-            status: LoopSpecStatus::Completed,
+            status: GraphSpecStatus::Completed,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
@@ -665,14 +665,14 @@ mod tests {
             completed_via_reason: None,
             completed_via_at: None,
         };
-        let ps2 = LoopSpec {
+        let ps2 = GraphSpec {
             id: "ps2".to_string(),
-            loop_id: None,
+            graph_id: None,
             name: "Queue Spec 2".to_string(),
             description: None,
             position: 2,
             parallelizable: false,
-            status: LoopSpecStatus::Running,
+            status: GraphSpecStatus::Running,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
@@ -682,16 +682,16 @@ mod tests {
             completed_via_reason: None,
             completed_via_at: None,
         };
-        db.insert_loop_spec(&ps1).unwrap();
-        db.insert_loop_spec(&ps2).unwrap();
+        db.insert_graph_spec(&ps1).unwrap();
+        db.insert_graph_spec(&ps2).unwrap();
 
         db.append_queue_member("queue1", "ps1", None).unwrap();
         db.append_queue_member("queue1", "ps2", None).unwrap();
 
-        // Set the loop's active queue.
+        // Set the graph's active queue.
         let mut lp_with_queue = lp.clone();
         lp_with_queue.active_run_queue_id = Some("queue1".to_string());
-        db.update_loop_details(
+        db.update_graph_details(
             &lp.id,
             Some(&lp.name),
             None,
@@ -699,8 +699,8 @@ mod tests {
         )
         .unwrap();
 
-        let details = details_from_loop(&db, &lp_with_queue);
-        let state = assemble_loop_live_state(&db, &details).unwrap();
+        let details = details_from_graph(&db, &lp_with_queue);
+        let state = assemble_graph_live_state(&db, &details).unwrap();
 
         assert_eq!(state.spec_queue.len(), 2);
         assert_eq!(state.spec_queue[0].spec_id, "ps1");
@@ -710,18 +710,18 @@ mod tests {
     }
 
     #[test]
-    fn effective_graph_spec_wins_over_loop() {
+    fn effective_graph_spec_wins_over_graph() {
         let db = test_db();
-        let lp = make_loop("lp1", LoopStatus::Running);
-        db.insert_loop(&lp).unwrap();
+        let lp = make_graph("lp1", GraphStatus::Running);
+        db.insert_graph(&lp).unwrap();
 
-        // Loop-level graph.
-        db.insert_loop_node(&LoopNode {
+        // Graph-level graph.
+        db.insert_graph_node(&GraphNode {
             id: "ln1".to_string(),
             spec_id: None,
-            loop_id: Some("lp1".to_string()),
-            name: "Loop Node".to_string(),
-            kind: LoopNodeKind::Agent,
+            graph_id: Some("lp1".to_string()),
+            name: "Graph Node".to_string(),
+            kind: GraphNodeKind::Agent,
             config: json!({}),
             position: 1,
             created_at: Utc::now(),
@@ -729,23 +729,23 @@ mod tests {
         .unwrap();
 
         // Spec with its own graph.
-        db.insert_loop_spec(&make_spec("s1", "lp1", LoopSpecStatus::Running, 1))
+        db.insert_graph_spec(&make_spec("s1", "lp1", GraphSpecStatus::Running, 1))
             .unwrap();
-        db.insert_loop_node(&make_node("sn1", "s1", LoopNodeKind::Agent, 1))
+        db.insert_graph_node(&make_node("sn1", "s1", GraphNodeKind::Agent, 1))
             .unwrap();
-        db.insert_loop_node(&make_node("sn2", "s1", LoopNodeKind::Check, 2))
+        db.insert_graph_node(&make_node("sn2", "s1", GraphNodeKind::Check, 2))
             .unwrap();
-        db.insert_loop_edge(&make_edge(
+        db.insert_graph_edge(&make_edge(
             "se1",
             "s1",
             "sn1",
             "sn2",
-            LoopEdgeCondition::Pass,
+            GraphEdgeCondition::Pass,
         ))
         .unwrap();
 
-        let details = details_from_loop(&db, &lp);
-        let state = assemble_loop_live_state(&db, &details).unwrap();
+        let details = details_from_graph(&db, &lp);
+        let state = assemble_graph_live_state(&db, &details).unwrap();
 
         // Spec graph should win.
         assert_eq!(state.effective_nodes.len(), 2);
@@ -755,18 +755,18 @@ mod tests {
     }
 
     #[test]
-    fn effective_graph_falls_back_to_loop_when_spec_has_no_nodes() {
+    fn effective_graph_falls_back_to_graph_when_spec_has_no_nodes() {
         let db = test_db();
-        let lp = make_loop("lp1", LoopStatus::Running);
-        db.insert_loop(&lp).unwrap();
+        let lp = make_graph("lp1", GraphStatus::Running);
+        db.insert_graph(&lp).unwrap();
 
-        // Loop-level graph.
-        db.insert_loop_node(&LoopNode {
+        // Graph-level graph.
+        db.insert_graph_node(&GraphNode {
             id: "ln1".to_string(),
             spec_id: None,
-            loop_id: Some("lp1".to_string()),
-            name: "Loop Node".to_string(),
-            kind: LoopNodeKind::Agent,
+            graph_id: Some("lp1".to_string()),
+            name: "Graph Node".to_string(),
+            kind: GraphNodeKind::Agent,
             config: json!({}),
             position: 1,
             created_at: Utc::now(),
@@ -774,13 +774,13 @@ mod tests {
         .unwrap();
 
         // Spec with NO nodes.
-        db.insert_loop_spec(&make_spec("s1", "lp1", LoopSpecStatus::Running, 1))
+        db.insert_graph_spec(&make_spec("s1", "lp1", GraphSpecStatus::Running, 1))
             .unwrap();
 
-        let details = details_from_loop(&db, &lp);
-        let state = assemble_loop_live_state(&db, &details).unwrap();
+        let details = details_from_graph(&db, &lp);
+        let state = assemble_graph_live_state(&db, &details).unwrap();
 
-        // Should fall back to loop-level graph.
+        // Should fall back to top-level graph.
         assert_eq!(state.effective_nodes.len(), 1);
         assert_eq!(state.effective_nodes[0].id, "ln1");
     }
@@ -788,36 +788,36 @@ mod tests {
     #[test]
     fn current_node_from_active_run() {
         let db = test_db();
-        let lp = make_loop("lp1", LoopStatus::Running);
-        db.insert_loop(&lp).unwrap();
+        let lp = make_graph("lp1", GraphStatus::Running);
+        db.insert_graph(&lp).unwrap();
 
-        db.insert_loop_spec(&make_spec("s1", "lp1", LoopSpecStatus::Running, 1))
+        db.insert_graph_spec(&make_spec("s1", "lp1", GraphSpecStatus::Running, 1))
             .unwrap();
-        db.insert_loop_node(&make_node("n1", "s1", LoopNodeKind::Agent, 1))
+        db.insert_graph_node(&make_node("n1", "s1", GraphNodeKind::Agent, 1))
             .unwrap();
 
-        let run = make_run("lp1", "s1", "n1", LoopRunStatus::Running, 1, None);
-        db.insert_loop_run(&run).unwrap();
+        let run = make_run("lp1", "s1", "n1", GraphRunStatus::Running, 1, None);
+        db.insert_graph_run(&run).unwrap();
 
-        let details = details_from_loop(&db, &lp);
-        let state = assemble_loop_live_state(&db, &details).unwrap();
+        let details = details_from_graph(&db, &lp);
+        let state = assemble_graph_live_state(&db, &details).unwrap();
 
         assert_eq!(state.current_node_id.as_deref(), Some("n1"));
-        assert_eq!(state.current_node_status, Some(LoopRunStatus::Running));
+        assert_eq!(state.current_node_status, Some(GraphRunStatus::Running));
         assert_eq!(state.current_node_iteration, Some(1));
     }
 
     #[test]
     fn current_node_from_latest_completed_run() {
         let db = test_db();
-        let lp = make_loop("lp1", LoopStatus::Running);
-        db.insert_loop(&lp).unwrap();
+        let lp = make_graph("lp1", GraphStatus::Running);
+        db.insert_graph(&lp).unwrap();
 
-        db.insert_loop_spec(&make_spec("s1", "lp1", LoopSpecStatus::Running, 1))
+        db.insert_graph_spec(&make_spec("s1", "lp1", GraphSpecStatus::Running, 1))
             .unwrap();
-        db.insert_loop_node(&make_node("n1", "s1", LoopNodeKind::Agent, 1))
+        db.insert_graph_node(&make_node("n1", "s1", GraphNodeKind::Agent, 1))
             .unwrap();
-        db.insert_loop_node(&make_node("n2", "s1", LoopNodeKind::Check, 2))
+        db.insert_graph_node(&make_node("n2", "s1", GraphNodeKind::Check, 2))
             .unwrap();
 
         // n1 completed, no active run for s1.
@@ -825,17 +825,17 @@ mod tests {
             "lp1",
             "s1",
             "n2",
-            LoopRunStatus::Pass,
+            GraphRunStatus::Pass,
             1,
             Some(json!({"summary": "done"})),
         );
-        db.insert_loop_run(&run).unwrap();
+        db.insert_graph_run(&run).unwrap();
 
-        let details = details_from_loop(&db, &lp);
-        let state = assemble_loop_live_state(&db, &details).unwrap();
+        let details = details_from_graph(&db, &lp);
+        let state = assemble_graph_live_state(&db, &details).unwrap();
 
         assert_eq!(state.current_node_id.as_deref(), Some("n2"));
-        assert_eq!(state.current_node_status, Some(LoopRunStatus::Pass));
+        assert_eq!(state.current_node_status, Some(GraphRunStatus::Pass));
         // Regression: a completed (non-running) current node must still
         // surface its output tail, not just status/timing.
         assert_eq!(state.current_node_output_tail.as_deref(), Some("done"));
@@ -844,47 +844,47 @@ mod tests {
     #[test]
     fn requested_node_info_for_non_current_node() {
         let db = test_db();
-        let lp = make_loop("lp1", LoopStatus::Running);
-        db.insert_loop(&lp).unwrap();
+        let lp = make_graph("lp1", GraphStatus::Running);
+        db.insert_graph(&lp).unwrap();
 
-        db.insert_loop_spec(&make_spec("s1", "lp1", LoopSpecStatus::Running, 1))
+        db.insert_graph_spec(&make_spec("s1", "lp1", GraphSpecStatus::Running, 1))
             .unwrap();
-        db.insert_loop_node(&make_node("n1", "s1", LoopNodeKind::Agent, 1))
+        db.insert_graph_node(&make_node("n1", "s1", GraphNodeKind::Agent, 1))
             .unwrap();
-        db.insert_loop_node(&make_node("n2", "s1", LoopNodeKind::Check, 2))
+        db.insert_graph_node(&make_node("n2", "s1", GraphNodeKind::Check, 2))
             .unwrap();
 
         // n1 already completed; n2 is the active run (the "current" node).
-        db.insert_loop_run(&make_run(
+        db.insert_graph_run(&make_run(
             "lp1",
             "s1",
             "n1",
-            LoopRunStatus::Pass,
+            GraphRunStatus::Pass,
             1,
             Some(json!({"summary": "n1 finished"})),
         ))
         .unwrap();
-        db.insert_loop_run(&make_run(
+        db.insert_graph_run(&make_run(
             "lp1",
             "s1",
             "n2",
-            LoopRunStatus::Running,
+            GraphRunStatus::Running,
             1,
             None,
         ))
         .unwrap();
 
-        let details = details_from_loop(&db, &lp);
-        let state = assemble_loop_live_state(&db, &details).unwrap();
+        let details = details_from_graph(&db, &lp);
+        let state = assemble_graph_live_state(&db, &details).unwrap();
         assert_eq!(state.current_node_id.as_deref(), Some("n2"));
 
         // Requesting n1 explicitly (not the current node) still works.
         let n1_info = resolve_node_run_info(&db, "s1", "n1");
-        assert_eq!(n1_info.status, Some(LoopRunStatus::Pass));
+        assert_eq!(n1_info.status, Some(GraphRunStatus::Pass));
         assert_eq!(n1_info.output_tail.as_deref(), Some("n1 finished"));
 
         let n2_info = resolve_node_run_info(&db, "s1", "n2");
-        assert_eq!(n2_info.status, Some(LoopRunStatus::Running));
+        assert_eq!(n2_info.status, Some(GraphRunStatus::Running));
     }
 
     #[test]
@@ -919,15 +919,15 @@ mod tests {
     }
 
     #[test]
-    fn no_loop_selected_yields_none() {
-        // assemble_loop_live_state always returns Some when given valid details.
-        // The "no loop selected" case is handled by the caller not calling this.
-        // But we test that a loop with no specs and no runs works.
+    fn no_graph_selected_yields_none() {
+        // assemble_graph_live_state always returns Some when given valid details.
+        // The "no graph selected" case is handled by the caller not calling this.
+        // But we test that a graph with no specs and no runs works.
         let db = test_db();
-        let lp = make_loop("lp1", LoopStatus::Draft);
-        db.insert_loop(&lp).unwrap();
-        let details = details_from_loop(&db, &lp);
-        let state = assemble_loop_live_state(&db, &details);
+        let lp = make_graph("lp1", GraphStatus::Draft);
+        db.insert_graph(&lp).unwrap();
+        let details = details_from_graph(&db, &lp);
+        let state = assemble_graph_live_state(&db, &details);
         assert!(state.is_some());
         let state = state.unwrap();
         assert!(state.spec_queue.is_empty());
@@ -937,10 +937,10 @@ mod tests {
     #[test]
     fn degraded_case_no_runs_no_specs() {
         let db = test_db();
-        let lp = make_loop("lp1", LoopStatus::Running);
-        db.insert_loop(&lp).unwrap();
-        let details = details_from_loop(&db, &lp);
-        let state = assemble_loop_live_state(&db, &details).unwrap();
+        let lp = make_graph("lp1", GraphStatus::Running);
+        db.insert_graph(&lp).unwrap();
+        let details = details_from_graph(&db, &lp);
+        let state = assemble_graph_live_state(&db, &details).unwrap();
 
         assert_eq!(state.done_count, 0);
         assert_eq!(state.total_count, 0);
@@ -953,18 +953,18 @@ mod tests {
     #[test]
     fn progress_all_completed() {
         let db = test_db();
-        let lp = make_loop("lp1", LoopStatus::Completed);
-        db.insert_loop(&lp).unwrap();
+        let lp = make_graph("lp1", GraphStatus::Completed);
+        db.insert_graph(&lp).unwrap();
 
-        db.insert_loop_spec(&make_spec("s1", "lp1", LoopSpecStatus::Completed, 1))
+        db.insert_graph_spec(&make_spec("s1", "lp1", GraphSpecStatus::Completed, 1))
             .unwrap();
-        db.insert_loop_spec(&make_spec("s2", "lp1", LoopSpecStatus::Completed, 2))
+        db.insert_graph_spec(&make_spec("s2", "lp1", GraphSpecStatus::Completed, 2))
             .unwrap();
-        db.insert_loop_spec(&make_spec("s3", "lp1", LoopSpecStatus::Skipped, 3))
+        db.insert_graph_spec(&make_spec("s3", "lp1", GraphSpecStatus::Skipped, 3))
             .unwrap();
 
-        let details = details_from_loop(&db, &lp);
-        let state = assemble_loop_live_state(&db, &details).unwrap();
+        let details = details_from_graph(&db, &lp);
+        let state = assemble_graph_live_state(&db, &details).unwrap();
 
         assert_eq!(state.done_count, 2); // Skipped doesn't count as done
         assert_eq!(state.total_count, 3);
@@ -974,13 +974,13 @@ mod tests {
     #[test]
     fn trigger_type_labels() {
         let db = test_db();
-        let mut lp = make_loop("lp1", LoopStatus::Draft);
+        let mut lp = make_graph("lp1", GraphStatus::Draft);
         lp.trigger = Some(crate::domain::models::Trigger::Cron {
             schedule_expr: "30 9 * * *".to_string(),
         });
-        db.insert_loop(&lp).unwrap();
-        let details = details_from_loop(&db, &lp);
-        let state = assemble_loop_live_state(&db, &details).unwrap();
+        db.insert_graph(&lp).unwrap();
+        let details = details_from_graph(&db, &lp);
+        let state = assemble_graph_live_state(&db, &details).unwrap();
 
         assert_eq!(state.trigger_type, "cron");
         assert_eq!(state.schedule_expr.as_deref(), Some("30 9 * * *"));
@@ -990,75 +990,75 @@ mod tests {
     #[test]
     fn autorun_at_propagated() {
         let db = test_db();
-        let mut lp = make_loop("lp1", LoopStatus::Failed);
+        let mut lp = make_graph("lp1", GraphStatus::Failed);
         let now = Utc::now();
         lp.autorun_at = Some(now);
-        db.insert_loop(&lp).unwrap();
-        let details = details_from_loop(&db, &lp);
-        let state = assemble_loop_live_state(&db, &details).unwrap();
+        db.insert_graph(&lp).unwrap();
+        let details = details_from_graph(&db, &lp);
+        let state = assemble_graph_live_state(&db, &details).unwrap();
 
         assert!(state.autorun_at.is_some());
     }
 
     fn insert_ensemble_fixture(db: &Database, spec_id: &str) {
-        use crate::domain::loops::{Ensemble, EnsembleMember, LoopEdgeCondition, LoopNodeKind};
+        use crate::domain::graphs::{Ensemble, EnsembleMember, GraphEdgeCondition, GraphNodeKind};
 
-        let member_nodes: Vec<LoopNode> = (1..=3)
-            .map(|i| LoopNode {
+        let member_nodes: Vec<GraphNode> = (1..=3)
+            .map(|i| GraphNode {
                 id: format!("m{i}"),
                 spec_id: Some(spec_id.to_string()),
-                loop_id: None,
+                graph_id: None,
                 name: format!("Proposers [{i}]"),
-                kind: LoopNodeKind::Agent,
+                kind: GraphNodeKind::Agent,
                 config: json!({}),
                 position: i,
                 created_at: Utc::now(),
             })
             .collect();
-        let join_node = LoopNode {
+        let join_node = GraphNode {
             id: "join1".to_string(),
             spec_id: Some(spec_id.to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "Proposers (quorum)".to_string(),
-            kind: LoopNodeKind::Join,
+            kind: GraphNodeKind::Join,
             config: json!({}),
             position: 4,
             created_at: Utc::now(),
         };
         let mut edges = Vec::new();
         for node in &member_nodes {
-            edges.push(LoopEdge {
+            edges.push(GraphEdge {
                 id: format!("entry-{}", node.id),
                 spec_id: Some(spec_id.to_string()),
-                loop_id: None,
+                graph_id: None,
                 from_node: "n1".to_string(),
                 to_node: node.id.clone(),
-                condition: LoopEdgeCondition::Always,
+                condition: GraphEdgeCondition::Always,
             });
-            edges.push(LoopEdge {
+            edges.push(GraphEdge {
                 id: format!("join-{}", node.id),
                 spec_id: Some(spec_id.to_string()),
-                loop_id: None,
+                graph_id: None,
                 from_node: node.id.clone(),
                 to_node: "join1".to_string(),
-                condition: LoopEdgeCondition::Always,
+                condition: GraphEdgeCondition::Always,
             });
         }
         let ensemble = Ensemble {
             id: "ens1".to_string(),
             spec_id: Some(spec_id.to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "Proposers".to_string(),
             prompt_template: "{{spec_content}}".to_string(),
             join_node_id: "join1".to_string(),
             entry_from_node: "n1".to_string(),
-            entry_condition: LoopEdgeCondition::Always,
+            entry_condition: GraphEdgeCondition::Always,
             min_pass: 3,
             straggler_timeout_minutes: None,
             timeout_minutes: 30,
             on_pass_to: "n2".to_string(),
             on_fail_to: None,
-            kind: crate::domain::loops::EnsembleKind::Parallel,
+            kind: crate::domain::graphs::EnsembleKind::Parallel,
             round_robin_index: None,
             created_at: Utc::now(),
         };
@@ -1243,12 +1243,12 @@ mod tests {
             "lp1",
             "s1",
             "n1",
-            LoopRunStatus::Pass,
+            GraphRunStatus::Pass,
             3,
             Some(json!({"summary": "all good"})),
         );
         let info = NodeRunInfo::from_run(&run);
-        assert_eq!(info.status, Some(LoopRunStatus::Pass));
+        assert_eq!(info.status, Some(GraphRunStatus::Pass));
         assert!(info.started_at.is_some());
         assert_eq!(info.iteration, Some(3));
         assert_eq!(info.output_tail.as_deref(), Some("all good"));
@@ -1256,9 +1256,9 @@ mod tests {
 
     #[test]
     fn node_run_info_from_run_with_none_output() {
-        let run = make_run("lp1", "s1", "n1", LoopRunStatus::Running, 1, None);
+        let run = make_run("lp1", "s1", "n1", GraphRunStatus::Running, 1, None);
         let info = NodeRunInfo::from_run(&run);
-        assert_eq!(info.status, Some(LoopRunStatus::Running));
+        assert_eq!(info.status, Some(GraphRunStatus::Running));
         assert!(info.output_tail.is_none());
     }
 
@@ -1274,43 +1274,43 @@ mod tests {
     #[test]
     fn resolve_node_run_info_finds_completed_run() {
         let db = test_db();
-        let lp = make_loop("lp1", LoopStatus::Running);
-        db.insert_loop(&lp).unwrap();
-        db.insert_loop_spec(&make_spec("s1", "lp1", LoopSpecStatus::Running, 1))
+        let lp = make_graph("lp1", GraphStatus::Running);
+        db.insert_graph(&lp).unwrap();
+        db.insert_graph_spec(&make_spec("s1", "lp1", GraphSpecStatus::Running, 1))
             .unwrap();
-        db.insert_loop_node(&make_node("n1", "s1", LoopNodeKind::Check, 1))
+        db.insert_graph_node(&make_node("n1", "s1", GraphNodeKind::Check, 1))
             .unwrap();
 
-        db.insert_loop_run(&make_run(
+        db.insert_graph_run(&make_run(
             "lp1",
             "s1",
             "n1",
-            LoopRunStatus::Pass,
+            GraphRunStatus::Pass,
             1,
             Some(json!("completed")),
         ))
         .unwrap();
 
         let info = resolve_node_run_info(&db, "s1", "n1");
-        assert_eq!(info.status, Some(LoopRunStatus::Pass));
+        assert_eq!(info.status, Some(GraphRunStatus::Pass));
         assert_eq!(info.output_tail.as_deref(), Some("completed"));
     }
 
     #[test]
     fn resolve_node_run_info_wrong_spec_returns_default() {
         let db = test_db();
-        let lp = make_loop("lp1", LoopStatus::Running);
-        db.insert_loop(&lp).unwrap();
-        db.insert_loop_spec(&make_spec("s1", "lp1", LoopSpecStatus::Running, 1))
+        let lp = make_graph("lp1", GraphStatus::Running);
+        db.insert_graph(&lp).unwrap();
+        db.insert_graph_spec(&make_spec("s1", "lp1", GraphSpecStatus::Running, 1))
             .unwrap();
-        db.insert_loop_node(&make_node("n1", "s1", LoopNodeKind::Check, 1))
+        db.insert_graph_node(&make_node("n1", "s1", GraphNodeKind::Check, 1))
             .unwrap();
 
-        db.insert_loop_run(&make_run(
+        db.insert_graph_run(&make_run(
             "lp1",
             "s1",
             "n1",
-            LoopRunStatus::Pass,
+            GraphRunStatus::Pass,
             1,
             Some(json!("done")),
         ))
@@ -1322,20 +1322,20 @@ mod tests {
         assert!(info.status.is_none());
     }
 
-    // ── assemble_loop_live_state edge cases ──────────────────────
+    // ── assemble_graph_live_state edge cases ──────────────────────
 
     #[test]
-    fn paused_loop_has_no_current_spec() {
+    fn paused_graph_has_no_current_spec() {
         let db = test_db();
-        let lp = make_loop("lp1", LoopStatus::Paused);
-        db.insert_loop(&lp).unwrap();
-        db.insert_loop_spec(&make_spec("s1", "lp1", LoopSpecStatus::Completed, 1))
+        let lp = make_graph("lp1", GraphStatus::Paused);
+        db.insert_graph(&lp).unwrap();
+        db.insert_graph_spec(&make_spec("s1", "lp1", GraphSpecStatus::Completed, 1))
             .unwrap();
-        db.insert_loop_spec(&make_spec("s2", "lp1", LoopSpecStatus::Skipped, 2))
+        db.insert_graph_spec(&make_spec("s2", "lp1", GraphSpecStatus::Skipped, 2))
             .unwrap();
 
-        let details = details_from_loop(&db, &lp);
-        let state = assemble_loop_live_state(&db, &details).unwrap();
+        let details = details_from_graph(&db, &lp);
+        let state = assemble_graph_live_state(&db, &details).unwrap();
         assert!(state.current_spec_id.is_none());
         assert_eq!(state.done_count, 1); // Only Completed counts
     }
@@ -1343,16 +1343,16 @@ mod tests {
     #[test]
     fn watch_trigger_type_label() {
         let db = test_db();
-        let mut lp = make_loop("lp1", LoopStatus::Draft);
+        let mut lp = make_graph("lp1", GraphStatus::Draft);
         lp.trigger = Some(crate::domain::models::Trigger::Watch {
             path: "/tmp/watch".to_string(),
             events: vec![crate::domain::models::WatchEvent::Modify],
             debounce_seconds: 5,
             recursive: false,
         });
-        db.insert_loop(&lp).unwrap();
-        let details = details_from_loop(&db, &lp);
-        let state = assemble_loop_live_state(&db, &details).unwrap();
+        db.insert_graph(&lp).unwrap();
+        let details = details_from_graph(&db, &lp);
+        let state = assemble_graph_live_state(&db, &details).unwrap();
         assert_eq!(state.trigger_type, "watch");
         assert_eq!(state.watch_path.as_deref(), Some("/tmp/watch"));
         assert!(state.schedule_expr.is_none());
@@ -1361,32 +1361,32 @@ mod tests {
     #[test]
     fn manual_trigger_type_label() {
         let db = test_db();
-        let lp = make_loop("lp1", LoopStatus::Draft);
-        db.insert_loop(&lp).unwrap();
-        let details = details_from_loop(&db, &lp);
-        let state = assemble_loop_live_state(&db, &details).unwrap();
+        let lp = make_graph("lp1", GraphStatus::Draft);
+        db.insert_graph(&lp).unwrap();
+        let details = details_from_graph(&db, &lp);
+        let state = assemble_graph_live_state(&db, &details).unwrap();
         assert_eq!(state.trigger_type, "manual");
     }
 
     #[test]
     fn multiple_specs_progress_counting() {
         let db = test_db();
-        let lp = make_loop("lp1", LoopStatus::Running);
-        db.insert_loop(&lp).unwrap();
+        let lp = make_graph("lp1", GraphStatus::Running);
+        db.insert_graph(&lp).unwrap();
 
-        db.insert_loop_spec(&make_spec("s1", "lp1", LoopSpecStatus::Completed, 1))
+        db.insert_graph_spec(&make_spec("s1", "lp1", GraphSpecStatus::Completed, 1))
             .unwrap();
-        db.insert_loop_spec(&make_spec("s2", "lp1", LoopSpecStatus::Completed, 2))
+        db.insert_graph_spec(&make_spec("s2", "lp1", GraphSpecStatus::Completed, 2))
             .unwrap();
-        db.insert_loop_spec(&make_spec("s3", "lp1", LoopSpecStatus::Running, 3))
+        db.insert_graph_spec(&make_spec("s3", "lp1", GraphSpecStatus::Running, 3))
             .unwrap();
-        db.insert_loop_spec(&make_spec("s4", "lp1", LoopSpecStatus::Pending, 4))
+        db.insert_graph_spec(&make_spec("s4", "lp1", GraphSpecStatus::Pending, 4))
             .unwrap();
-        db.insert_loop_spec(&make_spec("s5", "lp1", LoopSpecStatus::Skipped, 5))
+        db.insert_graph_spec(&make_spec("s5", "lp1", GraphSpecStatus::Skipped, 5))
             .unwrap();
 
-        let details = details_from_loop(&db, &lp);
-        let state = assemble_loop_live_state(&db, &details).unwrap();
+        let details = details_from_graph(&db, &lp);
+        let state = assemble_graph_live_state(&db, &details).unwrap();
 
         assert_eq!(state.done_count, 2);
         assert_eq!(state.total_count, 5);
@@ -1396,38 +1396,38 @@ mod tests {
     #[test]
     fn ensembles_live_info_reports_join_and_per_member_status() {
         let db = test_db();
-        let lp = make_loop("lp1", LoopStatus::Running);
-        db.insert_loop(&lp).unwrap();
-        db.insert_loop_spec(&make_spec("s1", "lp1", LoopSpecStatus::Running, 1))
+        let lp = make_graph("lp1", GraphStatus::Running);
+        db.insert_graph(&lp).unwrap();
+        db.insert_graph_spec(&make_spec("s1", "lp1", GraphSpecStatus::Running, 1))
             .unwrap();
-        db.insert_loop_node(&make_node("n1", "s1", LoopNodeKind::Agent, 0))
+        db.insert_graph_node(&make_node("n1", "s1", GraphNodeKind::Agent, 0))
             .unwrap();
-        db.insert_loop_node(&make_node("n2", "s1", LoopNodeKind::Agent, 5))
+        db.insert_graph_node(&make_node("n2", "s1", GraphNodeKind::Agent, 5))
             .unwrap();
         insert_ensemble_fixture(&db, "s1");
 
-        db.insert_loop_run(&make_run(
+        db.insert_graph_run(&make_run(
             "lp1",
             "s1",
             "m1",
-            LoopRunStatus::Pass,
+            GraphRunStatus::Pass,
             1,
             Some(json!({"stdout": "draft one"})),
         ))
         .unwrap();
-        db.insert_loop_run(&make_run(
+        db.insert_graph_run(&make_run(
             "lp1",
             "s1",
             "m2",
-            LoopRunStatus::Running,
+            GraphRunStatus::Running,
             1,
             None,
         ))
         .unwrap();
         // m3 has no run yet — still pending.
 
-        let details = details_from_loop(&db, &lp);
-        let state = assemble_loop_live_state(&db, &details).unwrap();
+        let details = details_from_graph(&db, &lp);
+        let state = assemble_graph_live_state(&db, &details).unwrap();
 
         assert_eq!(state.ensembles.len(), 1);
         let ensemble = &state.ensembles[0];
@@ -1435,8 +1435,8 @@ mod tests {
         assert_eq!(ensemble.join_node_id, "join1");
         assert_eq!(ensemble.members.len(), 3);
         assert_eq!(ensemble.members[0].label, "openrouter/model-0");
-        assert_eq!(ensemble.members[0].status, Some(LoopRunStatus::Pass));
-        assert_eq!(ensemble.members[1].status, Some(LoopRunStatus::Running));
+        assert_eq!(ensemble.members[0].status, Some(GraphRunStatus::Pass));
+        assert_eq!(ensemble.members[1].status, Some(GraphRunStatus::Running));
         assert_eq!(ensemble.members[2].status, None);
     }
 }

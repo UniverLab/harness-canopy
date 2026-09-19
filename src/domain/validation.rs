@@ -2,8 +2,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::domain::loops::{
-    EnsembleDetails, EnsembleKind, LoopEdge, LoopEdgeCondition, LoopNode, LoopNodeKind,
+use crate::domain::graphs::{
+    EnsembleDetails, EnsembleKind, GraphEdge, GraphEdgeCondition, GraphNode, GraphNodeKind,
 };
 
 pub const MAX_ID_LENGTH: usize = 64;
@@ -62,7 +62,7 @@ pub fn validate_watch_path(path: &str) -> Result<(), String> {
 
 /// Returns `Err` when `min_pass` is out of the [1, member_count] range.
 /// Applies to every ensemble kind. Used by every write site so the writer
-/// and the importer (`loop_transfer.rs`) cannot drift apart.
+/// and the importer (`graph_transfer.rs`) cannot drift apart.
 /// Error text: "Ensemble '<name>' has an invalid min_pass (<n>) for <m> members."
 pub fn validate_ensemble_min_pass(
     ensemble_name: &str,
@@ -77,26 +77,26 @@ pub fn validate_ensemble_min_pass(
     Ok(())
 }
 
-/// Validate every ensemble (F1) found within one graph (a loop's top-level
+/// Validate every ensemble (F1) found within one graph (a graph's top-level
 /// graph, or a single spec's own graph — never both mixed together, since an
 /// ensemble belongs to exactly one) as a unit: entry reachable, every member
 /// wired to the join, and both exits wired to nodes that actually exist in
-/// this same graph. Called at `loop_run` so a structurally broken ensemble
+/// this same graph. Called at `graph_run` so a structurally broken ensemble
 /// fails fast with an actionable message instead of surfacing as a runtime
 /// "ambiguous outgoing edges" or "node not found" deep into a run.
 ///
 /// In practice every one of these invariants is guaranteed by construction —
-/// `loop_add_ensemble`/`loop_update_ensemble` are the only writers of
+/// `graph_add_ensemble`/`graph_update_ensemble` are the only writers of
 /// ensemble-owned nodes/edges — so this exists as defense in depth against a
 /// future bug or direct DB edit, not because callers are expected to trip it
 /// today.
 pub fn validate_ensembles_in_graph(
     ensembles: &[EnsembleDetails],
-    nodes: &[LoopNode],
-    edges: &[LoopEdge],
+    nodes: &[GraphNode],
+    edges: &[GraphEdge],
 ) -> Result<(), String> {
     let node_exists = |id: &str| nodes.iter().any(|node| node.id == id);
-    let has_edge = |from: &str, to: &str, condition: LoopEdgeCondition| {
+    let has_edge = |from: &str, to: &str, condition: GraphEdgeCondition| {
         edges
             .iter()
             .any(|edge| edge.from_node == from && edge.to_node == to && edge.condition == condition)
@@ -151,7 +151,7 @@ pub fn validate_ensembles_in_graph(
             ensembles,
             ensemble,
             &ensemble.on_pass_to,
-            &LoopEdgeCondition::Pass,
+            &GraphEdgeCondition::Pass,
             edges,
         ) {
             let target = exit_target_label(ensembles, ensemble, &ensemble.on_pass_to);
@@ -164,7 +164,7 @@ pub fn validate_ensembles_in_graph(
                 ensembles,
                 ensemble,
                 on_fail_to,
-                &LoopEdgeCondition::Fail,
+                &GraphEdgeCondition::Fail,
                 edges,
             ) {
                 let target = exit_target_label(ensembles, ensemble, on_fail_to);
@@ -205,7 +205,7 @@ pub fn validate_ensembles_in_graph(
             if !has_edge(
                 &member.node_id,
                 &ensemble.join_node_id,
-                LoopEdgeCondition::Always,
+                GraphEdgeCondition::Always,
             ) {
                 return Err(format!(
                     "{label}'s member '{}' is not wired to the quorum — every member must route to the quorum.",
@@ -235,7 +235,7 @@ pub fn validate_ensembles_in_graph(
             for (from, count) in sources {
                 if count != member_ids.len() {
                     return Err(format!(
-                        "{label} has incomplete entry wiring from '{from}': reaches {count} of {} members — rewire with loop_update_ensemble (from_node/add_entry_from).",
+                        "{label} has incomplete entry wiring from '{from}': reaches {count} of {} members — rewire with graph_update_ensemble (from_node/add_entry_from).",
                         member_ids.len()
                     ));
                 }
@@ -250,13 +250,13 @@ pub fn validate_ensembles_in_graph(
 /// usually a node id (one edge join→node), but when ensembles are chained the
 /// row holds the *target ensemble's quorum id* instead — in which case every
 /// member of that ensemble must have an edge from this join (the fan-out
-/// `loop_update_ensemble` builds, with no intermediate node).
+/// `graph_update_ensemble` builds, with no intermediate node).
 fn has_ensemble_exit_edge(
     ensembles: &[EnsembleDetails],
-    ensemble: &crate::domain::loops::Ensemble,
+    ensemble: &crate::domain::graphs::Ensemble,
     target: &str,
-    condition: &LoopEdgeCondition,
-    edges: &[LoopEdge],
+    condition: &GraphEdgeCondition,
+    edges: &[GraphEdge],
 ) -> bool {
     if let Some(target_details) = ensembles.iter().find(|details| {
         details.ensemble.join_node_id == target && details.ensemble.id != ensemble.id
@@ -280,7 +280,7 @@ fn has_ensemble_exit_edge(
 /// ensemble's id when the row holds its quorum id, else the node id itself.
 fn exit_target_label(
     ensembles: &[EnsembleDetails],
-    ensemble: &crate::domain::loops::Ensemble,
+    ensemble: &crate::domain::graphs::Ensemble,
     target: &str,
 ) -> String {
     match ensembles.iter().find(|details| {
@@ -313,15 +313,15 @@ pub struct GraphTerminal {
 /// outgoing edge the graph is meant to end there, and that is reported in
 /// [`GraphValidationReport::terminals`] instead.
 ///
-/// `has_break_path` records whether the node has an outgoing `break` edge —
+/// `has_error_path` records whether the node has an outgoing `error` edge —
 /// the infrastructure-failure path, normally wired to the graph's infra node.
-/// A `break` edge does NOT satisfy the `fail` requirement (a real fail verdict
+/// An `error` edge does NOT satisfy the `fail` requirement (a real fail verdict
 /// is never routed down it); this flag only tells the reader whether an
 /// infrastructure crash would also dead-end at this node.
 #[derive(Debug)]
 pub struct FailDeadEnd {
     pub node_id: String,
-    pub has_break_path: bool,
+    pub has_error_path: bool,
 }
 
 /// Result of structural graph validation.
@@ -338,7 +338,7 @@ pub struct GraphValidationReport {
 /// string (a name in an import document, an id in a live graph).
 pub struct GraphNodeView<'a> {
     pub id: &'a str,
-    pub kind: LoopNodeKind,
+    pub kind: GraphNodeKind,
     /// Declared route labels for router nodes; empty for every other kind.
     pub route_labels: &'a [String],
 }
@@ -347,10 +347,10 @@ pub struct GraphNodeView<'a> {
 pub struct GraphEdgeView<'a> {
     pub from: &'a str,
     pub to: &'a str,
-    pub condition: &'a LoopEdgeCondition,
+    pub condition: &'a GraphEdgeCondition,
 }
 
-/// Validate structural properties of a complete loop graph. Returns `Err`
+/// Validate structural properties of a complete graph. Returns `Err`
 /// with a message naming the concrete node(s) or edge(s) involved.
 ///
 /// Checks performed:
@@ -361,7 +361,7 @@ pub struct GraphEdgeView<'a> {
 ///    reported in [`GraphValidationReport::terminals`], not an error. Every
 ///    router node still requires an outgoing edge for each of its declared
 ///    routes. Join nodes are skipped (engine-managed).
-pub fn validate_loop_graph(
+pub fn validate_graph(
     nodes: &[GraphNodeView<'_>],
     edges: &[GraphEdgeView<'_>],
 ) -> Result<GraphValidationReport, String> {
@@ -398,7 +398,7 @@ pub fn validate_loop_graph(
             .iter()
             .find(|node| node.id == edge.from)
             .expect("edge endpoints were validated above");
-        if source.kind != LoopNodeKind::Router
+        if source.kind != GraphNodeKind::Router
             || !source.route_labels.iter().any(|declared| declared == label)
         {
             return Err(format!(
@@ -469,7 +469,7 @@ pub fn validate_loop_graph(
     }
 
     // 4. Outgoing coverage — collect terminals (states with no outgoing edge).
-    let mut outgoing: HashMap<&str, Vec<&LoopEdgeCondition>> = HashMap::new();
+    let mut outgoing: HashMap<&str, Vec<&GraphEdgeCondition>> = HashMap::new();
     for edge in edges {
         outgoing.entry(edge.from).or_default().push(edge.condition);
     }
@@ -478,10 +478,10 @@ pub fn validate_loop_graph(
     let mut fail_dead_ends: Vec<FailDeadEnd> = Vec::new();
 
     for node in nodes {
-        if node.kind == LoopNodeKind::Join {
+        if node.kind == GraphNodeKind::Join {
             continue;
         }
-        if node.kind == LoopNodeKind::Router {
+        if node.kind == GraphNodeKind::Router {
             // Router route coverage is still required — a router missing a route
             // edge is a broken graph, not a terminal.
             let outgoing_for_node = outgoing.get(node.id);
@@ -517,7 +517,7 @@ pub fn validate_loop_graph(
         // Agent / Check / Gate — missing pass or fail is a terminal, not an error.
         if matches!(
             node.kind,
-            LoopNodeKind::Agent | LoopNodeKind::Check | LoopNodeKind::Gate
+            GraphNodeKind::Agent | GraphNodeKind::Check | GraphNodeKind::Gate
         ) {
             let outgoing_for_node = outgoing.get(node.id);
             if outgoing_for_node.is_none() {
@@ -535,11 +535,11 @@ pub fn validate_loop_graph(
             let conds = outgoing_for_node.expect("just checked Some");
             let has_pass = conds
                 .iter()
-                .any(|c| **c == LoopEdgeCondition::Pass || **c == LoopEdgeCondition::Always);
+                .any(|c| **c == GraphEdgeCondition::Pass || **c == GraphEdgeCondition::Always);
             let has_fail = conds.iter().any(|c| {
-                **c == LoopEdgeCondition::Fail
-                    || **c == LoopEdgeCondition::Always
-                    || **c == LoopEdgeCondition::Break
+                **c == GraphEdgeCondition::Fail
+                    || **c == GraphEdgeCondition::Always
+                    || **c == GraphEdgeCondition::Error
             });
             if !has_pass {
                 terminals.push(GraphTerminal {
@@ -555,18 +555,18 @@ pub fn validate_loop_graph(
             }
             // CM19: a node that continues on `pass` (has a pass/always edge)
             // but has no `fail`/`always` edge dead-ends when it fails — the
-            // engine terminates the spec there. `Break` does NOT count: a
-            // real fail verdict is never routed down a break edge. A node
+            // engine terminates the spec there. `Error` does NOT count: a
+            // real fail verdict is never routed down an error edge. A node
             // with no `pass` edge either is a deliberate terminal (already in
             // `terminals`) and is not reported here.
             let has_fail_verdict_edge = conds
                 .iter()
-                .any(|c| **c == LoopEdgeCondition::Fail || **c == LoopEdgeCondition::Always);
-            let has_break_edge = conds.iter().any(|c| **c == LoopEdgeCondition::Break);
+                .any(|c| **c == GraphEdgeCondition::Fail || **c == GraphEdgeCondition::Always);
+            let has_error_edge = conds.iter().any(|c| **c == GraphEdgeCondition::Error);
             if has_pass && !has_fail_verdict_edge {
                 fail_dead_ends.push(FailDeadEnd {
                     node_id: node.id.to_string(),
-                    has_break_path: has_break_edge,
+                    has_error_path: has_error_edge,
                 });
             }
         }

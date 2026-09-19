@@ -1,15 +1,15 @@
 ---
 title: MCP Tools
-description: All 87 MCP tools exposed by the canopy daemon, by category.
+description: All 88 MCP tools exposed by the canopy daemon, by category.
 order: 11
 ---
 
 # MCP Tools
 
-The daemon exposes **87 MCP tools** over Streamable HTTP (port 7755) and
+The daemon exposes **88 MCP tools** over Streamable HTTP (port 7755) and
 stdio. Connect any MCP-capable AI CLI with `canopy mcp`.
 
-## Agent management (14)
+## Agent management (15)
 
 | Tool | Description |
 |---|---|
@@ -25,7 +25,8 @@ stdio. Connect any MCP-capable AI CLI with `canopy mcp`.
 | `agent_logs` | Read execution logs |
 | `agent_update` | Update an agent's definition |
 | `agent_report` | Report execution status for scheduled tasks |
-| `agent_probe` | Test platform+model liveness before loop_run |
+| `agent_probe` | Test platform+model liveness before graph_run |
+| `agent_probe_recent` | Sweep recently-used platform+model pairs before a run |
 
 ## Multi-agent sync (4)
 
@@ -57,27 +58,27 @@ stdio. Connect any MCP-capable AI CLI with `canopy mcp`.
 | `evolve_identity` | Refine the identity over time |
 | `create_seed` / `list_seeds` / `remove_seed` | Manage the seed nursery |
 
-## Loop engine (33)
+## Graph engine (33)
 
-`loop_create`, `loop_update`, `loop_add_spec`,
-`loop_update_spec`, `loop_add_node`, `loop_update_node`,
-`loop_add_edge`, `loop_update_edge`, `loop_delete_edge`,
-`loop_delete_node`, `loop_add_ensemble`,
-`loop_update_ensemble`, `loop_delete_ensemble`, `loop_get`,
-`loop_list`, `loop_run`, `loop_reset`, `loop_schedule_autorun`,
-`loop_pause`, `loop_continue`,
-`loop_complete_node`, `loop_report_blocker`,
-`loop_export`, `loop_import`, `loop_archive`, `loop_restore`,
-`loop_node_runs_list`, `loop_node_run_get`,
-`loop_copy_node`, `loop_copy_ensemble`,
-`loop_audit_node_configs`, `loop_schedule_continue`,
-`loop_preflight` — see [Loops](loops.md).
+`graph_create`, `graph_update`, `graph_add_spec`,
+`graph_update_spec`, `graph_add_node`, `graph_update_node`,
+`graph_add_edge`, `graph_update_edge`, `graph_delete_edge`,
+`graph_delete_node`, `graph_add_ensemble`,
+`graph_update_ensemble`, `graph_delete_ensemble`, `graph_get`,
+`graph_list`, `graph_run`, `graph_reset`, `graph_schedule_autorun`,
+`graph_pause`, `graph_continue`,
+`graph_complete_node`, `graph_report_blocker`,
+`graph_export`, `graph_import`, `graph_archive`, `graph_restore`,
+`graph_node_runs_list`, `graph_node_run_get`,
+`graph_copy_node`, `graph_copy_ensemble`,
+`graph_audit_node_configs`, `graph_schedule_continue`,
+`graph_preflight` — see [Graphs](graphs.md).
 
 ## Spec backlog (7)
 
 | Tool | Description |
 |---|---|
-| `spec_create` | Create a standalone spec (not bound to any loop) |
+| `spec_create` | Create a standalone spec (not bound to any graph) |
 | `spec_list` | List specs, filterable by workdir and status |
 | `spec_update` | Update a spec's name, description, or workdir tag |
 | `spec_delete` | Delete an unbound spec |
@@ -135,7 +136,7 @@ readable until `spec_convert` migrates them.
 
 | Tool | Description |
 |---|---|
-| `session_list` | List live interactive sessions with the exact ids an interactive loop hook's `target_session_id` accepts, each with platform, workdir, name, and whether a TUI is attached; pass `session_id` to look one up |
+| `session_list` | List live interactive sessions with the exact ids an interactive graph hook's `target_session_id` accepts, each with platform, workdir, name, and whether a TUI is attached; pass `session_id` to look one up |
 
 ## Scheduled sends (3)
 

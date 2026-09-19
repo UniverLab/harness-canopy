@@ -582,7 +582,7 @@ day someone runs `cargo test`.
 ### Pushing from the graph
 
 The final check verifies the commit landed and pushes it, so CI re-measures
-without a human in the loop:
+without a human in the graph:
 
 ```bash
 test -z "$(git status --porcelain -- src/)" || exit 1
@@ -598,8 +598,8 @@ printf '%s\n' "$out" | tail -5; exit $code
 gate mean "the committer node landed this spec's own commit", not just
 "HEAD moved since the spec began" — the latter is satisfied just as
 well by a commit someone else made in the same worktree while this
-spec's loop was running. It requires the committer node above to carry
-`commit_rights: true`; see [Commit rights](loops.md#commit-rights).
+spec's graph was running. It requires the committer node above to carry
+`commit_rights: true`; see [Commit rights](graphs.md#commit-rights).
 
 Two requirements. The remote must be HTTPS with a credential helper — with
 `gh` installed that is `git config credential.helper '!gh auth git-credential'`,

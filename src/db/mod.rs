@@ -8,7 +8,9 @@ use std::sync::{Arc, Mutex};
 /// guards can't detect (they'd silently recreate the old names as empty
 /// rather than erroring) — see `check_schema_version`. Version 4 adds
 /// the `activity_log` table (CM20 bitácora).
-const SCHEMA_VERSION: i64 = 4;
+/// Version 5 renames the loop→graph schema (tables, `loop_id` columns, and
+/// `break`→`error` edge conditions) — see `migrate_loop_to_graph_schema` (CC3).
+const SCHEMA_VERSION: i64 = 5;
 
 /// Thread-safe `SQLite` database wrapper.
 ///
@@ -145,14 +147,14 @@ impl Database {
 
         let legacy_active_run_alias_present: bool = conn
             .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('loops') WHERE name = 'active_run_pool_id'",
+                "SELECT COUNT(*) FROM pragma_table_info('graphs') WHERE name = 'active_run_pool_id'",
                 [],
                 |row| Ok(row.get::<_, i32>(0)? > 0),
             )
             .unwrap_or(false);
         let legacy_template_column_present: bool = conn
             .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('loops') WHERE name = 'spec_pool'",
+                "SELECT COUNT(*) FROM pragma_table_info('graphs') WHERE name = 'spec_pool'",
                 [],
                 |row| Ok(row.get::<_, i32>(0)? > 0),
             )
@@ -171,11 +173,11 @@ impl Database {
         );
         if legacy_active_run_alias_present {
             migration_sql.push_str(
-                "ALTER TABLE loops RENAME COLUMN active_run_pool_id TO active_run_queue_id;\n",
+                "ALTER TABLE graphs RENAME COLUMN active_run_pool_id TO active_run_queue_id;\n",
             );
         }
         if legacy_template_column_present {
-            migration_sql.push_str("ALTER TABLE loops RENAME COLUMN spec_pool TO spec_queue;\n");
+            migration_sql.push_str("ALTER TABLE graphs RENAME COLUMN spec_pool TO spec_queue;\n");
         }
         migration_sql.push_str("COMMIT;");
 
@@ -197,6 +199,139 @@ impl Database {
     }
     // RETIRED-SCHEMA-NAME-END
 
+    // RETIRED-SCHEMA-NAME-BEGIN (CC3 loop → graph migration)
+    fn migrate_loop_to_graph_schema(conn: &Connection) -> Result<()> {
+        let has_loops: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'loops'",
+                [],
+                |row| Ok(row.get::<_, i32>(0)? > 0),
+            )
+            .unwrap_or(false);
+        if !has_loops {
+            return Ok(());
+        }
+        let has_graphs: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'graphs'",
+                [],
+                |row| Ok(row.get::<_, i32>(0)? > 0),
+            )
+            .unwrap_or(false);
+        if has_graphs {
+            return Ok(());
+        }
+
+        conn.execute_batch(
+            "PRAGMA legacy_alter_table = OFF;
+             BEGIN TRANSACTION;
+             ALTER TABLE loops RENAME TO graphs;
+             ALTER TABLE loop_specs RENAME TO graph_specs;
+             ALTER TABLE loop_nodes RENAME TO graph_nodes;
+             ALTER TABLE loop_edges RENAME TO graph_edges;
+             ALTER TABLE loop_runs RENAME TO graph_runs;
+             ALTER TABLE loop_completion_hook_runs RENAME TO graph_completion_hook_runs;
+             ",
+        )
+        .map_err(|e| anyhow::anyhow!("graph to graph schema migration failed: {e}"))?;
+
+        // Column renames — each guarded by `pragma_table_info` (older
+        // databases may lack `loop_id` on tables that gained top-level
+        // targeting later, and a re-run must never fail on an already
+        // renamed column). The `graphs.active_run_pool_id` / `spec_pool`
+        // guards cover the ordering edge: `migrate_legacy_queue_schema`
+        // runs first but looks for `graphs`, so a database that still has
+        // both `pools` and `graphs` reaches this function with its
+        // queue-era columns untouched — renamed here instead of orphaned.
+        for (table, old, new_) in [
+            ("graph_specs", "loop_id", "graph_id"),
+            ("graph_nodes", "loop_id", "graph_id"),
+            ("graph_edges", "loop_id", "graph_id"),
+            ("graph_runs", "loop_id", "graph_id"),
+            ("graph_completion_hook_runs", "loop_id", "graph_id"),
+            ("ensembles", "loop_id", "graph_id"),
+            ("graphs", "active_run_pool_id", "active_run_queue_id"),
+            ("graphs", "spec_pool", "spec_queue"),
+        ] {
+            let has: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
+                    [table, old],
+                    |row| Ok(row.get::<_, i32>(0)? > 0),
+                )
+                .unwrap_or(false);
+            if has {
+                conn.execute(
+                    &format!("ALTER TABLE {table} RENAME COLUMN {old} TO {new_}"),
+                    [],
+                )
+                .map_err(|e| anyhow::anyhow!("graph to graph schema migration failed: {e}"))?;
+            }
+        }
+
+        conn.execute(
+            "UPDATE graph_edges SET condition = 'error' WHERE condition = 'break'",
+            [],
+        )
+        .map_err(|e| anyhow::anyhow!("graph to graph schema migration failed: {e}"))?;
+        // `ensembles.entry_condition` only exists on databases new enough
+        // for ensembles — guard so very old databases don't fail here.
+        let has_entry_condition: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('ensembles') WHERE name = 'entry_condition'",
+                [],
+                |row| Ok(row.get::<_, i32>(0)? > 0),
+            )
+            .unwrap_or(false);
+        if has_entry_condition {
+            conn.execute(
+                "UPDATE ensembles SET entry_condition = 'error' WHERE entry_condition = 'break'",
+                [],
+            )
+            .map_err(|e| anyhow::anyhow!("graph to graph schema migration failed: {e}"))?;
+        }
+        conn.execute(
+            "UPDATE graph_nodes SET config = REPLACE(config, '{{loop_name}}', '{{graph_name}}')
+                WHERE config LIKE '%{{loop_name}}%'",
+            [],
+        )
+        .map_err(|e| anyhow::anyhow!("graph to graph schema migration failed: {e}"))?;
+        conn.execute_batch(
+            "DROP INDEX IF EXISTS idx_loop_specs_position;
+             DROP INDEX IF EXISTS idx_loop_nodes_position;
+             DROP INDEX IF EXISTS idx_loop_edges_spec_from;
+             DROP INDEX IF EXISTS idx_loop_runs_spec_started;
+             DROP INDEX IF EXISTS idx_loop_runs_node_iteration;
+             DROP INDEX IF EXISTS idx_loop_runs_loop_started;
+             DROP INDEX IF EXISTS idx_loop_completion_hook_runs_loop_started;
+             CREATE UNIQUE INDEX IF NOT EXISTS idx_graph_specs_position
+                 ON graph_specs(graph_id, position);
+             CREATE INDEX IF NOT EXISTS idx_graph_edges_spec_from
+                 ON graph_edges(spec_id, from_node);
+             CREATE INDEX IF NOT EXISTS idx_graph_runs_spec_started
+                 ON graph_runs(spec_id, started_at ASC);
+             CREATE INDEX IF NOT EXISTS idx_graph_runs_node_iteration
+                 ON graph_runs(node_id, iteration DESC);
+             CREATE INDEX IF NOT EXISTS idx_graph_runs_graph_started
+                 ON graph_runs(graph_id, started_at DESC);
+             CREATE INDEX IF NOT EXISTS idx_graph_completion_hook_runs_graph_started
+                 ON graph_completion_hook_runs(graph_id, started_at ASC);
+             COMMIT;",
+        )
+        .map_err(|e| anyhow::anyhow!("graph to graph schema migration failed: {e}"))?;
+
+        let fk_violations: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
+            .map_err(|e| anyhow::anyhow!("graph to graph schema migration failed: {e}"))?;
+        if fk_violations > 0 {
+            anyhow::bail!("graph to graph schema migration failed: {fk_violations} foreign key violation(s) detected after migration");
+        }
+        Ok(())
+    }
+    // RETIRED-SCHEMA-NAME-END
+
     fn init(&self) -> Result<()> {
         let conn = self
             .conn
@@ -205,6 +340,7 @@ impl Database {
 
         Self::check_schema_version(&conn)?;
         Self::migrate_legacy_queue_schema(&conn)?;
+        Self::migrate_loop_to_graph_schema(&conn)?;
 
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS agents (
@@ -406,7 +542,7 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_operational_sessions_updated
                 ON operational_sessions(updated_at DESC);
 
-            CREATE TABLE IF NOT EXISTS loops (
+            CREATE TABLE IF NOT EXISTS graphs (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 description TEXT,
@@ -426,12 +562,12 @@ impl Database {
                 hooks TEXT
             );
 
-            CREATE INDEX IF NOT EXISTS idx_loops_workdir_created
-                ON loops(workdir, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_graphs_workdir_created
+                ON graphs(workdir, created_at DESC);
 
-            CREATE TABLE IF NOT EXISTS loop_specs (
+            CREATE TABLE IF NOT EXISTS graph_specs (
                 id TEXT PRIMARY KEY,
-                loop_id TEXT REFERENCES loops(id) ON DELETE CASCADE,
+                graph_id TEXT REFERENCES graphs(id) ON DELETE CASCADE,
                 name TEXT NOT NULL,
                 description TEXT,
                 position INTEGER NOT NULL,
@@ -448,51 +584,51 @@ impl Database {
                 cross_run_attempts INTEGER NOT NULL DEFAULT 0,
                 -- CT17: monotonic change signal for the panel's backlog event.
                 -- Milliseconds since epoch; every write to this row refreshes
-                -- it (see `insert_loop_spec` and the `UPDATE loop_specs`
-                -- writers in `db/loops.rs`). Never rendered, so the unit is
+                -- it (see `insert_graph_spec` and the `UPDATE graph_specs`
+                -- writers in `db/graphs.rs`). Never rendered, so the unit is
                 -- free — millis make same-tick edits distinguishable where
                 -- seconds would tie. Legacy rows backfilled below hold
                 -- seconds-scale values and are always smaller.
                 updated_at INTEGER NOT NULL DEFAULT 0
             );
 
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_loop_specs_position
-                ON loop_specs(loop_id, position);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_graph_specs_position
+                ON graph_specs(graph_id, position);
 
-            CREATE TABLE IF NOT EXISTS loop_nodes (
+            CREATE TABLE IF NOT EXISTS graph_nodes (
                 id TEXT PRIMARY KEY,
-                spec_id TEXT REFERENCES loop_specs(id) ON DELETE CASCADE,
-                loop_id TEXT REFERENCES loops(id) ON DELETE CASCADE,
+                spec_id TEXT REFERENCES graph_specs(id) ON DELETE CASCADE,
+                graph_id TEXT REFERENCES graphs(id) ON DELETE CASCADE,
                 name TEXT NOT NULL,
                 kind TEXT NOT NULL,
                 config TEXT NOT NULL,
                 position INTEGER NOT NULL,
                 created_at INTEGER NOT NULL,
-                CHECK ((spec_id IS NULL) <> (loop_id IS NULL))
+                CHECK ((spec_id IS NULL) <> (graph_id IS NULL))
             );
 
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_loop_nodes_position
-                ON loop_nodes(spec_id, position);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_graph_nodes_position
+                ON graph_nodes(spec_id, position);
 
-            CREATE TABLE IF NOT EXISTS loop_edges (
+            CREATE TABLE IF NOT EXISTS graph_edges (
                 id TEXT PRIMARY KEY,
-                spec_id TEXT REFERENCES loop_specs(id) ON DELETE CASCADE,
-                loop_id TEXT REFERENCES loops(id) ON DELETE CASCADE,
-                from_node TEXT NOT NULL REFERENCES loop_nodes(id) ON DELETE CASCADE,
-                to_node TEXT NOT NULL REFERENCES loop_nodes(id) ON DELETE CASCADE,
+                spec_id TEXT REFERENCES graph_specs(id) ON DELETE CASCADE,
+                graph_id TEXT REFERENCES graphs(id) ON DELETE CASCADE,
+                from_node TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE,
+                to_node TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE,
                 condition TEXT NOT NULL,
                 route TEXT,
-                CHECK ((spec_id IS NULL) <> (loop_id IS NULL))
+                CHECK ((spec_id IS NULL) <> (graph_id IS NULL))
             );
 
-            CREATE INDEX IF NOT EXISTS idx_loop_edges_spec_from
-                ON loop_edges(spec_id, from_node);
+            CREATE INDEX IF NOT EXISTS idx_graph_edges_spec_from
+                ON graph_edges(spec_id, from_node);
 
-            CREATE TABLE IF NOT EXISTS loop_runs (
+            CREATE TABLE IF NOT EXISTS graph_runs (
                 id TEXT PRIMARY KEY,
-                loop_id TEXT NOT NULL REFERENCES loops(id) ON DELETE CASCADE,
-                spec_id TEXT NOT NULL REFERENCES loop_specs(id) ON DELETE CASCADE,
-                node_id TEXT NOT NULL REFERENCES loop_nodes(id) ON DELETE CASCADE,
+                graph_id TEXT NOT NULL REFERENCES graphs(id) ON DELETE CASCADE,
+                spec_id TEXT NOT NULL REFERENCES graph_specs(id) ON DELETE CASCADE,
+                node_id TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE,
                 status TEXT NOT NULL,
                 input TEXT,
                 output TEXT,
@@ -507,25 +643,25 @@ impl Database {
                 executed_model TEXT
             );
 
-            CREATE INDEX IF NOT EXISTS idx_loop_runs_spec_started
-                ON loop_runs(spec_id, started_at ASC);
+            CREATE INDEX IF NOT EXISTS idx_graph_runs_spec_started
+                ON graph_runs(spec_id, started_at ASC);
 
-            CREATE INDEX IF NOT EXISTS idx_loop_runs_node_iteration
-                ON loop_runs(node_id, iteration DESC);
+            CREATE INDEX IF NOT EXISTS idx_graph_runs_node_iteration
+                ON graph_runs(node_id, iteration DESC);
 
-            -- Speeds the sidebar's last-activity-per-loop aggregate
-            -- (MAX(started_at) GROUP BY loop_id) into a loose index scan
+            -- Speeds the sidebar's last-activity-per-graph aggregate
+            -- (MAX(started_at) GROUP BY graph_id) into a loose index scan
             -- instead of a full table scan.
-            CREATE INDEX IF NOT EXISTS idx_loop_runs_loop_started
-                ON loop_runs(loop_id, started_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_graph_runs_graph_started
+                ON graph_runs(graph_id, started_at DESC);
 
-            -- N2: firings of a loop's `on_completed` hook. Deliberately not
-            -- `loop_runs` — that table's spec_id/node_id are NOT NULL FKs into
+            -- N2: firings of a graph's `on_completed` hook. Deliberately not
+            -- `graph_runs` — that table's spec_id/node_id are NOT NULL FKs into
             -- a spec's graph, which a completion hook (no spec, no graph node)
             -- can never satisfy.
-            CREATE TABLE IF NOT EXISTS loop_completion_hook_runs (
+            CREATE TABLE IF NOT EXISTS graph_completion_hook_runs (
                 id TEXT PRIMARY KEY,
-                loop_id TEXT NOT NULL REFERENCES loops(id) ON DELETE CASCADE,
+                graph_id TEXT NOT NULL REFERENCES graphs(id) ON DELETE CASCADE,
                 status TEXT NOT NULL,
                 output TEXT,
                 summary TEXT,
@@ -539,34 +675,34 @@ impl Database {
                 executed_model TEXT
             );
 
-            CREATE INDEX IF NOT EXISTS idx_loop_completion_hook_runs_loop_started
-                ON loop_completion_hook_runs(loop_id, started_at ASC);
+            CREATE INDEX IF NOT EXISTS idx_graph_completion_hook_runs_graph_started
+                ON graph_completion_hook_runs(graph_id, started_at ASC);
 
             -- F1: an ensemble unit -- the members and join are ordinary
-            -- loop_nodes/loop_edges rows (the engine's graph-walking code is
-            -- reused as-is); this row is what lets loop_get/loop_update_ensemble
+            -- graph_nodes/graph_edges rows (the engine's graph-walking code is
+            -- reused as-is); this row is what lets graph_get/graph_update_ensemble
             -- address the whole ensemble as one thing instead of N+1 nodes.
             CREATE TABLE IF NOT EXISTS ensembles (
                 id TEXT PRIMARY KEY,
-                spec_id TEXT REFERENCES loop_specs(id) ON DELETE CASCADE,
-                loop_id TEXT REFERENCES loops(id) ON DELETE CASCADE,
+                spec_id TEXT REFERENCES graph_specs(id) ON DELETE CASCADE,
+                graph_id TEXT REFERENCES graphs(id) ON DELETE CASCADE,
                 name TEXT NOT NULL,
                 prompt_template TEXT NOT NULL,
-                join_node_id TEXT NOT NULL REFERENCES loop_nodes(id) ON DELETE CASCADE,
-                entry_from_node TEXT NOT NULL REFERENCES loop_nodes(id) ON DELETE CASCADE,
+                join_node_id TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE,
+                entry_from_node TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE,
                 entry_condition TEXT NOT NULL,
                 min_pass INTEGER NOT NULL,
                 straggler_timeout_minutes INTEGER,
                 timeout_minutes INTEGER NOT NULL,
-                on_pass_to TEXT NOT NULL REFERENCES loop_nodes(id) ON DELETE CASCADE,
-                on_fail_to TEXT REFERENCES loop_nodes(id) ON DELETE SET NULL,
+                on_pass_to TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE,
+                on_fail_to TEXT REFERENCES graph_nodes(id) ON DELETE SET NULL,
                 created_at INTEGER NOT NULL,
-                CHECK ((spec_id IS NULL) <> (loop_id IS NULL))
+                CHECK ((spec_id IS NULL) <> (graph_id IS NULL))
             );
 
             CREATE TABLE IF NOT EXISTS ensemble_members (
                 ensemble_id TEXT NOT NULL REFERENCES ensembles(id) ON DELETE CASCADE,
-                node_id TEXT NOT NULL REFERENCES loop_nodes(id) ON DELETE CASCADE,
+                node_id TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE,
                 position INTEGER NOT NULL,
                 platform TEXT NOT NULL,
                 model TEXT,
@@ -604,7 +740,7 @@ impl Database {
 
             CREATE TABLE IF NOT EXISTS queue_members (
                 queue_id TEXT NOT NULL REFERENCES queues(id) ON DELETE CASCADE,
-                spec_id TEXT NOT NULL REFERENCES loop_specs(id) ON DELETE CASCADE,
+                spec_id TEXT NOT NULL REFERENCES graph_specs(id) ON DELETE CASCADE,
                 position INTEGER NOT NULL,
                 group_name TEXT,
                 PRIMARY KEY (queue_id, spec_id)
@@ -666,7 +802,7 @@ impl Database {
                 ON last_prompts(workdir, created_at DESC);
 
             -- CM5: ephemeral subagent runs. Not `agents` (no trigger, no
-            -- schedule, no permanent state) and not `loop_runs` (no spec/graph).
+            -- schedule, no permanent state) and not `graph_runs` (no spec/graph).
             -- A row lives only until it is collected or its TTL (`expires_at`)
             -- passes; the health routine deletes both on its periodic tick.
             -- CB43: `platform`/`model` below mean RESOLVED at dispatch (the
@@ -802,7 +938,7 @@ impl Database {
             .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         }
 
-        // `provenance` carries hook origin (`kind`/`loop_id`/`event`) as
+        // `provenance` carries hook origin (`kind`/`graph_id`/`event`) as
         // structured JSON so the TUI can name the sender without that
         // metadata being buried in the prompt text. Nullable so legacy
         // prompt-builder sends keep reading as `None`.
@@ -932,40 +1068,40 @@ impl Database {
                 .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         }
 
-        // Loops gained optional cron/watch triggers; older databases predate the
+        // Graphs gained optional cron/watch triggers; older databases predate the
         // columns. Add them if missing (both nullable, so existing rows stay
         // manual-only).
         for column in ["trigger_type", "trigger_config"] {
             let has_column: bool = conn
                 .query_row(
-                    "SELECT COUNT(*) FROM pragma_table_info('loops') WHERE name = ?1",
+                    "SELECT COUNT(*) FROM pragma_table_info('graphs') WHERE name = ?1",
                     [column],
                     |row| Ok(row.get::<_, i32>(0)? > 0),
                 )
                 .unwrap_or(false);
             if !has_column {
-                conn.execute(&format!("ALTER TABLE loops ADD COLUMN {column} TEXT"), [])
+                conn.execute(&format!("ALTER TABLE graphs ADD COLUMN {column} TEXT"), [])
                     .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
             }
         }
 
-        // One-shot resume schedule for loops (mirrors agents' `enable_at`);
+        // One-shot resume schedule for graphs (mirrors agents' `enable_at`);
         // older databases predate the column.
         let has_autorun_at: bool = conn
             .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('loops') WHERE name = 'autorun_at'",
+                "SELECT COUNT(*) FROM pragma_table_info('graphs') WHERE name = 'autorun_at'",
                 [],
                 |row| Ok(row.get::<_, i32>(0)? > 0),
             )
             .unwrap_or(false);
         if !has_autorun_at {
-            conn.execute("ALTER TABLE loops ADD COLUMN autorun_at INTEGER", [])
+            conn.execute("ALTER TABLE graphs ADD COLUMN autorun_at INTEGER", [])
                 .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         }
 
         // One-shot deferred-resume-while-paused schedule (distinct from
         // `autorun_at`'s reset-and-relaunch — see
-        // [`crate::domain::loops::Loop::auto_continue_at`]); older databases
+        // [`crate::domain::graphs::Graph::auto_continue_at`]); older databases
         // predate the columns.
         for (column, sql_type) in [
             ("auto_continue_at", "INTEGER"),
@@ -973,14 +1109,14 @@ impl Database {
         ] {
             let has_column: bool = conn
                 .query_row(
-                    "SELECT COUNT(*) FROM pragma_table_info('loops') WHERE name = ?1",
+                    "SELECT COUNT(*) FROM pragma_table_info('graphs') WHERE name = ?1",
                     [column],
                     |row| Ok(row.get::<_, i32>(0)? > 0),
                 )
                 .unwrap_or(false);
             if !has_column {
                 conn.execute(
-                    &format!("ALTER TABLE loops ADD COLUMN {column} {sql_type}"),
+                    &format!("ALTER TABLE graphs ADD COLUMN {column} {sql_type}"),
                     [],
                 )
                 .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
@@ -993,13 +1129,13 @@ impl Database {
         // migration; current code never reads or writes it.
         let has_spec_queue: bool = conn
             .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('loops') WHERE name = 'spec_queue'",
+                "SELECT COUNT(*) FROM pragma_table_info('graphs') WHERE name = 'spec_queue'",
                 [],
                 |row| Ok(row.get::<_, i32>(0)? > 0),
             )
             .unwrap_or(false);
         if !has_spec_queue {
-            conn.execute("ALTER TABLE loops ADD COLUMN spec_queue TEXT", [])
+            conn.execute("ALTER TABLE graphs ADD COLUMN spec_queue TEXT", [])
                 .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         }
 
@@ -1009,38 +1145,41 @@ impl Database {
         // databases predate the column.
         let has_spec_start_head: bool = conn
             .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('loop_specs') WHERE name = 'spec_start_head'",
+                "SELECT COUNT(*) FROM pragma_table_info('graph_specs') WHERE name = 'spec_start_head'",
                 [],
                 |row| Ok(row.get::<_, i32>(0)? > 0),
             )
             .unwrap_or(false);
         if !has_spec_start_head {
-            conn.execute("ALTER TABLE loop_specs ADD COLUMN spec_start_head TEXT", [])
-                .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
+            conn.execute(
+                "ALTER TABLE graph_specs ADD COLUMN spec_start_head TEXT",
+                [],
+            )
+            .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         }
 
-        // Standalone specs (R3): a spec no longer must belong to a loop — it
+        // Standalone specs (R3): a spec no longer must belong to a graph — it
         // can exist as a backlog item (optionally tagged to a workdir)
-        // before being assigned. Older databases have `loop_id NOT NULL`,
+        // before being assigned. Older databases have `graph_id NOT NULL`,
         // which `ALTER TABLE ... ADD COLUMN` cannot relax, so rebuild the
         // table via SQLite's documented copy-and-rename procedure. Every
-        // existing row keeps its `loop_id`; only new rows may leave it NULL.
-        let loop_specs_loop_id_nullable: bool = conn
+        // existing row keeps its `graph_id`; only new rows may leave it NULL.
+        let graph_specs_graph_id_nullable: bool = conn
             .query_row(
-                "SELECT \"notnull\" FROM pragma_table_info('loop_specs') WHERE name = 'loop_id'",
+                "SELECT \"notnull\" FROM pragma_table_info('graph_specs') WHERE name = 'graph_id'",
                 [],
                 |row| row.get::<_, i64>(0),
             )
             .map(|notnull| notnull == 0)
             .unwrap_or(false);
-        if !loop_specs_loop_id_nullable {
+        if !graph_specs_graph_id_nullable {
             conn.execute_batch(
                 "PRAGMA foreign_keys=OFF;
                  BEGIN TRANSACTION;
 
-                 CREATE TABLE loop_specs_new (
+                 CREATE TABLE graph_specs_new (
                      id TEXT PRIMARY KEY,
-                     loop_id TEXT REFERENCES loops(id) ON DELETE CASCADE,
+                     graph_id TEXT REFERENCES graphs(id) ON DELETE CASCADE,
                      name TEXT NOT NULL,
                      description TEXT,
                      position INTEGER NOT NULL,
@@ -1050,13 +1189,13 @@ impl Database {
                      completed_at INTEGER,
                      spec_start_head TEXT
                  );
-                 INSERT INTO loop_specs_new (id, loop_id, name, description, position, parallelizable, status, started_at, completed_at, spec_start_head)
-                     SELECT id, loop_id, name, description, position, parallelizable, status, started_at, completed_at, spec_start_head FROM loop_specs;
-                 DROP TABLE loop_specs;
-                 ALTER TABLE loop_specs_new RENAME TO loop_specs;
+                 INSERT INTO graph_specs_new (id, graph_id, name, description, position, parallelizable, status, started_at, completed_at, spec_start_head)
+                     SELECT id, graph_id, name, description, position, parallelizable, status, started_at, completed_at, spec_start_head FROM graph_specs;
+                 DROP TABLE graph_specs;
+                 ALTER TABLE graph_specs_new RENAME TO graph_specs;
 
-                 CREATE UNIQUE INDEX IF NOT EXISTS idx_loop_specs_position
-                     ON loop_specs(loop_id, position);
+                 CREATE UNIQUE INDEX IF NOT EXISTS idx_graph_specs_position
+                     ON graph_specs(graph_id, position);
 
                  COMMIT;
                  PRAGMA foreign_keys=ON;",
@@ -1065,79 +1204,79 @@ impl Database {
         }
 
         // Optional workdir tag on specs (R3), for backlog filtering only —
-        // it never drives execution. Nullable, so existing (loop-bound)
+        // it never drives execution. Nullable, so existing (graph-bound)
         // specs are unaffected; older databases predate the column.
         let has_spec_workdir: bool = conn
             .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('loop_specs') WHERE name = 'workdir'",
+                "SELECT COUNT(*) FROM pragma_table_info('graph_specs') WHERE name = 'workdir'",
                 [],
                 |row| Ok(row.get::<_, i32>(0)? > 0),
             )
             .unwrap_or(false);
         if !has_spec_workdir {
-            conn.execute("ALTER TABLE loop_specs ADD COLUMN workdir TEXT", [])
+            conn.execute("ALTER TABLE graph_specs ADD COLUMN workdir TEXT", [])
                 .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         }
 
-        // Loop-level graphs (R1): a node/edge may now target a loop directly
-        // (`loop_id`) instead of a spec, so it can be defined once per loop
+        // Graph-level graphs (R1): a node/edge may now target a graph directly
+        // (`graph_id`) instead of a spec, so it can be defined once per graph
         // instead of being repeated across every spec. Older databases have
         // `spec_id NOT NULL` on both tables, which `ALTER TABLE ... ADD
         // COLUMN` cannot relax, so rebuild the tables via SQLite's documented
         // copy-and-rename procedure ("Making Other Kinds Of Table Schema
-        // Changes"). Every existing row keeps its `spec_id`; `loop_id` starts
+        // Changes"). Every existing row keeps its `spec_id`; `graph_id` starts
         // NULL for all of them, so nothing already saved changes meaning.
-        let has_loop_nodes_loop_id: bool = conn
+        let has_graph_nodes_graph_id: bool = conn
             .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('loop_nodes') WHERE name = 'loop_id'",
+                "SELECT COUNT(*) FROM pragma_table_info('graph_nodes') WHERE name = 'graph_id'",
                 [],
                 |row| Ok(row.get::<_, i32>(0)? > 0),
             )
             .unwrap_or(false);
-        if !has_loop_nodes_loop_id {
+        if !has_graph_nodes_graph_id {
             conn.execute_batch(
                 "PRAGMA foreign_keys=OFF;
                  BEGIN TRANSACTION;
 
-                 CREATE TABLE loop_nodes_new (
+                 CREATE TABLE graph_nodes_new (
                      id TEXT PRIMARY KEY,
-                     spec_id TEXT REFERENCES loop_specs(id) ON DELETE CASCADE,
-                     loop_id TEXT REFERENCES loops(id) ON DELETE CASCADE,
+                     spec_id TEXT REFERENCES graph_specs(id) ON DELETE CASCADE,
+                     graph_id TEXT REFERENCES graphs(id) ON DELETE CASCADE,
                      name TEXT NOT NULL,
                      kind TEXT NOT NULL,
                      config TEXT NOT NULL,
                      position INTEGER NOT NULL,
                      created_at INTEGER NOT NULL,
-                     CHECK ((spec_id IS NULL) <> (loop_id IS NULL))
+                     CHECK ((spec_id IS NULL) <> (graph_id IS NULL))
                  );
-                 INSERT INTO loop_nodes_new (id, spec_id, loop_id, name, kind, config, position, created_at)
-                     SELECT id, spec_id, NULL, name, kind, config, position, created_at FROM loop_nodes;
-                 DROP TABLE loop_nodes;
-                 ALTER TABLE loop_nodes_new RENAME TO loop_nodes;
+                 INSERT INTO graph_nodes_new (id, spec_id, graph_id, name, kind, config, position, created_at)
+                     SELECT id, spec_id, NULL, name, kind, config, position, created_at FROM graph_nodes;
+                 DROP TABLE graph_nodes;
+                 ALTER TABLE graph_nodes_new RENAME TO graph_nodes;
 
-                 CREATE UNIQUE INDEX IF NOT EXISTS idx_loop_nodes_position
-                     ON loop_nodes(spec_id, position);
-                 CREATE UNIQUE INDEX IF NOT EXISTS idx_loop_nodes_loop_position
-                     ON loop_nodes(loop_id, position);
+                 CREATE UNIQUE INDEX IF NOT EXISTS idx_graph_nodes_position
+                     ON graph_nodes(spec_id, position);
+                 CREATE UNIQUE INDEX IF NOT EXISTS idx_graph_nodes_graph_position
+                     ON graph_nodes(graph_id, position);
 
-                 CREATE TABLE loop_edges_new (
+                 CREATE TABLE graph_edges_new (
                      id TEXT PRIMARY KEY,
-                     spec_id TEXT REFERENCES loop_specs(id) ON DELETE CASCADE,
-                     loop_id TEXT REFERENCES loops(id) ON DELETE CASCADE,
-                     from_node TEXT NOT NULL REFERENCES loop_nodes(id) ON DELETE CASCADE,
-                     to_node TEXT NOT NULL REFERENCES loop_nodes(id) ON DELETE CASCADE,
+                     spec_id TEXT REFERENCES graph_specs(id) ON DELETE CASCADE,
+                     graph_id TEXT REFERENCES graphs(id) ON DELETE CASCADE,
+                     from_node TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE,
+                     to_node TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE,
                      condition TEXT NOT NULL,
-                     CHECK ((spec_id IS NULL) <> (loop_id IS NULL))
+                     CHECK ((spec_id IS NULL) <> (graph_id IS NULL))
                  );
-                 INSERT INTO loop_edges_new (id, spec_id, loop_id, from_node, to_node, condition)
-                     SELECT id, spec_id, NULL, from_node, to_node, condition FROM loop_edges;
-                 DROP TABLE loop_edges;
-                 ALTER TABLE loop_edges_new RENAME TO loop_edges;
+                 INSERT INTO graph_edges_new (id, spec_id, graph_id, from_node, to_node, condition)
+                     SELECT id, spec_id, NULL, from_node, to_node, condition FROM graph_edges;
+                 DROP TABLE graph_edges;
+                 ALTER TABLE graph_edges_new RENAME TO graph_edges;
 
-                 CREATE INDEX IF NOT EXISTS idx_loop_edges_spec_from
-                     ON loop_edges(spec_id, from_node);
-                 CREATE INDEX IF NOT EXISTS idx_loop_edges_loop_from
-                     ON loop_edges(loop_id, from_node);
+                 CREATE INDEX IF NOT EXISTS idx_graph_edges_spec_from
+                     ON graph_edges(spec_id, from_node);
+                 CREATE INDEX IF NOT EXISTS idx_graph_edges_graph_from
+                     ON graph_edges(graph_id, from_node);
 
                  COMMIT;
                  PRAGMA foreign_keys=ON;",
@@ -1145,48 +1284,48 @@ impl Database {
             .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         }
 
-        // These reference `loop_id`, so they can only be created once the
+        // These reference `graph_id`, so they can only be created once the
         // column is guaranteed to exist — either from the fresh CREATE TABLE
         // above (new databases) or the rebuild just above (migrated ones).
         conn.execute_batch(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_loop_nodes_loop_position
-                 ON loop_nodes(loop_id, position);
-             CREATE INDEX IF NOT EXISTS idx_loop_edges_loop_from
-                 ON loop_edges(loop_id, from_node);",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_graph_nodes_graph_position
+                 ON graph_nodes(graph_id, position);
+             CREATE INDEX IF NOT EXISTS idx_graph_edges_graph_from
+                 ON graph_edges(graph_id, from_node);",
         )
         .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
 
-        // `active_run_queue_id` persists which queue (if any) a loop's current/
+        // `active_run_queue_id` persists which queue (if any) a graph's current/
         // last run drew from, so an interrupted run (quota failure, daemon
         // crash) can be resumed against the same queue by every resume path
-        // (scheduled autorun, `loop_reset`) instead of falling back to the
-        // loop's own bound specs. Older databases predate the column.
+        // (scheduled autorun, `graph_reset`) instead of falling back to the
+        // graph's own bound specs. Older databases predate the column.
         let has_active_run_queue_id: bool = conn
             .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('loops') WHERE name = 'active_run_queue_id'",
+                "SELECT COUNT(*) FROM pragma_table_info('graphs') WHERE name = 'active_run_queue_id'",
                 [],
                 |row| Ok(row.get::<_, i32>(0)? > 0),
             )
             .unwrap_or(false);
         if !has_active_run_queue_id {
-            conn.execute("ALTER TABLE loops ADD COLUMN active_run_queue_id TEXT", [])
+            conn.execute("ALTER TABLE graphs ADD COLUMN active_run_queue_id TEXT", [])
                 .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         }
 
-        // `on_completed` (N2): the loop's optional post-completion hook
+        // `on_completed` (N2): the graph's optional post-completion hook
         // config (agent-node-style JSON: platform/model/prompt/
         // timeout_minutes), fired once when a run reaches `Completed`. `NULL`
-        // on older databases and on any loop that never configured one —
+        // on older databases and on any graph that never configured one —
         // exactly today's (pre-N2) behavior.
         let has_on_completed: bool = conn
             .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('loops') WHERE name = 'on_completed'",
+                "SELECT COUNT(*) FROM pragma_table_info('graphs') WHERE name = 'on_completed'",
                 [],
                 |row| Ok(row.get::<_, i32>(0)? > 0),
             )
             .unwrap_or(false);
         if !has_on_completed {
-            conn.execute("ALTER TABLE loops ADD COLUMN on_completed TEXT", [])
+            conn.execute("ALTER TABLE graphs ADD COLUMN on_completed TEXT", [])
                 .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         }
 
@@ -1201,16 +1340,16 @@ impl Database {
         for column in ["pid", "boot_id"] {
             let has_column: bool = conn
                 .query_row(
-                    "SELECT COUNT(*) FROM pragma_table_info('loop_runs') WHERE name = ?1",
+                    "SELECT COUNT(*) FROM pragma_table_info('graph_runs') WHERE name = ?1",
                     [column],
                     |row| Ok(row.get::<_, i32>(0)? > 0),
                 )
                 .unwrap_or(false);
             if !has_column {
                 let sql = if column == "pid" {
-                    "ALTER TABLE loop_runs ADD COLUMN pid INTEGER".to_string()
+                    "ALTER TABLE graph_runs ADD COLUMN pid INTEGER".to_string()
                 } else {
-                    "ALTER TABLE loop_runs ADD COLUMN boot_id TEXT".to_string()
+                    "ALTER TABLE graph_runs ADD COLUMN boot_id TEXT".to_string()
                 };
                 conn.execute(&sql, [])
                     .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
@@ -1225,13 +1364,13 @@ impl Database {
         // foundation for resume mode (RS2).
         let has_session_id: bool = conn
             .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('loop_runs') WHERE name = 'session_id'",
+                "SELECT COUNT(*) FROM pragma_table_info('graph_runs') WHERE name = 'session_id'",
                 [],
                 |row| Ok(row.get::<_, i32>(0)? > 0),
             )
             .unwrap_or(false);
         if !has_session_id {
-            conn.execute("ALTER TABLE loop_runs ADD COLUMN session_id TEXT", [])
+            conn.execute("ALTER TABLE graph_runs ADD COLUMN session_id TEXT", [])
                 .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         }
 
@@ -1242,19 +1381,19 @@ impl Database {
         for column in ["completed_via", "completed_via_reason", "completed_via_at"] {
             let has_column: bool = conn
                 .query_row(
-                    "SELECT COUNT(*) FROM pragma_table_info('loop_specs') WHERE name = ?1",
+                    "SELECT COUNT(*) FROM pragma_table_info('graph_specs') WHERE name = ?1",
                     [column],
                     |row| Ok(row.get::<_, i32>(0)? > 0),
                 )
                 .unwrap_or(false);
             if !has_column {
                 let sql = match column {
-                    "completed_via" => "ALTER TABLE loop_specs ADD COLUMN completed_via TEXT",
+                    "completed_via" => "ALTER TABLE graph_specs ADD COLUMN completed_via TEXT",
                     "completed_via_reason" => {
-                        "ALTER TABLE loop_specs ADD COLUMN completed_via_reason TEXT"
+                        "ALTER TABLE graph_specs ADD COLUMN completed_via_reason TEXT"
                     }
                     "completed_via_at" => {
-                        "ALTER TABLE loop_specs ADD COLUMN completed_via_at INTEGER"
+                        "ALTER TABLE graph_specs ADD COLUMN completed_via_at INTEGER"
                     }
                     _ => "",
                 };
@@ -1285,18 +1424,18 @@ impl Database {
 
         // `route` (router nodes): the label a `route`-conditioned edge names,
         // alongside `condition = 'route'` — see
-        // `domain::loops::LoopEdgeCondition::{as_str, route_label, from_parts}`.
+        // `domain::graphs::GraphEdgeCondition::{as_str, route_label, from_parts}`.
         // NULL for every pre-existing edge (none of them can be a router's
-        // route edge, since `LoopNodeKind::Router` didn't exist yet either).
+        // route edge, since `GraphNodeKind::Router` didn't exist yet either).
         let has_edge_route: bool = conn
             .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('loop_edges') WHERE name = 'route'",
+                "SELECT COUNT(*) FROM pragma_table_info('graph_edges') WHERE name = 'route'",
                 [],
                 |row| Ok(row.get::<_, i32>(0)? > 0),
             )
             .unwrap_or(false);
         if !has_edge_route {
-            conn.execute("ALTER TABLE loop_edges ADD COLUMN route TEXT", [])
+            conn.execute("ALTER TABLE graph_edges ADD COLUMN route TEXT", [])
                 .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         }
 
@@ -1320,60 +1459,60 @@ impl Database {
             .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         }
 
-        // Archiving (F4): a loop can leave the sidebar's browsing list
+        // Archiving (F4): a graph can leave the sidebar's browsing list
         // without losing its row, specs, or run history — the reversible
-        // alternative to `delete_loop`. A constant `DEFAULT 0` means every
-        // pre-existing loop reads as not-archived with no data movement.
+        // alternative to `delete_graph`. A constant `DEFAULT 0` means every
+        // pre-existing graph reads as not-archived with no data movement.
         let has_archived: bool = conn
             .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('loops') WHERE name = 'archived'",
+                "SELECT COUNT(*) FROM pragma_table_info('graphs') WHERE name = 'archived'",
                 [],
                 |row| Ok(row.get::<_, i32>(0)? > 0),
             )
             .unwrap_or(false);
         if !has_archived {
             conn.execute(
-                "ALTER TABLE loops ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
+                "ALTER TABLE graphs ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
                 [],
             )
             .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         }
 
-        // C1: distinguishes a loop `reconcile_orphaned_loops` paused after an
+        // C1: distinguishes a graph `reconcile_orphaned_graphs` paused after an
         // unclean daemon exit from one an operator paused on purpose, so a
         // pending `autorun_at` schedule can survive the former but still be
         // blocked by the latter — see
-        // [`crate::domain::loops::Loop::is_autorun_due`]. `DEFAULT 0` means
-        // every pre-existing `Paused` loop reads as operator-paused, which is
+        // [`crate::domain::graphs::Graph::is_autorun_due`]. `DEFAULT 0` means
+        // every pre-existing `Paused` graph reads as operator-paused, which is
         // the safe assumption for a row this migration has no way to
         // distinguish retroactively.
         let has_paused_by_reconciliation: bool = conn
             .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('loops') WHERE name = 'paused_by_reconciliation'",
+                "SELECT COUNT(*) FROM pragma_table_info('graphs') WHERE name = 'paused_by_reconciliation'",
                 [],
                 |row| Ok(row.get::<_, i32>(0)? > 0),
             )
             .unwrap_or(false);
         if !has_paused_by_reconciliation {
             conn.execute(
-                "ALTER TABLE loops ADD COLUMN paused_by_reconciliation INTEGER NOT NULL DEFAULT 0",
+                "ALTER TABLE graphs ADD COLUMN paused_by_reconciliation INTEGER NOT NULL DEFAULT 0",
                 [],
             )
             .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         }
 
         // CM2: optional pre-wired target for infrastructure failures. When
-        // set, new agent/check/gate nodes auto-create a `Break` edge to
+        // set, new agent/check/gate nodes auto-create a `Error` edge to
         // this node. `NULL` on every pre-existing row (no auto-wiring).
         let has_infra_node_id: bool = conn
             .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('loops') WHERE name = 'infra_node_id'",
+                "SELECT COUNT(*) FROM pragma_table_info('graphs') WHERE name = 'infra_node_id'",
                 [],
                 |row| Ok(row.get::<_, i32>(0)? > 0),
             )
             .unwrap_or(false);
         if !has_infra_node_id {
-            conn.execute("ALTER TABLE loops ADD COLUMN infra_node_id TEXT", [])
+            conn.execute("ALTER TABLE graphs ADD COLUMN infra_node_id TEXT", [])
                 .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         }
 
@@ -1387,41 +1526,41 @@ impl Database {
         // the graph never named a committer. Additive.
         let has_spec_committed_head: bool = conn
             .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('loop_specs') WHERE name = 'spec_committed_head'",
+                "SELECT COUNT(*) FROM pragma_table_info('graph_specs') WHERE name = 'spec_committed_head'",
                 [],
                 |row| Ok(row.get::<_, i32>(0)? > 0),
             )
             .unwrap_or(false);
         if !has_spec_committed_head {
             conn.execute(
-                "ALTER TABLE loop_specs ADD COLUMN spec_committed_head TEXT",
+                "ALTER TABLE graph_specs ADD COLUMN spec_committed_head TEXT",
                 [],
             )
             .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         }
 
-        // `cross_run_attempts` (C19): how many separate loop executions this
+        // `cross_run_attempts` (C19): how many separate graph executions this
         // spec has failed with a genuine (non-infrastructure) verdict.
         // Unlike the per-node iteration budget `run_spec` tracks in memory
         // for the duration of one execution, this is persisted so it
-        // survives `loop_reset`, a relaunch, and a daemon restart — the
+        // survives `graph_reset`, a relaunch, and a daemon restart — the
         // whole point being that an unsatisfiable spec doesn't get a fresh
         // budget every time an operator resets and relaunches after a quota
         // failure. `DEFAULT 0` means every pre-existing spec reads as never
         // having failed under this counter, which is correct: it didn't
         // exist to count anything before now. See
-        // `Database::increment_loop_spec_cross_run_attempts` and
-        // `LoopEngine::record_spec_attempt`.
+        // `Database::increment_graph_spec_cross_run_attempts` and
+        // `GraphEngine::record_spec_attempt`.
         let has_cross_run_attempts: bool = conn
             .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('loop_specs') WHERE name = 'cross_run_attempts'",
+                "SELECT COUNT(*) FROM pragma_table_info('graph_specs') WHERE name = 'cross_run_attempts'",
                 [],
                 |row| Ok(row.get::<_, i32>(0)? > 0),
             )
             .unwrap_or(false);
         if !has_cross_run_attempts {
             conn.execute(
-                "ALTER TABLE loop_specs ADD COLUMN cross_run_attempts INTEGER NOT NULL DEFAULT 0",
+                "ALTER TABLE graph_specs ADD COLUMN cross_run_attempts INTEGER NOT NULL DEFAULT 0",
                 [],
             )
             .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
@@ -1432,24 +1571,24 @@ impl Database {
         // this migration cannot change that column's unit or meaning.
         let has_spec_updated_at: bool = conn
             .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('loop_specs') WHERE name = 'updated_at'",
+                "SELECT COUNT(*) FROM pragma_table_info('graph_specs') WHERE name = 'updated_at'",
                 [],
                 |row| Ok(row.get::<_, i32>(0)? > 0),
             )
             .unwrap_or(false);
         if !has_spec_updated_at {
             conn.execute(
-                "ALTER TABLE loop_specs ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0",
+                "ALTER TABLE graph_specs ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0",
                 [],
             )
             .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         }
         conn.execute(
-            "UPDATE loop_specs SET updated_at = COALESCE(started_at, completed_at, strftime('%s', 'now')) WHERE updated_at = 0",
+            "UPDATE graph_specs SET updated_at = COALESCE(started_at, completed_at, strftime('%s', 'now')) WHERE updated_at = 0",
             [],
         )?;
         conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_loop_specs_workdir_updated ON loop_specs(workdir, updated_at DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_graph_specs_workdir_updated ON graph_specs(workdir, updated_at DESC)",
             [],
         )?;
         let has_content_touched_at: bool = conn
@@ -1507,59 +1646,59 @@ impl Database {
 
         // CT3: live tailing of check-node output. Chunks of stdout/stderr are
         // appended while the node runs so the TUI can poll them; the final
-        // truncated tails are cached on `loop_runs` at completion for an
+        // truncated tails are cached on `graph_runs` at completion for an
         // instant post-completion view. Additive and idempotent.
         conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS loop_run_output (
+            "CREATE TABLE IF NOT EXISTS graph_run_output (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                run_id TEXT NOT NULL REFERENCES loop_runs(id) ON DELETE CASCADE,
+                run_id TEXT NOT NULL REFERENCES graph_runs(id) ON DELETE CASCADE,
                 stream TEXT NOT NULL CHECK (stream IN ('stdout','stderr')),
                 chunk TEXT NOT NULL,
                 ts INTEGER NOT NULL DEFAULT (strftime('%s','now'))
             );
-            CREATE INDEX IF NOT EXISTS idx_loop_run_output_run_ts
-                ON loop_run_output(run_id, ts ASC);
-            CREATE INDEX IF NOT EXISTS idx_loop_run_output_run_stream_id
-                ON loop_run_output(run_id, stream, id DESC);",
+            CREATE INDEX IF NOT EXISTS idx_graph_run_output_run_ts
+                ON graph_run_output(run_id, ts ASC);
+            CREATE INDEX IF NOT EXISTS idx_graph_run_output_run_stream_id
+                ON graph_run_output(run_id, stream, id DESC);",
         )
         .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         for column in ["stdout_tail", "stderr_tail"] {
             let has_column: bool = conn
                 .query_row(
-                    "SELECT COUNT(*) FROM pragma_table_info('loop_runs') WHERE name = ?1",
+                    "SELECT COUNT(*) FROM pragma_table_info('graph_runs') WHERE name = ?1",
                     [column],
                     |row| Ok(row.get::<_, i32>(0)? > 0),
                 )
                 .unwrap_or(false);
             if !has_column {
-                let sql = format!("ALTER TABLE loop_runs ADD COLUMN {column} TEXT");
+                let sql = format!("ALTER TABLE graph_runs ADD COLUMN {column} TEXT");
                 conn.execute(&sql, [])
                     .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
             }
         }
 
         // CB31: a node run finalized with its own verdict while a
-        // wait-for-completion `loop_pause` was pending is flagged here so
-        // `loop_continue` re-executing that node does not spend one of its
+        // wait-for-completion `graph_pause` was pending is flagged here so
+        // `graph_continue` re-executing that node does not spend one of its
         // `DEFAULT_MAX_ITERATIONS_PER_NODE` — an operator pause is not a node
         // attempt. Additive and idempotent; NOT NULL DEFAULT 0 backfills
         // every existing row as "not paused through".
         let has_paused_through: bool = conn
             .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('loop_runs') WHERE name = 'paused_through'",
+                "SELECT COUNT(*) FROM pragma_table_info('graph_runs') WHERE name = 'paused_through'",
                 [],
                 |row| Ok(row.get::<_, i32>(0)? > 0),
             )
             .unwrap_or(false);
         if !has_paused_through {
             conn.execute(
-                "ALTER TABLE loop_runs ADD COLUMN paused_through INTEGER NOT NULL DEFAULT 0",
+                "ALTER TABLE graph_runs ADD COLUMN paused_through INTEGER NOT NULL DEFAULT 0",
                 [],
             )
             .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         }
 
-        // Event-keyed hooks (CH1): the loop's hooks stored as a JSON map
+        // Event-keyed hooks (CH1): the graph's hooks stored as a JSON map
         // from event name to an ordered array of agent payloads, while
         // retaining `on_completed` for rollback/old fixtures. On database
         // open, add `hooks` if missing and idempotently backfill every
@@ -1568,25 +1707,25 @@ impl Database {
         // to the legacy column.
         let has_hooks: bool = conn
             .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('loops') WHERE name = 'hooks'",
+                "SELECT COUNT(*) FROM pragma_table_info('graphs') WHERE name = 'hooks'",
                 [],
                 |row| Ok(row.get::<_, i32>(0)? > 0),
             )
             .unwrap_or(false);
         if !has_hooks {
-            conn.execute("ALTER TABLE loops ADD COLUMN hooks TEXT", [])
+            conn.execute("ALTER TABLE graphs ADD COLUMN hooks TEXT", [])
                 .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         }
         // Backfill (unconditional): covers databases where `hooks` already
         // exists but legacy `on_completed` rows were never migrated.
         conn.execute(
-            "UPDATE loops SET hooks = json_object('on_completed', json_array(json(on_completed)))
+            "UPDATE graphs SET hooks = json_object('on_completed', json_array(json(on_completed)))
              WHERE on_completed IS NOT NULL AND (hooks IS NULL OR hooks = '')",
             [],
         )
         .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
 
-        // `event`/`hook_index` on `loop_completion_hook_runs` (CH1):
+        // `event`/`hook_index` on `graph_completion_hook_runs` (CH1):
         // every new hook run records which event it served and its
         // position within that event's hook list. Old rows default to
         // `on_completed`/`0` — the only event that existed before CH1.
@@ -1596,14 +1735,14 @@ impl Database {
         ] {
             let has_column: bool = conn
                 .query_row(
-                    "SELECT COUNT(*) FROM pragma_table_info('loop_completion_hook_runs') WHERE name = ?1",
+                    "SELECT COUNT(*) FROM pragma_table_info('graph_completion_hook_runs') WHERE name = ?1",
                     [column],
                     |row| Ok(row.get::<_, i32>(0)? > 0),
                 )
                 .unwrap_or(false);
             if !has_column {
                 let sql = format!(
-                    "ALTER TABLE loop_completion_hook_runs ADD COLUMN {column} {definition}"
+                    "ALTER TABLE graph_completion_hook_runs ADD COLUMN {column} {definition}"
                 );
                 conn.execute(&sql, [])
                     .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
@@ -1611,29 +1750,29 @@ impl Database {
         }
 
         // CH4: hook-launched depth tracking and provenance.
-        // `hook_launched` on `loops`: whether this loop was launched by a hook
-        // (depth cap enforcement). Defaults to 0 so existing loops are unaffected.
+        // `hook_launched` on `graphs`: whether this graph was launched by a hook
+        // (depth cap enforcement). Defaults to 0 so existing graphs are unaffected.
         let has_hook_launched: bool = conn
             .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('loops') WHERE name = 'hook_launched'",
+                "SELECT COUNT(*) FROM pragma_table_info('graphs') WHERE name = 'hook_launched'",
                 [],
                 |row| Ok(row.get::<_, i32>(0)? > 0),
             )
             .unwrap_or(false);
         if !has_hook_launched {
             conn.execute(
-                "ALTER TABLE loops ADD COLUMN hook_launched INTEGER NOT NULL DEFAULT 0",
+                "ALTER TABLE graphs ADD COLUMN hook_launched INTEGER NOT NULL DEFAULT 0",
                 [],
             )
             .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         }
-        // Provenance for hook-launched loops: which source loop and event
+        // Provenance for hook-launched graphs: which source graph and event
         // triggered this launch. Append-only, for traceability.
         conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS loop_hook_launches (
+            "CREATE TABLE IF NOT EXISTS graph_hook_launches (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                target_loop_id TEXT NOT NULL REFERENCES loops(id) ON DELETE CASCADE,
-                source_loop_id TEXT NOT NULL REFERENCES loops(id) ON DELETE CASCADE,
+                target_graph_id TEXT NOT NULL REFERENCES graphs(id) ON DELETE CASCADE,
+                source_graph_id TEXT NOT NULL REFERENCES graphs(id) ON DELETE CASCADE,
                 event TEXT NOT NULL,
                 launched_at INTEGER NOT NULL
             );",
@@ -1644,10 +1783,10 @@ impl Database {
         // nullable TEXT columns on the row already written — no new table, no
         // second write. Pre-migration rows keep NULL (omitted, never guessed).
         for (table, column) in [
-            ("loop_runs", "executed_platform"),
-            ("loop_runs", "executed_model"),
-            ("loop_completion_hook_runs", "executed_platform"),
-            ("loop_completion_hook_runs", "executed_model"),
+            ("graph_runs", "executed_platform"),
+            ("graph_runs", "executed_model"),
+            ("graph_completion_hook_runs", "executed_platform"),
+            ("graph_completion_hook_runs", "executed_model"),
             ("runs", "executed_platform"),
             ("runs", "executed_model"),
         ] {
@@ -1666,10 +1805,10 @@ impl Database {
         }
         // Keep the 30-day recent-usage scan bounded per table.
         conn.execute_batch(
-            "CREATE INDEX IF NOT EXISTS idx_loop_runs_executed_started
-                ON loop_runs(executed_platform, started_at DESC);
+            "CREATE INDEX IF NOT EXISTS idx_graph_runs_executed_started
+                ON graph_runs(executed_platform, started_at DESC);
              CREATE INDEX IF NOT EXISTS idx_hook_runs_executed_started
-                ON loop_completion_hook_runs(executed_platform, started_at DESC);
+                ON graph_completion_hook_runs(executed_platform, started_at DESC);
              CREATE INDEX IF NOT EXISTS idx_runs_executed_started
                 ON runs(executed_platform, started_at DESC);
              CREATE INDEX IF NOT EXISTS idx_subagent_runs_platform_started
@@ -1898,12 +2037,12 @@ pub mod blueprints;
 pub mod clean;
 pub mod ensembles;
 pub mod gamification;
+pub mod graph_transfer;
+pub mod graphs;
 pub mod group;
 pub mod health;
 pub mod intelligence;
 pub mod last_prompts;
-pub mod loop_transfer;
-pub mod loops;
 pub mod project;
 pub mod queues;
 pub mod run;

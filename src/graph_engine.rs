@@ -6,14 +6,15 @@ use serde_json::Value;
 use tokio::process::Command;
 use tokio::sync::Semaphore;
 
-use crate::application::notification_service::{LoopFinishOutcome, NotificationService};
+use crate::application::notification_service::{GraphFinishOutcome, NotificationService};
 use crate::daemon::process::KILL_GRACE;
 use crate::db::scheduled_sends::ScheduledSendProvenance;
 use crate::db::Database;
-use crate::domain::loops::{
-    EnsembleDetails, EnsembleKind, EnsembleMember, Loop, LoopCompletionHook, LoopCompletionHookRun,
-    LoopEdge, LoopEdgeCondition, LoopHookEvent, LoopNode, LoopNodeKind, LoopNodeRun, LoopRunStatus,
-    LoopSpec, LoopSpecStatus, LoopStatus, RouterRoute,
+use crate::domain::graphs::{
+    EnsembleDetails, EnsembleKind, EnsembleMember, Graph, GraphCompletionHook,
+    GraphCompletionHookRun, GraphEdge, GraphEdgeCondition, GraphHookEvent, GraphNode,
+    GraphNodeKind, GraphNodeRun, GraphRunStatus, GraphSpec, GraphSpecStatus, GraphStatus,
+    RouterRoute,
 };
 use crate::domain::models::Cli;
 use crate::domain::sandbox::Sandbox;
@@ -26,32 +27,32 @@ use crate::domain::sandbox::Sandbox;
 // Five bounces of the same (spec,node) pair is enough signal that a spec
 // needs a human or a redesign; ten burned entire quota windows ping-ponging.
 const DEFAULT_MAX_ITERATIONS_PER_NODE: usize = 5;
-/// Default cross-run attempt budget (C19): how many separate loop executions
-/// a spec may fail with a genuine verdict before the loop is marked blocked
+/// Default cross-run attempt budget (C19): how many separate graph executions
+/// a spec may fail with a genuine verdict before the graph is marked blocked
 /// instead of quietly costing another quota window on relaunch. Deliberately
 /// lower than [`DEFAULT_MAX_ITERATIONS_PER_NODE`] — these are whole attempts
 /// (one per relaunch), not node cycles within a single one. Overridable via
-/// [`LoopEngine::with_spec_attempt_limit`] (`CanopyConfig::spec_attempt_limit`).
+/// [`GraphEngine::with_spec_attempt_limit`] (`CanopyConfig::spec_attempt_limit`).
 const DEFAULT_MAX_SPEC_ATTEMPTS: usize = 3;
 const DEFAULT_INFRA_RETRY_LIMIT: u32 = 2;
 const DEFAULT_INFRA_CRASH_MAX_SECONDS: u64 = 60;
 const DEFAULT_INFRA_BACKOFF_SECONDS: u64 = 30;
 
 /// Default cap (F1) on ensemble members actually executing at once, across
-/// every loop run this engine drives — an 8-member ensemble queues past this
+/// every graph run this engine drives — an 8-member ensemble queues past this
 /// many rather than fork-bombing the host. Overridable via
-/// [`LoopEngine::with_ensemble_concurrency_cap`]
+/// [`GraphEngine::with_ensemble_concurrency_cap`]
 /// (`CanopyConfig::ensemble_concurrency_cap`).
 const DEFAULT_ENSEMBLE_CONCURRENCY_CAP: usize = 4;
 
 #[derive(Clone)]
-pub struct LoopEngine {
+pub struct GraphEngine {
     db: Arc<Database>,
     notification_service: Arc<dyn NotificationService>,
     /// Global semaphore (F1) bounding how many ensemble members run
-    /// concurrently across every loop this engine drives. Shared (not
-    /// per-run) so an 8-member ensemble in one loop can't starve another
-    /// loop's ensemble running at the same time — they queue for the same
+    /// concurrently across every graph this engine drives. Shared (not
+    /// per-run) so an 8-member ensemble in one graph can't starve another
+    /// graph's ensemble running at the same time — they queue for the same
     /// queue of permits.
     ensemble_concurrency: Arc<Semaphore>,
     /// Backing store (S1) for resolving skills pinned on agent nodes (S2)
@@ -67,7 +68,7 @@ pub struct LoopEngine {
 /// Where a spec's sequential graph cursor currently is: at a single ordinary
 /// node, or about to fan out into (or having just fanned out into) an
 /// ensemble's members. The cursor is a single value at all times — a spec
-/// never has two of these in flight — which is what lets `run_spec`'s loop
+/// never has two of these in flight — which is what lets `run_spec`'s graph
 /// stay a plain `loop { ... }` even though an `Ensemble` step internally runs
 /// N member nodes concurrently before it resolves to a single result.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,20 +90,20 @@ enum SpecExecutionOutcome {
     Failed(String),
     /// This spec's in-flight node run was terminated out from under this
     /// dispatch by the engine itself — a newer attempt at the same node
-    /// (B42), a concurrent `loop_reset`, `loop_pause`, iteration-budget
-    /// exhaustion, or `fail_loop`'s own sweep — see
+    /// (B42), a concurrent `graph_reset`, `graph_pause`, iteration-budget
+    /// exhaustion, or `fail_graph`'s own sweep — see
     /// `run_was_terminated_out_of_band`. Pure engine bookkeeping, not a node
     /// failure: the dispatch that owned the run stops silently — it routes
     /// down no edge, fails nothing, and completes nothing. Whatever
-    /// terminated it (a newer attempt, or the dispatch that won the loop
-    /// claim after a reset) is what now drives the loop.
+    /// terminated it (a newer attempt, or the dispatch that won the graph
+    /// claim after a reset) is what now drives the graph.
     Superseded,
     /// C19: this spec has now failed with a genuine verdict often enough,
-    /// across separate loop executions, to exceed its persisted cross-run
-    /// attempt budget ([`LoopEngine::spec_attempt_limit`]). Unlike `Failed`,
+    /// across separate graph executions, to exceed its persisted cross-run
+    /// attempt budget ([`GraphEngine::spec_attempt_limit`]). Unlike `Failed`,
     /// which invites another relaunch, this converts the dispatch's outcome
     /// into a paused, human-visible blocker — see
-    /// [`LoopEngine::block_loop`] — so an unsatisfiable spec stops quietly
+    /// [`GraphEngine::block_graph`] — so an unsatisfiable spec stops quietly
     /// costing another quota window on every reset. The `String` is the
     /// blocker text, naming the spec, the attempt count, and the last
     /// failure.
@@ -110,7 +111,7 @@ enum SpecExecutionOutcome {
 }
 
 struct NodeExecution {
-    status: LoopRunStatus,
+    status: GraphRunStatus,
     output: Value,
     summary: String,
 }
@@ -119,7 +120,7 @@ struct NodeExecution {
 /// command hooks so there is exactly one way to run a command in the
 /// codebase.
 struct ShellCommandResult {
-    status: LoopRunStatus,
+    status: GraphRunStatus,
     /// Check-shaped output JSON, with `stdout`/`stderr` already truncated to
     /// [`CHECK_OUTPUT_MAX_BYTES`] for storage (CB5 contract).
     output: Value,
@@ -136,13 +137,13 @@ struct ShellCommandResult {
     timed_out: bool,
 }
 
-/// (B17) Distinct failure mode for [`LoopEngine::run_loop_dispatch`]'s launch
-/// guard: the loop's effective spec set (bound specs, or the given queue's
+/// (B17) Distinct failure mode for [`GraphEngine::run_graph_dispatch`]'s launch
+/// guard: the graph's effective spec set (bound specs, or the given queue's
 /// pending members) was empty, so the run never actually launched. Unlike
-/// every other error `run_loop_dispatch` can return, this one must never flip
-/// the loop to `Failed` — [`LoopEngine::start_background_run`] and
-/// [`LoopEngine::resume_background`] downcast for it and skip `fail_loop`,
-/// leaving the loop's status exactly as it was before the call.
+/// every other error `run_graph_dispatch` can return, this one must never flip
+/// the graph to `Failed` — [`GraphEngine::start_background_run`] and
+/// [`GraphEngine::resume_background`] downcast for it and skip `fail_graph`,
+/// leaving the graph's status exactly as it was before the call.
 #[derive(Debug)]
 struct EmptySpecSetError(String);
 
@@ -154,7 +155,7 @@ impl std::fmt::Display for EmptySpecSetError {
 
 impl std::error::Error for EmptySpecSetError {}
 
-impl LoopEngine {
+impl GraphEngine {
     pub fn new(db: Arc<Database>, notification_service: Arc<dyn NotificationService>) -> Self {
         Self {
             db,
@@ -192,18 +193,18 @@ impl LoopEngine {
         self
     }
 
-    pub fn start_background(self: Arc<Self>, loop_id: String) {
-        Arc::clone(&self).start_background_run(loop_id, None, None, None, None);
+    pub fn start_background(self: Arc<Self>, graph_id: String) {
+        Arc::clone(&self).start_background_run(graph_id, None, None, None, None);
     }
 
-    /// Same as [`Self::start_background`], but optionally drives the loop's
-    /// pending queue specs (see [`Self::run_loop`]) and/or overrides the
+    /// Same as [`Self::start_background`], but optionally drives the graph's
+    /// pending queue specs (see [`Self::run_graph`]) and/or overrides the
     /// workdir for this run only.
     ///
-    /// This is a fresh dispatch, not a resume — it backs `loop_run`, the tool
-    /// a human/scheduler calls to launch or *relaunch* a loop (including
-    /// directly relaunching a `paused` loop instead of going through
-    /// `loop_continue`). Every spec it reaches is treated as newly entered
+    /// This is a fresh dispatch, not a resume — it backs `graph_run`, the tool
+    /// a human/scheduler calls to launch or *relaunch* a graph (including
+    /// directly relaunching a `paused` graph instead of going through
+    /// `graph_continue`). Every spec it reaches is treated as newly entered
     /// for `{{spec_start_head}}` purposes (B10): even a spec left `running`
     /// from a stale, never-reset prior attempt gets a fresh baseline here,
     /// rather than silently inheriting one captured under a previous
@@ -211,7 +212,7 @@ impl LoopEngine {
     /// allowed to reuse a persisted baseline.
     pub fn start_background_run(
         self: Arc<Self>,
-        loop_id: String,
+        graph_id: String,
         queue_id: Option<String>,
         workdir_override: Option<String>,
         idea: Option<String>,
@@ -219,27 +220,27 @@ impl LoopEngine {
     ) {
         tokio::spawn(async move {
             if let Err(error) = self
-                .run_loop(loop_id.clone(), queue_id, workdir_override, idea, sandbox)
+                .run_graph(graph_id.clone(), queue_id, workdir_override, idea, sandbox)
                 .await
             {
                 if error.downcast_ref::<EmptySpecSetError>().is_some() {
-                    // (B17) The loop never launched — its status is already
+                    // (B17) The graph never launched — its status is already
                     // untouched, and it must stay that way, so don't
-                    // `fail_loop` it.
-                    tracing::error!("Loop '{}' launch refused: {error:#}", loop_id);
+                    // `fail_graph` it.
+                    tracing::error!("Graph '{}' launch refused: {error:#}", graph_id);
                 } else {
-                    tracing::error!("Loop '{}' failed to run: {error:#}", loop_id);
+                    tracing::error!("Graph '{}' failed to run: {error:#}", graph_id);
                     let _ = self
-                        .fail_loop(&loop_id, None, None, &error.to_string())
+                        .fail_graph(&graph_id, None, None, &error.to_string())
                         .await;
                 }
             }
         });
     }
 
-    /// Request a pause for a running loop.
+    /// Request a pause for a running graph.
     ///
-    /// If `interrupt` is false (default), sets the loop to `Pausing` state and
+    /// If `interrupt` is false (default), sets the graph to `Pausing` state and
     /// waits for the running node to complete naturally. The engine checks this
     /// state between node executions and transitions to `Paused` after the
     /// current node finishes.
@@ -248,60 +249,68 @@ impl LoopEngine {
     /// marks it as `Interrupted` (not `Fail`). Use this when the operator
     /// explicitly wants to stop the current node.
     ///
-    /// Returns true if the pause was accepted (loop was running or pausing),
-    /// false if the loop is not running or does not exist.
-    pub fn request_pause(&self, loop_id: &str, interrupt: bool) -> Result<bool> {
-        let Some(lp) = self.db.get_loop(loop_id)? else {
+    /// Returns true if the pause was accepted (graph was running or pausing),
+    /// false if the graph is not running or does not exist.
+    pub fn request_pause(&self, graph_id: &str, interrupt: bool) -> Result<bool> {
+        let Some(lp) = self.db.get_graph(graph_id)? else {
             return Ok(false);
         };
 
         match lp.status {
-            LoopStatus::Running => {
+            GraphStatus::Running => {
                 if interrupt {
                     // Immediate termination mode: mark paused and interrupt running nodes
                     let result =
                         self.db
-                            .update_loop_status(loop_id, LoopStatus::Paused, None, None);
-                    for run in self.db.list_running_loop_runs(loop_id).unwrap_or_default() {
+                            .update_graph_status(graph_id, GraphStatus::Paused, None, None);
+                    for run in self
+                        .db
+                        .list_running_graph_runs(graph_id)
+                        .unwrap_or_default()
+                    {
                         self.interrupt_run(&run, "operator requested interrupt");
                     }
                     result
                 } else if self
                     .db
-                    .list_running_loop_runs(loop_id)
+                    .list_running_graph_runs(graph_id)
                     .unwrap_or_default()
                     .is_empty()
                 {
                     // Req 6: nothing is in flight, so there is nothing to wait
                     // for — pause immediately, exactly as before this change.
                     self.db
-                        .update_loop_status(loop_id, LoopStatus::Paused, None, None)
+                        .update_graph_status(graph_id, GraphStatus::Paused, None, None)
                 } else {
                     // Wait-for-completion mode: a node is running. Record the
-                    // pending pause; the engine transitions the loop to
+                    // pending pause; the engine transitions the graph to
                     // `Paused` once that node finishes on its own.
-                    self.db.request_pause_pending(loop_id)
+                    self.db.request_pause_pending(graph_id)
                 }
             }
-            LoopStatus::Pausing => {
+            GraphStatus::Pausing => {
                 if interrupt {
                     // Already pausing, but interrupt requested: terminate now
-                    for run in self.db.list_running_loop_runs(loop_id).unwrap_or_default() {
+                    for run in self
+                        .db
+                        .list_running_graph_runs(graph_id)
+                        .unwrap_or_default()
+                    {
                         self.interrupt_run(&run, "operator requested interrupt");
                     }
                     self.db
-                        .update_loop_status(loop_id, LoopStatus::Paused, None, None)
+                        .update_graph_status(graph_id, GraphStatus::Paused, None, None)
                 } else {
                     Ok(true) // Already pausing, nothing to do
                 }
             }
-            LoopStatus::Paused => Ok(true), // Already paused
-            _ => Ok(false),                 // Not running
+            GraphStatus::Paused => Ok(true), // Already paused
+            _ => Ok(false),                  // Not running
         }
     }
 
     /// Interrupt a running node, marking it as `Interrupted` (not `Fail`).
-    fn interrupt_run(&self, run: &LoopNodeRun, reason: &str) {
+    fn interrupt_run(&self, run: &GraphNodeRun, reason: &str) {
         tracing::info!(
             run_id = %run.id,
             node_id = %run.node_id,
@@ -313,15 +322,15 @@ impl LoopEngine {
             crate::daemon::process::terminate_process_group_async(pid, KILL_GRACE);
         }
         // Mark as interrupted (not fail)
-        let _ = self.db.interrupt_loop_run(&run.id, reason);
+        let _ = self.db.interrupt_graph_run(&run.id, reason);
     }
 
-    /// Run `loop_id`'s specs through its graph (R2).
+    /// Run `graph_id`'s specs through its graph (R2).
     ///
     /// With `queue_id`: runs the queue's pending members, in the queue's queue
-    /// order, instead of the loop's own bound specs. Queue membership never
-    /// mutates the specs themselves — they stay standalone (`loop_id: None`)
-    /// so the same queue can be run by different loops over time.
+    /// order, instead of the graph's own bound specs. Queue membership never
+    /// mutates the specs themselves — they stay standalone (`graph_id: None`)
+    /// so the same queue can be run by different graphs over time.
     ///
     /// A queue run is *live* (R6): the "next pending" spec is re-queried from
     /// the queue at every spec boundary via
@@ -332,26 +341,26 @@ impl LoopEngine {
     /// `queue_id`) keeps the pre-queue behavior below: its spec list is fixed
     /// at launch.
     ///
-    /// `workdir_override`, when set, wins over `loop.workdir` for this run
-    /// only — the loop's own `workdir` is left untouched.
+    /// `workdir_override`, when set, wins over `graph.workdir` for this run
+    /// only — the graph's own `workdir` is left untouched.
     ///
     /// Without `queue_id`: identical to the pre-queue behavior (bound specs,
-    /// `loop.workdir`).
+    /// `graph.workdir`).
     ///
     /// Equivalent to a fresh (non-resumed) dispatch — see
-    /// [`Self::run_loop_dispatch`] for the `is_resume` distinction that
+    /// [`Self::run_graph_dispatch`] for the `is_resume` distinction that
     /// matters for `{{spec_start_head}}` (B10).
-    pub async fn run_loop(
+    pub async fn run_graph(
         &self,
-        loop_id: String,
+        graph_id: String,
         queue_id: Option<String>,
         workdir_override: Option<String>,
         idea: Option<String>,
         sandbox: Option<Sandbox>,
     ) -> Result<()> {
         let result = self
-            .run_loop_dispatch(
-                loop_id.clone(),
+            .run_graph_dispatch(
+                graph_id.clone(),
                 queue_id,
                 workdir_override,
                 false,
@@ -360,98 +369,98 @@ impl LoopEngine {
             )
             .await;
         // CH4: clear the hook-launched flag on ALL exit paths (success, failure,
-        // pause, block, etc.). This must happen here, not in run_loop_dispatch,
+        // pause, block, etc.). This must happen here, not in run_graph_dispatch,
         // because that function has multiple early returns.
-        let _ = self.db.clear_loop_hook_launched(&loop_id);
+        let _ = self.db.clear_graph_hook_launched(&graph_id);
         result
     }
 
-    /// Core of [`Self::run_loop`], plus the one bit `run_loop`'s public
+    /// Core of [`Self::run_graph`], plus the one bit `run_graph`'s public
     /// signature can't carry: whether this call is *resuming* an
     /// already-in-flight run ([`Self::resume_background`], the sole path
-    /// behind `loop_continue` and interrupted-queue/autorun resumption) or a
-    /// fresh dispatch (`loop_run`, including relaunching a `paused` loop
-    /// directly, and the loop's initial launch).
+    /// behind `graph_continue` and interrupted-queue/autorun resumption) or a
+    /// fresh dispatch (`graph_run`, including relaunching a `paused` graph
+    /// directly, and the graph's initial launch).
     ///
     /// That distinction is exactly what `{{spec_start_head}}` (B10) needs: a
     /// spec can be left `running` in the DB either because this exact run is
-    /// paused mid-node-graph (daemon restart, explicit `loop_pause`) — where
+    /// paused mid-node-graph (daemon restart, explicit `graph_pause`) — where
     /// the previously captured baseline is still correct and must be kept —
     /// or because a *prior, distinct* run/launch died without ever being
     /// reset — where reusing that baseline would silently compare against a
     /// HEAD from a different attempt entirely. Only `is_resume = true`
     /// (i.e. only [`Self::resume_background`]) is allowed to reuse it; every
     /// other entry point re-captures, per spec.
-    async fn run_loop_dispatch(
+    async fn run_graph_dispatch(
         &self,
-        loop_id: String,
+        graph_id: String,
         queue_id: Option<String>,
         workdir_override: Option<String>,
         is_resume: bool,
         idea: Option<String>,
         sandbox: Option<Sandbox>,
     ) -> Result<()> {
-        let Some(lp) = self.db.get_loop(&loop_id)? else {
-            bail!("Loop '{}' not found.", loop_id);
+        let Some(lp) = self.db.get_graph(&graph_id)? else {
+            bail!("Graph '{}' not found.", graph_id);
         };
 
-        // (B17, CB22) Compute the effective spec set BEFORE flipping the loop to
+        // (B17, CB22) Compute the effective spec set BEFORE flipping the graph to
         // `Running` — the single choke point every launch path (fresh
-        // `loop_run`, cron/watch triggers, scheduled autorun, and
-        // `loop_continue`'s resume) funnels through. An empty set, or a set
+        // `graph_run`, cron/watch triggers, scheduled autorun, and
+        // `graph_continue`'s resume) funnels through. An empty set, or a set
         // containing a spec with no content, is a launch
-        // error, not a successful no-op run: it must leave the loop's status
+        // error, not a successful no-op run: it must leave the graph's status
         // untouched and record no run, so monitoring never sees a false
         // `completed` over a backlog the caller simply failed to point this
         // launch at (the 2026-07-14T14:16:31Z incident).
         if let Some(message) =
-            self.empty_launch_check(&loop_id, queue_id.as_deref(), idea.as_deref())?
+            self.empty_launch_check(&graph_id, queue_id.as_deref(), idea.as_deref())?
         {
             return Err(EmptySpecSetError(message).into());
         }
 
-        // (B42) Claim the loop for this dispatch by flipping it to `Running`,
+        // (B42) Claim the graph for this dispatch by flipping it to `Running`,
         // but ONLY if it isn't already `Running`. This is the single guarded
-        // entry point every launch path — fresh `loop_run`, cron/watch
-        // triggers, scheduled autorun, and `loop_continue`'s resume — funnels
-        // through, so two dispatches racing to launch the same loop (the
-        // autorun-vs-resume check-then-act race: one read the loop as `failed`,
+        // entry point every launch path — fresh `graph_run`, cron/watch
+        // triggers, scheduled autorun, and `graph_continue`'s resume — funnels
+        // through, so two dispatches racing to launch the same graph (the
+        // autorun-vs-resume check-then-act race: one read the graph as `failed`,
         // the other hadn't written `running` yet) can't both proceed. The loser
-        // of the atomic claim finds the loop already `Running` and returns a
+        // of the atomic claim finds the graph already `Running` and returns a
         // silent no-op rather than starting a duplicate run that would
         // supersede the winner's in-flight node the moment it reached the same
         // node. It touches nothing (no status flip, no queue context, no
-        // notification), leaving the loop exactly as the winning dispatch left it.
+        // notification), leaving the graph exactly as the winning dispatch left it.
         // Captured once, right at the claim, as this dispatch's own
-        // generation marker — `claim_loop_for_run` persists it as the loop's
+        // generation marker — `claim_graph_for_run` persists it as the graph's
         // `started_at`, so a LATER re-fetch of that column tells this exact
         // dispatch (not just any dispatch) whether it's still the current
-        // one. `fail_loop` compares against it before acting, so a stale
+        // one. `fail_graph` compares against it before acting, so a stale
         // dispatch's late failure can never flip status or sweep runs out
-        // from under whichever fresher dispatch has since claimed the loop
+        // from under whichever fresher dispatch has since claimed the graph
         // (the 2026-08-05 incident: a reset + relaunch raced a still-live
         // dispatch, and the loser's late `Fail` took the winner down with it).
         let claimed_at = chrono::Utc::now();
-        if !self.db.claim_loop_for_run(&loop_id, claimed_at)? {
+        if !self.db.claim_graph_for_run(&graph_id, claimed_at)? {
             tracing::info!(
-                "Loop '{}' is already running; this launch is a duplicate and was refused \
+                "Graph '{}' is already running; this launch is a duplicate and was refused \
                  (another dispatch owns the run).",
-                loop_id
+                graph_id
             );
             return Ok(());
         }
         // Persist which queue (if any) this run is drawing from *before* the
         // first spec executes, so an interruption (quota failure, daemon
         // crash) leaves behind the context every resume path needs — a
-        // resumed run must never fall back to the loop's own (often empty)
+        // resumed run must never fall back to the graph's own (often empty)
         // bound specs. `None` for a bound-spec run, overwriting whatever a
-        // previous run against this loop may have left behind.
+        // previous run against this graph may have left behind.
         self.db
-            .set_loop_active_run_queue(&loop_id, queue_id.as_deref())?;
+            .set_graph_active_run_queue(&graph_id, queue_id.as_deref())?;
 
-        // The run's `workdir` param wins over `loop.workdir` — a queue run can
-        // point the same loop's graph at a different checkout without
-        // mutating the loop itself. A sandbox's worktree path wins over both.
+        // The run's `workdir` param wins over `graph.workdir` — a queue run can
+        // point the same graph at a different checkout without
+        // mutating the graph itself. A sandbox's worktree path wins over both.
         let workdir = sandbox
             .as_ref()
             .map(|s| s.worktree_path.to_string_lossy().to_string())
@@ -459,18 +468,18 @@ impl LoopEngine {
             .unwrap_or_else(|| lp.workdir.clone());
 
         // A single fire per dispatch: covers a fresh launch (manual
-        // `loop_run`, a cron/watch trigger) and a resume (`loop_continue`,
+        // `graph_run`, a cron/watch trigger) and a resume (`graph_continue`,
         // autorun's auto-reset-and-resume) alike — every path that reaches
         // this function is a run actually starting to execute.
-        let (done, total_specs) = self.spec_progress(&loop_id, queue_id.as_deref())?;
+        let (done, total_specs) = self.spec_progress(&graph_id, queue_id.as_deref())?;
         // "Resumed" vs "Started": a resume of an in-flight run (autorun /
-        // loop_continue), or any dispatch where prior specs already completed,
-        // shouldn't read as the loop starting over from scratch. The first
+        // graph_continue), or any dispatch where prior specs already completed,
+        // shouldn't read as the graph starting over from scratch. The first
         // spec this dispatch will work is surfaced so the toast says what's
         // next, not just a count.
         let resumed = is_resume || done > 0;
-        let first_pending = self.first_pending_spec_name(&loop_id, queue_id.as_deref())?;
-        self.notification_service.notify_loop_started(
+        let first_pending = self.first_pending_spec_name(&graph_id, queue_id.as_deref())?;
+        self.notification_service.notify_graph_started(
             &lp.name,
             total_specs,
             resumed,
@@ -488,28 +497,28 @@ impl LoopEngine {
             Some(queue_id) => {
                 // R3 (B18): a queue member can be left `running` with no live
                 // node run behind it by a path G2 boot reconcile never
-                // touches (reconcile only reconciles a loop that was itself
-                // `Running` at boot — see `reconcile_orphaned_loops`). Surface
-                // it here, before the live pick loop starts scanning, so an
+                // touches (reconcile only reconciles a graph that was itself
+                // `Running` at boot — see `reconcile_orphaned_graphs`). Surface
+                // it here, before the live pick graph starts scanning, so an
                 // operator can see it — but never auto-reset it: a spec can
-                // legitimately sit `running` with no matching `loop_runs` row
+                // legitimately sit `running` with no matching `graph_runs` row
                 // for a moment (between two node executions), and this check
                 // can't tell that race apart from a genuine crash-orphan.
                 // Auto-resetting would risk yanking a spec out from under a
                 // dispatch that's still actively working it. Recovery stays
-                // the documented manual path: `loop_reset` (see
+                // the documented manual path: `graph_reset` (see
                 // `queue_has_incomplete_members`'s own guard below, which
-                // leaves the loop `running` rather than completing out from
+                // leaves the graph `running` rather than completing out from
                 // under a member stuck like this).
                 for spec_id in self
                     .db
                     .queue_stale_running_members(queue_id, crate::system::boot_id().as_deref())?
                 {
                     tracing::warn!(
-                        "Loop '{}' queue run against '{}': member spec '{}' is 'running' with no \
+                        "Graph '{}' queue run against '{}': member spec '{}' is 'running' with no \
                          live node run in this daemon's lifetime; leaving it as-is. Reset it via \
-                         loop_reset to resume if it's genuinely stuck.",
-                        loop_id,
+                         graph_reset to resume if it's genuinely stuck.",
+                        graph_id,
                         queue_id,
                         spec_id
                     );
@@ -518,11 +527,11 @@ impl LoopEngine {
                 // spec that was already `running` before falling through to
                 // the pending-picker. Without this, queue_next_pending_spec_id
                 // skips the running spec (it only picks `pending`) and the
-                // loop advances to the next queue member, stranding the
+                // graph advances to the next queue member, stranding the
                 // original spec in `running` with no active run.
                 if is_resume {
                     if let Some(running_spec_id) = self.db.queue_running_spec_id(queue_id)? {
-                        if let Some(spec) = self.db.get_loop_spec(&running_spec_id)? {
+                        if let Some(spec) = self.db.get_graph_spec(&running_spec_id)? {
                             match self
                                 .run_spec(&lp, &spec, &workdir, is_resume, Some(queue_id.as_str()))
                                 .await?
@@ -532,14 +541,14 @@ impl LoopEngine {
                                     self.fire_on_spec_completed_hooks(&lp, &spec).await;
                                 }
                                 // B42: a superseded run is silent — a newer
-                                // dispatch now owns this loop, so stop without
+                                // dispatch now owns this graph, so stop without
                                 // failing or completing anything.
                                 SpecExecutionOutcome::Paused | SpecExecutionOutcome::Superseded => {
                                     return Ok(())
                                 }
                                 SpecExecutionOutcome::Failed(summary) => {
-                                    self.fail_loop(
-                                        &loop_id,
+                                    self.fail_graph(
+                                        &graph_id,
                                         Some(claimed_at),
                                         Some(&spec.name),
                                         &summary,
@@ -548,7 +557,7 @@ impl LoopEngine {
                                     return Ok(());
                                 }
                                 SpecExecutionOutcome::Blocked(blocker) => {
-                                    self.block_loop(&loop_id, Some(claimed_at), &blocker)
+                                    self.block_graph(&graph_id, Some(claimed_at), &blocker)
                                         .await?;
                                     return Ok(());
                                 }
@@ -557,7 +566,7 @@ impl LoopEngine {
                     }
                 }
                 loop {
-                    if self.is_paused(&loop_id)? {
+                    if self.is_paused(&graph_id)? {
                         return Ok(());
                     }
                     // Live pick: fresh query, not a frozen list. Only ever
@@ -569,7 +578,7 @@ impl LoopEngine {
                     let Some(spec_id) = self.db.queue_next_pending_spec_id(queue_id)? else {
                         break;
                     };
-                    let Some(spec) = self.db.get_loop_spec(&spec_id)? else {
+                    let Some(spec) = self.db.get_graph_spec(&spec_id)? else {
                         continue;
                     };
 
@@ -586,12 +595,17 @@ impl LoopEngine {
                             return Ok(())
                         }
                         SpecExecutionOutcome::Failed(summary) => {
-                            self.fail_loop(&loop_id, Some(claimed_at), Some(&spec.name), &summary)
-                                .await?;
+                            self.fail_graph(
+                                &graph_id,
+                                Some(claimed_at),
+                                Some(&spec.name),
+                                &summary,
+                            )
+                            .await?;
                             return Ok(());
                         }
                         SpecExecutionOutcome::Blocked(blocker) => {
-                            self.block_loop(&loop_id, Some(claimed_at), &blocker)
+                            self.block_graph(&graph_id, Some(claimed_at), &blocker)
                                 .await?;
                             return Ok(());
                         }
@@ -604,68 +618,68 @@ impl LoopEngine {
                 // before deciding whether THIS dispatch needs a fresh one —
                 // never a still-live one (Pending/Running/Interrupted), which
                 // is exactly the row a resume of that same attempt needs to
-                // find via `list_loop_specs` below. Deferring the purge to
+                // find via `list_graph_specs` below. Deferring the purge to
                 // here (the start of the NEXT dispatch) rather than doing it
                 // the moment the prior attempt finished is what lets that
-                // attempt's `loop_runs` history survive long enough to be
-                // inspected (`loop_get`/`loop_node_runs_list`) — deleting it
-                // immediately would cascade its `loop_runs` rows away (FK
+                // attempt's `graph_runs` history survive long enough to be
+                // inspected (`graph_get`/`graph_node_runs_list`) — deleting it
+                // immediately would cascade its `graph_runs` rows away (FK
                 // `ON DELETE CASCADE`) before anyone could look.
                 // `empty_launch_check` already treated "only bookkeeping left,
                 // no idea" as empty, so a no-idea TUI launch never reaches
                 // this purge-then-refuse path after the claim.
-                for spec in self.db.list_loop_specs(&loop_id)? {
+                for spec in self.db.list_graph_specs(&graph_id)? {
                     if is_no_spec_placeholder(&spec)
                         && matches!(
                             spec.status,
-                            LoopSpecStatus::Completed
-                                | LoopSpecStatus::Failed
-                                | LoopSpecStatus::Skipped
+                            GraphSpecStatus::Completed
+                                | GraphSpecStatus::Failed
+                                | GraphSpecStatus::Skipped
                         )
                     {
-                        self.db.delete_loop_spec(&spec.id)?;
+                        self.db.delete_graph_spec(&spec.id)?;
                     }
                 }
 
-                let mut specs = self.db.list_loop_specs(&loop_id)?;
+                let mut specs = self.db.list_graph_specs(&graph_id)?;
                 // (CB22) A no-spec launch never reaches here without an
                 // explicit non-empty `idea` — `empty_launch_check` above
                 // already refused it. The `idea` path keeps a single
                 // internal bookkeeping row (idea text as the description, so
                 // it carries content) because every per-spec mechanic below
-                // (the NOT NULL `loop_runs.spec_id` FK, resumability,
-                // `spec_start_head`) needs a real `loop_specs` row. That row
+                // (the NOT NULL `graph_runs.spec_id` FK, resumability,
+                // `spec_start_head`) needs a real `graph_specs` row. That row
                 // is hidden from work listings by its blank name (see the
-                // `spec_list`/`loop_get` filters) and must never be created
+                // `spec_list`/`graph_get` filters) and must never be created
                 // for a no-idea TUI launch.
                 if specs.is_empty() {
                     let Some(idea_text) = &idea else {
                         // Should be unreachable: empty_launch_check refused
                         // this before the claim. Unwind the claim rather than
-                        // leaving the loop `Running` with nothing to execute.
+                        // leaving the graph `Running` with nothing to execute.
                         let message = self.empty_spec_set_message(&lp, None)?;
-                        self.fail_loop(&loop_id, Some(claimed_at), None, &message)
+                        self.fail_graph(&graph_id, Some(claimed_at), None, &message)
                             .await?;
                         return Err(EmptySpecSetError(message).into());
                     };
                     if idea_text.trim().is_empty() {
                         let message = self.empty_spec_set_message(&lp, None)?;
-                        self.fail_loop(&loop_id, Some(claimed_at), None, &message)
+                        self.fail_graph(&graph_id, Some(claimed_at), None, &message)
                             .await?;
                         return Err(EmptySpecSetError(message).into());
                     }
-                    let mut placeholder = no_spec_placeholder(&loop_id);
+                    let mut placeholder = no_spec_placeholder(&graph_id);
                     placeholder.description = Some(idea_text.clone());
-                    self.db.insert_loop_spec(&placeholder)?;
+                    self.db.insert_graph_spec(&placeholder)?;
                     specs = vec![placeholder];
                 }
                 for spec in specs {
-                    if self.is_paused(&loop_id)? {
+                    if self.is_paused(&graph_id)? {
                         return Ok(());
                     }
                     if matches!(
                         spec.status,
-                        LoopSpecStatus::Completed | LoopSpecStatus::Skipped
+                        GraphSpecStatus::Completed | GraphSpecStatus::Skipped
                     ) {
                         continue;
                     }
@@ -680,12 +694,17 @@ impl LoopEngine {
                             return Ok(())
                         }
                         SpecExecutionOutcome::Failed(summary) => {
-                            self.fail_loop(&loop_id, Some(claimed_at), Some(&spec.name), &summary)
-                                .await?;
+                            self.fail_graph(
+                                &graph_id,
+                                Some(claimed_at),
+                                Some(&spec.name),
+                                &summary,
+                            )
+                            .await?;
                             return Ok(());
                         }
                         SpecExecutionOutcome::Blocked(blocker) => {
-                            self.block_loop(&loop_id, Some(claimed_at), &blocker)
+                            self.block_graph(&graph_id, Some(claimed_at), &blocker)
                                 .await?;
                             return Ok(());
                         }
@@ -694,21 +713,21 @@ impl LoopEngine {
             }
         }
 
-        // A queue run's live-pick loop above only ever breaks when no
+        // A queue run's live-pick graph above only ever breaks when no
         // `pending` member remains — but a member can still be stuck
         // `running`/`failed` from a prior interrupted run that was never
-        // reset. That isn't a genuinely finished queue, so the loop must not
+        // reset. That isn't a genuinely finished queue, so the graph must not
         // be marked `completed` out from under it (it would silently strand
         // those members forever, exactly the false-completion this guards
         // against).
         if let Some(queue_id) = &queue_id {
             if self.db.queue_has_incomplete_members(queue_id)? {
                 tracing::warn!(
-                    "Loop '{}' queue run against '{}' found no pending member to pick, but the \
+                    "Graph '{}' queue run against '{}' found no pending member to pick, but the \
                      queue still has incomplete (non completed/skipped) member(s); leaving the \
-                     loop as-is rather than marking it completed. Reset the stuck member(s) via \
-                     loop_reset to resume.",
-                    loop_id,
+                     graph as-is rather than marking it completed. Reset the stuck member(s) via \
+                     graph_reset to resume.",
+                    graph_id,
                     queue_id
                 );
                 return Ok(());
@@ -717,22 +736,22 @@ impl LoopEngine {
 
         // The run is genuinely finished, but keep `active_run_queue_id` as
         // last-run context rather than clearing it (B31): a finished
-        // queue-driven loop with no bound specs of its own would otherwise
-        // lose the only link back to the queue it ran, so `loop list` /
-        // `loop info` render a misleading `0/0` instead of its real `n/n`
-        // (`loop_progress` in `daemon/loop_cli.rs` reads this field). B8's
+        // queue-driven graph with no bound specs of its own would otherwise
+        // lose the only link back to the queue it ran, so `graph list` /
+        // `graph info` render a misleading `0/0` instead of its real `n/n`
+        // (`graph_progress` in `daemon/graph_cli.rs` reads this field). B8's
         // anti-pollution guarantee is unaffected: every launch path
         // re-persists this field before the first spec runs (the
-        // unconditional `set_loop_active_run_queue` above), so a later fresh
-        // `loop_run` against a different queue — or a bound-spec run (`None`)
+        // unconditional `set_graph_active_run_queue` above), so a later fresh
+        // `graph_run` against a different queue — or a bound-spec run (`None`)
         // — overwrites this value rather than inheriting it.
-        self.db.update_loop_status(
-            &loop_id,
-            LoopStatus::Completed,
+        self.db.update_graph_status(
+            &graph_id,
+            GraphStatus::Completed,
             None,
             Some(chrono::Utc::now()),
         )?;
-        let (done, total) = self.spec_progress(&loop_id, queue_id.as_deref())?;
+        let (done, total) = self.spec_progress(&graph_id, queue_id.as_deref())?;
         // (B17) This dispatch's own completed-spec count is what makes a
         // completion "real": a run that never actually executed a spec this
         // dispatch (every bound spec was already completed/skipped, or —
@@ -743,21 +762,21 @@ impl LoopEngine {
         let hook_launched = executed_any_spec
             && lp
                 .hooks
-                .get(&LoopHookEvent::OnCompleted)
+                .get(&GraphHookEvent::OnCompleted)
                 .is_some_and(|hooks| !hooks.is_empty());
-        self.notification_service.notify_loop_finished(
+        self.notification_service.notify_graph_finished(
             &lp.name,
-            LoopFinishOutcome::Completed {
+            GraphFinishOutcome::Completed {
                 done,
                 total,
                 hook_launched,
             },
         );
 
-        // N2: fire the loop's `on_completed` hook exactly once, right here —
+        // N2: fire the graph's `on_completed` hook exactly once, right here —
         // the sole place a run transitions to `Completed`. Awaited (not
         // fire-and-forget) so its outcome is recorded before this dispatch
-        // returns, but its own pass/fail never feeds back into `loop_id`'s
+        // returns, but its own pass/fail never feeds back into `graph_id`'s
         // status above: the run is already finished.
         if executed_any_spec {
             self.fire_completion_hook(&lp, &workdir, &completed_specs)
@@ -765,7 +784,7 @@ impl LoopEngine {
         }
 
         // CB42: the `Completed` status above is already written — teardown
-        // runs after the final status, so a crash here cannot leave the loop
+        // runs after the final status, so a crash here cannot leave the graph
         // in a wrong state. Unique work is kept and recorded; only a
         // provably-empty branch is removed.
         self.teardown_sandbox_after_final_status(sandbox, "completed".into())
@@ -775,12 +794,12 @@ impl LoopEngine {
     }
 
     /// Fire all hooks registered for `event`, in declaration order. Each
-    /// hook gets its own `LoopCompletionHookRun` row (visible via
-    /// `loop_get`/`canopy loop info`), and a failed hook is recorded and
+    /// hook gets its own `GraphCompletionHookRun` row (visible via
+    /// `graph_get`/`canopy graph info`), and a failed hook is recorded and
     /// never stops the remaining hooks of that event from running. Never
     /// returns an `Err` — a malformed hook config or a failed process must
     /// never propagate past the caller.
-    async fn fire_hooks(&self, lp: &Loop, event: LoopHookEvent, ctx: &HookContext<'_>) {
+    async fn fire_hooks(&self, lp: &Graph, event: GraphHookEvent, ctx: &HookContext<'_>) {
         let Some(hooks) = lp.hooks.get(&event) else {
             return;
         };
@@ -790,21 +809,21 @@ impl LoopEngine {
 
         for (idx, hook) in hooks.iter().enumerate() {
             // Recorded the moment the hook fires — even a platform that fails
-            // to resolve below still shows up in `loop_get`/`canopy loop info`
+            // to resolve below still shows up in `graph_get`/`canopy graph info`
             // as a failed firing, rather than silently vanishing.
             let run_id = uuid::Uuid::new_v4().to_string();
             // CB43: agent hooks record their resolved pair; command,
-            // interactive and loop hooks dispatch no model (None, None).
+            // interactive and graph hooks dispatch no model (None, None).
             let (executed_platform, executed_model) =
                 executed_pair_for_platform_model(hook.platform.as_deref(), hook.model.as_deref());
             if let Err(error) = self
                 .db
-                .insert_loop_completion_hook_run(&LoopCompletionHookRun {
+                .insert_graph_completion_hook_run(&GraphCompletionHookRun {
                     id: run_id.clone(),
-                    loop_id: lp.id.clone(),
+                    graph_id: lp.id.clone(),
                     event,
                     hook_index: idx as i64,
-                    status: LoopRunStatus::Running,
+                    status: GraphRunStatus::Running,
                     output: None,
                     summary: None,
                     started_at: chrono::Utc::now(),
@@ -816,7 +835,7 @@ impl LoopEngine {
                 })
             {
                 tracing::warn!(
-                    "Loop '{}' failed to record {} hook run (index {idx}): {:#}",
+                    "Graph '{}' failed to record {} hook run (index {idx}): {:#}",
                     lp.name,
                     event.as_str(),
                     error
@@ -824,18 +843,18 @@ impl LoopEngine {
                 continue;
             }
 
-            // CH4: depth cap — refuse loop hooks on a hook-launched loop.
+            // CH4: depth cap — refuse graph hooks on a hook-launched graph.
             // Other hook types (agent, command, interactive) still fire normally.
-            if hook.is_loop() && self.is_hook_launched_loop(&lp.id) {
-                let _ = self.db.update_loop_completion_hook_run_result(
+            if hook.is_graph() && self.is_hook_launched_graph(&lp.id) {
+                let _ = self.db.update_graph_completion_hook_run_result(
                     &run_id,
-                    LoopRunStatus::Fail,
+                    GraphRunStatus::Fail,
                     Some(&serde_json::json!({
-                        "error": "loop hook refused: this loop was itself launched by a hook (depth cap is 1)",
-                        "target_loop_id": hook.target_loop_id,
+                        "error": "graph hook refused: this graph was itself launched by a hook (depth cap is 1)",
+                        "target_graph_id": hook.target_graph_id,
                     })),
                     Some(&format!(
-                        "Loop hook refused: '{}' is at depth 1. Depth cap is 1.",
+                        "Graph hook refused: '{}' is at depth 1. Depth cap is 1.",
                         lp.name
                     )),
                     Some(chrono::Utc::now()),
@@ -869,7 +888,7 @@ impl LoopEngine {
                                 summary: r.summary,
                             },
                             Err(e) => HookExecution {
-                                status: LoopRunStatus::Fail,
+                                status: GraphRunStatus::Fail,
                                 output: serde_json::json!({
                                     "command": command,
                                     "error": e.to_string(),
@@ -882,7 +901,7 @@ impl LoopEngine {
                         }
                     }
                     Err(error) => HookExecution {
-                        status: LoopRunStatus::Fail,
+                        status: GraphRunStatus::Fail,
                         output: serde_json::json!({
                             "command": raw_command,
                             "error": error.to_string(),
@@ -890,11 +909,11 @@ impl LoopEngine {
                         summary: format!("{} hook command is invalid: {error}", event.as_str()),
                     },
                 }
-            } else if hook.is_loop() {
-                // Loop hook (CH4): launch another loop in-process.
-                // Fire-and-forget: the launching loop does not wait for the target.
-                // Depth is enforced inside execute_loop_hook.
-                self.execute_loop_hook(lp, hook, &event, ctx).await
+            } else if hook.is_graph() {
+                // Graph hook (CH4): launch another graph in-process.
+                // Fire-and-forget: the launching graph does not wait for the target.
+                // Depth is enforced inside execute_graph_hook.
+                self.execute_graph_hook(lp, hook, &event, ctx).await
             } else {
                 // Agent hook: resolve CLI, render prompt, spawn
                 match Cli::resolve(hook.platform.as_deref()) {
@@ -924,7 +943,7 @@ impl LoopEngine {
                                 .await
                             }
                             Err(error) => HookExecution {
-                                status: LoopRunStatus::Fail,
+                                status: GraphRunStatus::Fail,
                                 output: serde_json::json!({
                                     "platform": hook.platform,
                                     "error": error.to_string(),
@@ -937,7 +956,7 @@ impl LoopEngine {
                         }
                     }
                     Err(error) => HookExecution {
-                        status: LoopRunStatus::Fail,
+                        status: GraphRunStatus::Fail,
                         output: serde_json::json!({ "platform": hook.platform, "error": error }),
                         summary: format!(
                             "{} hook has an invalid platform '{}': {error}",
@@ -948,7 +967,7 @@ impl LoopEngine {
                 }
             };
 
-            let _ = self.db.update_loop_completion_hook_run_result(
+            let _ = self.db.update_graph_completion_hook_run_result(
                 &run_id,
                 execution.status,
                 Some(&execution.output),
@@ -956,43 +975,43 @@ impl LoopEngine {
                 Some(chrono::Utc::now()),
             );
 
-            if execution.status != LoopRunStatus::Pass {
+            if execution.status != GraphRunStatus::Pass {
                 tracing::warn!(
-                    "Loop '{}' {} hook (index {idx}) failed: {}",
+                    "Graph '{}' {} hook (index {idx}) failed: {}",
                     lp.name,
                     event.as_str(),
                     execution.summary
                 );
                 self.notification_service
-                    .notify_loop_completion_hook_failed(&lp.name, &execution.summary);
+                    .notify_graph_completion_hook_failed(&lp.name, &execution.summary);
             }
         }
     }
 
-    /// Whether `loop_id` was launched by a hook (depth = 1). Used to enforce
-    /// the depth cap: a hook-launched loop cannot itself launch another loop
+    /// Whether `graph_id` was launched by a hook (depth = 1). Used to enforce
+    /// the depth cap: a hook-launched graph cannot itself launch another graph
     /// via hooks.
-    fn is_hook_launched_loop(&self, loop_id: &str) -> bool {
-        self.db.is_loop_hook_launched(loop_id).unwrap_or(false)
+    fn is_hook_launched_graph(&self, graph_id: &str) -> bool {
+        self.db.is_graph_hook_launched(graph_id).unwrap_or(false)
     }
 
     /// Fire one interactive hook (CH3): render its prompt through the same
     /// event-placeholder path as agent hooks, verify the configured target
     /// session is live in the database, and enqueue one due-now scheduled
     /// send carrying the rendered prompt, a canonical promptbuilder-equivalent
-    /// builder state, and structured hook provenance (loop id + event).
+    /// builder state, and structured hook provenance (graph id + event).
     ///
     /// Delivery itself stays where it already is — the TUI's
     /// `deliver_due_scheduled_sends` — so a send enqueued while no TUI is
     /// running stays queued (pending, never failed) until one comes up. A
     /// missing or non-live target fails the hook run naming the exact session
-    /// id, without inserting anything and without touching the loop's status
+    /// id, without inserting anything and without touching the graph's status
     /// (the caller records the failure and continues to later hooks).
     async fn execute_interactive_hook(
         &self,
-        lp: &Loop,
-        hook: &LoopCompletionHook,
-        event: &LoopHookEvent,
+        lp: &Graph,
+        hook: &GraphCompletionHook,
+        event: &GraphHookEvent,
         ctx: &HookContext<'_>,
     ) -> HookExecution {
         let target = hook
@@ -1002,7 +1021,7 @@ impl LoopEngine {
             .unwrap_or("");
         if target.is_empty() {
             return HookExecution {
-                status: LoopRunStatus::Fail,
+                status: GraphRunStatus::Fail,
                 output: serde_json::json!({
                     "error": "interactive hook has no target session id",
                 }),
@@ -1016,7 +1035,7 @@ impl LoopEngine {
             Ok(prompt) => prompt,
             Err(error) => {
                 return HookExecution {
-                    status: LoopRunStatus::Fail,
+                    status: GraphRunStatus::Fail,
                     output: serde_json::json!({
                         "target_session_id": target,
                         "error": error.to_string(),
@@ -1029,7 +1048,7 @@ impl LoopEngine {
             Ok(sessions) => sessions,
             Err(error) => {
                 return HookExecution {
-                    status: LoopRunStatus::Fail,
+                    status: GraphRunStatus::Fail,
                     output: serde_json::json!({
                         "target_session_id": target,
                         "error": error.to_string(),
@@ -1043,7 +1062,7 @@ impl LoopEngine {
         };
         if !live.iter().any(|session| session.id == target) {
             return HookExecution {
-                status: LoopRunStatus::Fail,
+                status: GraphRunStatus::Fail,
                 output: serde_json::json!({
                     "target_session_id": target,
                     "error": "session does not exist or is no longer live",
@@ -1059,7 +1078,7 @@ impl LoopEngine {
             Ok(json) => json,
             Err(error) => {
                 return HookExecution {
-                    status: LoopRunStatus::Fail,
+                    status: GraphRunStatus::Fail,
                     output: serde_json::json!({
                         "target_session_id": target,
                         "error": error.to_string(),
@@ -1083,7 +1102,7 @@ impl LoopEngine {
             Some(&provenance),
         ) {
             Ok(()) => HookExecution {
-                status: LoopRunStatus::Pass,
+                status: GraphRunStatus::Pass,
                 output: serde_json::json!({
                     "scheduled_send_id": send_id,
                     "target_session_id": target,
@@ -1095,7 +1114,7 @@ impl LoopEngine {
                 ),
             },
             Err(error) => HookExecution {
-                status: LoopRunStatus::Fail,
+                status: GraphRunStatus::Fail,
                 output: serde_json::json!({
                     "target_session_id": target,
                     "error": error.to_string(),
@@ -1108,78 +1127,84 @@ impl LoopEngine {
         }
     }
 
-    /// Fire one loop hook (CH4): validate the target loop, enforce depth cap,
-    /// and launch the target loop in-process via [`Self::launch_loop_from_hook`].
-    /// Fire-and-forget: the launching loop does not wait for the target.
-    async fn execute_loop_hook(
+    /// Fire one graph hook (CH4): validate the target graph, enforce depth cap,
+    /// and launch the target graph in-process via [`Self::launch_graph_from_hook`].
+    /// Fire-and-forget: the launching graph does not wait for the target.
+    async fn execute_graph_hook(
         &self,
-        lp: &Loop,
-        hook: &LoopCompletionHook,
-        event: &LoopHookEvent,
+        lp: &Graph,
+        hook: &GraphCompletionHook,
+        event: &GraphHookEvent,
         ctx: &HookContext<'_>,
     ) -> HookExecution {
-        // 1. Resolve target loop id (support prefix resolution).
-        let raw_target = hook.target_loop_id.as_deref().unwrap_or("");
-        let target_id = match Database::resolve_loop_id_by_prefix(&self.db, raw_target) {
+        // 1. Resolve target graph id (support prefix resolution).
+        let raw_target = hook.target_graph_id.as_deref().unwrap_or("");
+        let target_id = match Database::resolve_graph_id_by_prefix(&self.db, raw_target) {
             Ok(Some(id)) => id,
             Ok(None) => {
                 return HookExecution {
-                    status: LoopRunStatus::Fail,
+                    status: GraphRunStatus::Fail,
                     output: serde_json::json!({
-                        "error": format!("target loop '{}' not found", raw_target),
+                        "error": format!("target graph '{}' not found", raw_target),
                     }),
-                    summary: format!("Loop hook failed: target loop '{}' not found.", raw_target),
+                    summary: format!(
+                        "Graph hook failed: target graph '{}' not found.",
+                        raw_target
+                    ),
                 };
             }
             Err(e) => {
                 return HookExecution {
-                    status: LoopRunStatus::Fail,
+                    status: GraphRunStatus::Fail,
                     output: serde_json::json!({ "error": e.to_string() }),
-                    summary: format!("Loop hook failed to resolve target: {e}"),
+                    summary: format!("Graph hook failed to resolve target: {e}"),
                 };
             }
         };
 
-        // 2. Validate target loop state: must not be running, archived, or absent.
-        let target_lp = match self.db.get_loop(&target_id) {
+        // 2. Validate target graph state: must not be running, archived, or absent.
+        let target_lp = match self.db.get_graph(&target_id) {
             Ok(Some(lp)) => lp,
             Ok(None) => {
                 return HookExecution {
-                    status: LoopRunStatus::Fail,
+                    status: GraphRunStatus::Fail,
                     output: serde_json::json!({
-                        "error": format!("target loop '{}' not found", raw_target),
+                        "error": format!("target graph '{}' not found", raw_target),
                     }),
-                    summary: format!("Loop hook failed: target loop '{}' not found.", raw_target),
+                    summary: format!(
+                        "Graph hook failed: target graph '{}' not found.",
+                        raw_target
+                    ),
                 };
             }
             Err(e) => {
                 return HookExecution {
-                    status: LoopRunStatus::Fail,
+                    status: GraphRunStatus::Fail,
                     output: serde_json::json!({ "error": e.to_string() }),
-                    summary: format!("Loop hook failed to read target: {e}"),
+                    summary: format!("Graph hook failed to read target: {e}"),
                 };
             }
         };
         if target_lp.archived {
             return HookExecution {
-                status: LoopRunStatus::Fail,
+                status: GraphRunStatus::Fail,
                 output: serde_json::json!({
-                    "error": format!("target loop '{}' is archived", target_lp.name),
+                    "error": format!("target graph '{}' is archived", target_lp.name),
                 }),
                 summary: format!(
-                    "Loop hook failed: target loop '{}' is archived.",
+                    "Graph hook failed: target graph '{}' is archived.",
                     target_lp.name
                 ),
             };
         }
-        if target_lp.status == LoopStatus::Running {
+        if target_lp.status == GraphStatus::Running {
             return HookExecution {
-                status: LoopRunStatus::Fail,
+                status: GraphRunStatus::Fail,
                 output: serde_json::json!({
-                    "error": format!("target loop '{}' is already running", target_lp.name),
+                    "error": format!("target graph '{}' is already running", target_lp.name),
                 }),
                 summary: format!(
-                    "Loop hook failed: target loop '{}' is already running.",
+                    "Graph hook failed: target graph '{}' is already running.",
                     target_lp.name
                 ),
             };
@@ -1190,11 +1215,11 @@ impl LoopEngine {
         let idea = hook.idea.as_deref().filter(|s| !s.trim().is_empty());
         if queue_id.is_some() && idea.is_some() {
             return HookExecution {
-                status: LoopRunStatus::Fail,
+                status: GraphRunStatus::Fail,
                 output: serde_json::json!({
                     "error": "queue_id and idea are mutually exclusive",
                 }),
-                summary: "Loop hook failed: queue_id and idea are mutually exclusive.".to_string(),
+                summary: "Graph hook failed: queue_id and idea are mutually exclusive.".to_string(),
             };
         }
 
@@ -1204,9 +1229,9 @@ impl LoopEngine {
                 Ok(rendered) => Some(rendered),
                 Err(e) => {
                     return HookExecution {
-                        status: LoopRunStatus::Fail,
+                        status: GraphRunStatus::Fail,
                         output: serde_json::json!({ "error": e.to_string() }),
-                        summary: format!("Loop hook idea template is invalid: {e}"),
+                        summary: format!("Graph hook idea template is invalid: {e}"),
                     };
                 }
             }
@@ -1214,10 +1239,10 @@ impl LoopEngine {
             None
         };
 
-        // 6. Launch the target loop in-process. Fire-and-forget on success;
-        //    on a refused launch, `launch_loop_from_hook` hands back the
+        // 6. Launch the target graph in-process. Fire-and-forget on success;
+        //    on a refused launch, `launch_graph_from_hook` hands back the
         //    engine's own refusal text and nothing was started.
-        match self.launch_loop_from_hook(
+        match self.launch_graph_from_hook(
             target_id.clone(),
             queue_id.map(str::to_string),
             hook.workdir_override
@@ -1232,20 +1257,20 @@ impl LoopEngine {
                     .db
                     .record_hook_launch_provenance(&target_id, &lp.id, event.as_str());
                 HookExecution {
-                    status: LoopRunStatus::Pass,
+                    status: GraphRunStatus::Pass,
                     output: serde_json::json!({
-                        "launched_loop_id": target_id,
+                        "launched_graph_id": target_id,
                         "queue_id": queue_id,
                         "idea": rendered_idea,
                     }),
-                    summary: format!("Loop hook launched '{}' in background.", target_lp.name),
+                    summary: format!("Graph hook launched '{}' in background.", target_lp.name),
                 }
             }
             Err(message) => HookExecution {
-                status: LoopRunStatus::Fail,
+                status: GraphRunStatus::Fail,
                 output: serde_json::json!({
                     "error": message,
-                    "target_loop_id": target_id,
+                    "target_graph_id": target_id,
                     "queue_id": queue_id,
                     "idea": rendered_idea,
                 }),
@@ -1254,31 +1279,31 @@ impl LoopEngine {
         }
     }
 
-    /// Launch a loop from a hook context (CH4). Fire-and-forget: spawns a
-    /// background task that calls [`Self::run_loop`]. The launched loop is
-    /// marked as hook-launched so its own loop hooks are refused (depth
+    /// Launch a graph from a hook context (CH4). Fire-and-forget: spawns a
+    /// background task that calls [`Self::run_graph`]. The launched graph is
+    /// marked as hook-launched so its own graph hooks are refused (depth
     /// cap = 1).
-    fn launch_loop_from_hook(
+    fn launch_graph_from_hook(
         &self,
-        loop_id: String,
+        graph_id: String,
         queue_id: Option<String>,
         workdir_override: Option<String>,
         idea: Option<String>,
     ) -> Result<(), String> {
         // CB41: refuse here with the engine's own pre-claim gate — the same check
-        // `run_loop_dispatch` runs before it claims the loop
-        // (see `empty_launch_check`, ~loop_engine.rs:408). The in-process launch
+        // `run_graph_dispatch` runs before it claims the graph
+        // (see `empty_launch_check`, ~graph_engine.rs:408). The in-process launch
         // would return `EmptySpecSetError(message)` for exactly this `message`;
         // propagating it is the whole point. The hook reports whether the launch
-        // was accepted, never whether the launched loop's work succeeds.
-        match self.empty_launch_check(&loop_id, queue_id.as_deref(), idea.as_deref()) {
+        // was accepted, never whether the launched graph's work succeeds.
+        match self.empty_launch_check(&graph_id, queue_id.as_deref(), idea.as_deref()) {
             Ok(Some(message)) => return Err(message),
             Ok(None) => {}
             Err(e) => return Err(e.to_string()),
         }
-        // Mark this loop as hook-launched before spawning, so when
-        // run_loop_dispatch begins, it knows to enforce the depth cap.
-        let _ = self.db.mark_loop_as_hook_launched(&loop_id);
+        // Mark this graph as hook-launched before spawning, so when
+        // run_graph_dispatch begins, it knows to enforce the depth cap.
+        let _ = self.db.mark_graph_as_hook_launched(&graph_id);
 
         let db = Arc::clone(&self.db);
         let notification_service = Arc::clone(&self.notification_service);
@@ -1287,7 +1312,7 @@ impl LoopEngine {
         let spec_attempt_limit = self.spec_attempt_limit;
 
         tokio::spawn(async move {
-            let engine = LoopEngine {
+            let engine = GraphEngine {
                 db,
                 notification_service,
                 ensemble_concurrency,
@@ -1295,15 +1320,18 @@ impl LoopEngine {
                 spec_attempt_limit,
             };
             if let Err(error) = engine
-                .run_loop(loop_id.clone(), queue_id, workdir_override, idea, None)
+                .run_graph(graph_id.clone(), queue_id, workdir_override, idea, None)
                 .await
             {
                 if error.downcast_ref::<EmptySpecSetError>().is_some() {
-                    tracing::error!("Hook-launched loop '{}' launch refused: {error:#}", loop_id);
+                    tracing::error!(
+                        "Hook-launched graph '{}' launch refused: {error:#}",
+                        graph_id
+                    );
                 } else {
-                    tracing::error!("Hook-launched loop '{}' failed: {error:#}", loop_id);
+                    tracing::error!("Hook-launched graph '{}' failed: {error:#}", graph_id);
                     let _ = engine
-                        .fail_loop(&loop_id, None, None, &error.to_string())
+                        .fail_graph(&graph_id, None, None, &error.to_string())
                         .await;
                 }
             }
@@ -1312,21 +1340,21 @@ impl LoopEngine {
     }
 
     /// Fire `lp`'s `on_completed` hook (N2), if configured — a no-op
-    /// otherwise. Runs through the same spawn path as a loop agent node
+    /// otherwise. Runs through the same spawn path as a graph agent node
     /// ([`run_agent_process`]/[`spawn_and_wait_cli_process`]), records the
-    /// firing in `loop_completion_hook_runs` (visible via `loop_get`/`canopy
-    /// loop info`), and on failure logs a WARN plus a "post-completion hook
+    /// firing in `graph_completion_hook_runs` (visible via `graph_get`/`canopy
+    /// graph info`), and on failure logs a WARN plus a "post-completion hook
     /// failed" notification. Never returns an `Err` — a malformed hook
     /// config or a failed process must never propagate past the run that
     /// already finished successfully.
     async fn fire_completion_hook(
         &self,
-        lp: &crate::domain::loops::Loop,
+        lp: &crate::domain::graphs::Graph,
         workdir: &str,
         completed_specs: &[(String, String)],
     ) {
         let ctx = HookContext {
-            loop_name: &lp.name,
+            graph_name: &lp.name,
             workdir,
             completed_specs,
             spec_name: None,
@@ -1334,14 +1362,14 @@ impl LoopEngine {
             blocker: None,
             node_name: None,
         };
-        self.fire_hooks(lp, LoopHookEvent::OnCompleted, &ctx).await;
+        self.fire_hooks(lp, GraphHookEvent::OnCompleted, &ctx).await;
     }
 
     /// (CB22) Whether `spec` carries usable content: a trimmed non-empty
     /// name or a trimmed non-empty description. A spec with neither is not
     /// executable — the engine rejects it at launch instead of spending
     /// agents on an empty `{{spec_content}}`.
-    pub fn spec_has_content(spec: &LoopSpec) -> bool {
+    pub fn spec_has_content(spec: &GraphSpec) -> bool {
         if !spec.name.trim().is_empty() {
             return true;
         }
@@ -1354,38 +1382,38 @@ impl LoopEngine {
     }
 
     /// (CB22) Actionable error for a bound or queued spec with no content.
-    /// Names the loop and the offending spec (falling back to its id when
+    /// Names the graph and the offending spec (falling back to its id when
     /// its name is blank) so the caller knows exactly which row to fix.
-    fn blank_spec_message(loop_name: &str, spec: &LoopSpec) -> String {
+    fn blank_spec_message(graph_name: &str, spec: &GraphSpec) -> String {
         let display = if spec.name.trim().is_empty() {
             spec.id.clone()
         } else {
             spec.name.clone()
         };
         format!(
-            "Loop '{}' has a spec '{}' (id '{}') with no content: both name and description \
+            "Graph '{}' has a spec '{}' (id '{}') with no content: both name and description \
              are empty. Give the spec a name or description before running.",
-            loop_name, display, spec.id
+            graph_name, display, spec.id
         )
     }
 
-    /// (B17) `Ok(Some(message))` if launching `loop_id` (optionally against
+    /// (B17) `Ok(Some(message))` if launching `graph_id` (optionally against
     /// `queue_id`) would find no effective spec to run — `message` is the
     /// actionable, human/LLM-readable error to surface. `Ok(None)` means the
     /// launch may proceed.
     ///
-    /// Exposed (not just inlined in [`Self::run_loop_dispatch`]) so the
-    /// synchronous `loop_run` MCP handler can hand this straight back to its
+    /// Exposed (not just inlined in [`Self::run_graph_dispatch`]) so the
+    /// synchronous `graph_run` MCP handler can hand this straight back to its
     /// caller instead of the caller only finding out via a log line once the
     /// fire-and-forget background dispatch fails — every other launch path
-    /// (autorun, cron/watch triggers, `loop_continue`) still gets the same
-    /// check from `run_loop_dispatch` itself.
+    /// (autorun, cron/watch triggers, `graph_continue`) still gets the same
+    /// check from `run_graph_dispatch` itself.
     ///
     /// Emptiness is defined per launch mode:
     /// - Bound specs (`queue_id` is `None`): every *non-terminal* bound spec
     ///   must have usable content (CB22 — trimmed non-empty name or
     ///   description); a runnable spec with both blank is rejected before
-    ///   the loop is claimed. Blank-name bookkeeping rows (idea / legacy
+    ///   the graph is claimed. Blank-name bookkeeping rows (idea / legacy
     ///   placeholders) do not count as an effective bound set. Zero real
     ///   bound specs is an error unless the caller supplied an explicit
     ///   non-empty `idea` (the intentional spec-less API mode). A top-level
@@ -1393,23 +1421,23 @@ impl LoopEngine {
     /// - A queue (`queue_id` is `Some`): the queue has no `pending` member *and*
     ///   no other non-terminal (`running`/`failed`) member left either — i.e.
     ///   [`Database::queue_has_incomplete_members`] is false. Unlike bound
-    ///   specs, a queue is a shared queue another loop or a stale relaunch can
+    ///   specs, a queue is a shared queue another graph or a stale relaunch can
     ///   easily point at by mistake, so "every member already done" is
     ///   treated as an error here rather than a silent, do-nothing
     ///   completion (regression (b): a queue run where every member is
     ///   already completed). Only the queue's own selected (non-terminal)
-    ///   members are inspected for blank content — unrelated loop-bound
+    ///   members are inspected for blank content — unrelated graph-bound
     ///   specs, including blank ones, are ignored. Unaffected by the
     ///   spec-less carve-out above —
     ///   a queue run always needs actual queue members.
     pub fn empty_launch_check(
         &self,
-        loop_id: &str,
+        graph_id: &str,
         queue_id: Option<&str>,
         idea: Option<&str>,
     ) -> Result<Option<String>> {
-        let Some(lp) = self.db.get_loop(loop_id)? else {
-            // Not-found is handled by the caller (`run_loop_dispatch` bails
+        let Some(lp) = self.db.get_graph(graph_id)? else {
+            // Not-found is handled by the caller (`run_graph_dispatch` bails
             // on it above this check runs; the MCP handler checks it before
             // calling this at all) — nothing to report here.
             return Ok(None);
@@ -1420,15 +1448,15 @@ impl LoopEngine {
                 return Ok(Some(self.empty_spec_set_message(&lp, Some(queue_id))?));
             }
             // (CB22) Validate only the queue's own effective members: a
-            // blank selected member is rejected, while unrelated loop-bound
+            // blank selected member is rejected, while unrelated graph-bound
             // specs are ignored entirely.
             for spec_id in self.db.list_queue_member_spec_ids(queue_id)? {
-                let Some(spec) = self.db.get_loop_spec(&spec_id)? else {
+                let Some(spec) = self.db.get_graph_spec(&spec_id)? else {
                     continue;
                 };
                 if matches!(
                     spec.status,
-                    LoopSpecStatus::Completed | LoopSpecStatus::Skipped
+                    GraphSpecStatus::Completed | GraphSpecStatus::Skipped
                 ) {
                     continue;
                 }
@@ -1439,16 +1467,16 @@ impl LoopEngine {
             return Ok(None);
         }
 
-        let bound = self.db.list_loop_specs(loop_id)?;
+        let bound = self.db.list_graph_specs(graph_id)?;
         // (CB22) Reject non-terminal bound specs with no content before the
-        // loop is claimed — the engine must never execute an empty
+        // graph is claimed — the engine must never execute an empty
         // `{{spec_content}}`. Terminal rows are skipped here so a leftover
         // completed bookkeeping/legacy blank does not block a relaunch that
         // still has real work (and so this matches the queue path above).
         for spec in &bound {
             if matches!(
                 spec.status,
-                LoopSpecStatus::Completed | LoopSpecStatus::Skipped
+                GraphSpecStatus::Completed | GraphSpecStatus::Skipped
             ) {
                 continue;
             }
@@ -1464,11 +1492,11 @@ impl LoopEngine {
         //   all-done relaunch still takes the zero-exec completion path.
         // Blank-name bookkeeping left over from a prior idea/legacy run does
         // *not* count: the next no-idea dispatch must refuse before claim
-        // rather than purge-then-fail after flipping the loop to Running.
+        // rather than purge-then-fail after flipping the graph to Running.
         let has_effective_bound = bound.iter().any(|spec| {
             if matches!(
                 spec.status,
-                LoopSpecStatus::Completed | LoopSpecStatus::Skipped
+                GraphSpecStatus::Completed | GraphSpecStatus::Skipped
             ) {
                 !spec.name.trim().is_empty()
             } else {
@@ -1488,7 +1516,7 @@ impl LoopEngine {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .is_some();
-        if has_idea && !self.db.list_loop_nodes_for_loop(loop_id)?.is_empty() {
+        if has_idea && !self.db.list_graph_nodes_for_graph(graph_id)?.is_empty() {
             return Ok(None);
         }
 
@@ -1497,24 +1525,24 @@ impl LoopEngine {
 
     /// Build the actionable error text for [`Self::empty_launch_check`].
     ///
-    /// Queue membership doesn't record which loop(s) normally draw from it
-    /// (queue specs stay standalone — see [`Self::run_loop`]'s doc), so the
-    /// one concrete, discoverable link back to "which queue should this loop
-    /// use?" is the loop's own [`crate::domain::loops::Loop::active_run_queue_id`]
+    /// Queue membership doesn't record which graph(s) normally draw from it
+    /// (queue specs stay standalone — see [`Self::run_graph`]'s doc), so the
+    /// one concrete, discoverable link back to "which queue should this graph
+    /// use?" is the graph's own [`crate::domain::graphs::Graph::active_run_queue_id`]
     /// — the queue its last real run drew from. This is exactly requirement 3's
-    /// guard rail: a queue-less relaunch of a loop that was last queue-driven
+    /// guard rail: a queue-less relaunch of a graph that was last queue-driven
     /// names that queue so a recovery agent can retry correctly instead of
     /// the launch silently discarding the queue context.
     fn empty_spec_set_message(
         &self,
-        lp: &crate::domain::loops::Loop,
+        lp: &crate::domain::graphs::Graph,
         queue_id: Option<&str>,
     ) -> Result<String> {
         match queue_id {
             Some(queue_id) => {
                 let total = self.db.list_queue_member_spec_ids(queue_id)?.len();
                 Ok(format!(
-                    "Loop '{}' has no specs to run: queue '{}' has {} member(s), none pending \
+                    "Graph '{}' has no specs to run: queue '{}' has {} member(s), none pending \
                      (all already completed/skipped, or the queue is empty). Add pending specs \
                      to the queue, or pass a different queue_id.",
                     lp.name, queue_id, total
@@ -1522,7 +1550,7 @@ impl LoopEngine {
             }
             None => {
                 let mut message = format!(
-                    "Loop '{}' has no specs to run: it has 0 bound specs and no queue_id was \
+                    "Graph '{}' has no specs to run: it has 0 bound specs and no queue_id was \
                      given.",
                     lp.name
                 );
@@ -1542,48 +1570,48 @@ impl LoopEngine {
         }
     }
 
-    /// Resume `loop_id` in the background using whatever run context (queue
-    /// or bound-spec) it last persisted via [`Database::set_loop_active_run_queue`].
-    /// The one path every "continue where this loop left off" entry point —
-    /// the scheduler's autorun auto-reset-and-resume, `loop_continue` — must
-    /// go through, so a queue run is never silently swapped for the loop's own
+    /// Resume `graph_id` in the background using whatever run context (queue
+    /// or bound-spec) it last persisted via [`Database::set_graph_active_run_queue`].
+    /// The one path every "continue where this graph left off" entry point —
+    /// the scheduler's autorun auto-reset-and-resume, `graph_continue` — must
+    /// go through, so a queue run is never silently swapped for the graph's own
     /// (typically empty) bound specs.
     ///
     /// This is the *only* entry point allowed to carry `is_resume = true`
-    /// into [`Self::run_loop_dispatch`] — see that function's doc for why the
-    /// distinction matters for `{{spec_start_head}}` (B10). A loop relaunched
-    /// via `loop_run` directly (even a `paused` one) goes through
+    /// into [`Self::run_graph_dispatch`] — see that function's doc for why the
+    /// distinction matters for `{{spec_start_head}}` (B10). A graph relaunched
+    /// via `graph_run` directly (even a `paused` one) goes through
     /// [`Self::start_background_run`] instead and always gets a fresh
     /// baseline.
-    pub fn resume_background(self: Arc<Self>, loop_id: String) {
+    pub fn resume_background(self: Arc<Self>, graph_id: String) {
         let queue_id = self
             .db
-            .get_loop(&loop_id)
+            .get_graph(&graph_id)
             .ok()
             .flatten()
             .and_then(|lp| lp.active_run_queue_id);
-        // A sandboxed loop that was paused (daemon restart, `loop_pause`) must
+        // A sandboxed graph that was paused (daemon restart, `graph_pause`) must
         // resume inside its worktree and still merge back on completion —
         // otherwise the remaining nodes run against the user's real repo and
         // the sandbox is stranded.
         let sandbox = self
             .db
-            .get_active_sandbox_for_owner("loop", &loop_id)
+            .get_active_sandbox_for_owner("graph", &graph_id)
             .ok()
             .flatten();
         tokio::spawn(async move {
             let result = self
-                .run_loop_dispatch(loop_id.clone(), queue_id, None, true, None, sandbox)
+                .run_graph_dispatch(graph_id.clone(), queue_id, None, true, None, sandbox)
                 .await;
             // CH4: clear the hook-launched flag on ALL exit paths.
-            let _ = self.db.clear_loop_hook_launched(&loop_id);
+            let _ = self.db.clear_graph_hook_launched(&graph_id);
             if let Err(error) = result {
                 if error.downcast_ref::<EmptySpecSetError>().is_some() {
-                    tracing::error!("Loop '{}' launch refused: {error:#}", loop_id);
+                    tracing::error!("Graph '{}' launch refused: {error:#}", graph_id);
                 } else {
-                    tracing::error!("Loop '{}' failed to run: {error:#}", loop_id);
+                    tracing::error!("Graph '{}' failed to run: {error:#}", graph_id);
                     let _ = self
-                        .fail_loop(&loop_id, None, None, &error.to_string())
+                        .fail_graph(&graph_id, None, None, &error.to_string())
                         .await;
                 }
             }
@@ -1592,7 +1620,7 @@ impl LoopEngine {
 
     /// Run one spec's node graph to completion, pause, or failure.
     ///
-    /// `is_resume` (see [`Self::run_loop_dispatch`]) governs whether
+    /// `is_resume` (see [`Self::run_graph_dispatch`]) governs whether
     /// `{{spec_start_head}}` may be inherited from a value this spec already
     /// persisted (only valid when this call is genuinely continuing the same
     /// in-flight attempt) or must be captured fresh (every other case,
@@ -1600,40 +1628,40 @@ impl LoopEngine {
     /// prior attempt).
     async fn run_spec(
         &self,
-        lp: &crate::domain::loops::Loop,
-        spec: &LoopSpec,
+        lp: &crate::domain::graphs::Graph,
+        spec: &GraphSpec,
         workdir: &str,
         is_resume: bool,
         queue_id: Option<&str>,
     ) -> Result<SpecExecutionOutcome> {
         let spec_details = self
             .db
-            .get_loop_spec_details(&spec.id)?
-            .ok_or_else(|| anyhow!("Loop spec '{}' not found.", spec.id))?;
-        let graph_nodes = self.db.list_loop_nodes_for_loop(&lp.id)?;
-        let graph_edges = self.db.list_loop_edges_for_loop(&lp.id)?;
+            .get_graph_spec_details(&spec.id)?
+            .ok_or_else(|| anyhow!("Graph spec '{}' not found.", spec.id))?;
+        let graph_nodes = self.db.list_graph_nodes_for_graph(&lp.id)?;
+        let graph_edges = self.db.list_graph_edges_for_graph(&lp.id)?;
 
         // A spec with its own graph always uses it (full backwards
         // compatibility). Only a spec with no nodes of its own falls back to
-        // the loop-level graph, so the same graph can drive every spec in
-        // the loop without repeating it per spec. Ensembles (F1) follow the
+        // the top-level graph, so the same graph can drive every spec in
+        // the graph without repeating it per spec. Ensembles (F1) follow the
         // exact same precedence — a spec-level ensemble only exists when the
         // spec has its own graph, so it's fetched alongside it.
-        let (nodes, edges, ensembles): (&[LoopNode], &[LoopEdge], Vec<EnsembleDetails>) =
+        let (nodes, edges, ensembles): (&[GraphNode], &[GraphEdge], Vec<EnsembleDetails>) =
             if !spec_details.nodes.is_empty() {
                 let ensembles = self.db.list_ensembles_for_spec(&spec.id)?;
                 (&spec_details.nodes, &spec_details.edges, ensembles)
             } else if !graph_nodes.is_empty() {
-                let ensembles = self.db.list_ensembles_for_loop(&lp.id)?;
+                let ensembles = self.db.list_ensembles_for_graph(&lp.id)?;
                 (&graph_nodes, &graph_edges, ensembles)
             } else {
                 let summary = format!(
-                "Spec '{}' has no nodes of its own and loop '{}' has no loop-level graph to fall back to.",
+                "Spec '{}' has no nodes of its own and graph '{}' has no top-level graph to fall back to.",
                 spec.name, lp.name
             );
-                self.db.update_loop_spec_status(
+                self.db.update_graph_spec_status(
                     &spec.id,
-                    LoopSpecStatus::Failed,
+                    GraphSpecStatus::Failed,
                     Some(chrono::Utc::now()),
                     Some(chrono::Utc::now()),
                 )?;
@@ -1646,9 +1674,9 @@ impl LoopEngine {
             .collect::<HashMap<_, _>>();
         // B37: whether this graph designates a committer at all. Resolved
         // once from whichever graph won the precedence above, so a spec-level
-        // graph and the loop-level fallback each answer for themselves.
+        // graph and the top-level fallback each answer for themselves.
         let enforce_commit_rights = graph_enforces_commit_rights(nodes);
-        let existing_runs = self.db.list_loop_runs_for_spec(&spec.id)?;
+        let existing_runs = self.db.list_graph_runs_for_spec(&spec.id)?;
         let all_node_names: Vec<String> = nodes.iter().map(|n| n.name.clone()).collect();
         let (mut cursor, mut node_outputs, resume_previous_output, mut iterations) =
             resolve_spec_start(nodes, edges, spec, &existing_runs, &ensembles)?;
@@ -1664,9 +1692,9 @@ impl LoopEngine {
         //
         // - `is_resume` — this call is genuinely continuing the same
         //   in-flight attempt (daemon restart mid-node-graph, explicit
-        //   `loop_pause`/`loop_continue`), not a fresh dispatch. Only
-        //   `resume_background` sets this; `start_background_run`/`loop_run`
-        //   — including relaunching a `paused` loop directly — never do, so
+        //   `graph_pause`/`graph_continue`), not a fresh dispatch. Only
+        //   `resume_background` sets this; `start_background_run`/`graph_run`
+        //   — including relaunching a `paused` graph directly — never do, so
         //   a relaunch always re-captures even if it finds a spec still
         //   marked `running` from a stale, never-reset earlier attempt. That
         //   stale-`running` case is exactly the 2026-07-11 incident: a
@@ -1674,12 +1702,12 @@ impl LoopEngine {
         //   silently reused because status alone couldn't distinguish "same
         //   attempt, paused" from "different, abandoned attempt".
         // - `spec.status == Running` — this spec itself has already started
-        //   (as opposed to a pending/failed spec a resumed queue/loop run is
+        //   (as opposed to a pending/failed spec a resumed queue/graph run is
         //   only now reaching for the first time, which must capture fresh
         //   like any other new entry).
         //
         // Whenever a fresh capture happens, it happens strictly before any
-        // node of this attempt executes (right here, before the node loop
+        // node of this attempt executes (right here, before the node graph
         // below and before `spec.status` is even flipped to `running`), so
         // it can never observe a commit this attempt's own agent node is
         // about to make — only commits that landed before this attempt
@@ -1688,12 +1716,12 @@ impl LoopEngine {
         // for every node execution and every review/check retry of this
         // attempt, amend or no amend — it is never touched again until the
         // next spec attempt captures its own.
-        let spec_start_head = if is_resume && spec.status == LoopSpecStatus::Running {
+        let spec_start_head = if is_resume && spec.status == GraphSpecStatus::Running {
             spec_details.spec.spec_start_head.clone()
         } else {
             let head = capture_workdir_head(workdir).await;
             self.db
-                .set_loop_spec_start_head(&spec.id, head.as_deref())?;
+                .set_graph_spec_start_head(&spec.id, head.as_deref())?;
             head
         };
 
@@ -1711,16 +1739,16 @@ impl LoopEngine {
         // sync) every time a `commit_rights: true` node's own execution
         // moves HEAD, so a check node placed anywhere after the committer
         // sees the latest value.
-        let mut spec_committed_head = if is_resume && spec.status == LoopSpecStatus::Running {
+        let mut spec_committed_head = if is_resume && spec.status == GraphSpecStatus::Running {
             spec_details.spec.spec_committed_head.clone()
         } else {
-            self.db.set_loop_spec_committed_head(&spec.id, None)?;
+            self.db.set_graph_spec_committed_head(&spec.id, None)?;
             None
         };
 
-        self.db.update_loop_spec_status(
+        self.db.update_graph_spec_status(
             &spec.id,
-            LoopSpecStatus::Running,
+            GraphSpecStatus::Running,
             Some(chrono::Utc::now()),
             None,
         )?;
@@ -1735,7 +1763,7 @@ impl LoopEngine {
         let mut resumable_sessions: HashMap<String, String> = HashMap::new();
 
         // RS3: the context group this spec belongs to within the running
-        // queue, if any. Only queue/queue runs carry a group (a loop's own
+        // queue, if any. Only queue/queue runs carry a group (a graph's own
         // bound specs never do — `queue_id` is `None` there), so ungrouped and
         // non-queue specs never cross-resume. This is the ONE deliberate
         // exception to RS2's "first visit is cold" rule: the first visit of a
@@ -1773,7 +1801,7 @@ impl LoopEngine {
             // leftover, never the legitimately active run: this iteration's
             // own rows don't exist yet.
             for node_id in cursor_node_ids(&cursor, &ensembles) {
-                if let Some(stale) = self.db.get_active_loop_run_for_node(&node_id)? {
+                if let Some(stale) = self.db.get_active_graph_run_for_node(&node_id)? {
                     self.terminate_run(&stale, SUPERSEDE_REASON);
                 }
             }
@@ -1782,10 +1810,10 @@ impl LoopEngine {
 
             // CB31: an operator pause or interrupt is not a node attempt. If
             // the previous run at this cursor was ended by the operator —
-            // recorded `Interrupted` (explicit `loop_pause(interrupt: true)`),
+            // recorded `Interrupted` (explicit `graph_pause(interrupt: true)`),
             // or finalized with its own verdict while a wait-for-completion
             // pause was pending (`paused_through`) — the re-execution on
-            // `loop_continue` reuses the same iteration number instead of
+            // `graph_continue` reuses the same iteration number instead of
             // consuming a fresh one. Only genuine node outcomes count against
             // DEFAULT_MAX_ITERATIONS_PER_NODE.
             let previous_was_operator_paused = self.db.last_spec_node_run_was_operator_paused(
@@ -1799,12 +1827,12 @@ impl LoopEngine {
                 // B12: the process from the last execution at this node
                 // (or any other node still running) must not survive the
                 // spec failure — otherwise it burns quota, holds locks,
-                // and could call loop_complete_node late with a stale
+                // and could call graph_complete_node late with a stale
                 // report. The process from the *previous* iteration is
                 // the most likely survivor: the budget check fires before
                 // any new execution starts, so the in-flight child is
                 // always from a prior run at this node.
-                for run in self.db.list_running_loop_runs(&lp.id).unwrap_or_default() {
+                for run in self.db.list_running_graph_runs(&lp.id).unwrap_or_default() {
                     self.terminate_run(&run, "iteration budget exhausted");
                 }
                 // CB7: blocker explicativo que nombra spec, nodo, intentos consumidos y techo
@@ -1818,8 +1846,8 @@ impl LoopEngine {
                     DEFAULT_MAX_ITERATIONS_PER_NODE,
                 );
                 // CB7: SIEMPRE escribir el blocker en el último run para que sea visible
-                // en loop_list/loop_get sin necesidad de encadenar loop_node_runs_list
-                if let Some(run) = self.db.list_loop_runs_for_spec(&spec.id)?.last() {
+                // en graph_list/graph_get sin necesidad de encadenar graph_node_runs_list
+                if let Some(run) = self.db.list_graph_runs_for_spec(&spec.id)?.last() {
                     self.set_run_blocker(
                         &run.id,
                         run.status,
@@ -1840,7 +1868,7 @@ impl LoopEngine {
                     // cross-run text (it embeds the iteration message as its
                     // "last failure"), so the single-call diagnosis still
                     // names the cross-execution count, not just this run's.
-                    if let Some(run) = self.db.list_loop_runs_for_spec(&spec.id)?.last() {
+                    if let Some(run) = self.db.list_graph_runs_for_spec(&spec.id)?.last() {
                         self.set_run_blocker(
                             &run.id,
                             run.status,
@@ -1848,17 +1876,17 @@ impl LoopEngine {
                             &blocker,
                         )?;
                     }
-                    self.db.update_loop_spec_status(
+                    self.db.update_graph_spec_status(
                         &spec.id,
-                        LoopSpecStatus::Failed,
+                        GraphSpecStatus::Failed,
                         None,
                         Some(chrono::Utc::now()),
                     )?;
                     return Ok(SpecExecutionOutcome::Blocked(blocker));
                 }
-                self.db.update_loop_spec_status(
+                self.db.update_graph_spec_status(
                     &spec.id,
-                    LoopSpecStatus::Failed,
+                    GraphSpecStatus::Failed,
                     None,
                     Some(chrono::Utc::now()),
                 )?;
@@ -1872,7 +1900,7 @@ impl LoopEngine {
                     // prompt, timeout, commit_rights, resume — everything read by
                     // execute_agent_node / execute_check_node / execute_router_node)
                     // is read from the database HERE, at the moment of dispatch —
-                    // not from the per-run `nodes` snapshot. So a loop_update_node
+                    // not from the per-run `nodes` snapshot. So a graph_update_node
                     // applied between two dispatches of this node lands on the
                     // second dispatch (FR1). This read happens exactly once, before
                     // the run row below is created, and the same `node` value is
@@ -1882,13 +1910,13 @@ impl LoopEngine {
                     // execute_agent_node derives them from this same `node` (FR4).
                     // `nodes_by_id` (the launch snapshot) stays authoritative for
                     // graph TOPOLOGY — kind, position, edges, router routes — which
-                    // loop_update_node / loop_update_ensemble refuse to change while
-                    // the loop is `running` (FR5).
+                    // graph_update_node / graph_update_ensemble refuse to change while
+                    // the graph is `running` (FR5).
                     let node_fresh = self
                         .db
-                        .get_loop_node(node_id.as_str())
-                        .map_err(|e| anyhow!("Loop node '{}' lookup failed: {e}", node_id))?
-                        .ok_or_else(|| anyhow!("Loop node '{}' not found.", node_id))?;
+                        .get_graph_node(node_id.as_str())
+                        .map_err(|e| anyhow!("Graph node '{}' lookup failed: {e}", node_id))?
+                        .ok_or_else(|| anyhow!("Graph node '{}' not found.", node_id))?;
                     let node = &node_fresh;
                     let (retry_limit, crash_max_secs, backoff_secs) = read_infra_config(node);
                     let mut attempt: u32 = 0;
@@ -1936,12 +1964,12 @@ impl LoopEngine {
                     // CB43: record the pair resolved at dispatch, on the row
                     // itself — never re-derived from the node config later.
                     let (executed_platform, executed_model) = executed_pair_for_node(node);
-                    self.db.insert_loop_run(&LoopNodeRun {
+                    self.db.insert_graph_run(&GraphNodeRun {
                         id: run_id.clone(),
-                        loop_id: lp.id.clone(),
+                        graph_id: lp.id.clone(),
                         spec_id: spec.id.clone(),
                         node_id: node.id.clone(),
-                        status: LoopRunStatus::Running,
+                        status: GraphRunStatus::Running,
                         input: previous_output.clone(),
                         output: None,
                         started_at: chrono::Utc::now(),
@@ -1964,7 +1992,7 @@ impl LoopEngine {
                             .filter(|v| !v.is_empty());
                         let node_model = node.config.get("model").and_then(Value::as_str);
                         tracing::info!(
-                            loop_id = %lp.id,
+                            graph_id = %lp.id,
                             spec_id = %spec.id,
                             node_id = %node.id,
                             node = %node.name,
@@ -2014,8 +2042,8 @@ impl LoopEngine {
                                 &all_node_names,
                             )
                             .await?;
-                        let run = self.db.get_loop_run(&run_id)?.ok_or_else(|| {
-                            anyhow!("Loop run '{}' not found after execution.", run_id)
+                        let run = self.db.get_graph_run(&run_id)?.ok_or_else(|| {
+                            anyhow!("Graph run '{}' not found after execution.", run_id)
                         })?;
 
                         if is_infra_crash(
@@ -2060,11 +2088,11 @@ impl LoopEngine {
                             continue;
                         }
 
-                        // CM2: the loop is settling on this attempt (no more
-                        // retries). Route `Break` only if this final attempt is
+                        // CM2: the graph is settling on this attempt (no more
+                        // retries). Route `Error` only if this final attempt is
                         // itself a no-verdict infra crash — a retry that
                         // recovered (Pass) or a genuine negative verdict (Fail)
-                        // must NOT take the `Break` edge.
+                        // must NOT take the `Error` edge.
                         let had_infra_crash =
                             is_infra_crash_shape(node, &execution, &run, crash_max_secs);
 
@@ -2080,17 +2108,17 @@ impl LoopEngine {
 
                     // B42/2026-08-05: something terminated this run out from
                     // under us — a newer attempt at this node, a concurrent
-                    // `loop_reset`, `loop_pause`, or budget/`fail_loop`
+                    // `graph_reset`, `graph_pause`, or budget/`fail_graph`
                     // sweep (see `run_was_terminated_out_of_band`). That is
                     // engine bookkeeping, not a node failure — so this
                     // dispatch stops here: it evaluates NO edge (never the
                     // fail edge to a resilience node), fails nothing, and
-                    // leaves the loop to whichever dispatch now owns it.
+                    // leaves the graph to whichever dispatch now owns it.
                     // Checked before any routing so the termination can
                     // never be routed as a fail (the runaway that
                     // manufactured a resilience run per killed implementer,
                     // and the incident where a stale dispatch's late
-                    // completion failed a loop out from under a healthy
+                    // completion failed a graph out from under a healthy
                     // sibling dispatch).
                     if run_was_terminated_out_of_band(&run) {
                         return Ok(SpecExecutionOutcome::Superseded);
@@ -2104,8 +2132,8 @@ impl LoopEngine {
                         resumable_sessions.insert(node.id.clone(), sid);
                     }
 
-                    let final_execution = if run.status == LoopRunStatus::Running {
-                        self.db.update_loop_run_result(
+                    let final_execution = if run.status == GraphRunStatus::Running {
+                        self.db.update_graph_run_result(
                             &run_id,
                             final_execution.status,
                             Some(&final_execution.output),
@@ -2122,10 +2150,10 @@ impl LoopEngine {
 
                     // B37: applied AFTER the node's own verdict is settled,
                     // so it overrides every way a node can report success —
-                    // a clean exit code, or a `loop_complete_node` self-report
+                    // a clean exit code, or a `graph_complete_node` self-report
                     // of `pass`. A node that moved history without the right
                     // to fails, and the fail is persisted on the run row so
-                    // `canopy loop info` shows it.
+                    // `canopy graph info` shows it.
                     let mut final_execution = match &commit_watch {
                         Some(watch) => match watch.violation(workdir).await {
                             Some(head_after) => {
@@ -2142,9 +2170,9 @@ impl LoopEngine {
                                     head_after = %head_after,
                                     "node committed but has no commit rights"
                                 );
-                                self.db.update_loop_run_result(
+                                self.db.update_graph_run_result(
                                     &run_id,
-                                    LoopRunStatus::Fail,
+                                    GraphRunStatus::Fail,
                                     Some(&violation.output),
                                     Some(chrono::Utc::now()),
                                 )?;
@@ -2181,9 +2209,9 @@ impl LoopEngine {
                                     current_head = %current_head,
                                     "spec_start_head is no longer an ancestor of HEAD"
                                 );
-                                self.db.update_loop_run_result(
+                                self.db.update_graph_run_result(
                                     &run_id,
-                                    LoopRunStatus::Fail,
+                                    GraphRunStatus::Fail,
                                     Some(&ancestry_fail.output),
                                     Some(chrono::Utc::now()),
                                 )?;
@@ -2205,7 +2233,7 @@ impl LoopEngine {
                         if let Some(head_before) = committer_head_before.as_deref() {
                             if let Some(head_after) = capture_workdir_head(workdir).await {
                                 if head_after != head_before {
-                                    self.db.set_loop_spec_committed_head(
+                                    self.db.set_graph_spec_committed_head(
                                         &spec.id,
                                         Some(&head_after),
                                     )?;
@@ -2218,7 +2246,7 @@ impl LoopEngine {
                     // CB31: a wait-for-completion pause was requested while this
                     // node was running. It ran to its own completion and its
                     // verdict is now recorded normally; flag that run so
-                    // `loop_continue` re-executing this node does not spend one
+                    // `graph_continue` re-executing this node does not spend one
                     // of its iterations (the pause is not an attempt), then
                     // transition to paused and stop before the next node.
                     if self.is_pausing(&lp.id)? {
@@ -2236,9 +2264,9 @@ impl LoopEngine {
                     }
 
                     if should_advance_to_next_spec(node, final_execution.status) {
-                        self.db.update_loop_spec_status(
+                        self.db.update_graph_spec_status(
                             &spec.id,
-                            LoopSpecStatus::Completed,
+                            GraphSpecStatus::Completed,
                             None,
                             Some(chrono::Utc::now()),
                         )?;
@@ -2259,12 +2287,12 @@ impl LoopEngine {
                     // CM15: the ensemble's MEMBER SET and shared prompt are read
                     // from the database HERE, once per dispatch of this ensemble
                     // step (NFR3: the whole set in one read, never member-by-member
-                    // across an await), so a loop_update_ensemble applied between
+                    // across an await), so a graph_update_ensemble applied between
                     // two dispatches lands on the second (FR2). The launch-time
                     // `ensembles` snapshot stays authoritative for the ensemble's
                     // WIRING (entry/exit edges, used by cursor_node_ids /
-                    // select_next_step) and its `kind`, which loop_update_ensemble
-                    // refuses to change while the loop is `running` (FR5).
+                    // select_next_step) and its `kind`, which graph_update_ensemble
+                    // refuses to change while the graph is `running` (FR5).
                     let details_fresh = self
                         .db
                         .get_ensemble_details(ensemble_id)
@@ -2289,7 +2317,7 @@ impl LoopEngine {
                     // CB31: as in the single-node arm — a wait-for-completion
                     // pause landed on this ensemble step. Its members ran to
                     // completion; flag every run of this iteration so a
-                    // `loop_continue` re-run of the step costs no iteration.
+                    // `graph_continue` re-run of the step costs no iteration.
                     if self.is_pausing(&lp.id)? {
                         self.db.mark_spec_node_runs_paused_through(
                             &spec.id,
@@ -2321,8 +2349,8 @@ impl LoopEngine {
             // exactly like any other node's fail edge.
             let is_routed_router = nodes_by_id
                 .get(from_node_id.as_str())
-                .is_some_and(|node| node.kind == LoopNodeKind::Router)
-                && final_execution.status == LoopRunStatus::Pass;
+                .is_some_and(|node| node.kind == GraphNodeKind::Router)
+                && final_execution.status == GraphRunStatus::Pass;
             let step_selection = if is_routed_router {
                 let route_label = final_execution
                     .output
@@ -2331,17 +2359,17 @@ impl LoopEngine {
                     .unwrap_or_default();
                 select_router_step(edges, &from_node_id, route_label)?
             } else if had_infra_crash {
-                // CM2: infra failures try `Break` edges first, falling back
-                // to `Fail`/`Always` when no `Break` edge exists — additive,
+                // CM2: infra failures try `Error` edges first, falling back
+                // to `Fail`/`Always` when no `Error` edge exists — additive,
                 // no existing graph changes behavior.
-                let break_selection = select_next_step_with_condition(
+                let error_selection = select_next_step_with_condition(
                     edges,
                     &ensembles,
                     &from_node_id,
-                    &LoopEdgeCondition::Break,
+                    &GraphEdgeCondition::Error,
                 )?;
-                if break_selection.is_some() {
-                    break_selection
+                if error_selection.is_some() {
+                    error_selection
                 } else {
                     select_next_step(edges, &ensembles, &from_node_id, final_execution.status)?
                 }
@@ -2381,7 +2409,7 @@ impl LoopEngine {
                         status = ?final_execution.status,
                         "no outgoing edge matched; spec terminating"
                     );
-                    if final_execution.status == LoopRunStatus::Fail {
+                    if final_execution.status == GraphRunStatus::Fail {
                         if let Some(terminal_run_id) = run_id.as_deref() {
                             let node_name = nodes_by_id
                                 .get(from_node_id.as_str())
@@ -2417,10 +2445,10 @@ impl LoopEngine {
                     }
                     cursor = step;
                 }
-                None if final_execution.status == LoopRunStatus::Pass => {
-                    self.db.update_loop_spec_status(
+                None if final_execution.status == GraphRunStatus::Pass => {
+                    self.db.update_graph_spec_status(
                         &spec.id,
-                        LoopSpecStatus::Completed,
+                        GraphSpecStatus::Completed,
                         None,
                         Some(chrono::Utc::now()),
                     )?;
@@ -2447,17 +2475,17 @@ impl LoopEngine {
                                 &blocker,
                             )?;
                         }
-                        self.db.update_loop_spec_status(
+                        self.db.update_graph_spec_status(
                             &spec.id,
-                            LoopSpecStatus::Failed,
+                            GraphSpecStatus::Failed,
                             None,
                             Some(chrono::Utc::now()),
                         )?;
                         return Ok(SpecExecutionOutcome::Blocked(blocker));
                     }
-                    self.db.update_loop_spec_status(
+                    self.db.update_graph_spec_status(
                         &spec.id,
-                        LoopSpecStatus::Failed,
+                        GraphSpecStatus::Failed,
                         None,
                         Some(chrono::Utc::now()),
                     )?;
@@ -2471,11 +2499,11 @@ impl LoopEngine {
     /// leaves no blocker anywhere a human can see unless something writes
     /// one — see the module-level defect this closes. Writes a derived
     /// blocker onto the terminating run's `output.blocker`, the exact key
-    /// `loop_run_blocker` (daemon/handler.rs) already reads for `loop_list`
-    /// and `loop_get`'s `blocked`/`blocker` fields, so no reader needs to
+    /// `graph_run_blocker` (daemon/handler.rs) already reads for `graph_list`
+    /// and `graph_get`'s `blocked`/`blocker` fields, so no reader needs to
     /// change. Never invoked for a PASSING termination (the normal, correct
     /// end of a spec — see `Check committed`) and never overwrites a
-    /// blocker `loop_report_blocker` already recorded, since that text is
+    /// blocker `graph_report_blocker` already recorded, since that text is
     /// more specific than anything derived here.
     fn record_terminal_blocker(
         &self,
@@ -2500,7 +2528,7 @@ impl LoopEngine {
             None => output = serde_json::json!({ "blocker": blocker }),
         }
         self.db
-            .update_loop_run_result(run_id, final_execution.status, Some(&output), None)?;
+            .update_graph_run_result(run_id, final_execution.status, Some(&output), None)?;
         Ok(())
     }
 
@@ -2514,7 +2542,7 @@ impl LoopEngine {
     fn set_run_blocker(
         &self,
         run_id: &str,
-        status: LoopRunStatus,
+        status: GraphRunStatus,
         output: &Value,
         blocker: &str,
     ) -> Result<()> {
@@ -2526,7 +2554,7 @@ impl LoopEngine {
             None => merged = serde_json::json!({ "blocker": blocker }),
         }
         self.db
-            .update_loop_run_result(run_id, status, Some(&merged), None)?;
+            .update_graph_run_result(run_id, status, Some(&merged), None)?;
         Ok(())
     }
 
@@ -2538,9 +2566,9 @@ impl LoopEngine {
     /// returns `None` immediately.
     ///
     /// A genuine failure increments the spec's own persisted
-    /// `cross_run_attempts` counter (`loop_specs.cross_run_attempts`) —
+    /// `cross_run_attempts` counter (`graph_specs.cross_run_attempts`) —
     /// unlike the per-node `iterations` map `run_spec` builds fresh on every
-    /// call, this survives `loop_reset`, a relaunch, and a daemon restart,
+    /// call, this survives `graph_reset`, a relaunch, and a daemon restart,
     /// which is the entire point: an unsatisfiable spec must not get a
     /// fresh budget every time an operator resets and relaunches after a
     /// quota failure. Once the count reaches `self.spec_attempt_limit`,
@@ -2550,19 +2578,19 @@ impl LoopEngine {
     /// instead of `Failed`.
     fn record_spec_attempt(
         &self,
-        spec: &LoopSpec,
+        spec: &GraphSpec,
         summary: &str,
         is_infra_failure: bool,
     ) -> Result<Option<String>> {
         if is_infra_failure {
             return Ok(None);
         }
-        let attempts = self.db.increment_loop_spec_cross_run_attempts(&spec.id)?;
+        let attempts = self.db.increment_graph_spec_cross_run_attempts(&spec.id)?;
         if (attempts as usize) < self.spec_attempt_limit {
             return Ok(None);
         }
         Ok(Some(format!(
-            "Spec '{}' failed {} time(s) across separate loop executions (limit {}); last \
+            "Spec '{}' failed {} time(s) across separate graph executions (limit {}); last \
              failure: {}",
             spec.name, attempts, self.spec_attempt_limit, summary
         )))
@@ -2575,15 +2603,15 @@ impl LoopEngine {
     /// Every member receives the exact same `previous_output` (the same
     /// input, in parallel — the defining shape of an ensemble). Concurrency
     /// is bounded by `self.ensemble_concurrency`, a semaphore shared across
-    /// every loop this engine drives, so an 8-member ensemble queues past the
+    /// every graph this engine drives, so an 8-member ensemble queues past the
     /// cap rather than spawning all 8 processes at once.
     #[allow(clippy::too_many_arguments)]
     async fn execute_ensemble(
         &self,
-        lp: &crate::domain::loops::Loop,
-        spec: &LoopSpec,
+        lp: &crate::domain::graphs::Graph,
+        spec: &GraphSpec,
         details: &EnsembleDetails,
-        nodes_by_id: &HashMap<&str, &LoopNode>,
+        nodes_by_id: &HashMap<&str, &GraphNode>,
         previous_output: Option<&Value>,
         iteration: usize,
         workdir: &str,
@@ -2634,18 +2662,18 @@ impl LoopEngine {
 
         // CM15: every member node's CONFIG (platform/model/prompt/timeout/…) is
         // read fresh here, once, before any member task is spawned — so a
-        // loop_update_ensemble between two dispatches of this step lands on the
+        // graph_update_ensemble between two dispatches of this step lands on the
         // second (FR2), and this dispatch can never see a half-applied member
         // set (NFR3). See the load-point comment in run_spec's
         // SpecCursor::Ensemble arm. `nodes_by_id` (launch snapshot) is still used
         // for the commit-rights roster below because an ensemble member's
-        // commit_rights cannot change on a running loop — loop_update_node
-        // refuses ensemble-owned nodes and loop_update_ensemble has no such field.
-        let mut member_nodes: HashMap<String, LoopNode> = HashMap::new();
+        // commit_rights cannot change on a running graph — graph_update_node
+        // refuses ensemble-owned nodes and graph_update_ensemble has no such field.
+        let mut member_nodes: HashMap<String, GraphNode> = HashMap::new();
         for member in &details.members {
             let n = self
                 .db
-                .get_loop_node(&member.node_id)
+                .get_graph_node(&member.node_id)
                 .map_err(|e| {
                     anyhow!(
                         "Ensemble member node '{}' lookup failed: {e}",
@@ -2680,12 +2708,12 @@ impl LoopEngine {
                 Some(member.platform.as_str()),
                 member.model.as_deref(),
             );
-            self.db.insert_loop_run(&LoopNodeRun {
+            self.db.insert_graph_run(&GraphNodeRun {
                 id: run_id.clone(),
-                loop_id: lp.id.clone(),
+                graph_id: lp.id.clone(),
                 spec_id: spec.id.clone(),
                 node_id: node.id.clone(),
-                status: LoopRunStatus::Running,
+                status: GraphRunStatus::Running,
                 input: previous_output.cloned(),
                 output: None,
                 started_at: chrono::Utc::now(),
@@ -2702,7 +2730,7 @@ impl LoopEngine {
                 let member_platform = member.platform.as_str();
                 let member_model = member.model.as_deref().unwrap_or("");
                 tracing::info!(
-                    loop_id = %lp.id,
+                    graph_id = %lp.id,
                     spec_id = %spec.id,
                     node_id = %node.id,
                     node = %node.name,
@@ -2771,8 +2799,8 @@ impl LoopEngine {
                                 &all_node_names,
                             )
                             .await?;
-                            let run = db.get_loop_run(&member_run_id)?.ok_or_else(|| {
-                                anyhow!("Loop run '{}' not found after execution.", member_run_id)
+                            let run = db.get_graph_run(&member_run_id)?.ok_or_else(|| {
+                                anyhow!("Graph run '{}' not found after execution.", member_run_id)
                             })?;
                             if is_infra_crash(
                                 &node,
@@ -2814,8 +2842,8 @@ impl LoopEngine {
                             ensemble_id = %ensemble_id,
                             "ensemble member run completed"
                         );
-                        if run.status == LoopRunStatus::Running {
-                            let _ = db.update_loop_run_result(
+                        if run.status == GraphRunStatus::Running {
+                            let _ = db.update_graph_run_result(
                                 &final_run_id,
                                 execution.status,
                                 Some(&execution.output),
@@ -2831,16 +2859,16 @@ impl LoopEngine {
                         }
                     }
                     // A DB error (or other hard error) from within the retry
-                    // loop — reuse the finalized row output if there is one.
+                    // graph — reuse the finalized row output if there is one.
                     Ok(Err(error)) => {
                         let output = db
-                            .get_active_loop_run_for_node(&node.id)
+                            .get_active_graph_run_for_node(&node.id)
                             .ok()
                             .flatten()
                             .and_then(|run| run.output)
                             .unwrap_or_else(|| serde_json::json!({ "error": error.to_string() }));
                         NodeExecution {
-                            status: LoopRunStatus::Fail,
+                            status: GraphRunStatus::Fail,
                             output,
                             summary: format!("Ensemble member '{}' failed: {error}", node.name),
                         }
@@ -2853,11 +2881,11 @@ impl LoopEngine {
                     // member caught mid-backoff has no live run and is simply
                     // recorded as failed.
                     Err(_elapsed) => {
-                        if let Ok(Some(run)) = db.get_active_loop_run_for_node(&node.id) {
+                        if let Ok(Some(run)) = db.get_active_graph_run_for_node(&node.id) {
                             terminate_run_row(&db, &run, "ensemble straggler timeout");
                         }
                         NodeExecution {
-                            status: LoopRunStatus::Fail,
+                            status: GraphRunStatus::Fail,
                             output: serde_json::json!({
                                 "kind": "agent",
                                 "node_id": node.id,
@@ -2895,7 +2923,7 @@ impl LoopEngine {
                     member.node_id
                 )
             })?;
-            let status_label = if execution.status == LoopRunStatus::Pass {
+            let status_label = if execution.status == GraphRunStatus::Pass {
                 passed += 1;
                 "pass"
             } else {
@@ -2915,9 +2943,9 @@ impl LoopEngine {
         }
 
         let join_status = if passed >= ensemble.min_pass {
-            LoopRunStatus::Pass
+            GraphRunStatus::Pass
         } else {
-            LoopRunStatus::Fail
+            GraphRunStatus::Fail
         };
         let join_output = serde_json::json!({
             "kind": "quorum",
@@ -2934,7 +2962,7 @@ impl LoopEngine {
             summary: format!(
                 "Ensemble '{}' {} ({}/{} passed).",
                 ensemble.name,
-                if join_status == LoopRunStatus::Pass {
+                if join_status == GraphRunStatus::Pass {
                     "passed"
                 } else {
                     "failed"
@@ -2965,9 +2993,9 @@ impl LoopEngine {
             }
         }
 
-        self.db.insert_loop_run(&LoopNodeRun {
+        self.db.insert_graph_run(&GraphNodeRun {
             id: uuid::Uuid::new_v4().to_string(),
-            loop_id: lp.id.clone(),
+            graph_id: lp.id.clone(),
             spec_id: spec.id.clone(),
             node_id: ensemble.join_node_id.clone(),
             status: execution.status,
@@ -2998,9 +3026,9 @@ impl LoopEngine {
     #[allow(clippy::too_many_arguments)]
     async fn run_ensemble_member(
         &self,
-        lp: &crate::domain::loops::Loop,
-        spec: &LoopSpec,
-        node: &LoopNode,
+        lp: &crate::domain::graphs::Graph,
+        spec: &GraphSpec,
+        node: &GraphNode,
         previous_output: Option<&Value>,
         iteration: usize,
         workdir: &str,
@@ -3011,12 +3039,12 @@ impl LoopEngine {
         let run_id = uuid::Uuid::new_v4().to_string();
         // CB43: member run — resolved from the node config at dispatch.
         let (executed_platform, executed_model) = executed_pair_for_node(node);
-        self.db.insert_loop_run(&LoopNodeRun {
+        self.db.insert_graph_run(&GraphNodeRun {
             id: run_id.clone(),
-            loop_id: lp.id.clone(),
+            graph_id: lp.id.clone(),
             spec_id: spec.id.clone(),
             node_id: node.id.clone(),
-            status: LoopRunStatus::Running,
+            status: GraphRunStatus::Running,
             input: previous_output.cloned(),
             output: None,
             started_at: chrono::Utc::now(),
@@ -3062,8 +3090,8 @@ impl LoopEngine {
                         &all_node_names,
                     )
                     .await?;
-                    let run = db.get_loop_run(&member_run_id)?.ok_or_else(|| {
-                        anyhow!("Loop run '{}' not found after execution.", member_run_id)
+                    let run = db.get_graph_run(&member_run_id)?.ok_or_else(|| {
+                        anyhow!("Graph run '{}' not found after execution.", member_run_id)
                     })?;
                     if is_infra_crash(
                         &node,
@@ -3108,8 +3136,8 @@ impl LoopEngine {
 
         let result = match outcome {
             Ok(Ok((execution, run, final_run_id, no_verdict))) => {
-                let execution = if run.status == LoopRunStatus::Running {
-                    let _ = db.update_loop_run_result(
+                let execution = if run.status == GraphRunStatus::Running {
+                    let _ = db.update_graph_run_result(
                         &final_run_id,
                         execution.status,
                         Some(&execution.output),
@@ -3125,11 +3153,11 @@ impl LoopEngine {
                 };
                 (execution, no_verdict)
             }
-            // A hard error inside the retry loop — the member never produced a
+            // A hard error inside the retry graph — the member never produced a
             // verdict, so the caller moves on to the next one.
             Ok(Err(error)) => (
                 NodeExecution {
-                    status: LoopRunStatus::Fail,
+                    status: GraphRunStatus::Fail,
                     output: serde_json::json!({ "error": error.to_string() }),
                     summary: format!("Ensemble member '{}' failed: {error}", node.name),
                 },
@@ -3138,12 +3166,12 @@ impl LoopEngine {
             // Straggler timeout — the member was killed before it produced a
             // verdict, so the caller moves on to the next one.
             Err(_elapsed) => {
-                if let Ok(Some(run)) = db.get_active_loop_run_for_node(&node.id) {
+                if let Ok(Some(run)) = db.get_active_graph_run_for_node(&node.id) {
                     terminate_run_row(&db, &run, "ensemble straggler timeout");
                 }
                 (
                     NodeExecution {
-                        status: LoopRunStatus::Fail,
+                        status: GraphRunStatus::Fail,
                         output: serde_json::json!({
                             "kind": "agent",
                             "node_id": node.id,
@@ -3165,10 +3193,10 @@ impl LoopEngine {
     #[allow(clippy::too_many_arguments)]
     async fn execute_ensemble_cascade(
         &self,
-        lp: &crate::domain::loops::Loop,
-        spec: &LoopSpec,
+        lp: &crate::domain::graphs::Graph,
+        spec: &GraphSpec,
         details: &EnsembleDetails,
-        nodes_by_id: &HashMap<&str, &LoopNode>,
+        nodes_by_id: &HashMap<&str, &GraphNode>,
         previous_output: Option<&Value>,
         iteration: usize,
         workdir: &str,
@@ -3181,18 +3209,18 @@ impl LoopEngine {
 
         // CM15: every member node's CONFIG (platform/model/prompt/timeout/…) is
         // read fresh here, once, before any member task is spawned — so a
-        // loop_update_ensemble between two dispatches of this step lands on the
+        // graph_update_ensemble between two dispatches of this step lands on the
         // second (FR2), and this dispatch can never see a half-applied member
         // set (NFR3). See the load-point comment in run_spec's
         // SpecCursor::Ensemble arm. `nodes_by_id` (launch snapshot) is still used
         // for the commit-rights roster below because an ensemble member's
-        // commit_rights cannot change on a running loop — loop_update_node
-        // refuses ensemble-owned nodes and loop_update_ensemble has no such field.
-        let mut member_nodes: HashMap<String, LoopNode> = HashMap::new();
+        // commit_rights cannot change on a running graph — graph_update_node
+        // refuses ensemble-owned nodes and graph_update_ensemble has no such field.
+        let mut member_nodes: HashMap<String, GraphNode> = HashMap::new();
         for member in &details.members {
             let n = self
                 .db
-                .get_loop_node(&member.node_id)
+                .get_graph_node(&member.node_id)
                 .map_err(|e| {
                     anyhow!(
                         "Ensemble member node '{}' lookup failed: {e}",
@@ -3242,7 +3270,7 @@ impl LoopEngine {
                         "node_id": member.node_id,
                         "platform": member.platform,
                         "model": member.model,
-                        "status": if join_status == LoopRunStatus::Pass { "pass" } else { "fail" },
+                        "status": if join_status == GraphRunStatus::Pass { "pass" } else { "fail" },
                         "output": execution.output,
                     },
                     "members_tried": details.members.iter().position(|m| m.node_id == member.node_id).unwrap_or(0) + 1,
@@ -3255,7 +3283,7 @@ impl LoopEngine {
                     summary: format!(
                         "Cascade ensemble '{}' {} (member '{}' at position {}).",
                         ensemble.name,
-                        if join_status == LoopRunStatus::Pass {
+                        if join_status == GraphRunStatus::Pass {
                             "passed"
                         } else {
                             "failed"
@@ -3278,9 +3306,9 @@ impl LoopEngine {
                     }
                 }
 
-                self.db.insert_loop_run(&LoopNodeRun {
+                self.db.insert_graph_run(&GraphNodeRun {
                     id: uuid::Uuid::new_v4().to_string(),
-                    loop_id: lp.id.clone(),
+                    graph_id: lp.id.clone(),
                     spec_id: spec.id.clone(),
                     node_id: ensemble.join_node_id.clone(),
                     status: join_execution.status,
@@ -3317,7 +3345,7 @@ impl LoopEngine {
         });
 
         let mut execution = NodeExecution {
-            status: LoopRunStatus::Fail,
+            status: GraphRunStatus::Fail,
             output: join_output,
             summary: format!(
                 "Cascade ensemble '{}' failed: all {} members infra-crashed.",
@@ -3339,9 +3367,9 @@ impl LoopEngine {
             }
         }
 
-        self.db.insert_loop_run(&LoopNodeRun {
+        self.db.insert_graph_run(&GraphNodeRun {
             id: uuid::Uuid::new_v4().to_string(),
-            loop_id: lp.id.clone(),
+            graph_id: lp.id.clone(),
             spec_id: spec.id.clone(),
             node_id: ensemble.join_node_id.clone(),
             status: execution.status,
@@ -3364,10 +3392,10 @@ impl LoopEngine {
     #[allow(clippy::too_many_arguments)]
     async fn execute_ensemble_round_robin(
         &self,
-        lp: &crate::domain::loops::Loop,
-        spec: &LoopSpec,
+        lp: &crate::domain::graphs::Graph,
+        spec: &GraphSpec,
         details: &EnsembleDetails,
-        nodes_by_id: &HashMap<&str, &LoopNode>,
+        nodes_by_id: &HashMap<&str, &GraphNode>,
         previous_output: Option<&Value>,
         iteration: usize,
         workdir: &str,
@@ -3410,18 +3438,18 @@ impl LoopEngine {
 
         // CM15: every member node's CONFIG (platform/model/prompt/timeout/…) is
         // read fresh here, once, before any member task is spawned — so a
-        // loop_update_ensemble between two dispatches of this step lands on the
+        // graph_update_ensemble between two dispatches of this step lands on the
         // second (FR2), and this dispatch can never see a half-applied member
         // set (NFR3). See the load-point comment in run_spec's
         // SpecCursor::Ensemble arm. `nodes_by_id` (launch snapshot) is still used
         // for the commit-rights roster below because an ensemble member's
-        // commit_rights cannot change on a running loop — loop_update_node
-        // refuses ensemble-owned nodes and loop_update_ensemble has no such field.
-        let mut member_nodes: HashMap<String, LoopNode> = HashMap::new();
+        // commit_rights cannot change on a running graph — graph_update_node
+        // refuses ensemble-owned nodes and graph_update_ensemble has no such field.
+        let mut member_nodes: HashMap<String, GraphNode> = HashMap::new();
         for member in &details.members {
             let n = self
                 .db
-                .get_loop_node(&member.node_id)
+                .get_graph_node(&member.node_id)
                 .map_err(|e| {
                     anyhow!(
                         "Ensemble member node '{}' lookup failed: {e}",
@@ -3482,7 +3510,7 @@ impl LoopEngine {
 
             let join_status = execution.status;
             let members_tried = offset + 1;
-            let status_str = if join_status == LoopRunStatus::Pass {
+            let status_str = if join_status == GraphRunStatus::Pass {
                 "pass"
             } else {
                 "fail"
@@ -3516,7 +3544,7 @@ impl LoopEngine {
                 summary: format!(
                     "Round-robin ensemble '{}' {} (member '{}' at position {}).",
                     ensemble.name,
-                    if join_status == LoopRunStatus::Pass {
+                    if join_status == GraphRunStatus::Pass {
                         "passed"
                     } else {
                         "failed"
@@ -3539,9 +3567,9 @@ impl LoopEngine {
                 }
             }
 
-            self.db.insert_loop_run(&LoopNodeRun {
+            self.db.insert_graph_run(&GraphNodeRun {
                 id: uuid::Uuid::new_v4().to_string(),
-                loop_id: lp.id.clone(),
+                graph_id: lp.id.clone(),
                 spec_id: spec.id.clone(),
                 node_id: ensemble.join_node_id.clone(),
                 status: join_execution.status,
@@ -3573,7 +3601,7 @@ impl LoopEngine {
         });
 
         let mut execution = NodeExecution {
-            status: LoopRunStatus::Fail,
+            status: GraphRunStatus::Fail,
             output: join_output,
             summary: format!(
                 "Round-robin ensemble '{}' failed: all {} members infra-crashed.",
@@ -3595,9 +3623,9 @@ impl LoopEngine {
             }
         }
 
-        self.db.insert_loop_run(&LoopNodeRun {
+        self.db.insert_graph_run(&GraphNodeRun {
             id: uuid::Uuid::new_v4().to_string(),
-            loop_id: lp.id.clone(),
+            graph_id: lp.id.clone(),
             spec_id: spec.id.clone(),
             node_id: ensemble.join_node_id.clone(),
             status: execution.status,
@@ -3620,9 +3648,9 @@ impl LoopEngine {
     #[allow(clippy::too_many_arguments)]
     async fn execute_node(
         &self,
-        lp: &crate::domain::loops::Loop,
-        spec: &LoopSpec,
-        node: &LoopNode,
+        lp: &crate::domain::graphs::Graph,
+        spec: &GraphSpec,
+        node: &GraphNode,
         previous_output: Option<&Value>,
         spec_start_head: Option<&str>,
         spec_committed_head: Option<&str>,
@@ -3634,7 +3662,7 @@ impl LoopEngine {
         all_node_names: &[String],
     ) -> Result<NodeExecution> {
         match node.kind {
-            LoopNodeKind::Check => {
+            GraphNodeKind::Check => {
                 execute_check_node(
                     &self.db,
                     run_id,
@@ -3647,8 +3675,8 @@ impl LoopEngine {
                 )
                 .await
             }
-            LoopNodeKind::Gate => execute_gate_node(node, previous_output),
-            LoopNodeKind::Agent => {
+            GraphNodeKind::Gate => execute_gate_node(node, previous_output),
+            GraphNodeKind::Agent => {
                 execute_agent_node(
                     &self.db,
                     lp,
@@ -3669,11 +3697,11 @@ impl LoopEngine {
             // detects the fan-out into its ensemble before this would ever be
             // called and runs `execute_ensemble` instead. This arm exists
             // only so the match stays exhaustive against future callers.
-            LoopNodeKind::Join => bail!(
+            GraphNodeKind::Join => bail!(
                 "Quorum node '{}' cannot execute directly; it only runs as part of ensemble fan-out.",
                 node.name
             ),
-            LoopNodeKind::Router => {
+            GraphNodeKind::Router => {
                 execute_router_node(&self.db, node, previous_output, run_id, workdir).await
             }
         }
@@ -3683,47 +3711,47 @@ impl LoopEngine {
     /// one recorded, and finalization of its DB row as `Fail` so it stops
     /// showing up as `running`. Every abnormal end that abandons a node run
     /// without letting it finish on its own — a stale row from a crashed
-    /// prior attempt, `loop_pause`, `loop_reset` of a running spec, or this
+    /// prior attempt, `graph_pause`, `graph_reset` of a running spec, or this
     /// run failing elsewhere — goes through here. A no-op beyond the
     /// status/summary update if `run` never got a pid recorded (e.g. a gate
     /// node, or an agent/check node that hadn't finished spawning yet).
-    fn terminate_run(&self, run: &LoopNodeRun, reason: &str) {
+    fn terminate_run(&self, run: &GraphNodeRun, reason: &str) {
         terminate_run_row(&self.db, run, reason);
     }
 
-    fn is_paused(&self, loop_id: &str) -> Result<bool> {
+    fn is_paused(&self, graph_id: &str) -> Result<bool> {
         Ok(self
             .db
-            .get_loop(loop_id)?
-            .is_some_and(|lp| lp.status == LoopStatus::Paused))
+            .get_graph(graph_id)?
+            .is_some_and(|lp| lp.status == GraphStatus::Paused))
     }
 
-    fn is_pausing(&self, loop_id: &str) -> Result<bool> {
+    fn is_pausing(&self, graph_id: &str) -> Result<bool> {
         Ok(self
             .db
-            .get_loop(loop_id)?
-            .is_some_and(|lp| lp.status == LoopStatus::Pausing))
+            .get_graph(graph_id)?
+            .is_some_and(|lp| lp.status == GraphStatus::Pausing))
     }
 
-    /// Fail `loop_id`, sweeping every run still `running` under it — but
+    /// Fail `graph_id`, sweeping every run still `running` under it — but
     /// only when `dispatch_started_at` (this call's claimed generation, from
-    /// `run_loop_dispatch`'s own atomic claim) still matches the loop's
+    /// `run_graph_dispatch`'s own atomic claim) still matches the graph's
     /// current `started_at`. A mismatch means a newer dispatch has since
-    /// claimed the loop (a reset + relaunch raced this one), so this call is
+    /// claimed the graph (a reset + relaunch raced this one), so this call is
     /// itself the stale one: it must not flip status out from under the
-    /// fresher dispatch, and — critically — must not sweep `list_running_loop_runs`,
+    /// fresher dispatch, and — critically — must not sweep `list_running_graph_runs`,
     /// which would otherwise terminate that fresher dispatch's entirely
     /// healthy runs (the 2026-08-05 incident this guards against). `None`
     /// skips the check (the two catch-all call sites in
     /// `start_background_run`/`resume_background` have no captured
     /// generation to compare, since the error they're reacting to already
-    /// unwound out of `run_loop_dispatch`'s scope) — decision-4's broadened
+    /// unwound out of `run_graph_dispatch`'s scope) — decision-4's broadened
     /// `run_was_terminated_out_of_band` check is what keeps a stale run's
     /// completion from reaching either of those paths in the first place.
     /// CB42: tear down a sandboxed run's worktree/branch after its final
     /// status is written. Takes `Option` so the completed and failed paths
     /// share it; `None` is a no-op. A teardown failure never changes the
-    /// loop's status — it is recorded on the sandbox row by
+    /// graph's status — it is recorded on the sandbox row by
     /// `teardown_sandbox_at_end`, never silent.
     async fn teardown_sandbox_after_final_status(&self, sandbox: Option<Sandbox>, reason: String) {
         let Some(sb) = sandbox else { return };
@@ -3744,50 +3772,58 @@ impl LoopEngine {
         crate::domain::sandbox::teardown_sandbox_at_end(&self.db, &row, &reason).await;
     }
 
-    async fn fail_loop(
+    async fn fail_graph(
         &self,
-        loop_id: &str,
+        graph_id: &str,
         dispatch_started_at: Option<chrono::DateTime<chrono::Utc>>,
         spec_name: Option<&str>,
         summary: &str,
     ) -> Result<()> {
         if let Some(expected) = dispatch_started_at {
-            let current_started_at = self.db.get_loop(loop_id)?.and_then(|lp| lp.started_at);
+            let current_started_at = self.db.get_graph(graph_id)?.and_then(|lp| lp.started_at);
             let still_current =
                 current_started_at.is_some_and(|at| at.timestamp() == expected.timestamp());
             if !still_current {
                 tracing::info!(
-                    "Loop '{}' failure from a stale dispatch (claimed at {}) ignored — a newer \
+                    "Graph '{}' failure from a stale dispatch (claimed at {}) ignored — a newer \
                      dispatch has since taken over; this attempt's own run row already records \
                      its own outcome.",
-                    loop_id,
+                    graph_id,
                     expected.to_rfc3339()
                 );
                 return Ok(());
             }
         }
 
-        self.db
-            .update_loop_status(loop_id, LoopStatus::Failed, None, Some(chrono::Utc::now()))?;
+        self.db.update_graph_status(
+            graph_id,
+            GraphStatus::Failed,
+            None,
+            Some(chrono::Utc::now()),
+        )?;
         // Resolve the human-readable ending node name BEFORE sweeping the
         // running runs below — afterwards there is nothing left to resolve.
-        let ending_node = self.ending_node_name(loop_id, spec_name);
+        let ending_node = self.ending_node_name(graph_id, spec_name);
         // B12 catch-all: whatever hard-error path got us here (a node
         // timeout already kills its own process before bubbling up, but a
         // DB error or any other error class reaching this point wouldn't
         // have), make sure nothing is left running under this now-failed
-        // loop. Safe to sweep every run still `running` under `loop_id`
+        // graph. Safe to sweep every run still `running` under `graph_id`
         // unscoped: the generation check above already established that no
-        // newer dispatch has claimed the loop since this one did, so
+        // newer dispatch has claimed the graph since this one did, so
         // anything still `running` here can only belong to this dispatch.
-        for run in self.db.list_running_loop_runs(loop_id).unwrap_or_default() {
-            self.terminate_run(&run, "loop run failed");
+        for run in self
+            .db
+            .list_running_graph_runs(graph_id)
+            .unwrap_or_default()
+        {
+            self.terminate_run(&run, "graph run failed");
         }
 
         // Fire `on_failed` hooks if any are registered.
-        if let Ok(Some(lp)) = self.db.get_loop(loop_id) {
+        if let Ok(Some(lp)) = self.db.get_graph(graph_id) {
             let ctx = HookContext {
-                loop_name: &lp.name,
+                graph_name: &lp.name,
                 workdir: &lp.workdir,
                 completed_specs: &[],
                 spec_name: None,
@@ -3795,71 +3831,71 @@ impl LoopEngine {
                 blocker: Some(summary),
                 node_name: ending_node.as_deref(),
             };
-            self.fire_hooks(&lp, LoopHookEvent::OnFailed, &ctx).await;
+            self.fire_hooks(&lp, GraphHookEvent::OnFailed, &ctx).await;
         }
 
-        let loop_name = self
+        let graph_name = self
             .db
-            .get_loop(loop_id)?
+            .get_graph(graph_id)?
             .map(|lp| lp.name)
-            .unwrap_or_else(|| loop_id.to_string());
-        self.notification_service.notify_loop_finished(
-            &loop_name,
-            LoopFinishOutcome::Failed {
+            .unwrap_or_else(|| graph_id.to_string());
+        self.notification_service.notify_graph_finished(
+            &graph_name,
+            GraphFinishOutcome::Failed {
                 spec_name: spec_name.unwrap_or(summary),
             },
         );
         // CB42: same teardown as the completed path, after the final status
         // and after hooks/notifications. `Paused`/`blocked` runs keep their
-        // sandbox (a resumed loop reuses it).
-        if let Ok(sb) = self.db.get_active_sandbox_for_owner("loop", loop_id) {
+        // sandbox (a resumed graph reuses it).
+        if let Ok(sb) = self.db.get_active_sandbox_for_owner("graph", graph_id) {
             self.teardown_sandbox_after_final_status(sb, format!("failed: {summary}"))
                 .await;
         }
         Ok(())
     }
 
-    /// Notify that `loop_id` has become blocked on a node needing human
-    /// intervention. Called both by the daemon's `loop_report_blocker` tool
-    /// (which owns that state transition itself — pausing the loop,
-    /// recording the blocker on the run) and by [`Self::block_loop`] (C19),
-    /// so there is one notification path for every way a loop can end up
+    /// Notify that `graph_id` has become blocked on a node needing human
+    /// intervention. Called both by the daemon's `graph_report_blocker` tool
+    /// (which owns that state transition itself — pausing the graph,
+    /// recording the blocker on the run) and by [`Self::block_graph`] (C19),
+    /// so there is one notification path for every way a graph can end up
     /// blocked. Also fires `on_blocked` hooks if any are registered.
-    pub fn notify_blocked(&self, loop_id: &str, summary: &str) -> Result<()> {
-        let loop_name = self
+    pub fn notify_blocked(&self, graph_id: &str, summary: &str) -> Result<()> {
+        let graph_name = self
             .db
-            .get_loop(loop_id)?
+            .get_graph(graph_id)?
             .map(|lp| lp.name)
-            .unwrap_or_else(|| loop_id.to_string());
+            .unwrap_or_else(|| graph_id.to_string());
         self.notification_service
-            .notify_loop_finished(&loop_name, LoopFinishOutcome::Blocked { summary });
+            .notify_graph_finished(&graph_name, GraphFinishOutcome::Blocked { summary });
         Ok(())
     }
 
-    /// Fire `on_blocked` hooks for `loop_id` — called after the loop has
+    /// Fire `on_blocked` hooks for `graph_id` — called after the graph has
     /// been transitioned to `Paused` and the blocker recorded. Separated
     /// from [`Self::notify_blocked`] because it needs async I/O. Shares the
-    /// post-transition firing path with [`Self::block_loop`]: both call this
+    /// post-transition firing path with [`Self::block_graph`]: both call this
     /// exactly once per blocker transition, so a blocker never double-fires.
     pub async fn fire_on_blocked_hooks(
         &self,
-        loop_id: &str,
+        graph_id: &str,
         blocker: &str,
         node_name: Option<&str>,
     ) {
         // Clone the owned values the async ctx borrows from out of the
-        // short-lived `get_loop` guard so the ctx can borrow them.
-        let owned: Option<(Loop, String, Option<String>)> =
-            self.db.get_loop(loop_id).ok().flatten().map(|lp| {
+        // short-lived `get_graph` guard so the ctx can borrow them.
+        let owned: Option<(Graph, String, Option<String>)> =
+            self.db.get_graph(graph_id).ok().flatten().map(|lp| {
                 let blocker_owned = blocker.to_string();
                 let node_owned = node_name
                     .map(str::to_string)
-                    .or_else(|| self.ending_node_name(loop_id, None));
+                    .or_else(|| self.ending_node_name(graph_id, None));
                 (lp, blocker_owned, node_owned)
             });
         if let Some((lp, blocker_owned, node_owned)) = owned.as_ref() {
             let ctx = HookContext {
-                loop_name: &lp.name,
+                graph_name: &lp.name,
                 workdir: &lp.workdir,
                 completed_specs: &[],
                 spec_name: None,
@@ -3867,20 +3903,20 @@ impl LoopEngine {
                 blocker: Some(blocker_owned.as_str()),
                 node_name: node_owned.as_deref(),
             };
-            self.fire_hooks(lp, LoopHookEvent::OnBlocked, &ctx).await;
+            self.fire_hooks(lp, GraphHookEvent::OnBlocked, &ctx).await;
         }
     }
 
-    /// Human-readable name of the node that ended the run for `loop_id`:
+    /// Human-readable name of the node that ended the run for `graph_id`:
     /// the first still-`running` row's node name, falling back to
     /// `fallback` (usually the spec name the dispatcher was working) and
     /// finally to the raw node id when the node row is gone. Returns `None`
     /// only when there is no running run and no fallback — callers firing
     /// `on_failed`/`on_blocked` should always have one of the two.
-    fn ending_node_name(&self, loop_id: &str, fallback: Option<&str>) -> Option<String> {
-        if let Ok(runs) = self.db.list_running_loop_runs(loop_id) {
+    fn ending_node_name(&self, graph_id: &str, fallback: Option<&str>) -> Option<String> {
+        if let Ok(runs) = self.db.list_running_graph_runs(graph_id) {
             if let Some(run) = runs.into_iter().next() {
-                if let Ok(Some(node)) = self.db.get_loop_node(&run.node_id) {
+                if let Ok(Some(node)) = self.db.get_graph_node(&run.node_id) {
                     return Some(node.name);
                 }
                 return Some(run.node_id);
@@ -3890,9 +3926,9 @@ impl LoopEngine {
     }
 
     /// Fire `on_spec_completed` hooks for a just-completed spec.
-    pub async fn fire_on_spec_completed_hooks(&self, lp: &Loop, spec: &LoopSpec) {
+    pub async fn fire_on_spec_completed_hooks(&self, lp: &Graph, spec: &GraphSpec) {
         let ctx = HookContext {
-            loop_name: &lp.name,
+            graph_name: &lp.name,
             workdir: &lp.workdir,
             completed_specs: &[],
             spec_name: Some(&spec.name),
@@ -3900,40 +3936,40 @@ impl LoopEngine {
             blocker: None,
             node_name: None,
         };
-        self.fire_hooks(lp, LoopHookEvent::OnSpecCompleted, &ctx)
+        self.fire_hooks(lp, GraphHookEvent::OnSpecCompleted, &ctx)
             .await;
     }
 
-    /// C19: the `Blocked` counterpart to [`Self::fail_loop`] — same
+    /// C19: the `Blocked` counterpart to [`Self::fail_graph`] — same
     /// stale-dispatch guard (a reset + relaunch that's already claimed the
-    /// loop must not be paused out from under it) and the same B12 sweep of
-    /// any run still `running` under `loop_id`, but pauses the loop instead
+    /// graph must not be paused out from under it) and the same B12 sweep of
+    /// any run still `running` under `graph_id`, but pauses the graph instead
     /// of failing it and fires [`Self::notify_blocked`] instead of the
-    /// ordinary failed-loop notification. This is what a spec that exceeded
+    /// ordinary failed-graph notification. This is what a spec that exceeded
     /// its persisted cross-run attempt budget routes through: unlike
     /// `Failed`, `Paused` is not accepted by a pending autorun
-    /// ([`crate::domain::loops::Loop::is_autorun_due`] already excludes it
-    /// unless `paused_by_reconciliation`, which `update_loop_status` always
-    /// clears) and is refused by `loop_run` once it carries a blocker (see
-    /// the daemon's `loop_run` tool) — exactly the "not started again until
-    /// a human clears it" FR4 asks for, reusing the loop_report_blocker
+    /// ([`crate::domain::graphs::Graph::is_autorun_due`] already excludes it
+    /// unless `paused_by_reconciliation`, which `update_graph_status` always
+    /// clears) and is refused by `graph_run` once it carries a blocker (see
+    /// the daemon's `graph_run` tool) — exactly the "not started again until
+    /// a human clears it" FR4 asks for, reusing the graph_report_blocker
     /// mechanism wholesale rather than inventing a parallel one.
-    async fn block_loop(
+    async fn block_graph(
         &self,
-        loop_id: &str,
+        graph_id: &str,
         dispatch_started_at: Option<chrono::DateTime<chrono::Utc>>,
         blocker: &str,
     ) -> Result<()> {
         if let Some(expected) = dispatch_started_at {
-            let current_started_at = self.db.get_loop(loop_id)?.and_then(|lp| lp.started_at);
+            let current_started_at = self.db.get_graph(graph_id)?.and_then(|lp| lp.started_at);
             let still_current =
                 current_started_at.is_some_and(|at| at.timestamp() == expected.timestamp());
             if !still_current {
                 tracing::info!(
-                    "Loop '{}' block from a stale dispatch (claimed at {}) ignored — a newer \
+                    "Graph '{}' block from a stale dispatch (claimed at {}) ignored — a newer \
                      dispatch has since taken over; this attempt's own run row already records \
                      its own outcome.",
-                    loop_id,
+                    graph_id,
                     expected.to_rfc3339()
                 );
                 return Ok(());
@@ -3941,32 +3977,36 @@ impl LoopEngine {
         }
 
         // Resolve the ending node BEFORE sweeping running runs, then share
-        // the single post-transition blocked helper with `loop_report_blocker`
+        // the single post-transition blocked helper with `graph_report_blocker`
         // (notification + exactly one `on_blocked` firing per transition).
-        let ending_node = self.ending_node_name(loop_id, None);
+        let ending_node = self.ending_node_name(graph_id, None);
         self.db
-            .update_loop_status(loop_id, LoopStatus::Paused, None, None)?;
-        for run in self.db.list_running_loop_runs(loop_id).unwrap_or_default() {
+            .update_graph_status(graph_id, GraphStatus::Paused, None, None)?;
+        for run in self
+            .db
+            .list_running_graph_runs(graph_id)
+            .unwrap_or_default()
+        {
             self.terminate_run(&run, "spec exceeded cross-run attempt budget");
         }
-        self.notify_blocked(loop_id, blocker)?;
-        self.fire_on_blocked_hooks(loop_id, blocker, ending_node.as_deref())
+        self.notify_blocked(graph_id, blocker)?;
+        self.fire_on_blocked_hooks(graph_id, blocker, ending_node.as_deref())
             .await;
         Ok(())
     }
 
-    /// `(done, total)` specs for `loop_id`'s current run — the loop's bound
+    /// `(done, total)` specs for `graph_id`'s current run — the graph's bound
     /// specs, or `queue_id`'s members when this run is drawing from a queue.
     /// `done` counts specs already `completed`; skipped/pending/running/failed
     /// specs count toward `total` but not `done`.
-    fn spec_progress(&self, loop_id: &str, queue_id: Option<&str>) -> Result<(usize, usize)> {
+    fn spec_progress(&self, graph_id: &str, queue_id: Option<&str>) -> Result<(usize, usize)> {
         match queue_id {
             Some(queue_id) => {
                 let ids = self.db.list_queue_member_spec_ids(queue_id)?;
                 let mut done = 0;
                 for id in &ids {
-                    if let Some(spec) = self.db.get_loop_spec(id)? {
-                        if spec.status == LoopSpecStatus::Completed {
+                    if let Some(spec) = self.db.get_graph_spec(id)? {
+                        if spec.status == GraphSpecStatus::Completed {
                             done += 1;
                         }
                     }
@@ -3974,10 +4014,10 @@ impl LoopEngine {
                 Ok((done, ids.len()))
             }
             None => {
-                let specs = self.db.list_loop_specs(loop_id)?;
+                let specs = self.db.list_graph_specs(graph_id)?;
                 let done = specs
                     .iter()
-                    .filter(|spec| spec.status == LoopSpecStatus::Completed)
+                    .filter(|spec| spec.status == GraphSpecStatus::Completed)
                     .count();
                 Ok((done, specs.len()))
             }
@@ -3990,8 +4030,8 @@ impl LoopEngine {
     /// coming next.
     fn notify_spec_completed(
         &self,
-        lp: &crate::domain::loops::Loop,
-        spec: &LoopSpec,
+        lp: &crate::domain::graphs::Graph,
+        spec: &GraphSpec,
         queue_id: Option<&str>,
     ) -> Result<()> {
         let (done, total) = self.spec_progress(&lp.id, queue_id)?;
@@ -4007,12 +4047,12 @@ impl LoopEngine {
     }
 
     /// Name of the next spec this run will work: the queue's next pending
-    /// member for a queue run, else the loop's first
+    /// member for a queue run, else the graph's first
     /// `running`-or-`pending`-or-`interrupted` bound spec in position order.
     /// `None` when nothing is left to do.
     fn first_pending_spec_name(
         &self,
-        loop_id: &str,
+        graph_id: &str,
         queue_id: Option<&str>,
     ) -> Result<Option<String>> {
         match queue_id {
@@ -4020,18 +4060,18 @@ impl LoopEngine {
                 let Some(spec_id) = self.db.queue_next_pending_spec_id(queue_id)? else {
                     return Ok(None);
                 };
-                Ok(self.db.get_loop_spec(&spec_id)?.map(|spec| spec.name))
+                Ok(self.db.get_graph_spec(&spec_id)?.map(|spec| spec.name))
             }
             None => {
-                let specs = self.db.list_loop_specs(loop_id)?;
+                let specs = self.db.list_graph_specs(graph_id)?;
                 let next = specs
                     .iter()
-                    .find(|spec| spec.status == LoopSpecStatus::Running)
+                    .find(|spec| spec.status == GraphSpecStatus::Running)
                     .or_else(|| {
                         specs.iter().find(|spec| {
                             matches!(
                                 spec.status,
-                                LoopSpecStatus::Pending | LoopSpecStatus::Interrupted
+                                GraphSpecStatus::Pending | GraphSpecStatus::Interrupted
                             )
                         })
                     });
@@ -4041,7 +4081,7 @@ impl LoopEngine {
     }
 }
 
-fn read_infra_config(node: &LoopNode) -> (u32, u64, u64) {
+fn read_infra_config(node: &GraphNode) -> (u32, u64, u64) {
     let retry_limit = node
         .config
         .get("infra_retry_limit")
@@ -4077,14 +4117,14 @@ fn merge_attempt_marker(output: &Value, attempt: u32, is_crash: bool) -> Value {
 /// that never filed a verdict is infrastructure at any duration, with any
 /// output, at any exit code.
 ///
-/// Shared by the sequential node path ([`LoopEngine::run_spec`]) and, since
-/// B26, by ensemble members ([`LoopEngine::execute_ensemble`]) — both use the
+/// Shared by the sequential node path ([`GraphEngine::run_spec`]) and, since
+/// B26, by ensemble members ([`GraphEngine::execute_ensemble`]) — both use the
 /// identical rule so a crashed member is retried exactly like a lone node and
 /// only counts as failed for the join once its retries are exhausted.
 fn is_infra_crash(
-    node: &LoopNode,
+    node: &GraphNode,
     execution: &NodeExecution,
-    run: &LoopNodeRun,
+    run: &GraphNodeRun,
     attempt: u32,
     retry_limit: u32,
     crash_max_secs: u64,
@@ -4094,20 +4134,20 @@ fn is_infra_crash(
 
 /// The infra-crash *shape*: every condition [`is_infra_crash`] tests except
 /// the `attempt < retry_limit` retry gate — the run never filed a verdict.
-/// Checked again after the retry loop settles so that a retry-exhausted
-/// infra crash (CM2: route `Break`) is told apart from a genuine negative
+/// Checked again after the retry graph settles so that a retry-exhausted
+/// infra crash (CM2: route `Error`) is told apart from a genuine negative
 /// verdict or an attempt that recovered on retry (route `Fail`/`Pass`),
 /// neither of which has this shape.
 ///
-/// CM13: A run that never called `loop_complete_node` or
-/// `loop_report_blocker` is infrastructure failure — regardless of
+/// CM13: A run that never called `graph_complete_node` or
+/// `graph_report_blocker` is infrastructure failure — regardless of
 /// duration, output, or exit code. The single fact is whether the run
 /// self-reported; everything else (time, stdout, exit code) is noise that
 /// let three different failures escape classification on 2026-09-03.
 fn is_infra_crash_shape(
-    node: &LoopNode,
+    node: &GraphNode,
     execution: &NodeExecution,
-    run: &LoopNodeRun,
+    run: &GraphNodeRun,
     _crash_max_secs: u64, // CM13: unused; kept for API compatibility
 ) -> bool {
     let self_reported = run_self_reported(run);
@@ -4119,7 +4159,7 @@ fn is_infra_crash_shape(
     // CM13: removed `!no_output`, `!no_report`, `execution.status == Fail`,
     // and the time check. A run that never reported is infrastructure at
     // any duration, with any output, at any exit code.
-    !self_reported && !permanent && node.kind == LoopNodeKind::Agent
+    !self_reported && !permanent && node.kind == GraphNodeKind::Agent
 }
 
 /// C19: whether `output` reflects an infrastructure failure — a crash,
@@ -4128,7 +4168,7 @@ fn is_infra_crash_shape(
 /// markers [`is_infra_crash`]/`agent_finished_execution` already write
 /// (`infra_crash`, `no_output`, `failure_kind: "no_report"`,
 /// `failure_kind: "unreported"`) instead of re-deriving the distinction —
-/// see [`LoopEngine::record_spec_attempt`], the only caller: an infra
+/// see [`GraphEngine::record_spec_attempt`], the only caller: an infra
 /// failure never consumes the persisted cross-run attempt budget.
 fn execution_is_infra_failure(output: &Value) -> bool {
     output
@@ -4152,9 +4192,9 @@ fn execution_is_infra_failure(output: &Value) -> bool {
 #[allow(clippy::too_many_arguments)]
 async fn begin_infra_retry(
     db: &Database,
-    lp: &crate::domain::loops::Loop,
-    spec: &LoopSpec,
-    node: &LoopNode,
+    lp: &crate::domain::graphs::Graph,
+    spec: &GraphSpec,
+    node: &GraphNode,
     previous_output: Option<&Value>,
     iteration: i64,
     crashed_run_id: &str,
@@ -4162,9 +4202,9 @@ async fn begin_infra_retry(
     attempt: u32,
     backoff_secs: u64,
 ) -> Result<String> {
-    db.update_loop_run_result(
+    db.update_graph_run_result(
         crashed_run_id,
-        LoopRunStatus::Fail,
+        GraphRunStatus::Fail,
         Some(&merge_attempt_marker(crashed_output, attempt, true)),
         Some(chrono::Utc::now()),
     )?;
@@ -4177,18 +4217,18 @@ async fn begin_infra_retry(
     // its recorded pair (re-resolve from config only if the original has none,
     // e.g. a pre-migration row).
     let (executed_platform, executed_model) = db
-        .get_loop_run(crashed_run_id)
+        .get_graph_run(crashed_run_id)
         .ok()
         .flatten()
         .map(|run| (run.executed_platform, run.executed_model))
         .filter(|(platform, _)| platform.is_some())
         .unwrap_or_else(|| executed_pair_for_node(node));
-    db.insert_loop_run(&LoopNodeRun {
+    db.insert_graph_run(&GraphNodeRun {
         id: run_id.clone(),
-        loop_id: lp.id.clone(),
+        graph_id: lp.id.clone(),
         spec_id: spec.id.clone(),
         node_id: node.id.clone(),
-        status: LoopRunStatus::Running,
+        status: GraphRunStatus::Running,
         input: previous_output.cloned(),
         output: None,
         started_at: chrono::Utc::now(),
@@ -4221,7 +4261,7 @@ async fn execute_shell_command(
         .with_context(|| format!("Failed to spawn command: {command}"))?;
     let pid = child.id();
     if let Some(pid) = pid {
-        let _ = db.set_loop_run_pid(run_id, pid as i64, crate::system::boot_id().as_deref());
+        let _ = db.set_graph_run_pid(run_id, pid as i64, crate::system::boot_id().as_deref());
     }
 
     let stdout_pipe = child.stdout.take().expect("shell_command pipes stdout");
@@ -4274,7 +4314,7 @@ async fn execute_shell_command(
         let partial_stderr = locked_stdout(&stderr_buf);
         let (stdout_snap, _) = truncate_check_output(partial_stdout.trim().to_string());
         let (stderr_snap, _) = truncate_check_output(partial_stderr.trim().to_string());
-        let _ = db.set_loop_run_tail_snapshot(run_id, Some(&stdout_snap), Some(&stderr_snap));
+        let _ = db.set_graph_run_tail_snapshot(run_id, Some(&stdout_snap), Some(&stderr_snap));
         let output = serde_json::json!({
             "kind": "check",
             "command": command,
@@ -4283,14 +4323,14 @@ async fn execute_shell_command(
             "stdout": stdout_snap,
             "stderr": stderr_snap,
         });
-        let _ = db.update_loop_run_result(
+        let _ = db.update_graph_run_result(
             run_id,
-            LoopRunStatus::Fail,
+            GraphRunStatus::Fail,
             Some(&output),
             Some(chrono::Utc::now()),
         );
         return Ok(ShellCommandResult {
-            status: LoopRunStatus::Fail,
+            status: GraphRunStatus::Fail,
             output,
             summary: format!("Command timed out after {timeout_seconds}s."),
             full_stdout: String::new(),
@@ -4323,12 +4363,12 @@ async fn execute_shell_command(
         output_json["truncated"] = serde_json::Value::Bool(true);
     }
 
-    let _ = db.set_loop_run_tail_snapshot(run_id, Some(&stdout), Some(&stderr));
+    let _ = db.set_graph_run_tail_snapshot(run_id, Some(&stdout), Some(&stderr));
 
     let status = if exit_code == 0 {
-        LoopRunStatus::Pass
+        GraphRunStatus::Pass
     } else {
-        LoopRunStatus::Fail
+        GraphRunStatus::Fail
     };
 
     Ok(ShellCommandResult {
@@ -4345,9 +4385,9 @@ async fn execute_shell_command(
 async fn execute_check_node(
     db: &Database,
     run_id: &str,
-    lp: &crate::domain::loops::Loop,
-    spec: &LoopSpec,
-    node: &LoopNode,
+    lp: &crate::domain::graphs::Graph,
+    spec: &GraphSpec,
+    node: &GraphNode,
     spec_start_head: Option<&str>,
     spec_committed_head: Option<&str>,
     workdir: &str,
@@ -4383,11 +4423,11 @@ async fn execute_check_node(
     // match the partial output.
     if result.timed_out {
         let mut output_json = result.output;
-        output_json["loop_id"] = serde_json::json!(lp.id);
+        output_json["graph_id"] = serde_json::json!(lp.id);
         output_json["spec_id"] = serde_json::json!(spec.id);
         output_json["node_id"] = serde_json::json!(node.id);
         return Ok(NodeExecution {
-            status: LoopRunStatus::Fail,
+            status: GraphRunStatus::Fail,
             output: output_json,
             summary: format!(
                 "Check node '{}' timed out after {timeout_seconds}s.",
@@ -4413,9 +4453,9 @@ async fn execute_check_node(
     };
     let passed = evaluate_success_condition(success_condition, exit_code, &combined)?;
 
-    // Build check-node-specific output with loop/spec/node metadata.
+    // Build check-node-specific output with graph/spec/node metadata.
     let mut output_json = result.output;
-    output_json["loop_id"] = serde_json::json!(lp.id);
+    output_json["graph_id"] = serde_json::json!(lp.id);
     output_json["spec_id"] = serde_json::json!(spec.id);
     output_json["node_id"] = serde_json::json!(node.id);
     output_json["success_condition"] = serde_json::json!(success_condition);
@@ -4423,9 +4463,9 @@ async fn execute_check_node(
 
     // Override the status from the success_condition evaluation.
     let status = if passed {
-        LoopRunStatus::Pass
+        GraphRunStatus::Pass
     } else {
-        LoopRunStatus::Fail
+        GraphRunStatus::Fail
     };
 
     Ok(NodeExecution {
@@ -4461,7 +4501,7 @@ fn sized_strategy(
 /// other than an array of strings (key absent, wrong type, non-string
 /// element) is treated as "no pins" — malformed config must never fail a
 /// spawn, exactly like every other loosely-typed node config key.
-fn node_pinned_skills(node: &LoopNode) -> Vec<String> {
+fn node_pinned_skills(node: &GraphNode) -> Vec<String> {
     node.config
         .get("skills")
         .and_then(Value::as_array)
@@ -4502,7 +4542,7 @@ fn render_unresolved_skill_note(name: &str) -> String {
 /// hard dependency for the spawn to proceed at all.
 async fn append_pinned_skills(
     mut prompt: String,
-    node: &LoopNode,
+    node: &GraphNode,
     dynamic_skills: Option<&Arc<crate::dynamic_skills::SkillStore>>,
 ) -> String {
     let names = node_pinned_skills(node);
@@ -4559,19 +4599,19 @@ async fn append_pinned_skills(
 }
 
 /// CM13: the single fact CM13 classifies on — did this run finalize its own
-/// row by calling `loop_complete_node` / `loop_report_blocker`? The run row's
+/// row by calling `graph_complete_node` / `graph_report_blocker`? The run row's
 /// status leaves `Running` only when a report call wrote to it. Routing
 /// (`is_infra_crash_shape`), the ensemble fallthrough (same function), and the
 /// self-reported-result path (`self_reported_execution`) all read this, so the
 /// three can never disagree.
-fn run_self_reported(run: &LoopNodeRun) -> bool {
-    run.status != LoopRunStatus::Running
+fn run_self_reported(run: &GraphNodeRun) -> bool {
+    run.status != GraphRunStatus::Running
 }
 
-/// If the agent finalized its own run row (called `loop_complete_node` /
-/// `loop_report_blocker`), turn that self-reported status into the node's
+/// If the agent finalized its own run row (called `graph_complete_node` /
+/// `graph_report_blocker`), turn that self-reported status into the node's
 /// result; otherwise `None` so the caller uses the process-derived execution.
-fn self_reported_execution(run: Option<&LoopNodeRun>, node: &LoopNode) -> Option<NodeExecution> {
+fn self_reported_execution(run: Option<&GraphNodeRun>, node: &GraphNode) -> Option<NodeExecution> {
     let run = run?;
     if !run_self_reported(run) {
         return None;
@@ -4603,9 +4643,9 @@ fn self_reported_execution(run: Option<&LoopNodeRun>, node: &LoopNode) -> Option
 #[allow(clippy::too_many_arguments)]
 async fn execute_agent_node(
     db: &Arc<Database>,
-    lp: &crate::domain::loops::Loop,
-    spec: &LoopSpec,
-    node: &LoopNode,
+    lp: &crate::domain::graphs::Graph,
+    spec: &GraphSpec,
+    node: &GraphNode,
     previous_output: Option<&Value>,
     run_id: &str,
     workdir: &str,
@@ -4667,7 +4707,7 @@ async fn execute_agent_node(
                 Ok(p) => p,
                 Err(e) => {
                     return Ok(NodeExecution {
-                        status: LoopRunStatus::Fail,
+                        status: GraphRunStatus::Fail,
                         output: serde_json::json!({
                             "failure_kind": "invalid_template",
                             "error": e.to_string(),
@@ -4696,7 +4736,7 @@ async fn execute_agent_node(
             )
             .await?;
 
-            let run = db.get_loop_run(run_id)?;
+            let run = db.get_graph_run(run_id)?;
             // The resumed agent self-reported → route its verdict normally.
             if let Some(reported) = self_reported_execution(run.as_ref(), node) {
                 return Ok(reported);
@@ -4723,7 +4763,7 @@ async fn execute_agent_node(
             // exit (or a spawn failure with no exit code at all) reads as
             // "rejected at spawn" and falls back.
             let exited_zero = execution.output.get("exit_code").and_then(Value::as_i64) == Some(0);
-            let resume_failed_at_spawn = execution.status == LoopRunStatus::Fail
+            let resume_failed_at_spawn = execution.status == GraphRunStatus::Fail
                 && elapsed < crash_max_secs as i64
                 && !no_report
                 && !exited_zero;
@@ -4758,7 +4798,7 @@ async fn execute_agent_node(
         Ok(p) => p,
         Err(e) => {
             return Ok(NodeExecution {
-                status: LoopRunStatus::Fail,
+                status: GraphRunStatus::Fail,
                 output: serde_json::json!({
                     "failure_kind": "invalid_template",
                     "error": e.to_string(),
@@ -4784,7 +4824,7 @@ async fn execute_agent_node(
     )
     .await?;
 
-    if let Some(reported) = self_reported_execution(db.get_loop_run(run_id)?.as_ref(), node) {
+    if let Some(reported) = self_reported_execution(db.get_graph_run(run_id)?.as_ref(), node) {
         return Ok(reported);
     }
     Ok(execution)
@@ -4858,7 +4898,7 @@ enum CliProcessOutcome {
 
 /// Build the CLI command, spawn it, and wait for it (or a timeout) — the
 /// one spawn path shared by every detached single-agent execution the
-/// engine runs, node or hook alike: a loop agent node
+/// engine runs, node or hook alike: a graph agent node
 /// ([`run_agent_process`]) and the `on_completed` hook
 /// ([`run_completion_hook_process`]).
 ///
@@ -4866,7 +4906,7 @@ enum CliProcessOutcome {
 /// `E2BIG` from an oversized argv, binary not found, permission denied) —
 /// callers turn that into their own kind of "failed" record rather than a
 /// hard error, since a spawn failure must never abort anything wider (the
-/// whole loop run, for a node; the loop's already-finalized status, for the
+/// whole graph run, for a node; the graph's already-finalized status, for the
 /// hook).
 ///
 /// A timeout is a different failure class (the process started; it just
@@ -4950,7 +4990,7 @@ async fn spawn_and_wait_cli_process(
 /// Run an agent node's process via [`spawn_and_wait_cli_process`], turning
 /// any failure to build or spawn the process into a failed `NodeExecution`
 /// rather than propagating a hard error — routed through the graph's fail
-/// edge for resilience triage, never aborting the whole loop run.
+/// edge for resilience triage, never aborting the whole graph run.
 ///
 /// A timeout (B28) is likewise a failed `NodeExecution`, not a hard error:
 /// it exceeds `infra_crash_max_seconds` by definition, so it's always a
@@ -5009,7 +5049,7 @@ fn resolved_model_for_run(model_flag: Option<&str>, model: Option<&str>) -> Opti
 /// current config. `Cli::resolve` failure (unknown platform) stores the
 /// configured values as-is rather than dropping them. Check/gate nodes
 /// carry no platform and record `(None, None)`.
-fn executed_pair_for_node(node: &LoopNode) -> (Option<String>, Option<String>) {
+fn executed_pair_for_node(node: &GraphNode) -> (Option<String>, Option<String>) {
     let platform = node
         .config
         .get("platform")
@@ -5065,7 +5105,7 @@ async fn run_agent_process(
     run_id: &str,
     cli: &Cli,
     strategy: &crate::domain::cli_strategy::CliStrategy,
-    node: &LoopNode,
+    node: &GraphNode,
     prompt: &str,
     model: Option<&str>,
     effort: Option<&str>,
@@ -5079,7 +5119,7 @@ async fn run_agent_process(
     // creates no new session to find. When resuming, `session_id`/
     // `pre_session_ids` stay `None` so neither capture path runs.
     if let Some(sid) = resume_session_id {
-        let _ = db.set_loop_run_session_id(run_id, sid);
+        let _ = db.set_graph_run_session_id(run_id, sid);
     }
 
     // Set-at-spawn session id capture (RS1): when the platform accepts a
@@ -5095,7 +5135,7 @@ async fn run_agent_process(
         None
     };
     if let Some(sid) = session_id.as_deref() {
-        let _ = db.set_loop_run_session_id(run_id, sid);
+        let _ = db.set_graph_run_session_id(run_id, sid);
     }
 
     // List-after-run session id capture (RS1 phase 2): for platforms that
@@ -5133,7 +5173,7 @@ async fn run_agent_process(
         resume_session_id,
         trust_workdir,
         |pid| {
-            let _ = db.set_loop_run_pid(run_id, pid as i64, crate::system::boot_id().as_deref());
+            let _ = db.set_graph_run_pid(run_id, pid as i64, crate::system::boot_id().as_deref());
         },
     )
     .await;
@@ -5198,14 +5238,14 @@ async fn run_agent_process(
                     map.insert("model_not_applied".to_string(), notice.clone());
                 }
             }
-            let _ = db.update_loop_run_result(
+            let _ = db.update_graph_run_result(
                 run_id,
-                LoopRunStatus::Fail,
+                GraphRunStatus::Fail,
                 Some(&output),
                 Some(chrono::Utc::now()),
             );
             Ok(NodeExecution {
-                status: LoopRunStatus::Fail,
+                status: GraphRunStatus::Fail,
                 output,
                 summary: format!(
                     "Agent node '{}' timed out after {timeout_minutes}m.",
@@ -5224,7 +5264,7 @@ async fn run_agent_process(
             // its final word — reusing `self_reported_execution`'s own
             // "did it self-report" check (`run.status != Running`) rather
             // than re-deriving it.
-            let run = db.get_loop_run(run_id)?;
+            let run = db.get_graph_run(run_id)?;
             let self_reported = self_reported_execution(run.as_ref(), node).is_some();
             let mut exec = agent_finished_execution(
                 node,
@@ -5268,7 +5308,7 @@ async fn run_agent_process(
 ///
 /// `.agents/` is where MCP server configuration lives, so a harness hitting
 /// this silently loses every tool it needed — including the two calls
-/// (`loop_complete_node`/`loop_report_blocker`) it would need to report that
+/// (`graph_complete_node`/`graph_report_blocker`) it would need to report that
 /// loss. Matches on the *shape* of the refusal (an explicit "not trusted"
 /// verdict alongside project configuration being ignored) rather than this
 /// one CLI's exact sentence, since a different harness or a future wording
@@ -5303,7 +5343,7 @@ fn is_untrusted_workdir_signal(stderr: &str) -> bool {
 /// unconditional `Pass`.
 ///
 /// `self_reported` — whether this run's row already carries a
-/// `loop_complete_node`/`loop_report_blocker` verdict — decides two more
+/// `graph_complete_node`/`graph_report_blocker` verdict — decides two more
 /// things unrelated to `zero_exit_no_output`:
 ///
 /// - `unreported: true` is stamped on the output whenever it's `false`,
@@ -5327,7 +5367,7 @@ fn is_untrusted_workdir_signal(stderr: &str) -> bool {
 /// `"no_report"` in this vocabulary when [`is_untrusted_workdir_signal`]
 /// matches stderr on a `zero_exit_no_output` run (C3).
 fn agent_finished_execution(
-    node: &LoopNode,
+    node: &GraphNode,
     cli: &Cli,
     model: Option<&str>,
     exit_code: i32,
@@ -5361,12 +5401,12 @@ fn agent_finished_execution(
     // Scoped to Agent nodes: a Router node's verdict IS its stdout (it never
     // self-reports by design), so its pass/fail still comes from the
     // exit/output shape below.
-    let verdict_must_be_reported = node.kind == LoopNodeKind::Agent;
+    let verdict_must_be_reported = node.kind == GraphNodeKind::Agent;
     let status =
         if exit_says_pass && !no_report_override && (!verdict_must_be_reported || self_reported) {
-            LoopRunStatus::Pass
+            GraphRunStatus::Pass
         } else {
-            LoopRunStatus::Fail
+            GraphRunStatus::Fail
         };
     let mut output = serde_json::json!({
         "kind": "agent",
@@ -5410,7 +5450,7 @@ fn agent_finished_execution(
     // distinguish "never reported" from "failed at work" and from "process crashed".
     // Agent-only, matching the verdict gate above: routers keep their own output shape.
     // Never clobbers a more specific kind already set above (e.g. "untrusted_workdir").
-    if !self_reported && !no_report_override && node.kind == LoopNodeKind::Agent {
+    if !self_reported && !no_report_override && node.kind == GraphNodeKind::Agent {
         if let Value::Object(map) = &mut output {
             if !map.contains_key("failure_kind") {
                 map.insert(
@@ -5432,7 +5472,7 @@ fn agent_finished_execution(
         status,
         summary: if no_report_override {
             format!(
-                "Agent node '{}' exited 0 but never called loop_complete_node (require_report).",
+                "Agent node '{}' exited 0 but never called graph_complete_node (require_report).",
                 node.name
             )
         } else if untrusted_workdir {
@@ -5454,7 +5494,7 @@ fn agent_finished_execution(
 }
 
 fn agent_spawn_failure(
-    node: &LoopNode,
+    node: &GraphNode,
     cli: &Cli,
     model: Option<&str>,
     error: &SpawnError,
@@ -5478,7 +5518,7 @@ fn agent_spawn_failure(
         );
     }
     NodeExecution {
-        status: LoopRunStatus::Fail,
+        status: GraphRunStatus::Fail,
         output,
         summary: format!(
             "Agent node '{}' failed to spawn: {}",
@@ -5489,11 +5529,11 @@ fn agent_spawn_failure(
 
 /// Read a router node's `routes` + `fallback` straight from its `config`.
 /// The shape (`2`-`8` unique-labeled routes, a fallback naming one of them)
-/// is already enforced at `loop_add_node`/`loop_update_node` time (see
+/// is already enforced at `graph_add_node`/`graph_update_node` time (see
 /// `daemon::handler::validate_node_config`'s `Router` arm) — this only
 /// defends against that guard somehow having been bypassed, so it bails with
 /// a generic engine error rather than re-deriving the MCP layer's messages.
-fn parse_router_config(node: &LoopNode) -> Result<(Vec<RouterRoute>, String)> {
+fn parse_router_config(node: &GraphNode) -> Result<(Vec<RouterRoute>, String)> {
     let map = node
         .config
         .as_object()
@@ -5539,7 +5579,7 @@ fn parse_router_config(node: &LoopNode) -> Result<(Vec<RouterRoute>, String)> {
 /// `{{previous_feedback}}`) plus its declared routes with descriptions and a
 /// hard instruction to answer with exactly one route label and nothing else.
 /// Deliberately carries none of `render_agent_prompt`'s
-/// `loop_complete_node`/`loop_report_blocker` reporting contract — a router
+/// `graph_complete_node`/`graph_report_blocker` reporting contract — a router
 /// never self-reports; its whole answer is read straight from process
 /// stdout by [`match_router_token`].
 fn render_router_prompt(previous_output: Option<&Value>, routes: &[RouterRoute]) -> String {
@@ -5574,7 +5614,7 @@ fn match_router_token<'a>(raw_answer: &str, routes: &'a [RouterRoute]) -> Option
 /// Execute a router node (M2): spawn the configured platform/model exactly
 /// like an agent node's cold start ([`execute_agent_node`]), then read its
 /// one-shot answer straight from stdout — a router never self-reports via
-/// `loop_complete_node`, so [`self_reported_execution`] never applies here,
+/// `graph_complete_node`, so [`self_reported_execution`] never applies here,
 /// and it never resumes a prior session (there is nothing to continue: each
 /// visit is an independent classification).
 ///
@@ -5589,7 +5629,7 @@ fn match_router_token<'a>(raw_answer: &str, routes: &'a [RouterRoute]) -> Option
 /// B43's node-run lifecycle logging.
 async fn execute_router_node(
     db: &Database,
-    node: &LoopNode,
+    node: &GraphNode,
     previous_output: Option<&Value>,
     run_id: &str,
     workdir: &str,
@@ -5631,7 +5671,7 @@ async fn execute_router_node(
     )
     .await?;
 
-    if execution.status != LoopRunStatus::Pass {
+    if execution.status != GraphRunStatus::Pass {
         return Ok(execution);
     }
 
@@ -5656,7 +5696,7 @@ async fn execute_router_node(
     );
 
     Ok(NodeExecution {
-        status: LoopRunStatus::Pass,
+        status: GraphRunStatus::Pass,
         output: serde_json::json!({
             "kind": "router",
             "node_id": node.id,
@@ -5737,7 +5777,7 @@ async fn list_session_ids(
 }
 
 /// After a run finishes, list the platform's sessions again and attribute the
-/// single id that wasn't in `pre` to this run via `set_loop_run_session_id`.
+/// single id that wasn't in `pre` to this run via `set_graph_run_session_id`.
 /// A diff of exactly one is recorded; zero or many is logged and the id left
 /// NULL (non-fatal). Same-platform parallel runs can race and produce
 /// multiple new ids — that's logged, not solved. Never touches the verdict.
@@ -5758,7 +5798,7 @@ async fn capture_session_id_after_run(
     let new: Vec<&String> = post.difference(pre).collect();
     match new.as_slice() {
         [only] => {
-            if let Err(error) = db.set_loop_run_session_id(run_id, only) {
+            if let Err(error) = db.set_graph_run_session_id(run_id, only) {
                 tracing::warn!(run_id, %error, "session id capture: failed to persist session id");
             }
         }
@@ -5780,17 +5820,17 @@ async fn capture_session_id_after_run(
 /// result, this one must never feed back into the run's routing or final
 /// status (the run is already `Completed` by the time this fires).
 struct HookExecution {
-    status: LoopRunStatus,
+    status: GraphRunStatus,
     output: Value,
     summary: String,
 }
 
 /// Run the `on_completed` hook's process via [`spawn_and_wait_cli_process`] —
 /// the same spawn path as [`run_agent_process`], minus the parts that are
-/// specific to a graph node run (no `LoopNodeRun` id to route a late report
+/// specific to a graph node run (no `GraphNodeRun` id to route a late report
 /// against, no hard-error timeout: a hook failure is always recorded and
 /// reported to the caller as data, never propagated as an `Err`, since it
-/// must never affect the already-finalized loop run that spawned it).
+/// must never affect the already-finalized graph run that spawned it).
 #[allow(clippy::too_many_arguments)]
 async fn run_completion_hook_process(
     db: &Database,
@@ -5814,7 +5854,7 @@ async fn run_completion_hook_process(
         None,
         false,
         |pid| {
-            let _ = db.set_loop_completion_hook_run_pid(
+            let _ = db.set_graph_completion_hook_run_pid(
                 hook_run_id,
                 pid as i64,
                 crate::system::boot_id().as_deref(),
@@ -5825,7 +5865,7 @@ async fn run_completion_hook_process(
 
     match outcome {
         Err(error) => HookExecution {
-            status: LoopRunStatus::Fail,
+            status: GraphRunStatus::Fail,
             output: serde_json::json!({
                 "cli": cli.as_str(),
                 "model": model,
@@ -5834,7 +5874,7 @@ async fn run_completion_hook_process(
             summary: format!("on_completed hook failed to spawn: {}", error.message),
         },
         Ok(CliProcessOutcome::TimedOut) => HookExecution {
-            status: LoopRunStatus::Fail,
+            status: GraphRunStatus::Fail,
             output: serde_json::json!({
                 "cli": cli.as_str(),
                 "model": model,
@@ -5849,9 +5889,9 @@ async fn run_completion_hook_process(
             stderr,
         }) => HookExecution {
             status: if exit_code == 0 {
-                LoopRunStatus::Pass
+                GraphRunStatus::Pass
             } else {
-                LoopRunStatus::Fail
+                GraphRunStatus::Fail
             },
             output: serde_json::json!({
                 "cli": cli.as_str(),
@@ -5865,7 +5905,7 @@ async fn run_completion_hook_process(
     }
 }
 
-fn execute_gate_node(node: &LoopNode, previous_output: Option<&Value>) -> Result<NodeExecution> {
+fn execute_gate_node(node: &GraphNode, previous_output: Option<&Value>) -> Result<NodeExecution> {
     let previous_output = previous_output
         .ok_or_else(|| anyhow!("Gate node '{}' requires previous node output.", node.name))?;
     let evaluate = node
@@ -5887,9 +5927,9 @@ fn execute_gate_node(node: &LoopNode, previous_output: Option<&Value>) -> Result
 
     Ok(NodeExecution {
         status: if passed {
-            LoopRunStatus::Pass
+            GraphRunStatus::Pass
         } else {
-            LoopRunStatus::Fail
+            GraphRunStatus::Fail
         },
         output: serde_json::json!({
             "kind": "gate",
@@ -5923,8 +5963,8 @@ fn evaluate_success_condition(condition: &str, exit_code: i32, output: &str) -> 
 }
 
 pub(crate) fn find_entry_node(
-    nodes: &[LoopNode],
-    edges: &[LoopEdge],
+    nodes: &[GraphNode],
+    edges: &[GraphEdge],
     spec_name: &str,
 ) -> Result<String> {
     let incoming = edges
@@ -5955,7 +5995,7 @@ pub(crate) fn find_entry_node(
 #[derive(Debug)]
 struct StepSelection {
     cursor: SpecCursor,
-    edge_condition: LoopEdgeCondition,
+    edge_condition: GraphEdgeCondition,
 }
 
 /// Resolve the next graph step from `from_node`'s outgoing edges matching
@@ -5965,24 +6005,24 @@ struct StepSelection {
 /// which case this is F1's fan-out point and resolves to
 /// [`SpecCursor::Ensemble`] instead of erroring.
 fn select_next_step(
-    edges: &[LoopEdge],
+    edges: &[GraphEdge],
     ensembles: &[EnsembleDetails],
     from_node: &str,
-    status: LoopRunStatus,
+    status: GraphRunStatus,
 ) -> Result<Option<StepSelection>> {
     let matching = edges
         .iter()
         .filter(|edge| edge.from_node == from_node)
         .filter(|edge| match status {
-            LoopRunStatus::Pass => {
-                edge.condition == LoopEdgeCondition::Pass
-                    || edge.condition == LoopEdgeCondition::Always
+            GraphRunStatus::Pass => {
+                edge.condition == GraphEdgeCondition::Pass
+                    || edge.condition == GraphEdgeCondition::Always
             }
-            LoopRunStatus::Fail | LoopRunStatus::Interrupted => {
-                edge.condition == LoopEdgeCondition::Fail
-                    || edge.condition == LoopEdgeCondition::Always
+            GraphRunStatus::Fail | GraphRunStatus::Interrupted => {
+                edge.condition == GraphEdgeCondition::Fail
+                    || edge.condition == GraphEdgeCondition::Always
             }
-            LoopRunStatus::Running => false,
+            GraphRunStatus::Running => false,
         })
         .collect::<Vec<_>>();
 
@@ -6023,14 +6063,14 @@ fn select_next_step(
 }
 
 /// CM2: like [`select_next_step`], but matches edges by an explicit condition
-/// rather than by run status. Used to find `Break` edges after an
+/// rather than by run status. Used to find `Error` edges after an
 /// infrastructure failure — the engine knows there was an infra crash, but
 /// the agent declared nothing, so only the engine can resolve this edge.
 fn select_next_step_with_condition(
-    edges: &[LoopEdge],
+    edges: &[GraphEdge],
     ensembles: &[EnsembleDetails],
     from_node: &str,
-    condition: &LoopEdgeCondition,
+    condition: &GraphEdgeCondition,
 ) -> Result<Option<StepSelection>> {
     let matching = edges
         .iter()
@@ -6080,15 +6120,15 @@ fn select_next_step_with_condition(
 
 /// Resolve a router node's next graph step: the edge out of `from_node`
 /// whose declared route matches `route_label` exactly (see
-/// [`LoopEdgeCondition::Route`]). Used instead of [`select_next_step`] only
-/// when the node just executed is a [`LoopNodeKind::Router`] that finished
+/// [`GraphEdgeCondition::Route`]). Used instead of [`select_next_step`] only
+/// when the node just executed is a [`GraphNodeKind::Router`] that finished
 /// `Pass` — a router's own verdict carries no notion of success/failure, only
 /// a choice among its declared routes, so Pass/Fail/Always-conditioned edges
 /// never apply here. A failed router (spawn failure/timeout) instead falls
 /// through to `select_next_step` like any other node, per its fail-edge
 /// contract.
 fn select_router_step(
-    edges: &[LoopEdge],
+    edges: &[GraphEdge],
     from_node: &str,
     route_label: &str,
 ) -> Result<Option<StepSelection>> {
@@ -6167,24 +6207,24 @@ const SUPERSEDE_REASON: &str = "superseded by a new attempt at this node";
 
 /// Whether `run` was terminated by the engine out from under the dispatch
 /// that owned it — a same-node supersede ([`SUPERSEDE_REASON`], B42), a
-/// concurrent `loop_reset`, `loop_pause`, iteration-budget exhaustion, or
-/// `fail_loop`'s own sweep — rather than a genuine node outcome (a clean
-/// exit, or a self-report via `loop_complete_node`). Every one of those
+/// concurrent `graph_reset`, `graph_pause`, iteration-budget exhaustion, or
+/// `fail_graph`'s own sweep — rather than a genuine node outcome (a clean
+/// exit, or a self-report via `graph_complete_node`). Every one of those
 /// paths is pure engine bookkeeping, not a node failure: the dispatch that
 /// owned the run must recognise it and stop silently here, routing down no
 /// edge, failing nothing, and completing nothing (see its use in
-/// [`LoopEngine::run_spec`]) — exactly what let a stale dispatch's late
+/// [`GraphEngine::run_spec`]) — exactly what let a stale dispatch's late
 /// completion route a fail edge and take down a healthy sibling dispatch on
 /// 2026-08-05.
 ///
 /// Recognised by the `{ "terminated": true, "reason": … }` marker every one
-/// of those paths writes via [`terminate_run_row`] (or, for `loop_reset`,
-/// the identically-shaped write in [`crate::db::Database::reset_loop`]) —
+/// of those paths writes via [`terminate_run_row`] (or, for `graph_reset`,
+/// the identically-shaped write in [`crate::db::Database::reset_graph`]) —
 /// matched on the `terminated` key alone, not a specific reason string, so
 /// nothing that terminates a run out-of-band can be missed here. A genuine
 /// agent output can never be mistaken for one: self-reports never set this
 /// key.
-fn run_was_terminated_out_of_band(run: &LoopNodeRun) -> bool {
+fn run_was_terminated_out_of_band(run: &GraphNodeRun) -> bool {
     let Some(output) = run.output.as_ref() else {
         return false;
     };
@@ -6193,9 +6233,9 @@ fn run_was_terminated_out_of_band(run: &LoopNodeRun) -> bool {
 
 /// Best-effort termination (B12) of `run`'s OS process, if it still has one
 /// recorded, and finalization of its DB row as `Fail`. Free-function core of
-/// [`LoopEngine::terminate_run`] — also used by ensemble member tasks, which
-/// don't have a `&LoopEngine` to call the method on.
-fn terminate_run_row(db: &Database, run: &LoopNodeRun, reason: &str) {
+/// [`GraphEngine::terminate_run`] — also used by ensemble member tasks, which
+/// don't have a `&GraphEngine` to call the method on.
+fn terminate_run_row(db: &Database, run: &GraphNodeRun, reason: &str) {
     tracing::info!(
         run_id = %run.id,
         node_id = %run.node_id,
@@ -6205,9 +6245,9 @@ fn terminate_run_row(db: &Database, run: &LoopNodeRun, reason: &str) {
     if let Some(pid) = run.pid {
         crate::daemon::process::terminate_process_group_async(pid, KILL_GRACE);
     }
-    let _ = db.update_loop_run_result(
+    let _ = db.update_graph_run_result(
         &run.id,
-        LoopRunStatus::Fail,
+        GraphRunStatus::Fail,
         Some(&serde_json::json!({ "terminated": true, "reason": reason })),
         Some(chrono::Utc::now()),
     );
@@ -6244,14 +6284,14 @@ fn member_output_text(output: &Value) -> String {
     serde_json::to_string_pretty(output).unwrap_or_default()
 }
 
-fn should_advance_to_next_spec(node: &LoopNode, status: LoopRunStatus) -> bool {
+fn should_advance_to_next_spec(node: &GraphNode, status: GraphRunStatus) -> bool {
     let route_key = match status {
-        LoopRunStatus::Pass => "pass_route",
-        LoopRunStatus::Fail | LoopRunStatus::Interrupted => "fail_route",
-        LoopRunStatus::Running => return false,
+        GraphRunStatus::Pass => "pass_route",
+        GraphRunStatus::Fail | GraphRunStatus::Interrupted => "fail_route",
+        GraphRunStatus::Running => return false,
     };
 
-    node.kind == LoopNodeKind::Gate
+    node.kind == GraphNodeKind::Gate
         && node
             .config
             .get(route_key)
@@ -6265,13 +6305,13 @@ fn should_advance_to_next_spec(node: &LoopNode, status: LoopRunStatus) -> bool {
 /// emit an arbitrarily large output (e.g. a full `cargo test` log), and
 /// nothing about interpolating it whole into the next prompt is actually
 /// useful past a point. The full output is never lost — it stays in
-/// `loop_runs.output` for humans to inspect.
+/// `graph_runs.output` for humans to inspect.
 const PREVIOUS_FEEDBACK_ELISION_THRESHOLD: usize = 16 * 1024;
 
 /// Maximum prompt size (in bytes) that is safe to pass via argv. Linux's
 /// `MAX_ARG_STRLEN` is 128KiB; we leave headroom for other argv elements
 /// (headless flags, model flag, working dir flag) by using 100KiB. When
-/// the composed prompt exceeds this, the loop engine forces stdin delivery
+/// the composed prompt exceeds this, the graph engine forces stdin delivery
 /// regardless of the CLI's `prompt_via_stdin` registry setting.
 const ARGV_SAFETY_THRESHOLD: usize = 100 * 1024;
 
@@ -6322,7 +6362,7 @@ fn ceil_char_boundary(s: &str, index: usize) -> usize {
 /// default template. Resolving at spawn time (rather than baking the prompt
 /// into the node's config once) is what lets a user's edit to a preset file
 /// take effect on the very next run without touching the node itself.
-fn resolve_node_prompt_template(node: &LoopNode, prompts_dir: &std::path::Path) -> String {
+fn resolve_node_prompt_template(node: &GraphNode, prompts_dir: &std::path::Path) -> String {
     if let Some(template) = node
         .config
         .get("prompt_template")
@@ -6347,8 +6387,8 @@ fn resolve_node_prompt_template(node: &LoopNode, prompts_dir: &std::path::Path) 
 /// set), `"preset"` (`prompt_preset` set), or `"default_fallback"` (neither,
 /// so the node silently runs on the bare fallback template nobody chose).
 /// Read-only mirror of that function's own precedence check — never the
-/// other way around, so the two can't drift. Surfaced in `loop_get`'s node
-/// JSON (`daemon::handler::loop_node_json`) and recorded on every agent run's
+/// other way around, so the two can't drift. Surfaced in `graph_get`'s node
+/// JSON (`daemon::handler::graph_node_json`) and recorded on every agent run's
 /// output, so a node running on the default is distinguishable from one
 /// running its author's prompt without having to inspect its raw config.
 pub(crate) fn agent_prompt_source(config: &Value) -> &'static str {
@@ -6444,7 +6484,7 @@ fn substitute_named_outputs(
 /// engine will not spawn an agent on a prompt still holding a literal
 /// `{{name}}` the agent would read as an instruction.
 const AGENT_PROMPT_BINDINGS: &[&str] = &[
-    "loop_name",
+    "graph_name",
     "workdir",
     "spec_id",
     "spec_name",
@@ -6455,9 +6495,9 @@ const AGENT_PROMPT_BINDINGS: &[&str] = &[
 
 #[allow(clippy::too_many_arguments)]
 fn render_agent_prompt(
-    lp: &crate::domain::loops::Loop,
-    spec: &LoopSpec,
-    node: &LoopNode,
+    lp: &crate::domain::graphs::Graph,
+    spec: &GraphSpec,
+    node: &GraphNode,
     prompt_template: &str,
     previous_output: Option<&Value>,
     workdir: &str,
@@ -6478,7 +6518,7 @@ fn render_agent_prompt(
     let previous_feedback = bound_previous_feedback(previous_feedback);
     let spec_content = spec.description.as_deref().unwrap_or(&spec.name);
     let prompt = crate::domain::prompts::render_template(prompt_template, |raw| match raw {
-        "loop_name" => Some(lp.name.clone()),
+        "graph_name" => Some(lp.name.clone()),
         "workdir" => Some(workdir.to_string()),
         "spec_id" => Some(spec.id.clone()),
         "spec_name" => Some(spec.name.clone()),
@@ -6504,7 +6544,7 @@ fn render_agent_prompt(
     // something external (a daemon restart, a crash), not set aside for
     // being wrong, and the right move is to inspect what's there and
     // continue it rather than redo it from scratch.
-    let continuation_notice = if spec.status == LoopSpecStatus::Interrupted {
+    let continuation_notice = if spec.status == GraphSpecStatus::Interrupted {
         format!(
             "\n# [CONTINUATION]\nA previous attempt at this spec was interrupted by something external — a daemon restart, a machine crash, or an unrelated process — not by any problem with the work itself. The working tree at {workdir} may already hold that attempt's partial progress, left exactly as it was. Before doing anything else, run `git status` and `git diff` there to see what already exists, and continue from it rather than starting over. (If {workdir} is not a git repository, inspect it directly instead — the same partial work may still be present.)\n"
         )
@@ -6520,7 +6560,7 @@ fn render_agent_prompt(
     // otherwise be matched to "whatever's currently active for this node_id"
     // and silently corrupt a newer, unrelated run.
     Ok(format!(
-        "# [LOOP CONTEXT]\n<loop>\n  <name>{}</name>\n  <spec>{}</spec>\n  <node>{}</node>\n  <workdir>{}</workdir>\n</loop>\n{}\n# [SPEC]\n{}\n\n# [PREVIOUS FEEDBACK]\n{}\n\n# [REPORTING]\nWhen you finish this node, call loop_complete_node with run_id=\"{}\", node_id=\"{}\", status=\"pass\"|\"fail\", a concise summary, and your output.\nIf you are blocked and need human intervention, call loop_report_blocker with run_id=\"{}\", node_id=\"{}\" and the blocker description.\n",
+        "# [GRAPH CONTEXT]\n<graph>\n  <name>{}</name>\n  <spec>{}</spec>\n  <node>{}</node>\n  <workdir>{}</workdir>\n</graph>\n{}\n# [SPEC]\n{}\n\n# [PREVIOUS FEEDBACK]\n{}\n\n# [REPORTING]\nWhen you finish this node, call graph_complete_node with run_id=\"{}\", node_id=\"{}\", status=\"pass\"|\"fail\", a concise summary, and your output.\nIf you are blocked and need human intervention, call graph_report_blocker with run_id=\"{}\", node_id=\"{}\" and the blocker description.\n",
         lp.name,
         spec.name,
         node.name,
@@ -6538,14 +6578,14 @@ fn render_agent_prompt(
 /// Default incremental prompt for a SAME-SPEC resumed agent run (RS2): a
 /// fail-edge bounce or B19 infra retry, where the resumed session was
 /// captured by THIS spec earlier in this same dispatch. Deliberately omits
-/// the full `[LOOP CONTEXT]`/`[SPEC]` block that a cold start renders: the
+/// the full `[GRAPH CONTEXT]`/`[SPEC]` block that a cold start renders: the
 /// resumed session already holds all of that in its own history, so
 /// re-sending it wastes tokens and can confuse the model into re-reading the
 /// whole task. Only the new feedback and a one-line reminder of the reporting
 /// contract are sent. Overridable per node via the `resume_prompt` config
 /// key — but only for this same-spec case; see
 /// [`RESUME_PROMPT_CROSS_SPEC_DEFAULT`] for the other one.
-const RESUME_PROMPT_DEFAULT: &str = "# [CONTINUE]\nYou are resuming your existing session for this task. The full task context is already in your session history — only the new feedback is included below. Address it, then report.\n\n# [PREVIOUS FEEDBACK]\n{{previous_feedback}}\n\n# [REPORTING]\nWhen you finish, call loop_complete_node with run_id=\"{{run_id}}\", node_id=\"{{node_id}}\", status=\"pass\"|\"fail\", a concise summary, and your output.\nIf you are blocked and need human intervention, call loop_report_blocker with run_id=\"{{run_id}}\", node_id=\"{{node_id}}\" and the blocker description.\n";
+const RESUME_PROMPT_DEFAULT: &str = "# [CONTINUE]\nYou are resuming your existing session for this task. The full task context is already in your session history — only the new feedback is included below. Address it, then report.\n\n# [PREVIOUS FEEDBACK]\n{{previous_feedback}}\n\n# [REPORTING]\nWhen you finish, call graph_complete_node with run_id=\"{{run_id}}\", node_id=\"{{node_id}}\", status=\"pass\"|\"fail\", a concise summary, and your output.\nIf you are blocked and need human intervention, call graph_report_blocker with run_id=\"{{run_id}}\", node_id=\"{{node_id}}\" and the blocker description.\n";
 
 /// Default incremental prompt for a CROSS-SPEC resumed agent run (RS3): a
 /// context-group handoff, where the session being resumed was captured by a
@@ -6559,7 +6599,7 @@ const RESUME_PROMPT_DEFAULT: &str = "# [CONTINUE]\nYou are resuming your existin
 /// spec captured the session being resumed) — never overridable via the
 /// node's `resume_prompt` config key, since that choice depends on runtime
 /// state a static per-node template cannot know.
-const RESUME_PROMPT_CROSS_SPEC_DEFAULT: &str = "# [CONTINUE: NEW SPEC]\nYou are resuming your existing session, but for a NEW spec. The previous spec you were working on is finished and already committed — do not restate its conclusions or describe its prior work as this spec's output. Only the spec below is outstanding; address it, then report.\n\n# [SPEC]\n{{spec_content}}\n\n# [PREVIOUS FEEDBACK]\n{{previous_feedback}}\n\n# [REPORTING]\nWhen you finish, call loop_complete_node with run_id=\"{{run_id}}\", node_id=\"{{node_id}}\", status=\"pass\"|\"fail\", a concise summary, and your output.\nIf you are blocked and need human intervention, call loop_report_blocker with run_id=\"{{run_id}}\", node_id=\"{{node_id}}\" and the blocker description.\n";
+const RESUME_PROMPT_CROSS_SPEC_DEFAULT: &str = "# [CONTINUE: NEW SPEC]\nYou are resuming your existing session, but for a NEW spec. The previous spec you were working on is finished and already committed — do not restate its conclusions or describe its prior work as this spec's output. Only the spec below is outstanding; address it, then report.\n\n# [SPEC]\n{{spec_content}}\n\n# [PREVIOUS FEEDBACK]\n{{previous_feedback}}\n\n# [REPORTING]\nWhen you finish, call graph_complete_node with run_id=\"{{run_id}}\", node_id=\"{{node_id}}\", status=\"pass\"|\"fail\", a concise summary, and your output.\nIf you are blocked and need human intervention, call graph_report_blocker with run_id=\"{{run_id}}\", node_id=\"{{node_id}}\" and the blocker description.\n";
 
 /// Render a resumed run's incremental prompt (RS2/RS3) from `template` — the
 /// node's `resume_prompt` override or [`RESUME_PROMPT_DEFAULT`] for a
@@ -6574,9 +6614,9 @@ const RESUME_PROMPT_CROSS_SPEC_DEFAULT: &str = "# [CONTINUE: NEW SPEC]\nYou are 
 /// never seen this spec).
 #[allow(clippy::too_many_arguments)]
 fn render_resume_prompt(
-    lp: &crate::domain::loops::Loop,
-    spec: &LoopSpec,
-    node: &LoopNode,
+    lp: &crate::domain::graphs::Graph,
+    spec: &GraphSpec,
+    node: &GraphNode,
     template: &str,
     previous_output: Option<&Value>,
     workdir: &str,
@@ -6599,7 +6639,7 @@ fn render_resume_prompt(
     Ok(crate::domain::prompts::render_template(
         template,
         |raw| match raw {
-            "loop_name" => Some(lp.name.clone()),
+            "graph_name" => Some(lp.name.clone()),
             "workdir" => Some(workdir.to_string()),
             "spec_id" => Some(spec.id.clone()),
             "spec_name" => Some(spec.name.clone()),
@@ -6627,7 +6667,7 @@ fn render_resume_prompt(
 /// `resume_prompt` override, are all refused (CP1) if they carry anything
 /// else.
 const RESUME_PROMPT_BINDINGS: &[&str] = &[
-    "loop_name",
+    "graph_name",
     "workdir",
     "spec_id",
     "spec_name",
@@ -6643,7 +6683,7 @@ const RESUME_PROMPT_BINDINGS: &[&str] = &[
 /// not per spec), so it supports a smaller, hook-specific placeholder set
 /// rather than [`render_agent_prompt`]'s full one:
 ///
-/// - `{{loop_name}}` / `{{workdir}}` — same meaning as the node-prompt
+/// - `{{graph_name}}` / `{{workdir}}` — same meaning as the node-prompt
 ///   placeholders of the same name.
 /// - `{{completed_specs}}` — name + one-line summary of each spec completed
 ///   *in this run* (the final node's own summary text), one per line;
@@ -6651,7 +6691,7 @@ const RESUME_PROMPT_BINDINGS: &[&str] = &[
 ///   `completed`/`skipped` before this run started).
 #[allow(dead_code)]
 fn render_completion_hook_prompt(
-    lp: &crate::domain::loops::Loop,
+    lp: &crate::domain::graphs::Graph,
     workdir: &str,
     completed_specs: &[(String, String)],
     prompt_template: &str,
@@ -6676,7 +6716,7 @@ fn render_completion_hook_prompt(
     Ok(crate::domain::prompts::render_template(
         prompt_template,
         |raw| match raw {
-            "loop_name" => Some(lp.name.clone()),
+            "graph_name" => Some(lp.name.clone()),
             "workdir" => Some(workdir.to_string()),
             "completed_specs" => Some(completed_specs_text.clone()),
             _ => None,
@@ -6688,13 +6728,13 @@ fn render_completion_hook_prompt(
 /// hook prompt carrying anything else is refused (CP1) and the firing is
 /// recorded as failed rather than sent.
 #[allow(dead_code)]
-const COMPLETION_HOOK_BINDINGS: &[&str] = &["loop_name", "workdir", "completed_specs"];
+const COMPLETION_HOOK_BINDINGS: &[&str] = &["graph_name", "workdir", "completed_specs"];
 
-/// Context passed to [`LoopEngine::fire_hooks`] so the renderer can bind
+/// Context passed to [`GraphEngine::fire_hooks`] so the renderer can bind
 /// event-specific placeholders into the hook prompt. All events share
-/// `loop_name` and `workdir`; the remaining fields are event-specific.
+/// `graph_name` and `workdir`; the remaining fields are event-specific.
 struct HookContext<'a> {
-    loop_name: &'a str,
+    graph_name: &'a str,
     workdir: &'a str,
     /// `on_completed`: name + summary of each spec completed this dispatch.
     completed_specs: &'a [(String, String)],
@@ -6708,13 +6748,13 @@ struct HookContext<'a> {
 }
 
 /// The supported `{{...}}` markers per event.
-fn hook_bindings_for_event(event: &LoopHookEvent) -> &'static [&'static str] {
+fn hook_bindings_for_event(event: &GraphHookEvent) -> &'static [&'static str] {
     match event {
-        LoopHookEvent::OnCompleted => &["loop_name", "workdir", "completed_specs"],
-        LoopHookEvent::OnFailed | LoopHookEvent::OnBlocked => {
-            &["loop_name", "workdir", "blocker", "node"]
+        GraphHookEvent::OnCompleted => &["graph_name", "workdir", "completed_specs"],
+        GraphHookEvent::OnFailed | GraphHookEvent::OnBlocked => {
+            &["graph_name", "workdir", "blocker", "node"]
         }
-        LoopHookEvent::OnSpecCompleted => &["loop_name", "workdir", "spec_name", "spec_id"],
+        GraphHookEvent::OnSpecCompleted => &["graph_name", "workdir", "spec_name", "spec_id"],
     }
 }
 
@@ -6722,7 +6762,7 @@ fn hook_bindings_for_event(event: &LoopHookEvent) -> &'static [&'static str] {
 /// that event supports. Returns `Err` if the template carries unbindable
 /// markers — the caller records a failed hook run instead of spawning.
 fn render_hook_prompt(
-    event: &LoopHookEvent,
+    event: &GraphHookEvent,
     ctx: &HookContext<'_>,
     prompt_template: &str,
 ) -> Result<String> {
@@ -6747,7 +6787,7 @@ fn render_hook_prompt(
     Ok(crate::domain::prompts::render_template(
         prompt_template,
         |raw| match raw {
-            "loop_name" => Some(ctx.loop_name.to_string()),
+            "graph_name" => Some(ctx.graph_name.to_string()),
             "workdir" => Some(ctx.workdir.to_string()),
             "completed_specs" => Some(completed_specs_text.clone()),
             "spec_name" => ctx.spec_name.map(str::to_string),
@@ -6763,7 +6803,7 @@ fn render_hook_prompt(
 /// that event supports. Returns `Err` if the template carries unbindable
 /// markers — the caller records a failed hook run instead of executing.
 fn render_hook_command(
-    event: &LoopHookEvent,
+    event: &GraphHookEvent,
     ctx: &HookContext<'_>,
     command_template: &str,
 ) -> Result<String> {
@@ -6788,7 +6828,7 @@ fn render_hook_command(
     Ok(crate::domain::prompts::render_template(
         command_template,
         |raw| match raw {
-            "loop_name" => Some(ctx.loop_name.to_string()),
+            "graph_name" => Some(ctx.graph_name.to_string()),
             "workdir" => Some(ctx.workdir.to_string()),
             "completed_specs" => Some(completed_specs_text.clone()),
             "spec_name" => ctx.spec_name.map(str::to_string),
@@ -6800,11 +6840,11 @@ fn render_hook_command(
     ))
 }
 
-/// Render a loop hook's `idea` template (CH4), binding the same placeholders
+/// Render a graph hook's `idea` template (CH4), binding the same placeholders
 /// as the hook's event. Returns `Err` if the template carries unbindable
 /// markers.
 fn render_hook_idea(
-    event: &LoopHookEvent,
+    event: &GraphHookEvent,
     ctx: &HookContext<'_>,
     idea_template: &str,
 ) -> Result<String> {
@@ -6829,7 +6869,7 @@ fn render_hook_idea(
     Ok(crate::domain::prompts::render_template(
         idea_template,
         |raw| match raw {
-            "loop_name" => Some(ctx.loop_name.to_string()),
+            "graph_name" => Some(ctx.graph_name.to_string()),
             "workdir" => Some(ctx.workdir.to_string()),
             "completed_specs" => Some(completed_specs_text.clone()),
             "spec_name" => ctx.spec_name.map(str::to_string),
@@ -6881,7 +6921,7 @@ async fn check_start_head_ancestry(workdir: &str, start_head: &str) -> Option<bo
 /// Whether this node is a designated committer (B37): explicit graph
 /// configuration, `commit_rights: true`, never inferred from the node's name,
 /// kind, or prompt. Absent the key, a node has no commit rights.
-fn node_has_commit_rights(node: &LoopNode) -> bool {
+fn node_has_commit_rights(node: &GraphNode) -> bool {
     node.config.get("commit_rights").and_then(Value::as_bool) == Some(true)
 }
 
@@ -6893,7 +6933,7 @@ fn node_has_commit_rights(node: &LoopNode) -> bool {
 /// enforcing there would fail exactly the node the graph relies on to land
 /// work. Once ONE node declares the right, the graph's intent is unambiguous
 /// and every other node in it is held to it.
-fn graph_enforces_commit_rights(nodes: &[LoopNode]) -> bool {
+fn graph_enforces_commit_rights(nodes: &[GraphNode]) -> bool {
     nodes.iter().any(node_has_commit_rights)
 }
 
@@ -6975,7 +7015,7 @@ fn commit_rights_failure(
     NodeExecution {
         output: Value::Object(output),
         summary: message,
-        status: LoopRunStatus::Fail,
+        status: GraphRunStatus::Fail,
     }
 }
 
@@ -7010,7 +7050,7 @@ fn ancestry_failure(
     NodeExecution {
         output: Value::Object(output),
         summary: message,
-        status: LoopRunStatus::Fail,
+        status: GraphRunStatus::Fail,
     }
 }
 
@@ -7031,25 +7071,25 @@ fn ensemble_owning_node(node_id: &str, ensembles: &[EnsembleDetails]) -> Option<
         .map(|details| details.ensemble.id.clone())
 }
 
-/// The internal bookkeeping row [`LoopEngine::run_loop_dispatch`]'s
+/// The internal bookkeeping row [`GraphEngine::run_graph_dispatch`]'s
 /// bound-spec (`None` queue) branch inserts for an explicit-`idea` run only:
-/// a loop launched with zero bound specs and a non-empty `idea` that
+/// a graph launched with zero bound specs and a non-empty `idea` that
 /// `empty_launch_check` let through. The blank `name` keeps it hidden from
-/// work listings (`spec_list`/`loop_get` filter on it); the caller-supplied
+/// work listings (`spec_list`/`graph_get` filter on it); the caller-supplied
 /// idea text in `description` is what `{{spec_content}}` resolves from, so
 /// this row always carries content and is never the blank row CB22 refuses.
-/// `loop_add_spec` rejects an empty name for every real, user-authored spec,
+/// `graph_add_spec` rejects an empty name for every real, user-authored spec,
 /// so `""` can never collide with one. Never created for a no-idea launch —
 /// those are refused before reaching the dispatch body.
-fn no_spec_placeholder(loop_id: &str) -> LoopSpec {
-    LoopSpec {
+fn no_spec_placeholder(graph_id: &str) -> GraphSpec {
+    GraphSpec {
         id: uuid::Uuid::new_v4().to_string(),
-        loop_id: Some(loop_id.to_string()),
+        graph_id: Some(graph_id.to_string()),
         name: String::new(),
         description: None,
         position: 0,
         parallelizable: false,
-        status: LoopSpecStatus::Pending,
+        status: GraphSpecStatus::Pending,
         started_at: None,
         completed_at: None,
         spec_start_head: None,
@@ -7064,19 +7104,19 @@ fn no_spec_placeholder(loop_id: &str) -> LoopSpec {
 /// Whether `spec` is the blank-name bookkeeping row [`no_spec_placeholder`]
 /// creates for an idea-driven run (and that legacy graph-only runs also
 /// wrote). The blank `name` is the sentinel — idea text may live in
-/// `description` — so `run_loop_dispatch` can purge a prior attempt's
+/// `description` — so `run_graph_dispatch` can purge a prior attempt's
 /// terminal bookkeeping row without touching a still-live resume row or any
-/// real user-authored spec (`loop_add_spec` rejects an empty name).
-pub(crate) fn is_no_spec_placeholder(spec: &LoopSpec) -> bool {
+/// real user-authored spec (`graph_add_spec` rejects an empty name).
+pub(crate) fn is_no_spec_placeholder(spec: &GraphSpec) -> bool {
     spec.name.trim().is_empty()
 }
 
 #[allow(clippy::type_complexity)]
 fn resolve_spec_start(
-    nodes: &[LoopNode],
-    edges: &[LoopEdge],
-    spec: &LoopSpec,
-    existing_runs: &[LoopNodeRun],
+    nodes: &[GraphNode],
+    edges: &[GraphEdge],
+    spec: &GraphSpec,
+    existing_runs: &[GraphNodeRun],
     ensembles: &[EnsembleDetails],
 ) -> Result<(
     SpecCursor,
@@ -7084,10 +7124,10 @@ fn resolve_spec_start(
     Option<Value>,
     HashMap<String, usize>,
 )> {
-    if spec.status == LoopSpecStatus::Running {
+    if spec.status == GraphSpecStatus::Running {
         if let Some(last_run) = existing_runs.last() {
             // An ensemble's N members (+ its join) each get their own
-            // `loop_runs` row sharing the same `iteration` number — dedupe
+            // `graph_runs` row sharing the same `iteration` number — dedupe
             // on (budget key, iteration) so a bounce into the ensemble
             // still counts as exactly one iteration (F1), not N+1.
             let mut iterations = HashMap::<String, usize>::new();
@@ -7110,7 +7150,7 @@ fn resolve_spec_start(
             // `{{output:NodeName}}` for any earlier node — not only the last.
             let mut node_outputs = HashMap::new();
             for run in existing_runs {
-                if (run.status == LoopRunStatus::Pass || run.status == LoopRunStatus::Fail)
+                if (run.status == GraphRunStatus::Pass || run.status == GraphRunStatus::Fail)
                     && run.output.is_some()
                 {
                     if let Some(node) = nodes.iter().find(|n| n.id == run.node_id) {
@@ -7165,7 +7205,7 @@ fn shell_command(command: &str) -> Command {
 }
 
 /// CT3: background reader for one piped check-node stream. Appends every
-/// chunk to `loop_run_output` (the TUI tail dialog polls it) and mirrors it
+/// chunk to `graph_run_output` (the TUI tail dialog polls it) and mirrors it
 /// into `buffer` so the completion path can evaluate the success condition
 /// and snapshot the tails without a DB round-trip. Ends when the child
 /// closes the pipe; I/O or DB errors end this task, never the node.
@@ -7188,7 +7228,7 @@ fn spawn_check_output_reader(
                     if let Ok(mut guard) = buffer.lock() {
                         guard.push_str(&chunk);
                     }
-                    let _ = db.append_loop_run_output(&run_id, stream_name, &chunk);
+                    let _ = db.append_graph_run_output(&run_id, stream_name, &chunk);
                 }
                 Err(_) => break,
             }
@@ -7222,18 +7262,18 @@ mod tests {
     use crate::application::notification_service::DefaultNotificationService;
     use tempfile::{tempdir, TempDir};
 
-    fn loop_fixture() -> Result<(TempDir, Arc<Database>, LoopEngine, String, String)> {
+    fn graph_fixture() -> Result<(TempDir, Arc<Database>, GraphEngine, String, String)> {
         let dir = tempdir()?;
         let db = Arc::new(Database::new(&dir.path().join("test.db"))?);
-        let lp = crate::domain::loops::Loop {
+        let lp = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
             infra_node_id: None,
             id: "wf-test".to_string(),
-            name: "Loop".to_string(),
+            name: "Graph".to_string(),
             description: None,
             workdir: dir.path().to_string_lossy().to_string(),
-            status: LoopStatus::Draft,
+            status: GraphStatus::Draft,
             trigger: None,
             created_at: chrono::Utc::now(),
             started_at: None,
@@ -7244,16 +7284,16 @@ mod tests {
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
         };
-        let spec = crate::domain::loops::LoopSpec {
+        let spec = crate::domain::graphs::GraphSpec {
             id: "spec-test".to_string(),
-            loop_id: Some(lp.id.clone()),
+            graph_id: Some(lp.id.clone()),
             name: "Spec".to_string(),
             description: Some(
                 "Functional Requirements:\n- A\n\nNon-Functional Requirements:\n- B\n\nObjective:\n- C\n\nConstraints:\n- D\n\nGuidelines:\n- E\n\nIn Scope:\n- F\n\nOut of Scope:\n- G".to_string(),
             ),
             position: 1,
             parallelizable: false,
-            status: LoopSpecStatus::Pending,
+            status: GraphSpecStatus::Pending,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
@@ -7264,13 +7304,13 @@ mod tests {
             completed_via_at: None,
         };
 
-        db.insert_loop(&lp)?;
-        db.insert_loop_spec(&spec)?;
+        db.insert_graph(&lp)?;
+        db.insert_graph_spec(&spec)?;
 
         Ok((
             dir,
             Arc::clone(&db),
-            LoopEngine::new(db, Arc::new(DefaultNotificationService)),
+            GraphEngine::new(db, Arc::new(DefaultNotificationService)),
             lp.id,
             spec.id,
         ))
@@ -7278,35 +7318,35 @@ mod tests {
 
     #[derive(Debug, Clone, PartialEq)]
     enum RecordedNotification {
-        LoopStarted {
-            loop_name: String,
+        GraphStarted {
+            graph_name: String,
             spec_count: usize,
             resumed: bool,
             first_pending: Option<String>,
         },
         SpecCompleted {
-            loop_name: String,
+            graph_name: String,
             spec_name: String,
             done: usize,
             total: usize,
             next_pending: Option<String>,
         },
-        LoopFinishedCompleted {
-            loop_name: String,
+        GraphFinishedCompleted {
+            graph_name: String,
             done: usize,
             total: usize,
             hook_launched: bool,
         },
-        LoopFinishedFailed {
-            loop_name: String,
+        GraphFinishedFailed {
+            graph_name: String,
             spec_name: String,
         },
-        LoopFinishedBlocked {
-            loop_name: String,
+        GraphFinishedBlocked {
+            graph_name: String,
             summary: String,
         },
         CompletionHookFailed {
-            loop_name: String,
+            graph_name: String,
             error: String,
         },
     }
@@ -7330,9 +7370,9 @@ mod tests {
         }
         fn notify_nursery_failed(&self, _error_msg: &str) {}
 
-        fn notify_loop_started(
+        fn notify_graph_started(
             &self,
-            loop_name: &str,
+            graph_name: &str,
             spec_count: usize,
             resumed: bool,
             first_pending: Option<&str>,
@@ -7340,8 +7380,8 @@ mod tests {
             self.events
                 .lock()
                 .unwrap()
-                .push(RecordedNotification::LoopStarted {
-                    loop_name: loop_name.to_string(),
+                .push(RecordedNotification::GraphStarted {
+                    graph_name: graph_name.to_string(),
                     spec_count,
                     resumed,
                     first_pending: first_pending.map(str::to_string),
@@ -7350,7 +7390,7 @@ mod tests {
 
         fn notify_spec_completed(
             &self,
-            loop_name: &str,
+            graph_name: &str,
             spec_name: &str,
             done: usize,
             total: usize,
@@ -7360,7 +7400,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(RecordedNotification::SpecCompleted {
-                    loop_name: loop_name.to_string(),
+                    graph_name: graph_name.to_string(),
                     spec_name: spec_name.to_string(),
                     done,
                     total,
@@ -7368,27 +7408,27 @@ mod tests {
                 });
         }
 
-        fn notify_loop_finished(&self, loop_name: &str, outcome: LoopFinishOutcome<'_>) {
+        fn notify_graph_finished(&self, graph_name: &str, outcome: GraphFinishOutcome<'_>) {
             let event = match outcome {
-                LoopFinishOutcome::Completed {
+                GraphFinishOutcome::Completed {
                     done,
                     total,
                     hook_launched,
-                } => RecordedNotification::LoopFinishedCompleted {
-                    loop_name: loop_name.to_string(),
+                } => RecordedNotification::GraphFinishedCompleted {
+                    graph_name: graph_name.to_string(),
                     done,
                     total,
                     hook_launched,
                 },
-                LoopFinishOutcome::Failed { spec_name } => {
-                    RecordedNotification::LoopFinishedFailed {
-                        loop_name: loop_name.to_string(),
+                GraphFinishOutcome::Failed { spec_name } => {
+                    RecordedNotification::GraphFinishedFailed {
+                        graph_name: graph_name.to_string(),
                         spec_name: spec_name.to_string(),
                     }
                 }
-                LoopFinishOutcome::Blocked { summary } => {
-                    RecordedNotification::LoopFinishedBlocked {
-                        loop_name: loop_name.to_string(),
+                GraphFinishOutcome::Blocked { summary } => {
+                    RecordedNotification::GraphFinishedBlocked {
+                        graph_name: graph_name.to_string(),
                         summary: summary.to_string(),
                     }
                 }
@@ -7396,12 +7436,12 @@ mod tests {
             self.events.lock().unwrap().push(event);
         }
 
-        fn notify_loop_completion_hook_failed(&self, loop_name: &str, error: &str) {
+        fn notify_graph_completion_hook_failed(&self, graph_name: &str, error: &str) {
             self.events
                 .lock()
                 .unwrap()
                 .push(RecordedNotification::CompletionHookFailed {
-                    loop_name: loop_name.to_string(),
+                    graph_name: graph_name.to_string(),
                     error: error.to_string(),
                 });
         }
@@ -7409,27 +7449,27 @@ mod tests {
         fn notify_announcement(&self, _title: &str, _body: &str) {}
     }
 
-    type MockLoopFixture = (
+    type MockGraphFixture = (
         TempDir,
         Arc<Database>,
-        LoopEngine,
+        GraphEngine,
         Arc<MockNotificationService>,
         String,
         String,
     );
 
-    fn loop_fixture_with_mock() -> Result<MockLoopFixture> {
+    fn graph_fixture_with_mock() -> Result<MockGraphFixture> {
         let dir = tempdir()?;
         let db = Arc::new(Database::new(&dir.path().join("test.db"))?);
-        let lp = crate::domain::loops::Loop {
+        let lp = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
             infra_node_id: None,
             id: "wf-test".to_string(),
-            name: "Loop".to_string(),
+            name: "Graph".to_string(),
             description: None,
             workdir: dir.path().to_string_lossy().to_string(),
-            status: LoopStatus::Draft,
+            status: GraphStatus::Draft,
             trigger: None,
             created_at: chrono::Utc::now(),
             started_at: None,
@@ -7440,14 +7480,14 @@ mod tests {
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
         };
-        let spec = crate::domain::loops::LoopSpec {
+        let spec = crate::domain::graphs::GraphSpec {
             id: "spec-test".to_string(),
-            loop_id: Some(lp.id.clone()),
+            graph_id: Some(lp.id.clone()),
             name: "Spec".to_string(),
             description: Some("Objective:\n- test".to_string()),
             position: 1,
             parallelizable: false,
-            status: LoopSpecStatus::Pending,
+            status: GraphSpecStatus::Pending,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
@@ -7458,14 +7498,14 @@ mod tests {
             completed_via_at: None,
         };
 
-        db.insert_loop(&lp)?;
-        db.insert_loop_spec(&spec)?;
+        db.insert_graph(&lp)?;
+        db.insert_graph_spec(&spec)?;
 
         let notifications = Arc::new(MockNotificationService::default());
         Ok((
             dir,
             Arc::clone(&db),
-            LoopEngine::new(
+            GraphEngine::new(
                 db,
                 Arc::clone(&notifications) as Arc<dyn NotificationService>,
             ),
@@ -7509,17 +7549,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn loop_engine_captures_spec_start_head_for_git_workdir() {
-        let (dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+    async fn graph_engine_captures_spec_start_head_for_git_workdir() {
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
         init_git_repo(dir.path());
         let expected_head = git_head(dir.path());
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-check".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "printf APPROVED",
                 "success_condition": "exit_code_0"
@@ -7530,11 +7570,11 @@ mod tests {
         .unwrap();
 
         engine
-            .run_loop(loop_id, None, None, None, None)
+            .run_graph(graph_id, None, None, None, None)
             .await
             .unwrap();
 
-        let spec = db.get_loop_spec(&spec_id).unwrap().unwrap();
+        let spec = db.get_graph_spec(&spec_id).unwrap().unwrap();
         assert_eq!(
             spec.spec_start_head.as_deref(),
             Some(expected_head.as_str())
@@ -7542,16 +7582,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn loop_engine_substitutes_spec_start_head_in_check_command() {
-        let (dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+    async fn graph_engine_substitutes_spec_start_head_in_check_command() {
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
         init_git_repo(dir.path());
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-check".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "test \"$(git rev-parse HEAD)\" = \"{{spec_start_head}}\"",
                 "success_condition": "exit_code_0"
@@ -7562,26 +7602,26 @@ mod tests {
         .unwrap();
 
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
-        let spec = db.get_loop_spec(&spec_id).unwrap().unwrap();
-        assert_eq!(lp.status, LoopStatus::Completed);
-        assert_eq!(spec.status, LoopSpecStatus::Completed);
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        let spec = db.get_graph_spec(&spec_id).unwrap().unwrap();
+        assert_eq!(lp.status, GraphStatus::Completed);
+        assert_eq!(spec.status, GraphSpecStatus::Completed);
     }
 
     #[tokio::test]
-    async fn loop_engine_substitutes_empty_spec_start_head_for_non_git_workdir() {
-        let (_dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+    async fn graph_engine_substitutes_empty_spec_start_head_for_non_git_workdir() {
+        let (_dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-check".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "test -z \"{{spec_start_head}}\"",
                 "success_condition": "exit_code_0"
@@ -7592,14 +7632,14 @@ mod tests {
         .unwrap();
 
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
-        let spec = db.get_loop_spec(&spec_id).unwrap().unwrap();
-        assert_eq!(lp.status, LoopStatus::Completed);
-        assert_eq!(spec.status, LoopSpecStatus::Completed);
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        let spec = db.get_graph_spec(&spec_id).unwrap().unwrap();
+        assert_eq!(lp.status, GraphStatus::Completed);
+        assert_eq!(spec.status, GraphSpecStatus::Completed);
         assert_eq!(spec.spec_start_head, None);
     }
 
@@ -7614,7 +7654,7 @@ mod tests {
         command: &str,
         commit_rights: Option<bool>,
         position: i64,
-    ) -> LoopNode {
+    ) -> GraphNode {
         let mut config = serde_json::json!({
             "command": command,
             "success_condition": "exit_code_0"
@@ -7622,12 +7662,12 @@ mod tests {
         if let Some(rights) = commit_rights {
             config["commit_rights"] = serde_json::json!(rights);
         }
-        LoopNode {
+        GraphNode {
             id: id.to_string(),
             spec_id: Some(spec_id.to_string()),
-            loop_id: None,
+            graph_id: None,
             name: id.to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config,
             position,
             created_at: chrono::Utc::now(),
@@ -7638,47 +7678,47 @@ mod tests {
 
     #[tokio::test]
     async fn node_without_commit_rights_that_commits_fails_and_routes_via_fail_edge() {
-        let (dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
         init_git_repo(dir.path());
         let head_before = git_head(dir.path());
 
         // `worker` exits 0 and reports success — but commits. `committer`
         // (never reached) is what makes this graph enforce commit rights.
-        db.insert_loop_node(&rights_node(&spec_id, "worker", COMMIT_CMD, None, 1))
+        db.insert_graph_node(&rights_node(&spec_id, "worker", COMMIT_CMD, None, 1))
             .unwrap();
-        db.insert_loop_node(&rights_node(&spec_id, "committer", "true", Some(true), 2))
+        db.insert_graph_node(&rights_node(&spec_id, "committer", "true", Some(true), 2))
             .unwrap();
-        db.insert_loop_node(&rights_node(&spec_id, "triage", "true", None, 3))
+        db.insert_graph_node(&rights_node(&spec_id, "triage", "true", None, 3))
             .unwrap();
-        db.insert_loop_edge(&LoopEdge {
+        db.insert_graph_edge(&GraphEdge {
             id: "e-pass".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             from_node: "worker".to_string(),
             to_node: "committer".to_string(),
-            condition: crate::domain::loops::LoopEdgeCondition::Pass,
+            condition: crate::domain::graphs::GraphEdgeCondition::Pass,
         })
         .unwrap();
-        db.insert_loop_edge(&LoopEdge {
+        db.insert_graph_edge(&GraphEdge {
             id: "e-fail".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             from_node: "worker".to_string(),
             to_node: "triage".to_string(),
-            condition: crate::domain::loops::LoopEdgeCondition::Fail,
+            condition: crate::domain::graphs::GraphEdgeCondition::Fail,
         })
         .unwrap();
 
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
 
-        let runs = db.list_loop_runs_for_spec(&spec_id).unwrap();
+        let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
         let worker = runs.iter().find(|r| r.node_id == "worker").unwrap();
         assert_eq!(
             worker.status,
-            LoopRunStatus::Fail,
+            GraphRunStatus::Fail,
             "committing without commit rights must be a deterministic fail"
         );
         let violation = worker
@@ -7719,10 +7759,10 @@ mod tests {
 
     #[tokio::test]
     async fn designated_committer_that_commits_passes() {
-        let (dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
         init_git_repo(dir.path());
 
-        db.insert_loop_node(&rights_node(
+        db.insert_graph_node(&rights_node(
             &spec_id,
             "committer",
             COMMIT_CMD,
@@ -7732,14 +7772,14 @@ mod tests {
         .unwrap();
 
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
 
-        let spec = db.get_loop_spec(&spec_id).unwrap().unwrap();
-        assert_eq!(spec.status, LoopSpecStatus::Completed);
-        let runs = db.list_loop_runs_for_spec(&spec_id).unwrap();
-        assert_eq!(runs[0].status, LoopRunStatus::Pass);
+        let spec = db.get_graph_spec(&spec_id).unwrap().unwrap();
+        assert_eq!(spec.status, GraphSpecStatus::Completed);
+        let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
+        assert_eq!(runs[0].status, GraphRunStatus::Pass);
         assert!(runs[0]
             .output
             .as_ref()
@@ -7748,11 +7788,11 @@ mod tests {
 
     #[tokio::test]
     async fn node_that_changes_files_without_committing_is_unaffected() {
-        let (dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
         init_git_repo(dir.path());
         let head_before = git_head(dir.path());
 
-        db.insert_loop_node(&rights_node(
+        db.insert_graph_node(&rights_node(
             &spec_id,
             "worker",
             "printf changed > README.md",
@@ -7760,28 +7800,28 @@ mod tests {
             1,
         ))
         .unwrap();
-        db.insert_loop_node(&rights_node(&spec_id, "committer", "true", Some(true), 2))
+        db.insert_graph_node(&rights_node(&spec_id, "committer", "true", Some(true), 2))
             .unwrap();
-        db.insert_loop_edge(&LoopEdge {
+        db.insert_graph_edge(&GraphEdge {
             id: "e-pass".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             from_node: "worker".to_string(),
             to_node: "committer".to_string(),
-            condition: crate::domain::loops::LoopEdgeCondition::Pass,
+            condition: crate::domain::graphs::GraphEdgeCondition::Pass,
         })
         .unwrap();
 
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
 
-        let spec = db.get_loop_spec(&spec_id).unwrap().unwrap();
-        assert_eq!(spec.status, LoopSpecStatus::Completed);
-        let runs = db.list_loop_runs_for_spec(&spec_id).unwrap();
+        let spec = db.get_graph_spec(&spec_id).unwrap().unwrap();
+        assert_eq!(spec.status, GraphSpecStatus::Completed);
+        let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
         let worker = runs.iter().find(|r| r.node_id == "worker").unwrap();
-        assert_eq!(worker.status, LoopRunStatus::Pass);
+        assert_eq!(worker.status, GraphRunStatus::Pass);
         assert_eq!(git_head(dir.path()), head_before);
     }
 
@@ -7790,48 +7830,48 @@ mod tests {
         // Enforcement is opt-in per graph: without a single `commit_rights`
         // node there is no way to tell the designated committer from a
         // violator, so an existing graph must behave exactly as before.
-        let (dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
         init_git_repo(dir.path());
 
-        db.insert_loop_node(&rights_node(&spec_id, "worker", COMMIT_CMD, None, 1))
+        db.insert_graph_node(&rights_node(&spec_id, "worker", COMMIT_CMD, None, 1))
             .unwrap();
 
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
 
-        let spec = db.get_loop_spec(&spec_id).unwrap().unwrap();
-        assert_eq!(spec.status, LoopSpecStatus::Completed);
-        let runs = db.list_loop_runs_for_spec(&spec_id).unwrap();
-        assert_eq!(runs[0].status, LoopRunStatus::Pass);
+        let spec = db.get_graph_spec(&spec_id).unwrap().unwrap();
+        assert_eq!(spec.status, GraphSpecStatus::Completed);
+        let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
+        assert_eq!(runs[0].status, GraphRunStatus::Pass);
     }
 
     #[tokio::test]
     async fn commit_rights_enforcement_skips_non_git_workdirs() {
-        let (_dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (_dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
 
-        db.insert_loop_node(&rights_node(&spec_id, "worker", "true", None, 1))
+        db.insert_graph_node(&rights_node(&spec_id, "worker", "true", None, 1))
             .unwrap();
-        db.insert_loop_node(&rights_node(&spec_id, "committer", "true", Some(true), 2))
+        db.insert_graph_node(&rights_node(&spec_id, "committer", "true", Some(true), 2))
             .unwrap();
-        db.insert_loop_edge(&LoopEdge {
+        db.insert_graph_edge(&GraphEdge {
             id: "e-pass".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             from_node: "worker".to_string(),
             to_node: "committer".to_string(),
-            condition: crate::domain::loops::LoopEdgeCondition::Pass,
+            condition: crate::domain::graphs::GraphEdgeCondition::Pass,
         })
         .unwrap();
 
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
 
-        let spec = db.get_loop_spec(&spec_id).unwrap().unwrap();
-        assert_eq!(spec.status, LoopSpecStatus::Completed);
+        let spec = db.get_graph_spec(&spec_id).unwrap().unwrap();
+        assert_eq!(spec.status, GraphSpecStatus::Completed);
     }
 
     #[test]
@@ -7864,12 +7904,12 @@ mod tests {
     async fn committer_that_amends_previous_commit_fails_as_infrastructure() {
         // Two committing nodes in one spec: the second rewrites history so
         // spec_start_head is no longer reachable. The ancestry check must
-        // fail the second node's run as infrastructure and route via Break.
-        let (dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        // fail the second node's run as infrastructure and route via Error.
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
         init_git_repo(dir.path());
 
         // committer1: commits normally (pass edge -> committer2)
-        db.insert_loop_node(&rights_node(
+        db.insert_graph_node(&rights_node(
             &spec_id,
             "committer1",
             "git commit -q --allow-empty -m 'spec work'",
@@ -7879,7 +7919,7 @@ mod tests {
         .unwrap();
         // committer2: create a disconnected root commit so spec_start_head
         // (captured before committer1 ran) is no longer reachable.
-        db.insert_loop_node(&rights_node(
+        db.insert_graph_node(&rights_node(
             &spec_id,
             "committer2",
             "git checkout --orphan fresh && git rm -rf . && echo disconnected > file.txt && git add . && git commit -m 'disconnected root' && git checkout -B main && git checkout main",
@@ -7887,55 +7927,55 @@ mod tests {
             2,
         ))
         .unwrap();
-        // triage: reached via Break edge from committer2
-        db.insert_loop_node(&rights_node(&spec_id, "triage", "true", None, 3))
+        // triage: reached via Error edge from committer2
+        db.insert_graph_node(&rights_node(&spec_id, "triage", "true", None, 3))
             .unwrap();
         // done: reached via Pass edge from committer2 (should NOT be reached)
-        db.insert_loop_node(&rights_node(&spec_id, "done", "true", None, 4))
+        db.insert_graph_node(&rights_node(&spec_id, "done", "true", None, 4))
             .unwrap();
 
-        db.insert_loop_edge(&LoopEdge {
+        db.insert_graph_edge(&GraphEdge {
             id: "e-pass-12".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             from_node: "committer1".to_string(),
             to_node: "committer2".to_string(),
-            condition: crate::domain::loops::LoopEdgeCondition::Pass,
+            condition: crate::domain::graphs::GraphEdgeCondition::Pass,
         })
         .unwrap();
-        db.insert_loop_edge(&LoopEdge {
+        db.insert_graph_edge(&GraphEdge {
             id: "e-pass-2d".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             from_node: "committer2".to_string(),
             to_node: "done".to_string(),
-            condition: crate::domain::loops::LoopEdgeCondition::Pass,
+            condition: crate::domain::graphs::GraphEdgeCondition::Pass,
         })
         .unwrap();
-        db.insert_loop_edge(&LoopEdge {
-            id: "e-break-2t".to_string(),
+        db.insert_graph_edge(&GraphEdge {
+            id: "e-error-2t".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             from_node: "committer2".to_string(),
             to_node: "triage".to_string(),
-            condition: crate::domain::loops::LoopEdgeCondition::Break,
+            condition: crate::domain::graphs::GraphEdgeCondition::Error,
         })
         .unwrap();
 
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
 
-        let runs = db.list_loop_runs_for_spec(&spec_id).unwrap();
+        let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
 
         // committer1 passed normally
         let c1 = runs.iter().find(|r| r.node_id == "committer1").unwrap();
-        assert_eq!(c1.status, LoopRunStatus::Pass);
+        assert_eq!(c1.status, GraphRunStatus::Pass);
 
         // committer2 failed — ancestry violation
         let c2 = runs.iter().find(|r| r.node_id == "committer2").unwrap();
-        assert_eq!(c2.status, LoopRunStatus::Fail);
+        assert_eq!(c2.status, GraphRunStatus::Fail);
         let output = c2.output.as_ref().unwrap();
         let violation = output.get("ancestry_violation").unwrap();
         assert!(
@@ -7960,10 +8000,10 @@ mod tests {
             "the reason must be stated in plain words"
         );
 
-        // Break edge was taken — triage ran
+        // Error edge was taken — triage ran
         assert!(
             runs.iter().any(|r| r.node_id == "triage"),
-            "the Break edge must have been taken to triage"
+            "the Error edge must have been taken to triage"
         );
         // done must NOT have run
         assert!(
@@ -7974,7 +8014,7 @@ mod tests {
         // spec_committed_head must NOT have been updated to the disconnected
         // root — it still holds committer1's value (or none if committer1
         // didn't commit). The ancestry check prevents masking the problem.
-        let spec = db.get_loop_spec(&spec_id).unwrap().unwrap();
+        let spec = db.get_graph_spec(&spec_id).unwrap().unwrap();
         if let Some(ref ch) = spec.spec_committed_head {
             assert_ne!(
                 ch,
@@ -7988,10 +8028,10 @@ mod tests {
     async fn committer_that_commits_normally_passes_and_records_committed_head() {
         // A single committing node that commits normally: ancestry check
         // passes, spec_committed_head is written, no ancestry_violation.
-        let (dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
         init_git_repo(dir.path());
 
-        db.insert_loop_node(&rights_node(
+        db.insert_graph_node(&rights_node(
             &spec_id,
             "committer",
             "git commit -q --allow-empty -m 'work'",
@@ -8001,14 +8041,14 @@ mod tests {
         .unwrap();
 
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
 
-        let spec = db.get_loop_spec(&spec_id).unwrap().unwrap();
-        assert_eq!(spec.status, LoopSpecStatus::Completed);
-        let runs = db.list_loop_runs_for_spec(&spec_id).unwrap();
-        assert_eq!(runs[0].status, LoopRunStatus::Pass);
+        let spec = db.get_graph_spec(&spec_id).unwrap().unwrap();
+        assert_eq!(spec.status, GraphSpecStatus::Completed);
+        let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
+        assert_eq!(runs[0].status, GraphRunStatus::Pass);
         assert!(
             runs[0]
                 .output
@@ -8031,31 +8071,31 @@ mod tests {
     #[tokio::test]
     async fn ancestry_check_skipped_in_non_git_workdir() {
         // Non-git workdir: ancestry check must be skipped (no error).
-        let (_dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (_dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
 
-        db.insert_loop_node(&rights_node(&spec_id, "worker", "true", None, 1))
+        db.insert_graph_node(&rights_node(&spec_id, "worker", "true", None, 1))
             .unwrap();
-        db.insert_loop_node(&rights_node(&spec_id, "committer", "true", Some(true), 2))
+        db.insert_graph_node(&rights_node(&spec_id, "committer", "true", Some(true), 2))
             .unwrap();
-        db.insert_loop_edge(&LoopEdge {
+        db.insert_graph_edge(&GraphEdge {
             id: "e-pass".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             from_node: "worker".to_string(),
             to_node: "committer".to_string(),
-            condition: crate::domain::loops::LoopEdgeCondition::Pass,
+            condition: crate::domain::graphs::GraphEdgeCondition::Pass,
         })
         .unwrap();
 
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
 
-        let spec = db.get_loop_spec(&spec_id).unwrap().unwrap();
-        assert_eq!(spec.status, LoopSpecStatus::Completed);
-        let runs = db.list_loop_runs_for_spec(&spec_id).unwrap();
-        assert_eq!(runs[0].status, LoopRunStatus::Pass);
+        let spec = db.get_graph_spec(&spec_id).unwrap().unwrap();
+        assert_eq!(spec.status, GraphSpecStatus::Completed);
+        let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
+        assert_eq!(runs[0].status, GraphRunStatus::Pass);
         assert!(
             runs[0]
                 .output
@@ -8068,26 +8108,26 @@ mod tests {
     // ── B10: spec_start_head frozen-per-attempt, amend-proof ─────────────
 
     #[tokio::test]
-    async fn loop_engine_resume_dispatch_reuses_persisted_spec_start_head_even_if_stale() {
-        // `resume_background` (`loop_continue`, autorun's plain resume) is
+    async fn graph_engine_resume_dispatch_reuses_persisted_spec_start_head_even_if_stale() {
+        // `resume_background` (`graph_continue`, autorun's plain resume) is
         // the one path allowed to inherit a spec's already-persisted
         // baseline while it's still `running` — this is what makes resuming
         // a daemon-restart-interrupted spec keep comparing against the HEAD
         // it started at, not whatever HEAD happens to be at resume time.
-        let (dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
         init_git_repo(dir.path());
 
-        db.update_loop_spec_status(&spec_id, LoopSpecStatus::Running, None, None)
+        db.update_graph_spec_status(&spec_id, GraphSpecStatus::Running, None, None)
             .unwrap();
-        db.set_loop_spec_start_head(&spec_id, Some("deadbeef"))
+        db.set_graph_spec_start_head(&spec_id, Some("deadbeef"))
             .unwrap();
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-check".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "test \"{{spec_start_head}}\" = \"deadbeef\" && printf APPROVED",
                 "success_condition": "exit_code_0"
@@ -8098,12 +8138,12 @@ mod tests {
         .unwrap();
 
         engine
-            .run_loop_dispatch(loop_id.clone(), None, None, true, None, None)
+            .run_graph_dispatch(graph_id.clone(), None, None, true, None, None)
             .await
             .unwrap();
 
-        let spec = db.get_loop_spec(&spec_id).unwrap().unwrap();
-        assert_eq!(spec.status, LoopSpecStatus::Completed);
+        let spec = db.get_graph_spec(&spec_id).unwrap().unwrap();
+        assert_eq!(spec.status, GraphSpecStatus::Completed);
         assert_eq!(
             spec.spec_start_head.as_deref(),
             Some("deadbeef"),
@@ -8112,32 +8152,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn loop_engine_fresh_relaunch_recaptures_even_when_spec_still_shows_running() {
+    async fn graph_engine_fresh_relaunch_recaptures_even_when_spec_still_shows_running() {
         // The 2026-07-11 incident: a spec left `running` by a prior,
         // never-reset attempt kept having its stale baseline reused across
         // later relaunches ("12:56 relaunch compared against b9e8928, the
         // HEAD of the ORIGINAL 07:58 launch, two relaunches earlier"). A
-        // fresh dispatch — `loop_run`/`start_background_run`, including
-        // relaunching a `paused` loop directly instead of via
-        // `loop_continue` — must never inherit that: it re-captures
+        // fresh dispatch — `graph_run`/`start_background_run`, including
+        // relaunching a `paused` graph directly instead of via
+        // `graph_continue` — must never inherit that: it re-captures
         // regardless of the spec's leftover `running` status.
-        let (dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
         init_git_repo(dir.path());
         let real_head = git_head(dir.path());
 
         // Simulate the abandoned attempt: still `running`, with a baseline
         // that has nothing to do with the current, real HEAD.
-        db.update_loop_spec_status(&spec_id, LoopSpecStatus::Running, None, None)
+        db.update_graph_spec_status(&spec_id, GraphSpecStatus::Running, None, None)
             .unwrap();
-        db.set_loop_spec_start_head(&spec_id, Some("deadbeef"))
+        db.set_graph_spec_start_head(&spec_id, Some("deadbeef"))
             .unwrap();
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-check".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "test \"{{spec_start_head}}\" != \"deadbeef\" && printf APPROVED",
                 "success_condition": "exit_code_0"
@@ -8147,15 +8187,15 @@ mod tests {
         })
         .unwrap();
 
-        // `run_loop` is the fresh-dispatch entry point (same one `loop_run`
+        // `run_graph` is the fresh-dispatch entry point (same one `graph_run`
         // uses) — no `is_resume` flag reaches it.
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
 
-        let spec = db.get_loop_spec(&spec_id).unwrap().unwrap();
-        assert_eq!(spec.status, LoopSpecStatus::Completed);
+        let spec = db.get_graph_spec(&spec_id).unwrap().unwrap();
+        assert_eq!(spec.status, GraphSpecStatus::Completed);
         assert_eq!(
             spec.spec_start_head.as_deref(),
             Some(real_head.as_str()),
@@ -8164,24 +8204,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn loop_engine_check_retry_baseline_stays_frozen_across_reviewer_commits() {
+    async fn graph_engine_check_retry_baseline_stays_frozen_across_reviewer_commits() {
         // Placeholder captured at spec entry must be stable across every
         // node execution of that attempt, including check retries after
         // reviewer iterations — even while the reviewer keeps committing new
         // work in between.
-        let (dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
         init_git_repo(dir.path());
         let initial_head = git_head(dir.path());
         let baseline_log = dir.path().join("baseline.log");
         let counter = dir.path().join("counter");
 
         // "review": always commits a bit more work and passes.
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-review".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "review".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "echo more >> work.txt && git add -A && git commit -q -m more && printf APPROVED",
                 "success_condition": "exit_code_0"
@@ -8193,12 +8233,12 @@ mod tests {
         // "check": logs the substituted baseline every time it runs, and
         // only passes on its third invocation — forcing review<->check to
         // iterate a few times within the same spec attempt.
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-check".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": format!(
                     "echo '{{{{spec_start_head}}}}' >> \"{log}\"; n=$(cat \"{counter}\" 2>/dev/null || echo 0); n=$((n+1)); echo $n > \"{counter}\"; [ \"$n\" -ge 3 ] && printf APPROVED || exit 1",
@@ -8211,32 +8251,32 @@ mod tests {
             created_at: chrono::Utc::now(),
         })
         .unwrap();
-        db.insert_loop_edge(&LoopEdge {
+        db.insert_graph_edge(&GraphEdge {
             id: "edge-review-check".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             from_node: "node-review".to_string(),
             to_node: "node-check".to_string(),
-            condition: crate::domain::loops::LoopEdgeCondition::Pass,
+            condition: crate::domain::graphs::GraphEdgeCondition::Pass,
         })
         .unwrap();
-        db.insert_loop_edge(&LoopEdge {
+        db.insert_graph_edge(&GraphEdge {
             id: "edge-check-review".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             from_node: "node-check".to_string(),
             to_node: "node-review".to_string(),
-            condition: crate::domain::loops::LoopEdgeCondition::Fail,
+            condition: crate::domain::graphs::GraphEdgeCondition::Fail,
         })
         .unwrap();
 
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
 
-        let spec = db.get_loop_spec(&spec_id).unwrap().unwrap();
-        assert_eq!(spec.status, LoopSpecStatus::Completed);
+        let spec = db.get_graph_spec(&spec_id).unwrap().unwrap();
+        assert_eq!(spec.status, GraphSpecStatus::Completed);
         assert_eq!(spec.spec_start_head.as_deref(), Some(initial_head.as_str()));
 
         let logged = std::fs::read_to_string(&baseline_log).unwrap();
@@ -8257,18 +8297,18 @@ mod tests {
 
     #[tokio::test]
     async fn cm15_node_redispatch_reads_config_from_db_not_launch_snapshot() {
-        let (dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
         let ran_log = dir.path().join("ran.log");
         let counter = dir.path().join("cnt");
 
         // node-a: writes a config-derived marker each time it runs. Its command is
         // rewritten (below) between its first and second dispatch.
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-a".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "a".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": format!("printf A1 >> \"{}\"", ran_log.display()),
                 "success_condition": "exit_code_0"
@@ -8278,12 +8318,12 @@ mod tests {
         })
         .unwrap();
         // node-b: fails once (sleeping 0.5s to widen the update window), then passes.
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-b".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "b".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": format!(
                     "n=$(cat \"{c}\" 2>/dev/null || echo 0); n=$((n+1)); echo $n > \"{c}\"; \
@@ -8296,47 +8336,47 @@ mod tests {
             created_at: chrono::Utc::now(),
         })
         .unwrap();
-        db.insert_loop_edge(&LoopEdge {
+        db.insert_graph_edge(&GraphEdge {
             id: "a->b".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             from_node: "node-a".to_string(),
             to_node: "node-b".to_string(),
-            condition: crate::domain::loops::LoopEdgeCondition::Pass,
+            condition: crate::domain::graphs::GraphEdgeCondition::Pass,
         })
         .unwrap();
-        db.insert_loop_edge(&LoopEdge {
+        db.insert_graph_edge(&GraphEdge {
             id: "b->a".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             from_node: "node-b".to_string(),
             to_node: "node-a".to_string(),
-            condition: crate::domain::loops::LoopEdgeCondition::Fail,
+            condition: crate::domain::graphs::GraphEdgeCondition::Fail,
         })
         .unwrap();
 
         let engine = std::sync::Arc::new(engine);
         let engine2 = std::sync::Arc::clone(&engine);
-        let loop_id2 = loop_id.clone();
+        let graph_id2 = graph_id.clone();
         let handle =
-            tokio::spawn(async move { engine2.run_loop(loop_id2, None, None, None, None).await });
+            tokio::spawn(async move { engine2.run_graph(graph_id2, None, None, None, None).await });
 
         // Wait until node-a has completed exactly once, then rewrite its command —
-        // this is the `loop_update_node` between two dispatches. Full-config replace,
-        // matching update_loop_node_details semantics.
+        // this is the `graph_update_node` between two dispatches. Full-config replace,
+        // matching update_graph_node_details semantics.
         loop {
             let done = db
-                .list_loop_runs_for_spec(&spec_id)
+                .list_graph_runs_for_spec(&spec_id)
                 .unwrap()
                 .iter()
-                .filter(|r| r.node_id == "node-a" && r.status != LoopRunStatus::Running)
+                .filter(|r| r.node_id == "node-a" && r.status != GraphRunStatus::Running)
                 .count();
             if done >= 1 {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
-        db.update_loop_node_details(
+        db.update_graph_node_details(
             "node-a",
             None,
             None,
@@ -8351,11 +8391,11 @@ mod tests {
         handle.await.unwrap().unwrap();
 
         assert_eq!(
-            db.get_loop_spec(&spec_id).unwrap().unwrap().status,
-            LoopSpecStatus::Completed
+            db.get_graph_spec(&spec_id).unwrap().unwrap().status,
+            GraphSpecStatus::Completed
         );
         let a_runs: Vec<_> = db
-            .list_loop_runs_for_spec(&spec_id)
+            .list_graph_runs_for_spec(&spec_id)
             .unwrap()
             .into_iter()
             .filter(|r| r.node_id == "node-a")
@@ -8376,13 +8416,13 @@ mod tests {
 
     #[tokio::test]
     async fn cm15_config_change_during_a_running_node_does_not_alter_that_run() {
-        let (_dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
-        db.insert_loop_node(&LoopNode {
+        let (_dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+        db.insert_graph_node(&GraphNode {
             id: "node-slow".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "slow".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "sleep 2 && printf APPROVED",
                 "success_condition": "exit_code_0"
@@ -8394,13 +8434,13 @@ mod tests {
 
         let engine = std::sync::Arc::new(engine);
         let engine2 = std::sync::Arc::clone(&engine);
-        let loop_id2 = loop_id.clone();
+        let graph_id2 = graph_id.clone();
         let handle =
-            tokio::spawn(async move { engine2.run_loop(loop_id2, None, None, None, None).await });
+            tokio::spawn(async move { engine2.run_graph(graph_id2, None, None, None, None).await });
 
         // Let the single dispatch get into `sleep 2`, then swap its command.
         tokio::time::sleep(std::time::Duration::from_millis(600)).await;
-        db.update_loop_node_details(
+        db.update_graph_node_details(
             "node-slow",
             None,
             None,
@@ -8415,14 +8455,14 @@ mod tests {
         handle.await.unwrap().unwrap();
 
         let runs: Vec<_> = db
-            .list_loop_runs_for_spec(&spec_id)
+            .list_graph_runs_for_spec(&spec_id)
             .unwrap()
             .into_iter()
             .filter(|r| r.node_id == "node-slow")
             .collect();
         assert_eq!(runs.len(), 1, "the node must have been dispatched once");
         let out = runs[0].output.as_ref().unwrap();
-        assert_eq!(runs[0].status, LoopRunStatus::Pass);
+        assert_eq!(runs[0].status, GraphRunStatus::Pass);
         assert_eq!(
             out["command"], "sleep 2 && printf APPROVED",
             "the in-flight run keeps the command it started with (FR3/FR4)"
@@ -8430,28 +8470,28 @@ mod tests {
         assert!(out["stdout"].as_str().unwrap().contains("APPROVED"));
         assert!(!out["stdout"].as_str().unwrap().contains("CHANGED"));
         assert_eq!(
-            db.get_loop_spec(&spec_id).unwrap().unwrap().status,
-            LoopSpecStatus::Completed
+            db.get_graph_spec(&spec_id).unwrap().unwrap().status,
+            GraphSpecStatus::Completed
         );
     }
 
     #[tokio::test]
-    async fn loop_engine_regression_reviewer_commit_between_implement_and_check_uses_precommit_baseline(
+    async fn graph_engine_regression_reviewer_commit_between_implement_and_check_uses_precommit_baseline(
     ) {
         // Regression for the 18:19 incident shape: the reviewer commits as
         // part of this spec's own work, then the check node runs — it must
         // evaluate against the baseline captured *before* that commit and
         // pass, never see its own attempt's commit as "no movement".
-        let (dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
         init_git_repo(dir.path());
         let pre_commit_head = git_head(dir.path());
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-implement".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "implement".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "echo change >> work.txt && git add -A && git commit -q -m change && printf APPROVED",
                 "success_condition": "exit_code_0"
@@ -8460,12 +8500,12 @@ mod tests {
             created_at: chrono::Utc::now(),
         })
         .unwrap();
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-check".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "test \"$(git rev-parse HEAD)\" != \"{{spec_start_head}}\" && printf APPROVED",
                 "success_condition": "exit_code_0"
@@ -8474,25 +8514,25 @@ mod tests {
             created_at: chrono::Utc::now(),
         })
         .unwrap();
-        db.insert_loop_edge(&LoopEdge {
+        db.insert_graph_edge(&GraphEdge {
             id: "edge-implement-check".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             from_node: "node-implement".to_string(),
             to_node: "node-check".to_string(),
-            condition: crate::domain::loops::LoopEdgeCondition::Pass,
+            condition: crate::domain::graphs::GraphEdgeCondition::Pass,
         })
         .unwrap();
 
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
-        let spec = db.get_loop_spec(&spec_id).unwrap().unwrap();
-        assert_eq!(lp.status, LoopStatus::Completed);
-        assert_eq!(spec.status, LoopSpecStatus::Completed);
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        let spec = db.get_graph_spec(&spec_id).unwrap().unwrap();
+        assert_eq!(lp.status, GraphStatus::Completed);
+        assert_eq!(spec.status, GraphSpecStatus::Completed);
         assert_eq!(
             spec.spec_start_head.as_deref(),
             Some(pre_commit_head.as_str()),
@@ -8500,12 +8540,12 @@ mod tests {
              reviewer's own commit"
         );
 
-        let runs = db.list_loop_runs_for_spec(&spec_id).unwrap();
+        let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
         let check_run = runs
             .iter()
             .find(|r| r.node_id == "node-check")
             .expect("check node must have run");
-        assert_eq!(check_run.status, LoopRunStatus::Pass);
+        assert_eq!(check_run.status, GraphRunStatus::Pass);
     }
 
     // ── C15: spec_committed_head — tied to *this run's* committer, not to
@@ -8519,13 +8559,13 @@ mod tests {
          && test \"$(git rev-parse HEAD)\" = \"{{spec_committed_head}}\"";
 
     #[tokio::test]
-    async fn loop_engine_committed_check_passes_when_this_runs_committer_commits() {
+    async fn graph_engine_committed_check_passes_when_this_runs_committer_commits() {
         // Test 1 (spec TESTS REQUIRED): a spec that commits — the check
         // passes.
-        let (dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
         init_git_repo(dir.path());
 
-        db.insert_loop_node(&rights_node(
+        db.insert_graph_node(&rights_node(
             &spec_id,
             "committer",
             COMMIT_CMD,
@@ -8533,12 +8573,12 @@ mod tests {
             1,
         ))
         .unwrap();
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-check".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": COMMITTED_CHECK_CMD,
                 "success_condition": "exit_code_0"
@@ -8547,52 +8587,52 @@ mod tests {
             created_at: chrono::Utc::now(),
         })
         .unwrap();
-        db.insert_loop_edge(&LoopEdge {
+        db.insert_graph_edge(&GraphEdge {
             id: "e-committer-check".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             from_node: "committer".to_string(),
             to_node: "node-check".to_string(),
-            condition: crate::domain::loops::LoopEdgeCondition::Always,
+            condition: crate::domain::graphs::GraphEdgeCondition::Always,
         })
         .unwrap();
 
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
 
-        let spec = db.get_loop_spec(&spec_id).unwrap().unwrap();
-        assert_eq!(spec.status, LoopSpecStatus::Completed);
+        let spec = db.get_graph_spec(&spec_id).unwrap().unwrap();
+        assert_eq!(spec.status, GraphSpecStatus::Completed);
         assert_eq!(
             spec.spec_committed_head.as_deref(),
             Some(git_head(dir.path()).as_str()),
             "the committer's own resulting HEAD must be recorded"
         );
 
-        let runs = db.list_loop_runs_for_spec(&spec_id).unwrap();
+        let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
         let check_run = runs.iter().find(|r| r.node_id == "node-check").unwrap();
-        assert_eq!(check_run.status, LoopRunStatus::Pass);
+        assert_eq!(check_run.status, GraphRunStatus::Pass);
     }
 
     #[tokio::test]
-    async fn loop_engine_committed_check_fails_when_nothing_committed_and_tree_clean() {
+    async fn graph_engine_committed_check_fails_when_nothing_committed_and_tree_clean() {
         // Test 2 (spec TESTS REQUIRED): a spec that commits nothing, clean
         // tree — the check fails.
-        let (dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
         init_git_repo(dir.path());
 
         // Carries commit rights but never actually commits — the exact
         // shape of the bug this gate exists to catch: an approval with no
         // commit behind it.
-        db.insert_loop_node(&rights_node(&spec_id, "committer", "true", Some(true), 1))
+        db.insert_graph_node(&rights_node(&spec_id, "committer", "true", Some(true), 1))
             .unwrap();
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-check".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": COMMITTED_CHECK_CMD,
                 "success_condition": "exit_code_0"
@@ -8601,43 +8641,43 @@ mod tests {
             created_at: chrono::Utc::now(),
         })
         .unwrap();
-        db.insert_loop_edge(&LoopEdge {
+        db.insert_graph_edge(&GraphEdge {
             id: "e-committer-check".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             from_node: "committer".to_string(),
             to_node: "node-check".to_string(),
-            condition: crate::domain::loops::LoopEdgeCondition::Always,
+            condition: crate::domain::graphs::GraphEdgeCondition::Always,
         })
         .unwrap();
 
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
 
-        let spec = db.get_loop_spec(&spec_id).unwrap().unwrap();
+        let spec = db.get_graph_spec(&spec_id).unwrap().unwrap();
         assert_eq!(
             spec.spec_committed_head, None,
             "no commit landed, so there is nothing to record"
         );
-        let runs = db.list_loop_runs_for_spec(&spec_id).unwrap();
+        let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
         let check_run = runs.iter().find(|r| r.node_id == "node-check").unwrap();
-        assert_eq!(check_run.status, LoopRunStatus::Fail);
+        assert_eq!(check_run.status, GraphRunStatus::Fail);
     }
 
     #[tokio::test]
-    async fn loop_engine_regression_concurrent_commit_from_outside_this_run_fails_committed_check()
+    async fn graph_engine_regression_concurrent_commit_from_outside_this_run_fails_committed_check()
     {
         // Test 3 (spec TESTS REQUIRED) — the regression test for the
         // concurrent-worktree case: a commit made by something other than
         // this spec's run, with the spec having committed nothing, must
         // fail. This is the 2026-08-19 incident shape: a human (or another
-        // agent) commits into the same worktree while a loop is running on
+        // agent) commits into the same worktree while a graph is running on
         // it. The superseded `HEAD != spec_start_head` comparison is
         // satisfied by exactly this, which is the bug this test guards
         // against.
-        let (dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
         init_git_repo(dir.path());
         let baseline = git_head(dir.path());
 
@@ -8645,9 +8685,9 @@ mod tests {
         // captured and persisted — same setup the B10 resume tests use, so
         // a genuine resume (daemon restart mid-run) reuses it rather than
         // recapturing.
-        db.update_loop_spec_status(&spec_id, LoopSpecStatus::Running, None, None)
+        db.update_graph_spec_status(&spec_id, GraphSpecStatus::Running, None, None)
             .unwrap();
-        db.set_loop_spec_start_head(&spec_id, Some(&baseline))
+        db.set_graph_spec_start_head(&spec_id, Some(&baseline))
             .unwrap();
 
         // The concurrent-worktree case itself: something other than this
@@ -8681,12 +8721,12 @@ mod tests {
         );
 
         // This spec's own graph never commits anything — just the check.
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-check".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": COMMITTED_CHECK_CMD,
                 "success_condition": "exit_code_0"
@@ -8698,22 +8738,22 @@ mod tests {
 
         // A resumed dispatch — same path a daemon restart mid-run takes.
         engine
-            .run_loop_dispatch(loop_id.clone(), None, None, true, None, None)
+            .run_graph_dispatch(graph_id.clone(), None, None, true, None, None)
             .await
             .unwrap();
 
-        let spec = db.get_loop_spec(&spec_id).unwrap().unwrap();
+        let spec = db.get_graph_spec(&spec_id).unwrap().unwrap();
         assert_eq!(
             spec.spec_committed_head, None,
             "no node this run trusts to commit ever ran, so `spec_committed_head` \
              must stay unset even though HEAD moved"
         );
 
-        let runs = db.list_loop_runs_for_spec(&spec_id).unwrap();
+        let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
         let check_run = runs.iter().find(|r| r.node_id == "node-check").unwrap();
         assert_eq!(
             check_run.status,
-            LoopRunStatus::Fail,
+            GraphRunStatus::Fail,
             "the superseded `HEAD != spec_start_head` comparison alone would have passed \
              here (HEAD moved to the concurrent commit) — the strengthened check must not"
         );
@@ -8724,14 +8764,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn loop_engine_spec_committed_head_scoped_per_spec_not_shared() {
+    async fn graph_engine_spec_committed_head_scoped_per_spec_not_shared() {
         // Test 4 (spec TESTS REQUIRED): the marker's value is scoped to the
-        // run — two specs in one loop do not share it. A loop with two bound
-        // specs runs both, in position order, within one `run_loop` call.
-        let (dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        // run — two specs in one graph do not share it. A graph with two bound
+        // specs runs both, in position order, within one `run_graph` call.
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
         init_git_repo(dir.path());
 
-        db.insert_loop_node(&rights_node(
+        db.insert_graph_node(&rights_node(
             &spec_id,
             "committer",
             COMMIT_CMD,
@@ -8740,16 +8780,16 @@ mod tests {
         ))
         .unwrap();
 
-        // A second spec in the same loop, with its own committer that also
+        // A second spec in the same graph, with its own committer that also
         // commits.
-        let spec_b = crate::domain::loops::LoopSpec {
+        let spec_b = crate::domain::graphs::GraphSpec {
             id: "spec-b".to_string(),
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             name: "Spec B".to_string(),
             description: Some("second spec".to_string()),
             position: 2,
             parallelizable: false,
-            status: LoopSpecStatus::Pending,
+            status: GraphSpecStatus::Pending,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
@@ -8759,8 +8799,8 @@ mod tests {
             completed_via_at: None,
             spec_committed_head: None,
         };
-        db.insert_loop_spec(&spec_b).unwrap();
-        db.insert_loop_node(&rights_node(
+        db.insert_graph_spec(&spec_b).unwrap();
+        db.insert_graph_node(&rights_node(
             &spec_b.id,
             "committer-b",
             COMMIT_CMD,
@@ -8770,14 +8810,14 @@ mod tests {
         .unwrap();
 
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
 
-        let spec_a_after = db.get_loop_spec(&spec_id).unwrap().unwrap();
-        let spec_b_after = db.get_loop_spec(&spec_b.id).unwrap().unwrap();
-        assert_eq!(spec_a_after.status, LoopSpecStatus::Completed);
-        assert_eq!(spec_b_after.status, LoopSpecStatus::Completed);
+        let spec_a_after = db.get_graph_spec(&spec_id).unwrap().unwrap();
+        let spec_b_after = db.get_graph_spec(&spec_b.id).unwrap().unwrap();
+        assert_eq!(spec_a_after.status, GraphSpecStatus::Completed);
+        assert_eq!(spec_b_after.status, GraphSpecStatus::Completed);
         assert!(
             spec_a_after.spec_committed_head.is_some(),
             "spec A must have recorded its own commit"
@@ -8793,31 +8833,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn loop_engine_restart_mid_run_does_not_turn_committed_check_fail_into_pass() {
+    async fn graph_engine_restart_mid_run_does_not_turn_committed_check_fail_into_pass() {
         // Test 5 (spec TESTS REQUIRED): if a restart path is reachable in a
         // test, a restart mid-run does not turn a fail into a pass. Mirrors
-        // B10's `loop_engine_resume_dispatch_reuses_persisted_spec_start_head_even_if_stale`:
+        // B10's `graph_engine_resume_dispatch_reuses_persisted_spec_start_head_even_if_stale`:
         // a spec left `running` (as a daemon restart would leave it) with no
         // `spec_committed_head` recorded yet must resume still lacking one —
         // a resume must never manufacture evidence of a commit that never
         // happened.
-        let (dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
         init_git_repo(dir.path());
         let baseline = git_head(dir.path());
 
-        db.update_loop_spec_status(&spec_id, LoopSpecStatus::Running, None, None)
+        db.update_graph_spec_status(&spec_id, GraphSpecStatus::Running, None, None)
             .unwrap();
-        db.set_loop_spec_start_head(&spec_id, Some(&baseline))
+        db.set_graph_spec_start_head(&spec_id, Some(&baseline))
             .unwrap();
         // Deliberately left unset, as an interrupted attempt that hadn't
         // committed yet would leave it.
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-check".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": COMMITTED_CHECK_CMD,
                 "success_condition": "exit_code_0"
@@ -8828,30 +8868,30 @@ mod tests {
         .unwrap();
 
         engine
-            .run_loop_dispatch(loop_id.clone(), None, None, true, None, None)
+            .run_graph_dispatch(graph_id.clone(), None, None, true, None, None)
             .await
             .unwrap();
 
-        let spec = db.get_loop_spec(&spec_id).unwrap().unwrap();
+        let spec = db.get_graph_spec(&spec_id).unwrap().unwrap();
         assert_eq!(spec.spec_committed_head, None);
-        let runs = db.list_loop_runs_for_spec(&spec_id).unwrap();
+        let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
         let check_run = runs.iter().find(|r| r.node_id == "node-check").unwrap();
         assert_eq!(
             check_run.status,
-            LoopRunStatus::Fail,
+            GraphRunStatus::Fail,
             "resuming an attempt that never committed must never read as a pass"
         );
     }
 
     #[tokio::test]
-    async fn loop_engine_completes_check_and_gate_spec() {
-        let (_dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
-        let check = LoopNode {
+    async fn graph_engine_completes_check_and_gate_spec() {
+        let (_dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+        let check = GraphNode {
             id: "node-check".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "printf APPROVED",
                 "success_condition": "exit_code_0"
@@ -8859,12 +8899,12 @@ mod tests {
             position: 1,
             created_at: chrono::Utc::now(),
         };
-        let gate = LoopNode {
+        let gate = GraphNode {
             id: "node-gate".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "gate".to_string(),
-            kind: LoopNodeKind::Gate,
+            kind: GraphNodeKind::Gate,
             config: serde_json::json!({
                 "evaluate": "output_contains",
                 "value": "APPROVED",
@@ -8874,41 +8914,41 @@ mod tests {
             created_at: chrono::Utc::now(),
         };
 
-        db.insert_loop_node(&check).unwrap();
-        db.insert_loop_node(&gate).unwrap();
-        db.insert_loop_edge(&LoopEdge {
+        db.insert_graph_node(&check).unwrap();
+        db.insert_graph_node(&gate).unwrap();
+        db.insert_graph_edge(&GraphEdge {
             id: "edge-pass".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             from_node: check.id.clone(),
             to_node: gate.id.clone(),
-            condition: crate::domain::loops::LoopEdgeCondition::Pass,
+            condition: crate::domain::graphs::GraphEdgeCondition::Pass,
         })
         .unwrap();
 
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
-        let spec = db.get_loop_spec(&spec_id).unwrap().unwrap();
-        let runs = db.list_loop_runs_for_spec(&spec_id).unwrap();
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        let spec = db.get_graph_spec(&spec_id).unwrap().unwrap();
+        let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
 
-        assert_eq!(lp.status, LoopStatus::Completed);
-        assert_eq!(spec.status, LoopSpecStatus::Completed);
+        assert_eq!(lp.status, GraphStatus::Completed);
+        assert_eq!(spec.status, GraphSpecStatus::Completed);
         assert_eq!(runs.len(), 2);
     }
 
     #[tokio::test]
-    async fn loop_engine_fails_spec_when_check_fails_without_route() {
-        let (_dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
-        db.insert_loop_node(&LoopNode {
+    async fn graph_engine_fails_spec_when_check_fails_without_route() {
+        let (_dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+        db.insert_graph_node(&GraphNode {
             id: "node-check".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "exit 1",
                 "success_condition": "exit_code_0"
@@ -8919,27 +8959,27 @@ mod tests {
         .unwrap();
 
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
-        let spec = db.get_loop_spec(&spec_id).unwrap().unwrap();
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        let spec = db.get_graph_spec(&spec_id).unwrap().unwrap();
 
-        assert_eq!(lp.status, LoopStatus::Failed);
-        assert_eq!(spec.status, LoopSpecStatus::Failed);
+        assert_eq!(lp.status, GraphStatus::Failed);
+        assert_eq!(spec.status, GraphSpecStatus::Failed);
     }
 
     #[test]
     fn resolve_spec_start_retries_last_running_node() {
-        let spec = LoopSpec {
+        let spec = GraphSpec {
             id: "spec".to_string(),
-            loop_id: Some("wf".to_string()),
+            graph_id: Some("wf".to_string()),
             name: "Spec".to_string(),
             description: None,
             position: 1,
             parallelizable: false,
-            status: LoopSpecStatus::Running,
+            status: GraphSpecStatus::Running,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
@@ -8949,26 +8989,26 @@ mod tests {
             completed_via_reason: None,
             completed_via_at: None,
         };
-        let details = crate::domain::loops::LoopSpecDetails {
+        let details = crate::domain::graphs::GraphSpecDetails {
             spec: spec.clone(),
-            nodes: vec![LoopNode {
+            nodes: vec![GraphNode {
                 id: "node-1".to_string(),
                 spec_id: Some(spec.id.clone()),
-                loop_id: None,
+                graph_id: None,
                 name: "Node".to_string(),
-                kind: LoopNodeKind::Check,
+                kind: GraphNodeKind::Check,
                 config: serde_json::json!({"command": "true"}),
                 position: 1,
                 created_at: chrono::Utc::now(),
             }],
             edges: vec![],
         };
-        let runs = vec![LoopNodeRun {
+        let runs = vec![GraphNodeRun {
             id: "run".to_string(),
-            loop_id: "wf".to_string(),
+            graph_id: "wf".to_string(),
             spec_id: spec.id.clone(),
             node_id: "node-1".to_string(),
-            status: LoopRunStatus::Fail,
+            status: GraphRunStatus::Fail,
             input: Some(serde_json::json!({"previous": "context"})),
             // Deliberately distinct from `input`: a resumed node must be fed
             // the value propagated into it, not its own verdict.
@@ -9007,14 +9047,14 @@ mod tests {
 
     #[test]
     fn resolve_spec_start_resets_iterations_for_fresh_spec() {
-        let spec = LoopSpec {
+        let spec = GraphSpec {
             id: "spec".to_string(),
-            loop_id: Some("wf".to_string()),
+            graph_id: Some("wf".to_string()),
             name: "Spec".to_string(),
             description: None,
             position: 1,
             parallelizable: false,
-            status: LoopSpecStatus::Pending,
+            status: GraphSpecStatus::Pending,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
@@ -9024,14 +9064,14 @@ mod tests {
             completed_via_reason: None,
             completed_via_at: None,
         };
-        let details = crate::domain::loops::LoopSpecDetails {
+        let details = crate::domain::graphs::GraphSpecDetails {
             spec: spec.clone(),
-            nodes: vec![LoopNode {
+            nodes: vec![GraphNode {
                 id: "node-1".to_string(),
                 spec_id: Some(spec.id.clone()),
-                loop_id: None,
+                graph_id: None,
                 name: "Node".to_string(),
-                kind: LoopNodeKind::Check,
+                kind: GraphNodeKind::Check,
                 config: serde_json::json!({"command": "true"}),
                 position: 1,
                 created_at: chrono::Utc::now(),
@@ -9040,13 +9080,13 @@ mod tests {
         };
         // Historical runs from a previous attempt at this spec: 10 failed
         // iterations that exhausted the budget last time around.
-        let runs: Vec<LoopNodeRun> = (0..10)
-            .map(|i| LoopNodeRun {
+        let runs: Vec<GraphNodeRun> = (0..10)
+            .map(|i| GraphNodeRun {
                 id: format!("run-{i}"),
-                loop_id: "wf".to_string(),
+                graph_id: "wf".to_string(),
                 spec_id: spec.id.clone(),
                 node_id: "node-1".to_string(),
-                status: LoopRunStatus::Fail,
+                status: GraphRunStatus::Fail,
                 input: None,
                 output: None,
                 started_at: chrono::Utc::now(),
@@ -9073,14 +9113,14 @@ mod tests {
         // implement (pos 1) <-> review (pos 2): every node has an incoming
         // edge, so there is no source node. The entry must be the designated
         // start (lowest position), not an error.
-        let spec = LoopSpec {
+        let spec = GraphSpec {
             id: "spec".to_string(),
-            loop_id: Some("wf".to_string()),
+            graph_id: Some("wf".to_string()),
             name: "Spec".to_string(),
             description: None,
             position: 1,
             parallelizable: false,
-            status: LoopSpecStatus::Pending,
+            status: GraphSpecStatus::Pending,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
@@ -9090,25 +9130,25 @@ mod tests {
             completed_via_reason: None,
             completed_via_at: None,
         };
-        let node = |id: &str, position: i64| LoopNode {
+        let node = |id: &str, position: i64| GraphNode {
             id: id.to_string(),
             spec_id: Some(spec.id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: id.to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({}),
             position,
             created_at: chrono::Utc::now(),
         };
-        let edge = |id: &str, from: &str, to: &str, condition| LoopEdge {
+        let edge = |id: &str, from: &str, to: &str, condition| GraphEdge {
             id: id.to_string(),
             spec_id: Some(spec.id.clone()),
-            loop_id: None,
+            graph_id: None,
             from_node: from.to_string(),
             to_node: to.to_string(),
             condition,
         };
-        let details = crate::domain::loops::LoopSpecDetails {
+        let details = crate::domain::graphs::GraphSpecDetails {
             spec: spec.clone(),
             // Insert review before implement so the result cannot depend on
             // node ordering — only on position.
@@ -9118,13 +9158,13 @@ mod tests {
                     "e1",
                     "implement",
                     "review",
-                    crate::domain::loops::LoopEdgeCondition::Always,
+                    crate::domain::graphs::GraphEdgeCondition::Always,
                 ),
                 edge(
                     "e2",
                     "review",
                     "implement",
-                    crate::domain::loops::LoopEdgeCondition::Fail,
+                    crate::domain::graphs::GraphEdgeCondition::Fail,
                 ),
             ],
         };
@@ -9137,15 +9177,15 @@ mod tests {
 
     #[test]
     fn render_agent_prompt_includes_reporting_contract() {
-        let lp = crate::domain::loops::Loop {
+        let lp = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
             infra_node_id: None,
             id: "wf".to_string(),
-            name: "Loop".to_string(),
+            name: "Graph".to_string(),
             description: None,
             workdir: "/tmp/project".to_string(),
-            status: LoopStatus::Draft,
+            status: GraphStatus::Draft,
             trigger: None,
             created_at: chrono::Utc::now(),
             started_at: None,
@@ -9156,14 +9196,14 @@ mod tests {
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
         };
-        let spec = LoopSpec {
+        let spec = GraphSpec {
             id: "spec".to_string(),
-            loop_id: Some("wf".to_string()),
+            graph_id: Some("wf".to_string()),
             name: "Spec".to_string(),
             description: Some("Do the thing".to_string()),
             position: 1,
             parallelizable: false,
-            status: LoopSpecStatus::Pending,
+            status: GraphSpecStatus::Pending,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
@@ -9173,12 +9213,12 @@ mod tests {
             completed_via_reason: None,
             completed_via_at: None,
         };
-        let node = LoopNode {
+        let node = GraphNode {
             id: "node-1".to_string(),
             spec_id: Some("spec".to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "Agent".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({}),
             position: 1,
             created_at: chrono::Utc::now(),
@@ -9197,8 +9237,8 @@ mod tests {
         )
         .unwrap();
 
-        assert!(prompt.contains("loop_complete_node"));
-        assert!(prompt.contains("loop_report_blocker"));
+        assert!(prompt.contains("graph_complete_node"));
+        assert!(prompt.contains("graph_report_blocker"));
         assert!(prompt.contains("run_id=\"run-1\""));
         assert!(prompt.contains("Do the thing"));
         assert!(prompt.contains("\"feedback\": \"ok\""));
@@ -9212,15 +9252,15 @@ mod tests {
     /// notice — nothing was interrupted, there is nothing to continue.
     #[test]
     fn render_agent_prompt_adds_continuation_notice_only_when_spec_interrupted() {
-        let lp = crate::domain::loops::Loop {
+        let lp = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
             infra_node_id: None,
             id: "wf".to_string(),
-            name: "Loop".to_string(),
+            name: "Graph".to_string(),
             description: None,
             workdir: "/tmp/project".to_string(),
-            status: LoopStatus::Draft,
+            status: GraphStatus::Draft,
             trigger: None,
             created_at: chrono::Utc::now(),
             started_at: None,
@@ -9231,14 +9271,14 @@ mod tests {
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
         };
-        let mut spec = LoopSpec {
+        let mut spec = GraphSpec {
             id: "spec".to_string(),
-            loop_id: Some("wf".to_string()),
+            graph_id: Some("wf".to_string()),
             name: "Spec".to_string(),
             description: Some("Do the thing".to_string()),
             position: 1,
             parallelizable: false,
-            status: LoopSpecStatus::Pending,
+            status: GraphSpecStatus::Pending,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
@@ -9248,12 +9288,12 @@ mod tests {
             completed_via_reason: None,
             completed_via_at: None,
         };
-        let node = LoopNode {
+        let node = GraphNode {
             id: "node-1".to_string(),
             spec_id: Some("spec".to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "Agent".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({}),
             position: 1,
             created_at: chrono::Utc::now(),
@@ -9273,7 +9313,7 @@ mod tests {
         .unwrap();
         assert!(!pending_prompt.contains("[CONTINUATION]"));
 
-        spec.status = LoopSpecStatus::Interrupted;
+        spec.status = GraphSpecStatus::Interrupted;
         let interrupted_prompt = render_agent_prompt(
             &lp,
             &spec,
@@ -9293,13 +9333,13 @@ mod tests {
         assert!(interrupted_prompt.contains(&lp.workdir));
     }
 
-    fn agent_node_with_config(config: Value) -> LoopNode {
-        LoopNode {
+    fn agent_node_with_config(config: Value) -> GraphNode {
+        GraphNode {
             id: "node-1".to_string(),
             spec_id: Some("spec".to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "Agent".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config,
             position: 1,
             created_at: chrono::Utc::now(),
@@ -9402,15 +9442,15 @@ mod tests {
         // times over the elision threshold — the real incident this fixes
         // was a 65KB test log blowing up argv. The full text must never be
         // interpolated whole; the marker must show it was cut.
-        let lp = crate::domain::loops::Loop {
+        let lp = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
             infra_node_id: None,
             id: "wf".to_string(),
-            name: "Loop".to_string(),
+            name: "Graph".to_string(),
             description: None,
             workdir: "/tmp/project".to_string(),
-            status: LoopStatus::Draft,
+            status: GraphStatus::Draft,
             trigger: None,
             created_at: chrono::Utc::now(),
             started_at: None,
@@ -9421,14 +9461,14 @@ mod tests {
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
         };
-        let spec = LoopSpec {
+        let spec = GraphSpec {
             id: "spec".to_string(),
-            loop_id: Some("wf".to_string()),
+            graph_id: Some("wf".to_string()),
             name: "Spec".to_string(),
             description: Some("Do the thing".to_string()),
             position: 1,
             parallelizable: false,
-            status: LoopSpecStatus::Pending,
+            status: GraphSpecStatus::Pending,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
@@ -9438,12 +9478,12 @@ mod tests {
             completed_via_reason: None,
             completed_via_at: None,
         };
-        let node = LoopNode {
+        let node = GraphNode {
             id: "node-1".to_string(),
             spec_id: Some("spec".to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "Agent".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({}),
             position: 1,
             created_at: chrono::Utc::now(),
@@ -9627,7 +9667,7 @@ mod tests {
 
     #[tokio::test]
     async fn append_pinned_skills_degrades_gracefully_without_a_configured_store() {
-        // No dynamic skill store at all (e.g. a LoopEngine built without
+        // No dynamic skill store at all (e.g. a GraphEngine built without
         // `with_dynamic_skills`) must not fail the spawn either — every pin
         // just becomes a note.
         let node = agent_node_with_config(serde_json::json!({
@@ -9671,7 +9711,7 @@ mod tests {
         );
     }
 
-    /// Full pipeline, not just the helper: `LoopEngine::with_dynamic_skills`
+    /// Full pipeline, not just the helper: `GraphEngine::with_dynamic_skills`
     /// through `execute_node` → `execute_agent_node` → `append_pinned_skills`
     /// → the actual spawned process, proving the plumbing between the engine
     /// and the S1 store is wired correctly end to end.
@@ -9682,17 +9722,17 @@ mod tests {
         let store_dir = tempdir().unwrap();
         let store = Arc::new(skill_store_for(registry.path(), store_dir.path()));
 
-        let (dir, db, engine, loop_id) = bare_loop_fixture().unwrap();
+        let (dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
         let engine = engine.with_dynamic_skills(Arc::clone(&store));
 
         let spec = standalone_spec("sid-pin", 1);
-        db.insert_loop_spec(&spec).unwrap();
-        let node = LoopNode {
+        db.insert_graph_spec(&spec).unwrap();
+        let node = GraphNode {
             id: "node-pin".to_string(),
             spec_id: Some(spec.id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "impl".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({
                 "platform": "skills-test-cli",
                 "prompt_template": "{{spec_content}}",
@@ -9701,7 +9741,7 @@ mod tests {
             position: 1,
             created_at: chrono::Utc::now(),
         };
-        db.insert_loop_node(&node).unwrap();
+        db.insert_graph_node(&node).unwrap();
 
         let cli = crate::domain::cli_config::CliConfig {
             name: "skills-test-cli".to_string(),
@@ -9712,7 +9752,7 @@ mod tests {
         let home = write_resume_cli_home(cli);
         let _guard = HomeGuard::set(home.path());
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
 
         let execution = engine
             .execute_node(
@@ -9741,13 +9781,13 @@ mod tests {
         assert!(stdout.contains("Write clean code."));
     }
 
-    fn sample_agent_node() -> LoopNode {
-        LoopNode {
+    fn sample_agent_node() -> GraphNode {
+        GraphNode {
             id: "node-agent".to_string(),
             spec_id: Some("spec".to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "Agent".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({}),
             position: 1,
             created_at: chrono::Utc::now(),
@@ -9755,8 +9795,8 @@ mod tests {
     }
 
     /// A throwaway `Database` for `run_agent_process` tests that only need
-    /// somewhere to (harmlessly) persist a pid — no loop/spec/node rows are
-    /// inserted, so `set_loop_run_pid`/`update_loop_run_result` against the
+    /// somewhere to (harmlessly) persist a pid — no graph/spec/node rows are
+    /// inserted, so `set_graph_run_pid`/`update_graph_run_result` against the
     /// fake `run_id` below just affect zero rows.
     fn test_db() -> (TempDir, Database) {
         let dir = tempdir().unwrap();
@@ -9784,21 +9824,21 @@ mod tests {
         }
     }
 
-    /// Seed a spec + agent node + `running` run under `loop_id` so
-    /// `run_agent_process` tests can read the run row back (`loop_runs`
+    /// Seed a spec + agent node + `running` run under `graph_id` so
+    /// `run_agent_process` tests can read the run row back (`graph_runs`
     /// enforces foreign keys). Returns the inserted node.
-    fn seed_agent_run(db: &Database, loop_id: &str, run_id: &str) -> LoopNode {
+    fn seed_agent_run(db: &Database, graph_id: &str, run_id: &str) -> GraphNode {
         let spec = standalone_spec("sid-spec", 1);
-        db.insert_loop_spec(&spec).unwrap();
+        db.insert_graph_spec(&spec).unwrap();
         let mut node = sample_agent_node();
         node.spec_id = Some(spec.id.clone());
-        db.insert_loop_node(&node).unwrap();
-        db.insert_loop_run(&LoopNodeRun {
+        db.insert_graph_node(&node).unwrap();
+        db.insert_graph_run(&GraphNodeRun {
             id: run_id.to_string(),
-            loop_id: loop_id.to_string(),
+            graph_id: graph_id.to_string(),
             spec_id: spec.id,
             node_id: node.id.clone(),
-            status: LoopRunStatus::Running,
+            status: GraphRunStatus::Running,
             input: None,
             output: None,
             started_at: chrono::Utc::now(),
@@ -9816,8 +9856,8 @@ mod tests {
 
     #[tokio::test]
     async fn run_agent_process_records_set_at_spawn_session_id() {
-        let (_dir, db, _engine, loop_id) = bare_loop_fixture().unwrap();
-        let node = seed_agent_run(&db, &loop_id, "run-sid");
+        let (_dir, db, _engine, graph_id) = bare_graph_fixture().unwrap();
+        let node = seed_agent_run(&db, &graph_id, "run-sid");
         let cli = Cli::new("test-cli");
         let mut strategy = sample_strategy("/bin/echo");
         strategy.session_id_set_flag = Some("--session-id".to_string());
@@ -9828,7 +9868,7 @@ mod tests {
         .await
         .unwrap();
 
-        let run = db.get_loop_run("run-sid").unwrap().unwrap();
+        let run = db.get_graph_run("run-sid").unwrap().unwrap();
         let sid = run
             .session_id
             .expect("set-at-spawn platform must record a session id");
@@ -9837,8 +9877,8 @@ mod tests {
 
     #[tokio::test]
     async fn run_agent_process_leaves_session_id_null_without_set_flag() {
-        let (_dir, db, _engine, loop_id) = bare_loop_fixture().unwrap();
-        let node = seed_agent_run(&db, &loop_id, "run-nosid");
+        let (_dir, db, _engine, graph_id) = bare_graph_fixture().unwrap();
+        let node = seed_agent_run(&db, &graph_id, "run-nosid");
         let cli = Cli::new("test-cli");
         let strategy = sample_strategy("/bin/echo");
 
@@ -9858,7 +9898,7 @@ mod tests {
         .await
         .unwrap();
 
-        let run = db.get_loop_run("run-nosid").unwrap().unwrap();
+        let run = db.get_graph_run("run-nosid").unwrap().unwrap();
         assert_eq!(
             run.session_id, None,
             "no set flag and no capture: session_id must stay NULL"
@@ -9933,8 +9973,8 @@ esac
 
     #[tokio::test]
     async fn run_agent_process_captures_new_session_id_after_run() {
-        let (_dir, db, _engine, loop_id) = bare_loop_fixture().unwrap();
-        let node = seed_agent_run(&db, &loop_id, "run-cap");
+        let (_dir, db, _engine, graph_id) = bare_graph_fixture().unwrap();
+        let node = seed_agent_run(&db, &graph_id, "run-cap");
         let scratch = tempdir().unwrap();
         let statefile = scratch.path().join("sessions");
         std::fs::write(&statefile, "ses_pre_existing\n").unwrap();
@@ -9952,8 +9992,8 @@ esac
         .await
         .unwrap();
 
-        assert_eq!(execution.status, LoopRunStatus::Fail); // CM13: unreported
-        let run = db.get_loop_run("run-cap").unwrap().unwrap();
+        assert_eq!(execution.status, GraphRunStatus::Fail); // CM13: unreported
+        let run = db.get_graph_run("run-cap").unwrap().unwrap();
         assert_eq!(
             run.session_id.as_deref(),
             Some("ses_brand_new"),
@@ -9963,8 +10003,8 @@ esac
 
     #[tokio::test]
     async fn run_agent_process_no_new_session_leaves_session_id_null() {
-        let (_dir, db, _engine, loop_id) = bare_loop_fixture().unwrap();
-        let node = seed_agent_run(&db, &loop_id, "run-nonew");
+        let (_dir, db, _engine, graph_id) = bare_graph_fixture().unwrap();
+        let node = seed_agent_run(&db, &graph_id, "run-nonew");
         let scratch = tempdir().unwrap();
         let statefile = scratch.path().join("sessions");
         std::fs::write(&statefile, "ses_pre_existing\n").unwrap();
@@ -9992,8 +10032,8 @@ esac
         .await
         .unwrap();
 
-        assert_eq!(execution.status, LoopRunStatus::Fail); // CM13: unreported
-        let run = db.get_loop_run("run-nonew").unwrap().unwrap();
+        assert_eq!(execution.status, GraphRunStatus::Fail); // CM13: unreported
+        let run = db.get_graph_run("run-nonew").unwrap().unwrap();
         assert_eq!(
             run.session_id, None,
             "no new session in the diff must leave session_id NULL"
@@ -10002,8 +10042,8 @@ esac
 
     #[tokio::test]
     async fn run_agent_process_list_failure_leaves_null_and_verdict_unaffected() {
-        let (_dir, db, _engine, loop_id) = bare_loop_fixture().unwrap();
-        let node = seed_agent_run(&db, &loop_id, "run-listfail");
+        let (_dir, db, _engine, graph_id) = bare_graph_fixture().unwrap();
+        let node = seed_agent_run(&db, &graph_id, "run-listfail");
         let scratch = tempdir().unwrap();
         let statefile = scratch.path().join("sessions");
         std::fs::write(&statefile, "ses_pre_existing\n").unwrap();
@@ -10036,8 +10076,8 @@ esac
 
         assert_eq!(
             execution.status,
-            LoopRunStatus::Fail,
-            // CM13: the fake session CLI never calls loop_complete_node, so the
+            GraphRunStatus::Fail,
+            // CM13: the fake session CLI never calls graph_complete_node, so the
             // run is unreported infra — but capture must still silently give up
             // (NULL) without affecting anything else.
             "CM13: unreported run is infra"
@@ -10046,7 +10086,7 @@ esac
             execution.output.get("failure_kind").and_then(Value::as_str),
             Some("unreported")
         );
-        let run = db.get_loop_run("run-listfail").unwrap().unwrap();
+        let run = db.get_graph_run("run-listfail").unwrap().unwrap();
         assert_eq!(run.session_id, None, "capture failure must leave NULL");
     }
 
@@ -10055,8 +10095,8 @@ esac
         // A platform with BOTH a set-at-spawn flag and a list command must
         // use set-at-spawn (uuid, known before spawn) and never run the list
         // diff — set-at-spawn takes strict precedence.
-        let (_dir, db, _engine, loop_id) = bare_loop_fixture().unwrap();
-        let node = seed_agent_run(&db, &loop_id, "run-precedence");
+        let (_dir, db, _engine, graph_id) = bare_graph_fixture().unwrap();
+        let node = seed_agent_run(&db, &graph_id, "run-precedence");
         let scratch = tempdir().unwrap();
         let statefile = scratch.path().join("sessions");
         std::fs::write(&statefile, "ses_pre_existing\n").unwrap();
@@ -10085,7 +10125,7 @@ esac
         .await
         .unwrap();
 
-        let run = db.get_loop_run("run-precedence").unwrap().unwrap();
+        let run = db.get_graph_run("run-precedence").unwrap().unwrap();
         let sid = run.session_id.expect("set-at-spawn must record an id");
         uuid::Uuid::parse_str(&sid)
             .expect("recorded id must be the set-at-spawn uuid, not a listed session id");
@@ -10113,7 +10153,7 @@ if [ "$is_resume" = "1" ] && [ -n "$FAIL_RESUME" ]; then
   exit 1
 fi
 # CM13 test support: linger so a test-side verdict filer can file a
-# `loop_complete_node` verdict on this run's row before the process exits.
+# `graph_complete_node` verdict on this run's row before the process exits.
 # Unset (the default) keeps the instant behavior every other test relies on.
 if [ -n "$LINGER_SECONDS" ]; then
   sleep "$LINGER_SECONDS"
@@ -10167,19 +10207,19 @@ echo done
 
     /// An agent node driven by the `resume-cli` platform, with optional extra
     /// config keys merged in (e.g. `{"resume": false}`).
-    fn resume_agent_node(extra: Value) -> LoopNode {
+    fn resume_agent_node(extra: Value) -> GraphNode {
         let mut config = serde_json::json!({ "platform": "resume-cli" });
         if let Value::Object(extra) = extra {
             for (k, v) in extra {
                 config[k] = v;
             }
         }
-        LoopNode {
+        GraphNode {
             id: "node-impl".to_string(),
             spec_id: Some("sid-spec".to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "impl".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config,
             position: 1,
             created_at: chrono::Utc::now(),
@@ -10195,8 +10235,8 @@ echo done
         set_flag: Option<&str>,
         list_cmd: Option<&str>,
         fail_resume: bool,
-    ) -> (NodeExecution, LoopNodeRun, String) {
-        let (dir, db, _engine, loop_id) = bare_loop_fixture().unwrap();
+    ) -> (NodeExecution, GraphNodeRun, String) {
+        let (dir, db, _engine, graph_id) = bare_graph_fixture().unwrap();
         let argv_file = dir.path().join("argv.log");
         let script = write_argv_echo_cli(dir.path());
         let mut env = HashMap::new();
@@ -10219,9 +10259,9 @@ echo done
         // serialized) HomeGuard under a loaded full suite could otherwise
         // inflate the measured age past the window and defeat the fallback.
         let guard = HomeGuard::set(home.path());
-        seed_agent_run(&db, &loop_id, "run-r");
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
-        let spec = db.get_loop_spec("sid-spec").unwrap().unwrap();
+        seed_agent_run(&db, &graph_id, "run-r");
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        let spec = db.get_graph_spec("sid-spec").unwrap().unwrap();
         let execution = execute_agent_node(
             &db,
             &lp,
@@ -10240,7 +10280,7 @@ echo done
         .unwrap();
         drop(guard);
 
-        let run = db.get_loop_run("run-r").unwrap().unwrap();
+        let run = db.get_graph_run("run-r").unwrap().unwrap();
         let argv = std::fs::read_to_string(&argv_file).unwrap_or_default();
         (execution, run, argv)
     }
@@ -10249,7 +10289,7 @@ echo done
     async fn resume_uses_resume_flag_and_incremental_prompt() {
         let (execution, run, argv) =
             run_resume_agent_node(Value::Null, Some("ses_prev"), false, None, None, false).await;
-        assert_eq!(execution.status, LoopRunStatus::Fail); // CM13: unreported
+        assert_eq!(execution.status, GraphRunStatus::Fail); // CM13: unreported
         assert!(argv.contains("--resume"), "resume flag must be passed");
         assert!(argv.contains("ses_prev"), "the resumed id must be passed");
         // Incremental prompt: the resume continuation marker, but NOT the full
@@ -10278,7 +10318,7 @@ echo done
             false,
         )
         .await;
-        assert_eq!(execution.status, LoopRunStatus::Fail); // CM13: unreported
+        assert_eq!(execution.status, GraphRunStatus::Fail); // CM13: unreported
         assert!(
             !argv.contains("--resume"),
             "resume:false must force a cold start"
@@ -10294,7 +10334,7 @@ echo done
         // No resume_session_id offered (first visit to the node) → cold.
         let (execution, _run, argv) =
             run_resume_agent_node(Value::Null, None, false, None, None, false).await;
-        assert_eq!(execution.status, LoopRunStatus::Fail); // CM13: unreported
+        assert_eq!(execution.status, GraphRunStatus::Fail); // CM13: unreported
         assert!(!argv.contains("--resume"));
         assert!(argv.contains("# [SPEC]"));
     }
@@ -10307,7 +10347,7 @@ echo done
             run_resume_agent_node(Value::Null, Some("ses_prev"), false, None, None, true).await;
         assert_eq!(
             execution.status,
-            LoopRunStatus::Fail, // CM13: unreported
+            GraphRunStatus::Fail, // CM13: unreported
             "verdict must come from the cold fallback run"
         );
         assert!(argv.contains("--resume"), "the resume attempt ran first");
@@ -10331,7 +10371,7 @@ echo done
             false,
         )
         .await;
-        assert_eq!(execution.status, LoopRunStatus::Fail); // CM13: unreported
+        assert_eq!(execution.status, GraphRunStatus::Fail); // CM13: unreported
         assert_eq!(
             run.session_id.as_deref(),
             Some("ses_prev"),
@@ -10351,7 +10391,7 @@ echo done
         // content plus a notice that the previous spec is done.
         let (execution, run, argv) =
             run_resume_agent_node(Value::Null, Some("ses_prev"), true, None, None, false).await;
-        assert_eq!(execution.status, LoopRunStatus::Fail); // CM13: unreported
+        assert_eq!(execution.status, GraphRunStatus::Fail); // CM13: unreported
         assert!(argv.contains("--resume"), "still a genuine resume");
         assert!(argv.contains("ses_prev"), "the resumed id must be passed");
         assert!(
@@ -10401,11 +10441,11 @@ echo done
     /// CM13: an agent that never self-reports is unreported infra. This test
     /// was originally about session resume (cold first visit, bounce-resume),
     /// but CM13 reclassifies the agent's runs as infra because the bare
-    /// script never calls `loop_complete_node`. After retry exhaustion, the
+    /// script never calls `graph_complete_node`. After retry exhaustion, the
     /// agent counts as "no verdict" and the spec fails.
     #[tokio::test]
     async fn bounce_resumes_second_visit_after_cold_first_visit() {
-        let (dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
         let argv_file = dir.path().join("argv.log");
         let counter = dir.path().join("counter");
         let script = write_argv_echo_cli(dir.path());
@@ -10418,23 +10458,23 @@ echo done
         let cli = argv_cli_config(&script, env, Some("--resume"), Some("--set"), None);
         let home = write_resume_cli_home(cli);
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-impl".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "impl".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({ "platform": "resume-cli", "infra_backoff_seconds": 0 }),
             position: 1,
             created_at: chrono::Utc::now(),
         })
         .unwrap();
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-gate".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "gate".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": format!(
                     "n=$(cat \"{c}\" 2>/dev/null || echo 0); n=$((n+1)); echo $n > \"{c}\"; [ \"$n\" -ge 2 ] && printf APPROVED || exit 1",
@@ -10446,28 +10486,28 @@ echo done
             created_at: chrono::Utc::now(),
         })
         .unwrap();
-        db.insert_loop_edge(&LoopEdge {
+        db.insert_graph_edge(&GraphEdge {
             id: "edge-impl-gate".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             from_node: "node-impl".to_string(),
             to_node: "node-gate".to_string(),
-            condition: crate::domain::loops::LoopEdgeCondition::Pass,
+            condition: crate::domain::graphs::GraphEdgeCondition::Pass,
         })
         .unwrap();
-        db.insert_loop_edge(&LoopEdge {
+        db.insert_graph_edge(&GraphEdge {
             id: "edge-gate-impl".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             from_node: "node-gate".to_string(),
             to_node: "node-impl".to_string(),
-            condition: crate::domain::loops::LoopEdgeCondition::Fail,
+            condition: crate::domain::graphs::GraphEdgeCondition::Fail,
         })
         .unwrap();
 
         let guard = HomeGuard::set(home.path());
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
         drop(guard);
@@ -10475,8 +10515,8 @@ echo done
         // CM13: the agent never self-reports, so every run is infra.
         // With retry_limit=2, the agent runs 3 times (initial + 2 retries).
         // After exhaustion, had_infra_crash=true, no pass edge → spec fails.
-        let mut impl_runs: Vec<LoopNodeRun> = db
-            .list_loop_runs_for_spec(&spec_id)
+        let mut impl_runs: Vec<GraphNodeRun> = db
+            .list_graph_runs_for_spec(&spec_id)
             .unwrap()
             .into_iter()
             .filter(|r| r.node_id == "node-impl")
@@ -10490,7 +10530,7 @@ echo done
         for run in &impl_runs {
             assert_eq!(
                 run.status,
-                LoopRunStatus::Fail,
+                GraphRunStatus::Fail,
                 "CM13: every unreported agent run is infra-crash Fail"
             );
         }
@@ -10503,15 +10543,15 @@ echo done
         );
     }
 
-    /// Build a loop with a single loop-level agent node backed by the argv-echo
+    /// Build a graph with a single top-level agent node backed by the argv-echo
     /// `resume-cli` (set-at-spawn capture + resume-by-id), queue `member_specs`
     /// into `queue-1`, run the queue, and hand back the argv log path plus the db.
-    /// Each grouped member shares the one loop-level node id `node-impl`, which
+    /// Each grouped member shares the one top-level node id `node-impl`, which
     /// is exactly what a warm-context queue looks like: several small specs
-    /// draining one loop graph.
+    /// draining one graph.
     /// CM13 test support: simulates a well-behaved harness for tests whose
     /// fake CLI scripts can print and exit but can never call
-    /// `loop_complete_node`. A background thread watches the given nodes'
+    /// `graph_complete_node`. A background thread watches the given nodes'
     /// active (`Running`) run rows and files a `Pass` verdict on each —
     /// exactly what the real harness's report call would write — so the run
     /// reads as self-reported instead of unreported infra. Pair with a
@@ -10528,13 +10568,13 @@ echo done
         /// `members`: `(node_id, stdout)` — `stdout` is recorded on the filed
         /// verdict so downstream `{{output:Name}}` substitution keeps working.
         fn spawn(db: &Arc<Database>, members: Vec<(String, Option<String>)>) -> Self {
-            Self::spawn_with_status(db, members, LoopRunStatus::Pass)
+            Self::spawn_with_status(db, members, GraphRunStatus::Pass)
         }
 
         fn spawn_with_status(
             db: &Arc<Database>,
             members: Vec<(String, Option<String>)>,
-            status: LoopRunStatus,
+            status: GraphRunStatus,
         ) -> Self {
             let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let stop_child = Arc::clone(&stop);
@@ -10542,12 +10582,12 @@ echo done
             let handle = std::thread::spawn(move || {
                 while !stop_child.load(std::sync::atomic::Ordering::Relaxed) {
                     for (node_id, stdout) in &members {
-                        if let Ok(Some(run)) = db_child.get_active_loop_run_for_node(node_id) {
+                        if let Ok(Some(run)) = db_child.get_active_graph_run_for_node(node_id) {
                             let mut output = serde_json::json!({ "test_self_report": true });
                             if let Some(text) = stdout {
                                 output["stdout"] = serde_json::Value::String(text.clone());
                             }
-                            let _ = db_child.update_loop_run_result(
+                            let _ = db_child.update_graph_run_result(
                                 &run.id,
                                 status,
                                 Some(&output),
@@ -10577,7 +10617,7 @@ echo done
     async fn run_grouped_queue(
         member_specs: &[(&str, Option<&str>)],
     ) -> (Arc<Database>, std::path::PathBuf) {
-        let (dir, db, engine, loop_id) = bare_loop_fixture().unwrap();
+        let (dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
         let argv_file = dir.path().join("argv.log");
         let script = write_argv_echo_cli(dir.path());
         let mut env = HashMap::new();
@@ -10586,7 +10626,7 @@ echo done
             argv_file.to_string_lossy().into_owned(),
         );
         env.insert("RESUME_FLAG".to_string(), "--resume".to_string());
-        // CM13: the echo script never calls loop_complete_node, so without a
+        // CM13: the echo script never calls graph_complete_node, so without a
         // filer every run would be unreported infra and the queue would halt
         // at the first spec. The filer simulates the well-behaved harness;
         // the linger keeps each run alive until its verdict lands.
@@ -10596,19 +10636,19 @@ echo done
         let home = write_resume_cli_home(cli);
 
         for (position, (spec_id, _)) in member_specs.iter().enumerate() {
-            db.insert_loop_spec(&standalone_spec(spec_id, (position as i64) + 1))
+            db.insert_graph_spec(&standalone_spec(spec_id, (position as i64) + 1))
                 .unwrap();
         }
         insert_queue_with_grouped_members(&db, "queue-1", member_specs);
 
-        // Loop-level agent node: every queue member with no graph of its own
+        // Graph-level agent node: every queue member with no graph of its own
         // drains this shared node, so grouped siblings share the node id.
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-impl".to_string(),
             spec_id: None,
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             name: "impl".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({ "platform": "resume-cli" }),
             position: 1,
             created_at: chrono::Utc::now(),
@@ -10621,8 +10661,8 @@ echo done
         // infra. Dropped (joined) before returning.
         let _filer = VerdictFiler::spawn(&db, vec![("node-impl".to_string(), None)]);
         engine
-            .run_loop(
-                loop_id.clone(),
+            .run_graph(
+                graph_id.clone(),
                 Some("queue-1".to_string()),
                 None,
                 None,
@@ -10639,7 +10679,7 @@ echo done
     }
 
     fn impl_session(db: &Database, spec_id: &str) -> Option<String> {
-        db.list_loop_runs_for_spec(spec_id)
+        db.list_graph_runs_for_spec(spec_id)
             .unwrap()
             .into_iter()
             .find(|r| r.node_id == "node-impl")
@@ -10655,12 +10695,12 @@ echo done
             run_grouped_queue(&[("spec-a", Some("ctx")), ("spec-b", Some("ctx"))]).await;
 
         assert_eq!(
-            db.get_loop_spec("spec-a").unwrap().unwrap().status,
-            LoopSpecStatus::Completed
+            db.get_graph_spec("spec-a").unwrap().unwrap().status,
+            GraphSpecStatus::Completed
         );
         assert_eq!(
-            db.get_loop_spec("spec-b").unwrap().unwrap().status,
-            LoopSpecStatus::Completed
+            db.get_graph_spec("spec-b").unwrap().unwrap().status,
+            GraphSpecStatus::Completed
         );
 
         let sid_a = impl_session(&db, "spec-a").expect("spec-a cold-start captures a session");
@@ -10699,7 +10739,7 @@ echo done
 
     #[tokio::test]
     async fn grouped_spec_resume_across_boundary_shows_new_spec_not_old() {
-        // Reproduces the incident on loop 824de730-7fec-4031-800a-7933d2cf94c1,
+        // Reproduces the incident on graph 824de730-7fec-4031-800a-7933d2cf94c1,
         // group `rag`: spec 2's implementer resumed spec 1's session and, with
         // the old RESUME_PROMPT_DEFAULT claiming full context was already in
         // history, was never shown ANY spec at all — it reported PASS after
@@ -10707,7 +10747,7 @@ echo done
         // the only work it had ever seen. The fix must show the resumed
         // session its OWN (spec 2's) content, plus a notice that spec 1 is
         // done, so it neither regurgitates spec 1 nor works blind.
-        let (dir, db, engine, loop_id) = bare_loop_fixture().unwrap();
+        let (dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
         let argv_file = dir.path().join("argv.log");
         let script = write_argv_echo_cli(dir.path());
         let mut env = HashMap::new();
@@ -10726,22 +10766,22 @@ echo done
         spec_1.description = Some("SPEC-1-MARKER: bridge restart recovery".to_string());
         let mut spec_2 = standalone_spec("rag-2", 2);
         spec_2.description = Some("SPEC-2-MARKER: rag ingestion pipeline".to_string());
-        db.insert_loop_spec(&spec_1).unwrap();
-        db.insert_loop_spec(&spec_2).unwrap();
+        db.insert_graph_spec(&spec_1).unwrap();
+        db.insert_graph_spec(&spec_2).unwrap();
         insert_queue_with_grouped_members(
             &db,
             "queue-1",
             &[("rag-1", Some("rag")), ("rag-2", Some("rag"))],
         );
 
-        // Loop-level agent node: both grouped members drain the same node id,
+        // Graph-level agent node: both grouped members drain the same node id,
         // exactly like the incident's implementer node.
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-impl".to_string(),
             spec_id: None,
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             name: "impl".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({ "platform": "resume-cli" }),
             position: 1,
             created_at: chrono::Utc::now(),
@@ -10753,8 +10793,8 @@ echo done
         // and the cross-boundary resume below is exercised.
         let _filer = VerdictFiler::spawn(&db, vec![("node-impl".to_string(), None)]);
         engine
-            .run_loop(
-                loop_id.clone(),
+            .run_graph(
+                graph_id.clone(),
                 Some("queue-1".to_string()),
                 None,
                 None,
@@ -10806,7 +10846,7 @@ echo done
         // it said so plainly: "I need the spec content to know what work to
         // do next." Same fix, different node role — a `review` node instead
         // of `impl`, proving the fix is node-role-agnostic.
-        let (dir, db, engine, loop_id) = bare_loop_fixture().unwrap();
+        let (dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
         let argv_file = dir.path().join("argv.log");
         let script = write_argv_echo_cli(dir.path());
         let mut env = HashMap::new();
@@ -10825,20 +10865,20 @@ echo done
         spec_1.description = Some("DAEMON-SPEC-1: bridge restart recovery".to_string());
         let mut spec_2 = standalone_spec("daemon-2", 2);
         spec_2.description = Some("DAEMON-SPEC-2: watchdog heartbeat timeout".to_string());
-        db.insert_loop_spec(&spec_1).unwrap();
-        db.insert_loop_spec(&spec_2).unwrap();
+        db.insert_graph_spec(&spec_1).unwrap();
+        db.insert_graph_spec(&spec_2).unwrap();
         insert_queue_with_grouped_members(
             &db,
             "queue-1",
             &[("daemon-1", Some("daemon")), ("daemon-2", Some("daemon"))],
         );
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-review".to_string(),
             spec_id: None,
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             name: "review".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({ "platform": "resume-cli" }),
             position: 1,
             created_at: chrono::Utc::now(),
@@ -10850,8 +10890,8 @@ echo done
         // and the cross-boundary resume below is exercised.
         let _filer = VerdictFiler::spawn(&db, vec![("node-review".to_string(), None)]);
         engine
-            .run_loop(
-                loop_id.clone(),
+            .run_graph(
+                graph_id.clone(),
                 Some("queue-1".to_string()),
                 None,
                 None,
@@ -10890,7 +10930,7 @@ echo done
     async fn run_agent_process_reports_spawn_failure_as_node_fail_not_hard_error() {
         // Simulates the E2BIG incident: the process fails to spawn. This
         // must come back as a failed node run (routed like any other node
-        // failure) rather than an `Err` that would abort the whole loop.
+        // failure) rather than an `Err` that would abort the whole graph.
         let (_dir, db) = test_db();
         let cli = Cli::new("test-cli");
         let mut strategy = sample_strategy("/nonexistent/somewhere/definitely-not-a-binary");
@@ -10903,7 +10943,7 @@ echo done
         .await
         .expect("spawn failure must not propagate as a hard error");
 
-        assert_eq!(execution.status, LoopRunStatus::Fail);
+        assert_eq!(execution.status, GraphRunStatus::Fail);
         assert!(execution.summary.contains("failed to spawn"));
         assert!(execution.output.get("error").is_some());
     }
@@ -10933,7 +10973,7 @@ echo done
 
         assert_eq!(
             execution.status,
-            LoopRunStatus::Fail,
+            GraphRunStatus::Fail,
             "empty stdout must be a Fail even though the process exited 0"
         );
         assert_eq!(
@@ -10963,15 +11003,15 @@ echo done
         );
 
         // CM13: a no_output run that never filed a verdict IS an infra crash —
-        // the run never called loop_complete_node, so it is infrastructure
+        // the run never called graph_complete_node, so it is infrastructure
         // regardless of exit code or output. The retry gate (attempt < retry_limit)
         // still applies; this just means it qualifies for infra-crash retry.
-        let run = LoopNodeRun {
+        let run = GraphNodeRun {
             id: "run-test".to_string(),
-            loop_id: "loop1".to_string(),
+            graph_id: "loop1".to_string(),
             spec_id: "spec1".to_string(),
             node_id: node.id.clone(),
-            status: LoopRunStatus::Running,
+            status: GraphRunStatus::Running,
             input: None,
             output: None,
             started_at: chrono::Utc::now(),
@@ -11220,7 +11260,7 @@ echo done
         .await
         .unwrap();
 
-        assert_eq!(execution.status, LoopRunStatus::Fail);
+        assert_eq!(execution.status, GraphRunStatus::Fail);
         assert_eq!(
             execution.output.get("no_output").and_then(Value::as_bool),
             Some(true),
@@ -11269,7 +11309,7 @@ echo done
         .await
         .unwrap();
 
-        assert_eq!(execution.status, LoopRunStatus::Fail);
+        assert_eq!(execution.status, GraphRunStatus::Fail);
         assert_eq!(
             execution.output.get("no_output").and_then(Value::as_bool),
             Some(true)
@@ -11284,7 +11324,7 @@ echo done
     /// stderr alongside REAL stdout must never add the `untrusted_workdir`
     /// cause — only the empty-stdout shape is diagnostic here.
     /// CM13: the run still fails as unreported infra (the script never called
-    /// `loop_complete_node`); the warning changes nothing about that.
+    /// `graph_complete_node`); the warning changes nothing about that.
     #[tokio::test]
     async fn run_agent_process_untrusted_warning_with_real_output_still_passes() {
         let (dir, db) = test_db();
@@ -11306,9 +11346,9 @@ echo done
 
         assert_eq!(
             execution.status,
-            LoopRunStatus::Fail,
+            GraphRunStatus::Fail,
             // CM13: unreported infra (the script never called
-            // loop_complete_node); the warning neither downgrades nor rescues.
+            // graph_complete_node); the warning neither downgrades nor rescues.
             "CM13: an unreported run is never a pass"
         );
         assert!(execution.output.get("no_output").is_none());
@@ -11410,7 +11450,7 @@ echo done
     }
 
     /// CM13: a script that exits 0 with real stdout but never calls
-    /// `loop_complete_node` is unreported infra, not Pass.
+    /// `graph_complete_node` is unreported infra, not Pass.
     #[tokio::test]
     async fn run_agent_process_normal_stdout_zero_exit_still_passes() {
         let (dir, db) = test_db();
@@ -11426,7 +11466,7 @@ echo done
         .unwrap();
 
         // CM13: unreported run is never Pass.
-        assert_eq!(execution.status, LoopRunStatus::Fail);
+        assert_eq!(execution.status, GraphRunStatus::Fail);
         assert_eq!(
             execution.output.get("stdout").and_then(Value::as_str),
             Some("all done")
@@ -11458,18 +11498,18 @@ echo done
         .await
         .unwrap();
 
-        assert_eq!(execution.status, LoopRunStatus::Fail);
+        assert_eq!(execution.status, GraphRunStatus::Fail);
         assert!(
             execution.output.get("no_output").is_none(),
             "a nonzero-exit crash must not be conflated with the exit-0 no-output case"
         );
 
-        let run = LoopNodeRun {
+        let run = GraphNodeRun {
             id: "run-test".to_string(),
-            loop_id: "loop1".to_string(),
+            graph_id: "loop1".to_string(),
             spec_id: "spec1".to_string(),
             node_id: node.id.clone(),
-            status: LoopRunStatus::Running,
+            status: GraphRunStatus::Running,
             input: None,
             output: None,
             started_at: chrono::Utc::now(),
@@ -11487,26 +11527,26 @@ echo done
         );
     }
 
-    /// A self-reported FAIL (the agent called `loop_complete_node` itself)
+    /// A self-reported FAIL (the agent called `graph_complete_node` itself)
     /// must route on its own reported verdict, never on the no-output rule —
     /// even when the CLI process that follows the self-report happens to
     /// exit 0 with no further stdout.
     #[tokio::test]
     async fn self_reported_fail_is_not_reclassified_as_no_output() {
-        let (_dir, db, _engine, loop_id) = bare_loop_fixture().unwrap();
-        let node = seed_agent_run(&db, &loop_id, "run-selfreport");
-        db.update_loop_run_result(
+        let (_dir, db, _engine, graph_id) = bare_graph_fixture().unwrap();
+        let node = seed_agent_run(&db, &graph_id, "run-selfreport");
+        db.update_graph_run_result(
             "run-selfreport",
-            LoopRunStatus::Fail,
+            GraphRunStatus::Fail,
             Some(&serde_json::json!({ "summary": "agent reported it failed" })),
             Some(chrono::Utc::now()),
         )
         .unwrap();
 
-        let run = db.get_loop_run("run-selfreport").unwrap();
+        let run = db.get_graph_run("run-selfreport").unwrap();
         let reported = self_reported_execution(run.as_ref(), &node)
             .expect("a completed run row must be read as self-reported");
-        assert_eq!(reported.status, LoopRunStatus::Fail);
+        assert_eq!(reported.status, GraphRunStatus::Fail);
         assert!(reported.output.get("no_output").is_none());
 
         assert!(
@@ -11522,7 +11562,7 @@ echo done
     // live process) exactly like `self_reported_fail_is_not_reclassified_as_
     // no_output` above: `self_reported` is a plain bool parameter here, so
     // the corner is exercised precisely without needing a fake CLI that can
-    // actually call `loop_complete_node` mid-run.
+    // actually call `graph_complete_node` mid-run.
 
     /// CM13: an exit-0, real-stdout, never-self-reported run is no longer a
     /// pass — silence is not success. `failure_kind: "unreported"` is stamped
@@ -11536,7 +11576,7 @@ echo done
 
         assert_eq!(
             execution.status,
-            LoopRunStatus::Fail,
+            GraphRunStatus::Fail,
             "CM13: an unreported run must not be recorded as pass"
         );
         assert_eq!(
@@ -11558,7 +11598,7 @@ echo done
         let node = sample_agent_node();
         let execution = agent_finished_execution(&node, &cli, None, 0, "all done", "", true);
 
-        assert_eq!(execution.status, LoopRunStatus::Pass);
+        assert_eq!(execution.status, GraphRunStatus::Pass);
         assert!(
             execution.output.get("unreported").is_none(),
             "a self-reported run must not be marked unreported"
@@ -11582,7 +11622,7 @@ echo done
 
         assert_eq!(
             execution.status,
-            LoopRunStatus::Fail,
+            GraphRunStatus::Fail,
             "require_report must fail an exit-0 run that never self-reported"
         );
         assert_eq!(
@@ -11612,7 +11652,7 @@ echo done
 
         assert_eq!(
             execution.status,
-            LoopRunStatus::Pass,
+            GraphRunStatus::Pass,
             "require_report must never override a self-reported result"
         );
         assert!(execution.output.get("unreported").is_none());
@@ -11640,7 +11680,7 @@ echo done
 
         assert_eq!(
             execution.status,
-            LoopRunStatus::Fail,
+            GraphRunStatus::Fail,
             "exit 0 with real stdout but no self-report must fail when require_report is set"
         );
         assert_eq!(
@@ -11656,12 +11696,12 @@ echo done
             Some("no_report")
         );
 
-        let run = LoopNodeRun {
+        let run = GraphNodeRun {
             id: "run-test".to_string(),
-            loop_id: "loop1".to_string(),
+            graph_id: "loop1".to_string(),
             spec_id: "spec1".to_string(),
             node_id: node.id.clone(),
-            status: LoopRunStatus::Running,
+            status: GraphRunStatus::Running,
             input: None,
             output: None,
             started_at: chrono::Utc::now(),
@@ -11695,7 +11735,7 @@ echo done
         .await
         .expect("spawn failure must not propagate as a hard error");
 
-        assert_eq!(execution.status, LoopRunStatus::Fail);
+        assert_eq!(execution.status, GraphRunStatus::Fail);
         assert!(
             execution
                 .output
@@ -11713,12 +11753,12 @@ echo done
             "the run row must record why the retry was skipped"
         );
 
-        let run = LoopNodeRun {
+        let run = GraphNodeRun {
             id: "run-test".to_string(),
-            loop_id: "loop1".to_string(),
+            graph_id: "loop1".to_string(),
             spec_id: "spec1".to_string(),
             node_id: node.id.clone(),
-            status: LoopRunStatus::Running,
+            status: GraphRunStatus::Running,
             input: None,
             output: None,
             started_at: chrono::Utc::now(),
@@ -11736,7 +11776,7 @@ echo done
         );
     }
 
-    /// B39, the case actually observed in loop f9d070bc: the CLI's configured
+    /// B39, the case actually observed in graph f9d070bc: the CLI's configured
     /// binary resolves to nothing, so the failure happens while *building* the
     /// command rather than at spawn. It is just as permanent, and must be
     /// classified as such without matching on the rendered message.
@@ -11755,7 +11795,7 @@ echo done
         .await
         .expect("spawn failure must not propagate as a hard error");
 
-        assert_eq!(execution.status, LoopRunStatus::Fail);
+        assert_eq!(execution.status, GraphRunStatus::Fail);
         assert_eq!(
             execution
                 .output
@@ -11781,17 +11821,17 @@ echo done
             "error": "some transient build error",
         });
         let execution = NodeExecution {
-            status: LoopRunStatus::Fail,
+            status: GraphRunStatus::Fail,
             output,
             summary: "failed to spawn".to_string(),
         };
         let node = sample_agent_node();
-        let run = LoopNodeRun {
+        let run = GraphNodeRun {
             id: "run1".to_string(),
-            loop_id: "loop1".to_string(),
+            graph_id: "loop1".to_string(),
             spec_id: "spec1".to_string(),
             node_id: node.id.clone(),
-            status: LoopRunStatus::Running,
+            status: GraphRunStatus::Running,
             input: None,
             output: None,
             started_at: chrono::Utc::now(),
@@ -11897,7 +11937,7 @@ echo done
         .await
         .unwrap();
 
-        assert_eq!(execution.status, LoopRunStatus::Fail);
+        assert_eq!(execution.status, GraphRunStatus::Fail);
         assert_eq!(
             execution.output.get("stdout").and_then(Value::as_str),
             Some(huge_prompt.as_str())
@@ -11905,7 +11945,7 @@ echo done
     }
 
     /// When the composed prompt exceeds `ARGV_SAFETY_THRESHOLD` and the CLI
-    /// doesn't have `prompt_via_stdin` set, the loop engine must override the
+    /// doesn't have `prompt_via_stdin` set, the graph engine must override the
     /// strategy to force stdin delivery — preventing E2BIG.
     #[tokio::test]
     async fn large_prompt_overrides_strategy_to_stdin() {
@@ -11942,7 +11982,7 @@ echo done
         )
         .await
         .unwrap();
-        assert_eq!(execution.status, LoopRunStatus::Fail); // CM13: unreported
+        assert_eq!(execution.status, GraphRunStatus::Fail); // CM13: unreported
         assert_eq!(
             execution.output.get("stdout").and_then(Value::as_str),
             Some(large_prompt.as_str())
@@ -11968,10 +12008,10 @@ echo done
 
     #[test]
     fn select_next_step_dedupes_identical_edges_to_same_target() {
-        let edge = |id: &str, to: &str, condition| LoopEdge {
+        let edge = |id: &str, to: &str, condition| GraphEdge {
             id: id.to_string(),
             spec_id: Some("spec".to_string()),
-            loop_id: None,
+            graph_id: None,
             from_node: "implement".to_string(),
             to_node: to.to_string(),
             condition,
@@ -11980,31 +12020,31 @@ echo done
             edge(
                 "e1",
                 "review",
-                crate::domain::loops::LoopEdgeCondition::Always,
+                crate::domain::graphs::GraphEdgeCondition::Always,
             ),
             edge(
                 "e2",
                 "review",
-                crate::domain::loops::LoopEdgeCondition::Always,
+                crate::domain::graphs::GraphEdgeCondition::Always,
             ),
         ];
 
-        let next = select_next_step(&edges, &[], "implement", LoopRunStatus::Pass).unwrap();
+        let next = select_next_step(&edges, &[], "implement", GraphRunStatus::Pass).unwrap();
 
         let sel = next.unwrap();
         assert_eq!(sel.cursor, SpecCursor::Node("review".to_string()));
         assert_eq!(
             sel.edge_condition,
-            crate::domain::loops::LoopEdgeCondition::Always
+            crate::domain::graphs::GraphEdgeCondition::Always
         );
     }
 
     #[test]
     fn select_next_step_errors_on_distinct_targets() {
-        let edge = |id: &str, to: &str, condition| LoopEdge {
+        let edge = |id: &str, to: &str, condition| GraphEdge {
             id: id.to_string(),
             spec_id: Some("spec".to_string()),
-            loop_id: None,
+            graph_id: None,
             from_node: "implement".to_string(),
             to_node: to.to_string(),
             condition,
@@ -12013,16 +12053,16 @@ echo done
             edge(
                 "e1",
                 "review",
-                crate::domain::loops::LoopEdgeCondition::Always,
+                crate::domain::graphs::GraphEdgeCondition::Always,
             ),
             edge(
                 "e2",
                 "deploy",
-                crate::domain::loops::LoopEdgeCondition::Always,
+                crate::domain::graphs::GraphEdgeCondition::Always,
             ),
         ];
 
-        let err = select_next_step(&edges, &[], "implement", LoopRunStatus::Pass).unwrap_err();
+        let err = select_next_step(&edges, &[], "implement", GraphRunStatus::Pass).unwrap_err();
 
         assert!(err.to_string().contains("ambiguous outgoing edges"));
     }
@@ -12033,13 +12073,13 @@ echo done
         // nodes — normally ambiguous, but here the distinct targets are
         // exactly one ensemble's full member set, so this must resolve to
         // the ensemble instead of erroring.
-        let edge = |id: &str, to: &str| LoopEdge {
+        let edge = |id: &str, to: &str| GraphEdge {
             id: id.to_string(),
             spec_id: Some("spec".to_string()),
-            loop_id: None,
+            graph_id: None,
             from_node: "kickoff".to_string(),
             to_node: to.to_string(),
-            condition: crate::domain::loops::LoopEdgeCondition::Always,
+            condition: crate::domain::graphs::GraphEdgeCondition::Always,
         };
         let edges = vec![edge("e1", "m1"), edge("e2", "m2"), edge("e3", "m3")];
         let ensembles = vec![ensemble_details_fixture(
@@ -12048,13 +12088,13 @@ echo done
             &["m1", "m2", "m3"],
         )];
 
-        let next = select_next_step(&edges, &ensembles, "kickoff", LoopRunStatus::Pass).unwrap();
+        let next = select_next_step(&edges, &ensembles, "kickoff", GraphRunStatus::Pass).unwrap();
 
         let sel = next.unwrap();
         assert_eq!(sel.cursor, SpecCursor::Ensemble("ens1".to_string()));
         assert_eq!(
             sel.edge_condition,
-            crate::domain::loops::LoopEdgeCondition::Always
+            crate::domain::graphs::GraphEdgeCondition::Always
         );
     }
 
@@ -12062,13 +12102,13 @@ echo done
     fn select_next_step_resolves_ensemble_from_any_of_several_entry_sources() {
         // CM14: an ensemble entered from two different nodes resolves to the
         // ensemble from EACH of them — multi-source entry needs no relay.
-        let edge = |id: &str, from: &str, to: &str| LoopEdge {
+        let edge = |id: &str, from: &str, to: &str| GraphEdge {
             id: id.to_string(),
             spec_id: Some("spec".to_string()),
-            loop_id: None,
+            graph_id: None,
             from_node: from.to_string(),
             to_node: to.to_string(),
-            condition: crate::domain::loops::LoopEdgeCondition::Always,
+            condition: crate::domain::graphs::GraphEdgeCondition::Always,
         };
         let edges = vec![
             edge("e1", "designer", "m1"),
@@ -12079,7 +12119,7 @@ echo done
         let ensembles = vec![ensemble_details_fixture("ens1", "join1", &["m1", "m2"])];
 
         for from in ["designer", "gate"] {
-            let next = select_next_step(&edges, &ensembles, from, LoopRunStatus::Pass).unwrap();
+            let next = select_next_step(&edges, &ensembles, from, GraphRunStatus::Pass).unwrap();
             let sel = next.unwrap();
             assert_eq!(sel.cursor, SpecCursor::Ensemble("ens1".to_string()));
         }
@@ -12089,18 +12129,18 @@ echo done
     fn select_next_step_resolves_chained_ensemble_from_upstream_quorum() {
         // CM14: a quorum fanned out to another ensemble's members resolves to
         // that ensemble — chaining needs no intermediate node.
-        let edge = |id: &str, to: &str| LoopEdge {
+        let edge = |id: &str, to: &str| GraphEdge {
             id: id.to_string(),
             spec_id: Some("spec".to_string()),
-            loop_id: None,
+            graph_id: None,
             from_node: "join1".to_string(),
             to_node: to.to_string(),
-            condition: crate::domain::loops::LoopEdgeCondition::Pass,
+            condition: crate::domain::graphs::GraphEdgeCondition::Pass,
         };
         let edges = vec![edge("e1", "n1"), edge("e2", "n2")];
         let ensembles = vec![ensemble_details_fixture("ens2", "join2", &["n1", "n2"])];
 
-        let next = select_next_step(&edges, &ensembles, "join1", LoopRunStatus::Pass).unwrap();
+        let next = select_next_step(&edges, &ensembles, "join1", GraphRunStatus::Pass).unwrap();
 
         let sel = next.unwrap();
         assert_eq!(sel.cursor, SpecCursor::Ensemble("ens2".to_string()));
@@ -12110,30 +12150,30 @@ echo done
         ensemble_id: &str,
         join_node_id: &str,
         member_node_ids: &[&str],
-    ) -> crate::domain::loops::EnsembleDetails {
-        crate::domain::loops::EnsembleDetails {
-            ensemble: crate::domain::loops::Ensemble {
+    ) -> crate::domain::graphs::EnsembleDetails {
+        crate::domain::graphs::EnsembleDetails {
+            ensemble: crate::domain::graphs::Ensemble {
                 id: ensemble_id.to_string(),
                 spec_id: Some("spec".to_string()),
-                loop_id: None,
+                graph_id: None,
                 name: "Proposers".to_string(),
                 prompt_template: "{{spec_content}}".to_string(),
                 join_node_id: join_node_id.to_string(),
                 entry_from_node: "kickoff".to_string(),
-                entry_condition: crate::domain::loops::LoopEdgeCondition::Always,
+                entry_condition: crate::domain::graphs::GraphEdgeCondition::Always,
                 min_pass: member_node_ids.len() as i64,
                 straggler_timeout_minutes: None,
                 timeout_minutes: 30,
                 on_pass_to: "arbiter".to_string(),
                 on_fail_to: None,
-                kind: crate::domain::loops::EnsembleKind::Parallel,
+                kind: crate::domain::graphs::EnsembleKind::Parallel,
                 round_robin_index: None,
                 created_at: chrono::Utc::now(),
             },
             members: member_node_ids
                 .iter()
                 .enumerate()
-                .map(|(i, node_id)| crate::domain::loops::EnsembleMember {
+                .map(|(i, node_id)| crate::domain::graphs::EnsembleMember {
                     ensemble_id: ensemble_id.to_string(),
                     node_id: node_id.to_string(),
                     position: i as i64,
@@ -12145,17 +12185,17 @@ echo done
         }
     }
 
-    fn second_spec(loop_id: &str, id: &str, position: i64) -> LoopSpec {
-        LoopSpec {
+    fn second_spec(graph_id: &str, id: &str, position: i64) -> GraphSpec {
+        GraphSpec {
             id: id.to_string(),
-            loop_id: Some(loop_id.to_string()),
+            graph_id: Some(graph_id.to_string()),
             name: format!("Spec {id}"),
             description: Some(
                 "Functional Requirements:\n- A\n\nNon-Functional Requirements:\n- B\n\nObjective:\n- C\n\nConstraints:\n- D\n\nGuidelines:\n- E\n\nIn Scope:\n- F\n\nOut of Scope:\n- G".to_string(),
             ),
             position,
             parallelizable: false,
-            status: LoopSpecStatus::Pending,
+            status: GraphSpecStatus::Pending,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
@@ -12168,19 +12208,19 @@ echo done
     }
 
     #[tokio::test]
-    async fn loop_engine_runs_loop_level_graph_across_two_specs() {
-        // Neither spec has nodes of its own; both walk the loop's shared
-        // top-level graph. A loop defined once should drive every spec.
-        let (_dir, db, engine, loop_id, spec1_id) = loop_fixture().unwrap();
-        let spec2 = second_spec(&loop_id, "spec-2", 2);
-        db.insert_loop_spec(&spec2).unwrap();
+    async fn graph_engine_runs_graph_level_graph_across_two_specs() {
+        // Neither spec has nodes of its own; both walk the graph's shared
+        // top-level graph. A graph defined once should drive every spec.
+        let (_dir, db, engine, graph_id, spec1_id) = graph_fixture().unwrap();
+        let spec2 = second_spec(&graph_id, "spec-2", 2);
+        db.insert_graph_spec(&spec2).unwrap();
 
-        let check = LoopNode {
-            id: "loop-check".to_string(),
+        let check = GraphNode {
+            id: "graph-check".to_string(),
             spec_id: None,
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             name: "check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "printf APPROVED",
                 "success_condition": "exit_code_0"
@@ -12188,12 +12228,12 @@ echo done
             position: 1,
             created_at: chrono::Utc::now(),
         };
-        let gate = LoopNode {
-            id: "loop-gate".to_string(),
+        let gate = GraphNode {
+            id: "graph-gate".to_string(),
             spec_id: None,
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             name: "gate".to_string(),
-            kind: LoopNodeKind::Gate,
+            kind: GraphNodeKind::Gate,
             config: serde_json::json!({
                 "evaluate": "output_contains",
                 "value": "APPROVED",
@@ -12202,50 +12242,50 @@ echo done
             position: 2,
             created_at: chrono::Utc::now(),
         };
-        db.insert_loop_node(&check).unwrap();
-        db.insert_loop_node(&gate).unwrap();
-        db.insert_loop_edge(&LoopEdge {
-            id: "loop-edge-pass".to_string(),
+        db.insert_graph_node(&check).unwrap();
+        db.insert_graph_node(&gate).unwrap();
+        db.insert_graph_edge(&GraphEdge {
+            id: "graph-edge-pass".to_string(),
             spec_id: None,
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             from_node: check.id.clone(),
             to_node: gate.id.clone(),
-            condition: crate::domain::loops::LoopEdgeCondition::Pass,
+            condition: crate::domain::graphs::GraphEdgeCondition::Pass,
         })
         .unwrap();
 
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
-        assert_eq!(lp.status, LoopStatus::Completed);
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        assert_eq!(lp.status, GraphStatus::Completed);
 
         for spec_id in [spec1_id.as_str(), spec2.id.as_str()] {
-            let spec = db.get_loop_spec(spec_id).unwrap().unwrap();
-            assert_eq!(spec.status, LoopSpecStatus::Completed);
-            let runs = db.list_loop_runs_for_spec(spec_id).unwrap();
+            let spec = db.get_graph_spec(spec_id).unwrap().unwrap();
+            assert_eq!(spec.status, GraphSpecStatus::Completed);
+            let runs = db.list_graph_runs_for_spec(spec_id).unwrap();
             assert_eq!(runs.len(), 2);
             assert!(runs.iter().all(|run| run.spec_id == spec_id));
-            assert!(runs.iter().any(|run| run.node_id == "loop-check"));
-            assert!(runs.iter().any(|run| run.node_id == "loop-gate"));
+            assert!(runs.iter().any(|run| run.node_id == "graph-check"));
+            assert!(runs.iter().any(|run| run.node_id == "graph-gate"));
         }
     }
 
     #[tokio::test]
-    async fn loop_engine_spec_with_own_graph_ignores_loop_level_graph() {
-        // The loop-level graph always fails; if it were used, the spec would
+    async fn graph_engine_spec_with_own_graph_ignores_graph_level_graph() {
+        // The top-level graph always fails; if it were used, the spec would
         // fail. The spec's own graph always passes, and precedence must
         // favor it — full backwards compatibility.
-        let (_dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (_dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
 
-        db.insert_loop_node(&LoopNode {
-            id: "loop-check".to_string(),
+        db.insert_graph_node(&GraphNode {
+            id: "graph-check".to_string(),
             spec_id: None,
-            loop_id: Some(loop_id.clone()),
-            name: "loop-check".to_string(),
-            kind: LoopNodeKind::Check,
+            graph_id: Some(graph_id.clone()),
+            name: "graph-check".to_string(),
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "exit 1",
                 "success_condition": "exit_code_0"
@@ -12255,12 +12295,12 @@ echo done
         })
         .unwrap();
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "spec-check".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "spec-check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "printf APPROVED",
                 "success_condition": "exit_code_0"
@@ -12271,39 +12311,39 @@ echo done
         .unwrap();
 
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
-        let spec = db.get_loop_spec(&spec_id).unwrap().unwrap();
-        let runs = db.list_loop_runs_for_spec(&spec_id).unwrap();
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        let spec = db.get_graph_spec(&spec_id).unwrap().unwrap();
+        let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
 
-        assert_eq!(lp.status, LoopStatus::Completed);
-        assert_eq!(spec.status, LoopSpecStatus::Completed);
+        assert_eq!(lp.status, GraphStatus::Completed);
+        assert_eq!(spec.status, GraphSpecStatus::Completed);
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].node_id, "spec-check");
     }
 
     #[tokio::test]
-    async fn loop_engine_iteration_budget_resets_between_specs_on_loop_graph() {
-        // A single loop-level node that self-loops on failure, gated by a
+    async fn graph_engine_iteration_budget_resets_between_specs_on_graph() {
+        // A single top-level node that self-loops on failure, gated by a
         // counter file shared across the whole run. It fails budget-1 times
         // then passes on the budget-th call — exactly the per-node iteration
         // cap. If spec 2's budget carried over from spec 1 instead of
         // resetting, its first attempt would already read as one past the
         // cap and the spec would fail before the check command ever runs
         // again.
-        let (_dir, db, engine, loop_id, spec1_id) = loop_fixture().unwrap();
-        let spec2 = second_spec(&loop_id, "spec-2", 2);
-        db.insert_loop_spec(&spec2).unwrap();
+        let (_dir, db, engine, graph_id, spec1_id) = graph_fixture().unwrap();
+        let spec2 = second_spec(&graph_id, "spec-2", 2);
+        db.insert_graph_spec(&spec2).unwrap();
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "flaky".to_string(),
             spec_id: None,
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             name: "flaky".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": format!(
                     "n=$(cat counter.txt 2>/dev/null || echo 0); n=$((n+1)); echo $n > counter.txt; test $n -ge {DEFAULT_MAX_ITERATIONS_PER_NODE}"
@@ -12314,32 +12354,32 @@ echo done
             created_at: chrono::Utc::now(),
         })
         .unwrap();
-        db.insert_loop_edge(&LoopEdge {
-            id: "self-loop".to_string(),
+        db.insert_graph_edge(&GraphEdge {
+            id: "self-graph".to_string(),
             spec_id: None,
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             from_node: "flaky".to_string(),
             to_node: "flaky".to_string(),
-            condition: crate::domain::loops::LoopEdgeCondition::Fail,
+            condition: crate::domain::graphs::GraphEdgeCondition::Fail,
         })
         .unwrap();
 
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
-        assert_eq!(lp.status, LoopStatus::Completed);
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        assert_eq!(lp.status, GraphStatus::Completed);
 
-        let spec1 = db.get_loop_spec(&spec1_id).unwrap().unwrap();
-        let spec1_runs = db.list_loop_runs_for_spec(&spec1_id).unwrap();
-        assert_eq!(spec1.status, LoopSpecStatus::Completed);
+        let spec1 = db.get_graph_spec(&spec1_id).unwrap().unwrap();
+        let spec1_runs = db.list_graph_runs_for_spec(&spec1_id).unwrap();
+        assert_eq!(spec1.status, GraphSpecStatus::Completed);
         assert_eq!(spec1_runs.len(), DEFAULT_MAX_ITERATIONS_PER_NODE);
 
-        let spec2_saved = db.get_loop_spec(&spec2.id).unwrap().unwrap();
-        let spec2_runs = db.list_loop_runs_for_spec(&spec2.id).unwrap();
-        assert_eq!(spec2_saved.status, LoopSpecStatus::Completed);
+        let spec2_saved = db.get_graph_spec(&spec2.id).unwrap().unwrap();
+        let spec2_runs = db.list_graph_runs_for_spec(&spec2.id).unwrap();
+        assert_eq!(spec2_saved.status, GraphSpecStatus::Completed);
         // Fresh budget: the counter file is already at the cap from spec 1,
         // so spec 2's first (and only) fresh-budget attempt passes
         // immediately.
@@ -12347,18 +12387,18 @@ echo done
     }
 
     #[tokio::test]
-    async fn loop_engine_loop_level_entry_fallback_by_lowest_position() {
+    async fn graph_engine_graph_level_entry_fallback_by_lowest_position() {
         // Retry cycle (implement <-> review): every node has an incoming
         // edge, so there is no source node and the engine must fall back to
         // the lowest-position node as the entry point.
-        let (_dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (_dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
 
-        let implement = LoopNode {
+        let implement = GraphNode {
             id: "implement".to_string(),
             spec_id: None,
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             name: "implement".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "printf IMPLEMENT",
                 "success_condition": "exit_code_0"
@@ -12366,12 +12406,12 @@ echo done
             position: 1,
             created_at: chrono::Utc::now(),
         };
-        let review = LoopNode {
+        let review = GraphNode {
             id: "review".to_string(),
             spec_id: None,
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             name: "review".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "printf REVIEW",
                 "success_condition": "exit_code_0"
@@ -12379,38 +12419,38 @@ echo done
             position: 2,
             created_at: chrono::Utc::now(),
         };
-        db.insert_loop_node(&implement).unwrap();
-        db.insert_loop_node(&review).unwrap();
-        db.insert_loop_edge(&LoopEdge {
+        db.insert_graph_node(&implement).unwrap();
+        db.insert_graph_node(&review).unwrap();
+        db.insert_graph_edge(&GraphEdge {
             id: "e1".to_string(),
             spec_id: None,
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             from_node: "implement".to_string(),
             to_node: "review".to_string(),
-            condition: crate::domain::loops::LoopEdgeCondition::Always,
+            condition: crate::domain::graphs::GraphEdgeCondition::Always,
         })
         .unwrap();
-        db.insert_loop_edge(&LoopEdge {
+        db.insert_graph_edge(&GraphEdge {
             id: "e2".to_string(),
             spec_id: None,
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             from_node: "review".to_string(),
             to_node: "implement".to_string(),
-            condition: crate::domain::loops::LoopEdgeCondition::Fail,
+            condition: crate::domain::graphs::GraphEdgeCondition::Fail,
         })
         .unwrap();
 
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
-        let spec = db.get_loop_spec(&spec_id).unwrap().unwrap();
-        let runs = db.list_loop_runs_for_spec(&spec_id).unwrap();
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        let spec = db.get_graph_spec(&spec_id).unwrap().unwrap();
+        let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
 
-        assert_eq!(lp.status, LoopStatus::Completed);
-        assert_eq!(spec.status, LoopSpecStatus::Completed);
+        assert_eq!(lp.status, GraphStatus::Completed);
+        assert_eq!(spec.status, GraphSpecStatus::Completed);
         assert_eq!(runs.len(), 2);
         // "implement" must be the entry: it ran with no previous-node input.
         // "review" ran second, fed by implement's output — proving the walk
@@ -12422,41 +12462,41 @@ echo done
     }
 
     #[tokio::test]
-    async fn loop_engine_fails_spec_with_no_graph_anywhere_and_loop_moves_on() {
-        // Neither the spec nor the loop has a graph: the spec must fail with
+    async fn graph_engine_fails_spec_with_no_graph_anywhere_and_graph_moves_on() {
+        // Neither the spec nor the graph has a graph: the spec must fail with
         // an actionable error instead of the engine erroring out before the
         // spec is even marked failed.
-        let (_dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (_dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
 
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
-        let spec = db.get_loop_spec(&spec_id).unwrap().unwrap();
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        let spec = db.get_graph_spec(&spec_id).unwrap().unwrap();
 
-        assert_eq!(lp.status, LoopStatus::Failed);
-        assert_eq!(spec.status, LoopSpecStatus::Failed);
+        assert_eq!(lp.status, GraphStatus::Failed);
+        assert_eq!(spec.status, GraphSpecStatus::Failed);
     }
 
-    // ── R5: `loop_run` with a queue ──────────────────────────────────────
+    // ── R5: `graph_run` with a queue ──────────────────────────────────────
 
-    /// A loop with no bound specs — the queue's own standalone specs supply
-    /// the work instead. Distinct from [`loop_fixture`], which always seeds
+    /// A graph with no bound specs — the queue's own standalone specs supply
+    /// the work instead. Distinct from [`graph_fixture`], which always seeds
     /// one bound spec.
-    fn bare_loop_fixture() -> Result<(TempDir, Arc<Database>, LoopEngine, String)> {
+    fn bare_graph_fixture() -> Result<(TempDir, Arc<Database>, GraphEngine, String)> {
         let dir = tempdir()?;
         let db = Arc::new(Database::new(&dir.path().join("test.db"))?);
-        let lp = crate::domain::loops::Loop {
+        let lp = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
             infra_node_id: None,
             id: "wf-test".to_string(),
-            name: "Loop".to_string(),
+            name: "Graph".to_string(),
             description: None,
             workdir: dir.path().to_string_lossy().to_string(),
-            status: LoopStatus::Draft,
+            status: GraphStatus::Draft,
             trigger: None,
             created_at: chrono::Utc::now(),
             started_at: None,
@@ -12467,28 +12507,28 @@ echo done
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
         };
-        db.insert_loop(&lp)?;
+        db.insert_graph(&lp)?;
         Ok((
             dir,
             Arc::clone(&db),
-            LoopEngine::new(db, Arc::new(DefaultNotificationService)),
+            GraphEngine::new(db, Arc::new(DefaultNotificationService)),
             lp.id,
         ))
     }
 
-    /// A standalone spec (`loop_id: None`), the shape queue members take —
-    /// queue membership never binds the spec to a loop.
-    fn standalone_spec(id: &str, position: i64) -> LoopSpec {
-        LoopSpec {
+    /// A standalone spec (`graph_id: None`), the shape queue members take —
+    /// queue membership never binds the spec to a graph.
+    fn standalone_spec(id: &str, position: i64) -> GraphSpec {
+        GraphSpec {
             id: id.to_string(),
-            loop_id: None,
+            graph_id: None,
             name: id.to_string(),
             description: Some(
                 "Functional Requirements:\n- A\n\nNon-Functional Requirements:\n- B\n\nObjective:\n- C\n\nConstraints:\n- D\n\nGuidelines:\n- E\n\nIn Scope:\n- F\n\nOut of Scope:\n- G".to_string(),
             ),
             position,
             parallelizable: false,
-            status: LoopSpecStatus::Pending,
+            status: GraphSpecStatus::Pending,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
@@ -12532,29 +12572,29 @@ echo done
     }
 
     #[tokio::test]
-    async fn loop_engine_queue_run_walks_loop_graph_across_queue_specs_in_queue_order() {
+    async fn graph_engine_queue_run_walks_graph_across_queue_specs_in_queue_order() {
         // Two standalone specs, queued into the queue in the *opposite* order
         // of their `position` field — proving the queue's queue order drives
         // execution, not the spec's own position. Each pass through the
-        // shared loop-level check node commits to the workdir's git repo, so
+        // shared top-level check node commits to the workdir's git repo, so
         // the spec that captures the pre-commit HEAD ran first.
-        let (dir, db, engine, loop_id) = bare_loop_fixture().unwrap();
+        let (dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
         init_git_repo(dir.path());
         let initial_head = git_head(dir.path());
 
         let spec_a = standalone_spec("queue-spec-a", 1);
         let spec_b = standalone_spec("queue-spec-b", 2);
-        db.insert_loop_spec(&spec_a).unwrap();
-        db.insert_loop_spec(&spec_b).unwrap();
+        db.insert_graph_spec(&spec_a).unwrap();
+        db.insert_graph_spec(&spec_b).unwrap();
         // Queue order: b, then a — the reverse of position order.
         insert_queue_with_members(&db, "queue-1", &[&spec_b.id, &spec_a.id]);
 
-        db.insert_loop_node(&LoopNode {
-            id: "loop-check".to_string(),
+        db.insert_graph_node(&GraphNode {
+            id: "graph-check".to_string(),
             spec_id: None,
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             name: "check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "echo committed >> log.txt && git add -A && git commit -q -m spec && printf APPROVED",
                 "success_condition": "exit_code_0"
@@ -12565,8 +12605,8 @@ echo done
         .unwrap();
 
         engine
-            .run_loop(
-                loop_id.clone(),
+            .run_graph(
+                graph_id.clone(),
                 Some("queue-1".to_string()),
                 None,
                 None,
@@ -12575,15 +12615,15 @@ echo done
             .await
             .unwrap();
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
-        assert_eq!(lp.status, LoopStatus::Completed);
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        assert_eq!(lp.status, GraphStatus::Completed);
 
-        let spec_a_after = db.get_loop_spec(&spec_a.id).unwrap().unwrap();
-        let spec_b_after = db.get_loop_spec(&spec_b.id).unwrap().unwrap();
-        assert_eq!(spec_a_after.status, LoopSpecStatus::Completed);
-        assert_eq!(spec_b_after.status, LoopSpecStatus::Completed);
-        assert_eq!(db.list_loop_runs_for_spec(&spec_a.id).unwrap().len(), 1);
-        assert_eq!(db.list_loop_runs_for_spec(&spec_b.id).unwrap().len(), 1);
+        let spec_a_after = db.get_graph_spec(&spec_a.id).unwrap().unwrap();
+        let spec_b_after = db.get_graph_spec(&spec_b.id).unwrap().unwrap();
+        assert_eq!(spec_a_after.status, GraphSpecStatus::Completed);
+        assert_eq!(spec_b_after.status, GraphSpecStatus::Completed);
+        assert_eq!(db.list_graph_runs_for_spec(&spec_a.id).unwrap().len(), 1);
+        assert_eq!(db.list_graph_runs_for_spec(&spec_b.id).unwrap().len(), 1);
 
         // spec_b ran first: nothing had been committed yet.
         assert_eq!(
@@ -12604,41 +12644,41 @@ echo done
     /// in-flight member `Interrupted` (not `Pending` — the run was cut short
     /// by something external, not a failure of the work) in the same pass it
     /// interrupts the dangling run, and the resumed dispatch (what
-    /// `loop_continue`'s `retry_current_node` triggers via
-    /// `resume_background`, simulated here by calling `run_loop_dispatch`
+    /// `graph_continue`'s `retry_current_node` triggers via
+    /// `resume_background`, simulated here by calling `run_graph_dispatch`
     /// directly with `is_resume: true`) must pick the interrupted member up
     /// FIRST — never skip straight past it to the next queued member, which
     /// is exactly how it got orphaned in the 2026-07-14 incident.
     #[tokio::test]
-    async fn loop_engine_restart_recovery_runs_interrupted_queue_spec_first() {
-        let (dir, db, engine, loop_id) = bare_loop_fixture().unwrap();
+    async fn graph_engine_restart_recovery_runs_interrupted_queue_spec_first() {
+        let (dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
         let data_dir = tempdir().unwrap();
         init_git_repo(dir.path());
         let initial_head = git_head(dir.path());
 
         let mut interrupted = standalone_spec("queue-interrupted", 1);
-        interrupted.status = LoopSpecStatus::Running;
+        interrupted.status = GraphSpecStatus::Running;
         let next = standalone_spec("queue-next", 2);
-        db.insert_loop_spec(&interrupted).unwrap();
-        db.insert_loop_spec(&next).unwrap();
+        db.insert_graph_spec(&interrupted).unwrap();
+        db.insert_graph_spec(&next).unwrap();
         insert_queue_with_members(&db, "queue-1", &[&interrupted.id, &next.id]);
 
-        db.update_loop_status(
-            &loop_id,
-            LoopStatus::Running,
+        db.update_graph_status(
+            &graph_id,
+            GraphStatus::Running,
             Some(chrono::Utc::now()),
             None,
         )
         .unwrap();
-        db.set_loop_active_run_queue(&loop_id, Some("queue-1"))
+        db.set_graph_active_run_queue(&graph_id, Some("queue-1"))
             .unwrap();
 
-        db.insert_loop_node(&LoopNode {
-            id: "loop-check".to_string(),
+        db.insert_graph_node(&GraphNode {
+            id: "graph-check".to_string(),
             spec_id: None,
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             name: "check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "echo committed >> log.txt && git add -A && git commit -q -m spec && printf APPROVED",
                 "success_condition": "exit_code_0"
@@ -12651,12 +12691,12 @@ echo done
         // The daemon-restart artifact: a node run stuck `running` for the
         // in-flight spec, no live process behind it (no pid, no boot_id —
         // exactly what a dead daemon leaves for reconcile to find).
-        db.insert_loop_run(&LoopNodeRun {
+        db.insert_graph_run(&GraphNodeRun {
             id: "run-interrupted".to_string(),
-            loop_id: loop_id.clone(),
+            graph_id: graph_id.clone(),
             spec_id: interrupted.id.clone(),
-            node_id: "loop-check".to_string(),
-            status: LoopRunStatus::Running,
+            node_id: "graph-check".to_string(),
+            status: GraphRunStatus::Running,
             input: None,
             output: None,
             started_at: chrono::Utc::now(),
@@ -12671,23 +12711,23 @@ echo done
         .unwrap();
 
         // G2 boot reconcile.
-        assert_eq!(db.reconcile_orphaned_loops(data_dir.path()).unwrap(), 1);
-        let lp_after_reconcile = db.get_loop(&loop_id).unwrap().unwrap();
-        assert_eq!(lp_after_reconcile.status, LoopStatus::Paused);
-        let interrupted_after_reconcile = db.get_loop_spec(&interrupted.id).unwrap().unwrap();
+        assert_eq!(db.reconcile_orphaned_graphs(data_dir.path()).unwrap(), 1);
+        let lp_after_reconcile = db.get_graph(&graph_id).unwrap().unwrap();
+        assert_eq!(lp_after_reconcile.status, GraphStatus::Paused);
+        let interrupted_after_reconcile = db.get_graph_spec(&interrupted.id).unwrap().unwrap();
         assert_eq!(
             interrupted_after_reconcile.status,
-            LoopSpecStatus::Interrupted,
+            GraphSpecStatus::Interrupted,
             "reconcile must mark the in-flight member interrupted, not leave it running"
         );
 
-        // `loop_continue { retry_current_node }`: resume with the loop's
-        // persisted queue context, same as `resume_background`. The loop is left
+        // `graph_continue { retry_current_node }`: resume with the graph's
+        // persisted queue context, same as `resume_background`. The graph is left
         // `Paused` (as reconcile set it) — the dispatch's own atomic claim (B42)
         // owns the flip to `Running`, so no caller pre-flips it anymore.
         engine
-            .run_loop_dispatch(
-                loop_id.clone(),
+            .run_graph_dispatch(
+                graph_id.clone(),
                 Some("queue-1".to_string()),
                 None,
                 true,
@@ -12697,12 +12737,12 @@ echo done
             .await
             .unwrap();
 
-        let lp_final = db.get_loop(&loop_id).unwrap().unwrap();
-        assert_eq!(lp_final.status, LoopStatus::Completed);
-        let interrupted_final = db.get_loop_spec(&interrupted.id).unwrap().unwrap();
-        let next_final = db.get_loop_spec(&next.id).unwrap().unwrap();
-        assert_eq!(interrupted_final.status, LoopSpecStatus::Completed);
-        assert_eq!(next_final.status, LoopSpecStatus::Completed);
+        let lp_final = db.get_graph(&graph_id).unwrap().unwrap();
+        assert_eq!(lp_final.status, GraphStatus::Completed);
+        let interrupted_final = db.get_graph_spec(&interrupted.id).unwrap().unwrap();
+        let next_final = db.get_graph_spec(&next.id).unwrap().unwrap();
+        assert_eq!(interrupted_final.status, GraphSpecStatus::Completed);
+        assert_eq!(next_final.status, GraphSpecStatus::Completed);
 
         // The interrupted spec ran FIRST — against the pre-existing HEAD,
         // before anything was committed — not skipped in favor of `next`.
@@ -12719,24 +12759,24 @@ echo done
     }
 
     #[tokio::test]
-    async fn loop_engine_run_workdir_override_is_used_as_check_node_cwd() {
-        // The loop's own workdir must be left untouched by an override — only
+    async fn graph_engine_run_workdir_override_is_used_as_check_node_cwd() {
+        // The graph's own workdir must be left untouched by an override — only
         // the check node's actual working directory should change.
         let db_dir = tempdir().unwrap();
-        let loop_workdir = tempdir().unwrap();
+        let graph_workdir = tempdir().unwrap();
         let override_workdir = tempdir().unwrap();
         let db = Arc::new(Database::new(&db_dir.path().join("test.db")).unwrap());
-        let engine = LoopEngine::new(Arc::clone(&db), Arc::new(DefaultNotificationService));
+        let engine = GraphEngine::new(Arc::clone(&db), Arc::new(DefaultNotificationService));
 
-        let lp = crate::domain::loops::Loop {
+        let lp = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
             infra_node_id: None,
             id: "wf-workdir".to_string(),
-            name: "Loop".to_string(),
+            name: "Graph".to_string(),
             description: None,
-            workdir: loop_workdir.path().to_string_lossy().to_string(),
-            status: LoopStatus::Draft,
+            workdir: graph_workdir.path().to_string_lossy().to_string(),
+            status: GraphStatus::Draft,
             trigger: None,
             created_at: chrono::Utc::now(),
             started_at: None,
@@ -12747,19 +12787,19 @@ echo done
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
         };
-        db.insert_loop(&lp).unwrap();
+        db.insert_graph(&lp).unwrap();
         let spec = standalone_spec("bound-spec", 1);
         let mut bound_spec = spec.clone();
-        bound_spec.loop_id = Some(lp.id.clone());
-        db.insert_loop_spec(&bound_spec).unwrap();
+        bound_spec.graph_id = Some(lp.id.clone());
+        db.insert_graph_spec(&bound_spec).unwrap();
 
         let override_path = override_workdir.path().to_string_lossy().to_string();
-        db.insert_loop_node(&LoopNode {
-            id: "loop-check".to_string(),
+        db.insert_graph_node(&GraphNode {
+            id: "graph-check".to_string(),
             spec_id: None,
-            loop_id: Some(lp.id.clone()),
+            graph_id: Some(lp.id.clone()),
             name: "check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": format!("test \"$(pwd)\" = \"{override_path}\""),
                 "success_condition": "exit_code_0"
@@ -12770,37 +12810,37 @@ echo done
         .unwrap();
 
         engine
-            .run_loop(lp.id.clone(), None, Some(override_path.clone()), None, None)
+            .run_graph(lp.id.clone(), None, Some(override_path.clone()), None, None)
             .await
             .unwrap();
 
-        let lp_after = db.get_loop(&lp.id).unwrap().unwrap();
-        let spec_after = db.get_loop_spec(&bound_spec.id).unwrap().unwrap();
-        assert_eq!(lp_after.status, LoopStatus::Completed);
-        assert_eq!(spec_after.status, LoopSpecStatus::Completed);
-        // The loop's own workdir is unchanged by the run-level override.
+        let lp_after = db.get_graph(&lp.id).unwrap().unwrap();
+        let spec_after = db.get_graph_spec(&bound_spec.id).unwrap().unwrap();
+        assert_eq!(lp_after.status, GraphStatus::Completed);
+        assert_eq!(spec_after.status, GraphSpecStatus::Completed);
+        // The graph's own workdir is unchanged by the run-level override.
         assert_eq!(
             lp_after.workdir,
-            loop_workdir.path().to_string_lossy().to_string()
+            graph_workdir.path().to_string_lossy().to_string()
         );
     }
 
     #[tokio::test]
-    async fn loop_engine_legacy_run_without_queue_id_only_touches_bound_specs() {
+    async fn graph_engine_legacy_run_without_queue_id_only_touches_bound_specs() {
         // A standalone spec exists in the DB (e.g. queue backlog) but isn't
-        // added to any queue and isn't bound to this loop. Calling run_loop
+        // added to any queue and isn't bound to this graph. Calling run_graph
         // without queue_id must behave exactly as before queues existed: only
-        // the loop's own bound specs are touched.
-        let (_dir, db, engine, loop_id, bound_spec_id) = loop_fixture().unwrap();
+        // the graph's own bound specs are touched.
+        let (_dir, db, engine, graph_id, bound_spec_id) = graph_fixture().unwrap();
         let untouched = standalone_spec("untouched-standalone", 99);
-        db.insert_loop_spec(&untouched).unwrap();
+        db.insert_graph_spec(&untouched).unwrap();
 
-        db.insert_loop_node(&LoopNode {
-            id: "loop-check".to_string(),
+        db.insert_graph_node(&GraphNode {
+            id: "graph-check".to_string(),
             spec_id: None,
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             name: "check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "printf APPROVED",
                 "success_condition": "exit_code_0"
@@ -12811,40 +12851,40 @@ echo done
         .unwrap();
 
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
-        let bound = db.get_loop_spec(&bound_spec_id).unwrap().unwrap();
-        let untouched_after = db.get_loop_spec(&untouched.id).unwrap().unwrap();
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        let bound = db.get_graph_spec(&bound_spec_id).unwrap().unwrap();
+        let untouched_after = db.get_graph_spec(&untouched.id).unwrap().unwrap();
 
-        assert_eq!(lp.status, LoopStatus::Completed);
-        assert_eq!(bound.status, LoopSpecStatus::Completed);
-        assert_eq!(untouched_after.status, LoopSpecStatus::Pending);
+        assert_eq!(lp.status, GraphStatus::Completed);
+        assert_eq!(bound.status, GraphSpecStatus::Completed);
+        assert_eq!(untouched_after.status, GraphSpecStatus::Pending);
         assert!(db
-            .list_loop_runs_for_spec(&untouched.id)
+            .list_graph_runs_for_spec(&untouched.id)
             .unwrap()
             .is_empty());
     }
 
     #[tokio::test]
-    async fn loop_engine_queue_run_skips_already_completed_members() {
-        let (_dir, db, engine, loop_id) = bare_loop_fixture().unwrap();
+    async fn graph_engine_queue_run_skips_already_completed_members() {
+        let (_dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
 
         let mut done = standalone_spec("queue-done", 1);
-        done.status = LoopSpecStatus::Completed;
+        done.status = GraphSpecStatus::Completed;
         let pending = standalone_spec("queue-pending", 2);
-        db.insert_loop_spec(&done).unwrap();
-        db.insert_loop_spec(&pending).unwrap();
+        db.insert_graph_spec(&done).unwrap();
+        db.insert_graph_spec(&pending).unwrap();
         insert_queue_with_members(&db, "queue-1", &[&done.id, &pending.id]);
 
-        db.insert_loop_node(&LoopNode {
-            id: "loop-check".to_string(),
+        db.insert_graph_node(&GraphNode {
+            id: "graph-check".to_string(),
             spec_id: None,
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             name: "check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "printf APPROVED",
                 "success_condition": "exit_code_0"
@@ -12855,8 +12895,8 @@ echo done
         .unwrap();
 
         engine
-            .run_loop(
-                loop_id.clone(),
+            .run_graph(
+                graph_id.clone(),
                 Some("queue-1".to_string()),
                 None,
                 None,
@@ -12865,32 +12905,32 @@ echo done
             .await
             .unwrap();
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
-        let done_after = db.get_loop_spec(&done.id).unwrap().unwrap();
-        let pending_after = db.get_loop_spec(&pending.id).unwrap().unwrap();
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        let done_after = db.get_graph_spec(&done.id).unwrap().unwrap();
+        let pending_after = db.get_graph_spec(&pending.id).unwrap().unwrap();
 
-        assert_eq!(lp.status, LoopStatus::Completed);
-        assert_eq!(done_after.status, LoopSpecStatus::Completed);
-        assert_eq!(pending_after.status, LoopSpecStatus::Completed);
+        assert_eq!(lp.status, GraphStatus::Completed);
+        assert_eq!(done_after.status, GraphSpecStatus::Completed);
+        assert_eq!(pending_after.status, GraphSpecStatus::Completed);
         // The already-completed spec was skipped outright: no run recorded.
-        assert!(db.list_loop_runs_for_spec(&done.id).unwrap().is_empty());
-        assert_eq!(db.list_loop_runs_for_spec(&pending.id).unwrap().len(), 1);
+        assert!(db.list_graph_runs_for_spec(&done.id).unwrap().is_empty());
+        assert_eq!(db.list_graph_runs_for_spec(&pending.id).unwrap().len(), 1);
     }
 
     #[tokio::test]
-    async fn loop_engine_queue_run_retains_context_on_genuine_completion_for_progress() {
-        let (_dir, db, engine, loop_id) = bare_loop_fixture().unwrap();
+    async fn graph_engine_queue_run_retains_context_on_genuine_completion_for_progress() {
+        let (_dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
 
         let spec = standalone_spec("queue-spec", 1);
-        db.insert_loop_spec(&spec).unwrap();
+        db.insert_graph_spec(&spec).unwrap();
         insert_queue_with_members(&db, "queue-1", &[&spec.id]);
 
-        db.insert_loop_node(&LoopNode {
-            id: "loop-check".to_string(),
+        db.insert_graph_node(&GraphNode {
+            id: "graph-check".to_string(),
             spec_id: None,
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             name: "check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "printf APPROVED",
                 "success_condition": "exit_code_0"
@@ -12901,8 +12941,8 @@ echo done
         .unwrap();
 
         engine
-            .run_loop(
-                loop_id.clone(),
+            .run_graph(
+                graph_id.clone(),
                 Some("queue-1".to_string()),
                 None,
                 None,
@@ -12911,50 +12951,50 @@ echo done
             .await
             .unwrap();
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
-        assert_eq!(lp.status, LoopStatus::Completed);
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        assert_eq!(lp.status, GraphStatus::Completed);
         // B31: a genuinely finished queue run keeps its `active_run_queue_id`
-        // as last-run context so `loop list` / `loop info` can still render
+        // as last-run context so `graph list` / `graph info` can still render
         // its real progress instead of a misleading `0/0`. B8's
         // anti-pollution guarantee is upheld elsewhere: every launch path
         // re-persists this field before the first spec runs, so a later
-        // fresh `loop_run` against a different queue overwrites it.
+        // fresh `graph_run` against a different queue overwrites it.
         assert_eq!(
             lp.active_run_queue_id.as_deref(),
             Some("queue-1"),
             "a genuinely finished queue run must keep the run context so its queue progress \
              stays queryable"
         );
-        // The progress the CLI/MCP surfaces (mirrored by `loop_progress` in
-        // `daemon/loop_cli.rs`) is a real `1/1`, not `0/0`.
+        // The progress the CLI/MCP surfaces (mirrored by `graph_progress` in
+        // `daemon/graph_cli.rs`) is a real `1/1`, not `0/0`.
         assert_eq!(
             engine
-                .spec_progress(&loop_id, lp.active_run_queue_id.as_deref())
+                .spec_progress(&graph_id, lp.active_run_queue_id.as_deref())
                 .unwrap(),
             (1, 1),
-            "completed queue loop must report n/n progress, not 0/0"
+            "completed queue graph must report n/n progress, not 0/0"
         );
     }
 
     /// If `queue_next_pending_spec_id` finds no `pending` member to pick, but a
     /// member is nonetheless left non-terminal (e.g. `running`, from a crash
     /// mid-spec that never got reset), the queue isn't genuinely finished —
-    /// the loop must not be marked `completed` out from under it. This is
+    /// the graph must not be marked `completed` out from under it. This is
     /// the guard that keeps a resumed queue run from repeating the incident's
-    /// false-completion (17 of 20 queue specs still pending, loop marked
+    /// false-completion (17 of 20 queue specs still pending, graph marked
     /// completed anyway).
     #[tokio::test]
-    async fn loop_engine_queue_run_does_not_complete_loop_while_member_left_running() {
-        let (_dir, db, engine, loop_id) = bare_loop_fixture().unwrap();
+    async fn graph_engine_queue_run_does_not_complete_graph_while_member_left_running() {
+        let (_dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
 
         let mut stuck = standalone_spec("queue-stuck", 1);
-        stuck.status = LoopSpecStatus::Running;
-        db.insert_loop_spec(&stuck).unwrap();
+        stuck.status = GraphSpecStatus::Running;
+        db.insert_graph_spec(&stuck).unwrap();
         insert_queue_with_members(&db, "queue-1", &[&stuck.id]);
 
         engine
-            .run_loop(
-                loop_id.clone(),
+            .run_graph(
+                graph_id.clone(),
                 Some("queue-1".to_string()),
                 None,
                 None,
@@ -12963,10 +13003,10 @@ echo done
             .await
             .unwrap();
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
         assert_eq!(
             lp.status,
-            LoopStatus::Running,
+            GraphStatus::Running,
             "must not be marked completed while a queue member is still non-terminal"
         );
         assert_eq!(
@@ -12988,13 +13028,13 @@ echo done
         panic!("timed out waiting for file: {}", path.display());
     }
 
-    fn record_node(id: &str, spec_id: &str, log: &std::path::Path, label: &str) -> LoopNode {
-        LoopNode {
+    fn record_node(id: &str, spec_id: &str, log: &std::path::Path, label: &str) -> GraphNode {
+        GraphNode {
             id: id.to_string(),
             spec_id: Some(spec_id.to_string()),
-            loop_id: None,
+            graph_id: None,
             name: id.to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": format!(
                     "echo {label} >> \"{log}\" && printf APPROVED",
@@ -13012,13 +13052,13 @@ echo done
         spec_id: &str,
         marker: &std::path::Path,
         gate: &std::path::Path,
-    ) -> LoopNode {
-        LoopNode {
+    ) -> GraphNode {
+        GraphNode {
             id: id.to_string(),
             spec_id: Some(spec_id.to_string()),
-            loop_id: None,
+            graph_id: None,
             name: id.to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": format!(
                     "touch \"{marker}\"; while [ ! -f \"{gate}\" ]; do sleep 0.02; done; printf APPROVED",
@@ -13033,39 +13073,39 @@ echo done
     }
 
     #[tokio::test]
-    async fn loop_engine_queue_run_picks_up_spec_appended_mid_run() {
+    async fn graph_engine_queue_run_picks_up_spec_appended_mid_run() {
         // A spec appended to the queue while the run is in flight must still
         // get executed before the run ends: the engine re-queries the queue
         // for its next pending member at each spec boundary instead of
         // iterating a list frozen at launch.
-        let (dir, db, engine, loop_id) = bare_loop_fixture().unwrap();
+        let (dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
         let started_marker = dir.path().join("started.marker");
         let go_marker = dir.path().join("go.marker");
         let order_log = dir.path().join("order.log");
 
         let spec_a = standalone_spec("queue-spec-a", 1);
         let spec_b = standalone_spec("queue-spec-b", 2);
-        db.insert_loop_spec(&spec_a).unwrap();
-        db.insert_loop_spec(&spec_b).unwrap();
+        db.insert_graph_spec(&spec_a).unwrap();
+        db.insert_graph_spec(&spec_b).unwrap();
         // spec_b exists in the DB but is NOT yet in the queue — it's appended
         // below, while spec_a is mid-run.
         insert_queue_with_members(&db, "queue-1", &[&spec_a.id]);
 
-        db.insert_loop_node(&touch_gate_node(
+        db.insert_graph_node(&touch_gate_node(
             "node-a",
             &spec_a.id,
             &started_marker,
             &go_marker,
         ))
         .unwrap();
-        db.insert_loop_node(&record_node("node-b", &spec_b.id, &order_log, "spec-b"))
+        db.insert_graph_node(&record_node("node-b", &spec_b.id, &order_log, "spec-b"))
             .unwrap();
 
         let run_engine = engine.clone();
-        let run_loop_id = loop_id.clone();
+        let run_graph_id = graph_id.clone();
         let handle = tokio::spawn(async move {
             run_engine
-                .run_loop(run_loop_id, Some("queue-1".to_string()), None, None, None)
+                .run_graph(run_graph_id, Some("queue-1".to_string()), None, None, None)
                 .await
         });
 
@@ -13077,25 +13117,25 @@ echo done
 
         handle.await.unwrap().unwrap();
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
-        let spec_a_after = db.get_loop_spec(&spec_a.id).unwrap().unwrap();
-        let spec_b_after = db.get_loop_spec(&spec_b.id).unwrap().unwrap();
-        assert_eq!(lp.status, LoopStatus::Completed);
-        assert_eq!(spec_a_after.status, LoopSpecStatus::Completed);
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        let spec_a_after = db.get_graph_spec(&spec_a.id).unwrap().unwrap();
+        let spec_b_after = db.get_graph_spec(&spec_b.id).unwrap().unwrap();
+        assert_eq!(lp.status, GraphStatus::Completed);
+        assert_eq!(spec_a_after.status, GraphSpecStatus::Completed);
         assert_eq!(
             spec_b_after.status,
-            LoopSpecStatus::Completed,
+            GraphSpecStatus::Completed,
             "spec appended mid-run must still be executed before the run ends"
         );
-        assert_eq!(db.list_loop_runs_for_spec(&spec_b.id).unwrap().len(), 1);
+        assert_eq!(db.list_graph_runs_for_spec(&spec_b.id).unwrap().len(), 1);
     }
 
     #[tokio::test]
-    async fn loop_engine_queue_run_reorder_changes_pick_order_mid_run() {
+    async fn graph_engine_queue_run_reorder_changes_pick_order_mid_run() {
         // Reordering the queue's PENDING members while a run is in flight
         // must change which one the engine picks next — proving the pick is
         // a live, fresh query, not a list captured at launch.
-        let (dir, db, engine, loop_id) = bare_loop_fixture().unwrap();
+        let (dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
         let started_marker = dir.path().join("started.marker");
         let go_marker = dir.path().join("go.marker");
         let order_log = dir.path().join("order.log");
@@ -13103,29 +13143,29 @@ echo done
         let spec_a = standalone_spec("queue-spec-a", 1);
         let spec_b = standalone_spec("queue-spec-b", 2);
         let spec_c = standalone_spec("queue-spec-c", 3);
-        db.insert_loop_spec(&spec_a).unwrap();
-        db.insert_loop_spec(&spec_b).unwrap();
-        db.insert_loop_spec(&spec_c).unwrap();
+        db.insert_graph_spec(&spec_a).unwrap();
+        db.insert_graph_spec(&spec_b).unwrap();
+        db.insert_graph_spec(&spec_c).unwrap();
         // Queue order at launch: a, b, c.
         insert_queue_with_members(&db, "queue-1", &[&spec_a.id, &spec_b.id, &spec_c.id]);
 
-        db.insert_loop_node(&touch_gate_node(
+        db.insert_graph_node(&touch_gate_node(
             "node-a",
             &spec_a.id,
             &started_marker,
             &go_marker,
         ))
         .unwrap();
-        db.insert_loop_node(&record_node("node-b", &spec_b.id, &order_log, "spec-b"))
+        db.insert_graph_node(&record_node("node-b", &spec_b.id, &order_log, "spec-b"))
             .unwrap();
-        db.insert_loop_node(&record_node("node-c", &spec_c.id, &order_log, "spec-c"))
+        db.insert_graph_node(&record_node("node-c", &spec_c.id, &order_log, "spec-c"))
             .unwrap();
 
         let run_engine = engine.clone();
-        let run_loop_id = loop_id.clone();
+        let run_graph_id = graph_id.clone();
         let handle = tokio::spawn(async move {
             run_engine
-                .run_loop(run_loop_id, Some("queue-1".to_string()), None, None, None)
+                .run_graph(run_graph_id, Some("queue-1".to_string()), None, None, None)
                 .await
         });
 
@@ -13140,8 +13180,8 @@ echo done
 
         handle.await.unwrap().unwrap();
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
-        assert_eq!(lp.status, LoopStatus::Completed);
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        assert_eq!(lp.status, GraphStatus::Completed);
 
         let order = std::fs::read_to_string(&order_log).unwrap();
         let lines: Vec<&str> = order.lines().collect();
@@ -13153,27 +13193,27 @@ echo done
     }
 
     #[tokio::test]
-    async fn loop_engine_queue_run_ends_when_no_pending_members_remain() {
+    async fn graph_engine_queue_run_ends_when_no_pending_members_remain() {
         // Sanity check underpinning both tests above: with no gating at all,
         // a queue run with N pending members ends after exactly N specs run,
         // and picks up an appended spec before completing.
-        let (dir, db, engine, loop_id) = bare_loop_fixture().unwrap();
+        let (dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
         let order_log = dir.path().join("order.log");
 
         let spec_a = standalone_spec("queue-spec-a", 1);
         let spec_b = standalone_spec("queue-spec-b", 2);
-        db.insert_loop_spec(&spec_a).unwrap();
-        db.insert_loop_spec(&spec_b).unwrap();
+        db.insert_graph_spec(&spec_a).unwrap();
+        db.insert_graph_spec(&spec_b).unwrap();
         insert_queue_with_members(&db, "queue-1", &[&spec_a.id, &spec_b.id]);
 
-        db.insert_loop_node(&record_node("node-a", &spec_a.id, &order_log, "spec-a"))
+        db.insert_graph_node(&record_node("node-a", &spec_a.id, &order_log, "spec-a"))
             .unwrap();
-        db.insert_loop_node(&record_node("node-b", &spec_b.id, &order_log, "spec-b"))
+        db.insert_graph_node(&record_node("node-b", &spec_b.id, &order_log, "spec-b"))
             .unwrap();
 
         engine
-            .run_loop(
-                loop_id.clone(),
+            .run_graph(
+                graph_id.clone(),
                 Some("queue-1".to_string()),
                 None,
                 None,
@@ -13182,8 +13222,8 @@ echo done
             .await
             .unwrap();
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
-        assert_eq!(lp.status, LoopStatus::Completed);
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        assert_eq!(lp.status, GraphStatus::Completed);
         assert!(db.queue_next_pending_spec_id("queue-1").unwrap().is_none());
 
         let order = std::fs::read_to_string(&order_log).unwrap();
@@ -13212,10 +13252,10 @@ echo done
 
         // The execution must be a Fail — exactly what select_next_step matches
         // against the Fail edge condition.
-        assert_eq!(execution.status, LoopRunStatus::Fail);
+        assert_eq!(execution.status, GraphRunStatus::Fail);
         assert!(execution.summary.contains("failed to spawn"));
 
-        // Verify the output JSON has the fields the loop engine expects.
+        // Verify the output JSON has the fields the graph engine expects.
         let output = &execution.output;
         assert_eq!(output.get("kind").and_then(Value::as_str), Some("agent"));
         assert_eq!(
@@ -13247,15 +13287,15 @@ echo done
         );
 
         // 2. Render the full prompt — elision must survive composition.
-        let lp = crate::domain::loops::Loop {
+        let lp = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
             infra_node_id: None,
             id: "wf".to_string(),
-            name: "Loop".to_string(),
+            name: "Graph".to_string(),
             description: None,
             workdir: "/tmp/project".to_string(),
-            status: LoopStatus::Draft,
+            status: GraphStatus::Draft,
             trigger: None,
             created_at: chrono::Utc::now(),
             started_at: None,
@@ -13266,14 +13306,14 @@ echo done
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
         };
-        let spec = LoopSpec {
+        let spec = GraphSpec {
             id: "spec".to_string(),
-            loop_id: Some("wf".to_string()),
+            graph_id: Some("wf".to_string()),
             name: "Spec".to_string(),
             description: Some("Do the thing".to_string()),
             position: 1,
             parallelizable: false,
-            status: LoopSpecStatus::Pending,
+            status: GraphSpecStatus::Pending,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
@@ -13283,12 +13323,12 @@ echo done
             completed_via_reason: None,
             completed_via_at: None,
         };
-        let node = LoopNode {
+        let node = GraphNode {
             id: "node-1".to_string(),
             spec_id: Some("spec".to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "Agent".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({}),
             position: 1,
             created_at: chrono::Utc::now(),
@@ -13341,7 +13381,7 @@ echo done
         .await;
         let result = execution.expect("stdin delivery must not fail");
         // CM13: cat never self-reports, so the run is infra (Fail).
-        assert_eq!(result.status, LoopRunStatus::Fail);
+        assert_eq!(result.status, GraphRunStatus::Fail);
         let stdout = result.output.get("stdout").and_then(Value::as_str).unwrap();
         assert!(
             stdout.contains("bytes elided"),
@@ -13366,27 +13406,27 @@ echo done
         )
         .await
         .expect("spawn failure must not propagate as hard error");
-        assert_eq!(fail_result.status, LoopRunStatus::Fail);
+        assert_eq!(fail_result.status, GraphRunStatus::Fail);
     }
 
     /// Full engine integration: a node failure must route through the graph's
-    /// fail edge and let the loop continue — never abort the entire loop run.
+    /// fail edge and let the graph continue — never abort the entire graph run.
     /// This proves the resilience contract that the E2BIG fix depends on:
     /// when `run_agent_process` returns a failed `NodeExecution` (instead of
     /// propagating `Err`), the engine routes it through the fail edge.
     #[tokio::test]
-    async fn loop_engine_node_failure_routes_through_fail_edge_and_loop_continues() {
-        let (_dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+    async fn graph_engine_node_failure_routes_through_fail_edge_and_graph_continues() {
+        let (_dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
 
         // "implement" node: always fails (simulates any node failure,
         // including an agent spawn failure that's caught by
         // `run_agent_process`).
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-implement".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "implement".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "exit 1",
                 "success_condition": "exit_code_0"
@@ -13396,13 +13436,13 @@ echo done
         })
         .unwrap();
 
-        // "review" node: runs after the failure, proving the loop survived.
-        db.insert_loop_node(&LoopNode {
+        // "review" node: runs after the failure, proving the graph survived.
+        db.insert_graph_node(&GraphNode {
             id: "node-review".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "review".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "printf APPROVED",
                 "success_condition": "exit_code_0"
@@ -13413,36 +13453,36 @@ echo done
         .unwrap();
 
         // implement --fail--> review
-        db.insert_loop_edge(&LoopEdge {
+        db.insert_graph_edge(&GraphEdge {
             id: "edge-fail".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             from_node: "node-implement".to_string(),
             to_node: "node-review".to_string(),
-            condition: crate::domain::loops::LoopEdgeCondition::Fail,
+            condition: crate::domain::graphs::GraphEdgeCondition::Fail,
         })
         .unwrap();
 
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
-        let spec = db.get_loop_spec(&spec_id).unwrap().unwrap();
-        let runs = db.list_loop_runs_for_spec(&spec_id).unwrap();
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        let spec = db.get_graph_spec(&spec_id).unwrap().unwrap();
+        let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
 
-        // The loop must complete (not fail/abort), the spec must complete
+        // The graph must complete (not fail/abort), the spec must complete
         // (review passed), and both nodes must have run.
-        assert_eq!(lp.status, LoopStatus::Completed);
-        assert_eq!(spec.status, LoopSpecStatus::Completed);
+        assert_eq!(lp.status, GraphStatus::Completed);
+        assert_eq!(spec.status, GraphSpecStatus::Completed);
         assert_eq!(runs.len(), 2);
 
         let implement_run = runs.iter().find(|r| r.node_id == "node-implement").unwrap();
-        assert_eq!(implement_run.status, LoopRunStatus::Fail);
+        assert_eq!(implement_run.status, GraphRunStatus::Fail);
 
         let review_run = runs.iter().find(|r| r.node_id == "node-review").unwrap();
-        assert_eq!(review_run.status, LoopRunStatus::Pass);
+        assert_eq!(review_run.status, GraphRunStatus::Pass);
     }
 
     // ── B42: a superseded run is terminal and silent ─────────────────────
@@ -13455,17 +13495,17 @@ echo done
     #[cfg(unix)]
     #[tokio::test]
     async fn superseded_run_traverses_no_edge_and_creates_no_resilience_run() {
-        let (_dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (_dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
 
         // "implement": a long-running node we can supersede mid-flight. A
         // killed process exits nonzero, so absent the fix its `Fail` would
         // route straight down the fail edge below.
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "implement".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "implement".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "sleep 30",
                 "success_condition": "exit_code_0",
@@ -13476,12 +13516,12 @@ echo done
         })
         .unwrap();
         // "resilience": the fail-edge target that must NEVER run for a supersede.
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "resilience".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "resilience".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "printf DIAGNOSED",
                 "success_condition": "exit_code_0",
@@ -13490,30 +13530,30 @@ echo done
             created_at: chrono::Utc::now(),
         })
         .unwrap();
-        db.insert_loop_edge(&LoopEdge {
+        db.insert_graph_edge(&GraphEdge {
             id: "edge-fail".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             from_node: "implement".to_string(),
             to_node: "resilience".to_string(),
-            condition: crate::domain::loops::LoopEdgeCondition::Fail,
+            condition: crate::domain::graphs::GraphEdgeCondition::Fail,
         })
         .unwrap();
 
         let engine = Arc::new(engine);
         let dispatch = {
             let engine = Arc::clone(&engine);
-            let loop_id = loop_id.clone();
-            tokio::spawn(async move { engine.run_loop(loop_id, None, None, None, None).await })
+            let graph_id = graph_id.clone();
+            tokio::spawn(async move { engine.run_graph(graph_id, None, None, None, None).await })
         };
 
         // Once the implement run is live (has a pid), supersede it exactly as a
         // newer attempt at the same node does — the same
-        // `terminate_run(&stale, SUPERSEDE_REASON)` the reap loop runs. Polling
+        // `terminate_run(&stale, SUPERSEDE_REASON)` the reap graph runs. Polling
         // to the pid makes the ordering deterministic: the row is finalized
         // superseded before the killed process's `wait` ever returns.
         let superseded_run_id = loop {
-            if let Some(run) = db.get_active_loop_run_for_node("implement").unwrap() {
+            if let Some(run) = db.get_active_graph_run_for_node("implement").unwrap() {
                 if run.pid.is_some() {
                     terminate_run_row(&db, &run, SUPERSEDE_REASON);
                     break run.id;
@@ -13525,8 +13565,8 @@ echo done
         dispatch.await.unwrap().unwrap();
 
         // The superseded run is recorded terminated/superseded...
-        let superseded = db.get_loop_run(&superseded_run_id).unwrap().unwrap();
-        assert_eq!(superseded.status, LoopRunStatus::Fail);
+        let superseded = db.get_graph_run(&superseded_run_id).unwrap().unwrap();
+        assert_eq!(superseded.status, GraphRunStatus::Fail);
         assert!(
             run_was_terminated_out_of_band(&superseded),
             "the run must carry the supersede marker"
@@ -13534,7 +13574,7 @@ echo done
 
         // ...and it traversed no edge: NO resilience run was ever created, and
         // the only run for the spec is the one superseded implement run.
-        let runs = db.list_loop_runs_for_spec(&spec_id).unwrap();
+        let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
         assert!(
             runs.iter().all(|r| r.node_id != "resilience"),
             "a superseded run must not route down the fail edge to the resilience node"
@@ -13543,30 +13583,30 @@ echo done
         assert_eq!(runs[0].node_id, "implement");
 
         // The dispatch stopped silently — it failed nothing and completed
-        // nothing; the loop and spec are left for whoever now owns them.
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
-        assert_eq!(lp.status, LoopStatus::Running);
-        let spec = db.get_loop_spec(&spec_id).unwrap().unwrap();
-        assert_eq!(spec.status, LoopSpecStatus::Running);
+        // nothing; the graph and spec are left for whoever now owns them.
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        assert_eq!(lp.status, GraphStatus::Running);
+        let spec = db.get_graph_spec(&spec_id).unwrap().unwrap();
+        assert_eq!(spec.status, GraphSpecStatus::Running);
     }
 
     /// The same mechanism, generalized (2026-08-05): a run terminated
     /// out-of-band for ANY reason — not just a same-node supersede — must be
-    /// recognized and traverse no edge. `loop_reset` marks a run it kills
+    /// recognized and traverse no edge. `graph_reset` marks a run it kills
     /// with reason `"spec reset"`, not `SUPERSEDE_REASON`; before the fix
     /// this reason mismatch meant a spec reset out from under an executing
     /// node let its late completion route the fail edge anyway.
     #[cfg(unix)]
     #[tokio::test]
     async fn run_terminated_for_any_out_of_band_reason_also_traverses_no_edge() {
-        let (_dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (_dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "implement".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "implement".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "sleep 30",
                 "success_condition": "exit_code_0",
@@ -13576,12 +13616,12 @@ echo done
             created_at: chrono::Utc::now(),
         })
         .unwrap();
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "resilience".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "resilience".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "printf DIAGNOSED",
                 "success_condition": "exit_code_0",
@@ -13590,29 +13630,29 @@ echo done
             created_at: chrono::Utc::now(),
         })
         .unwrap();
-        db.insert_loop_edge(&LoopEdge {
+        db.insert_graph_edge(&GraphEdge {
             id: "edge-fail".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             from_node: "implement".to_string(),
             to_node: "resilience".to_string(),
-            condition: crate::domain::loops::LoopEdgeCondition::Fail,
+            condition: crate::domain::graphs::GraphEdgeCondition::Fail,
         })
         .unwrap();
 
         let engine = Arc::new(engine);
         let dispatch = {
             let engine = Arc::clone(&engine);
-            let loop_id = loop_id.clone();
-            tokio::spawn(async move { engine.run_loop(loop_id, None, None, None, None).await })
+            let graph_id = graph_id.clone();
+            tokio::spawn(async move { engine.run_graph(graph_id, None, None, None, None).await })
         };
 
-        // Terminate the live run exactly as `Database::reset_loop` does when
+        // Terminate the live run exactly as `Database::reset_graph` does when
         // it finds an in-flight run for a spec being reset: same
         // `{ "terminated": true, "reason": … }` shape, but a different
         // reason than the same-node supersede path uses.
         let terminated_run_id = loop {
-            if let Some(run) = db.get_active_loop_run_for_node("implement").unwrap() {
+            if let Some(run) = db.get_active_graph_run_for_node("implement").unwrap() {
                 if run.pid.is_some() {
                     terminate_run_row(&db, &run, "spec reset");
                     break run.id;
@@ -13623,40 +13663,40 @@ echo done
 
         dispatch.await.unwrap().unwrap();
 
-        let terminated = db.get_loop_run(&terminated_run_id).unwrap().unwrap();
-        assert_eq!(terminated.status, LoopRunStatus::Fail);
+        let terminated = db.get_graph_run(&terminated_run_id).unwrap().unwrap();
+        assert_eq!(terminated.status, GraphRunStatus::Fail);
         assert!(run_was_terminated_out_of_band(&terminated));
 
-        let runs = db.list_loop_runs_for_spec(&spec_id).unwrap();
+        let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
         assert!(
             runs.iter().all(|r| r.node_id != "resilience"),
             "an out-of-band termination for any reason must not route down the fail edge"
         );
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
-        assert_eq!(lp.status, LoopStatus::Running);
-        let spec = db.get_loop_spec(&spec_id).unwrap().unwrap();
-        assert_eq!(spec.status, LoopSpecStatus::Running);
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        assert_eq!(lp.status, GraphStatus::Running);
+        let spec = db.get_graph_spec(&spec_id).unwrap().unwrap();
+        assert_eq!(spec.status, GraphSpecStatus::Running);
     }
 
     // ── terminal blocker: dead-ending on a failing node must self-explain ──
 
-    /// The defect this closes (2026-08-06, loop 824de730): a spec that dies
+    /// The defect this closes (2026-08-06, graph 824de730): a spec that dies
     /// because a FAILING node has no outgoing edge left NOTHING visible
-    /// beyond a log line — no blocker anywhere `loop_list`/the TUI could
+    /// beyond a log line — no blocker anywhere `graph_list`/the TUI could
     /// show. The engine must now derive one, naming the node and what it
     /// reported, onto the terminating run's `output.blocker` — the exact
-    /// key `loop_run_blocker` (daemon/handler.rs) already reads.
+    /// key `graph_run_blocker` (daemon/handler.rs) already reads.
     #[tokio::test]
     async fn terminal_fail_node_with_no_outgoing_edge_records_a_derived_blocker() {
-        let (_dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (_dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "dead-end".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "dead-end".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "exit 1",
                 "success_condition": "exit_code_0",
@@ -13669,16 +13709,16 @@ echo done
         // dead-ends right here.
 
         engine
-            .run_loop(loop_id, None, None, None, None)
+            .run_graph(graph_id, None, None, None, None)
             .await
             .unwrap();
 
-        let spec = db.get_loop_spec(&spec_id).unwrap().unwrap();
-        assert_eq!(spec.status, LoopSpecStatus::Failed);
+        let spec = db.get_graph_spec(&spec_id).unwrap().unwrap();
+        assert_eq!(spec.status, GraphSpecStatus::Failed);
 
-        let runs = db.list_loop_runs_for_spec(&spec_id).unwrap();
+        let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
         assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0].status, LoopRunStatus::Fail);
+        assert_eq!(runs[0].status, GraphRunStatus::Fail);
         let blocker = runs[0]
             .output
             .as_ref()
@@ -13695,14 +13735,14 @@ echo done
     /// blocked.
     #[tokio::test]
     async fn terminal_pass_node_with_no_outgoing_edge_records_no_blocker() {
-        let (_dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (_dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "check-committed".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "check-committed".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "exit 0",
                 "success_condition": "exit_code_0",
@@ -13713,16 +13753,16 @@ echo done
         .unwrap();
 
         engine
-            .run_loop(loop_id, None, None, None, None)
+            .run_graph(graph_id, None, None, None, None)
             .await
             .unwrap();
 
-        let spec = db.get_loop_spec(&spec_id).unwrap().unwrap();
-        assert_eq!(spec.status, LoopSpecStatus::Completed);
+        let spec = db.get_graph_spec(&spec_id).unwrap().unwrap();
+        assert_eq!(spec.status, GraphSpecStatus::Completed);
 
-        let runs = db.list_loop_runs_for_spec(&spec_id).unwrap();
+        let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
         assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0].status, LoopRunStatus::Pass);
+        assert_eq!(runs[0].status, GraphRunStatus::Pass);
         assert!(
             runs[0]
                 .output
@@ -13736,20 +13776,20 @@ echo done
 
     /// The regression test for the whole spec: a spec that keeps failing
     /// with a genuine verdict — never an infra crash — across three
-    /// SEPARATE `run_loop` dispatches (not three bounces within one, which
+    /// SEPARATE `run_graph` dispatches (not three bounces within one, which
     /// is the pre-existing per-node `DEFAULT_MAX_ITERATIONS_PER_NODE`
-    /// budget) must end up `Blocked`, not `Failed`: the loop pauses, and the
+    /// budget) must end up `Blocked`, not `Failed`: the graph pauses, and the
     /// terminating run's blocker names the spec and the attempt count.
     #[tokio::test]
-    async fn cross_run_attempt_budget_blocks_loop_after_three_failed_executions() {
-        let (_dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+    async fn cross_run_attempt_budget_blocks_graph_after_three_failed_executions() {
+        let (_dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "dead-end".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "dead-end".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "exit 1",
                 "success_condition": "exit_code_0",
@@ -13764,13 +13804,17 @@ echo done
         // Executions 1 and 2: ordinary Failed, not yet blocked.
         for expected_attempts in 1..=2 {
             engine
-                .run_loop(loop_id.clone(), None, None, None, None)
+                .run_graph(graph_id.clone(), None, None, None, None)
                 .await
                 .unwrap();
-            let lp = db.get_loop(&loop_id).unwrap().unwrap();
-            assert_eq!(lp.status, LoopStatus::Failed, "attempt {expected_attempts}");
+            let lp = db.get_graph(&graph_id).unwrap().unwrap();
             assert_eq!(
-                db.get_loop_spec_cross_run_attempts(&spec_id).unwrap(),
+                lp.status,
+                GraphStatus::Failed,
+                "attempt {expected_attempts}"
+            );
+            assert_eq!(
+                db.get_graph_spec_cross_run_attempts(&spec_id).unwrap(),
                 expected_attempts,
                 "attempt count must persist across separate executions"
             );
@@ -13778,18 +13822,18 @@ echo done
 
         // Execution 3: the budget (default 3) is now exceeded — blocked.
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
-        assert_eq!(db.get_loop_spec_cross_run_attempts(&spec_id).unwrap(), 3);
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
+        assert_eq!(db.get_graph_spec_cross_run_attempts(&spec_id).unwrap(), 3);
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
         assert_eq!(
             lp.status,
-            LoopStatus::Paused,
-            "the third genuine failure must block the loop, not just fail it"
+            GraphStatus::Paused,
+            "the third genuine failure must block the graph, not just fail it"
         );
 
-        let runs = db.list_loop_runs_for_spec(&spec_id).unwrap();
+        let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
         let blocker = runs
             .last()
             .unwrap()
@@ -13816,8 +13860,8 @@ echo done
     /// crash end-to-end.
     #[tokio::test]
     async fn infra_marked_output_does_not_consume_the_cross_run_budget() {
-        let (_dir, db, engine, _loop_id, spec_id) = loop_fixture().unwrap();
-        let spec = db.get_loop_spec(&spec_id).unwrap().unwrap();
+        let (_dir, db, engine, _graph_id, spec_id) = graph_fixture().unwrap();
+        let spec = db.get_graph_spec(&spec_id).unwrap().unwrap();
 
         for infra_output in [
             serde_json::json!({"infra_crash": true, "infra_attempt": 0}),
@@ -13832,7 +13876,7 @@ echo done
             assert!(blocked.is_none(), "an infra failure must never block");
         }
         assert_eq!(
-            db.get_loop_spec_cross_run_attempts(&spec_id).unwrap(),
+            db.get_graph_spec_cross_run_attempts(&spec_id).unwrap(),
             0,
             "none of the infra-flavoured failures above may have touched the counter"
         );
@@ -13842,24 +13886,24 @@ echo done
         engine
             .record_spec_attempt(&spec, "a real fail", false)
             .unwrap();
-        assert_eq!(db.get_loop_spec_cross_run_attempts(&spec_id).unwrap(), 1);
+        assert_eq!(db.get_graph_spec_cross_run_attempts(&spec_id).unwrap(), 1);
     }
 
-    /// Decision 6: an EXPLICIT `loop_reset` of the specific spec that hit
+    /// Decision 6: an EXPLICIT `graph_reset` of the specific spec that hit
     /// the budget clears its count, so the next execution starts fresh
     /// rather than being blocked on its very first fail. The counter must
     /// still be shared across executions otherwise — this is the one
     /// deliberate escape hatch, not a general amnesty.
     #[tokio::test]
     async fn explicit_spec_reset_clears_the_cross_run_attempt_count() {
-        let (_dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (_dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "dead-end".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "dead-end".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "exit 1",
                 "success_condition": "exit_code_0",
@@ -13872,25 +13916,25 @@ echo done
         // Two genuine failures — one short of the default budget of 3.
         for _ in 0..2 {
             engine
-                .run_loop(loop_id.clone(), None, None, None, None)
+                .run_graph(graph_id.clone(), None, None, None, None)
                 .await
                 .unwrap();
         }
-        assert_eq!(db.get_loop_spec_cross_run_attempts(&spec_id).unwrap(), 2);
+        assert_eq!(db.get_graph_spec_cross_run_attempts(&spec_id).unwrap(), 2);
 
         // The operator names this spec explicitly — the "I fixed it" signal.
         let outcome = db
-            .reset_loop(&loop_id, Some(std::slice::from_ref(&spec_id)))
+            .reset_graph(&graph_id, Some(std::slice::from_ref(&spec_id)))
             .unwrap();
         assert!(matches!(
             outcome,
-            crate::domain::loops::LoopResetOutcome::Reset {
+            crate::domain::graphs::GraphResetOutcome::Reset {
                 spec_count: 1,
                 skipped_count: 0
             }
         ));
         assert_eq!(
-            db.get_loop_spec_cross_run_attempts(&spec_id).unwrap(),
+            db.get_graph_spec_cross_run_attempts(&spec_id).unwrap(),
             0,
             "an explicit reset of this exact spec must clear its count"
         );
@@ -13898,33 +13942,33 @@ echo done
         // The next execution starts fresh: one more genuine failure lands
         // at count 1, not 3 — still an ordinary Failed, not Blocked.
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
-        assert_eq!(db.get_loop_spec_cross_run_attempts(&spec_id).unwrap(), 1);
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
+        assert_eq!(db.get_graph_spec_cross_run_attempts(&spec_id).unwrap(), 1);
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
         assert_eq!(
             lp.status,
-            LoopStatus::Failed,
+            GraphStatus::Failed,
             "must not be blocked so soon after reset"
         );
     }
 
     /// The mirror image, and decision 6's other half: a BLANKET
-    /// `loop_reset` (no `specs` named) resets the spec's status like any
+    /// `graph_reset` (no `specs` named) resets the spec's status like any
     /// other, but must NOT clear its attempt count — that's exactly the
     /// "operator resets and relaunches without fixing anything" recovery
     /// this whole spec exists to stop from silently resetting the budget.
     #[tokio::test]
-    async fn blanket_loop_reset_does_not_clear_the_cross_run_attempt_count() {
-        let (_dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+    async fn blanket_graph_reset_does_not_clear_the_cross_run_attempt_count() {
+        let (_dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "dead-end".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "dead-end".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "exit 1",
                 "success_condition": "exit_code_0",
@@ -13935,32 +13979,32 @@ echo done
         .unwrap();
 
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
-        assert_eq!(db.get_loop_spec_cross_run_attempts(&spec_id).unwrap(), 1);
+        assert_eq!(db.get_graph_spec_cross_run_attempts(&spec_id).unwrap(), 1);
 
-        db.reset_loop(&loop_id, None).unwrap();
+        db.reset_graph(&graph_id, None).unwrap();
         assert_eq!(
-            db.get_loop_spec_cross_run_attempts(&spec_id).unwrap(),
+            db.get_graph_spec_cross_run_attempts(&spec_id).unwrap(),
             1,
             "a blanket reset must leave the persisted count untouched"
         );
     }
 
-    /// A blocker already written by `loop_report_blocker` is more specific
+    /// A blocker already written by `graph_report_blocker` is more specific
     /// than anything the engine can synthesise — `record_terminal_blocker`
     /// must never overwrite it.
     #[tokio::test]
     async fn record_terminal_blocker_preserves_an_existing_blocker() {
-        let (_dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (_dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "node".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({}),
             position: 1,
             created_at: chrono::Utc::now(),
@@ -13968,12 +14012,12 @@ echo done
         .unwrap();
         let run_id = "run-with-existing-blocker".to_string();
         let existing_output = serde_json::json!({ "blocker": "human already reported this" });
-        db.insert_loop_run(&LoopNodeRun {
+        db.insert_graph_run(&GraphNodeRun {
             id: run_id.clone(),
-            loop_id,
+            graph_id,
             spec_id,
             node_id: "node".to_string(),
-            status: LoopRunStatus::Fail,
+            status: GraphRunStatus::Fail,
             input: None,
             output: Some(existing_output.clone()),
             started_at: chrono::Utc::now(),
@@ -13988,7 +14032,7 @@ echo done
         .unwrap();
 
         let final_execution = NodeExecution {
-            status: LoopRunStatus::Fail,
+            status: GraphRunStatus::Fail,
             output: existing_output,
             summary: "whatever the node reported".to_string(),
         };
@@ -13996,7 +14040,7 @@ echo done
             .record_terminal_blocker(&run_id, "node", &final_execution)
             .unwrap();
 
-        let run = db.get_loop_run(&run_id).unwrap().unwrap();
+        let run = db.get_graph_run(&run_id).unwrap().unwrap();
         let blocker = run
             .output
             .as_ref()
@@ -14006,24 +14050,24 @@ echo done
         assert_eq!(blocker, "human already reported this");
     }
 
-    // ── fail_loop: scoped to the dispatch generation that failed ─────────
+    // ── fail_graph: scoped to the dispatch generation that failed ─────────
 
-    /// `fail_loop`'s sweep must never terminate a sibling dispatch's healthy
+    /// `fail_graph`'s sweep must never terminate a sibling dispatch's healthy
     /// run — the exact way the 2026-08-05 incident took down a fresh,
-    /// correct dispatch that had claimed the loop 64 seconds after the one
+    /// correct dispatch that had claimed the graph 64 seconds after the one
     /// that eventually failed. Simulates the race directly: dispatch A
     /// claims, a reset + relaunch (dispatch B) claims again with a later
     /// timestamp and starts its own run, and only then does dispatch A's
     /// late failure arrive carrying its now-stale claim.
     #[tokio::test]
-    async fn fail_loop_from_stale_dispatch_never_touches_a_newer_dispatchs_runs() {
-        let (_dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
-        db.insert_loop_node(&LoopNode {
+    async fn fail_graph_from_stale_dispatch_never_touches_a_newer_dispatchs_runs() {
+        let (_dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+        db.insert_graph_node(&GraphNode {
             id: "node-a".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "node-a".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({"command": "true"}),
             position: 1,
             created_at: chrono::Utc::now(),
@@ -14031,23 +14075,23 @@ echo done
         .unwrap();
 
         let claim_a = chrono::Utc::now();
-        assert!(db.claim_loop_for_run(&loop_id, claim_a).unwrap());
+        assert!(db.claim_graph_for_run(&graph_id, claim_a).unwrap());
 
         // A reset + relaunch out from under dispatch A: status drops out of
-        // `running` (what `Database::reset_loop` does), then dispatch B
+        // `running` (what `Database::reset_graph` does), then dispatch B
         // claims again with a strictly later timestamp.
-        db.update_loop_status(&loop_id, LoopStatus::Draft, None, None)
+        db.update_graph_status(&graph_id, GraphStatus::Draft, None, None)
             .unwrap();
         let claim_b = claim_a + chrono::Duration::seconds(5);
-        assert!(db.claim_loop_for_run(&loop_id, claim_b).unwrap());
+        assert!(db.claim_graph_for_run(&graph_id, claim_b).unwrap());
 
         // Dispatch B's own healthy, in-flight run.
-        db.insert_loop_run(&LoopNodeRun {
+        db.insert_graph_run(&GraphNodeRun {
             id: "run-b".to_string(),
-            loop_id: loop_id.clone(),
+            graph_id: graph_id.clone(),
             spec_id,
             node_id: "node-a".to_string(),
-            status: LoopRunStatus::Running,
+            status: GraphRunStatus::Running,
             input: None,
             output: None,
             started_at: chrono::Utc::now(),
@@ -14063,8 +14107,8 @@ echo done
 
         // Dispatch A's late failure, carrying its now-stale claim.
         engine
-            .fail_loop(
-                &loop_id,
+            .fail_graph(
+                &graph_id,
                 Some(claim_a),
                 Some("spec"),
                 "dispatch A's late failure",
@@ -14072,32 +14116,32 @@ echo done
             .await
             .unwrap();
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
         assert_eq!(
             lp.status,
-            LoopStatus::Running,
+            GraphStatus::Running,
             "a stale dispatch's failure must not flip status out from under the current dispatch"
         );
-        let run_b = db.get_loop_run("run-b").unwrap().unwrap();
+        let run_b = db.get_graph_run("run-b").unwrap().unwrap();
         assert_eq!(
             run_b.status,
-            LoopRunStatus::Running,
-            "a stale dispatch's fail_loop sweep must never touch a newer dispatch's run"
+            GraphRunStatus::Running,
+            "a stale dispatch's fail_graph sweep must never touch a newer dispatch's run"
         );
     }
 
     /// The ordinary, single-dispatch case is unchanged: when
-    /// `dispatch_started_at` still matches the loop's current claim,
-    /// `fail_loop` flips status and sweeps exactly as before.
+    /// `dispatch_started_at` still matches the graph's current claim,
+    /// `fail_graph` flips status and sweeps exactly as before.
     #[tokio::test]
-    async fn fail_loop_from_current_dispatch_still_flips_status_and_sweeps() {
-        let (_dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
-        db.insert_loop_node(&LoopNode {
+    async fn fail_graph_from_current_dispatch_still_flips_status_and_sweeps() {
+        let (_dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+        db.insert_graph_node(&GraphNode {
             id: "node-a".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "node-a".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({"command": "true"}),
             position: 1,
             created_at: chrono::Utc::now(),
@@ -14105,13 +14149,13 @@ echo done
         .unwrap();
 
         let claim = chrono::Utc::now();
-        assert!(db.claim_loop_for_run(&loop_id, claim).unwrap());
-        db.insert_loop_run(&LoopNodeRun {
+        assert!(db.claim_graph_for_run(&graph_id, claim).unwrap());
+        db.insert_graph_run(&GraphNodeRun {
             id: "run-a".to_string(),
-            loop_id: loop_id.clone(),
+            graph_id: graph_id.clone(),
             spec_id,
             node_id: "node-a".to_string(),
-            status: LoopRunStatus::Running,
+            status: GraphRunStatus::Running,
             input: None,
             output: None,
             started_at: chrono::Utc::now(),
@@ -14126,29 +14170,29 @@ echo done
         .unwrap();
 
         engine
-            .fail_loop(&loop_id, Some(claim), Some("spec"), "genuine failure")
+            .fail_graph(&graph_id, Some(claim), Some("spec"), "genuine failure")
             .await
             .unwrap();
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
-        assert_eq!(lp.status, LoopStatus::Failed);
-        let run = db.get_loop_run("run-a").unwrap().unwrap();
-        assert_eq!(run.status, LoopRunStatus::Fail);
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        assert_eq!(lp.status, GraphStatus::Failed);
+        let run = db.get_graph_run("run-a").unwrap().unwrap();
+        assert_eq!(run.status, GraphRunStatus::Fail);
     }
 
-    /// A second launch against a loop that already has an in-flight run must be
-    /// a silent no-op — the atomic loop claim refuses it, so it can't start a
+    /// A second launch against a graph that already has an in-flight run must be
+    /// a silent no-op — the atomic graph claim refuses it, so it can't start a
     /// duplicate dispatch that would supersede the live run at the next node.
     #[tokio::test]
-    async fn duplicate_launch_of_running_loop_is_a_noop() {
-        let (_dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+    async fn duplicate_launch_of_running_graph_is_a_noop() {
+        let (_dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "implement".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "implement".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "printf OK",
                 "success_condition": "exit_code_0",
@@ -14158,21 +14202,21 @@ echo done
         })
         .unwrap();
 
-        // Simulate a live dispatch: the loop is already `Running` with an
+        // Simulate a live dispatch: the graph is already `Running` with an
         // in-flight node run behind it.
-        db.update_loop_status(
-            &loop_id,
-            LoopStatus::Running,
+        db.update_graph_status(
+            &graph_id,
+            GraphStatus::Running,
             Some(chrono::Utc::now()),
             None,
         )
         .unwrap();
-        db.insert_loop_run(&LoopNodeRun {
+        db.insert_graph_run(&GraphNodeRun {
             id: "inflight".to_string(),
-            loop_id: loop_id.clone(),
+            graph_id: graph_id.clone(),
             spec_id: spec_id.clone(),
             node_id: "implement".to_string(),
-            status: LoopRunStatus::Running,
+            status: GraphRunStatus::Running,
             input: None,
             output: None,
             started_at: chrono::Utc::now(),
@@ -14188,39 +14232,40 @@ echo done
 
         // A second dispatch (autorun/resume racing the live one) must no-op.
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
 
-        // The loop is untouched and the in-flight run was neither superseded
+        // The graph is untouched and the in-flight run was neither superseded
         // nor duplicated.
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
-        assert_eq!(lp.status, LoopStatus::Running);
-        let runs = db.list_loop_runs_for_spec(&spec_id).unwrap();
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        assert_eq!(lp.status, GraphStatus::Running);
+        let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
         assert_eq!(
             runs.len(),
             1,
             "the duplicate launch must not create a second run"
         );
-        assert_eq!(runs[0].status, LoopRunStatus::Running);
+        assert_eq!(runs[0].status, GraphRunStatus::Running);
     }
 
-    // ── N1: loop lifecycle notifications ──────────────────────────────────
+    // ── N1: graph lifecycle notifications ──────────────────────────────────
 
     #[tokio::test]
-    async fn loop_engine_notifies_started_spec_completed_and_finished_on_success() {
-        // A retrying check (self-loop on fail) must not spam a
+    async fn graph_engine_notifies_started_spec_completed_and_finished_on_success() {
+        // A retrying check (self-graph on fail) must not spam a
         // spec-completed notification per attempt — only once, when the
         // spec actually reaches `completed`.
-        let (dir, db, engine, notifications, loop_id, spec_id) = loop_fixture_with_mock().unwrap();
+        let (dir, db, engine, notifications, graph_id, spec_id) =
+            graph_fixture_with_mock().unwrap();
         let counter = dir.path().join("counter");
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-check".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": format!(
                     "n=$(cat \"{counter}\" 2>/dev/null || echo 0); n=$((n+1)); echo $n > \"{counter}\"; [ \"$n\" -ge 3 ] && printf APPROVED || exit 1",
@@ -14232,39 +14277,39 @@ echo done
             created_at: chrono::Utc::now(),
         })
         .unwrap();
-        db.insert_loop_edge(&LoopEdge {
+        db.insert_graph_edge(&GraphEdge {
             id: "edge-self".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             from_node: "node-check".to_string(),
             to_node: "node-check".to_string(),
-            condition: crate::domain::loops::LoopEdgeCondition::Fail,
+            condition: crate::domain::graphs::GraphEdgeCondition::Fail,
         })
         .unwrap();
 
         engine
-            .run_loop(loop_id, None, None, None, None)
+            .run_graph(graph_id, None, None, None, None)
             .await
             .unwrap();
 
         assert_eq!(
             notifications.events(),
             vec![
-                RecordedNotification::LoopStarted {
-                    loop_name: "Loop".to_string(),
+                RecordedNotification::GraphStarted {
+                    graph_name: "Graph".to_string(),
                     spec_count: 1,
                     resumed: false,
                     first_pending: Some("Spec".to_string()),
                 },
                 RecordedNotification::SpecCompleted {
-                    loop_name: "Loop".to_string(),
+                    graph_name: "Graph".to_string(),
                     spec_name: "Spec".to_string(),
                     done: 1,
                     total: 1,
                     next_pending: None,
                 },
-                RecordedNotification::LoopFinishedCompleted {
-                    loop_name: "Loop".to_string(),
+                RecordedNotification::GraphFinishedCompleted {
+                    graph_name: "Graph".to_string(),
                     done: 1,
                     total: 1,
                     hook_launched: false,
@@ -14275,16 +14320,16 @@ echo done
     }
 
     #[tokio::test]
-    async fn loop_engine_notifies_failed_variant_with_failing_spec_name() {
-        let (_dir, _db, engine, notifications, loop_id, spec_id) =
-            loop_fixture_with_mock().unwrap();
+    async fn graph_engine_notifies_failed_variant_with_failing_spec_name() {
+        let (_dir, _db, engine, notifications, graph_id, spec_id) =
+            graph_fixture_with_mock().unwrap();
 
-        _db.insert_loop_node(&LoopNode {
+        _db.insert_graph_node(&GraphNode {
             id: "node-check".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "exit 1",
                 "success_condition": "exit_code_0"
@@ -14295,21 +14340,21 @@ echo done
         .unwrap();
 
         engine
-            .run_loop(loop_id, None, None, None, None)
+            .run_graph(graph_id, None, None, None, None)
             .await
             .unwrap();
 
         assert_eq!(
             notifications.events(),
             vec![
-                RecordedNotification::LoopStarted {
-                    loop_name: "Loop".to_string(),
+                RecordedNotification::GraphStarted {
+                    graph_name: "Graph".to_string(),
                     spec_count: 1,
                     resumed: false,
                     first_pending: Some("Spec".to_string()),
                 },
-                RecordedNotification::LoopFinishedFailed {
-                    loop_name: "Loop".to_string(),
+                RecordedNotification::GraphFinishedFailed {
+                    graph_name: "Graph".to_string(),
                     spec_name: "Spec".to_string(),
                 },
             ],
@@ -14318,18 +14363,18 @@ echo done
     }
 
     #[tokio::test]
-    async fn loop_engine_notify_blocked_fires_loop_finished_blocked() {
-        let (_dir, _db, engine, notifications, loop_id, _spec_id) =
-            loop_fixture_with_mock().unwrap();
+    async fn graph_engine_notify_blocked_fires_graph_finished_blocked() {
+        let (_dir, _db, engine, notifications, graph_id, _spec_id) =
+            graph_fixture_with_mock().unwrap();
 
         engine
-            .notify_blocked(&loop_id, "needs human review")
+            .notify_blocked(&graph_id, "needs human review")
             .unwrap();
 
         assert_eq!(
             notifications.events(),
-            vec![RecordedNotification::LoopFinishedBlocked {
-                loop_name: "Loop".to_string(),
+            vec![RecordedNotification::GraphFinishedBlocked {
+                graph_name: "Graph".to_string(),
                 summary: "needs human review".to_string(),
             }],
         );
@@ -14372,21 +14417,21 @@ echo done
 
     /// Iteration budget exhaustion must terminate any in-flight child
     /// processes and finalize all runs. A check node that always fails
-    /// loops back to itself via a self-loop edge until the per-node
+    /// graphs back to itself via a self-graph edge until the per-node
     /// iteration budget (DEFAULT_MAX_ITERATIONS_PER_NODE) is hit.
     #[cfg(unix)]
     #[tokio::test]
     async fn iteration_budget_exhaustion_kills_inflight_child() {
-        let (_dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (_dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
 
-        // This node always fails. A self-loop edge routes its failure
+        // This node always fails. A self-graph edge routes its failure
         // back to itself, forcing retries until the budget is exhausted.
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "flaky".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "flaky".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "sleep 0.2; exit 1",
                 "success_condition": "exit_code_0",
@@ -14396,31 +14441,31 @@ echo done
             created_at: chrono::Utc::now(),
         })
         .unwrap();
-        // Self-loop: failure routes back to the same node for retry.
-        db.insert_loop_edge(&LoopEdge {
-            id: "self-loop".to_string(),
+        // Self-graph: failure routes back to the same node for retry.
+        db.insert_graph_edge(&GraphEdge {
+            id: "self-graph".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             from_node: "flaky".to_string(),
             to_node: "flaky".to_string(),
-            condition: crate::domain::loops::LoopEdgeCondition::Fail,
+            condition: crate::domain::graphs::GraphEdgeCondition::Fail,
         })
         .unwrap();
 
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
 
         // The spec must have failed on budget exhaustion.
-        let spec = db.get_loop_spec(&spec_id).unwrap().unwrap();
-        assert_eq!(spec.status, LoopSpecStatus::Failed);
+        let spec = db.get_graph_spec(&spec_id).unwrap().unwrap();
+        assert_eq!(spec.status, GraphSpecStatus::Failed);
 
         // All runs for this spec must be finalized (no longer `running`).
-        let runs = db.list_loop_runs_for_spec(&spec_id).unwrap();
+        let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
         assert_eq!(runs.len(), DEFAULT_MAX_ITERATIONS_PER_NODE);
         assert!(
-            runs.iter().all(|r| r.status != LoopRunStatus::Running),
+            runs.iter().all(|r| r.status != GraphRunStatus::Running),
             "no run should still be running after budget exhaustion"
         );
         // CB7: el blocker debe ser visible en el último run
@@ -14452,27 +14497,27 @@ echo done
     #[cfg(unix)]
     #[tokio::test]
     async fn agent_timeout_kills_child_process() {
-        let (dir, db, _engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, _engine, graph_id, spec_id) = graph_fixture().unwrap();
         let marker = dir.path().join("agent_survived");
 
-        let node = LoopNode {
+        let node = GraphNode {
             id: "agent-timeout".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "agent-timeout".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({}),
             position: 1,
             created_at: chrono::Utc::now(),
         };
-        db.insert_loop_node(&node).unwrap();
+        db.insert_graph_node(&node).unwrap();
         let run_id = "run-agent-timeout".to_string();
-        db.insert_loop_run(&LoopNodeRun {
+        db.insert_graph_run(&GraphNodeRun {
             id: run_id.clone(),
-            loop_id: loop_id.clone(),
+            graph_id: graph_id.clone(),
             spec_id: spec_id.clone(),
             node_id: node.id.clone(),
-            status: LoopRunStatus::Running,
+            status: GraphRunStatus::Running,
             input: None,
             output: None,
             started_at: chrono::Utc::now(),
@@ -14499,7 +14544,7 @@ echo done
         // error — it must be routable through the graph's fail edge rather
         // than aborting the whole spec.
         let execution = result.expect("a timed-out agent process must not be a hard error");
-        assert_eq!(execution.status, LoopRunStatus::Fail);
+        assert_eq!(execution.status, GraphRunStatus::Fail);
         assert_eq!(execution.output["error"], "timed out");
 
         // Wait out the grace period (plus a margin) before checking — the
@@ -14518,11 +14563,11 @@ echo done
 
     /// An agent node that times out must resolve as a FAIL that traverses
     /// its fail edge — not abort the whole spec. The fail edge routes to a
-    /// recovery node whose marker file only appears if the loop actually
+    /// recovery node whose marker file only appears if the graph actually
     /// kept running past the timeout.
     #[tokio::test]
     async fn agent_node_timeout_with_fail_edge_traverses_it() {
-        let (dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
         let marker = dir.path().join("recovered.marker");
 
         let fake_home = setup_multi_cli_home(&[(
@@ -14530,12 +14575,12 @@ echo done
             &write_member_script(dir.path(), "hang.sh", "sleep 5"),
         )]);
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-agent-timeout".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "slow-agent".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({
                 "platform": "hang-cli",
                 "prompt_template": "ignored by the test script",
@@ -14546,12 +14591,12 @@ echo done
         })
         .unwrap();
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-recovery".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "recovery".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": format!("touch \"{}\"", marker.display()),
                 "success_condition": "exit_code_0"
@@ -14561,59 +14606,59 @@ echo done
         })
         .unwrap();
 
-        db.insert_loop_edge(&LoopEdge {
+        db.insert_graph_edge(&GraphEdge {
             id: "edge-fail".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             from_node: "node-agent-timeout".to_string(),
             to_node: "node-recovery".to_string(),
-            condition: LoopEdgeCondition::Fail,
+            condition: GraphEdgeCondition::Fail,
         })
         .unwrap();
 
         let _home = HomeGuard::set(fake_home.path());
         let result = engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await;
         drop(_home);
         result.unwrap();
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
-        let spec = db.get_loop_spec(&spec_id).unwrap().unwrap();
-        assert_eq!(lp.status, LoopStatus::Completed);
-        assert_eq!(spec.status, LoopSpecStatus::Completed);
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        let spec = db.get_graph_spec(&spec_id).unwrap().unwrap();
+        assert_eq!(lp.status, GraphStatus::Completed);
+        assert_eq!(spec.status, GraphSpecStatus::Completed);
         assert!(
             marker.exists(),
             "fail edge must have been traversed after the agent node timed out"
         );
 
-        let runs = db.list_loop_runs_for_spec(&spec_id).unwrap();
+        let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
         let timeout_run = runs
             .iter()
             .find(|r| r.node_id == "node-agent-timeout")
             .unwrap();
-        assert_eq!(timeout_run.status, LoopRunStatus::Fail);
+        assert_eq!(timeout_run.status, GraphRunStatus::Fail);
         assert_eq!(timeout_run.output.as_ref().unwrap()["error"], "timed out");
     }
 
     /// An agent node that times out with no fail edge must fail the spec
-    /// (and the loop) cleanly — same as any other dead-end fail — rather
-    /// than propagating a hard error out of `run_loop`.
+    /// (and the graph) cleanly — same as any other dead-end fail — rather
+    /// than propagating a hard error out of `run_graph`.
     #[tokio::test]
     async fn agent_node_timeout_without_fail_edge_fails_spec_cleanly() {
-        let (dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
 
         let fake_home = setup_multi_cli_home(&[(
             "hang-cli",
             &write_member_script(dir.path(), "hang.sh", "sleep 5"),
         )]);
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-agent-timeout".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "slow-agent".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({
                 "platform": "hang-cli",
                 "prompt_template": "ignored by the test script",
@@ -14626,22 +14671,22 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         let result = engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await;
         drop(_home);
         result.unwrap();
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
-        let spec = db.get_loop_spec(&spec_id).unwrap().unwrap();
-        assert_eq!(lp.status, LoopStatus::Failed);
-        assert_eq!(spec.status, LoopSpecStatus::Failed);
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        let spec = db.get_graph_spec(&spec_id).unwrap().unwrap();
+        assert_eq!(lp.status, GraphStatus::Failed);
+        assert_eq!(spec.status, GraphSpecStatus::Failed);
 
-        let runs = db.list_loop_runs_for_spec(&spec_id).unwrap();
+        let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
         let timeout_run = runs
             .iter()
             .find(|r| r.node_id == "node-agent-timeout")
             .unwrap();
-        assert_eq!(timeout_run.status, LoopRunStatus::Fail);
+        assert_eq!(timeout_run.status, GraphRunStatus::Fail);
         assert_eq!(timeout_run.output.as_ref().unwrap()["error"], "timed out");
     }
 
@@ -14649,15 +14694,15 @@ echo done
     /// fail: it traverses its fail edge instead of aborting the spec.
     #[tokio::test]
     async fn check_node_timeout_behaves_as_check_fail() {
-        let (dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
         let marker = dir.path().join("recovered.marker");
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-check-timeout".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "slow-check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "sleep 5",
                 "success_condition": "exit_code_0",
@@ -14668,12 +14713,12 @@ echo done
         })
         .unwrap();
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-recovery".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "recovery".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": format!("touch \"{}\"", marker.display()),
                 "success_condition": "exit_code_0"
@@ -14683,36 +14728,36 @@ echo done
         })
         .unwrap();
 
-        db.insert_loop_edge(&LoopEdge {
+        db.insert_graph_edge(&GraphEdge {
             id: "edge-fail".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             from_node: "node-check-timeout".to_string(),
             to_node: "node-recovery".to_string(),
-            condition: LoopEdgeCondition::Fail,
+            condition: GraphEdgeCondition::Fail,
         })
         .unwrap();
 
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
-        let spec = db.get_loop_spec(&spec_id).unwrap().unwrap();
-        assert_eq!(lp.status, LoopStatus::Completed);
-        assert_eq!(spec.status, LoopSpecStatus::Completed);
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        let spec = db.get_graph_spec(&spec_id).unwrap().unwrap();
+        assert_eq!(lp.status, GraphStatus::Completed);
+        assert_eq!(spec.status, GraphSpecStatus::Completed);
         assert!(
             marker.exists(),
             "fail edge must have been traversed after the check node timed out"
         );
 
-        let runs = db.list_loop_runs_for_spec(&spec_id).unwrap();
+        let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
         let timeout_run = runs
             .iter()
             .find(|r| r.node_id == "node-check-timeout")
             .unwrap();
-        assert_eq!(timeout_run.status, LoopRunStatus::Fail);
+        assert_eq!(timeout_run.status, GraphRunStatus::Fail);
         assert_eq!(timeout_run.output.as_ref().unwrap()["error"], "timed out");
     }
 
@@ -14723,7 +14768,7 @@ echo done
     /// reaches quorum despite the timed-out member.
     #[tokio::test]
     async fn ensemble_member_agent_timeout_counts_as_member_fail_without_killing_join() {
-        let (dir, db, engine, _loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, _graph_id, spec_id) = graph_fixture().unwrap();
 
         let fake_home = setup_multi_cli_home(&[
             (
@@ -14737,7 +14782,7 @@ echo done
         ]);
 
         let pass_marker = dir.path().join("pass.marker");
-        db.insert_loop_node(&touch_marker_node("on-pass", &spec_id, &pass_marker, 100))
+        db.insert_graph_node(&touch_marker_node("on-pass", &spec_id, &pass_marker, 100))
             .unwrap();
         insert_test_ensemble(
             &db,
@@ -14754,7 +14799,7 @@ echo done
 
         // Force the hanging member's own agent timeout to fire immediately,
         // well before the ensemble's straggler watchdog would.
-        db.update_loop_node_details(
+        db.update_graph_node_details(
             "m-hang",
             None,
             None,
@@ -14769,7 +14814,7 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_loop("wf-test".to_string(), None, None, None, None)
+            .run_graph("wf-test".to_string(), None, None, None, None)
             .await
             .unwrap();
         drop(_home);
@@ -14780,16 +14825,16 @@ echo done
         );
 
         let join = join_run(&db, &spec_id, "join1");
-        assert_eq!(join.status, LoopRunStatus::Fail);
+        assert_eq!(join.status, GraphRunStatus::Fail);
         assert_eq!(join.output.as_ref().unwrap()["passed"], 0);
 
         let hang_run = db
-            .list_loop_runs_for_spec(&spec_id)
+            .list_graph_runs_for_spec(&spec_id)
             .unwrap()
             .into_iter()
             .find(|r| r.node_id == "m-hang")
             .unwrap();
-        assert_eq!(hang_run.status, LoopRunStatus::Fail);
+        assert_eq!(hang_run.status, GraphRunStatus::Fail);
         assert_eq!(
             hang_run.output.as_ref().unwrap()["error"],
             "timed out",
@@ -14878,20 +14923,20 @@ echo done
     }
 
     /// DIAGNOSTIC (temporary): while a spec's agent node is actually
-    /// in-flight (mid `run_loop_dispatch`), does a concurrent DB write
-    /// targeting the SAME loop id block until the dispatch finishes?
+    /// in-flight (mid `run_graph_dispatch`), does a concurrent DB write
+    /// targeting the SAME graph id block until the dispatch finishes?
     #[tokio::test]
     async fn diag_concurrent_db_write_during_dispatch() {
         let fake_home = setup_sleeping_cli_home();
-        let (_dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (_dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
         let engine = Arc::new(engine);
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-sleep".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "sleep".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({
                 "platform": "sleep-cli",
                 "timeout_minutes": 1,
@@ -14903,20 +14948,20 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         let engine2 = Arc::clone(&engine);
-        let loop_id2 = loop_id.clone();
+        let graph_id2 = graph_id.clone();
         let dispatch =
-            tokio::spawn(async move { engine2.run_loop(loop_id2, None, None, None, None).await });
+            tokio::spawn(async move { engine2.run_graph(graph_id2, None, None, None, None).await });
 
         tokio::time::sleep(std::time::Duration::from_millis(800)).await;
-        let lp_mid = db.get_loop(&loop_id).unwrap().unwrap();
-        eprintln!("DIAG: mid-dispatch loop status = {:?}", lp_mid.status);
+        let lp_mid = db.get_graph(&graph_id).unwrap().unwrap();
+        eprintln!("DIAG: mid-dispatch graph status = {:?}", lp_mid.status);
 
         let db2 = Arc::clone(&db);
-        let loop_id3 = loop_id.clone();
+        let graph_id3 = graph_id.clone();
         let start = std::time::Instant::now();
         let write = tokio::time::timeout(std::time::Duration::from_secs(3), async move {
-            db2.get_loop(&loop_id3).unwrap();
-            db2.schedule_loop_autorun(&loop_id3, chrono::Utc::now() + chrono::Duration::hours(1))
+            db2.get_graph(&graph_id3).unwrap();
+            db2.schedule_graph_autorun(&graph_id3, chrono::Utc::now() + chrono::Duration::hours(1))
                 .unwrap();
         })
         .await;
@@ -14932,8 +14977,8 @@ echo done
             "DIAG: dispatch total elapsed = {:?}",
             dispatch_start.elapsed()
         );
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
-        eprintln!("DIAG: final loop status = {:?}", lp.status);
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        eprintln!("DIAG: final graph status = {:?}", lp.status);
         drop(_home);
 
         assert!(
@@ -14948,15 +14993,15 @@ echo done
     #[tokio::test]
     async fn diag_dispatch_alone_no_concurrent_write() {
         let fake_home = setup_sleeping_cli_home();
-        let (_dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (_dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
         let engine = Arc::new(engine);
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-sleep".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "sleep".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({
                 "platform": "sleep-cli",
                 "timeout_minutes": 1,
@@ -14969,13 +15014,13 @@ echo done
         let _home = HomeGuard::set(fake_home.path());
         let start = std::time::Instant::now();
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
         eprintln!("DIAG: dispatch-alone total elapsed = {:?}", start.elapsed());
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
-        eprintln!("DIAG: final loop status = {:?}", lp.status);
-        let runs = db.list_loop_runs_for_spec(&spec_id).unwrap();
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        eprintln!("DIAG: final graph status = {:?}", lp.status);
+        let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
         for r in &runs {
             eprintln!("DIAG: run status={:?} output={:?}", r.status, r.output);
         }
@@ -15028,20 +15073,20 @@ echo done
         }
     }
 
-    /// Hook fires once when the loop completes. The mock process writes a
+    /// Hook fires once when the graph completes. The mock process writes a
     /// marker file so we can verify it actually ran.
     #[tokio::test]
-    async fn loop_engine_on_completed_hook_fires_on_completion() {
+    async fn graph_engine_on_completed_hook_fires_on_completion() {
         let fake_home = setup_test_cli_home();
-        let (dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
         let marker = dir.path().join("hook_fired.marker");
 
-        let node = LoopNode {
+        let node = GraphNode {
             id: "node-check".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "printf APPROVED",
                 "success_condition": "exit_code_0"
@@ -15049,10 +15094,10 @@ echo done
             position: 1,
             created_at: chrono::Utc::now(),
         };
-        db.insert_loop_node(&node).unwrap();
+        db.insert_graph_node(&node).unwrap();
 
         let marker_path = marker.to_string_lossy().to_string();
-        let hook = crate::domain::loops::LoopCompletionHook {
+        let hook = crate::domain::graphs::GraphCompletionHook {
             platform: Some("test-cli".to_string()),
             model: None,
             effort: None,
@@ -15060,45 +15105,45 @@ echo done
             command: None,
             target_session_id: None,
             timeout_minutes: Some(1),
-            target_loop_id: None,
+            target_graph_id: None,
             queue_id: None,
             workdir_override: None,
             idea: None,
         };
-        db.update_loop_completion_hook(&loop_id, Some(&hook))
+        db.update_graph_completion_hook(&graph_id, Some(&hook))
             .unwrap();
 
         // Cli::strategy() reads from $CANOPY_HOME_OVERRIDE/.canopy/config.toml.
         let _home = HomeGuard::set(fake_home.path());
         let result = engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await;
         drop(_home);
         drop(fake_home);
         result.unwrap();
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
-        assert_eq!(lp.status, LoopStatus::Completed);
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        assert_eq!(lp.status, GraphStatus::Completed);
         assert!(marker.exists(), "on_completed hook must have run");
 
-        let hook_runs = db.list_loop_completion_hook_runs(&loop_id).unwrap();
+        let hook_runs = db.list_graph_completion_hook_runs(&graph_id).unwrap();
         assert_eq!(hook_runs.len(), 1);
-        assert_eq!(hook_runs[0].status, LoopRunStatus::Pass);
+        assert_eq!(hook_runs[0].status, GraphRunStatus::Pass);
     }
 
-    /// Hook must NOT fire when the loop fails (a spec's check node returns
+    /// Hook must NOT fire when the graph fails (a spec's check node returns
     /// non-zero). Only `Completed` triggers it.
     #[tokio::test]
-    async fn loop_engine_on_completed_hook_does_not_fire_on_failure() {
-        let (dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+    async fn graph_engine_on_completed_hook_does_not_fire_on_failure() {
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
         let marker = dir.path().join("hook_should_not_exist.marker");
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-check".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "exit 1",
                 "success_condition": "exit_code_0"
@@ -15109,7 +15154,7 @@ echo done
         .unwrap();
 
         let marker_path = marker.to_string_lossy().to_string();
-        let hook = crate::domain::loops::LoopCompletionHook {
+        let hook = crate::domain::graphs::GraphCompletionHook {
             platform: Some("test-cli".to_string()),
             model: None,
             effort: None,
@@ -15117,44 +15162,44 @@ echo done
             command: None,
             target_session_id: None,
             timeout_minutes: Some(1),
-            target_loop_id: None,
+            target_graph_id: None,
             queue_id: None,
             workdir_override: None,
             idea: None,
         };
-        db.update_loop_completion_hook(&loop_id, Some(&hook))
+        db.update_graph_completion_hook(&graph_id, Some(&hook))
             .unwrap();
 
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
-        assert_eq!(lp.status, LoopStatus::Failed);
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        assert_eq!(lp.status, GraphStatus::Failed);
         assert!(
             !marker.exists(),
-            "on_completed hook must NOT fire on a failed loop"
+            "on_completed hook must NOT fire on a failed graph"
         );
 
-        let hook_runs = db.list_loop_completion_hook_runs(&loop_id).unwrap();
+        let hook_runs = db.list_graph_completion_hook_runs(&graph_id).unwrap();
         assert!(hook_runs.is_empty(), "no hook runs should be recorded");
     }
 
     /// After a completed→reset→recomplete cycle, the hook fires again (once
     /// per completion).
     #[tokio::test]
-    async fn loop_engine_on_completed_hook_fires_again_after_reset_and_recomplete() {
+    async fn graph_engine_on_completed_hook_fires_again_after_reset_and_recomplete() {
         let fake_home = setup_test_cli_home();
-        let (dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
         let marker = dir.path().join("hook_count.log");
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-check".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "printf APPROVED",
                 "success_condition": "exit_code_0"
@@ -15165,7 +15210,7 @@ echo done
         .unwrap();
 
         let marker_path = marker.to_string_lossy().to_string();
-        let hook = crate::domain::loops::LoopCompletionHook {
+        let hook = crate::domain::graphs::GraphCompletionHook {
             platform: Some("test-cli".to_string()),
             model: None,
             effort: None,
@@ -15173,55 +15218,55 @@ echo done
             command: None,
             target_session_id: None,
             timeout_minutes: Some(1),
-            target_loop_id: None,
+            target_graph_id: None,
             queue_id: None,
             workdir_override: None,
             idea: None,
         };
-        db.update_loop_completion_hook(&loop_id, Some(&hook))
+        db.update_graph_completion_hook(&graph_id, Some(&hook))
             .unwrap();
 
         let _home = HomeGuard::set(fake_home.path());
         // First completion.
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
-        assert_eq!(lp.status, LoopStatus::Completed);
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        assert_eq!(lp.status, GraphStatus::Completed);
 
-        // Reset and recomplete. `reset_loop`'s default (`specs: None`) leaves
+        // Reset and recomplete. `reset_graph`'s default (`specs: None`) leaves
         // an already-`Completed` spec untouched (see its doc) — pass the
         // spec id explicitly so it actually re-runs (B17: a dispatch that
         // executes zero specs must not fire the hook a second time for
         // doing nothing).
-        db.reset_loop(&loop_id, Some(std::slice::from_ref(&spec_id)))
+        db.reset_graph(&graph_id, Some(std::slice::from_ref(&spec_id)))
             .unwrap();
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
         drop(_home);
         drop(fake_home);
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
-        assert_eq!(lp.status, LoopStatus::Completed);
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        assert_eq!(lp.status, GraphStatus::Completed);
 
-        let hook_runs = db.list_loop_completion_hook_runs(&loop_id).unwrap();
+        let hook_runs = db.list_graph_completion_hook_runs(&graph_id).unwrap();
         assert_eq!(hook_runs.len(), 2, "hook must fire once per completion");
     }
 
     // ── B17: empty effective spec set is a launch error, not a completion ──
 
-    /// A loop with *neither* bound specs *nor* an explicit idea has genuinely
+    /// A graph with *neither* bound specs *nor* an explicit idea has genuinely
     /// nothing to run and must refuse to launch (CB22: a top-level graph
     /// alone is not a spec). Status must stay untouched and no run recorded.
     #[tokio::test]
-    async fn loop_engine_zero_bound_specs_and_no_queue_is_a_launch_error() {
-        let (_dir, db, engine, loop_id) = bare_loop_fixture().unwrap();
+    async fn graph_engine_zero_bound_specs_and_no_queue_is_a_launch_error() {
+        let (_dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
 
         let error = engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap_err();
         assert!(
@@ -15229,31 +15274,31 @@ echo done
             "unexpected error message: {error}"
         );
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
         assert_eq!(
             lp.status,
-            LoopStatus::Draft,
-            "an empty launch must leave the loop's status untouched"
+            GraphStatus::Draft,
+            "an empty launch must leave the graph's status untouched"
         );
         assert!(
-            db.list_loop_runs_for_loop(&loop_id).unwrap().is_empty(),
+            db.list_graph_runs_for_graph(&graph_id).unwrap().is_empty(),
             "an empty launch must record no run"
         );
     }
 
     /// (CB22) A top-level graph alone is not a spec: `empty_launch_check`
-    /// must refuse a spec-less, idea-less launch even when the loop has
+    /// must refuse a spec-less, idea-less launch even when the graph has
     /// top-level graph nodes. Only an explicit non-empty `idea` may supply
-    /// `spec_content` for a loop with zero bound specs.
+    /// `spec_content` for a graph with zero bound specs.
     #[tokio::test]
     async fn empty_launch_check_refuses_spec_less_run_even_when_a_top_level_graph_exists() {
-        let (_dir, db, engine, loop_id) = bare_loop_fixture().unwrap();
-        db.insert_loop_node(&LoopNode {
+        let (_dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
+        db.insert_graph_node(&GraphNode {
             id: "node-only".to_string(),
             spec_id: None,
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             name: "only".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "printf APPROVED",
                 "success_condition": "exit_code_0"
@@ -15264,7 +15309,7 @@ echo done
         .unwrap();
 
         let message = engine
-            .empty_launch_check(&loop_id, None, None)
+            .empty_launch_check(&graph_id, None, None)
             .unwrap()
             .expect("a spec-less, idea-less launch must be refused even with a graph");
         assert!(
@@ -15273,14 +15318,14 @@ echo done
         );
     }
 
-    /// (CB22) A loop with a top-level graph but zero bound specs and no
+    /// (CB22) A graph with a top-level graph but zero bound specs and no
     /// explicit `idea` is refused: the engine must not manufacture a blank
     /// bound spec and spend agents on an empty `{{spec_content}}`. No agent
-    /// node ever executes, no `loop_runs` row is recorded, and no placeholder
+    /// node ever executes, no `graph_runs` row is recorded, and no placeholder
     /// row is left behind.
     #[tokio::test]
     async fn spec_less_run_with_graph_and_no_idea_is_refused() {
-        let (dir, db, engine, loop_id) = bare_loop_fixture().unwrap();
+        let (dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
         let argv_file = dir.path().join("argv.log");
         let script = write_argv_echo_cli(dir.path());
         let mut env = HashMap::new();
@@ -15292,23 +15337,23 @@ echo done
         let cli = argv_cli_config(&script, env, None, None, None);
         let home = write_resume_cli_home(cli);
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-impl".to_string(),
             spec_id: None,
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             name: "impl".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({ "platform": "resume-cli" }),
             position: 1,
             created_at: chrono::Utc::now(),
         })
         .unwrap();
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-check".to_string(),
             spec_id: None,
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             name: "check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "printf APPROVED",
                 "success_condition": "exit_code_0"
@@ -15317,24 +15362,24 @@ echo done
             created_at: chrono::Utc::now(),
         })
         .unwrap();
-        db.insert_loop_edge(&LoopEdge {
+        db.insert_graph_edge(&GraphEdge {
             id: "edge-impl-check".to_string(),
             spec_id: None,
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             from_node: "node-impl".to_string(),
             to_node: "node-check".to_string(),
-            condition: crate::domain::loops::LoopEdgeCondition::Pass,
+            condition: crate::domain::graphs::GraphEdgeCondition::Pass,
         })
         .unwrap();
 
         assert!(
-            db.list_loop_specs(&loop_id).unwrap().is_empty(),
-            "sanity: this loop has no bound specs"
+            db.list_graph_specs(&graph_id).unwrap().is_empty(),
+            "sanity: this graph has no bound specs"
         );
 
         let guard = HomeGuard::set(home.path());
         let error = engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap_err();
         drop(guard);
@@ -15343,18 +15388,18 @@ echo done
             "a graph-only launch with no idea must be refused: {error}"
         );
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
         assert_eq!(
             lp.status,
-            LoopStatus::Draft,
-            "a refused launch must leave the loop's status untouched"
+            GraphStatus::Draft,
+            "a refused launch must leave the graph's status untouched"
         );
         assert!(
-            db.list_loop_runs_for_loop(&loop_id).unwrap().is_empty(),
+            db.list_graph_runs_for_graph(&graph_id).unwrap().is_empty(),
             "a refused launch must record no run"
         );
         assert!(
-            db.list_loop_specs(&loop_id).unwrap().is_empty(),
+            db.list_graph_specs(&graph_id).unwrap().is_empty(),
             "a refused launch must not manufacture a blank bound spec"
         );
         assert!(
@@ -15365,13 +15410,13 @@ echo done
         );
     }
 
-    /// (CB22) A loop with a bound spec whose name and description are both
-    /// empty is not executable: `run_loop` rejects it before claiming the
-    /// loop, so no agent node ever executes. This is the measured 2026-09-01
-    /// incident shape (empty name, `None` description, bound to the loop).
+    /// (CB22) A graph with a bound spec whose name and description are both
+    /// empty is not executable: `run_graph` rejects it before claiming the
+    /// graph, so no agent node ever executes. This is the measured 2026-09-01
+    /// incident shape (empty name, `None` description, bound to the graph).
     #[tokio::test]
     async fn blank_bound_spec_is_rejected_before_any_agent_executes() {
-        let (dir, db, engine, loop_id) = bare_loop_fixture().unwrap();
+        let (dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
         let argv_file = dir.path().join("argv.log");
         let script = write_argv_echo_cli(dir.path());
         let mut env = HashMap::new();
@@ -15383,14 +15428,14 @@ echo done
         let cli = argv_cli_config(&script, env, None, None, None);
         let home = write_resume_cli_home(cli);
 
-        db.insert_loop_spec(&LoopSpec {
+        db.insert_graph_spec(&GraphSpec {
             id: "blank-spec".to_string(),
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             name: String::new(),
             description: None,
             position: 1,
             parallelizable: false,
-            status: LoopSpecStatus::Pending,
+            status: GraphSpecStatus::Pending,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
@@ -15401,12 +15446,12 @@ echo done
             completed_via_at: None,
         })
         .unwrap();
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-impl".to_string(),
             spec_id: None,
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             name: "impl".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({ "platform": "resume-cli" }),
             position: 1,
             created_at: chrono::Utc::now(),
@@ -15415,7 +15460,7 @@ echo done
 
         let guard = HomeGuard::set(home.path());
         let error = engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap_err();
         drop(guard);
@@ -15430,14 +15475,14 @@ echo done
             "the refusal must say what is missing: {message}"
         );
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
         assert_eq!(
             lp.status,
-            LoopStatus::Draft,
-            "a refused launch must leave the loop's status untouched"
+            GraphStatus::Draft,
+            "a refused launch must leave the graph's status untouched"
         );
         assert!(
-            db.list_loop_runs_for_loop(&loop_id).unwrap().is_empty(),
+            db.list_graph_runs_for_graph(&graph_id).unwrap().is_empty(),
             "a refused launch must record no run"
         );
         assert!(
@@ -15452,15 +15497,15 @@ echo done
     /// applies before the content check.
     #[tokio::test]
     async fn whitespace_only_bound_spec_is_rejected() {
-        let (_dir, db, engine, loop_id) = bare_loop_fixture().unwrap();
-        db.insert_loop_spec(&LoopSpec {
+        let (_dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
+        db.insert_graph_spec(&GraphSpec {
             id: "ws-spec".to_string(),
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             name: "   ".to_string(),
             description: Some("  \n\t ".to_string()),
             position: 1,
             parallelizable: false,
-            status: LoopSpecStatus::Pending,
+            status: GraphSpecStatus::Pending,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
@@ -15473,7 +15518,7 @@ echo done
         .unwrap();
 
         let error = engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap_err();
         assert!(
@@ -15487,15 +15532,15 @@ echo done
     /// requires a name.
     #[tokio::test]
     async fn description_only_bound_spec_is_executable() {
-        let (_dir, db, engine, loop_id) = bare_loop_fixture().unwrap();
-        db.insert_loop_spec(&LoopSpec {
+        let (_dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
+        db.insert_graph_spec(&GraphSpec {
             id: "description-only".to_string(),
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             name: String::new(),
             description: Some("Run the verification checks.".to_string()),
             position: 1,
             parallelizable: false,
-            status: LoopSpecStatus::Pending,
+            status: GraphSpecStatus::Pending,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
@@ -15506,12 +15551,12 @@ echo done
             completed_via_reason: None,
         })
         .unwrap();
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "description-only-check".to_string(),
             spec_id: None,
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             name: "check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "printf APPROVED",
                 "success_condition": "exit_code_0"
@@ -15522,28 +15567,28 @@ echo done
         .unwrap();
 
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
 
-        let spec = db.get_loop_spec("description-only").unwrap().unwrap();
-        assert_eq!(spec.status, LoopSpecStatus::Completed);
+        let spec = db.get_graph_spec("description-only").unwrap().unwrap();
+        assert_eq!(spec.status, GraphSpecStatus::Completed);
     }
 
-    /// (CB22) Queue isolation: a valid queue run succeeds even when the loop
+    /// (CB22) Queue isolation: a valid queue run succeeds even when the graph
     /// has an unrelated blank bound spec — queue launches validate only the
     /// queue's own members.
     #[tokio::test]
     async fn queue_run_ignores_unrelated_blank_bound_spec() {
-        let (_dir, db, engine, loop_id) = bare_loop_fixture().unwrap();
-        db.insert_loop_spec(&LoopSpec {
+        let (_dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
+        db.insert_graph_spec(&GraphSpec {
             id: "blank-bound".to_string(),
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             name: String::new(),
             description: None,
             position: 1,
             parallelizable: false,
-            status: LoopSpecStatus::Pending,
+            status: GraphSpecStatus::Pending,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
@@ -15556,15 +15601,15 @@ echo done
         .unwrap();
 
         let member = standalone_spec("queue-member", 1);
-        db.insert_loop_spec(&member).unwrap();
+        db.insert_graph_spec(&member).unwrap();
         insert_queue_with_members(&db, "queue-1", &[&member.id]);
 
-        db.insert_loop_node(&LoopNode {
-            id: "loop-check".to_string(),
+        db.insert_graph_node(&GraphNode {
+            id: "graph-check".to_string(),
             spec_id: None,
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             name: "check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "printf APPROVED",
                 "success_condition": "exit_code_0"
@@ -15575,8 +15620,8 @@ echo done
         .unwrap();
 
         engine
-            .run_loop(
-                loop_id.clone(),
+            .run_graph(
+                graph_id.clone(),
                 Some("queue-1".to_string()),
                 None,
                 None,
@@ -15585,23 +15630,23 @@ echo done
             .await
             .unwrap();
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
-        assert_eq!(lp.status, LoopStatus::Completed);
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        assert_eq!(lp.status, GraphStatus::Completed);
     }
 
     /// (CB22) A blank queue member is rejected at launch: the queue path
     /// validates the members it actually selects.
     #[tokio::test]
     async fn blank_queue_member_is_rejected() {
-        let (_dir, db, engine, loop_id) = bare_loop_fixture().unwrap();
-        db.insert_loop_spec(&LoopSpec {
+        let (_dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
+        db.insert_graph_spec(&GraphSpec {
             id: "blank-member".to_string(),
-            loop_id: None,
+            graph_id: None,
             name: String::new(),
             description: None,
             position: 1,
             parallelizable: false,
-            status: LoopSpecStatus::Pending,
+            status: GraphSpecStatus::Pending,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
@@ -15615,8 +15660,8 @@ echo done
         insert_queue_with_members(&db, "queue-1", &["blank-member"]);
 
         let error = engine
-            .run_loop(
-                loop_id.clone(),
+            .run_graph(
+                graph_id.clone(),
                 Some("queue-1".to_string()),
                 None,
                 None,
@@ -15629,22 +15674,22 @@ echo done
             "the refusal must name the offending queue member: {error}"
         );
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
         assert_eq!(
             lp.status,
-            LoopStatus::Draft,
-            "a refused queue launch must leave the loop's status untouched"
+            GraphStatus::Draft,
+            "a refused queue launch must leave the graph's status untouched"
         );
     }
 
-    /// (CB22) Explicit non-empty `idea` still drives a zero-bound-spec loop:
+    /// (CB22) Explicit non-empty `idea` still drives a zero-bound-spec graph:
     /// the engine binds an internal bookkeeping row carrying the idea as
     /// `description`, runs the top-level graph once, and a second idea
     /// launch purges the prior terminal bookkeeping row so the new idea
     /// actually executes (not a silent zero-exec completion).
     #[tokio::test]
     async fn explicit_idea_run_executes_graph_and_rerun_picks_up_new_idea() {
-        let (dir, db, engine, loop_id) = bare_loop_fixture().unwrap();
+        let (dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
         let argv_file = dir.path().join("argv.log");
         let script = write_argv_echo_cli(dir.path());
         let mut env = HashMap::new();
@@ -15659,23 +15704,23 @@ echo done
         let cli = argv_cli_config(&script, env, None, None, None);
         let home = write_resume_cli_home(cli);
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-impl".to_string(),
             spec_id: None,
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             name: "impl".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({ "platform": "resume-cli" }),
             position: 1,
             created_at: chrono::Utc::now(),
         })
         .unwrap();
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-check".to_string(),
             spec_id: None,
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             name: "check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "printf APPROVED",
                 "success_condition": "exit_code_0"
@@ -15684,13 +15729,13 @@ echo done
             created_at: chrono::Utc::now(),
         })
         .unwrap();
-        db.insert_loop_edge(&LoopEdge {
+        db.insert_graph_edge(&GraphEdge {
             id: "edge-impl-check".to_string(),
             spec_id: None,
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             from_node: "node-impl".to_string(),
             to_node: "node-check".to_string(),
-            condition: crate::domain::loops::LoopEdgeCondition::Pass,
+            condition: crate::domain::graphs::GraphEdgeCondition::Pass,
         })
         .unwrap();
 
@@ -15699,8 +15744,8 @@ echo done
         // complete; the filer lives across both dispatches below.
         let _filer = VerdictFiler::spawn(&db, vec![("node-impl".to_string(), None)]);
         engine
-            .run_loop(
-                loop_id.clone(),
+            .run_graph(
+                graph_id.clone(),
                 None,
                 None,
                 Some("build a landing page".to_string()),
@@ -15709,9 +15754,9 @@ echo done
             .await
             .unwrap();
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
-        assert_eq!(lp.status, LoopStatus::Completed);
-        let specs = db.list_loop_specs(&loop_id).unwrap();
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        assert_eq!(lp.status, GraphStatus::Completed);
+        let specs = db.list_graph_specs(&graph_id).unwrap();
         assert_eq!(specs.len(), 1, "idea run leaves one bookkeeping row");
         assert!(
             specs[0].name.is_empty(),
@@ -15733,13 +15778,13 @@ echo done
             "the agent node must run exactly once on the first idea dispatch"
         );
 
-        // A second idea launch: `claim_loop_for_run` only refuses while
+        // A second idea launch: `claim_graph_for_run` only refuses while
         // `Running`, so the completed status from the first run doesn't
         // block this. The prior terminal bookkeeping row must be purged
         // and replaced so the new idea actually executes.
         engine
-            .run_loop(
-                loop_id.clone(),
+            .run_graph(
+                graph_id.clone(),
                 None,
                 None,
                 Some("ship the docs site".to_string()),
@@ -15749,7 +15794,7 @@ echo done
             .unwrap();
         drop(guard);
 
-        let specs_after = db.list_loop_specs(&loop_id).unwrap();
+        let specs_after = db.list_graph_specs(&graph_id).unwrap();
         assert_eq!(specs_after.len(), 1);
         assert_ne!(
             specs_after[0].id, first_placeholder_id,
@@ -15776,15 +15821,15 @@ echo done
     /// non-terminal blank content is a launch error.
     #[tokio::test]
     async fn completed_blank_bookkeeping_does_not_block_real_bound_spec() {
-        let (_dir, db, engine, loop_id) = bare_loop_fixture().unwrap();
-        db.insert_loop_spec(&LoopSpec {
+        let (_dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
+        db.insert_graph_spec(&GraphSpec {
             id: "legacy-blank".to_string(),
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             name: String::new(),
             description: None,
             position: 0,
             parallelizable: false,
-            status: LoopSpecStatus::Completed,
+            status: GraphSpecStatus::Completed,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
@@ -15795,16 +15840,16 @@ echo done
             completed_via_at: None,
         })
         .unwrap();
-        db.insert_loop_spec(&LoopSpec {
+        db.insert_graph_spec(&GraphSpec {
             id: "real-spec".to_string(),
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             name: "Real Work".to_string(),
             description: Some(
                 "Functional Requirements:\n- A\n\nNon-Functional Requirements:\n- B\n\nObjective:\n- C\n\nConstraints:\n- D\n\nGuidelines:\n- E\n\nIn Scope:\n- F\n\nOut of Scope:\n- G".to_string(),
             ),
             position: 1,
             parallelizable: false,
-            status: LoopSpecStatus::Pending,
+            status: GraphSpecStatus::Pending,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
@@ -15815,12 +15860,12 @@ echo done
             completed_via_at: None,
         })
         .unwrap();
-        db.insert_loop_node(&LoopNode {
-            id: "loop-check".to_string(),
+        db.insert_graph_node(&GraphNode {
+            id: "graph-check".to_string(),
             spec_id: None,
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             name: "check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "printf APPROVED",
                 "success_condition": "exit_code_0"
@@ -15831,35 +15876,35 @@ echo done
         .unwrap();
 
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
-        assert_eq!(lp.status, LoopStatus::Completed);
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        assert_eq!(lp.status, GraphStatus::Completed);
         // Legacy blank bookkeeping is purged once terminal at the start of
         // the next bound-spec dispatch.
-        let specs = db.list_loop_specs(&loop_id).unwrap();
+        let specs = db.list_graph_specs(&graph_id).unwrap();
         assert!(
             specs.iter().all(|s| s.id != "legacy-blank"),
             "terminal blank bookkeeping must be purged: {specs:?}"
         );
     }
 
-    /// (CB22) A loop whose only bound row is terminal blank-name bookkeeping
+    /// (CB22) A graph whose only bound row is terminal blank-name bookkeeping
     /// (no real named specs, no idea) must refuse *before* claim — leaving
     /// status `Draft` — rather than claim, purge, and fail after the fact.
     #[tokio::test]
     async fn only_terminal_blank_bookkeeping_is_refused_before_claim() {
-        let (_dir, db, engine, loop_id) = bare_loop_fixture().unwrap();
-        db.insert_loop_spec(&LoopSpec {
+        let (_dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
+        db.insert_graph_spec(&GraphSpec {
             id: "stale-bookkeeping".to_string(),
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             name: String::new(),
             description: Some("prior idea text".to_string()),
             position: 0,
             parallelizable: false,
-            status: LoopSpecStatus::Completed,
+            status: GraphSpecStatus::Completed,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
@@ -15870,12 +15915,12 @@ echo done
             completed_via_at: None,
         })
         .unwrap();
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "graph-only".to_string(),
             spec_id: None,
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             name: "check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "printf APPROVED",
                 "success_condition": "exit_code_0"
@@ -15886,21 +15931,21 @@ echo done
         .unwrap();
 
         let error = engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap_err();
         assert!(
             error.to_string().contains("no specs to run"),
             "only bookkeeping left must look empty: {error}"
         );
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
         assert_eq!(
             lp.status,
-            LoopStatus::Draft,
+            GraphStatus::Draft,
             "refusal must happen before claim so status stays Draft"
         );
         assert!(
-            db.list_loop_runs_for_loop(&loop_id).unwrap().is_empty(),
+            db.list_graph_runs_for_graph(&graph_id).unwrap().is_empty(),
             "a pre-claim refusal must record no run"
         );
     }
@@ -15909,13 +15954,13 @@ echo done
     /// launch even when a top-level graph exists.
     #[tokio::test]
     async fn whitespace_only_idea_is_rejected_even_with_graph() {
-        let (_dir, db, engine, loop_id) = bare_loop_fixture().unwrap();
-        db.insert_loop_node(&LoopNode {
+        let (_dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
+        db.insert_graph_node(&GraphNode {
             id: "graph-only".to_string(),
             spec_id: None,
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             name: "check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "printf APPROVED",
                 "success_condition": "exit_code_0"
@@ -15926,8 +15971,8 @@ echo done
         .unwrap();
 
         let error = engine
-            .run_loop(
-                loop_id.clone(),
+            .run_graph(
+                graph_id.clone(),
                 None,
                 None,
                 Some("   \n\t  ".to_string()),
@@ -15940,34 +15985,34 @@ echo done
             "whitespace idea must not count as content: {error}"
         );
         assert_eq!(
-            db.get_loop(&loop_id).unwrap().unwrap().status,
-            LoopStatus::Draft
+            db.get_graph(&graph_id).unwrap().unwrap().status,
+            GraphStatus::Draft
         );
     }
 
-    /// (Requirement 3) When the loop's last run was queue-driven and a fresh
-    /// `loop_run` arrives without `queue_id` and finds zero bound specs, the
+    /// (Requirement 3) When the graph's last run was queue-driven and a fresh
+    /// `graph_run` arrives without `queue_id` and finds zero bound specs, the
     /// error must name the last queue so a recovery agent can retry
     /// correctly instead of silently discarding the queue context.
     #[tokio::test]
-    async fn loop_engine_queue_less_relaunch_after_queue_run_names_last_queue() {
-        let (_dir, db, engine, loop_id) = bare_loop_fixture().unwrap();
+    async fn graph_engine_queue_less_relaunch_after_queue_run_names_last_queue() {
+        let (_dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
 
         // Simulate the incident: a queue-driven run left interrupted (daemon
         // crash, quota failure) — `active_run_queue_id` stays persisted
         // (it's only ever cleared on a *genuine* completion) with pending
         // queue members still queued behind it.
         let pending = standalone_spec("queue-pending", 1);
-        db.insert_loop_spec(&pending).unwrap();
+        db.insert_graph_spec(&pending).unwrap();
         insert_queue_with_members(&db, "queue-1", &[&pending.id]);
-        db.set_loop_active_run_queue(&loop_id, Some("queue-1"))
+        db.set_graph_active_run_queue(&graph_id, Some("queue-1"))
             .unwrap();
 
-        // The recovery agent's mistake: relaunch directly (the loop's own
+        // The recovery agent's mistake: relaunch directly (the graph's own
         // bound specs are still empty — every spec lives in the queue)
         // without passing `queue_id` back.
         let error = engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap_err();
         assert!(
@@ -15975,11 +16020,11 @@ echo done
             "error must name the last queue so a recovery agent can retry correctly: {error}"
         );
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
         assert_eq!(
             lp.status,
-            LoopStatus::Draft,
-            "the failed queue-less relaunch must not touch the loop's status"
+            GraphStatus::Draft,
+            "the failed queue-less relaunch must not touch the graph's status"
         );
         assert_eq!(
             lp.active_run_queue_id.as_deref(),
@@ -15993,17 +16038,17 @@ echo done
     /// run — a queue is shared/reusable, so "nothing pending" is far more
     /// likely a stale/incorrect queue_id than a genuine finish.
     #[tokio::test]
-    async fn loop_engine_queue_run_with_all_members_completed_is_a_launch_error() {
-        let (_dir, db, engine, loop_id) = bare_loop_fixture().unwrap();
+    async fn graph_engine_queue_run_with_all_members_completed_is_a_launch_error() {
+        let (_dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
 
         let mut done = standalone_spec("queue-done", 1);
-        done.status = LoopSpecStatus::Completed;
-        db.insert_loop_spec(&done).unwrap();
+        done.status = GraphSpecStatus::Completed;
+        db.insert_graph_spec(&done).unwrap();
         insert_queue_with_members(&db, "queue-1", &[&done.id]);
 
         let error = engine
-            .run_loop(
-                loop_id.clone(),
+            .run_graph(
+                graph_id.clone(),
                 Some("queue-1".to_string()),
                 None,
                 None,
@@ -16016,11 +16061,11 @@ echo done
             "unexpected error message: {error}"
         );
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
         assert_eq!(
             lp.status,
-            LoopStatus::Draft,
-            "an empty queue launch must leave the loop's status untouched"
+            GraphStatus::Draft,
+            "an empty queue launch must leave the graph's status untouched"
         );
     }
 
@@ -16028,21 +16073,21 @@ echo done
     /// completes and fires the `on_completed` hook exactly once; the B17
     /// guard must not interfere with a genuine completion.
     #[tokio::test]
-    async fn loop_engine_normal_queue_run_still_completes_and_fires_hook_once() {
+    async fn graph_engine_normal_queue_run_still_completes_and_fires_hook_once() {
         let fake_home = setup_test_cli_home();
-        let (dir, db, engine, loop_id) = bare_loop_fixture().unwrap();
+        let (dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
         let marker = dir.path().join("hook_fired.marker");
 
         let spec = standalone_spec("queue-spec", 1);
-        db.insert_loop_spec(&spec).unwrap();
+        db.insert_graph_spec(&spec).unwrap();
         insert_queue_with_members(&db, "queue-1", &[&spec.id]);
 
-        db.insert_loop_node(&LoopNode {
-            id: "loop-check".to_string(),
+        db.insert_graph_node(&GraphNode {
+            id: "graph-check".to_string(),
             spec_id: None,
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             name: "check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "printf APPROVED",
                 "success_condition": "exit_code_0"
@@ -16053,7 +16098,7 @@ echo done
         .unwrap();
 
         let marker_path = marker.to_string_lossy().to_string();
-        let hook = crate::domain::loops::LoopCompletionHook {
+        let hook = crate::domain::graphs::GraphCompletionHook {
             platform: Some("test-cli".to_string()),
             model: None,
             effort: None,
@@ -16061,18 +16106,18 @@ echo done
             command: None,
             target_session_id: None,
             timeout_minutes: Some(1),
-            target_loop_id: None,
+            target_graph_id: None,
             queue_id: None,
             workdir_override: None,
             idea: None,
         };
-        db.update_loop_completion_hook(&loop_id, Some(&hook))
+        db.update_graph_completion_hook(&graph_id, Some(&hook))
             .unwrap();
 
         let _home = HomeGuard::set(fake_home.path());
         let result = engine
-            .run_loop(
-                loop_id.clone(),
+            .run_graph(
+                graph_id.clone(),
                 Some("queue-1".to_string()),
                 None,
                 None,
@@ -16083,35 +16128,35 @@ echo done
         drop(fake_home);
         result.unwrap();
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
-        assert_eq!(lp.status, LoopStatus::Completed);
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        assert_eq!(lp.status, GraphStatus::Completed);
         assert!(marker.exists(), "on_completed hook must have run");
 
-        let hook_runs = db.list_loop_completion_hook_runs(&loop_id).unwrap();
+        let hook_runs = db.list_graph_completion_hook_runs(&graph_id).unwrap();
         assert_eq!(hook_runs.len(), 1, "hook must fire exactly once");
     }
 
-    /// A loop whose bound specs are non-empty but were *all* already
-    /// completed/skipped before this dispatch (e.g. the loop's last spec was
-    /// explicitly skipped via `loop_continue`) legitimately completes — the
+    /// A graph whose bound specs are non-empty but were *all* already
+    /// completed/skipped before this dispatch (e.g. the graph's last spec was
+    /// explicitly skipped via `graph_continue`) legitimately completes — the
     /// B17 guard only fires on *zero bound specs*, not "zero pending" — but
     /// must not fire the hook, since this dispatch executed nothing.
     #[tokio::test]
-    async fn loop_engine_all_bound_specs_already_done_completes_without_firing_hook() {
+    async fn graph_engine_all_bound_specs_already_done_completes_without_firing_hook() {
         let fake_home = setup_test_cli_home();
-        let (dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
         let marker = dir.path().join("hook_should_not_exist.marker");
 
-        db.update_loop_spec_status(
+        db.update_graph_spec_status(
             &spec_id,
-            LoopSpecStatus::Skipped,
+            GraphSpecStatus::Skipped,
             None,
             Some(chrono::Utc::now()),
         )
         .unwrap();
 
         let marker_path = marker.to_string_lossy().to_string();
-        let hook = crate::domain::loops::LoopCompletionHook {
+        let hook = crate::domain::graphs::GraphCompletionHook {
             platform: Some("test-cli".to_string()),
             model: None,
             effort: None,
@@ -16119,51 +16164,51 @@ echo done
             command: None,
             target_session_id: None,
             timeout_minutes: Some(1),
-            target_loop_id: None,
+            target_graph_id: None,
             queue_id: None,
             workdir_override: None,
             idea: None,
         };
-        db.update_loop_completion_hook(&loop_id, Some(&hook))
+        db.update_graph_completion_hook(&graph_id, Some(&hook))
             .unwrap();
 
         let _home = HomeGuard::set(fake_home.path());
         let result = engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await;
         drop(_home);
         drop(fake_home);
         result.unwrap();
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
         assert_eq!(
             lp.status,
-            LoopStatus::Completed,
-            "a loop whose only bound spec is already skipped is genuinely done"
+            GraphStatus::Completed,
+            "a graph whose only bound spec is already skipped is genuinely done"
         );
         assert!(
             !marker.exists(),
             "on_completed must not fire for a dispatch that executed zero specs"
         );
         assert!(db
-            .list_loop_completion_hook_runs(&loop_id)
+            .list_graph_completion_hook_runs(&graph_id)
             .unwrap()
             .is_empty());
     }
 
-    /// Placeholder interpolation: `{{loop_name}}`, `{{workdir}}`,
+    /// Placeholder interpolation: `{{graph_name}}`, `{{workdir}}`,
     /// `{{completed_specs}}` must all be substituted.
     #[tokio::test]
     async fn render_completion_hook_prompt_substitutes_all_placeholders() {
-        let lp = crate::domain::loops::Loop {
+        let lp = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
             infra_node_id: None,
             id: "wf".to_string(),
-            name: "MyLoop".to_string(),
+            name: "MyGraph".to_string(),
             description: None,
             workdir: "/tmp/proj".to_string(),
-            status: LoopStatus::Draft,
+            status: GraphStatus::Draft,
             trigger: None,
             created_at: chrono::Utc::now(),
             started_at: None,
@@ -16183,28 +16228,28 @@ echo done
             &lp,
             &lp.workdir,
             &completed_specs,
-            "Loop={{loop_name}} Workdir={{workdir}} Specs={{completed_specs}}",
+            "Graph={{graph_name}} Workdir={{workdir}} Specs={{completed_specs}}",
         )
         .unwrap();
 
         assert_eq!(
             result,
-            "Loop=MyLoop Workdir=/tmp/proj Specs=- Spec-A: summary A\n- Spec-B: summary B"
+            "Graph=MyGraph Workdir=/tmp/proj Specs=- Spec-A: summary A\n- Spec-B: summary B"
         );
     }
 
     /// Empty completed_specs list renders `(none)`.
     #[tokio::test]
     async fn render_completion_hook_prompt_empty_specs_shows_none() {
-        let lp = crate::domain::loops::Loop {
+        let lp = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
             infra_node_id: None,
             id: "wf".to_string(),
-            name: "Loop".to_string(),
+            name: "Graph".to_string(),
             description: None,
             workdir: "/tmp".to_string(),
-            status: LoopStatus::Draft,
+            status: GraphStatus::Draft,
             trigger: None,
             created_at: chrono::Utc::now(),
             started_at: None,
@@ -16225,9 +16270,9 @@ echo done
     // --- CH1: renderer validation tests for event-specific hooks ---
 
     #[test]
-    fn render_hook_prompt_on_completed_binds_loop_name_workdir_completed_specs() {
+    fn render_hook_prompt_on_completed_binds_graph_name_workdir_completed_specs() {
         let ctx = HookContext {
-            loop_name: "TestLoop",
+            graph_name: "TestGraph",
             workdir: "/tmp/test",
             completed_specs: &[("SpecA".into(), "done".into())],
             spec_name: None,
@@ -16236,18 +16281,18 @@ echo done
             node_name: None,
         };
         let result = render_hook_prompt(
-            &LoopHookEvent::OnCompleted,
+            &GraphHookEvent::OnCompleted,
             &ctx,
-            "{{loop_name}} {{workdir}} {{completed_specs}}",
+            "{{graph_name}} {{workdir}} {{completed_specs}}",
         )
         .unwrap();
-        assert_eq!(result, "TestLoop /tmp/test - SpecA: done");
+        assert_eq!(result, "TestGraph /tmp/test - SpecA: done");
     }
 
     #[test]
     fn render_hook_prompt_on_failed_binds_blocker_and_node() {
         let ctx = HookContext {
-            loop_name: "TestLoop",
+            graph_name: "TestGraph",
             workdir: "/tmp/test",
             completed_specs: &[],
             spec_name: None,
@@ -16256,14 +16301,14 @@ echo done
             node_name: Some("agent-1"),
         };
         let result =
-            render_hook_prompt(&LoopHookEvent::OnFailed, &ctx, "{{blocker}} on {{node}}").unwrap();
+            render_hook_prompt(&GraphHookEvent::OnFailed, &ctx, "{{blocker}} on {{node}}").unwrap();
         assert_eq!(result, "quota exceeded on agent-1");
     }
 
     #[test]
     fn render_hook_prompt_on_blocked_binds_blocker() {
         let ctx = HookContext {
-            loop_name: "TestLoop",
+            graph_name: "TestGraph",
             workdir: "/tmp/test",
             completed_specs: &[],
             spec_name: None,
@@ -16272,14 +16317,14 @@ echo done
             node_name: None,
         };
         let result =
-            render_hook_prompt(&LoopHookEvent::OnBlocked, &ctx, "Blocked: {{blocker}}").unwrap();
+            render_hook_prompt(&GraphHookEvent::OnBlocked, &ctx, "Blocked: {{blocker}}").unwrap();
         assert_eq!(result, "Blocked: needs human review");
     }
 
     #[test]
     fn render_hook_prompt_on_spec_completed_binds_spec_name_and_id() {
         let ctx = HookContext {
-            loop_name: "TestLoop",
+            graph_name: "TestGraph",
             workdir: "/tmp/test",
             completed_specs: &[],
             spec_name: Some("Auth Spec"),
@@ -16288,7 +16333,7 @@ echo done
             node_name: None,
         };
         let result = render_hook_prompt(
-            &LoopHookEvent::OnSpecCompleted,
+            &GraphHookEvent::OnSpecCompleted,
             &ctx,
             "Spec {{spec_name}} ({{spec_id}}) done",
         )
@@ -16299,7 +16344,7 @@ echo done
     #[test]
     fn render_hook_prompt_rejects_unbindable_marker() {
         let ctx = HookContext {
-            loop_name: "TestLoop",
+            graph_name: "TestGraph",
             workdir: "/tmp/test",
             completed_specs: &[],
             spec_name: None,
@@ -16309,9 +16354,9 @@ echo done
         };
         // {{unknown}} is not supported by on_completed
         let result = render_hook_prompt(
-            &LoopHookEvent::OnCompleted,
+            &GraphHookEvent::OnCompleted,
             &ctx,
-            "{{loop_name}} {{unknown}}",
+            "{{graph_name}} {{unknown}}",
         );
         assert!(result.is_err());
     }
@@ -16319,7 +16364,7 @@ echo done
     #[test]
     fn render_hook_prompt_cross_event_marker_rejected() {
         let ctx = HookContext {
-            loop_name: "TestLoop",
+            graph_name: "TestGraph",
             workdir: "/tmp/test",
             completed_specs: &[],
             spec_name: None,
@@ -16329,26 +16374,26 @@ echo done
         };
         // {{completed_specs}} is not supported by on_failed
         let result = render_hook_prompt(
-            &LoopHookEvent::OnFailed,
+            &GraphHookEvent::OnFailed,
             &ctx,
-            "{{loop_name}} {{completed_specs}}",
+            "{{graph_name}} {{completed_specs}}",
         );
         assert!(result.is_err());
     }
 
-    /// A hook failure does not change the loop's already-final status — the
-    /// loop is `Completed` even though the hook exited non-zero.
+    /// A hook failure does not change the graph's already-final status — the
+    /// graph is `Completed` even though the hook exited non-zero.
     #[tokio::test]
-    async fn loop_engine_hook_failure_does_not_alter_loop_status() {
+    async fn graph_engine_hook_failure_does_not_alter_graph_status() {
         let fake_home = setup_test_cli_home();
-        let (_dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (_dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-check".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "printf APPROVED",
                 "success_condition": "exit_code_0"
@@ -16359,7 +16404,7 @@ echo done
         .unwrap();
 
         // Hook that always fails (exit 1).
-        let hook = crate::domain::loops::LoopCompletionHook {
+        let hook = crate::domain::graphs::GraphCompletionHook {
             platform: Some("test-cli".to_string()),
             model: None,
             effort: None,
@@ -16367,46 +16412,46 @@ echo done
             command: None,
             target_session_id: None,
             timeout_minutes: Some(1),
-            target_loop_id: None,
+            target_graph_id: None,
             queue_id: None,
             workdir_override: None,
             idea: None,
         };
-        db.update_loop_completion_hook(&loop_id, Some(&hook))
+        db.update_graph_completion_hook(&graph_id, Some(&hook))
             .unwrap();
 
         let _home = HomeGuard::set(fake_home.path());
         let result = engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await;
         drop(_home);
         drop(fake_home);
         result.unwrap();
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
         assert_eq!(
             lp.status,
-            LoopStatus::Completed,
-            "loop must stay Completed even when its on_completed hook fails"
+            GraphStatus::Completed,
+            "graph must stay Completed even when its on_completed hook fails"
         );
 
-        let hook_runs = db.list_loop_completion_hook_runs(&loop_id).unwrap();
+        let hook_runs = db.list_graph_completion_hook_runs(&graph_id).unwrap();
         assert_eq!(hook_runs.len(), 1);
-        assert_eq!(hook_runs[0].status, LoopRunStatus::Fail);
+        assert_eq!(hook_runs[0].status, GraphRunStatus::Fail);
     }
 
     /// CH1: `on_spec_completed` fires once per bound spec completing, with
     /// `{{spec_name}}` bound to that spec.
     #[tokio::test]
-    async fn loop_engine_on_spec_completed_fires_once_with_spec_name() {
+    async fn graph_engine_on_spec_completed_fires_once_with_spec_name() {
         let fake_home = setup_test_cli_home();
-        let (dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
-        db.insert_loop_node(&LoopNode {
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+        db.insert_graph_node(&GraphNode {
             id: "node-check".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "printf APPROVED",
                 "success_condition": "exit_code_0"
@@ -16418,7 +16463,7 @@ echo done
 
         // Marker path embeds {{spec_name}} so a passing run proves binding.
         let marker = dir.path().join("spec-Spec.marker");
-        let hook = crate::domain::loops::LoopCompletionHook {
+        let hook = crate::domain::graphs::GraphCompletionHook {
             platform: Some("test-cli".to_string()),
             model: None,
             effort: None,
@@ -16426,53 +16471,53 @@ echo done
             command: None,
             target_session_id: None,
             timeout_minutes: Some(1),
-            target_loop_id: None,
+            target_graph_id: None,
             queue_id: None,
             workdir_override: None,
             idea: None,
         };
         let mut hooks = std::collections::BTreeMap::new();
         hooks.insert(
-            crate::domain::loops::LoopHookEvent::OnSpecCompleted,
+            crate::domain::graphs::GraphHookEvent::OnSpecCompleted,
             vec![hook],
         );
-        db.update_loop_hooks(&loop_id, &hooks).unwrap();
+        db.update_graph_hooks(&graph_id, &hooks).unwrap();
 
         let _home = HomeGuard::set(fake_home.path());
         let result = engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await;
         drop(_home);
         drop(fake_home);
         result.unwrap();
 
         assert!(marker.exists(), "on_spec_completed hook must have run");
-        let hook_runs = db.list_loop_completion_hook_runs(&loop_id).unwrap();
+        let hook_runs = db.list_graph_completion_hook_runs(&graph_id).unwrap();
         assert_eq!(hook_runs.len(), 1);
         assert_eq!(
             hook_runs[0].event,
-            crate::domain::loops::LoopHookEvent::OnSpecCompleted
+            crate::domain::graphs::GraphHookEvent::OnSpecCompleted
         );
         assert_eq!(hook_runs[0].hook_index, 0);
-        assert_eq!(hook_runs[0].status, LoopRunStatus::Pass);
+        assert_eq!(hook_runs[0].status, GraphRunStatus::Pass);
     }
 
     /// CH1: `on_spec_completed` fires once per queue member completing, with
     /// `{{spec_name}}` bound to that spec.
     #[tokio::test]
-    async fn loop_engine_on_spec_completed_fires_for_queue_member() {
+    async fn graph_engine_on_spec_completed_fires_for_queue_member() {
         let fake_home = setup_test_cli_home();
-        let (dir, db, engine, loop_id) = bare_loop_fixture().unwrap();
+        let (dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
         let spec = standalone_spec("queue-spec", 1);
-        db.insert_loop_spec(&spec).unwrap();
+        db.insert_graph_spec(&spec).unwrap();
         insert_queue_with_members(&db, "queue-1", &[&spec.id]);
 
-        db.insert_loop_node(&LoopNode {
-            id: "loop-check".to_string(),
+        db.insert_graph_node(&GraphNode {
+            id: "graph-check".to_string(),
             spec_id: None,
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             name: "check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "printf APPROVED",
                 "success_condition": "exit_code_0"
@@ -16483,7 +16528,7 @@ echo done
         .unwrap();
 
         let marker = dir.path().join("queue-spec.marker");
-        let hook = crate::domain::loops::LoopCompletionHook {
+        let hook = crate::domain::graphs::GraphCompletionHook {
             platform: Some("test-cli".to_string()),
             model: None,
             effort: None,
@@ -16491,22 +16536,22 @@ echo done
             command: None,
             target_session_id: None,
             timeout_minutes: Some(1),
-            target_loop_id: None,
+            target_graph_id: None,
             queue_id: None,
             workdir_override: None,
             idea: None,
         };
         let mut hooks = std::collections::BTreeMap::new();
         hooks.insert(
-            crate::domain::loops::LoopHookEvent::OnSpecCompleted,
+            crate::domain::graphs::GraphHookEvent::OnSpecCompleted,
             vec![hook],
         );
-        db.update_loop_hooks(&loop_id, &hooks).unwrap();
+        db.update_graph_hooks(&graph_id, &hooks).unwrap();
 
         let _home = HomeGuard::set(fake_home.path());
         let result = engine
-            .run_loop(
-                loop_id.clone(),
+            .run_graph(
+                graph_id.clone(),
                 Some("queue-1".to_string()),
                 None,
                 None,
@@ -16521,28 +16566,28 @@ echo done
             marker.exists(),
             "on_spec_completed hook must have run for queue member"
         );
-        let hook_runs = db.list_loop_completion_hook_runs(&loop_id).unwrap();
+        let hook_runs = db.list_graph_completion_hook_runs(&graph_id).unwrap();
         assert_eq!(hook_runs.len(), 1);
         assert_eq!(
             hook_runs[0].event,
-            crate::domain::loops::LoopHookEvent::OnSpecCompleted
+            crate::domain::graphs::GraphHookEvent::OnSpecCompleted
         );
         assert_eq!(hook_runs[0].hook_index, 0);
-        assert_eq!(hook_runs[0].status, LoopRunStatus::Pass);
+        assert_eq!(hook_runs[0].status, GraphRunStatus::Pass);
     }
 
-    /// CH1: a loop reaching `failed` fires `on_failed` with `{{blocker}}`
-    /// and `{{node}}` bound; the loop stays `Failed`.
+    /// CH1: a graph reaching `failed` fires `on_failed` with `{{blocker}}`
+    /// and `{{node}}` bound; the graph stays `Failed`.
     #[tokio::test]
-    async fn loop_engine_on_failed_fires_with_blocker_and_node() {
+    async fn graph_engine_on_failed_fires_with_blocker_and_node() {
         let fake_home = setup_test_cli_home();
-        let (_dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
-        db.insert_loop_node(&LoopNode {
+        let (_dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+        db.insert_graph_node(&GraphNode {
             id: "node-check".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "exit 1",
                 "success_condition": "exit_code_0"
@@ -16554,7 +16599,7 @@ echo done
 
         // If {{blocker}}/{{node}} were unbound the render would fail and the
         // hook run would be Fail; Pass proves both bound.
-        let hook = crate::domain::loops::LoopCompletionHook {
+        let hook = crate::domain::graphs::GraphCompletionHook {
             platform: Some("test-cli".to_string()),
             model: None,
             effort: None,
@@ -16562,59 +16607,59 @@ echo done
             command: None,
             target_session_id: None,
             timeout_minutes: Some(1),
-            target_loop_id: None,
+            target_graph_id: None,
             queue_id: None,
             workdir_override: None,
             idea: None,
         };
         let mut hooks = std::collections::BTreeMap::new();
-        hooks.insert(crate::domain::loops::LoopHookEvent::OnFailed, vec![hook]);
-        db.update_loop_hooks(&loop_id, &hooks).unwrap();
+        hooks.insert(crate::domain::graphs::GraphHookEvent::OnFailed, vec![hook]);
+        db.update_graph_hooks(&graph_id, &hooks).unwrap();
 
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
         drop(_home);
         drop(fake_home);
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
-        assert_eq!(lp.status, LoopStatus::Failed);
-        let hook_runs = db.list_loop_completion_hook_runs(&loop_id).unwrap();
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        assert_eq!(lp.status, GraphStatus::Failed);
+        let hook_runs = db.list_graph_completion_hook_runs(&graph_id).unwrap();
         assert_eq!(hook_runs.len(), 1);
         assert_eq!(
             hook_runs[0].event,
-            crate::domain::loops::LoopHookEvent::OnFailed
+            crate::domain::graphs::GraphHookEvent::OnFailed
         );
         assert_eq!(hook_runs[0].hook_index, 0);
-        assert_eq!(hook_runs[0].status, LoopRunStatus::Pass);
+        assert_eq!(hook_runs[0].status, GraphRunStatus::Pass);
     }
 
-    /// CH1: `block_loop` fires `on_blocked` once with the ending node name.
+    /// CH1: `block_graph` fires `on_blocked` once with the ending node name.
     #[tokio::test]
-    async fn loop_engine_on_blocked_fires_once_with_node_name() {
+    async fn graph_engine_on_blocked_fires_once_with_node_name() {
         let fake_home = setup_test_cli_home();
-        let (_dir, db, engine, loop_id, _spec_id) = loop_fixture().unwrap();
-        // Seed a loop-level agent node + a running run so `ending_node_name`
+        let (_dir, db, engine, graph_id, _spec_id) = graph_fixture().unwrap();
+        // Seed a top-level agent node + a running run so `ending_node_name`
         // resolves to a human-readable name.
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-agent".to_string(),
             spec_id: None,
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             name: "reviewer".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({"platform": "test-cli", "prompt": "hi"}),
             position: 1,
             created_at: chrono::Utc::now(),
         })
         .unwrap();
-        db.insert_loop_run(&crate::domain::loops::LoopNodeRun {
+        db.insert_graph_run(&crate::domain::graphs::GraphNodeRun {
             id: "run-1".to_string(),
-            loop_id: loop_id.clone(),
+            graph_id: graph_id.clone(),
             spec_id: "spec-test".to_string(),
             node_id: "node-agent".to_string(),
-            status: LoopRunStatus::Running,
+            status: GraphRunStatus::Running,
             iteration: 1,
             input: None,
             output: None,
@@ -16627,7 +16672,7 @@ echo done
             executed_model: None,
         })
         .unwrap();
-        let hook = crate::domain::loops::LoopCompletionHook {
+        let hook = crate::domain::graphs::GraphCompletionHook {
             platform: Some("test-cli".to_string()),
             model: None,
             effort: None,
@@ -16635,47 +16680,47 @@ echo done
             command: None,
             target_session_id: None,
             timeout_minutes: Some(1),
-            target_loop_id: None,
+            target_graph_id: None,
             queue_id: None,
             workdir_override: None,
             idea: None,
         };
         let mut hooks = std::collections::BTreeMap::new();
-        hooks.insert(crate::domain::loops::LoopHookEvent::OnBlocked, vec![hook]);
-        db.update_loop_hooks(&loop_id, &hooks).unwrap();
+        hooks.insert(crate::domain::graphs::GraphHookEvent::OnBlocked, vec![hook]);
+        db.update_graph_hooks(&graph_id, &hooks).unwrap();
 
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .block_loop(&loop_id, None, "needs human ruling")
+            .block_graph(&graph_id, None, "needs human ruling")
             .await
             .unwrap();
         drop(_home);
         drop(fake_home);
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
-        assert_eq!(lp.status, LoopStatus::Paused);
-        let hook_runs = db.list_loop_completion_hook_runs(&loop_id).unwrap();
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        assert_eq!(lp.status, GraphStatus::Paused);
+        let hook_runs = db.list_graph_completion_hook_runs(&graph_id).unwrap();
         assert_eq!(hook_runs.len(), 1);
         assert_eq!(
             hook_runs[0].event,
-            crate::domain::loops::LoopHookEvent::OnBlocked
+            crate::domain::graphs::GraphHookEvent::OnBlocked
         );
         assert_eq!(hook_runs[0].hook_index, 0);
-        assert_eq!(hook_runs[0].status, LoopRunStatus::Pass);
+        assert_eq!(hook_runs[0].status, GraphRunStatus::Pass);
     }
 
     /// CH1: two hooks on one event both run in declaration order; the first
-    /// failing neither stops the second nor changes the loop's status.
+    /// failing neither stops the second nor changes the graph's status.
     #[tokio::test]
-    async fn loop_engine_two_hooks_run_in_order_despite_first_failing() {
+    async fn graph_engine_two_hooks_run_in_order_despite_first_failing() {
         let fake_home = setup_test_cli_home();
-        let (dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
-        db.insert_loop_node(&LoopNode {
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+        db.insert_graph_node(&GraphNode {
             id: "node-check".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "printf APPROVED",
                 "success_condition": "exit_code_0"
@@ -16686,7 +16731,7 @@ echo done
         .unwrap();
 
         let marker = dir.path().join("second_hook.marker");
-        let failing = crate::domain::loops::LoopCompletionHook {
+        let failing = crate::domain::graphs::GraphCompletionHook {
             platform: Some("test-cli".to_string()),
             model: None,
             effort: None,
@@ -16694,12 +16739,12 @@ echo done
             command: None,
             target_session_id: None,
             timeout_minutes: Some(1),
-            target_loop_id: None,
+            target_graph_id: None,
             queue_id: None,
             workdir_override: None,
             idea: None,
         };
-        let passing = crate::domain::loops::LoopCompletionHook {
+        let passing = crate::domain::graphs::GraphCompletionHook {
             platform: Some("test-cli".to_string()),
             model: None,
             effort: None,
@@ -16707,51 +16752,51 @@ echo done
             command: None,
             target_session_id: None,
             timeout_minutes: Some(1),
-            target_loop_id: None,
+            target_graph_id: None,
             queue_id: None,
             workdir_override: None,
             idea: None,
         };
         let mut hooks = std::collections::BTreeMap::new();
         hooks.insert(
-            crate::domain::loops::LoopHookEvent::OnCompleted,
+            crate::domain::graphs::GraphHookEvent::OnCompleted,
             vec![failing, passing],
         );
-        db.update_loop_hooks(&loop_id, &hooks).unwrap();
+        db.update_graph_hooks(&graph_id, &hooks).unwrap();
 
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
         drop(_home);
         drop(fake_home);
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
-        assert_eq!(lp.status, LoopStatus::Completed);
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        assert_eq!(lp.status, GraphStatus::Completed);
         assert!(
             marker.exists(),
             "second hook must run despite first failing"
         );
-        let hook_runs = db.list_loop_completion_hook_runs(&loop_id).unwrap();
+        let hook_runs = db.list_graph_completion_hook_runs(&graph_id).unwrap();
         assert_eq!(hook_runs.len(), 2);
         assert_eq!(hook_runs[0].hook_index, 0);
-        assert_eq!(hook_runs[0].status, LoopRunStatus::Fail);
+        assert_eq!(hook_runs[0].status, GraphRunStatus::Fail);
         assert_eq!(hook_runs[1].hook_index, 1);
-        assert_eq!(hook_runs[1].status, LoopRunStatus::Pass);
+        assert_eq!(hook_runs[1].status, GraphRunStatus::Pass);
     }
 
     /// CH1: a hook registered after its event already fired does not run.
     #[tokio::test]
-    async fn loop_engine_hook_registered_after_completion_does_not_fire() {
+    async fn graph_engine_hook_registered_after_completion_does_not_fire() {
         let fake_home = setup_test_cli_home();
-        let (dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
-        db.insert_loop_node(&LoopNode {
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+        db.insert_graph_node(&GraphNode {
             id: "node-check".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "printf APPROVED",
                 "success_condition": "exit_code_0"
@@ -16763,17 +16808,17 @@ echo done
 
         // Complete first with no hooks configured.
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
         assert!(db
-            .list_loop_completion_hook_runs(&loop_id)
+            .list_graph_completion_hook_runs(&graph_id)
             .unwrap()
             .is_empty());
 
         // Register after the fact — must not fire retroactively.
         let marker = dir.path().join("late_hook.marker");
-        let hook = crate::domain::loops::LoopCompletionHook {
+        let hook = crate::domain::graphs::GraphCompletionHook {
             platform: Some("test-cli".to_string()),
             model: None,
             effort: None,
@@ -16781,14 +16826,17 @@ echo done
             command: None,
             target_session_id: None,
             timeout_minutes: Some(1),
-            target_loop_id: None,
+            target_graph_id: None,
             queue_id: None,
             workdir_override: None,
             idea: None,
         };
         let mut hooks = std::collections::BTreeMap::new();
-        hooks.insert(crate::domain::loops::LoopHookEvent::OnCompleted, vec![hook]);
-        db.update_loop_hooks(&loop_id, &hooks).unwrap();
+        hooks.insert(
+            crate::domain::graphs::GraphHookEvent::OnCompleted,
+            vec![hook],
+        );
+        db.update_graph_hooks(&graph_id, &hooks).unwrap();
 
         let _home = HomeGuard::set(fake_home.path());
         drop(_home);
@@ -16796,7 +16844,7 @@ echo done
         // No further dispatch happens here; the registration itself must not
         // create a run.
         assert!(db
-            .list_loop_completion_hook_runs(&loop_id)
+            .list_graph_completion_hook_runs(&graph_id)
             .unwrap()
             .is_empty());
         assert!(!marker.exists());
@@ -16807,8 +16855,8 @@ echo done
     fn interactive_hook_fixture(
         target: &str,
         prompt: &str,
-    ) -> crate::domain::loops::LoopCompletionHook {
-        crate::domain::loops::LoopCompletionHook {
+    ) -> crate::domain::graphs::GraphCompletionHook {
+        crate::domain::graphs::GraphCompletionHook {
             platform: None,
             model: None,
             effort: None,
@@ -16816,7 +16864,7 @@ echo done
             command: None,
             target_session_id: Some(target.to_string()),
             timeout_minutes: None,
-            target_loop_id: None,
+            target_graph_id: None,
             queue_id: None,
             workdir_override: None,
             idea: None,
@@ -16828,8 +16876,8 @@ echo done
     /// restorable builder state.
     #[tokio::test]
     async fn interactive_hook_enqueues_rendered_scheduled_send() {
-        let (_dir, db, engine, loop_id, _spec_id) = loop_fixture().unwrap();
-        let workdir = db.get_loop(&loop_id).unwrap().unwrap().workdir.clone();
+        let (_dir, db, engine, graph_id, _spec_id) = graph_fixture().unwrap();
+        let workdir = db.get_graph(&graph_id).unwrap().unwrap().workdir.clone();
         db.insert_interactive_session(
             "session-live",
             "operator",
@@ -16844,15 +16892,15 @@ echo done
 
         let hook = interactive_hook_fixture(
             "session-live",
-            "Loop {{loop_name}} failed: {{blocker}} on {{node}}",
+            "Graph {{graph_name}} failed: {{blocker}} on {{node}}",
         );
         let mut hooks = std::collections::BTreeMap::new();
-        hooks.insert(crate::domain::loops::LoopHookEvent::OnFailed, vec![hook]);
-        db.update_loop_hooks(&loop_id, &hooks).unwrap();
+        hooks.insert(crate::domain::graphs::GraphHookEvent::OnFailed, vec![hook]);
+        db.update_graph_hooks(&graph_id, &hooks).unwrap();
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
         let ctx = HookContext {
-            loop_name: &lp.name,
+            graph_name: &lp.name,
             workdir: &lp.workdir,
             completed_specs: &[],
             spec_name: None,
@@ -16861,17 +16909,17 @@ echo done
             node_name: Some("builder"),
         };
         engine
-            .fire_hooks(&lp, crate::domain::loops::LoopHookEvent::OnFailed, &ctx)
+            .fire_hooks(&lp, crate::domain::graphs::GraphHookEvent::OnFailed, &ctx)
             .await;
 
-        let hook_runs = db.list_loop_completion_hook_runs(&loop_id).unwrap();
+        let hook_runs = db.list_graph_completion_hook_runs(&graph_id).unwrap();
         assert_eq!(hook_runs.len(), 1);
-        assert_eq!(hook_runs[0].status, LoopRunStatus::Pass);
+        assert_eq!(hook_runs[0].status, GraphRunStatus::Pass);
 
         let due = db.list_due_scheduled_sends(chrono::Utc::now()).unwrap();
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].target_session_id, "session-live");
-        assert_eq!(due[0].prompt, "Loop Loop failed: build broke on builder");
+        assert_eq!(due[0].prompt, "Graph Graph failed: build broke on builder");
         let state_json = due[0]
             .builder_state
             .as_deref()
@@ -16883,16 +16931,16 @@ echo done
         state.restore_into(&mut dialog);
         assert_eq!(
             dialog.get_section_content("instruction_1"),
-            "Loop Loop failed: build broke on builder"
+            "Graph Graph failed: build broke on builder"
         );
     }
 
-    /// CH3: the enqueued message carries its provenance — loop and event —
+    /// CH3: the enqueued message carries its provenance — graph and event —
     /// as structure, not as prose inside the prompt.
     #[tokio::test]
     async fn interactive_hook_persists_structured_provenance() {
-        let (_dir, db, engine, loop_id, _spec_id) = loop_fixture().unwrap();
-        let workdir = db.get_loop(&loop_id).unwrap().unwrap().workdir.clone();
+        let (_dir, db, engine, graph_id, _spec_id) = graph_fixture().unwrap();
+        let workdir = db.get_graph(&graph_id).unwrap().unwrap().workdir.clone();
         db.insert_interactive_session(
             "session-live",
             "operator",
@@ -16905,15 +16953,18 @@ echo done
         )
         .unwrap();
 
-        let hook = interactive_hook_fixture("session-live", "Loop {{loop_name}} finished");
+        let hook = interactive_hook_fixture("session-live", "Graph {{graph_name}} finished");
         let mut hooks = std::collections::BTreeMap::new();
-        hooks.insert(crate::domain::loops::LoopHookEvent::OnCompleted, vec![hook]);
-        db.update_loop_hooks(&loop_id, &hooks).unwrap();
+        hooks.insert(
+            crate::domain::graphs::GraphHookEvent::OnCompleted,
+            vec![hook],
+        );
+        db.update_graph_hooks(&graph_id, &hooks).unwrap();
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
         let completed = vec![("Spec".to_string(), "ok".to_string())];
         let ctx = HookContext {
-            loop_name: &lp.name,
+            graph_name: &lp.name,
             workdir: &lp.workdir,
             completed_specs: &completed,
             spec_name: None,
@@ -16922,36 +16973,43 @@ echo done
             node_name: None,
         };
         engine
-            .fire_hooks(&lp, crate::domain::loops::LoopHookEvent::OnCompleted, &ctx)
+            .fire_hooks(
+                &lp,
+                crate::domain::graphs::GraphHookEvent::OnCompleted,
+                &ctx,
+            )
             .await;
 
         let due = db.list_due_scheduled_sends(chrono::Utc::now()).unwrap();
         assert_eq!(due.len(), 1);
         let provenance = due[0].provenance.as_ref().expect("provenance populated");
         assert_eq!(provenance.kind, "hook");
-        assert_eq!(provenance.loop_id, loop_id);
+        assert_eq!(provenance.graph_id, graph_id);
         assert_eq!(provenance.event, "on_completed");
         // Origin stays out of the delivered text.
-        assert!(!due[0].prompt.contains(&loop_id));
+        assert!(!due[0].prompt.contains(&graph_id));
         assert!(!due[0].prompt.contains("on_completed"));
     }
 
     /// CH3: a hook targeting an unknown or dead session fails with the id in
-    /// the message, inserts nothing, and leaves the loop's status unchanged.
+    /// the message, inserts nothing, and leaves the graph's status unchanged.
     #[tokio::test]
-    async fn interactive_hook_missing_target_fails_without_loop_status_change() {
-        let (_dir, db, engine, loop_id, _spec_id) = loop_fixture().unwrap();
-        let status_before = db.get_loop(&loop_id).unwrap().unwrap().status;
+    async fn interactive_hook_missing_target_fails_without_graph_status_change() {
+        let (_dir, db, engine, graph_id, _spec_id) = graph_fixture().unwrap();
+        let status_before = db.get_graph(&graph_id).unwrap().unwrap().status;
 
-        let hook = interactive_hook_fixture("session-gone", "Loop {{loop_name}} finished");
+        let hook = interactive_hook_fixture("session-gone", "Graph {{graph_name}} finished");
         let mut hooks = std::collections::BTreeMap::new();
-        hooks.insert(crate::domain::loops::LoopHookEvent::OnCompleted, vec![hook]);
-        db.update_loop_hooks(&loop_id, &hooks).unwrap();
+        hooks.insert(
+            crate::domain::graphs::GraphHookEvent::OnCompleted,
+            vec![hook],
+        );
+        db.update_graph_hooks(&graph_id, &hooks).unwrap();
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
         let completed = vec![("Spec".to_string(), "ok".to_string())];
         let ctx = HookContext {
-            loop_name: &lp.name,
+            graph_name: &lp.name,
             workdir: &lp.workdir,
             completed_specs: &completed,
             spec_name: None,
@@ -16960,12 +17018,16 @@ echo done
             node_name: None,
         };
         engine
-            .fire_hooks(&lp, crate::domain::loops::LoopHookEvent::OnCompleted, &ctx)
+            .fire_hooks(
+                &lp,
+                crate::domain::graphs::GraphHookEvent::OnCompleted,
+                &ctx,
+            )
             .await;
 
-        let hook_runs = db.list_loop_completion_hook_runs(&loop_id).unwrap();
+        let hook_runs = db.list_graph_completion_hook_runs(&graph_id).unwrap();
         assert_eq!(hook_runs.len(), 1);
-        assert_eq!(hook_runs[0].status, LoopRunStatus::Fail);
+        assert_eq!(hook_runs[0].status, GraphRunStatus::Fail);
         let summary = hook_runs[0].summary.as_deref().unwrap_or("");
         assert!(
             summary.contains("session-gone"),
@@ -16976,7 +17038,7 @@ echo done
             .unwrap()
             .is_empty());
         assert_eq!(
-            db.get_loop(&loop_id).unwrap().unwrap().status,
+            db.get_graph(&graph_id).unwrap().unwrap().status,
             status_before
         );
     }
@@ -16986,8 +17048,8 @@ echo done
     /// after firing returns.
     #[tokio::test]
     async fn interactive_hook_is_pending_without_tui() {
-        let (_dir, db, engine, loop_id, _spec_id) = loop_fixture().unwrap();
-        let workdir = db.get_loop(&loop_id).unwrap().unwrap().workdir.clone();
+        let (_dir, db, engine, graph_id, _spec_id) = graph_fixture().unwrap();
+        let workdir = db.get_graph(&graph_id).unwrap().unwrap().workdir.clone();
         db.insert_interactive_session(
             "session-live",
             "operator",
@@ -17000,15 +17062,18 @@ echo done
         )
         .unwrap();
 
-        let hook = interactive_hook_fixture("session-live", "Loop {{loop_name}} finished");
+        let hook = interactive_hook_fixture("session-live", "Graph {{graph_name}} finished");
         let mut hooks = std::collections::BTreeMap::new();
-        hooks.insert(crate::domain::loops::LoopHookEvent::OnCompleted, vec![hook]);
-        db.update_loop_hooks(&loop_id, &hooks).unwrap();
+        hooks.insert(
+            crate::domain::graphs::GraphHookEvent::OnCompleted,
+            vec![hook],
+        );
+        db.update_graph_hooks(&graph_id, &hooks).unwrap();
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
         let completed = vec![("Spec".to_string(), "ok".to_string())];
         let ctx = HookContext {
-            loop_name: &lp.name,
+            graph_name: &lp.name,
             workdir: &lp.workdir,
             completed_specs: &completed,
             spec_name: None,
@@ -17019,7 +17084,11 @@ echo done
         // No TUI delivery object exists anywhere in this test — firing only
         // enqueues.
         engine
-            .fire_hooks(&lp, crate::domain::loops::LoopHookEvent::OnCompleted, &ctx)
+            .fire_hooks(
+                &lp,
+                crate::domain::graphs::GraphHookEvent::OnCompleted,
+                &ctx,
+            )
             .await;
 
         let due = db.list_due_scheduled_sends(chrono::Utc::now()).unwrap();
@@ -17034,22 +17103,22 @@ echo done
     // ── CH2: command hook tests ────────────────────────────────────────
 
     /// A command hook on `on_spec_completed` runs once per spec, in the
-    /// loop's workdir.
+    /// graph's workdir.
     #[tokio::test]
     async fn command_hook_on_spec_completed_runs_once_per_spec() {
-        let (dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
 
         // Second spec with its own check node.
-        let spec2 = crate::domain::loops::LoopSpec {
+        let spec2 = crate::domain::graphs::GraphSpec {
             id: "spec-test-2".to_string(),
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             name: "Spec2".to_string(),
             description: Some(
                 "Functional Requirements:\n- A\n\nNon-Functional Requirements:\n- B\n\nObjective:\n- C\n\nConstraints:\n- D\n\nGuidelines:\n- E\n\nIn Scope:\n- F\n\nOut of Scope:\n- G".to_string(),
             ),
             position: 2,
             parallelizable: false,
-            status: LoopSpecStatus::Pending,
+            status: GraphSpecStatus::Pending,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
@@ -17059,14 +17128,14 @@ echo done
             completed_via_reason: None,
             completed_via_at: None,
         };
-        db.insert_loop_spec(&spec2).unwrap();
+        db.insert_graph_spec(&spec2).unwrap();
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-check-1".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "check1".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "printf APPROVED",
                 "success_condition": "exit_code_0"
@@ -17076,12 +17145,12 @@ echo done
         })
         .unwrap();
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-check-2".to_string(),
             spec_id: Some("spec-test-2".to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "check2".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "printf APPROVED",
                 "success_condition": "exit_code_0"
@@ -17092,7 +17161,7 @@ echo done
         .unwrap();
 
         // Command hook: touch a marker file named after the spec.
-        let hook = crate::domain::loops::LoopCompletionHook {
+        let hook = crate::domain::graphs::GraphCompletionHook {
             platform: None,
             model: None,
             effort: None,
@@ -17100,25 +17169,25 @@ echo done
             command: Some("touch \"{{spec_name}}.marker\"".to_string()),
             target_session_id: None,
             timeout_minutes: Some(1),
-            target_loop_id: None,
+            target_graph_id: None,
             queue_id: None,
             workdir_override: None,
             idea: None,
         };
         let mut hooks = std::collections::BTreeMap::new();
         hooks.insert(
-            crate::domain::loops::LoopHookEvent::OnSpecCompleted,
+            crate::domain::graphs::GraphHookEvent::OnSpecCompleted,
             vec![hook],
         );
-        db.update_loop_hooks(&loop_id, &hooks).unwrap();
+        db.update_graph_hooks(&graph_id, &hooks).unwrap();
 
         let result = engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await;
         result.unwrap();
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
-        assert_eq!(lp.status, LoopStatus::Completed);
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        assert_eq!(lp.status, GraphStatus::Completed);
 
         let spec1_marker = dir.path().join("Spec.marker");
         let spec2_marker = dir.path().join("Spec2.marker");
@@ -17131,24 +17200,24 @@ echo done
             "on_spec_completed hook must have run for spec2"
         );
 
-        let hook_runs = db.list_loop_completion_hook_runs(&loop_id).unwrap();
+        let hook_runs = db.list_graph_completion_hook_runs(&graph_id).unwrap();
         assert_eq!(hook_runs.len(), 2, "hook must fire once per spec");
-        assert!(hook_runs.iter().all(|r| r.status == LoopRunStatus::Pass));
+        assert!(hook_runs.iter().all(|r| r.status == GraphRunStatus::Pass));
     }
 
     /// A command hook exiting non-zero while writing to stdout and stderr
-    /// records all three, and the loop's status is untouched.
+    /// records all three, and the graph's status is untouched.
     #[tokio::test]
-    async fn command_hook_nonzero_exit_records_output_and_does_not_affect_loop() {
+    async fn command_hook_nonzero_exit_records_output_and_does_not_affect_graph() {
         let fake_home = setup_test_cli_home();
-        let (_dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (_dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-check".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "printf APPROVED",
                 "success_condition": "exit_code_0"
@@ -17159,7 +17228,7 @@ echo done
         .unwrap();
 
         // Command hook that exits non-zero and writes to both streams.
-        let hook = crate::domain::loops::LoopCompletionHook {
+        let hook = crate::domain::graphs::GraphCompletionHook {
             platform: None,
             model: None,
             effort: None,
@@ -17167,30 +17236,33 @@ echo done
             command: Some("echo out; echo err >&2; exit 3".to_string()),
             target_session_id: None,
             timeout_minutes: Some(1),
-            target_loop_id: None,
+            target_graph_id: None,
             queue_id: None,
             workdir_override: None,
             idea: None,
         };
         let mut hooks = std::collections::BTreeMap::new();
-        hooks.insert(crate::domain::loops::LoopHookEvent::OnCompleted, vec![hook]);
-        db.update_loop_hooks(&loop_id, &hooks).unwrap();
+        hooks.insert(
+            crate::domain::graphs::GraphHookEvent::OnCompleted,
+            vec![hook],
+        );
+        db.update_graph_hooks(&graph_id, &hooks).unwrap();
 
         let _home = HomeGuard::set(fake_home.path());
         let result = engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await;
         drop(_home);
         drop(fake_home);
         result.unwrap();
 
-        // Loop completed successfully despite hook failure.
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
-        assert_eq!(lp.status, LoopStatus::Completed);
+        // Graph completed successfully despite hook failure.
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        assert_eq!(lp.status, GraphStatus::Completed);
 
-        let hook_runs = db.list_loop_completion_hook_runs(&loop_id).unwrap();
+        let hook_runs = db.list_graph_completion_hook_runs(&graph_id).unwrap();
         assert_eq!(hook_runs.len(), 1);
-        assert_eq!(hook_runs[0].status, LoopRunStatus::Fail);
+        assert_eq!(hook_runs[0].status, GraphRunStatus::Fail);
 
         let output = hook_runs[0].output.as_ref().unwrap();
         assert_eq!(output["exit_code"], 3);
@@ -17202,14 +17274,14 @@ echo done
     /// A placeholder in the command is substituted before execution.
     #[tokio::test]
     async fn command_hook_placeholder_substitution() {
-        let (dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-check".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "printf APPROVED",
                 "success_condition": "exit_code_0"
@@ -17221,7 +17293,7 @@ echo done
 
         let output_file = dir.path().join("placeholder_output");
         let output_path = output_file.to_string_lossy().to_string();
-        let hook = crate::domain::loops::LoopCompletionHook {
+        let hook = crate::domain::graphs::GraphCompletionHook {
             platform: None,
             model: None,
             effort: None,
@@ -17229,20 +17301,20 @@ echo done
             command: Some(format!("echo {{{{spec_name}}}} > \"{}\"", output_path)),
             target_session_id: None,
             timeout_minutes: Some(1),
-            target_loop_id: None,
+            target_graph_id: None,
             queue_id: None,
             workdir_override: None,
             idea: None,
         };
         let mut hooks = std::collections::BTreeMap::new();
         hooks.insert(
-            crate::domain::loops::LoopHookEvent::OnSpecCompleted,
+            crate::domain::graphs::GraphHookEvent::OnSpecCompleted,
             vec![hook],
         );
-        db.update_loop_hooks(&loop_id, &hooks).unwrap();
+        db.update_graph_hooks(&graph_id, &hooks).unwrap();
 
         let result = engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await;
         result.unwrap();
 
@@ -17256,18 +17328,18 @@ echo done
     #[cfg(unix)]
     #[tokio::test]
     async fn process_group_children_die_with_parent() {
-        let (dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
         let marker = dir.path().join("grandchild_alive");
 
         // The check node forks a grandchild that sleeps and touches a
         // marker file. If the process group kill works, the grandchild
         // dies before the marker appears.
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "check-pg".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "check-pg".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": format!(
                     "( sleep 60; touch \"{}\" ) & exit 1",
@@ -17282,7 +17354,7 @@ echo done
         .unwrap();
 
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
 
@@ -17354,10 +17426,10 @@ echo done
     }
 
     /// Builds a real ensemble unit (kickoff -> N members -> join -> pass/fail
-    /// exits) directly against the DB, the same shape `loop_add_ensemble`
+    /// exits) directly against the DB, the same shape `graph_add_ensemble`
     /// assembles in one MCP call — but constructed here node-by-node so
     /// engine tests can drive it through the real `execute_ensemble` path
-    /// via `LoopEngine::run_loop` without spinning up the MCP server.
+    /// via `GraphEngine::run_graph` without spinning up the MCP server.
     #[allow(clippy::too_many_arguments)]
     fn insert_test_ensemble(
         db: &Database,
@@ -17373,12 +17445,12 @@ echo done
     ) {
         let now = chrono::Utc::now();
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: kickoff_id.to_string(),
             spec_id: Some(spec_id.to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "kickoff".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "printf ok",
                 "success_condition": "exit_code_0"
@@ -17388,15 +17460,15 @@ echo done
         })
         .unwrap();
 
-        let member_nodes: Vec<LoopNode> = members
+        let member_nodes: Vec<GraphNode> = members
             .iter()
             .enumerate()
-            .map(|(i, (node_id, platform))| LoopNode {
+            .map(|(i, (node_id, platform))| GraphNode {
                 id: node_id.to_string(),
                 spec_id: Some(spec_id.to_string()),
-                loop_id: None,
+                graph_id: None,
                 name: format!("member-{}", i + 1),
-                kind: LoopNodeKind::Agent,
+                kind: GraphNodeKind::Agent,
                 config: serde_json::json!({
                     "platform": platform,
                     "prompt_template": "ignored by the member's test script",
@@ -17414,12 +17486,12 @@ echo done
             })
             .collect();
 
-        let join_node = LoopNode {
+        let join_node = GraphNode {
             id: join_id.to_string(),
             spec_id: Some(spec_id.to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "quorum".to_string(),
-            kind: LoopNodeKind::Join,
+            kind: GraphNodeKind::Join,
             config: serde_json::json!({ "ensemble_id": ensemble_id }),
             position: 2 + members.len() as i64,
             created_at: now,
@@ -17427,57 +17499,57 @@ echo done
 
         let mut edges = Vec::new();
         for (node_id, _) in members {
-            edges.push(LoopEdge {
+            edges.push(GraphEdge {
                 id: format!("{kickoff_id}->{node_id}"),
                 spec_id: Some(spec_id.to_string()),
-                loop_id: None,
+                graph_id: None,
                 from_node: kickoff_id.to_string(),
                 to_node: node_id.to_string(),
-                condition: LoopEdgeCondition::Always,
+                condition: GraphEdgeCondition::Always,
             });
-            edges.push(LoopEdge {
+            edges.push(GraphEdge {
                 id: format!("{node_id}->{join_id}"),
                 spec_id: Some(spec_id.to_string()),
-                loop_id: None,
+                graph_id: None,
                 from_node: node_id.to_string(),
                 to_node: join_id.to_string(),
-                condition: LoopEdgeCondition::Always,
+                condition: GraphEdgeCondition::Always,
             });
         }
-        edges.push(LoopEdge {
+        edges.push(GraphEdge {
             id: format!("{join_id}->pass"),
             spec_id: Some(spec_id.to_string()),
-            loop_id: None,
+            graph_id: None,
             from_node: join_id.to_string(),
             to_node: on_pass_to.to_string(),
-            condition: LoopEdgeCondition::Pass,
+            condition: GraphEdgeCondition::Pass,
         });
         if let Some(fail_to) = on_fail_to {
-            edges.push(LoopEdge {
+            edges.push(GraphEdge {
                 id: format!("{join_id}->fail"),
                 spec_id: Some(spec_id.to_string()),
-                loop_id: None,
+                graph_id: None,
                 from_node: join_id.to_string(),
                 to_node: fail_to.to_string(),
-                condition: LoopEdgeCondition::Fail,
+                condition: GraphEdgeCondition::Fail,
             });
         }
 
-        let ensemble = crate::domain::loops::Ensemble {
+        let ensemble = crate::domain::graphs::Ensemble {
             id: ensemble_id.to_string(),
             spec_id: Some(spec_id.to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "Test Ensemble".to_string(),
             prompt_template: "ignored by the member's test script".to_string(),
             join_node_id: join_id.to_string(),
             entry_from_node: kickoff_id.to_string(),
-            entry_condition: LoopEdgeCondition::Always,
+            entry_condition: GraphEdgeCondition::Always,
             min_pass,
             straggler_timeout_minutes,
             timeout_minutes: 5,
             on_pass_to: on_pass_to.to_string(),
             on_fail_to: on_fail_to.map(str::to_string),
-            kind: crate::domain::loops::EnsembleKind::Parallel,
+            kind: crate::domain::graphs::EnsembleKind::Parallel,
             round_robin_index: None,
             created_at: now,
         };
@@ -17509,13 +17581,13 @@ echo done
         spec_id: &str,
         marker: &std::path::Path,
         position: i64,
-    ) -> LoopNode {
-        LoopNode {
+    ) -> GraphNode {
+        GraphNode {
             id: id.to_string(),
             spec_id: Some(spec_id.to_string()),
-            loop_id: None,
+            graph_id: None,
             name: id.to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": format!("touch \"{}\"", marker.display()),
                 "success_condition": "exit_code_0"
@@ -17525,8 +17597,8 @@ echo done
         }
     }
 
-    fn join_run(db: &Database, spec_id: &str, join_id: &str) -> LoopNodeRun {
-        db.list_loop_runs_for_spec(spec_id)
+    fn join_run(db: &Database, spec_id: &str, join_id: &str) -> GraphNodeRun {
+        db.list_graph_runs_for_spec(spec_id)
             .unwrap()
             .into_iter()
             .rfind(|run| run.node_id == join_id)
@@ -17543,7 +17615,7 @@ echo done
     /// lucky".
     #[tokio::test]
     async fn ensemble_execute_waits_for_slowest_member_before_joining() {
-        let (dir, db, engine, _loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, _graph_id, spec_id) = graph_fixture().unwrap();
         let fake_home = setup_multi_cli_home(&[
             (
                 "member-fast",
@@ -17555,7 +17627,7 @@ echo done
             ),
         ]);
         let pass_marker = dir.path().join("pass.marker");
-        db.insert_loop_node(&touch_marker_node("on-pass", &spec_id, &pass_marker, 100))
+        db.insert_graph_node(&touch_marker_node("on-pass", &spec_id, &pass_marker, 100))
             .unwrap();
         insert_test_ensemble(
             &db,
@@ -17573,7 +17645,7 @@ echo done
         let _home = HomeGuard::set(fake_home.path());
         let started = std::time::Instant::now();
         engine
-            .run_loop("wf-test".to_string(), None, None, None, None)
+            .run_graph("wf-test".to_string(), None, None, None, None)
             .await
             .unwrap();
         let elapsed = started.elapsed();
@@ -17583,7 +17655,7 @@ echo done
             elapsed >= std::time::Duration::from_millis(900),
             "join must not fire before the slow member finishes (elapsed: {elapsed:?})"
         );
-        // CM13: bare member scripts never call loop_complete_node, so both
+        // CM13: bare member scripts never call graph_complete_node, so both
         // members are unreported infra and the join fails. Wait-all is still
         // proven by the elapsed wall-clock time above and the doc below.
         assert!(
@@ -17592,7 +17664,7 @@ echo done
         );
 
         let join = join_run(&db, &spec_id, "join1");
-        assert_eq!(join.status, LoopRunStatus::Fail);
+        assert_eq!(join.status, GraphRunStatus::Fail);
         let doc = join.output.unwrap()["consolidated_doc"]
             .as_str()
             .unwrap()
@@ -17609,7 +17681,7 @@ echo done
     /// got lucky", mirroring `ensemble_execute_waits_for_slowest_member_before_joining`.
     #[tokio::test]
     async fn ensemble_execute_respects_configured_concurrency_cap() {
-        let (dir, db, engine, _loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, _graph_id, spec_id) = graph_fixture().unwrap();
         let engine = engine.with_ensemble_concurrency_cap(1);
         let fake_home = setup_multi_cli_home(&[
             (
@@ -17626,7 +17698,7 @@ echo done
             ),
         ]);
         let pass_marker = dir.path().join("pass.marker");
-        db.insert_loop_node(&touch_marker_node("on-pass", &spec_id, &pass_marker, 100))
+        db.insert_graph_node(&touch_marker_node("on-pass", &spec_id, &pass_marker, 100))
             .unwrap();
         insert_test_ensemble(
             &db,
@@ -17648,7 +17720,7 @@ echo done
         let _home = HomeGuard::set(fake_home.path());
         let started = std::time::Instant::now();
         engine
-            .run_loop("wf-test".to_string(), None, None, None, None)
+            .run_graph("wf-test".to_string(), None, None, None, None)
             .await
             .unwrap();
         let elapsed = started.elapsed();
@@ -17658,7 +17730,7 @@ echo done
             elapsed >= std::time::Duration::from_millis(850),
             "a concurrency cap of 1 must serialize all three members (elapsed: {elapsed:?})"
         );
-        // CM13: bare member scripts never call loop_complete_node, so every
+        // CM13: bare member scripts never call graph_complete_node, so every
         // member is unreported infra and the join fails (0/3). Serialization
         // is still proven by the elapsed wall-clock time above.
         assert!(
@@ -17667,7 +17739,7 @@ echo done
         );
 
         let join = join_run(&db, &spec_id, "join1");
-        assert_eq!(join.status, LoopRunStatus::Fail);
+        assert_eq!(join.status, GraphRunStatus::Fail);
         let doc = join.output.unwrap()["consolidated_doc"]
             .as_str()
             .unwrap()
@@ -17675,7 +17747,7 @@ echo done
         assert!(doc.contains('A') && doc.contains('B') && doc.contains('C'));
     }
 
-    /// CM13: bare member scripts never call loop_complete_node, so no member
+    /// CM13: bare member scripts never call graph_complete_node, so no member
     /// can pass — the min_pass quorum sees 0 passed, the join fails and routes
     /// to on_fail_to even though a majority "exited ok". Quorum counting itself
     /// is covered by unit tests over NodeExecution; the join Pass -> on_pass_to
@@ -17683,7 +17755,7 @@ echo done
     /// [`cm13_round_robin_falls_through_unreported_member_then_passes_on_next`].
     #[tokio::test]
     async fn ensemble_execute_unreported_members_route_to_on_fail_to() {
-        let (dir, db, engine, _loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, _graph_id, spec_id) = graph_fixture().unwrap();
         let fake_home = setup_multi_cli_home(&[
             (
                 "member-ok-a",
@@ -17700,9 +17772,9 @@ echo done
         ]);
         let pass_marker = dir.path().join("pass.marker");
         let fail_marker = dir.path().join("fail.marker");
-        db.insert_loop_node(&touch_marker_node("on-pass", &spec_id, &pass_marker, 100))
+        db.insert_graph_node(&touch_marker_node("on-pass", &spec_id, &pass_marker, 100))
             .unwrap();
-        db.insert_loop_node(&touch_marker_node("on-fail", &spec_id, &fail_marker, 101))
+        db.insert_graph_node(&touch_marker_node("on-fail", &spec_id, &fail_marker, 101))
             .unwrap();
         insert_test_ensemble(
             &db,
@@ -17723,7 +17795,7 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_loop("wf-test".to_string(), None, None, None, None)
+            .run_graph("wf-test".to_string(), None, None, None, None)
             .await
             .unwrap();
         drop(_home);
@@ -17731,7 +17803,7 @@ echo done
         let join = join_run(&db, &spec_id, "join1");
         // CM13: script-backed members never self-report, so the quorum sees
         // 0 passes and routes to on_fail_to.
-        assert_eq!(join.status, LoopRunStatus::Fail);
+        assert_eq!(join.status, GraphRunStatus::Fail);
         assert_eq!(join.output.unwrap()["passed"], 0);
         assert!(!pass_marker.exists(), "must not route to on_pass_to");
         assert!(fail_marker.exists(), "must route to on_fail_to");
@@ -17740,7 +17812,7 @@ echo done
     /// min_pass routing: too few members pass -> join Fail -> on_fail_to.
     #[tokio::test]
     async fn ensemble_execute_min_pass_not_met_routes_to_on_fail_to() {
-        let (dir, db, engine, _loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, _graph_id, spec_id) = graph_fixture().unwrap();
         let fake_home = setup_multi_cli_home(&[
             (
                 "member-ok",
@@ -17757,9 +17829,9 @@ echo done
         ]);
         let pass_marker = dir.path().join("pass.marker");
         let fail_marker = dir.path().join("fail.marker");
-        db.insert_loop_node(&touch_marker_node("on-pass", &spec_id, &pass_marker, 100))
+        db.insert_graph_node(&touch_marker_node("on-pass", &spec_id, &pass_marker, 100))
             .unwrap();
-        db.insert_loop_node(&touch_marker_node("on-fail", &spec_id, &fail_marker, 101))
+        db.insert_graph_node(&touch_marker_node("on-fail", &spec_id, &fail_marker, 101))
             .unwrap();
         insert_test_ensemble(
             &db,
@@ -17780,13 +17852,13 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_loop("wf-test".to_string(), None, None, None, None)
+            .run_graph("wf-test".to_string(), None, None, None, None)
             .await
             .unwrap();
         drop(_home);
 
         let join = join_run(&db, &spec_id, "join1");
-        assert_eq!(join.status, LoopRunStatus::Fail);
+        assert_eq!(join.status, GraphRunStatus::Fail);
         // CM13: the script-backed member never self-reports, so passed is 0.
         assert_eq!(join.output.unwrap()["passed"], 0);
         assert!(!pass_marker.exists(), "must not route to on_pass_to");
@@ -17799,7 +17871,7 @@ echo done
     /// member 2.
     #[tokio::test]
     async fn ensemble_execute_consolidates_in_member_position_order() {
-        let (dir, db, engine, _loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, _graph_id, spec_id) = graph_fixture().unwrap();
         let fake_home = setup_multi_cli_home(&[
             (
                 "member-a-slow",
@@ -17811,7 +17883,7 @@ echo done
             ),
         ]);
         let pass_marker = dir.path().join("pass.marker");
-        db.insert_loop_node(&touch_marker_node("on-pass", &spec_id, &pass_marker, 100))
+        db.insert_graph_node(&touch_marker_node("on-pass", &spec_id, &pass_marker, 100))
             .unwrap();
         insert_test_ensemble(
             &db,
@@ -17828,7 +17900,7 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_loop("wf-test".to_string(), None, None, None, None)
+            .run_graph("wf-test".to_string(), None, None, None, None)
             .await
             .unwrap();
         drop(_home);
@@ -17861,7 +17933,7 @@ echo done
     /// shared template.
     #[tokio::test]
     async fn ensemble_execute_attributes_members_sharing_platform_by_prompt_override() {
-        let (dir, db, engine, _loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, _graph_id, spec_id) = graph_fixture().unwrap();
         // A single registered CLI, `cat`, echoes its composed prompt back on
         // stdout verbatim — letting the consolidated doc prove which prompt
         // text each member actually rendered.
@@ -17870,19 +17942,19 @@ echo done
             &write_member_script(dir.path(), "echo.sh", "cat"),
         )]);
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "kickoff".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "kickoff".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({"command": "printf ok", "success_condition": "exit_code_0"}),
             position: 1,
             created_at: chrono::Utc::now(),
         })
         .unwrap();
         let pass_marker = dir.path().join("pass.marker");
-        db.insert_loop_node(&touch_marker_node("on-pass", &spec_id, &pass_marker, 100))
+        db.insert_graph_node(&touch_marker_node("on-pass", &spec_id, &pass_marker, 100))
             .unwrap();
 
         let overrides = [
@@ -17891,15 +17963,15 @@ echo done
             ("m-conventions", "OVERRIDE-CONVENTIONS-ANGLE"),
         ];
         let now = chrono::Utc::now();
-        let member_nodes: Vec<LoopNode> = overrides
+        let member_nodes: Vec<GraphNode> = overrides
             .iter()
             .enumerate()
-            .map(|(i, (node_id, prompt))| LoopNode {
+            .map(|(i, (node_id, prompt))| GraphNode {
                 id: node_id.to_string(),
                 spec_id: Some(spec_id.clone()),
-                loop_id: None,
+                graph_id: None,
                 name: format!("Panel [{}]", i + 1),
-                kind: LoopNodeKind::Agent,
+                kind: GraphNodeKind::Agent,
                 config: serde_json::json!({
                     "platform": "shared-cli",
                     "prompt_template": prompt,
@@ -17909,58 +17981,58 @@ echo done
                 created_at: now,
             })
             .collect();
-        let join_node = LoopNode {
+        let join_node = GraphNode {
             id: "join1".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "quorum".to_string(),
-            kind: LoopNodeKind::Join,
+            kind: GraphNodeKind::Join,
             config: serde_json::json!({ "ensemble_id": "ens1" }),
             position: 2 + overrides.len() as i64,
             created_at: now,
         };
         let mut edges = Vec::new();
         for (node_id, _) in &overrides {
-            edges.push(LoopEdge {
+            edges.push(GraphEdge {
                 id: format!("kickoff->{node_id}"),
                 spec_id: Some(spec_id.clone()),
-                loop_id: None,
+                graph_id: None,
                 from_node: "kickoff".to_string(),
                 to_node: node_id.to_string(),
-                condition: LoopEdgeCondition::Always,
+                condition: GraphEdgeCondition::Always,
             });
-            edges.push(LoopEdge {
+            edges.push(GraphEdge {
                 id: format!("{node_id}->join1"),
                 spec_id: Some(spec_id.clone()),
-                loop_id: None,
+                graph_id: None,
                 from_node: node_id.to_string(),
                 to_node: "join1".to_string(),
-                condition: LoopEdgeCondition::Always,
+                condition: GraphEdgeCondition::Always,
             });
         }
-        edges.push(LoopEdge {
+        edges.push(GraphEdge {
             id: "join1->on-pass".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             from_node: "join1".to_string(),
             to_node: "on-pass".to_string(),
-            condition: LoopEdgeCondition::Pass,
+            condition: GraphEdgeCondition::Pass,
         });
-        let ensemble = crate::domain::loops::Ensemble {
+        let ensemble = crate::domain::graphs::Ensemble {
             id: "ens1".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "Panel".to_string(),
             prompt_template: "shared prompt (unused — every member overrides it)".to_string(),
             join_node_id: "join1".to_string(),
             entry_from_node: "kickoff".to_string(),
-            entry_condition: LoopEdgeCondition::Always,
+            entry_condition: GraphEdgeCondition::Always,
             min_pass: 3,
             straggler_timeout_minutes: None,
             timeout_minutes: 5,
             on_pass_to: "on-pass".to_string(),
             on_fail_to: None,
-            kind: crate::domain::loops::EnsembleKind::Parallel,
+            kind: crate::domain::graphs::EnsembleKind::Parallel,
             round_robin_index: None,
             created_at: now,
         };
@@ -17987,16 +18059,16 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_loop("wf-test".to_string(), None, None, None, None)
+            .run_graph("wf-test".to_string(), None, None, None, None)
             .await
             .unwrap();
         drop(_home);
 
         let join = join_run(&db, &spec_id, "join1");
-        // CM13: the cat-backed members never call loop_complete_node, so each
+        // CM13: the cat-backed members never call graph_complete_node, so each
         // is unreported infra and the join fails. Attribution is still proven
         // by the position-numbered headings and per-member prompt text below.
-        assert_eq!(join.status, LoopRunStatus::Fail);
+        assert_eq!(join.status, GraphRunStatus::Fail);
         assert!(!pass_marker.exists());
         let doc = join.output.unwrap()["consolidated_doc"]
             .as_str()
@@ -18032,7 +18104,7 @@ echo done
     /// isolating the straggler behavior to every member avoids that.
     #[tokio::test]
     async fn ensemble_execute_straggler_timeout_kills_process_and_counts_as_fail() {
-        let (dir, db, engine, _loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, _graph_id, spec_id) = graph_fixture().unwrap();
         let marker_a = dir.path().join("a_survived.marker");
         let marker_b = dir.path().join("b_survived.marker");
         let fake_home = setup_multi_cli_home(&[
@@ -18054,14 +18126,14 @@ echo done
             ),
         ]);
         let fail_marker = dir.path().join("fail.marker");
-        db.insert_loop_node(&touch_marker_node(
+        db.insert_graph_node(&touch_marker_node(
             "on-pass",
             &spec_id,
             &dir.path().join("pass.marker"),
             100,
         ))
         .unwrap();
-        db.insert_loop_node(&touch_marker_node("on-fail", &spec_id, &fail_marker, 101))
+        db.insert_graph_node(&touch_marker_node("on-fail", &spec_id, &fail_marker, 101))
             .unwrap();
         insert_test_ensemble(
             &db,
@@ -18078,7 +18150,7 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_loop("wf-test".to_string(), None, None, None, None)
+            .run_graph("wf-test".to_string(), None, None, None, None)
             .await
             .unwrap();
         drop(_home);
@@ -18086,7 +18158,7 @@ echo done
         let join = join_run(&db, &spec_id, "join1");
         assert_eq!(
             join.status,
-            LoopRunStatus::Fail,
+            GraphRunStatus::Fail,
             "both members killed as stragglers -> zero passed -> join fails"
         );
         assert_eq!(join.output.as_ref().unwrap()["passed"], 0);
@@ -18120,19 +18192,19 @@ echo done
         member_config: &Value,
     ) {
         let now = chrono::Utc::now();
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "kickoff".to_string(),
             spec_id: Some(spec_id.to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "kickoff".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({ "command": "printf ok", "success_condition": "exit_code_0" }),
             position: 1,
             created_at: now,
         })
         .unwrap();
 
-        let member_nodes: Vec<LoopNode> = members
+        let member_nodes: Vec<GraphNode> = members
             .iter()
             .enumerate()
             .map(|(i, (node_id, platform))| {
@@ -18146,12 +18218,12 @@ echo done
                         config[k] = v.clone();
                     }
                 }
-                LoopNode {
+                GraphNode {
                     id: node_id.to_string(),
                     spec_id: Some(spec_id.to_string()),
-                    loop_id: None,
+                    graph_id: None,
                     name: format!("member-{}", i + 1),
-                    kind: LoopNodeKind::Agent,
+                    kind: GraphNodeKind::Agent,
                     config,
                     position: 2 + i as i64,
                     created_at: now,
@@ -18159,12 +18231,12 @@ echo done
             })
             .collect();
 
-        let join_node = LoopNode {
+        let join_node = GraphNode {
             id: "join1".to_string(),
             spec_id: Some(spec_id.to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "quorum".to_string(),
-            kind: LoopNodeKind::Join,
+            kind: GraphNodeKind::Join,
             config: serde_json::json!({ "ensemble_id": "ens1" }),
             position: 2 + members.len() as i64,
             created_at: now,
@@ -18172,60 +18244,60 @@ echo done
 
         let mut edges = Vec::new();
         for (node_id, _) in members {
-            edges.push(LoopEdge {
+            edges.push(GraphEdge {
                 id: format!("kickoff->{node_id}"),
                 spec_id: Some(spec_id.to_string()),
-                loop_id: None,
+                graph_id: None,
                 from_node: "kickoff".to_string(),
                 to_node: node_id.to_string(),
-                condition: LoopEdgeCondition::Always,
+                condition: GraphEdgeCondition::Always,
             });
-            edges.push(LoopEdge {
+            edges.push(GraphEdge {
                 id: format!("{node_id}->join1"),
                 spec_id: Some(spec_id.to_string()),
-                loop_id: None,
+                graph_id: None,
                 from_node: node_id.to_string(),
                 to_node: "join1".to_string(),
-                condition: LoopEdgeCondition::Always,
+                condition: GraphEdgeCondition::Always,
             });
         }
-        edges.push(LoopEdge {
+        edges.push(GraphEdge {
             id: "join1->pass".to_string(),
             spec_id: Some(spec_id.to_string()),
-            loop_id: None,
+            graph_id: None,
             from_node: "join1".to_string(),
             to_node: "done".to_string(),
-            condition: LoopEdgeCondition::Pass,
+            condition: GraphEdgeCondition::Pass,
         });
 
         // Terminal marker node so a passing join has somewhere to route.
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "done".to_string(),
             spec_id: Some(spec_id.to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "done".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({ "command": "printf ok", "success_condition": "exit_code_0" }),
             position: 200,
             created_at: now,
         })
         .unwrap();
 
-        let ensemble = crate::domain::loops::Ensemble {
+        let ensemble = crate::domain::graphs::Ensemble {
             id: "ens1".to_string(),
             spec_id: Some(spec_id.to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "Test Ensemble".to_string(),
             prompt_template: "ignored by the member's test script".to_string(),
             join_node_id: "join1".to_string(),
             entry_from_node: "kickoff".to_string(),
-            entry_condition: LoopEdgeCondition::Always,
+            entry_condition: GraphEdgeCondition::Always,
             min_pass,
             straggler_timeout_minutes,
             timeout_minutes: 5,
             on_pass_to: "done".to_string(),
             on_fail_to: None,
-            kind: crate::domain::loops::EnsembleKind::Parallel,
+            kind: crate::domain::graphs::EnsembleKind::Parallel,
             round_robin_index: None,
             created_at: now,
         };
@@ -18252,9 +18324,9 @@ echo done
         .unwrap();
     }
 
-    fn member_runs(db: &Database, spec_id: &str, node_id: &str) -> Vec<LoopNodeRun> {
-        let mut runs: Vec<LoopNodeRun> = db
-            .list_loop_runs_for_spec(spec_id)
+    fn member_runs(db: &Database, spec_id: &str, node_id: &str) -> Vec<GraphNodeRun> {
+        let mut runs: Vec<GraphNodeRun> = db
+            .list_graph_runs_for_spec(spec_id)
             .unwrap()
             .into_iter()
             .filter(|r| r.node_id == node_id)
@@ -18271,31 +18343,31 @@ echo done
     fn insert_kind_ensemble(
         db: &Database,
         spec_id: &str,
-        kind: crate::domain::loops::EnsembleKind,
+        kind: crate::domain::graphs::EnsembleKind,
         members: &[(&str, &str)],
     ) {
         let now = chrono::Utc::now();
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "kickoff".to_string(),
             spec_id: Some(spec_id.to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "kickoff".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({ "command": "printf ok", "success_condition": "exit_code_0" }),
             position: 1,
             created_at: now,
         })
         .unwrap();
 
-        let member_nodes: Vec<LoopNode> = members
+        let member_nodes: Vec<GraphNode> = members
             .iter()
             .enumerate()
-            .map(|(i, (node_id, platform))| LoopNode {
+            .map(|(i, (node_id, platform))| GraphNode {
                 id: node_id.to_string(),
                 spec_id: Some(spec_id.to_string()),
-                loop_id: None,
+                graph_id: None,
                 name: format!("member-{}", i + 1),
-                kind: LoopNodeKind::Agent,
+                kind: GraphNodeKind::Agent,
                 config: serde_json::json!({
                     "platform": platform,
                     "prompt_template": "ignored by the member's test script",
@@ -18307,12 +18379,12 @@ echo done
             })
             .collect();
 
-        let join_node = LoopNode {
+        let join_node = GraphNode {
             id: "join1".to_string(),
             spec_id: Some(spec_id.to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "join".to_string(),
-            kind: LoopNodeKind::Join,
+            kind: GraphNodeKind::Join,
             config: serde_json::json!({ "ensemble_id": "ens1" }),
             position: 50,
             created_at: now,
@@ -18320,67 +18392,67 @@ echo done
 
         let mut edges = Vec::new();
         for (node_id, _) in members {
-            edges.push(LoopEdge {
+            edges.push(GraphEdge {
                 id: format!("kickoff->{node_id}"),
                 spec_id: Some(spec_id.to_string()),
-                loop_id: None,
+                graph_id: None,
                 from_node: "kickoff".to_string(),
                 to_node: node_id.to_string(),
-                condition: LoopEdgeCondition::Always,
+                condition: GraphEdgeCondition::Always,
             });
-            edges.push(LoopEdge {
+            edges.push(GraphEdge {
                 id: format!("{node_id}->join1"),
                 spec_id: Some(spec_id.to_string()),
-                loop_id: None,
+                graph_id: None,
                 from_node: node_id.to_string(),
                 to_node: "join1".to_string(),
-                condition: LoopEdgeCondition::Always,
+                condition: GraphEdgeCondition::Always,
             });
         }
         for (i, (term, cond)) in [
-            ("done-pass", LoopEdgeCondition::Pass),
-            ("done-fail", LoopEdgeCondition::Fail),
+            ("done-pass", GraphEdgeCondition::Pass),
+            ("done-fail", GraphEdgeCondition::Fail),
         ]
         .into_iter()
         .enumerate()
         {
-            db.insert_loop_node(&LoopNode {
+            db.insert_graph_node(&GraphNode {
                 id: term.to_string(),
                 spec_id: Some(spec_id.to_string()),
-                loop_id: None,
+                graph_id: None,
                 name: term.to_string(),
-                kind: LoopNodeKind::Check,
+                kind: GraphNodeKind::Check,
                 config: serde_json::json!({ "command": "printf ok", "success_condition": "exit_code_0" }),
                 position: 100 + i as i64,
                 created_at: now,
             })
             .unwrap();
-            edges.push(LoopEdge {
+            edges.push(GraphEdge {
                 id: format!("join1->{term}"),
                 spec_id: Some(spec_id.to_string()),
-                loop_id: None,
+                graph_id: None,
                 from_node: "join1".to_string(),
                 to_node: term.to_string(),
                 condition: cond,
             });
         }
 
-        let ensemble = crate::domain::loops::Ensemble {
+        let ensemble = crate::domain::graphs::Ensemble {
             id: "ens1".to_string(),
             spec_id: Some(spec_id.to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "Switched Ensemble".to_string(),
             prompt_template: "ignored by the member's test script".to_string(),
             join_node_id: "join1".to_string(),
             entry_from_node: "kickoff".to_string(),
-            entry_condition: LoopEdgeCondition::Always,
+            entry_condition: GraphEdgeCondition::Always,
             min_pass: 1,
             straggler_timeout_minutes: Some(1),
             timeout_minutes: 5,
             on_pass_to: "done-pass".to_string(),
             on_fail_to: Some("done-fail".to_string()),
             kind,
-            round_robin_index: if kind == crate::domain::loops::EnsembleKind::RoundRobin {
+            round_robin_index: if kind == crate::domain::graphs::EnsembleKind::RoundRobin {
                 Some(0)
             } else {
                 None
@@ -18415,7 +18487,7 @@ echo done
     /// next one. The fallback member's pass becomes the ensemble's verdict.
     #[tokio::test]
     async fn cascade_falls_back_to_next_member_when_first_produces_no_verdict() {
-        let (dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
         let fake_home = setup_multi_cli_home(&[
             (
                 "m-crash",
@@ -18429,13 +18501,13 @@ echo done
         insert_kind_ensemble(
             &db,
             &spec_id,
-            crate::domain::loops::EnsembleKind::Cascade,
+            crate::domain::graphs::EnsembleKind::Cascade,
             &[("m-crash", "m-crash"), ("m-ok", "m-ok")],
         );
 
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
         drop(_home);
@@ -18446,7 +18518,7 @@ echo done
         // → no verdict → join fails (0/2).
         assert_eq!(
             join.status,
-            LoopRunStatus::Fail,
+            GraphRunStatus::Fail,
             "CM13: both members are unreported infra; join fails after retry exhaustion"
         );
         let out = join.output.as_ref().unwrap();
@@ -18472,7 +18544,7 @@ echo done
     /// side of the contract.
     #[tokio::test]
     async fn cascade_falls_through_unreported_member_then_exhausts_retries() {
-        let (dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
         let fake_home = setup_multi_cli_home(&[
             (
                 "m-noout",
@@ -18486,13 +18558,13 @@ echo done
         insert_kind_ensemble(
             &db,
             &spec_id,
-            crate::domain::loops::EnsembleKind::Cascade,
+            crate::domain::graphs::EnsembleKind::Cascade,
             &[("m-noout", "m-noout"), ("m-ok", "m-ok")],
         );
 
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
         drop(_home);
@@ -18503,7 +18575,7 @@ echo done
         // exhausts retries → no verdict → join fails (0/2).
         assert_eq!(
             join.status,
-            LoopRunStatus::Fail,
+            GraphRunStatus::Fail,
             "CM13: both members are unreported infra; join fails after retry exhaustion"
         );
         let out = join.output.as_ref().unwrap();
@@ -18525,7 +18597,7 @@ echo done
     /// `round_robin_index` advances each time and survives across runs.
     #[tokio::test]
     async fn round_robin_spreads_invocations_across_members_in_order() {
-        let (dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
         let fake_home = setup_multi_cli_home(&[
             (
                 "rr-a",
@@ -18543,12 +18615,12 @@ echo done
         insert_kind_ensemble(
             &db,
             &spec_id,
-            crate::domain::loops::EnsembleKind::RoundRobin,
+            crate::domain::graphs::EnsembleKind::RoundRobin,
             &[("rr-a", "rr-a"), ("rr-b", "rr-b"), ("rr-c", "rr-c")],
         );
 
         let _home = HomeGuard::set(fake_home.path());
-        // CM13: script-backed members never call loop_complete_node, so every
+        // CM13: script-backed members never call graph_complete_node, so every
         // member in the rotation is verdict-less. Each invocation walks all
         // three members (each exhausting its infra retries) and the join
         // fails — but the persisted rotation index must still advance by
@@ -18556,12 +18628,12 @@ echo done
         // of member verdicts.
         let expected = [0, 1, 2, 0];
         for (i, want_start) in expected.iter().enumerate() {
-            db.update_loop_spec_status(&spec_id, LoopSpecStatus::Pending, None, None)
+            db.update_graph_spec_status(&spec_id, GraphSpecStatus::Pending, None, None)
                 .unwrap();
-            db.update_loop_status(&loop_id, LoopStatus::Draft, None, None)
+            db.update_graph_status(&graph_id, GraphStatus::Draft, None, None)
                 .unwrap();
             engine
-                .run_loop(loop_id.clone(), None, None, None, None)
+                .run_graph(graph_id.clone(), None, None, None, None)
                 .await
                 .unwrap();
 
@@ -18570,7 +18642,7 @@ echo done
             assert_eq!(out["kind"], "round_robin");
             assert_eq!(
                 join.status,
-                LoopRunStatus::Fail,
+                GraphRunStatus::Fail,
                 "CM13: all members are unreported infra, so every invocation fails"
             );
             assert_eq!(
@@ -18600,7 +18672,7 @@ echo done
     /// so it too is verdict-less and the join fails after trying both.
     #[tokio::test]
     async fn round_robin_falls_through_to_next_member_when_first_has_no_verdict() {
-        let (dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
         let fake_home = setup_multi_cli_home(&[
             (
                 "rr-crash",
@@ -18614,13 +18686,13 @@ echo done
         insert_kind_ensemble(
             &db,
             &spec_id,
-            crate::domain::loops::EnsembleKind::RoundRobin,
+            crate::domain::graphs::EnsembleKind::RoundRobin,
             &[("rr-crash", "rr-crash"), ("rr-ok", "rr-ok")],
         );
 
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
         drop(_home);
@@ -18630,7 +18702,7 @@ echo done
         // verdict-less and the join fails after the fallthrough.
         assert_eq!(
             join.status,
-            LoopRunStatus::Fail,
+            GraphRunStatus::Fail,
             "CM13: both members are unreported infra; join fails after fallthrough"
         );
         let out = join.output.as_ref().unwrap();
@@ -18651,11 +18723,11 @@ echo done
 
     /// CM3: a round-robin member that returns a real verdict stops the walk.
     /// CM13: an exit-0 bare script is NOT a real verdict (it never called
-    /// `loop_complete_node`), so the `no_output` member is verdict-less and
+    /// `graph_complete_node`), so the `no_output` member is verdict-less and
     /// the walk falls through to the next member instead of stopping.
     #[tokio::test]
     async fn round_robin_stops_on_negative_verdict_without_trying_next_member() {
-        let (dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
         let fake_home = setup_multi_cli_home(&[
             (
                 "rr-noout",
@@ -18669,13 +18741,13 @@ echo done
         insert_kind_ensemble(
             &db,
             &spec_id,
-            crate::domain::loops::EnsembleKind::RoundRobin,
+            crate::domain::graphs::EnsembleKind::RoundRobin,
             &[("rr-noout", "rr-noout"), ("rr-ok", "rr-ok")],
         );
 
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
         drop(_home);
@@ -18685,7 +18757,7 @@ echo done
         // walk falls through to rr-ok — which is also unreported infra.
         assert_eq!(
             join.status,
-            LoopRunStatus::Fail,
+            GraphRunStatus::Fail,
             "CM13: both members are verdict-less; the ensemble fails after fallthrough"
         );
         let out = join.output.as_ref().unwrap();
@@ -18701,7 +18773,7 @@ echo done
     /// fails, in the same spirit as cascade's "all N members infra-crashed".
     #[tokio::test]
     async fn round_robin_fails_with_all_members_message_when_none_produce_a_verdict() {
-        let (dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
         let fake_home = setup_multi_cli_home(&[
             ("rr-c1", &write_member_script(dir.path(), "c1.sh", "exit 1")),
             ("rr-c2", &write_member_script(dir.path(), "c2.sh", "exit 1")),
@@ -18710,19 +18782,19 @@ echo done
         insert_kind_ensemble(
             &db,
             &spec_id,
-            crate::domain::loops::EnsembleKind::RoundRobin,
+            crate::domain::graphs::EnsembleKind::RoundRobin,
             &[("rr-c1", "rr-c1"), ("rr-c2", "rr-c2"), ("rr-c3", "rr-c3")],
         );
 
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
         drop(_home);
 
         let join = join_run(&db, &spec_id, "join1");
-        assert_eq!(join.status, LoopRunStatus::Fail);
+        assert_eq!(join.status, GraphRunStatus::Fail);
         let out = join.output.as_ref().unwrap();
         assert_eq!(out["kind"], "round_robin");
         assert_eq!(out["error"], "all members infra-crashed");
@@ -18743,7 +18815,7 @@ echo done
     /// starts one past where this one started, not past every skipped member.
     #[tokio::test]
     async fn round_robin_rotation_index_advances_by_one_not_by_members_skipped() {
-        let (dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
         let fake_home = setup_multi_cli_home(&[
             ("rr-x1", &write_member_script(dir.path(), "x1.sh", "exit 1")),
             ("rr-x2", &write_member_script(dir.path(), "x2.sh", "exit 1")),
@@ -18755,13 +18827,13 @@ echo done
         insert_kind_ensemble(
             &db,
             &spec_id,
-            crate::domain::loops::EnsembleKind::RoundRobin,
+            crate::domain::graphs::EnsembleKind::RoundRobin,
             &[("rr-x1", "rr-x1"), ("rr-x2", "rr-x2"), ("rr-ok", "rr-ok")],
         );
 
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
         drop(_home);
@@ -18770,7 +18842,7 @@ echo done
         // CM13: rr-ok never self-reports, so all three members are
         // verdict-less and the join fails — but the walk still tried all
         // three in order before giving up.
-        assert_eq!(join.status, LoopRunStatus::Fail);
+        assert_eq!(join.status, GraphRunStatus::Fail);
         let out = join.output.as_ref().unwrap();
         assert_eq!(
             out["members_tried"], 3,
@@ -18789,7 +18861,7 @@ echo done
     /// rotation, a no-verdict there continues at index 0.
     #[tokio::test]
     async fn round_robin_fallthrough_wraps_around_to_the_first_member() {
-        let (dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
         let fake_home = setup_multi_cli_home(&[
             (
                 "rr-ok",
@@ -18807,7 +18879,7 @@ echo done
         insert_kind_ensemble(
             &db,
             &spec_id,
-            crate::domain::loops::EnsembleKind::RoundRobin,
+            crate::domain::graphs::EnsembleKind::RoundRobin,
             &[
                 ("rr-ok", "rr-ok"),
                 ("rr-mid", "rr-mid"),
@@ -18820,7 +18892,7 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
         drop(_home);
@@ -18829,7 +18901,7 @@ echo done
         // CM13: every member is script-backed and unreported, so the walk
         // tries all three starting from the last and the join fails — but the
         // wrap itself still happened (rr-ok at index 0 ran).
-        assert_eq!(join.status, LoopRunStatus::Fail);
+        assert_eq!(join.status, GraphRunStatus::Fail);
         let out = join.output.as_ref().unwrap();
         assert_eq!(out["members_tried"], 3);
 
@@ -18861,13 +18933,13 @@ echo done
         // time, routing back to `kickoff`, which re-enters the ensemble; on
         // the second visit it passes and the spec completes. Between the two
         // dispatches the member set is swapped exactly the way
-        // `loop_update_ensemble` swaps it (the `ensemble_members` rows plus
+        // `graph_update_ensemble` swaps it (the `ensemble_members` rows plus
         // each member node's config). Dispatch 1 must record the launch-time
         // platform and dispatch 2 the replaced one — which only holds if the
         // engine re-reads the ensemble from the database per dispatch instead
-        // of from the launch snapshot. Two separate `run_loop` calls would not
+        // of from the launch snapshot. Two separate `run_graph` calls would not
         // prove this: each call rebuilds its snapshot from the current rows.
-        let (dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
         // Two members + two "replacement" platforms, all backed by a lingering
         // script so the VerdictFiler can file a Pass before the process exits.
         let s = write_member_script(dir.path(), "m.sh", "sleep 1");
@@ -18880,14 +18952,14 @@ echo done
         insert_kind_ensemble(
             &db,
             &spec_id,
-            crate::domain::loops::EnsembleKind::RoundRobin,
+            crate::domain::graphs::EnsembleKind::RoundRobin,
             &[("m0", "cli-m0a"), ("m1", "cli-m1a")],
         );
         // Turn `done-pass` into a fail-once gate and wire its Fail edge back to
         // `kickoff` so a second ensemble dispatch happens in the same run. The
         // 0.5s sleep widens the window for the member swap between dispatches.
         let gate = dir.path().join("gate.cnt");
-        db.update_loop_node_details(
+        db.update_graph_node_details(
             "done-pass",
             None,
             None,
@@ -18902,13 +18974,13 @@ echo done
             None,
         )
         .unwrap();
-        db.insert_loop_edge(&LoopEdge {
+        db.insert_graph_edge(&GraphEdge {
             id: "done-pass->kickoff".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             from_node: "done-pass".to_string(),
             to_node: "kickoff".to_string(),
-            condition: LoopEdgeCondition::Fail,
+            condition: GraphEdgeCondition::Fail,
         })
         .unwrap();
 
@@ -18921,16 +18993,16 @@ echo done
 
         let engine = std::sync::Arc::new(engine);
         let engine2 = std::sync::Arc::clone(&engine);
-        let loop_id2 = loop_id.clone();
+        let graph_id2 = graph_id.clone();
         let handle =
-            tokio::spawn(async move { engine2.run_loop(loop_id2, None, None, None, None).await });
+            tokio::spawn(async move { engine2.run_graph(graph_id2, None, None, None, None).await });
 
         // Wait for the first ensemble dispatch to land its join row, then swap
-        // the member set — this is the `loop_update_ensemble` between the two
+        // the member set — this is the `graph_update_ensemble` between the two
         // dispatches of the same ensemble step.
         loop {
             let joins = db
-                .list_loop_runs_for_spec(&spec_id)
+                .list_graph_runs_for_spec(&spec_id)
                 .unwrap()
                 .iter()
                 .filter(|r| r.node_id == "join1")
@@ -18943,7 +19015,7 @@ echo done
         for (nid, plat) in [("m0", "cli-m0b"), ("m1", "cli-m1b")] {
             db.update_ensemble_member("ens1", nid, plat, None, None)
                 .unwrap();
-            db.update_loop_node_details(
+            db.update_graph_node_details(
                 nid,
                 None,
                 None,
@@ -18963,11 +19035,11 @@ echo done
         drop(_filer);
 
         assert_eq!(
-            db.get_loop_spec(&spec_id).unwrap().unwrap().status,
-            LoopSpecStatus::Completed
+            db.get_graph_spec(&spec_id).unwrap().unwrap().status,
+            GraphSpecStatus::Completed
         );
         let joins: Vec<_> = db
-            .list_loop_runs_for_spec(&spec_id)
+            .list_graph_runs_for_spec(&spec_id)
             .unwrap()
             .into_iter()
             .filter(|r| r.node_id == "join1")
@@ -18994,7 +19066,7 @@ echo done
     /// runs and the join emits the `quorum` shape against `min_pass`.
     #[tokio::test]
     async fn parallel_ensemble_join_output_unchanged() {
-        let (dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
         let fake_home = setup_multi_cli_home(&[
             ("p-a", &write_member_script(dir.path(), "a.sh", "printf ok")),
             ("p-b", &write_member_script(dir.path(), "b.sh", "printf ok")),
@@ -19002,13 +19074,13 @@ echo done
         insert_kind_ensemble(
             &db,
             &spec_id,
-            crate::domain::loops::EnsembleKind::Parallel,
+            crate::domain::graphs::EnsembleKind::Parallel,
             &[("p-a", "p-a"), ("p-b", "p-b")],
         );
 
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
         drop(_home);
@@ -19016,7 +19088,7 @@ echo done
         let join = join_run(&db, &spec_id, "join1");
         // CM13: script-backed members never self-report, so both are
         // unreported infra and the join fails with 0 passed.
-        assert_eq!(join.status, LoopRunStatus::Fail);
+        assert_eq!(join.status, GraphRunStatus::Fail);
         let out = join.output.as_ref().unwrap();
         assert_eq!(
             out["kind"], "quorum",
@@ -19033,7 +19105,7 @@ echo done
     /// (Two members because ensemble fan-out needs more than one entry edge.)
     #[tokio::test]
     async fn ensemble_member_infra_crash_then_succeeds_on_retry_join_passes() {
-        let (dir, db, engine, _loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, _graph_id, spec_id) = graph_fixture().unwrap();
         let counter = dir.path().join("flap.counter");
         // Crashes (exit 1) on the first attempt, passes (exit 0) on the retry.
         let flap = write_member_script(
@@ -19062,7 +19134,7 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_loop("wf-test".to_string(), None, None, None, None)
+            .run_graph("wf-test".to_string(), None, None, None, None)
             .await
             .unwrap();
         drop(_home);
@@ -19071,7 +19143,7 @@ echo done
         // CM13: neither member self-reports, so both exhaust retries and fail.
         assert_eq!(
             join.status,
-            LoopRunStatus::Fail,
+            GraphRunStatus::Fail,
             "CM13: unreported runs are infra; both members exhaust retries"
         );
         assert_eq!(join.output.as_ref().unwrap()["passed"], 0);
@@ -19080,7 +19152,7 @@ echo done
         // CM13: initial + 2 retries = 3 runs, all infra (none self-report).
         assert_eq!(runs.len(), 3, "CM13: initial + 2 retries = 3 run rows");
         for run in &runs {
-            assert_eq!(run.status, LoopRunStatus::Fail);
+            assert_eq!(run.status, GraphRunStatus::Fail);
         }
         assert!(
             runs.iter()
@@ -19102,7 +19174,7 @@ echo done
     /// second, healthy member, the join arithmetic is 1/2 → Fail.
     #[tokio::test]
     async fn ensemble_member_infra_retries_exhausted_counts_as_member_fail() {
-        let (dir, db, engine, _loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, _graph_id, spec_id) = graph_fixture().unwrap();
         let fake_home = setup_multi_cli_home(&[
             (
                 "member-dead",
@@ -19124,7 +19196,7 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_loop("wf-test".to_string(), None, None, None, None)
+            .run_graph("wf-test".to_string(), None, None, None, None)
             .await
             .unwrap();
         drop(_home);
@@ -19132,7 +19204,7 @@ echo done
         let join = join_run(&db, &spec_id, "join1");
         assert_eq!(
             join.status,
-            LoopRunStatus::Fail,
+            GraphRunStatus::Fail,
             "CM13: both members are unreported infra -> 0/2 -> join fails"
         );
         assert_eq!(join.output.as_ref().unwrap()["passed"], 0);
@@ -19145,7 +19217,7 @@ echo done
             3,
             "two retries after the first crash = three rows"
         );
-        assert!(dead.iter().all(|r| r.status == LoopRunStatus::Fail));
+        assert!(dead.iter().all(|r| r.status == GraphRunStatus::Fail));
         assert_eq!(
             dead[0].output.as_ref().unwrap()["infra_crash"],
             serde_json::Value::Bool(true)
@@ -19168,7 +19240,7 @@ echo done
     /// reproduce the identical empty result.
     #[tokio::test]
     async fn ensemble_member_empty_output_zero_exit_counts_as_fail_not_pass() {
-        let (dir, db, engine, _loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, _graph_id, spec_id) = graph_fixture().unwrap();
         let fake_home = setup_multi_cli_home(&[
             (
                 "member-no-output",
@@ -19194,7 +19266,7 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_loop("wf-test".to_string(), None, None, None, None)
+            .run_graph("wf-test".to_string(), None, None, None, None)
             .await
             .unwrap();
         drop(_home);
@@ -19202,7 +19274,7 @@ echo done
         let join = join_run(&db, &spec_id, "join1");
         assert_eq!(
             join.status,
-            LoopRunStatus::Fail,
+            GraphRunStatus::Fail,
             "CM13: both members are unreported infra -> 0/2 -> join fails"
         );
         assert_eq!(join.output.as_ref().unwrap()["passed"], 0);
@@ -19215,7 +19287,7 @@ echo done
             3,
             "CM13: unreported infra runs are retried; initial + 2 retries = 3 rows"
         );
-        assert_eq!(runs[0].status, LoopRunStatus::Fail);
+        assert_eq!(runs[0].status, GraphRunStatus::Fail);
         assert_eq!(
             runs[0].output.as_ref().unwrap()["no_output"],
             serde_json::Value::Bool(true)
@@ -19239,7 +19311,7 @@ echo done
     /// (never infra-retried).
     #[tokio::test]
     async fn ensemble_member_require_report_true_without_self_report_counts_as_fail() {
-        let (dir, db, engine, _loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, _graph_id, spec_id) = graph_fixture().unwrap();
         let fake_home = setup_multi_cli_home(&[
             (
                 "member-silent-1",
@@ -19264,7 +19336,7 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_loop("wf-test".to_string(), None, None, None, None)
+            .run_graph("wf-test".to_string(), None, None, None, None)
             .await
             .unwrap();
         drop(_home);
@@ -19272,7 +19344,7 @@ echo done
         let join = join_run(&db, &spec_id, "join1");
         assert_eq!(
             join.status,
-            LoopRunStatus::Fail,
+            GraphRunStatus::Fail,
             "require_report members that exit 0 with real stdout but never self-report must fail the join"
         );
         assert_eq!(join.output.as_ref().unwrap()["passed"], 0);
@@ -19286,7 +19358,7 @@ echo done
             "CM13: unreported infra runs are retried; initial + 2 retries = 3 rows"
         );
         for run in &runs {
-            assert_eq!(run.status, LoopRunStatus::Fail);
+            assert_eq!(run.status, GraphRunStatus::Fail);
             assert_eq!(
                 run.output.as_ref().unwrap()["unreported"],
                 serde_json::Value::Bool(true)
@@ -19317,13 +19389,13 @@ echo done
     /// Chosen/documented behavior: fail-deterministically-on-window-expiry.
     /// The members here have infra retry enabled but each sleeps well past the
     /// zero-length straggler window, so the window always expires first — the
-    /// retry loop is dropped mid-attempt and both members resolve to Fail
+    /// retry graph is dropped mid-attempt and both members resolve to Fail
     /// (0/2), exactly as a lone straggler would, rather than being retried out
     /// past the window or hanging the join. (Sleeping members make the kill
     /// deterministic; a fast-exiting member could race a zero-length window.)
     #[tokio::test]
     async fn ensemble_member_straggler_window_bounds_the_retry_sequence() {
-        let (dir, db, engine, _loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, _graph_id, spec_id) = graph_fixture().unwrap();
         let marker = dir.path().join("retried.marker");
         // Would crash (exit 1) after a 3s sleep and then, on a retry, create a
         // marker — but the zero-length straggler window kills it long before
@@ -19351,7 +19423,7 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_loop("wf-test".to_string(), None, None, None, None)
+            .run_graph("wf-test".to_string(), None, None, None, None)
             .await
             .unwrap();
         drop(_home);
@@ -19359,7 +19431,7 @@ echo done
         let join = join_run(&db, &spec_id, "join1");
         assert_eq!(
             join.status,
-            LoopRunStatus::Fail,
+            GraphRunStatus::Fail,
             "straggler window expired before any member resolved -> 0/2 -> join fails"
         );
         assert_eq!(join.output.as_ref().unwrap()["passed"], 0);
@@ -19368,7 +19440,7 @@ echo done
         assert!(
             member_runs(&db, &spec_id, "m-flap")
                 .iter()
-                .all(|r| r.status != LoopRunStatus::Running),
+                .all(|r| r.status != GraphRunStatus::Running),
             "the straggler-timed-out member must be resolved, not abandoned Running"
         );
 
@@ -19389,15 +19461,15 @@ echo done
     async fn ensemble_runs_end_to_end_through_a_queue_dispatch() {
         let dir = tempdir().unwrap();
         let db = Arc::new(Database::new(&dir.path().join("test.db")).unwrap());
-        let lp = crate::domain::loops::Loop {
+        let lp = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
             infra_node_id: None,
             id: "wf-queue-ensemble".to_string(),
-            name: "Loop".to_string(),
+            name: "Graph".to_string(),
             description: None,
             workdir: dir.path().to_string_lossy().to_string(),
-            status: LoopStatus::Draft,
+            status: GraphStatus::Draft,
             trigger: None,
             created_at: chrono::Utc::now(),
             started_at: None,
@@ -19408,11 +19480,11 @@ echo done
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
         };
-        db.insert_loop(&lp).unwrap();
-        let engine = LoopEngine::new(Arc::clone(&db), Arc::new(DefaultNotificationService));
+        db.insert_graph(&lp).unwrap();
+        let engine = GraphEngine::new(Arc::clone(&db), Arc::new(DefaultNotificationService));
 
         let spec = standalone_spec("queue-ensemble-spec", 1);
-        db.insert_loop_spec(&spec).unwrap();
+        db.insert_graph_spec(&spec).unwrap();
         insert_queue_with_members(&db, "queue-1", &[&spec.id]);
 
         let fake_home = setup_multi_cli_home(&[
@@ -19425,7 +19497,7 @@ echo done
                 &write_member_script(dir.path(), "b.sh", "printf ok"),
             ),
         ]);
-        db.insert_loop_node(&touch_marker_node(
+        db.insert_graph_node(&touch_marker_node(
             "on-pass",
             &spec.id,
             &dir.path().join("pass.marker"),
@@ -19447,15 +19519,15 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_loop(lp.id.clone(), Some("queue-1".to_string()), None, None, None)
+            .run_graph(lp.id.clone(), Some("queue-1".to_string()), None, None, None)
             .await
             .unwrap();
         drop(_home);
 
-        let lp = db.get_loop(&lp.id).unwrap().unwrap();
+        let lp = db.get_graph(&lp.id).unwrap().unwrap();
         // CM13: script-backed members never self-report, so the ensemble
         // join fails and the spec fails with it.
-        assert_eq!(lp.status, LoopStatus::Failed);
+        assert_eq!(lp.status, GraphStatus::Failed);
         assert_eq!(
             db.queue_next_pending_spec_id("queue-1").unwrap(),
             None,
@@ -19470,12 +19542,12 @@ echo done
     #[test]
     fn infra_crash_classification_correct() {
         let now = chrono::Utc::now();
-        let run = LoopNodeRun {
+        let run = GraphNodeRun {
             id: "run1".to_string(),
-            loop_id: "loop1".to_string(),
+            graph_id: "loop1".to_string(),
             spec_id: "spec1".to_string(),
             node_id: "node1".to_string(),
-            status: LoopRunStatus::Running,
+            status: GraphRunStatus::Running,
             input: None,
             output: None,
             started_at: now,
@@ -19488,47 +19560,47 @@ echo done
             executed_model: None,
         };
 
-        let agent_node = LoopNode {
+        let agent_node = GraphNode {
             id: "node1".to_string(),
             spec_id: Some("spec1".to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "test-agent".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({}),
             position: 1,
             created_at: chrono::Utc::now(),
         };
 
         let execution = NodeExecution {
-            status: LoopRunStatus::Fail,
+            status: GraphRunStatus::Fail,
             output: serde_json::json!({}),
             summary: "crashed".to_string(),
         };
 
         // Scenario 1: agent node, failed, not self-reported (status=Running),
         // within threshold → should be classified as infra crash
-        let self_reported = run.status != LoopRunStatus::Running;
+        let self_reported = run.status != GraphRunStatus::Running;
         let duration_secs = (chrono::Utc::now() - run.started_at).num_seconds();
         let is_crash = !self_reported
-            && agent_node.kind == LoopNodeKind::Agent
-            && execution.status == LoopRunStatus::Fail
+            && agent_node.kind == GraphNodeKind::Agent
+            && execution.status == GraphRunStatus::Fail
             && duration_secs < 60;
         assert!(is_crash, "should classify as infra crash");
 
         // Scenario 2: check node, same conditions → should NOT be classified
-        let check_node = LoopNode {
+        let check_node = GraphNode {
             id: "node2".to_string(),
             spec_id: Some("spec1".to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "test-check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({}),
             position: 1,
             created_at: chrono::Utc::now(),
         };
         let is_crash_check = !self_reported
-            && check_node.kind == LoopNodeKind::Agent
-            && execution.status == LoopRunStatus::Fail
+            && check_node.kind == GraphNodeKind::Agent
+            && execution.status == GraphRunStatus::Fail
             && duration_secs < 60;
         assert!(
             !is_crash_check,
@@ -19536,14 +19608,14 @@ echo done
         );
 
         // Scenario 3: agent node, self-reported fail → should NOT be classified
-        let run_self_reported = LoopNodeRun {
-            status: LoopRunStatus::Fail,
+        let run_self_reported = GraphNodeRun {
+            status: GraphRunStatus::Fail,
             ..run.clone()
         };
-        let self_reported_bool = run_self_reported.status != LoopRunStatus::Running;
+        let self_reported_bool = run_self_reported.status != GraphRunStatus::Running;
         let is_crash_reported = !self_reported_bool
-            && agent_node.kind == LoopNodeKind::Agent
-            && execution.status == LoopRunStatus::Fail
+            && agent_node.kind == GraphNodeKind::Agent
+            && execution.status == GraphRunStatus::Fail
             && duration_secs < 60;
         assert!(
             !is_crash_reported,
@@ -19551,14 +19623,14 @@ echo done
         );
 
         // Scenario 4: agent node, failed, slow (> 60s) → should NOT be classified
-        let old_run = LoopNodeRun {
+        let old_run = GraphNodeRun {
             started_at: now - chrono::Duration::seconds(90),
             ..run
         };
         let slow_duration = (chrono::Utc::now() - old_run.started_at).num_seconds();
         let is_crash_slow = !self_reported
-            && agent_node.kind == LoopNodeKind::Agent
-            && execution.status == LoopRunStatus::Fail
+            && agent_node.kind == GraphNodeKind::Agent
+            && execution.status == GraphRunStatus::Fail
             && slow_duration < 60;
         assert!(
             !is_crash_slow,
@@ -19591,12 +19663,12 @@ echo done
     /// Read infra config returns defaults when not specified.
     #[test]
     fn read_infra_config_applies_defaults() {
-        let node = LoopNode {
+        let node = GraphNode {
             id: "n1".to_string(),
             spec_id: None,
-            loop_id: None,
+            graph_id: None,
             name: "test".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({}),
             position: 1,
             created_at: chrono::Utc::now(),
@@ -19611,12 +19683,12 @@ echo done
     /// Read infra config respects overrides in node config.
     #[test]
     fn read_infra_config_respects_overrides() {
-        let node = LoopNode {
+        let node = GraphNode {
             id: "n1".to_string(),
             spec_id: None,
-            loop_id: None,
+            graph_id: None,
             name: "test".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({
                 "infra_retry_limit": 5,
                 "infra_crash_max_seconds": 120,
@@ -19635,14 +19707,14 @@ echo done
     /// B19: check node nonzero exit is NOT retried as infra crash.
     #[tokio::test]
     async fn infra_crash_check_node_nonzero_exit_not_retried() {
-        let (_dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (_dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-check".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "exit 1",
                 "success_condition": "exit_code_0"
@@ -19652,25 +19724,25 @@ echo done
         })
         .unwrap();
 
-        db.insert_loop_edge(&LoopEdge {
+        db.insert_graph_edge(&GraphEdge {
             id: "edge-self".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             from_node: "node-check".to_string(),
             to_node: "node-check".to_string(),
-            condition: LoopEdgeCondition::Fail,
+            condition: GraphEdgeCondition::Fail,
         })
         .unwrap();
 
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
 
-        let spec = db.get_loop_spec(&spec_id).unwrap().unwrap();
-        let runs = db.list_loop_runs_for_spec(&spec_id).unwrap();
+        let spec = db.get_graph_spec(&spec_id).unwrap().unwrap();
+        let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
 
-        assert_eq!(spec.status, LoopSpecStatus::Failed);
+        assert_eq!(spec.status, GraphSpecStatus::Failed);
         assert_eq!(
             runs.len(),
             DEFAULT_MAX_ITERATIONS_PER_NODE,
@@ -19679,18 +19751,18 @@ echo done
     }
 
     /// CM2 (renamed from B19): infra crash retry exhausted falls back to fail
-    /// edge when no `Break` edge exists — the additive, non-breaking path.
+    /// edge when no `Error` edge exists — the additive, non-breaking path.
     #[tokio::test]
-    async fn infra_crash_retry_exhausted_falls_back_to_fail_when_no_break() {
+    async fn infra_crash_retry_exhausted_falls_back_to_fail_when_no_error() {
         let fake_home = setup_test_cli_home();
-        let (_dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (_dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-implement".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "implement".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({
                 // test-cli = /bin/sh -c <prompt>: always crashes fast with
                 // no self-report — the infra-crash signature.
@@ -19705,12 +19777,12 @@ echo done
         })
         .unwrap();
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-fix".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "fix".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "printf FIXED",
                 "success_condition": "exit_code_0"
@@ -19720,27 +19792,27 @@ echo done
         })
         .unwrap();
 
-        db.insert_loop_edge(&LoopEdge {
+        db.insert_graph_edge(&GraphEdge {
             id: "edge-fail".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             from_node: "node-implement".to_string(),
             to_node: "node-fix".to_string(),
-            condition: LoopEdgeCondition::Fail,
+            condition: GraphEdgeCondition::Fail,
         })
         .unwrap();
 
         let _home = HomeGuard::set(fake_home.path());
         let result = engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await;
         drop(_home);
         result.unwrap();
 
-        let spec = db.get_loop_spec(&spec_id).unwrap().unwrap();
-        let runs = db.list_loop_runs_for_spec(&spec_id).unwrap();
+        let spec = db.get_graph_spec(&spec_id).unwrap().unwrap();
+        let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
 
-        assert_eq!(spec.status, LoopSpecStatus::Completed);
+        assert_eq!(spec.status, GraphSpecStatus::Completed);
 
         let implement_runs: Vec<_> = runs
             .iter()
@@ -19764,21 +19836,21 @@ echo done
             "one implement attempt should carry the infra_crash marker"
         );
         assert_eq!(fix_runs.len(), 1, "fix should run once");
-        assert_eq!(fix_runs[0].status, LoopRunStatus::Pass);
+        assert_eq!(fix_runs[0].status, GraphRunStatus::Pass);
     }
 
-    /// CM2: infra crash routes to `Break` edge when present, not `Fail`.
+    /// CM2: infra crash routes to `Error` edge when present, not `Fail`.
     #[tokio::test]
-    async fn infra_crash_routes_to_break_edge_when_present() {
+    async fn infra_crash_routes_to_error_edge_when_present() {
         let fake_home = setup_test_cli_home();
-        let (_dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (_dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-implement".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "implement".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({
                 "platform": "test-cli",
                 "prompt_template": "exit 1",
@@ -19791,12 +19863,12 @@ echo done
         })
         .unwrap();
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-resilience".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "resilience".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "printf RESILIENCE",
                 "success_condition": "exit_code_0"
@@ -19806,25 +19878,25 @@ echo done
         })
         .unwrap();
 
-        // Break edge to resilience node (should be taken on infra crash).
-        db.insert_loop_edge(&LoopEdge {
-            id: "edge-break".to_string(),
+        // Error edge to resilience node (should be taken on infra crash).
+        db.insert_graph_edge(&GraphEdge {
+            id: "edge-error".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             from_node: "node-implement".to_string(),
             to_node: "node-resilience".to_string(),
-            condition: LoopEdgeCondition::Break,
+            condition: GraphEdgeCondition::Error,
         })
         .unwrap();
 
         let _home = HomeGuard::set(fake_home.path());
         let result = engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await;
         drop(_home);
         result.unwrap();
 
-        let runs = db.list_loop_runs_for_spec(&spec_id).unwrap();
+        let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
 
         let implement_runs: Vec<_> = runs
             .iter()
@@ -19849,22 +19921,22 @@ echo done
         assert_eq!(
             resilience_runs.len(),
             1,
-            "resilience node should run (Break edge taken)"
+            "resilience node should run (Error edge taken)"
         );
     }
 
-    /// CM2: `Break` edge does not fire on a genuine fail (agent said no).
+    /// CM2: `Error` edge does not fire on a genuine fail (agent said no).
     #[tokio::test]
-    async fn break_edge_does_not_fire_on_genuine_fail() {
-        let (_dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+    async fn error_edge_does_not_fire_on_genuine_fail() {
+        let (_dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
 
         // An agent that reports fail (not an infra crash).
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-reviewer".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "reviewer".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "exit 1",
                 "success_condition": "exit_code_0"
@@ -19874,12 +19946,12 @@ echo done
         })
         .unwrap();
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-resilience".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "resilience".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "printf RESILIENCE",
                 "success_condition": "exit_code_0"
@@ -19889,12 +19961,12 @@ echo done
         })
         .unwrap();
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-fail-target".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "fail-target".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "printf FAIL_TARGET",
                 "success_condition": "exit_code_0"
@@ -19904,34 +19976,34 @@ echo done
         })
         .unwrap();
 
-        // Break edge to resilience (should NOT be taken on genuine fail).
-        db.insert_loop_edge(&LoopEdge {
-            id: "edge-break".to_string(),
+        // Error edge to resilience (should NOT be taken on genuine fail).
+        db.insert_graph_edge(&GraphEdge {
+            id: "edge-error".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             from_node: "node-reviewer".to_string(),
             to_node: "node-resilience".to_string(),
-            condition: LoopEdgeCondition::Break,
+            condition: GraphEdgeCondition::Error,
         })
         .unwrap();
 
         // Fail edge to fail-target (SHOULD be taken on genuine fail).
-        db.insert_loop_edge(&LoopEdge {
+        db.insert_graph_edge(&GraphEdge {
             id: "edge-fail".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             from_node: "node-reviewer".to_string(),
             to_node: "node-fail-target".to_string(),
-            condition: LoopEdgeCondition::Fail,
+            condition: GraphEdgeCondition::Fail,
         })
         .unwrap();
 
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
 
-        let runs = db.list_loop_runs_for_spec(&spec_id).unwrap();
+        let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
 
         let resilience_runs: Vec<_> = runs
             .iter()
@@ -19945,7 +20017,7 @@ echo done
         assert_eq!(
             resilience_runs.len(),
             0,
-            "resilience should NOT run (Break edge not taken on genuine fail)"
+            "resilience should NOT run (Error edge not taken on genuine fail)"
         );
         assert!(
             !fail_target_runs.is_empty(),
@@ -19958,13 +20030,13 @@ echo done
     /// the run history shows both attempts with infra markers.
     #[tokio::test]
     async fn infra_crash_then_success_retries_same_node_in_place() {
-        let (dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
 
         // A fake CLI binary that ignores the rendered prompt entirely: it
         // fails fast on the first invocation and succeeds on the second
         // (marker file tracks invocations). Registered as its own platform
         // in a fixture canopy config, since node prompts are wrapped in a
-        // [LOOP CONTEXT] preamble that a plain `sh -c` cannot execute.
+        // [GRAPH CONTEXT] preamble that a plain `sh -c` cannot execute.
         let marker = dir.path().join("infra-marker");
         let script = dir.path().join("flaky-cli");
         std::fs::write(
@@ -20008,12 +20080,12 @@ echo done
         };
         config.save(&canopy_dir).unwrap();
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-flaky".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "flaky".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({
                 "platform": "flaky-cli",
                 "prompt_template": "ignored",
@@ -20028,21 +20100,21 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         let result = engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await;
         drop(_home);
         result.unwrap();
 
-        let spec = db.get_loop_spec(&spec_id).unwrap().unwrap();
+        let spec = db.get_graph_spec(&spec_id).unwrap().unwrap();
         // CM13: the second run (exit 0, stdout "ok") never self-reported,
         // so it is also infra. Retries exhaust and the spec fails.
         assert_eq!(
             spec.status,
-            LoopSpecStatus::Failed,
+            GraphSpecStatus::Failed,
             "CM13: all runs are unreported infra; retries exhaust and spec fails"
         );
 
-        let runs = db.list_loop_runs_for_spec(&spec_id).unwrap();
+        let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
         let flaky_runs: Vec<_> = runs.iter().filter(|r| r.node_id == "node-flaky").collect();
         assert_eq!(
             flaky_runs.len(),
@@ -20054,7 +20126,7 @@ echo done
         // The first 2 carry infra_crash (retried by begin_infra_retry).
         // The last one settled after retry exhaustion — carries unreported.
         for run in &flaky_runs {
-            assert_eq!(run.status, LoopRunStatus::Fail);
+            assert_eq!(run.status, GraphRunStatus::Fail);
         }
         assert!(
             flaky_runs
@@ -20083,13 +20155,13 @@ echo done
     }
 
     /// CM2 regression: an agent that infra-crashes once and then *recovers*
-    /// on the in-place retry must follow its `Pass` edge — the `Break` edge
+    /// on the in-place retry must follow its `Pass` edge — the `Error` edge
     /// (present here, as default pre-wiring would add it) must NOT fire just
     /// because an earlier attempt crashed. Routing keys off the settled
     /// attempt, not "did any attempt crash".
     #[tokio::test]
-    async fn recovered_infra_retry_takes_pass_edge_not_break_edge() {
-        let (dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+    async fn recovered_infra_retry_takes_pass_edge_not_error_edge() {
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
 
         // Fails fast on the first invocation, succeeds on the second.
         let marker = dir.path().join("recover-marker");
@@ -20135,12 +20207,12 @@ echo done
         };
         config.save(&canopy_dir).unwrap();
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-flaky".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "flaky".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({
                 "platform": "flaky-cli",
                 "prompt_template": "ignored",
@@ -20152,12 +20224,12 @@ echo done
             created_at: chrono::Utc::now(),
         })
         .unwrap();
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-after".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "after".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "printf AFTER",
                 "success_condition": "exit_code_0"
@@ -20166,12 +20238,12 @@ echo done
             created_at: chrono::Utc::now(),
         })
         .unwrap();
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-infra".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "infra".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "printf INFRA",
                 "success_condition": "exit_code_0"
@@ -20181,33 +20253,33 @@ echo done
         })
         .unwrap();
 
-        db.insert_loop_edge(&LoopEdge {
+        db.insert_graph_edge(&GraphEdge {
             id: "edge-pass".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             from_node: "node-flaky".to_string(),
             to_node: "node-after".to_string(),
-            condition: LoopEdgeCondition::Pass,
+            condition: GraphEdgeCondition::Pass,
         })
         .unwrap();
-        db.insert_loop_edge(&LoopEdge {
-            id: "edge-break".to_string(),
+        db.insert_graph_edge(&GraphEdge {
+            id: "edge-error".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             from_node: "node-flaky".to_string(),
             to_node: "node-infra".to_string(),
-            condition: LoopEdgeCondition::Break,
+            condition: GraphEdgeCondition::Error,
         })
         .unwrap();
 
         let _home = HomeGuard::set(fake_home.path());
         let result = engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await;
         drop(_home);
         result.unwrap();
 
-        let runs = db.list_loop_runs_for_spec(&spec_id).unwrap();
+        let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
         let flaky_runs: Vec<_> = runs.iter().filter(|r| r.node_id == "node-flaky").collect();
         let after_runs: Vec<_> = runs.iter().filter(|r| r.node_id == "node-after").collect();
         let infra_runs: Vec<_> = runs.iter().filter(|r| r.node_id == "node-infra").collect();
@@ -20219,7 +20291,7 @@ echo done
         );
         // CM13: all runs are infra, none pass (none self-report).
         for run in &flaky_runs {
-            assert_eq!(run.status, LoopRunStatus::Fail);
+            assert_eq!(run.status, GraphRunStatus::Fail);
         }
         assert_eq!(
             after_runs.len(),
@@ -20229,7 +20301,7 @@ echo done
         assert_eq!(
             infra_runs.len(),
             1,
-            "CM13: break edge fires when retries exhaust (all runs unreported)"
+            "CM13: error edge fires when retries exhaust (all runs unreported)"
         );
     }
 
@@ -20242,19 +20314,19 @@ echo done
         routes: &[(&str, &str)],
         fallback: &str,
         position: i64,
-    ) -> LoopNode {
+    ) -> GraphNode {
         let routes_json: Vec<Value> = routes
             .iter()
             .map(|(label, description)| {
                 serde_json::json!({ "label": label, "description": description })
             })
             .collect();
-        LoopNode {
+        GraphNode {
             id: id.to_string(),
             spec_id: Some(spec_id.to_string()),
-            loop_id: None,
+            graph_id: None,
             name: id.to_string(),
-            kind: LoopNodeKind::Router,
+            kind: GraphNodeKind::Router,
             config: serde_json::json!({
                 "platform": platform,
                 "routes": routes_json,
@@ -20272,14 +20344,14 @@ echo done
         from_node: &str,
         to_node: &str,
         label: &str,
-    ) -> LoopEdge {
-        LoopEdge {
+    ) -> GraphEdge {
+        GraphEdge {
             id: id.to_string(),
             spec_id: Some(spec_id.to_string()),
-            loop_id: None,
+            graph_id: None,
             from_node: from_node.to_string(),
             to_node: to_node.to_string(),
-            condition: LoopEdgeCondition::Route(label.to_string()),
+            condition: GraphEdgeCondition::Route(label.to_string()),
         }
     }
 
@@ -20422,7 +20494,7 @@ echo done
             .unwrap();
         drop(_home);
 
-        assert_eq!(execution.status, LoopRunStatus::Fail);
+        assert_eq!(execution.status, GraphRunStatus::Fail);
         assert!(
             execution.output.get("route").is_none(),
             "a spawn failure must not carry a chosen route"
@@ -20449,7 +20521,7 @@ echo done
             .unwrap();
         drop(_home);
 
-        assert_eq!(execution.status, LoopRunStatus::Pass);
+        assert_eq!(execution.status, GraphRunStatus::Pass);
         assert_eq!(
             execution.output.get("route").and_then(Value::as_str),
             Some("billing")
@@ -20491,7 +20563,7 @@ echo done
             .unwrap();
         drop(_home);
 
-        assert_eq!(execution.status, LoopRunStatus::Pass);
+        assert_eq!(execution.status, GraphRunStatus::Pass);
         assert_eq!(
             execution.output.get("route").and_then(Value::as_str),
             Some("technical"),
@@ -20510,25 +20582,25 @@ echo done
         );
     }
 
-    /// Acceptance: a three-route router loop takes a different path per
+    /// Acceptance: a three-route router graph takes a different path per
     /// input, and each decision — chosen route, raw answer — is persisted on
     /// the router node's own run row: the same JSON blob `execute_router_node`
     /// logs via `tracing::info!` (B43's node-run lifecycle logging) is what
-    /// `update_loop_run_result` writes, so the run row is the queryable
+    /// `update_graph_run_result` writes, so the run row is the queryable
     /// record of what the daemon log carries.
     #[tokio::test]
-    async fn three_route_router_loop_takes_a_different_path_per_input() {
+    async fn three_route_router_graph_takes_a_different_path_per_input() {
         for (answer, expected_marker) in [
             ("billing", "billing.marker"),
             ("technical", "technical.marker"),
             ("other", "other.marker"),
         ] {
-            let (dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+            let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
             let script =
                 write_member_script(dir.path(), "router.sh", &format!("printf '{answer}\\n'"));
             let fake_home = setup_multi_cli_home(&[("router-cli", &script)]);
 
-            db.insert_loop_node(&router_node(
+            db.insert_graph_node(&router_node(
                 "router",
                 &spec_id,
                 "router-cli",
@@ -20550,12 +20622,12 @@ echo done
             .into_iter()
             .enumerate()
             {
-                db.insert_loop_node(&LoopNode {
+                db.insert_graph_node(&GraphNode {
                     id: node_id.to_string(),
                     spec_id: Some(spec_id.clone()),
-                    loop_id: None,
+                    graph_id: None,
                     name: node_id.to_string(),
-                    kind: LoopNodeKind::Check,
+                    kind: GraphNodeKind::Check,
                     config: serde_json::json!({
                         "command": format!("touch \"{}\"", dir.path().join(marker_name).display()),
                         "success_condition": "exit_code_0"
@@ -20564,7 +20636,7 @@ echo done
                     created_at: chrono::Utc::now(),
                 })
                 .unwrap();
-                db.insert_loop_edge(&route_edge(
+                db.insert_graph_edge(&route_edge(
                     &format!("edge-{route_label}"),
                     &spec_id,
                     "router",
@@ -20576,15 +20648,15 @@ echo done
 
             let _home = HomeGuard::set(fake_home.path());
             let result = engine
-                .run_loop(loop_id.clone(), None, None, None, None)
+                .run_graph(graph_id.clone(), None, None, None, None)
                 .await;
             drop(_home);
             result.unwrap();
 
-            let spec = db.get_loop_spec(&spec_id).unwrap().unwrap();
+            let spec = db.get_graph_spec(&spec_id).unwrap().unwrap();
             assert_eq!(
                 spec.status,
-                LoopSpecStatus::Completed,
+                GraphSpecStatus::Completed,
                 "route '{answer}' must complete the spec"
             );
 
@@ -20600,9 +20672,9 @@ echo done
                 }
             }
 
-            let runs = db.list_loop_runs_for_spec(&spec_id).unwrap();
+            let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
             let router_run = runs.iter().find(|r| r.node_id == "router").unwrap();
-            assert_eq!(router_run.status, LoopRunStatus::Pass);
+            assert_eq!(router_run.status, GraphRunStatus::Pass);
             let output = router_run.output.as_ref().unwrap();
             assert_eq!(output.get("route").and_then(Value::as_str), Some(answer));
             assert_eq!(
@@ -20623,14 +20695,14 @@ echo done
     /// the router needs the failure payload the reviewer produced.
     #[tokio::test]
     async fn router_preserves_previous_output_for_next_node() {
-        let (dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "reviewer".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "reviewer".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "echo 'CHANGE_LIST: fix line 42, update test' && exit 1",
                 "success_condition": "exit_code_0"
@@ -20643,7 +20715,7 @@ echo done
         let router_script = write_member_script(dir.path(), "router.sh", "printf 'changes\\n'");
         let fake_home = setup_multi_cli_home(&[("router-cli", &router_script)]);
 
-        db.insert_loop_node(&router_node(
+        db.insert_graph_node(&router_node(
             "router",
             &spec_id,
             "router-cli",
@@ -20656,12 +20728,12 @@ echo done
         ))
         .unwrap();
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "implementer".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "implementer".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "true",
                 "success_condition": "exit_code_0"
@@ -20671,16 +20743,16 @@ echo done
         })
         .unwrap();
 
-        db.insert_loop_edge(&LoopEdge {
+        db.insert_graph_edge(&GraphEdge {
             id: "e1".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             from_node: "reviewer".to_string(),
             to_node: "router".to_string(),
-            condition: LoopEdgeCondition::Fail,
+            condition: GraphEdgeCondition::Fail,
         })
         .unwrap();
-        db.insert_loop_edge(&route_edge(
+        db.insert_graph_edge(&route_edge(
             "e2",
             &spec_id,
             "router",
@@ -20691,12 +20763,12 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         let result = engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await;
         drop(_home);
         result.unwrap();
 
-        let runs = db.list_loop_runs_for_spec(&spec_id).unwrap();
+        let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
         let impl_run = runs.iter().find(|r| r.node_id == "implementer").unwrap();
         let input = impl_run
             .input
@@ -20737,8 +20809,8 @@ echo done
     /// different workdir sharing the same database. Graph A is seeded
     /// mid-run and never driven again — its persisted rows are the baseline.
     /// Graph B is driven through a full, real start → pause → resume →
-    /// finish cycle via the same `LoopEngine` a shared daemon would use, and
-    /// graph A's loop/spec/run rows must be byte-identical (via their
+    /// finish cycle via the same `GraphEngine` a shared daemon would use, and
+    /// graph A's graph/spec/run rows must be byte-identical (via their
     /// serialized JSON) before and after.
     #[tokio::test]
     async fn graph_b_full_lifecycle_never_touches_graph_a_in_a_different_workdir() {
@@ -20748,7 +20820,7 @@ echo done
         let db = Arc::new(Database::new(&db_dir.path().join("shared.db")).unwrap());
 
         // Graph A: seeded as mid-run and left alone for the rest of the test.
-        let loop_a = crate::domain::loops::Loop {
+        let graph_a = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
             infra_node_id: None,
@@ -20756,7 +20828,7 @@ echo done
             name: "Graph A".to_string(),
             description: None,
             workdir: dir_a.path().to_string_lossy().to_string(),
-            status: LoopStatus::Running,
+            status: GraphStatus::Running,
             trigger: None,
             created_at: chrono::Utc::now(),
             started_at: Some(chrono::Utc::now()),
@@ -20767,14 +20839,14 @@ echo done
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
         };
-        let spec_a = LoopSpec {
+        let spec_a = GraphSpec {
             id: "spec-graph-a".to_string(),
-            loop_id: Some(loop_a.id.clone()),
+            graph_id: Some(graph_a.id.clone()),
             name: "Spec A".to_string(),
             description: None,
             position: 1,
             parallelizable: false,
-            status: LoopSpecStatus::Running,
+            status: GraphSpecStatus::Running,
             started_at: Some(chrono::Utc::now()),
             completed_at: None,
             spec_start_head: Some("deadbeef".to_string()),
@@ -20784,22 +20856,22 @@ echo done
             completed_via_at: None,
             spec_committed_head: None,
         };
-        let node_a = LoopNode {
+        let node_a = GraphNode {
             id: "node-graph-a".to_string(),
             spec_id: Some(spec_a.id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "Node A".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({"command": "true", "success_condition": "exit_code_0"}),
             position: 1,
             created_at: chrono::Utc::now(),
         };
-        let run_a = LoopNodeRun {
+        let run_a = GraphNodeRun {
             id: "run-graph-a".to_string(),
-            loop_id: loop_a.id.clone(),
+            graph_id: graph_a.id.clone(),
             spec_id: spec_a.id.clone(),
             node_id: node_a.id.clone(),
-            status: LoopRunStatus::Running,
+            status: GraphRunStatus::Running,
             input: None,
             output: None,
             started_at: chrono::Utc::now(),
@@ -20811,23 +20883,23 @@ echo done
             executed_platform: None,
             executed_model: None,
         };
-        db.insert_loop(&loop_a).unwrap();
-        db.insert_loop_spec(&spec_a).unwrap();
-        db.insert_loop_node(&node_a).unwrap();
-        db.insert_loop_run(&run_a).unwrap();
+        db.insert_graph(&graph_a).unwrap();
+        db.insert_graph_spec(&spec_a).unwrap();
+        db.insert_graph_node(&node_a).unwrap();
+        db.insert_graph_run(&run_a).unwrap();
 
         let snapshot = |db: &Database| {
             (
-                serde_json::to_value(db.get_loop(&loop_a.id).unwrap().unwrap()).unwrap(),
-                serde_json::to_value(db.get_loop_spec(&spec_a.id).unwrap().unwrap()).unwrap(),
-                serde_json::to_value(db.get_loop_run(&run_a.id).unwrap().unwrap()).unwrap(),
+                serde_json::to_value(db.get_graph(&graph_a.id).unwrap().unwrap()).unwrap(),
+                serde_json::to_value(db.get_graph_spec(&spec_a.id).unwrap().unwrap()).unwrap(),
+                serde_json::to_value(db.get_graph_run(&run_a.id).unwrap().unwrap()).unwrap(),
             )
         };
         let snapshot_before = snapshot(&db);
 
-        // Graph B: a real loop in a different workdir, driven through its
+        // Graph B: a real graph in a different workdir, driven through its
         // full lifecycle by the engine.
-        let loop_b = crate::domain::loops::Loop {
+        let graph_b = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
             infra_node_id: None,
@@ -20835,7 +20907,7 @@ echo done
             name: "Graph B".to_string(),
             description: None,
             workdir: dir_b.path().to_string_lossy().to_string(),
-            status: LoopStatus::Draft,
+            status: GraphStatus::Draft,
             trigger: None,
             created_at: chrono::Utc::now(),
             started_at: None,
@@ -20846,14 +20918,14 @@ echo done
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
         };
-        let spec_b = LoopSpec {
+        let spec_b = GraphSpec {
             id: "spec-graph-b".to_string(),
-            loop_id: Some(loop_b.id.clone()),
+            graph_id: Some(graph_b.id.clone()),
             name: "Spec B".to_string(),
             description: None,
             position: 1,
             parallelizable: false,
-            status: LoopSpecStatus::Pending,
+            status: GraphSpecStatus::Pending,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
@@ -20863,14 +20935,14 @@ echo done
             completed_via_reason: None,
             completed_via_at: None,
         };
-        db.insert_loop(&loop_b).unwrap();
-        db.insert_loop_spec(&spec_b).unwrap();
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph(&graph_b).unwrap();
+        db.insert_graph_spec(&spec_b).unwrap();
+        db.insert_graph_node(&GraphNode {
             id: "node-graph-b".to_string(),
             spec_id: Some(spec_b.id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "Node B".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "sleep 0.3 && true",
                 "success_condition": "exit_code_0"
@@ -20880,17 +20952,17 @@ echo done
         })
         .unwrap();
 
-        let engine = Arc::new(LoopEngine::new(
+        let engine = Arc::new(GraphEngine::new(
             Arc::clone(&db),
             Arc::new(DefaultNotificationService),
         ));
 
         // Start graph B in the background.
         let dispatch_engine = Arc::clone(&engine);
-        let loop_b_id = loop_b.id.clone();
+        let graph_b_id = graph_b.id.clone();
         let dispatch = tokio::spawn(async move {
             dispatch_engine
-                .run_loop(loop_b_id, None, None, None, None)
+                .run_graph(graph_b_id, None, None, None, None)
                 .await
         });
 
@@ -20900,7 +20972,7 @@ echo done
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             if !db
-                .list_running_loop_runs(&loop_b.id)
+                .list_running_graph_runs(&graph_b.id)
                 .unwrap_or_default()
                 .is_empty()
             {
@@ -20922,11 +20994,11 @@ echo done
         );
 
         // Pause graph B.
-        assert!(engine.request_pause(&loop_b.id, false).unwrap());
+        assert!(engine.request_pause(&graph_b.id, false).unwrap());
         dispatch.await.unwrap().unwrap();
         assert_eq!(
-            db.get_loop(&loop_b.id).unwrap().unwrap().status,
-            LoopStatus::Paused,
+            db.get_graph(&graph_b.id).unwrap().unwrap().status,
+            GraphStatus::Paused,
             "graph B must actually have paused for this test to be meaningful"
         );
         assert_eq!(
@@ -20935,17 +21007,17 @@ echo done
             "graph A must be untouched by graph B pausing"
         );
 
-        // Resume graph B — relaunching a paused loop directly is a
-        // supported, documented entry point of `run_loop`.
+        // Resume graph B — relaunching a paused graph directly is a
+        // supported, documented entry point of `run_graph`.
         engine
-            .run_loop(loop_b.id.clone(), None, None, None, None)
+            .run_graph(graph_b.id.clone(), None, None, None, None)
             .await
             .unwrap();
 
-        let loop_b_after = db.get_loop(&loop_b.id).unwrap().unwrap();
+        let graph_b_after = db.get_graph(&graph_b.id).unwrap().unwrap();
         assert_eq!(
-            loop_b_after.status,
-            LoopStatus::Completed,
+            graph_b_after.status,
+            GraphStatus::Completed,
             "graph B must have finished its lifecycle for this test to be meaningful"
         );
 
@@ -20972,7 +21044,7 @@ echo done
         let dir_b = tempdir().unwrap();
         let db = Arc::new(Database::new(&db_dir.path().join("shared.db")).unwrap());
 
-        let loop_a = crate::domain::loops::Loop {
+        let graph_a = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
             infra_node_id: None,
@@ -20980,7 +21052,7 @@ echo done
             name: "Graph A".to_string(),
             description: None,
             workdir: dir_a.path().to_string_lossy().to_string(),
-            status: LoopStatus::Running,
+            status: GraphStatus::Running,
             trigger: None,
             created_at: chrono::Utc::now(),
             started_at: Some(chrono::Utc::now()),
@@ -20991,14 +21063,14 @@ echo done
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
         };
-        let spec_a = LoopSpec {
+        let spec_a = GraphSpec {
             id: "spec-signal-a".to_string(),
-            loop_id: Some(loop_a.id.clone()),
+            graph_id: Some(graph_a.id.clone()),
             name: "Spec A".to_string(),
             description: None,
             position: 1,
             parallelizable: false,
-            status: LoopSpecStatus::Running,
+            status: GraphSpecStatus::Running,
             started_at: Some(chrono::Utc::now()),
             completed_at: None,
             spec_start_head: None,
@@ -21008,12 +21080,12 @@ echo done
             completed_via_reason: None,
             completed_via_at: None,
         };
-        let node_a = LoopNode {
+        let node_a = GraphNode {
             id: "node-signal-a".to_string(),
             spec_id: Some(spec_a.id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "Node A".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({"command": "true", "success_condition": "exit_code_0"}),
             position: 1,
             created_at: chrono::Utc::now(),
@@ -21022,12 +21094,12 @@ echo done
         // test spawns, so any attempt to signal it would be a no-op at best
         // and a wrong-process kill at worst; the assertion below is on the
         // row, not on process survival.
-        let run_a = LoopNodeRun {
+        let run_a = GraphNodeRun {
             id: "run-signal-a".to_string(),
-            loop_id: loop_a.id.clone(),
+            graph_id: graph_a.id.clone(),
             spec_id: spec_a.id.clone(),
             node_id: node_a.id.clone(),
-            status: LoopRunStatus::Running,
+            status: GraphRunStatus::Running,
             input: None,
             output: None,
             started_at: chrono::Utc::now(),
@@ -21039,14 +21111,14 @@ echo done
             executed_platform: None,
             executed_model: None,
         };
-        db.insert_loop(&loop_a).unwrap();
-        db.insert_loop_spec(&spec_a).unwrap();
-        db.insert_loop_node(&node_a).unwrap();
-        db.insert_loop_run(&run_a).unwrap();
+        db.insert_graph(&graph_a).unwrap();
+        db.insert_graph_spec(&spec_a).unwrap();
+        db.insert_graph_node(&node_a).unwrap();
+        db.insert_graph_run(&run_a).unwrap();
         let run_a_before =
-            serde_json::to_value(db.get_loop_run(&run_a.id).unwrap().unwrap()).unwrap();
+            serde_json::to_value(db.get_graph_run(&run_a.id).unwrap().unwrap()).unwrap();
 
-        let loop_b = crate::domain::loops::Loop {
+        let graph_b = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
             infra_node_id: None,
@@ -21054,7 +21126,7 @@ echo done
             name: "Graph B".to_string(),
             description: None,
             workdir: dir_b.path().to_string_lossy().to_string(),
-            status: LoopStatus::Draft,
+            status: GraphStatus::Draft,
             trigger: None,
             created_at: chrono::Utc::now(),
             started_at: None,
@@ -21065,14 +21137,14 @@ echo done
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
         };
-        let spec_b = LoopSpec {
+        let spec_b = GraphSpec {
             id: "spec-signal-b".to_string(),
-            loop_id: Some(loop_b.id.clone()),
+            graph_id: Some(graph_b.id.clone()),
             name: "Spec B".to_string(),
             description: None,
             position: 1,
             parallelizable: false,
-            status: LoopSpecStatus::Pending,
+            status: GraphSpecStatus::Pending,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
@@ -21082,14 +21154,14 @@ echo done
             completed_via_reason: None,
             completed_via_at: None,
         };
-        db.insert_loop(&loop_b).unwrap();
-        db.insert_loop_spec(&spec_b).unwrap();
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph(&graph_b).unwrap();
+        db.insert_graph_spec(&spec_b).unwrap();
+        db.insert_graph_node(&GraphNode {
             id: "node-signal-b".to_string(),
             spec_id: Some(spec_b.id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "Node B".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "sleep 0.3 && true",
                 "success_condition": "exit_code_0"
@@ -21099,22 +21171,22 @@ echo done
         })
         .unwrap();
 
-        let engine = Arc::new(LoopEngine::new(
+        let engine = Arc::new(GraphEngine::new(
             Arc::clone(&db),
             Arc::new(DefaultNotificationService),
         ));
         let dispatch_engine = Arc::clone(&engine);
-        let loop_b_id = loop_b.id.clone();
+        let graph_b_id = graph_b.id.clone();
         let dispatch = tokio::spawn(async move {
             dispatch_engine
-                .run_loop(loop_b_id, None, None, None, None)
+                .run_graph(graph_b_id, None, None, None, None)
                 .await
         });
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             if !db
-                .list_running_loop_runs(&loop_b.id)
+                .list_running_graph_runs(&graph_b.id)
                 .unwrap_or_default()
                 .is_empty()
             {
@@ -21127,10 +21199,10 @@ echo done
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
 
-        assert!(engine.request_pause(&loop_b.id, false).unwrap());
+        assert!(engine.request_pause(&graph_b.id, false).unwrap());
         dispatch.await.unwrap().unwrap();
 
-        let b_runs = db.list_loop_runs_for_spec(&spec_b.id).unwrap();
+        let b_runs = db.list_graph_runs_for_spec(&spec_b.id).unwrap();
         assert_eq!(
             b_runs.len(),
             1,
@@ -21138,40 +21210,40 @@ echo done
         );
         // With the new pause behavior, the node runs to completion — the
         // command `sleep 0.3 && true` exits 0, so the run is Pass, not Fail.
-        assert_eq!(b_runs[0].status, LoopRunStatus::Pass);
+        assert_eq!(b_runs[0].status, GraphRunStatus::Pass);
 
         let run_a_after =
-            serde_json::to_value(db.get_loop_run(&run_a.id).unwrap().unwrap()).unwrap();
+            serde_json::to_value(db.get_graph_run(&run_a.id).unwrap().unwrap()).unwrap();
         assert_eq!(
             run_a_after, run_a_before,
             "graph A's node run must never be signalled or mutated by graph B's pause"
         );
     }
 
-    // ── CB31: loop_pause waits for the running node and spends no iteration ──
+    // ── CB31: graph_pause waits for the running node and spends no iteration ──
 
-    /// A one-check-node loop whose command is `cmd` (node passes iff it exits
+    /// A one-check-node graph whose command is `cmd` (node passes iff it exits
     /// 0). Returns an Arc'd engine ready to dispatch in the background.
-    fn cb31_fixture(cmd: &str) -> (TempDir, Arc<Database>, Arc<LoopEngine>, String, String) {
-        let (dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
-        db.insert_loop_node(&LoopNode {
+    fn cb31_fixture(cmd: &str) -> (TempDir, Arc<Database>, Arc<GraphEngine>, String, String) {
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+        db.insert_graph_node(&GraphNode {
             id: "cb31-node".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "work".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({ "command": cmd, "success_condition": "exit_code_0" }),
             position: 1,
             created_at: chrono::Utc::now(),
         })
         .unwrap();
-        (dir, db, Arc::new(engine), loop_id, spec_id)
+        (dir, db, Arc::new(engine), graph_id, spec_id)
     }
 
-    async fn cb31_wait_for_running_run(db: &Database, loop_id: &str) {
+    async fn cb31_wait_for_running_run(db: &Database, graph_id: &str) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while db
-            .list_running_loop_runs(loop_id)
+            .list_running_graph_runs(graph_id)
             .unwrap_or_default()
             .is_empty()
         {
@@ -21185,40 +21257,40 @@ echo done
 
     /// Req 1 + 2: a default pause waits for the running node, is visible as a
     /// distinct `pausing` status while it waits, and the node's run is recorded
-    /// with its own outcome — the loop only reaches `paused` once it finished.
+    /// with its own outcome — the graph only reaches `paused` once it finished.
     #[tokio::test]
     async fn pause_waits_for_node_and_reports_pausing_until_it_finishes() {
-        let (_dir, db, engine, loop_id, spec_id) = cb31_fixture("sleep 2 && true");
+        let (_dir, db, engine, graph_id, spec_id) = cb31_fixture("sleep 2 && true");
         let disp = {
-            let (e, id) = (Arc::clone(&engine), loop_id.clone());
-            tokio::spawn(async move { e.run_loop(id, None, None, None, None).await })
+            let (e, id) = (Arc::clone(&engine), graph_id.clone());
+            tokio::spawn(async move { e.run_graph(id, None, None, None, None).await })
         };
 
-        cb31_wait_for_running_run(&db, &loop_id).await;
-        assert!(engine.request_pause(&loop_id, false).unwrap());
+        cb31_wait_for_running_run(&db, &graph_id).await;
+        assert!(engine.request_pause(&graph_id, false).unwrap());
 
         assert_eq!(
-            db.get_loop(&loop_id).unwrap().unwrap().status,
-            LoopStatus::Pausing,
+            db.get_graph(&graph_id).unwrap().unwrap().status,
+            GraphStatus::Pausing,
             "an accepted wait-for-completion pause is visible as `pausing`, distinct from running/paused"
         );
         assert!(
-            !db.list_running_loop_runs(&loop_id).unwrap().is_empty(),
+            !db.list_running_graph_runs(&graph_id).unwrap().is_empty(),
             "the running node must not be terminated by a default pause"
         );
 
         disp.await.unwrap().unwrap();
 
         assert_eq!(
-            db.get_loop(&loop_id).unwrap().unwrap().status,
-            LoopStatus::Paused,
-            "the loop reaches `paused` only after the node finished"
+            db.get_graph(&graph_id).unwrap().unwrap().status,
+            GraphStatus::Paused,
+            "the graph reaches `paused` only after the node finished"
         );
-        let runs = db.list_loop_runs_for_spec(&spec_id).unwrap();
+        let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
         assert_eq!(runs.len(), 1);
         assert_eq!(
             runs[0].status,
-            LoopRunStatus::Pass,
+            GraphRunStatus::Pass,
             "the node ran to its own completion and is recorded Pass — not Fail, not Interrupted"
         );
     }
@@ -21229,27 +21301,27 @@ echo done
     /// out-of-band `terminated` marker.
     #[tokio::test]
     async fn explicit_interrupt_records_operator_interrupted_not_failure() {
-        let (_dir, db, engine, loop_id, spec_id) = cb31_fixture("sleep 30 && true");
+        let (_dir, db, engine, graph_id, spec_id) = cb31_fixture("sleep 30 && true");
         let disp = {
-            let (e, id) = (Arc::clone(&engine), loop_id.clone());
-            tokio::spawn(async move { e.run_loop(id, None, None, None, None).await })
+            let (e, id) = (Arc::clone(&engine), graph_id.clone());
+            tokio::spawn(async move { e.run_graph(id, None, None, None, None).await })
         };
 
-        cb31_wait_for_running_run(&db, &loop_id).await;
-        assert!(engine.request_pause(&loop_id, true).unwrap());
+        cb31_wait_for_running_run(&db, &graph_id).await;
+        assert!(engine.request_pause(&graph_id, true).unwrap());
 
         disp.await.unwrap().unwrap();
 
         assert_eq!(
-            db.get_loop(&loop_id).unwrap().unwrap().status,
-            LoopStatus::Paused
+            db.get_graph(&graph_id).unwrap().unwrap().status,
+            GraphStatus::Paused
         );
-        let runs = db.list_loop_runs_for_spec(&spec_id).unwrap();
+        let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
         assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0].status, LoopRunStatus::Interrupted);
+        assert_eq!(runs[0].status, GraphRunStatus::Interrupted);
         assert_ne!(
             runs[0].status,
-            LoopRunStatus::Fail,
+            GraphRunStatus::Fail,
             "an operator's decision to stop the node must not read as the node failing"
         );
         let output = runs[0].output.clone().unwrap();
@@ -21268,27 +21340,27 @@ echo done
     /// the same iteration number it paused on.
     #[tokio::test]
     async fn waiting_pause_and_continue_consumes_no_iteration() {
-        let (_dir, db, engine, loop_id, spec_id) = cb31_fixture("sleep 2 && true");
+        let (_dir, db, engine, graph_id, spec_id) = cb31_fixture("sleep 2 && true");
         let disp = {
-            let (e, id) = (Arc::clone(&engine), loop_id.clone());
-            tokio::spawn(async move { e.run_loop(id, None, None, None, None).await })
+            let (e, id) = (Arc::clone(&engine), graph_id.clone());
+            tokio::spawn(async move { e.run_graph(id, None, None, None, None).await })
         };
 
-        cb31_wait_for_running_run(&db, &loop_id).await;
-        assert!(engine.request_pause(&loop_id, false).unwrap());
+        cb31_wait_for_running_run(&db, &graph_id).await;
+        assert!(engine.request_pause(&graph_id, false).unwrap());
         disp.await.unwrap().unwrap();
 
-        let before = db.list_loop_runs_for_spec(&spec_id).unwrap();
+        let before = db.list_graph_runs_for_spec(&spec_id).unwrap();
         assert_eq!(before.len(), 1);
         assert_eq!(before[0].iteration, 1);
 
-        // Continue (the resume path behind loop_continue).
+        // Continue (the resume path behind graph_continue).
         engine
-            .run_loop_dispatch(loop_id.clone(), None, None, true, None, None)
+            .run_graph_dispatch(graph_id.clone(), None, None, true, None, None)
             .await
             .unwrap();
 
-        let after = db.list_loop_runs_for_spec(&spec_id).unwrap();
+        let after = db.list_graph_runs_for_spec(&spec_id).unwrap();
         assert_eq!(after.len(), 2, "the node re-ran once on continue");
         assert!(
             after.iter().all(|r| r.iteration == 1),
@@ -21303,15 +21375,15 @@ echo done
     async fn interrupt_and_continue_consumes_no_iteration() {
         // First run blocks on `sleep` (no marker yet) so it can be interrupted;
         // once the marker exists the continue re-run returns immediately.
-        let (dir, db, engine, loop_id, spec_id) = {
-            let (dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, graph_id, spec_id) = {
+            let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
             let marker = dir.path().join("go.marker");
-            db.insert_loop_node(&LoopNode {
+            db.insert_graph_node(&GraphNode {
                 id: "cb31-node".to_string(),
                 spec_id: Some(spec_id.clone()),
-                loop_id: None,
+                graph_id: None,
                 name: "work".to_string(),
-                kind: LoopNodeKind::Check,
+                kind: GraphNodeKind::Check,
                 config: serde_json::json!({
                     "command": format!("test -f {} || sleep 30", marker.display()),
                     "success_condition": "exit_code_0"
@@ -21320,25 +21392,25 @@ echo done
                 created_at: chrono::Utc::now(),
             })
             .unwrap();
-            (dir, Arc::clone(&db), Arc::new(engine), loop_id, spec_id)
+            (dir, Arc::clone(&db), Arc::new(engine), graph_id, spec_id)
         };
         let disp = {
-            let (e, id) = (Arc::clone(&engine), loop_id.clone());
-            tokio::spawn(async move { e.run_loop(id, None, None, None, None).await })
+            let (e, id) = (Arc::clone(&engine), graph_id.clone());
+            tokio::spawn(async move { e.run_graph(id, None, None, None, None).await })
         };
 
-        cb31_wait_for_running_run(&db, &loop_id).await;
-        assert!(engine.request_pause(&loop_id, true).unwrap());
+        cb31_wait_for_running_run(&db, &graph_id).await;
+        assert!(engine.request_pause(&graph_id, true).unwrap());
         disp.await.unwrap().unwrap();
 
         std::fs::write(dir.path().join("go.marker"), b"").unwrap();
 
         engine
-            .run_loop_dispatch(loop_id.clone(), None, None, true, None, None)
+            .run_graph_dispatch(graph_id.clone(), None, None, true, None, None)
             .await
             .unwrap();
 
-        let after = db.list_loop_runs_for_spec(&spec_id).unwrap();
+        let after = db.list_graph_runs_for_spec(&spec_id).unwrap();
         assert!(
             after.iter().all(|r| r.iteration == 1),
             "interrupt-and-continue must not consume an iteration; saw {:?}",
@@ -21351,10 +21423,10 @@ echo done
     /// `DEFAULT_MAX_ITERATIONS_PER_NODE` by the operator's pause.
     #[tokio::test]
     async fn node_at_last_iteration_survives_pause_and_continue() {
-        let (_dir, db, engine, loop_id, spec_id) = cb31_fixture("sleep 2 && true");
-        db.update_loop_spec_status(
+        let (_dir, db, engine, graph_id, spec_id) = cb31_fixture("sleep 2 && true");
+        db.update_graph_spec_status(
             &spec_id,
-            LoopSpecStatus::Running,
+            GraphSpecStatus::Running,
             Some(chrono::Utc::now()),
             None,
         )
@@ -21362,12 +21434,12 @@ echo done
         // Four genuine prior attempts: the node's next attempt is iteration 5,
         // the last one DEFAULT_MAX_ITERATIONS_PER_NODE allows.
         for i in 1..=4 {
-            db.insert_loop_run(&LoopNodeRun {
+            db.insert_graph_run(&GraphNodeRun {
                 id: format!("cb31-seed-{i}"),
-                loop_id: loop_id.clone(),
+                graph_id: graph_id.clone(),
                 spec_id: spec_id.clone(),
                 node_id: "cb31-node".to_string(),
-                status: LoopRunStatus::Fail,
+                status: GraphRunStatus::Fail,
                 input: None,
                 output: Some(serde_json::json!({ "seed": i })),
                 started_at: chrono::Utc::now() - chrono::Duration::seconds(20 - i as i64),
@@ -21383,15 +21455,17 @@ echo done
         }
 
         let disp = {
-            let (e, id) = (Arc::clone(&engine), loop_id.clone());
-            tokio::spawn(async move { e.run_loop_dispatch(id, None, None, true, None, None).await })
+            let (e, id) = (Arc::clone(&engine), graph_id.clone());
+            tokio::spawn(
+                async move { e.run_graph_dispatch(id, None, None, true, None, None).await },
+            )
         };
-        cb31_wait_for_running_run(&db, &loop_id).await;
-        assert!(engine.request_pause(&loop_id, false).unwrap());
+        cb31_wait_for_running_run(&db, &graph_id).await;
+        assert!(engine.request_pause(&graph_id, false).unwrap());
         disp.await.unwrap().unwrap();
 
         let paused_run = db
-            .list_loop_runs_for_spec(&spec_id)
+            .list_graph_runs_for_spec(&spec_id)
             .unwrap()
             .into_iter()
             .max_by_key(|r| r.started_at)
@@ -21404,38 +21478,39 @@ echo done
         // Continue: the node must get to run iteration 5 again, not be blocked
         // by a spurious iteration 6.
         engine
-            .run_loop_dispatch(loop_id.clone(), None, None, true, None, None)
+            .run_graph_dispatch(graph_id.clone(), None, None, true, None, None)
             .await
             .unwrap();
 
-        let runs = db.list_loop_runs_for_spec(&spec_id).unwrap();
+        let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
         assert!(
             runs.iter().all(|r| r.iteration <= 5),
             "continue must not push the node to iteration 6; saw {:?}",
             runs.iter().map(|r| r.iteration).collect::<Vec<_>>()
         );
         assert_eq!(
-            db.get_loop_spec(&spec_id).unwrap().unwrap().status,
-            LoopSpecStatus::Completed,
+            db.get_graph_spec(&spec_id).unwrap().unwrap().status,
+            GraphSpecStatus::Completed,
             "the spec completes on the surviving last attempt, not blocked on an unearned ceiling"
         );
     }
 
-    /// Req 6: pausing a loop with nothing in flight is immediate.
+    /// Req 6: pausing a graph with nothing in flight is immediate.
     #[tokio::test]
     async fn pause_with_no_node_in_flight_is_immediate() {
-        let (_dir, db, engine, loop_id, _spec_id) = cb31_fixture("true");
-        db.claim_loop_for_run(&loop_id, chrono::Utc::now()).unwrap();
+        let (_dir, db, engine, graph_id, _spec_id) = cb31_fixture("true");
+        db.claim_graph_for_run(&graph_id, chrono::Utc::now())
+            .unwrap();
         assert_eq!(
-            db.get_loop(&loop_id).unwrap().unwrap().status,
-            LoopStatus::Running
+            db.get_graph(&graph_id).unwrap().unwrap().status,
+            GraphStatus::Running
         );
 
-        assert!(engine.request_pause(&loop_id, false).unwrap());
+        assert!(engine.request_pause(&graph_id, false).unwrap());
 
         assert_eq!(
-            db.get_loop(&loop_id).unwrap().unwrap().status,
-            LoopStatus::Paused,
+            db.get_graph(&graph_id).unwrap().unwrap().status,
+            GraphStatus::Paused,
             "with no node running there is nothing to wait for — the pause is immediate"
         );
     }
@@ -21444,15 +21519,15 @@ echo done
 
     #[tokio::test]
     async fn check_node_failure_captures_stdout_stderr() {
-        let (dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
         let marker = dir.path().join("recovered.marker");
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-check-fail".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "failing-check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "echo 'FAIL_LINE_STDOUT'; echo 'FAIL_LINE_STDERR' >&2; exit 1",
                 "success_condition": "exit_code_0"
@@ -21462,12 +21537,12 @@ echo done
         })
         .unwrap();
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-recovery".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "recovery".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": format!("touch \"{}\"", marker.display()),
                 "success_condition": "exit_code_0"
@@ -21477,27 +21552,27 @@ echo done
         })
         .unwrap();
 
-        db.insert_loop_edge(&LoopEdge {
+        db.insert_graph_edge(&GraphEdge {
             id: "edge-fail".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             from_node: "node-check-fail".to_string(),
             to_node: "node-recovery".to_string(),
-            condition: LoopEdgeCondition::Fail,
+            condition: GraphEdgeCondition::Fail,
         })
         .unwrap();
 
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
 
-        let runs = db.list_loop_runs_for_spec(&spec_id).unwrap();
+        let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
         let check_run = runs
             .iter()
             .find(|r| r.node_id == "node-check-fail")
             .expect("check run must exist");
-        assert_eq!(check_run.status, LoopRunStatus::Fail);
+        assert_eq!(check_run.status, GraphRunStatus::Fail);
         let out = check_run
             .output
             .as_ref()
@@ -21514,28 +21589,28 @@ echo done
             "stderr must contain FAIL_LINE_STDERR, got: {:?}",
             out["stderr"]
         );
-        // Verify persistence via loop_node_run_get equivalent
-        let fetched = db.get_loop_run(&check_run.id).unwrap().unwrap();
+        // Verify persistence via graph_node_run_get equivalent
+        let fetched = db.get_graph_run(&check_run.id).unwrap().unwrap();
         assert_eq!(fetched.output, check_run.output);
 
         assert!(
             marker.exists(),
             "fail edge must have been traversed to recovery node"
         );
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
-        assert_eq!(lp.status, LoopStatus::Completed);
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        assert_eq!(lp.status, GraphStatus::Completed);
     }
 
     #[tokio::test]
     async fn check_node_failure_output_reaches_next_node() {
-        let (_dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (_dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-check-fail".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "failing-check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "echo 'DISTINCT_FAIL_OUTPUT_42'; exit 1",
                 "success_condition": "exit_code_0"
@@ -21545,12 +21620,12 @@ echo done
         })
         .unwrap();
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-next".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "next".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "exit 0",
                 "success_condition": "exit_code_0"
@@ -21560,22 +21635,22 @@ echo done
         })
         .unwrap();
 
-        db.insert_loop_edge(&LoopEdge {
+        db.insert_graph_edge(&GraphEdge {
             id: "edge-fail".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             from_node: "node-check-fail".to_string(),
             to_node: "node-next".to_string(),
-            condition: LoopEdgeCondition::Fail,
+            condition: GraphEdgeCondition::Fail,
         })
         .unwrap();
 
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
 
-        let runs = db.list_loop_runs_for_spec(&spec_id).unwrap();
+        let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
         let check_run = runs
             .iter()
             .find(|r| r.node_id == "node-check-fail")
@@ -21608,14 +21683,14 @@ echo done
 
     #[tokio::test]
     async fn check_node_long_output_is_truncated() {
-        let (_dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (_dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-check-long".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "long-check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "head -c 70000 /dev/zero | tr '\\0' 'A'; printf 'TAIL_END'; exit 1",
                 "success_condition": "exit_code_0"
@@ -21626,16 +21701,16 @@ echo done
         .unwrap();
 
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
 
-        let runs = db.list_loop_runs_for_spec(&spec_id).unwrap();
+        let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
         let run = runs
             .iter()
             .find(|r| r.node_id == "node-check-long")
             .unwrap();
-        assert_eq!(run.status, LoopRunStatus::Fail);
+        assert_eq!(run.status, GraphRunStatus::Fail);
         let out = run.output.as_ref().unwrap();
         assert_eq!(out["truncated"], serde_json::Value::Bool(true));
         let stdout = out["stdout"].as_str().unwrap();
@@ -21665,14 +21740,14 @@ echo done
     /// wrongly fail.
     #[tokio::test]
     async fn check_node_success_condition_sees_full_output_not_just_truncated_tail() {
-        let (_dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (_dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-check-early-marker".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "early-marker-check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "printf 'EARLY_MARKER_77 '; head -c 70000 /dev/zero | tr '\\0' 'A'",
                 "success_condition": "exit_code_0_and_output_contains:EARLY_MARKER_77"
@@ -21683,18 +21758,18 @@ echo done
         .unwrap();
 
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
 
-        let runs = db.list_loop_runs_for_spec(&spec_id).unwrap();
+        let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
         let run = runs
             .iter()
             .find(|r| r.node_id == "node-check-early-marker")
             .unwrap();
         assert_eq!(
             run.status,
-            LoopRunStatus::Pass,
+            GraphRunStatus::Pass,
             "condition must match the marker in the full output even though it is truncated for storage"
         );
         let out = run.output.as_ref().unwrap();
@@ -21714,14 +21789,14 @@ echo done
         // mid-run and require the early line before the run completes.
         // Without the reader tasks the chunk table stays empty until the
         // completion snapshot, so this fails with the feature removed.
-        let (_dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (_dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-check-stream".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "stream-check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "echo 'STREAM_EARLY_OUT'; echo 'STREAM_EARLY_ERR' >&2; sleep 3; exit 0",
                 "success_condition": "exit_code_0"
@@ -21731,21 +21806,21 @@ echo done
         })
         .unwrap();
 
-        let run_loop = engine.run_loop(loop_id.clone(), None, None, None, None);
-        tokio::pin!(run_loop);
+        let run_graph = engine.run_graph(graph_id.clone(), None, None, None, None);
+        tokio::pin!(run_graph);
         // Poll the future without awaiting it yet: drive one step so the
         // check node spawns, then observe the live tail from this thread.
         let mut saw_early = false;
         for _ in 0..100 {
-            if tokio::time::timeout(std::time::Duration::from_millis(100), &mut run_loop)
+            if tokio::time::timeout(std::time::Duration::from_millis(100), &mut run_graph)
                 .await
                 .is_ok()
             {
                 break;
             }
-            let runs = db.list_loop_runs_for_spec(&spec_id).unwrap();
+            let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
             if let Some(run) = runs.iter().find(|r| r.node_id == "node-check-stream") {
-                let (stdout, stderr) = db.get_loop_run_tail(&run.id, 1000).unwrap();
+                let (stdout, stderr) = db.get_graph_run_tail(&run.id, 1000).unwrap();
                 if stdout.contains("STREAM_EARLY_OUT") && stderr.contains("STREAM_EARLY_ERR") {
                     saw_early = true;
                     break;
@@ -21756,16 +21831,16 @@ echo done
             saw_early,
             "live tail must show streamed output while the node still runs"
         );
-        run_loop.await.unwrap();
+        run_graph.await.unwrap();
 
         // Post-completion the snapshot keeps serving the tail.
-        let runs = db.list_loop_runs_for_spec(&spec_id).unwrap();
+        let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
         let run = runs
             .iter()
             .find(|r| r.node_id == "node-check-stream")
             .unwrap();
-        assert_eq!(run.status, LoopRunStatus::Pass);
-        let (stdout, stderr) = db.get_loop_run_tail(&run.id, 1000).unwrap();
+        assert_eq!(run.status, GraphRunStatus::Pass);
+        let (stdout, stderr) = db.get_graph_run_tail(&run.id, 1000).unwrap();
         assert!(stdout.contains("STREAM_EARLY_OUT"), "got: {stdout}");
         assert!(stderr.contains("STREAM_EARLY_ERR"), "got: {stderr}");
         let out = run.output.as_ref().unwrap();
@@ -21775,14 +21850,14 @@ echo done
 
     #[tokio::test]
     async fn check_node_timeout_marks_tail_timed_out_with_partial_output() {
-        let (_dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (_dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-check-hang".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "hang-check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "echo 'PARTIAL_BEFORE_HANG'; sleep 30",
                 "success_condition": "exit_code_0",
@@ -21794,16 +21869,16 @@ echo done
         .unwrap();
 
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
 
-        let runs = db.list_loop_runs_for_spec(&spec_id).unwrap();
+        let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
         let run = runs
             .iter()
             .find(|r| r.node_id == "node-check-hang")
             .unwrap();
-        assert_eq!(run.status, LoopRunStatus::Fail);
+        assert_eq!(run.status, GraphRunStatus::Fail);
         let out = run.output.as_ref().unwrap();
         assert_eq!(out["error"], serde_json::json!("timed out"));
         // Partial output captured before the kill must be visible in the
@@ -21816,7 +21891,7 @@ echo done
             "timeout output must carry partial stdout, got: {:?}",
             out["stdout"]
         );
-        let (stdout, _) = db.get_loop_run_tail(&run.id, 1000).unwrap();
+        let (stdout, _) = db.get_graph_run_tail(&run.id, 1000).unwrap();
         assert!(
             stdout.contains("PARTIAL_BEFORE_HANG"),
             "live tail must keep partial output after timeout, got: {stdout}"
@@ -21829,14 +21904,14 @@ echo done
         // silence case): the tail is empty AND the run is marked timed out,
         // so the dialog can render "no output" + timeout banner instead of
         // an ambiguous blank.
-        let (_dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (_dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-check-silent".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "silent-check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "sleep 30",
                 "success_condition": "exit_code_0",
@@ -21848,31 +21923,31 @@ echo done
         .unwrap();
 
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
 
-        let runs = db.list_loop_runs_for_spec(&spec_id).unwrap();
+        let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
         let run = runs
             .iter()
             .find(|r| r.node_id == "node-check-silent")
             .unwrap();
-        assert_eq!(run.status, LoopRunStatus::Fail);
-        let (stdout, stderr) = db.get_loop_run_tail(&run.id, 1000).unwrap();
+        assert_eq!(run.status, GraphRunStatus::Fail);
+        let (stdout, stderr) = db.get_graph_run_tail(&run.id, 1000).unwrap();
         assert_eq!(stdout, "");
         assert_eq!(stderr, "");
     }
 
     #[tokio::test]
     async fn check_node_large_output_tail_snapshot_stays_bounded() {
-        let (_dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (_dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-check-flood".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "flood-check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "head -c 100000 /dev/zero | tr '\\0' 'B'; printf 'FLOOD_TAIL'; exit 0",
                 "success_condition": "exit_code_0"
@@ -21883,17 +21958,17 @@ echo done
         .unwrap();
 
         engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
 
-        let runs = db.list_loop_runs_for_spec(&spec_id).unwrap();
+        let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
         let run = runs
             .iter()
             .find(|r| r.node_id == "node-check-flood")
             .unwrap();
-        assert_eq!(run.status, LoopRunStatus::Pass);
-        let (stdout, _) = db.get_loop_run_tail(&run.id, 1000).unwrap();
+        assert_eq!(run.status, GraphRunStatus::Pass);
+        let (stdout, _) = db.get_graph_run_tail(&run.id, 1000).unwrap();
         assert!(
             stdout.contains("FLOOD_TAIL"),
             "tail must keep the newest bytes, got len {}",
@@ -21910,15 +21985,15 @@ echo done
 
     #[test]
     fn render_agent_prompt_refuses_template_with_unbindable_placeholder() {
-        let lp = crate::domain::loops::Loop {
+        let lp = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
             infra_node_id: None,
             id: "wf".to_string(),
-            name: "Loop".to_string(),
+            name: "Graph".to_string(),
             description: None,
             workdir: "/tmp/project".to_string(),
-            status: LoopStatus::Draft,
+            status: GraphStatus::Draft,
             trigger: None,
             created_at: chrono::Utc::now(),
             started_at: None,
@@ -21929,14 +22004,14 @@ echo done
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
         };
-        let spec = LoopSpec {
+        let spec = GraphSpec {
             id: "spec".to_string(),
-            loop_id: Some("wf".to_string()),
+            graph_id: Some("wf".to_string()),
             name: "Spec".to_string(),
             description: Some("do the thing".to_string()),
             position: 1,
             parallelizable: false,
-            status: LoopSpecStatus::Pending,
+            status: GraphSpecStatus::Pending,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
@@ -21946,12 +22021,12 @@ echo done
             completed_via_reason: None,
             completed_via_at: None,
         };
-        let node = LoopNode {
+        let node = GraphNode {
             id: "node-1".to_string(),
             spec_id: Some("spec".to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "Agent".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({}),
             position: 1,
             created_at: chrono::Utc::now(),
@@ -21987,15 +22062,15 @@ echo done
 
     #[test]
     fn render_agent_prompt_spawns_with_an_escaped_unknown_marker() {
-        let lp = crate::domain::loops::Loop {
+        let lp = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
             infra_node_id: None,
             id: "wf".to_string(),
-            name: "Loop".to_string(),
+            name: "Graph".to_string(),
             description: None,
             workdir: "/tmp/project".to_string(),
-            status: LoopStatus::Draft,
+            status: GraphStatus::Draft,
             trigger: None,
             created_at: chrono::Utc::now(),
             started_at: None,
@@ -22006,14 +22081,14 @@ echo done
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
         };
-        let spec = LoopSpec {
+        let spec = GraphSpec {
             id: "spec".to_string(),
-            loop_id: Some("wf".to_string()),
+            graph_id: Some("wf".to_string()),
             name: "Spec".to_string(),
             description: Some("do the thing".to_string()),
             position: 1,
             parallelizable: false,
-            status: LoopSpecStatus::Pending,
+            status: GraphSpecStatus::Pending,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
@@ -22023,12 +22098,12 @@ echo done
             completed_via_reason: None,
             completed_via_at: None,
         };
-        let node = LoopNode {
+        let node = GraphNode {
             id: "node-1".to_string(),
             spec_id: Some("spec".to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "Final review (kilo)".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({}),
             position: 1,
             created_at: chrono::Utc::now(),
@@ -22065,15 +22140,15 @@ echo done
 
     #[test]
     fn render_agent_prompt_escape_wins_over_a_real_binding() {
-        let lp = crate::domain::loops::Loop {
+        let lp = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
             infra_node_id: None,
             id: "wf".to_string(),
-            name: "Loop".to_string(),
+            name: "Graph".to_string(),
             description: None,
             workdir: "/tmp/project".to_string(),
-            status: LoopStatus::Draft,
+            status: GraphStatus::Draft,
             trigger: None,
             created_at: chrono::Utc::now(),
             started_at: None,
@@ -22084,14 +22159,14 @@ echo done
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
         };
-        let spec = LoopSpec {
+        let spec = GraphSpec {
             id: "spec".to_string(),
-            loop_id: Some("wf".to_string()),
+            graph_id: Some("wf".to_string()),
             name: "Spec".to_string(),
             description: Some("SPEC-BODY".to_string()),
             position: 1,
             parallelizable: false,
-            status: LoopSpecStatus::Pending,
+            status: GraphSpecStatus::Pending,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
@@ -22101,12 +22176,12 @@ echo done
             completed_via_reason: None,
             completed_via_at: None,
         };
-        let node = LoopNode {
+        let node = GraphNode {
             id: "node-1".to_string(),
             spec_id: Some("spec".to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "Agent".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({}),
             position: 1,
             created_at: chrono::Utc::now(),
@@ -22151,15 +22226,15 @@ echo done
         );
         assert_eq!(escaped, "Literal {{output:Architect}} here.");
 
-        let lp = crate::domain::loops::Loop {
+        let lp = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
             infra_node_id: None,
             id: "wf-test".to_string(),
-            name: "Loop".to_string(),
+            name: "Graph".to_string(),
             description: None,
             workdir: "/tmp/project".to_string(),
-            status: LoopStatus::Draft,
+            status: GraphStatus::Draft,
             trigger: None,
             created_at: chrono::Utc::now(),
             started_at: None,
@@ -22170,14 +22245,14 @@ echo done
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
         };
-        let spec = LoopSpec {
+        let spec = GraphSpec {
             id: "spec".to_string(),
-            loop_id: Some(lp.id.clone()),
+            graph_id: Some(lp.id.clone()),
             name: "Spec".to_string(),
             description: Some("task".to_string()),
             position: 1,
             parallelizable: false,
-            status: LoopSpecStatus::Pending,
+            status: GraphSpecStatus::Pending,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
@@ -22187,12 +22262,12 @@ echo done
             completed_via_reason: None,
             completed_via_at: None,
         };
-        let node = LoopNode {
+        let node = GraphNode {
             id: "node-impl".to_string(),
             spec_id: Some(spec.id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "Implementer".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({}),
             position: 1,
             created_at: chrono::Utc::now(),
@@ -22272,15 +22347,15 @@ echo done
     #[test]
     fn render_agent_prompt_substitutes_named_output_marker() {
         let dir = tempdir().unwrap();
-        let lp = crate::domain::loops::Loop {
+        let lp = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
             infra_node_id: None,
             id: "wf-test".to_string(),
-            name: "Loop".to_string(),
+            name: "Graph".to_string(),
             description: None,
             workdir: dir.path().to_string_lossy().to_string(),
-            status: LoopStatus::Draft,
+            status: GraphStatus::Draft,
             trigger: None,
             created_at: chrono::Utc::now(),
             started_at: None,
@@ -22291,14 +22366,14 @@ echo done
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
         };
-        let spec = LoopSpec {
+        let spec = GraphSpec {
             id: "spec".to_string(),
-            loop_id: Some(lp.id.clone()),
+            graph_id: Some(lp.id.clone()),
             name: "Spec".to_string(),
             description: Some("Do the thing".to_string()),
             position: 1,
             parallelizable: false,
-            status: LoopSpecStatus::Pending,
+            status: GraphSpecStatus::Pending,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
@@ -22308,12 +22383,12 @@ echo done
             completed_via_reason: None,
             completed_via_at: None,
         };
-        let node = LoopNode {
+        let node = GraphNode {
             id: "node-impl".to_string(),
             spec_id: Some(spec.id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "Implementer".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({}),
             position: 1,
             created_at: chrono::Utc::now(),
@@ -22352,15 +22427,15 @@ echo done
     #[test]
     fn render_agent_prompt_accepts_output_marker_without_refusing() {
         let dir = tempdir().unwrap();
-        let lp = crate::domain::loops::Loop {
+        let lp = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
             infra_node_id: None,
             id: "wf-test".to_string(),
-            name: "Loop".to_string(),
+            name: "Graph".to_string(),
             description: None,
             workdir: dir.path().to_string_lossy().to_string(),
-            status: LoopStatus::Draft,
+            status: GraphStatus::Draft,
             trigger: None,
             created_at: chrono::Utc::now(),
             started_at: None,
@@ -22371,14 +22446,14 @@ echo done
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
         };
-        let spec = LoopSpec {
+        let spec = GraphSpec {
             id: "spec".to_string(),
-            loop_id: Some(lp.id.clone()),
+            graph_id: Some(lp.id.clone()),
             name: "Spec".to_string(),
             description: Some("task".to_string()),
             position: 1,
             parallelizable: false,
-            status: LoopSpecStatus::Pending,
+            status: GraphSpecStatus::Pending,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
@@ -22388,12 +22463,12 @@ echo done
             completed_via_reason: None,
             completed_via_at: None,
         };
-        let node = LoopNode {
+        let node = GraphNode {
             id: "node-impl".to_string(),
             spec_id: Some(spec.id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "Implementer".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({}),
             position: 1,
             created_at: chrono::Utc::now(),
@@ -22422,15 +22497,15 @@ echo done
     #[test]
     fn previous_feedback_still_works_without_named_outputs() {
         let dir = tempdir().unwrap();
-        let lp = crate::domain::loops::Loop {
+        let lp = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
             infra_node_id: None,
             id: "wf-test".to_string(),
-            name: "Loop".to_string(),
+            name: "Graph".to_string(),
             description: None,
             workdir: dir.path().to_string_lossy().to_string(),
-            status: LoopStatus::Draft,
+            status: GraphStatus::Draft,
             trigger: None,
             created_at: chrono::Utc::now(),
             started_at: None,
@@ -22441,14 +22516,14 @@ echo done
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
         };
-        let spec = LoopSpec {
+        let spec = GraphSpec {
             id: "spec".to_string(),
-            loop_id: Some(lp.id.clone()),
+            graph_id: Some(lp.id.clone()),
             name: "Spec".to_string(),
             description: Some("task".to_string()),
             position: 1,
             parallelizable: false,
-            status: LoopSpecStatus::Pending,
+            status: GraphSpecStatus::Pending,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
@@ -22458,12 +22533,12 @@ echo done
             completed_via_reason: None,
             completed_via_at: None,
         };
-        let node = LoopNode {
+        let node = GraphNode {
             id: "node-1".to_string(),
             spec_id: Some(spec.id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "Worker".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({}),
             position: 1,
             created_at: chrono::Utc::now(),
@@ -22544,16 +22619,16 @@ exit 0
     #[tokio::test]
     async fn execute_spec_retains_outputs_across_multiple_hops() {
         let fake_home = setup_prompt_capturing_cli_home();
-        let (dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
         let capture_dir = dir.path().join("prompts");
         std::fs::create_dir_all(&capture_dir).unwrap();
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-architect".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "Architect".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({
                 "platform": "capture-cli",
                 "prompt_template": "Design the system architecture",
@@ -22564,12 +22639,12 @@ exit 0
         })
         .unwrap();
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-tester".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "Tester".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({
                 "platform": "capture-cli",
                 "prompt_template": "Review the design for testability",
@@ -22580,12 +22655,12 @@ exit 0
         })
         .unwrap();
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-implementer".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "Implementer".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({
                 "platform": "capture-cli",
                 "prompt_template": "Implement based on this design: {{output:Architect}}",
@@ -22596,23 +22671,23 @@ exit 0
         })
         .unwrap();
 
-        db.insert_loop_edge(&LoopEdge {
+        db.insert_graph_edge(&GraphEdge {
             id: "edge-arch-test".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             from_node: "node-architect".to_string(),
             to_node: "node-tester".to_string(),
-            condition: crate::domain::loops::LoopEdgeCondition::Always,
+            condition: crate::domain::graphs::GraphEdgeCondition::Always,
         })
         .unwrap();
 
-        db.insert_loop_edge(&LoopEdge {
+        db.insert_graph_edge(&GraphEdge {
             id: "edge-test-impl".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             from_node: "node-tester".to_string(),
             to_node: "node-implementer".to_string(),
-            condition: crate::domain::loops::LoopEdgeCondition::Always,
+            condition: crate::domain::graphs::GraphEdgeCondition::Always,
         })
         .unwrap();
 
@@ -22620,7 +22695,7 @@ exit 0
         std::env::set_var("CAPTURE_DIR", capture_dir.to_str().unwrap());
         std::env::set_var("LINGER_SECONDS", "1");
 
-        // CM13: the capture script never calls loop_complete_node, so file
+        // CM13: the capture script never calls graph_complete_node, so file
         // Pass verdicts carrying each node's canned stdout (see VerdictFiler)
         // — the “happy path” the multi-hop retention below is about.
         let _filer = VerdictFiler::spawn(
@@ -22642,7 +22717,7 @@ exit 0
         );
 
         let result = engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await;
         drop(_home);
         std::env::remove_var("CAPTURE_DIR");
@@ -22650,8 +22725,8 @@ exit 0
 
         result.unwrap();
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
-        assert_eq!(lp.status, LoopStatus::Completed);
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        assert_eq!(lp.status, GraphStatus::Completed);
 
         let implementer_prompt_path = capture_dir.join("prompt_3");
         assert!(
@@ -22674,7 +22749,7 @@ exit 0
 
     #[tokio::test]
     async fn idea_text_populates_spec_content_in_placeholder() {
-        let (dir, db, engine, loop_id) = bare_loop_fixture().unwrap();
+        let (dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
         let argv_file = dir.path().join("argv.log");
         let script = write_argv_echo_cli(dir.path());
         let mut env = HashMap::new();
@@ -22689,23 +22764,23 @@ exit 0
         let cli = argv_cli_config(&script, env, None, None, None);
         let home = write_resume_cli_home(cli);
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-impl".to_string(),
             spec_id: None,
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             name: "impl".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({ "platform": "resume-cli" }),
             position: 1,
             created_at: chrono::Utc::now(),
         })
         .unwrap();
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-check".to_string(),
             spec_id: None,
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             name: "check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "printf APPROVED",
                 "success_condition": "exit_code_0"
@@ -22714,24 +22789,24 @@ exit 0
             created_at: chrono::Utc::now(),
         })
         .unwrap();
-        db.insert_loop_edge(&LoopEdge {
+        db.insert_graph_edge(&GraphEdge {
             id: "edge-impl-check".to_string(),
             spec_id: None,
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             from_node: "node-impl".to_string(),
             to_node: "node-check".to_string(),
-            condition: crate::domain::loops::LoopEdgeCondition::Pass,
+            condition: crate::domain::graphs::GraphEdgeCondition::Pass,
         })
         .unwrap();
 
         let guard = HomeGuard::set(home.path());
-        // CM13: the echo script never calls loop_complete_node, so the filer
+        // CM13: the echo script never calls graph_complete_node, so the filer
         // files the Pass verdict instead (see VerdictFiler). The filer is
         // dropped (joined) before returning.
         let _filer = VerdictFiler::spawn(&db, vec![("node-impl".to_string(), None)]);
         engine
-            .run_loop(
-                loop_id.clone(),
+            .run_graph(
+                graph_id.clone(),
                 None,
                 None,
                 Some("Build a landing page for our startup".to_string()),
@@ -22741,8 +22816,8 @@ exit 0
             .unwrap();
         drop(guard);
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
-        assert_eq!(lp.status, LoopStatus::Completed);
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        assert_eq!(lp.status, GraphStatus::Completed);
 
         let argv = std::fs::read_to_string(&argv_file).unwrap();
         assert!(
@@ -22757,11 +22832,11 @@ exit 0
 
     #[tokio::test]
     async fn idea_without_graph_still_errors() {
-        let (_dir, db, engine, loop_id) = bare_loop_fixture().unwrap();
+        let (_dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
 
         let error = engine
-            .run_loop(
-                loop_id.clone(),
+            .run_graph(
+                graph_id.clone(),
                 None,
                 None,
                 Some("some idea".to_string()),
@@ -22774,20 +22849,20 @@ exit 0
             "unexpected error message: {error}"
         );
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
         assert_eq!(
             lp.status,
-            LoopStatus::Draft,
-            "an idea without a graph must leave the loop's status untouched"
+            GraphStatus::Draft,
+            "an idea without a graph must leave the graph's status untouched"
         );
     }
 
     #[tokio::test]
     async fn no_idea_no_graph_still_errors() {
-        let (_dir, db, engine, loop_id) = bare_loop_fixture().unwrap();
+        let (_dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
 
         let error = engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap_err();
         assert!(
@@ -22795,25 +22870,25 @@ exit 0
             "unexpected error message: {error}"
         );
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
         assert_eq!(
             lp.status,
-            LoopStatus::Draft,
-            "no idea and no graph must leave the loop's status untouched"
+            GraphStatus::Draft,
+            "no idea and no graph must leave the graph's status untouched"
         );
     }
 
     #[test]
     fn render_agent_prompt_preserves_tagged_spec_body_verbatim() {
-        let lp = crate::domain::loops::Loop {
+        let lp = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
             infra_node_id: None,
             id: "wf".to_string(),
-            name: "Loop".to_string(),
+            name: "Graph".to_string(),
             description: None,
             workdir: "/tmp/project".to_string(),
-            status: LoopStatus::Draft,
+            status: GraphStatus::Draft,
             trigger: None,
             created_at: chrono::Utc::now(),
             started_at: None,
@@ -22825,14 +22900,14 @@ exit 0
             hooks: std::collections::BTreeMap::new(),
         };
         let tagged_body = "<spec>\n  <objective>Ship it.</objective>\n  <functional_requirements>Does thing.</functional_requirements>\n  <non_functional_requirements>Fast.</non_functional_requirements>\n  <constraints>None.</constraints>\n  <guidelines>Style.</guidelines>\n  <in_scope>This.</in_scope>\n  <out_of_scope>Nothing.</out_of_scope>\n</spec>";
-        let spec = LoopSpec {
+        let spec = GraphSpec {
             id: "spec".to_string(),
-            loop_id: Some("wf".to_string()),
+            graph_id: Some("wf".to_string()),
             name: "Spec".to_string(),
             description: Some(tagged_body.to_string()),
             position: 1,
             parallelizable: false,
-            status: LoopSpecStatus::Pending,
+            status: GraphSpecStatus::Pending,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
@@ -22842,12 +22917,12 @@ exit 0
             completed_via_reason: None,
             completed_via_at: None,
         };
-        let node = LoopNode {
+        let node = GraphNode {
             id: "node-1".to_string(),
             spec_id: Some("spec".to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "Agent".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({}),
             position: 1,
             created_at: chrono::Utc::now(),
@@ -22872,11 +22947,11 @@ exit 0
         assert!(!prompt.contains("# Functional Requirements"));
     }
 
-    // ── CH4: loop hook tests ─────────────────────────────────────────
+    // ── CH4: graph hook tests ─────────────────────────────────────────
 
-    /// Helper: create a second loop with a simple graph and spec, returning its id.
-    fn create_target_loop(db: &Database, id: &str, name: &str) -> Result<String> {
-        let lp = crate::domain::loops::Loop {
+    /// Helper: create a second graph with a simple graph and spec, returning its id.
+    fn create_target_graph(db: &Database, id: &str, name: &str) -> Result<String> {
+        let lp = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
             infra_node_id: None,
@@ -22884,7 +22959,7 @@ exit 0
             name: name.to_string(),
             description: None,
             workdir: "/tmp".to_string(),
-            status: LoopStatus::Draft,
+            status: GraphStatus::Draft,
             trigger: None,
             created_at: chrono::Utc::now(),
             started_at: None,
@@ -22895,28 +22970,28 @@ exit 0
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
         };
-        db.insert_loop(&lp)?;
-        // Add a Check node so the loop can actually run specs.
-        let node = crate::domain::loops::LoopNode {
+        db.insert_graph(&lp)?;
+        // Add a Check node so the graph can actually run specs.
+        let node = crate::domain::graphs::GraphNode {
             id: format!("{id}-node-1"),
             spec_id: None,
-            loop_id: Some(id.to_string()),
+            graph_id: Some(id.to_string()),
             name: "Check".to_string(),
-            kind: crate::domain::loops::LoopNodeKind::Check,
+            kind: crate::domain::graphs::GraphNodeKind::Check,
             config: serde_json::json!({"command": "true"}),
             position: 1,
             created_at: chrono::Utc::now(),
         };
-        db.insert_loop_node(&node)?;
-        // Add a spec so the loop has something to run.
-        let spec = crate::domain::loops::LoopSpec {
+        db.insert_graph_node(&node)?;
+        // Add a spec so the graph has something to run.
+        let spec = crate::domain::graphs::GraphSpec {
             id: format!("{id}-spec"),
-            loop_id: Some(id.to_string()),
+            graph_id: Some(id.to_string()),
             name: "Spec".to_string(),
             description: Some("task".to_string()),
             position: 1,
             parallelizable: false,
-            status: LoopSpecStatus::Pending,
+            status: GraphSpecStatus::Pending,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
@@ -22926,12 +23001,12 @@ exit 0
             completed_via_reason: None,
             completed_via_at: None,
         };
-        db.insert_loop_spec(&spec)?;
+        db.insert_graph_spec(&spec)?;
         Ok(id.to_string())
     }
 
-    fn create_target_loop_no_specs(db: &Database, id: &str, name: &str) -> Result<String> {
-        let lp = crate::domain::loops::Loop {
+    fn create_target_graph_no_specs(db: &Database, id: &str, name: &str) -> Result<String> {
+        let lp = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
             infra_node_id: None,
@@ -22939,7 +23014,7 @@ exit 0
             name: name.to_string(),
             description: None,
             workdir: "/tmp".to_string(),
-            status: LoopStatus::Draft,
+            status: GraphStatus::Draft,
             trigger: None,
             created_at: chrono::Utc::now(),
             started_at: None,
@@ -22950,31 +23025,31 @@ exit 0
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
         };
-        db.insert_loop(&lp)?;
-        let node = crate::domain::loops::LoopNode {
+        db.insert_graph(&lp)?;
+        let node = crate::domain::graphs::GraphNode {
             id: format!("{id}-node-1"),
             spec_id: None,
-            loop_id: Some(id.to_string()),
+            graph_id: Some(id.to_string()),
             name: "Check".to_string(),
-            kind: crate::domain::loops::LoopNodeKind::Check,
+            kind: crate::domain::graphs::GraphNodeKind::Check,
             config: serde_json::json!({"command": "true"}),
             position: 1,
             created_at: chrono::Utc::now(),
         };
-        db.insert_loop_node(&node)?;
+        db.insert_graph_node(&node)?;
         Ok(id.to_string())
     }
 
-    /// Helper: set up a source loop with an on_completed hook that launches
-    /// a target loop.
-    fn setup_loop_hook_source(
+    /// Helper: set up a source graph with an on_completed hook that launches
+    /// a target graph.
+    fn setup_graph_hook_source(
         db: &Database,
         source_id: &str,
         target_id: &str,
         queue_id: Option<&str>,
         idea: Option<&str>,
     ) -> Result<()> {
-        let hook = crate::domain::loops::LoopCompletionHook {
+        let hook = crate::domain::graphs::GraphCompletionHook {
             platform: None,
             model: None,
             effort: None,
@@ -22982,14 +23057,14 @@ exit 0
             command: None,
             target_session_id: None,
             timeout_minutes: None,
-            target_loop_id: Some(target_id.to_string()),
+            target_graph_id: Some(target_id.to_string()),
             queue_id: queue_id.map(str::to_string),
             workdir_override: None,
             idea: idea.map(str::to_string),
         };
         let mut hooks = std::collections::BTreeMap::new();
-        hooks.insert(LoopHookEvent::OnCompleted, vec![hook]);
-        let lp = crate::domain::loops::Loop {
+        hooks.insert(GraphHookEvent::OnCompleted, vec![hook]);
+        let lp = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
             infra_node_id: None,
@@ -22997,7 +23072,7 @@ exit 0
             name: format!("Source {source_id}"),
             description: None,
             workdir: "/tmp".to_string(),
-            status: LoopStatus::Draft,
+            status: GraphStatus::Draft,
             trigger: None,
             created_at: chrono::Utc::now(),
             started_at: None,
@@ -23008,28 +23083,28 @@ exit 0
             active_run_queue_id: None,
             hooks,
         };
-        db.insert_loop(&lp)?;
-        // Add a graph node so the loop can actually run specs.
-        let node = crate::domain::loops::LoopNode {
+        db.insert_graph(&lp)?;
+        // Add a graph node so the graph can actually run specs.
+        let node = crate::domain::graphs::GraphNode {
             id: format!("{source_id}-node-1"),
             spec_id: None,
-            loop_id: Some(source_id.to_string()),
+            graph_id: Some(source_id.to_string()),
             name: "Check".to_string(),
-            kind: crate::domain::loops::LoopNodeKind::Check,
+            kind: crate::domain::graphs::GraphNodeKind::Check,
             config: serde_json::json!({"command": "true"}),
             position: 1,
             created_at: chrono::Utc::now(),
         };
-        db.insert_loop_node(&node)?;
-        // Add a spec so the loop has something to run.
-        let spec = crate::domain::loops::LoopSpec {
+        db.insert_graph_node(&node)?;
+        // Add a spec so the graph has something to run.
+        let spec = crate::domain::graphs::GraphSpec {
             id: format!("{source_id}-spec"),
-            loop_id: Some(source_id.to_string()),
+            graph_id: Some(source_id.to_string()),
             name: "Spec".to_string(),
             description: Some("do nothing".to_string()),
             position: 1,
             parallelizable: false,
-            status: LoopSpecStatus::Pending,
+            status: GraphSpecStatus::Pending,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
@@ -23039,172 +23114,174 @@ exit 0
             completed_via_reason: None,
             completed_via_at: None,
         };
-        db.insert_loop_spec(&spec)?;
+        db.insert_graph_spec(&spec)?;
         Ok(())
     }
 
-    /// CH4: A hook launches a target loop, and the launching loop completes
+    /// CH4: A hook launches a target graph, and the launching graph completes
     /// without waiting for it.
     #[tokio::test]
-    async fn loop_hook_launches_target_loop_in_background() {
+    async fn graph_hook_launches_target_graph_in_background() {
         let dir = tempdir().unwrap();
         let db = Arc::new(Database::new(&dir.path().join("test.db")).unwrap());
-        let target_id = create_target_loop(&db, "target-bg", "Target").unwrap();
-        setup_loop_hook_source(&db, "source-bg", &target_id, None, None).unwrap();
+        let target_id = create_target_graph(&db, "target-bg", "Target").unwrap();
+        setup_graph_hook_source(&db, "source-bg", &target_id, None, None).unwrap();
 
-        let engine = LoopEngine::new(Arc::clone(&db), Arc::new(DefaultNotificationService));
+        let engine = GraphEngine::new(Arc::clone(&db), Arc::new(DefaultNotificationService));
         let result = engine
-            .run_loop("source-bg".to_string(), None, None, None, None)
+            .run_graph("source-bg".to_string(), None, None, None, None)
             .await;
-        assert!(result.is_ok(), "source loop should complete: {result:?}");
+        assert!(result.is_ok(), "source graph should complete: {result:?}");
 
-        // The source loop should be completed.
-        let source = db.get_loop("source-bg").unwrap().unwrap();
-        assert_eq!(source.status, LoopStatus::Completed);
+        // The source graph should be completed.
+        let source = db.get_graph("source-bg").unwrap().unwrap();
+        assert_eq!(source.status, GraphStatus::Completed);
 
-        // Give the background task a moment to start the target loop.
+        // Give the background task a moment to start the target graph.
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-        // The target loop should have been launched.
-        let target = db.get_loop(&target_id).unwrap().unwrap();
+        // The target graph should have been launched.
+        let target = db.get_graph(&target_id).unwrap().unwrap();
         assert!(
-            target.status == LoopStatus::Running || target.status == LoopStatus::Completed,
+            target.status == GraphStatus::Running || target.status == GraphStatus::Completed,
             "target should be running or completed, got {:?}",
             target.status
         );
     }
 
-    /// CH4: A hook launches a loop with an `idea` and no queue, and the
+    /// CH4: A hook launches a graph with an `idea` and no queue, and the
     /// target's first node receives that text as `{{spec_content}}`.
     #[tokio::test]
-    async fn loop_hook_launches_loop_with_idea() {
+    async fn graph_hook_launches_graph_with_idea() {
         let dir = tempdir().unwrap();
         let db = Arc::new(Database::new(&dir.path().join("test.db")).unwrap());
-        let target_id = create_target_loop(&db, "target-idea", "Target Idea").unwrap();
-        setup_loop_hook_source(&db, "source-idea", &target_id, None, Some("Build a widget"))
+        let target_id = create_target_graph(&db, "target-idea", "Target Idea").unwrap();
+        setup_graph_hook_source(&db, "source-idea", &target_id, None, Some("Build a widget"))
             .unwrap();
 
-        let engine = LoopEngine::new(Arc::clone(&db), Arc::new(DefaultNotificationService));
+        let engine = GraphEngine::new(Arc::clone(&db), Arc::new(DefaultNotificationService));
         let result = engine
-            .run_loop("source-idea".to_string(), None, None, None, None)
+            .run_graph("source-idea".to_string(), None, None, None, None)
             .await;
-        assert!(result.is_ok(), "source loop should complete: {result:?}");
+        assert!(result.is_ok(), "source graph should complete: {result:?}");
 
         // Give the background task time to start.
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-        // The target loop should have been launched.
-        let target = db.get_loop(&target_id).unwrap().unwrap();
+        // The target graph should have been launched.
+        let target = db.get_graph(&target_id).unwrap().unwrap();
         assert!(
-            target.status == LoopStatus::Running || target.status == LoopStatus::Completed,
+            target.status == GraphStatus::Running || target.status == GraphStatus::Completed,
             "target should be running or completed, got {:?}",
             target.status
         );
     }
 
     #[tokio::test]
-    async fn loop_hook_refused_launch_is_recorded_failed() {
+    async fn graph_hook_refused_launch_is_recorded_failed() {
         let dir = tempdir().unwrap();
         let db = Arc::new(Database::new(&dir.path().join("test.db")).unwrap());
-        let target_id = create_target_loop_no_specs(&db, "target-empty", "Target Empty").unwrap();
-        // Hook has only target_loop_id: no idea, no queue_id.
-        setup_loop_hook_source(&db, "source-empty", &target_id, None, None).unwrap();
+        let target_id = create_target_graph_no_specs(&db, "target-empty", "Target Empty").unwrap();
+        // Hook has only target_graph_id: no idea, no queue_id.
+        setup_graph_hook_source(&db, "source-empty", &target_id, None, None).unwrap();
 
-        let engine = LoopEngine::new(Arc::clone(&db), Arc::new(DefaultNotificationService));
+        let engine = GraphEngine::new(Arc::clone(&db), Arc::new(DefaultNotificationService));
         let result = engine
-            .run_loop("source-empty".to_string(), None, None, None, None)
+            .run_graph("source-empty".to_string(), None, None, None, None)
             .await;
-        assert!(result.is_ok(), "source loop should complete: {result:?}");
+        assert!(result.is_ok(), "source graph should complete: {result:?}");
 
-        // Constraint: a failed hook does not fail the loop that fired it.
-        let source = db.get_loop("source-empty").unwrap().unwrap();
-        assert_eq!(source.status, LoopStatus::Completed);
+        // Constraint: a failed hook does not fail the graph that fired it.
+        let source = db.get_graph("source-empty").unwrap().unwrap();
+        assert_eq!(source.status, GraphStatus::Completed);
 
         // Target never ran.
-        let target = db.get_loop(&target_id).unwrap().unwrap();
-        assert_eq!(target.status, LoopStatus::Draft);
+        let target = db.get_graph(&target_id).unwrap().unwrap();
+        assert_eq!(target.status, GraphStatus::Draft);
         assert!(db
-            .list_loop_node_runs(&target_id, None, None, 100, 0)
+            .list_graph_node_runs(&target_id, None, None, 100, 0)
             .unwrap()
             .is_empty());
 
         // The hook run is recorded failed, with the engine's refusal text.
-        let runs = db.list_loop_completion_hook_runs("source-empty").unwrap();
+        let runs = db.list_graph_completion_hook_runs("source-empty").unwrap();
         assert_eq!(runs.len(), 1);
         let run = &runs[0];
-        assert_eq!(run.status, LoopRunStatus::Fail);
+        assert_eq!(run.status, GraphRunStatus::Fail);
         let summary = run.summary.as_deref().unwrap_or("");
         assert!(
             summary.contains("has no specs to run") && summary.contains("0 bound specs"),
             "summary should carry the engine refusal verbatim, got: {summary:?}"
         );
-        // No launched_loop_id when nothing started.
+        // No launched_graph_id when nothing started.
         assert!(
             !run.output
                 .as_ref()
-                .is_some_and(|o| o.get("launched_loop_id").is_some()),
-            "refused launch must not write launched_loop_id, got: {:?}",
+                .is_some_and(|o| o.get("launched_graph_id").is_some()),
+            "refused launch must not write launched_graph_id, got: {:?}",
             run.output
         );
     }
 
     #[tokio::test]
-    async fn loop_hook_with_idea_launches_and_target_runs() {
+    async fn graph_hook_with_idea_launches_and_target_runs() {
         let dir = tempdir().unwrap();
         let db = Arc::new(Database::new(&dir.path().join("test.db")).unwrap());
-        let target_id = create_target_loop_no_specs(&db, "target-idea2", "Target Idea 2").unwrap();
-        setup_loop_hook_source(&db, "source-idea2", &target_id, None, Some("Do the thing"))
+        let target_id = create_target_graph_no_specs(&db, "target-idea2", "Target Idea 2").unwrap();
+        setup_graph_hook_source(&db, "source-idea2", &target_id, None, Some("Do the thing"))
             .unwrap();
 
-        let engine = LoopEngine::new(Arc::clone(&db), Arc::new(DefaultNotificationService));
+        let engine = GraphEngine::new(Arc::clone(&db), Arc::new(DefaultNotificationService));
         let result = engine
-            .run_loop("source-idea2".to_string(), None, None, None, None)
+            .run_graph("source-idea2".to_string(), None, None, None, None)
             .await;
-        assert!(result.is_ok(), "source loop should complete: {result:?}");
+        assert!(result.is_ok(), "source graph should complete: {result:?}");
 
         // Let the fire-and-forget launch start.
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-        let target = db.get_loop(&target_id).unwrap().unwrap();
+        let target = db.get_graph(&target_id).unwrap().unwrap();
         assert!(
-            target.status == LoopStatus::Running || target.status == LoopStatus::Completed,
+            target.status == GraphStatus::Running || target.status == GraphStatus::Completed,
             "target should have started, got {:?}",
             target.status
         );
 
-        let runs = db.list_loop_completion_hook_runs("source-idea2").unwrap();
+        let runs = db.list_graph_completion_hook_runs("source-idea2").unwrap();
         assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0].status, LoopRunStatus::Pass);
+        assert_eq!(runs[0].status, GraphRunStatus::Pass);
         assert_eq!(
             runs[0]
                 .output
                 .as_ref()
-                .and_then(|o| o.get("launched_loop_id"))
+                .and_then(|o| o.get("launched_graph_id"))
                 .and_then(|v| v.as_str()),
             Some(target_id.as_str()),
-            "accepted launch still reports launched_loop_id"
+            "accepted launch still reports launched_graph_id"
         );
     }
 
     #[tokio::test]
-    async fn loop_hook_nonexistent_target_is_recorded_failed() {
+    async fn graph_hook_nonexistent_target_is_recorded_failed() {
         let dir = tempdir().unwrap();
         let db = Arc::new(Database::new(&dir.path().join("test.db")).unwrap());
-        // Source's hook points at an id no loop has.
-        setup_loop_hook_source(&db, "source-missing", "does-not-exist-xyz", None, None).unwrap();
+        // Source's hook points at an id no graph has.
+        setup_graph_hook_source(&db, "source-missing", "does-not-exist-xyz", None, None).unwrap();
 
-        let engine = LoopEngine::new(Arc::clone(&db), Arc::new(DefaultNotificationService));
+        let engine = GraphEngine::new(Arc::clone(&db), Arc::new(DefaultNotificationService));
         let result = engine
-            .run_loop("source-missing".to_string(), None, None, None, None)
+            .run_graph("source-missing".to_string(), None, None, None, None)
             .await;
-        assert!(result.is_ok(), "source loop should complete: {result:?}");
+        assert!(result.is_ok(), "source graph should complete: {result:?}");
 
-        let source = db.get_loop("source-missing").unwrap().unwrap();
-        assert_eq!(source.status, LoopStatus::Completed);
+        let source = db.get_graph("source-missing").unwrap().unwrap();
+        assert_eq!(source.status, GraphStatus::Completed);
 
-        let runs = db.list_loop_completion_hook_runs("source-missing").unwrap();
+        let runs = db
+            .list_graph_completion_hook_runs("source-missing")
+            .unwrap();
         assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0].status, LoopRunStatus::Fail);
+        assert_eq!(runs[0].status, GraphRunStatus::Fail);
         assert!(
             runs[0]
                 .summary
@@ -23215,18 +23292,18 @@ exit 0
         );
     }
 
-    /// CH4: A loop launched by a hook has its own loop-launching hook refused,
+    /// CH4: A graph launched by a hook has its own graph-launching hook refused,
     /// with the reason recorded, while its other hooks still run.
     #[tokio::test]
-    async fn loop_hook_depth_cap_refuses_second_launch() {
+    async fn graph_hook_depth_cap_refuses_second_launch() {
         let dir = tempdir().unwrap();
         let db = Arc::new(Database::new(&dir.path().join("test.db")).unwrap());
 
-        // Create loop C (target for B's hook)
-        let c_id = create_target_loop(&db, "loop-c", "Loop C").unwrap();
+        // Create graph C (target for B's hook)
+        let c_id = create_target_graph(&db, "graph-c", "Graph C").unwrap();
 
-        // Create loop B manually with its own hook that launches C
-        let b_hook = crate::domain::loops::LoopCompletionHook {
+        // Create graph B manually with its own hook that launches C
+        let b_hook = crate::domain::graphs::GraphCompletionHook {
             platform: None,
             model: None,
             effort: None,
@@ -23234,22 +23311,22 @@ exit 0
             command: None,
             target_session_id: None,
             timeout_minutes: None,
-            target_loop_id: Some(c_id.clone()),
+            target_graph_id: Some(c_id.clone()),
             queue_id: None,
             workdir_override: None,
             idea: None,
         };
         let mut b_hooks = std::collections::BTreeMap::new();
-        b_hooks.insert(LoopHookEvent::OnCompleted, vec![b_hook]);
-        let lp_b = crate::domain::loops::Loop {
+        b_hooks.insert(GraphHookEvent::OnCompleted, vec![b_hook]);
+        let lp_b = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
             infra_node_id: None,
-            id: "loop-b".to_string(),
-            name: "Loop B".to_string(),
+            id: "graph-b".to_string(),
+            name: "Graph B".to_string(),
             description: None,
             workdir: "/tmp".to_string(),
-            status: LoopStatus::Draft,
+            status: GraphStatus::Draft,
             trigger: None,
             created_at: chrono::Utc::now(),
             started_at: None,
@@ -23260,28 +23337,28 @@ exit 0
             active_run_queue_id: None,
             hooks: b_hooks,
         };
-        db.insert_loop(&lp_b).unwrap();
-        // Add a Check node so loop B can actually run specs.
-        let b_node = crate::domain::loops::LoopNode {
-            id: "loop-b-node-1".to_string(),
+        db.insert_graph(&lp_b).unwrap();
+        // Add a Check node so graph B can actually run specs.
+        let b_node = crate::domain::graphs::GraphNode {
+            id: "graph-b-node-1".to_string(),
             spec_id: None,
-            loop_id: Some("loop-b".to_string()),
+            graph_id: Some("graph-b".to_string()),
             name: "Check".to_string(),
-            kind: crate::domain::loops::LoopNodeKind::Check,
+            kind: crate::domain::graphs::GraphNodeKind::Check,
             config: serde_json::json!({"command": "true"}),
             position: 1,
             created_at: chrono::Utc::now(),
         };
-        db.insert_loop_node(&b_node).unwrap();
-        // Add a spec so loop B has something to run.
-        let b_spec = crate::domain::loops::LoopSpec {
-            id: "loop-b-spec".to_string(),
-            loop_id: Some("loop-b".to_string()),
+        db.insert_graph_node(&b_node).unwrap();
+        // Add a spec so graph B has something to run.
+        let b_spec = crate::domain::graphs::GraphSpec {
+            id: "graph-b-spec".to_string(),
+            graph_id: Some("graph-b".to_string()),
             name: "Spec".to_string(),
             description: Some("task".to_string()),
             position: 1,
             parallelizable: false,
-            status: LoopSpecStatus::Pending,
+            status: GraphSpecStatus::Pending,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
@@ -23291,84 +23368,86 @@ exit 0
             completed_via_reason: None,
             completed_via_at: None,
         };
-        db.insert_loop_spec(&b_spec).unwrap();
+        db.insert_graph_spec(&b_spec).unwrap();
 
         // A has an on_completed hook that launches B (with a spec).
-        setup_loop_hook_source(&db, "loop-a", "loop-b", None, None).unwrap();
+        setup_graph_hook_source(&db, "graph-a", "graph-b", None, None).unwrap();
 
-        let engine = LoopEngine::new(Arc::clone(&db), Arc::new(DefaultNotificationService));
+        let engine = GraphEngine::new(Arc::clone(&db), Arc::new(DefaultNotificationService));
 
         // Run A — this should launch B, which should try to launch C but be refused.
         let result = engine
-            .run_loop("loop-a".to_string(), None, None, None, None)
+            .run_graph("graph-a".to_string(), None, None, None, None)
             .await;
-        assert!(result.is_ok(), "loop A should complete: {result:?}");
+        assert!(result.is_ok(), "graph A should complete: {result:?}");
 
         // Give background tasks time to run.
         tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
 
         // Debug: check what happened to B
-        let b_loop = db.get_loop("loop-b").unwrap().unwrap();
-        eprintln!("B status: {:?}", b_loop.status);
-        let b_runs = db.list_loop_completion_hook_runs("loop-b").unwrap();
+        let b_graph = db.get_graph("graph-b").unwrap().unwrap();
+        eprintln!("B status: {:?}", b_graph.status);
+        let b_runs = db.list_graph_completion_hook_runs("graph-b").unwrap();
         eprintln!("B hook runs: {}", b_runs.len());
         for r in &b_runs {
             eprintln!("  run: status={:?}, summary={:?}", r.status, r.summary);
         }
-        let b_spec_runs = db.list_loop_specs("loop-b").unwrap();
+        let b_spec_runs = db.list_graph_specs("graph-b").unwrap();
         eprintln!("B specs: {}", b_spec_runs.len());
         for s in &b_spec_runs {
             eprintln!("  spec: status={:?}", s.status);
         }
 
         // C should NOT have been launched (B's hook was refused at depth 1).
-        let c = db.get_loop(&c_id).unwrap().unwrap();
+        let c = db.get_graph(&c_id).unwrap().unwrap();
         assert_eq!(
             c.status,
-            LoopStatus::Draft,
+            GraphStatus::Draft,
             "C should still be Draft (B's hook was refused at depth 1)"
         );
 
         // Check that B's hook run was recorded as failed.
         assert!(
             b_runs.iter().any(|r| {
-                r.status == LoopRunStatus::Fail
+                r.status == GraphRunStatus::Fail
                     && r.summary
                         .as_deref()
                         .is_some_and(|s| s.contains("Depth cap"))
             }),
-            "B's loop hook should have been refused with depth cap reason"
+            "B's graph hook should have been refused with depth cap reason"
         );
     }
 
-    /// CH4: A hook targeting an already-running loop fails with the target
-    /// named, and the launching loop's status is unchanged.
+    /// CH4: A hook targeting an already-running graph fails with the target
+    /// named, and the launching graph's status is unchanged.
     #[tokio::test]
-    async fn loop_hook_refuses_already_running_target() {
+    async fn graph_hook_refuses_already_running_target() {
         let dir = tempdir().unwrap();
         let db = Arc::new(Database::new(&dir.path().join("test.db")).unwrap());
-        let target_id = create_target_loop(&db, "target-running", "Target Running").unwrap();
-        setup_loop_hook_source(&db, "source-running", &target_id, None, None).unwrap();
+        let target_id = create_target_graph(&db, "target-running", "Target Running").unwrap();
+        setup_graph_hook_source(&db, "source-running", &target_id, None, None).unwrap();
 
         // Manually set target to Running status.
-        db.update_loop_status(&target_id, LoopStatus::Running, None, None)
+        db.update_graph_status(&target_id, GraphStatus::Running, None, None)
             .unwrap();
 
-        let engine = LoopEngine::new(Arc::clone(&db), Arc::new(DefaultNotificationService));
+        let engine = GraphEngine::new(Arc::clone(&db), Arc::new(DefaultNotificationService));
         let result = engine
-            .run_loop("source-running".to_string(), None, None, None, None)
+            .run_graph("source-running".to_string(), None, None, None, None)
             .await;
-        assert!(result.is_ok(), "source loop should complete: {result:?}");
+        assert!(result.is_ok(), "source graph should complete: {result:?}");
 
         // Source should be completed.
-        let source = db.get_loop("source-running").unwrap().unwrap();
-        assert_eq!(source.status, LoopStatus::Completed);
+        let source = db.get_graph("source-running").unwrap().unwrap();
+        assert_eq!(source.status, GraphStatus::Completed);
 
         // The hook run should be recorded as failed.
-        let runs = db.list_loop_completion_hook_runs("source-running").unwrap();
+        let runs = db
+            .list_graph_completion_hook_runs("source-running")
+            .unwrap();
         assert!(
             runs.iter().any(|r| {
-                r.status == LoopRunStatus::Fail
+                r.status == GraphRunStatus::Fail
                     && r.summary
                         .as_deref()
                         .is_some_and(|s| s.contains("already running"))
@@ -23377,115 +23456,115 @@ exit 0
         );
 
         // Target should still be Running (unchanged).
-        let target = db.get_loop(&target_id).unwrap().unwrap();
-        assert_eq!(target.status, LoopStatus::Running);
+        let target = db.get_graph(&target_id).unwrap().unwrap();
+        assert_eq!(target.status, GraphStatus::Running);
     }
 
-    /// CH4: A hook targeting an archived loop fails with the target named.
+    /// CH4: A hook targeting an archived graph fails with the target named.
     #[tokio::test]
-    async fn loop_hook_refuses_archived_target() {
+    async fn graph_hook_refuses_archived_target() {
         let dir = tempdir().unwrap();
         let db = Arc::new(Database::new(&dir.path().join("test.db")).unwrap());
-        let target_id = create_target_loop(&db, "target-archived", "Target Archived").unwrap();
-        setup_loop_hook_source(&db, "source-archived", &target_id, None, None).unwrap();
+        let target_id = create_target_graph(&db, "target-archived", "Target Archived").unwrap();
+        setup_graph_hook_source(&db, "source-archived", &target_id, None, None).unwrap();
 
         // Archive the target.
-        db.archive_loop(&target_id).unwrap();
+        db.archive_graph(&target_id).unwrap();
 
-        let engine = LoopEngine::new(Arc::clone(&db), Arc::new(DefaultNotificationService));
+        let engine = GraphEngine::new(Arc::clone(&db), Arc::new(DefaultNotificationService));
         let result = engine
-            .run_loop("source-archived".to_string(), None, None, None, None)
+            .run_graph("source-archived".to_string(), None, None, None, None)
             .await;
-        assert!(result.is_ok(), "source loop should complete: {result:?}");
+        assert!(result.is_ok(), "source graph should complete: {result:?}");
 
         let runs = db
-            .list_loop_completion_hook_runs("source-archived")
+            .list_graph_completion_hook_runs("source-archived")
             .unwrap();
         assert!(
             runs.iter().any(|r| {
-                r.status == LoopRunStatus::Fail
+                r.status == GraphRunStatus::Fail
                     && r.summary.as_deref().is_some_and(|s| s.contains("archived"))
             }),
             "hook should have failed with 'archived'"
         );
     }
 
-    /// CH4: Provenance is recorded when a hook launches a loop.
+    /// CH4: Provenance is recorded when a hook launches a graph.
     #[tokio::test]
-    async fn loop_hook_records_provenance() {
+    async fn graph_hook_records_provenance() {
         let dir = tempdir().unwrap();
         let db = Arc::new(Database::new(&dir.path().join("test.db")).unwrap());
-        let target_id = create_target_loop(&db, "target-prov", "Target Prov").unwrap();
-        setup_loop_hook_source(&db, "source-prov", &target_id, None, None).unwrap();
+        let target_id = create_target_graph(&db, "target-prov", "Target Prov").unwrap();
+        setup_graph_hook_source(&db, "source-prov", &target_id, None, None).unwrap();
 
-        let engine = LoopEngine::new(Arc::clone(&db), Arc::new(DefaultNotificationService));
+        let engine = GraphEngine::new(Arc::clone(&db), Arc::new(DefaultNotificationService));
         let result = engine
-            .run_loop("source-prov".to_string(), None, None, None, None)
+            .run_graph("source-prov".to_string(), None, None, None, None)
             .await;
-        assert!(result.is_ok(), "source loop should complete: {result:?}");
+        assert!(result.is_ok(), "source graph should complete: {result:?}");
 
         // Give the background task time to record provenance.
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
         // Check provenance via the DB method (indirectly: verify the launch happened).
-        let target = db.get_loop(&target_id).unwrap().unwrap();
+        let target = db.get_graph(&target_id).unwrap().unwrap();
         assert!(
-            target.status == LoopStatus::Running || target.status == LoopStatus::Completed,
+            target.status == GraphStatus::Running || target.status == GraphStatus::Completed,
             "target should have been launched"
         );
     }
 
     /// CH4: The hook_launched flag is cleared after the run completes.
     #[tokio::test]
-    async fn loop_hook_launched_flag_cleared_on_completion() {
+    async fn graph_hook_launched_flag_cleared_on_completion() {
         let dir = tempdir().unwrap();
         let db = Arc::new(Database::new(&dir.path().join("test.db")).unwrap());
-        let target_id = create_target_loop(&db, "target-flag", "Target Flag").unwrap();
-        setup_loop_hook_source(&db, "source-flag", &target_id, None, None).unwrap();
+        let target_id = create_target_graph(&db, "target-flag", "Target Flag").unwrap();
+        setup_graph_hook_source(&db, "source-flag", &target_id, None, None).unwrap();
 
-        let engine = LoopEngine::new(Arc::clone(&db), Arc::new(DefaultNotificationService));
+        let engine = GraphEngine::new(Arc::clone(&db), Arc::new(DefaultNotificationService));
         let result = engine
-            .run_loop("source-flag".to_string(), None, None, None, None)
+            .run_graph("source-flag".to_string(), None, None, None, None)
             .await;
-        assert!(result.is_ok(), "source loop should complete: {result:?}");
+        assert!(result.is_ok(), "source graph should complete: {result:?}");
 
-        // After the source loop completes, the hook_launched flag should be cleared.
-        // (The source loop was NOT hook-launched, so the flag was never set for it.)
+        // After the source graph completes, the hook_launched flag should be cleared.
+        // (The source graph was NOT hook-launched, so the flag was never set for it.)
         assert!(
-            !db.is_loop_hook_launched("source-flag").unwrap(),
-            "source loop should not have hook_launched flag"
+            !db.is_graph_hook_launched("source-flag").unwrap(),
+            "source graph should not have hook_launched flag"
         );
     }
 
-    /// CH4: The hook_launched flag is set on the target loop, then cleared
+    /// CH4: The hook_launched flag is set on the target graph, then cleared
     /// when it completes.
     #[tokio::test]
-    async fn loop_hook_launched_flag_set_on_target() {
+    async fn graph_hook_launched_flag_set_on_target() {
         let dir = tempdir().unwrap();
         let db = Arc::new(Database::new(&dir.path().join("test.db")).unwrap());
-        let target_id = create_target_loop(&db, "target-flag2", "Target Flag2").unwrap();
-        setup_loop_hook_source(&db, "source-flag2", &target_id, None, None).unwrap();
+        let target_id = create_target_graph(&db, "target-flag2", "Target Flag2").unwrap();
+        setup_graph_hook_source(&db, "source-flag2", &target_id, None, None).unwrap();
 
-        let engine = LoopEngine::new(Arc::clone(&db), Arc::new(DefaultNotificationService));
+        let engine = GraphEngine::new(Arc::clone(&db), Arc::new(DefaultNotificationService));
         let result = engine
-            .run_loop("source-flag2".to_string(), None, None, None, None)
+            .run_graph("source-flag2".to_string(), None, None, None, None)
             .await;
-        assert!(result.is_ok(), "source loop should complete: {result:?}");
+        assert!(result.is_ok(), "source graph should complete: {result:?}");
 
         // Give the background task time to run and complete.
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-        // After the target loop completes, the hook_launched flag is cleared.
+        // After the target graph completes, the hook_launched flag is cleared.
         // So we just verify the target actually ran (completed).
-        let target = db.get_loop(&target_id).unwrap().unwrap();
+        let target = db.get_graph(&target_id).unwrap().unwrap();
         assert!(
-            target.status == LoopStatus::Completed || target.status == LoopStatus::Running,
+            target.status == GraphStatus::Completed || target.status == GraphStatus::Running,
             "target should have run, got {:?}",
             target.status
         );
         // And the flag is cleared.
         assert!(
-            !db.is_loop_hook_launched(&target_id).unwrap(),
+            !db.is_graph_hook_launched(&target_id).unwrap(),
             "hook_launched flag should be cleared after target completes"
         );
     }
@@ -23494,7 +23573,7 @@ exit 0
     #[test]
     fn render_hook_idea_substitutes_placeholders() {
         let ctx = HookContext {
-            loop_name: "MyLoop",
+            graph_name: "MyGraph",
             workdir: "/tmp/project",
             completed_specs: &[("SpecA".to_string(), "done".to_string())],
             spec_name: None,
@@ -23503,19 +23582,19 @@ exit 0
             node_name: None,
         };
         let result = render_hook_idea(
-            &LoopHookEvent::OnCompleted,
+            &GraphHookEvent::OnCompleted,
             &ctx,
-            "Loop {{loop_name}} finished",
+            "Graph {{graph_name}} finished",
         )
         .unwrap();
-        assert_eq!(result, "Loop MyLoop finished");
+        assert_eq!(result, "Graph MyGraph finished");
     }
 
     /// CH4: render_hook_idea rejects unbindable markers.
     #[test]
     fn render_hook_idea_rejects_unbindable_markers() {
         let ctx = HookContext {
-            loop_name: "MyLoop",
+            graph_name: "MyGraph",
             workdir: "/tmp",
             completed_specs: &[],
             spec_name: None,
@@ -23523,27 +23602,27 @@ exit 0
             blocker: None,
             node_name: None,
         };
-        let result = render_hook_idea(&LoopHookEvent::OnCompleted, &ctx, "Blocker: {{blocker}}");
+        let result = render_hook_idea(&GraphHookEvent::OnCompleted, &ctx, "Blocker: {{blocker}}");
         assert!(
             result.is_err(),
             "should reject unbindable {{blocker}} on on_completed"
         );
     }
 
-    /// CH4: Verify that a loop with a spec can be found by list_loop_specs.
+    /// CH4: Verify that a graph with a spec can be found by list_graph_specs.
     #[test]
-    fn loop_hook_spec_is_queryable() {
+    fn graph_hook_spec_is_queryable() {
         let dir = tempdir().unwrap();
         let db = Arc::new(Database::new(&dir.path().join("test.db")).unwrap());
-        let lp = crate::domain::loops::Loop {
+        let lp = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
             infra_node_id: None,
-            id: "test-loop".to_string(),
+            id: "test-graph".to_string(),
             name: "Test".to_string(),
             description: None,
             workdir: "/tmp".to_string(),
-            status: LoopStatus::Draft,
+            status: GraphStatus::Draft,
             trigger: None,
             created_at: chrono::Utc::now(),
             started_at: None,
@@ -23554,15 +23633,15 @@ exit 0
             active_run_queue_id: None,
             hooks: std::collections::BTreeMap::new(),
         };
-        db.insert_loop(&lp).unwrap();
-        let spec = crate::domain::loops::LoopSpec {
+        db.insert_graph(&lp).unwrap();
+        let spec = crate::domain::graphs::GraphSpec {
             id: "test-spec".to_string(),
-            loop_id: Some("test-loop".to_string()),
+            graph_id: Some("test-graph".to_string()),
             name: "Spec".to_string(),
             description: Some("do nothing".to_string()),
             position: 1,
             parallelizable: false,
-            status: LoopSpecStatus::Pending,
+            status: GraphSpecStatus::Pending,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
@@ -23572,21 +23651,21 @@ exit 0
             completed_via_reason: None,
             completed_via_at: None,
         };
-        db.insert_loop_spec(&spec).unwrap();
-        let specs = db.list_loop_specs("test-loop").unwrap();
+        db.insert_graph_spec(&spec).unwrap();
+        let specs = db.list_graph_specs("test-graph").unwrap();
         assert_eq!(specs.len(), 1, "should find the spec");
         assert_eq!(specs[0].id, "test-spec");
     }
 
-    /// CH4: Verify that a loop with a hook can run the hook on completion.
+    /// CH4: Verify that a graph with a hook can run the hook on completion.
     #[tokio::test]
-    async fn loop_hook_runs_on_completion() {
+    async fn graph_hook_runs_on_completion() {
         let dir = tempdir().unwrap();
         let db = Arc::new(Database::new(&dir.path().join("test.db")).unwrap());
-        let target_id = create_target_loop(&db, "target-compl", "Target Compl").unwrap();
+        let target_id = create_target_graph(&db, "target-compl", "Target Compl").unwrap();
 
-        // Create source loop with a spec AND a hook.
-        let hook = crate::domain::loops::LoopCompletionHook {
+        // Create source graph with a spec AND a hook.
+        let hook = crate::domain::graphs::GraphCompletionHook {
             platform: None,
             model: None,
             effort: None,
@@ -23594,14 +23673,14 @@ exit 0
             command: None,
             target_session_id: None,
             timeout_minutes: None,
-            target_loop_id: Some(target_id.clone()),
+            target_graph_id: Some(target_id.clone()),
             queue_id: None,
             workdir_override: None,
             idea: None,
         };
         let mut hooks = std::collections::BTreeMap::new();
-        hooks.insert(LoopHookEvent::OnCompleted, vec![hook]);
-        let lp = crate::domain::loops::Loop {
+        hooks.insert(GraphHookEvent::OnCompleted, vec![hook]);
+        let lp = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
             infra_node_id: None,
@@ -23609,7 +23688,7 @@ exit 0
             name: "Source".to_string(),
             description: None,
             workdir: "/tmp".to_string(),
-            status: LoopStatus::Draft,
+            status: GraphStatus::Draft,
             trigger: None,
             created_at: chrono::Utc::now(),
             started_at: None,
@@ -23620,17 +23699,17 @@ exit 0
             active_run_queue_id: None,
             hooks,
         };
-        db.insert_loop(&lp).unwrap();
+        db.insert_graph(&lp).unwrap();
 
         // Verify spec exists before running
-        let spec = crate::domain::loops::LoopSpec {
+        let spec = crate::domain::graphs::GraphSpec {
             id: "spec-compl".to_string(),
-            loop_id: Some("source-compl".to_string()),
+            graph_id: Some("source-compl".to_string()),
             name: "Spec".to_string(),
             description: Some("task".to_string()),
             position: 1,
             parallelizable: false,
-            status: LoopSpecStatus::Pending,
+            status: GraphSpecStatus::Pending,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
@@ -23640,41 +23719,41 @@ exit 0
             completed_via_reason: None,
             completed_via_at: None,
         };
-        db.insert_loop_spec(&spec).unwrap();
+        db.insert_graph_spec(&spec).unwrap();
 
         // Verify spec is queryable
-        let found = db.list_loop_specs("source-compl").unwrap();
+        let found = db.list_graph_specs("source-compl").unwrap();
         eprintln!("Found {} specs for source-compl", found.len());
 
-        // Verify loop was stored with hooks
-        let stored = db.get_loop("source-compl").unwrap().unwrap();
-        eprintln!("Loop hooks: {:?}", stored.hooks.keys().collect::<Vec<_>>());
-        if let Some(on_completed_hooks) = stored.hooks.get(&LoopHookEvent::OnCompleted) {
+        // Verify graph was stored with hooks
+        let stored = db.get_graph("source-compl").unwrap().unwrap();
+        eprintln!("Graph hooks: {:?}", stored.hooks.keys().collect::<Vec<_>>());
+        if let Some(on_completed_hooks) = stored.hooks.get(&GraphHookEvent::OnCompleted) {
             eprintln!("on_completed hooks count: {}", on_completed_hooks.len());
             for h in on_completed_hooks {
-                eprintln!("  target_loop_id: {:?}", h.target_loop_id);
-                eprintln!("  is_loop: {}", h.is_loop());
+                eprintln!("  target_graph_id: {:?}", h.target_graph_id);
+                eprintln!("  is_graph: {}", h.is_graph());
             }
         }
 
-        let engine = LoopEngine::new(Arc::clone(&db), Arc::new(DefaultNotificationService));
+        let engine = GraphEngine::new(Arc::clone(&db), Arc::new(DefaultNotificationService));
         let result = engine
-            .run_loop("source-compl".to_string(), None, None, None, None)
+            .run_graph("source-compl".to_string(), None, None, None, None)
             .await;
-        eprintln!("run_loop result: {:?}", result);
-        assert!(result.is_ok(), "source loop should complete: {result:?}");
+        eprintln!("run_graph result: {:?}", result);
+        assert!(result.is_ok(), "source graph should complete: {result:?}");
     }
 
     // ── CM13: classify infrastructure by verdict, not heuristics ────────
 
     /// CM13 measurement 1: a run that exits non-zero after 90 seconds
     /// without reporting is classified as infrastructure and takes the
-    /// `break` edge — the case that failed at 75 seconds with a rate limit.
+    /// `error` edge — the case that failed at 75 seconds with a rate limit.
     #[test]
     fn cm13_slow_unreported_run_is_infra_crash() {
         let node = sample_agent_node();
         let execution = NodeExecution {
-            status: LoopRunStatus::Fail,
+            status: GraphRunStatus::Fail,
             output: serde_json::json!({
                 "kind": "agent",
                 "exit_code": 1,
@@ -23683,12 +23762,12 @@ exit 0
             }),
             summary: "agent exited with code 1".to_string(),
         };
-        let run = LoopNodeRun {
+        let run = GraphNodeRun {
             id: "run-slow".to_string(),
-            loop_id: "loop1".to_string(),
+            graph_id: "loop1".to_string(),
             spec_id: "spec1".to_string(),
             node_id: node.id.clone(),
-            status: LoopRunStatus::Running,
+            status: GraphRunStatus::Running,
             input: None,
             output: None,
             // Started 90 seconds ago — well past the old 60-second window.
@@ -23714,7 +23793,7 @@ exit 0
     fn cm13_silent_unreported_run_is_infra_crash() {
         let node = sample_agent_node();
         let execution = NodeExecution {
-            status: LoopRunStatus::Fail,
+            status: GraphRunStatus::Fail,
             output: serde_json::json!({
                 "kind": "agent",
                 "exit_code": 0,
@@ -23723,12 +23802,12 @@ exit 0
             }),
             summary: "agent produced no output (exit code 0).".to_string(),
         };
-        let run = LoopNodeRun {
+        let run = GraphNodeRun {
             id: "run-silent".to_string(),
-            loop_id: "loop1".to_string(),
+            graph_id: "loop1".to_string(),
             spec_id: "spec1".to_string(),
             node_id: node.id.clone(),
-            status: LoopRunStatus::Running,
+            status: GraphRunStatus::Running,
             input: None,
             output: None,
             // Started 15 minutes ago — the exact backend timeout case.
@@ -23758,7 +23837,7 @@ exit 0
 
         assert_eq!(
             execution.status,
-            LoopRunStatus::Fail,
+            GraphRunStatus::Fail,
             "CM13: an exit-0 unreported run must never be recorded as pass"
         );
         assert_eq!(
@@ -23783,7 +23862,7 @@ exit 0
 
         // Member A: unreported (still Running), exit 0, no output.
         let exec_a = NodeExecution {
-            status: LoopRunStatus::Fail,
+            status: GraphRunStatus::Fail,
             output: serde_json::json!({
                 "kind": "agent",
                 "exit_code": 0,
@@ -23792,12 +23871,12 @@ exit 0
             }),
             summary: "agent exited with code 0".to_string(),
         };
-        let run_a = LoopNodeRun {
+        let run_a = GraphNodeRun {
             id: "run-member-a".to_string(),
-            loop_id: "loop1".to_string(),
+            graph_id: "loop1".to_string(),
             spec_id: "spec1".to_string(),
             node_id: node_a.id.clone(),
-            status: LoopRunStatus::Running,
+            status: GraphRunStatus::Running,
             input: None,
             output: None,
             started_at: chrono::Utc::now(),
@@ -23819,19 +23898,19 @@ exit 0
 
         // Member B: self-reported pass.
         let exec_b = NodeExecution {
-            status: LoopRunStatus::Pass,
+            status: GraphRunStatus::Pass,
             output: serde_json::json!({
                 "kind": "agent",
                 "exit_code": 0,
             }),
             summary: "agent reported pass".to_string(),
         };
-        let run_b = LoopNodeRun {
+        let run_b = GraphNodeRun {
             id: "run-member-b".to_string(),
-            loop_id: "loop1".to_string(),
+            graph_id: "loop1".to_string(),
             spec_id: "spec1".to_string(),
             node_id: node_b.id.clone(),
-            status: LoopRunStatus::Pass,
+            status: GraphRunStatus::Pass,
             input: None,
             output: None,
             started_at: chrono::Utc::now(),
@@ -23851,25 +23930,25 @@ exit 0
         );
     }
 
-    /// CM13: a run that called `loop_complete_node` with a `fail` status
-    /// still routes on `fail`, never on `break`, and never causes a
+    /// CM13: a run that called `graph_complete_node` with a `fail` status
+    /// still routes on `fail`, never on `error`, and never causes a
     /// fallthrough.
     #[tokio::test]
-    async fn cm13_self_reported_fail_routes_on_fail_not_break() {
-        let (_dir, db, _engine, loop_id) = bare_loop_fixture().unwrap();
-        let node = seed_agent_run(&db, &loop_id, "run-selfreport-fail");
-        db.update_loop_run_result(
+    async fn cm13_self_reported_fail_routes_on_fail_not_error() {
+        let (_dir, db, _engine, graph_id) = bare_graph_fixture().unwrap();
+        let node = seed_agent_run(&db, &graph_id, "run-selfreport-fail");
+        db.update_graph_run_result(
             "run-selfreport-fail",
-            LoopRunStatus::Fail,
+            GraphRunStatus::Fail,
             Some(&serde_json::json!({ "summary": "agent reported it failed" })),
             Some(chrono::Utc::now()),
         )
         .unwrap();
 
-        let run = db.get_loop_run("run-selfreport-fail").unwrap();
+        let run = db.get_graph_run("run-selfreport-fail").unwrap();
         let reported = self_reported_execution(run.as_ref(), &node)
             .expect("a completed run row must be read as self-reported");
-        assert_eq!(reported.status, LoopRunStatus::Fail);
+        assert_eq!(reported.status, GraphRunStatus::Fail);
 
         assert!(
             !is_infra_crash(&node, &reported, &run.unwrap(), 0, 3, 60),
@@ -23882,25 +23961,25 @@ exit 0
     fn cm13_blocker_still_blocks() {
         let cli = Cli::new("test-cli");
         let node = sample_agent_node();
-        // A self-reported blocker: the run called loop_report_blocker,
+        // A self-reported blocker: the run called graph_report_blocker,
         // so self_reported = true.
         let execution = agent_finished_execution(&node, &cli, None, 0, "", "", true);
 
         assert_eq!(
             execution.status,
-            LoopRunStatus::Fail,
+            GraphRunStatus::Fail,
             "a blocker must be recorded as fail"
         );
         assert!(
             !is_infra_crash_shape(
                 &node,
                 &execution,
-                &LoopNodeRun {
+                &GraphNodeRun {
                     id: "run-blocker".to_string(),
-                    loop_id: "loop1".to_string(),
+                    graph_id: "loop1".to_string(),
                     spec_id: "spec1".to_string(),
                     node_id: node.id.clone(),
-                    status: LoopRunStatus::Fail, // self_reported
+                    status: GraphRunStatus::Fail, // self_reported
                     input: None,
                     output: None,
                     started_at: chrono::Utc::now(),
@@ -23927,7 +24006,7 @@ exit 0
 
         // Case 1: unreported → failure_kind: "unreported"
         let unreported = agent_finished_execution(&node, &cli, None, 0, "output", "", false);
-        assert_eq!(unreported.status, LoopRunStatus::Fail);
+        assert_eq!(unreported.status, GraphRunStatus::Fail);
         assert_eq!(
             unreported
                 .output
@@ -23939,7 +24018,7 @@ exit 0
 
         // Case 2: self-reported fail → no failure_kind from CM13
         let self_reported = agent_finished_execution(&node, &cli, None, 1, "", "", true);
-        assert_eq!(self_reported.status, LoopRunStatus::Fail);
+        assert_eq!(self_reported.status, GraphRunStatus::Fail);
         assert!(
             self_reported.output.get("failure_kind").is_none(),
             "self-reported fail must not carry failure_kind"
@@ -23947,7 +24026,7 @@ exit 0
 
         // Case 3: infra crash marker → infra_crash: true
         let infra = NodeExecution {
-            status: LoopRunStatus::Fail,
+            status: GraphRunStatus::Fail,
             output: serde_json::json!({
                 "infra_crash": true,
                 "infra_attempt": 0,
@@ -23959,20 +24038,20 @@ exit 0
 
     // ── §C: missing behavioural tests (spec GUIDELINES) ───────────────
 
-    /// C1: a run that exits 0 without reporting takes the `break` edge and
+    /// C1: a run that exits 0 without reporting takes the `error` edge and
     /// is never recorded as pass — the exact case of measurement (2) and (3)
     /// (designer exits 0 at 100 seconds having written nothing).
     #[tokio::test]
-    async fn cm13_unreported_exit_zero_routes_to_break_edge_and_is_not_pass() {
+    async fn cm13_unreported_exit_zero_routes_to_error_edge_and_is_not_pass() {
         let fake_home = setup_test_cli_home();
-        let (_dir, db, engine, loop_id, spec_id) = loop_fixture().unwrap();
+        let (_dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-implement".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "implement".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({
                 "platform": "test-cli",
                 "prompt_template": "exit 0",
@@ -23985,12 +24064,12 @@ exit 0
         })
         .unwrap();
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-resilience".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "resilience".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "printf RESILIENCE",
                 "success_condition": "exit_code_0"
@@ -24000,25 +24079,25 @@ exit 0
         })
         .unwrap();
 
-        // Break edge to resilience node (should be taken on infra crash).
-        db.insert_loop_edge(&LoopEdge {
-            id: "edge-break".to_string(),
+        // Error edge to resilience node (should be taken on infra crash).
+        db.insert_graph_edge(&GraphEdge {
+            id: "edge-error".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             from_node: "node-implement".to_string(),
             to_node: "node-resilience".to_string(),
-            condition: LoopEdgeCondition::Break,
+            condition: GraphEdgeCondition::Error,
         })
         .unwrap();
 
         let _home = HomeGuard::set(fake_home.path());
         let result = engine
-            .run_loop(loop_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await;
         drop(_home);
         result.unwrap();
 
-        let runs = db.list_loop_runs_for_spec(&spec_id).unwrap();
+        let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
 
         let implement_runs: Vec<_> = runs
             .iter()
@@ -24029,17 +24108,17 @@ exit 0
             .filter(|r| r.node_id == "node-resilience")
             .collect();
 
-        // Break edge was taken even though the run exited 0.
+        // Error edge was taken even though the run exited 0.
         assert_eq!(
             resilience_runs.len(),
             1,
-            "resilience node should run (Break edge taken)"
+            "resilience node should run (Error edge taken)"
         );
         // Every implement run must be Fail, never Pass.
         assert!(
             implement_runs
                 .iter()
-                .all(|r| r.status == LoopRunStatus::Fail),
+                .all(|r| r.status == GraphRunStatus::Fail),
             "all implement runs must be Fail, never Pass"
         );
         // The settled run carries failure_kind: unreported.
@@ -24060,7 +24139,7 @@ exit 0
     /// that one succeeds.
     #[tokio::test]
     async fn cm13_round_robin_falls_through_unreported_member_then_passes_on_next() {
-        let (dir, db, engine, _loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, _graph_id, spec_id) = graph_fixture().unwrap();
 
         let silent_path = write_member_script(dir.path(), "silent.sh", "exit 0");
         let ok_path = write_member_script(dir.path(), "ok.sh", "sleep 1");
@@ -24072,7 +24151,7 @@ exit 0
         insert_kind_ensemble(
             &db,
             &spec_id,
-            crate::domain::loops::EnsembleKind::RoundRobin,
+            crate::domain::graphs::EnsembleKind::RoundRobin,
             &[("rr-silent", "rr-silent"), ("rr-ok", "rr-ok")],
         );
 
@@ -24080,7 +24159,7 @@ exit 0
 
         let _home = HomeGuard::set(fake_home.path());
         let result = engine
-            .run_loop(_loop_id.clone(), None, None, None, None)
+            .run_graph(_graph_id.clone(), None, None, None, None)
             .await;
         drop(_home);
         drop(_filer);
@@ -24090,7 +24169,7 @@ exit 0
         let join = join_run(&db, &spec_id, "join1");
         assert_eq!(
             join.status,
-            LoopRunStatus::Pass,
+            GraphRunStatus::Pass,
             "ensemble must pass when the second member succeeds"
         );
         let out = join.output.as_ref().unwrap();
@@ -24107,7 +24186,7 @@ exit 0
         );
         let ok_runs = member_runs(&db, &spec_id, "rr-ok");
         assert!(
-            ok_runs.iter().any(|r| r.status == LoopRunStatus::Pass),
+            ok_runs.iter().any(|r| r.status == GraphRunStatus::Pass),
             "rr-ok must have a Pass run"
         );
         // The passing join must route onward on its Pass edge (to the
@@ -24117,7 +24196,7 @@ exit 0
         assert!(
             member_runs(&db, &spec_id, "done-pass")
                 .iter()
-                .any(|r| r.status == LoopRunStatus::Pass),
+                .any(|r| r.status == GraphRunStatus::Pass),
             "a passing ensemble join must route on its Pass edge to on_pass_to"
         );
     }
@@ -24126,7 +24205,7 @@ exit 0
     /// member. A reported fail is not infra and not retried.
     #[tokio::test]
     async fn cm13_round_robin_self_reported_fail_stops_walk_no_fallthrough() {
-        let (dir, db, engine, _loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, _graph_id, spec_id) = graph_fixture().unwrap();
 
         let saysno_path = write_member_script(dir.path(), "saysno.sh", "sleep 1");
         let second_path = write_member_script(dir.path(), "second.sh", "printf ok");
@@ -24138,19 +24217,19 @@ exit 0
         insert_kind_ensemble(
             &db,
             &spec_id,
-            crate::domain::loops::EnsembleKind::RoundRobin,
+            crate::domain::graphs::EnsembleKind::RoundRobin,
             &[("rr-saysno", "rr-saysno"), ("rr-second", "rr-second")],
         );
 
         let _filer = VerdictFiler::spawn_with_status(
             &db,
             vec![("rr-saysno".into(), None)],
-            LoopRunStatus::Fail,
+            GraphRunStatus::Fail,
         );
 
         let _home = HomeGuard::set(fake_home.path());
         let _result = engine
-            .run_loop(_loop_id.clone(), None, None, None, None)
+            .run_graph(_graph_id.clone(), None, None, None, None)
             .await;
         drop(_home);
         drop(_filer);
@@ -24158,7 +24237,7 @@ exit 0
         let join = join_run(&db, &spec_id, "join1");
         assert_eq!(
             join.status,
-            LoopRunStatus::Fail,
+            GraphRunStatus::Fail,
             "ensemble must fail on the self-reported fail"
         );
         let out = join.output.as_ref().unwrap();
@@ -24186,7 +24265,7 @@ exit 0
     /// this pins the cascade half.
     #[tokio::test]
     async fn cm13_cascade_self_reported_fail_stops_walk_no_fallthrough() {
-        let (dir, db, engine, _loop_id, spec_id) = loop_fixture().unwrap();
+        let (dir, db, engine, _graph_id, spec_id) = graph_fixture().unwrap();
 
         let saysno_path = write_member_script(dir.path(), "saysno.sh", "sleep 1");
         let second_path = write_member_script(dir.path(), "second.sh", "printf ok");
@@ -24198,19 +24277,19 @@ exit 0
         insert_kind_ensemble(
             &db,
             &spec_id,
-            crate::domain::loops::EnsembleKind::Cascade,
+            crate::domain::graphs::EnsembleKind::Cascade,
             &[("c-saysno", "c-saysno"), ("c-second", "c-second")],
         );
 
         let _filer = VerdictFiler::spawn_with_status(
             &db,
             vec![("c-saysno".into(), None)],
-            LoopRunStatus::Fail,
+            GraphRunStatus::Fail,
         );
 
         let _home = HomeGuard::set(fake_home.path());
         let _result = engine
-            .run_loop(_loop_id.clone(), None, None, None, None)
+            .run_graph(_graph_id.clone(), None, None, None, None)
             .await;
         drop(_home);
         drop(_filer);
@@ -24218,7 +24297,7 @@ exit 0
         let join = join_run(&db, &spec_id, "join1");
         assert_eq!(
             join.status,
-            LoopRunStatus::Fail,
+            GraphRunStatus::Fail,
             "cascade must fail on the self-reported fail"
         );
         let out = join.output.as_ref().unwrap();
@@ -24243,12 +24322,12 @@ exit 0
     /// "did this run file a verdict?" — pins the shared helper in place.
     #[test]
     fn run_self_reported_is_the_only_report_check() {
-        let mut run = LoopNodeRun {
+        let mut run = GraphNodeRun {
             id: "run-test".to_string(),
-            loop_id: "loop1".to_string(),
+            graph_id: "loop1".to_string(),
             spec_id: "spec1".to_string(),
             node_id: "node1".to_string(),
-            status: LoopRunStatus::Running,
+            status: GraphRunStatus::Running,
             input: None,
             output: None,
             started_at: chrono::Utc::now(),
@@ -24261,9 +24340,9 @@ exit 0
             executed_model: None,
         };
         assert!(!run_self_reported(&run));
-        run.status = LoopRunStatus::Pass;
+        run.status = GraphRunStatus::Pass;
         assert!(run_self_reported(&run));
-        run.status = LoopRunStatus::Fail;
+        run.status = GraphRunStatus::Fail;
         assert!(run_self_reported(&run));
     }
 }

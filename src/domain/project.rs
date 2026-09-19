@@ -151,8 +151,8 @@ impl RemapKind {
 pub struct RemapCounts {
     pub interactive_sessions: i64,
     pub terminal_sessions: i64,
-    pub loops: i64,
-    pub loop_specs: i64,
+    pub graphs: i64,
+    pub graph_specs: i64,
     pub sync_messages: i64,
     pub sync_locks: i64,
     pub last_prompts: i64,
@@ -166,8 +166,8 @@ impl RemapCounts {
     pub fn total(&self) -> i64 {
         self.interactive_sessions
             + self.terminal_sessions
-            + self.loops
-            + self.loop_specs
+            + self.graphs
+            + self.graph_specs
             + self.sync_messages
             + self.sync_locks
             + self.last_prompts
@@ -197,8 +197,8 @@ mod tests {
         let counts = RemapCounts {
             interactive_sessions: 1,
             terminal_sessions: 2,
-            loops: 3,
-            loop_specs: 4,
+            graphs: 3,
+            graph_specs: 4,
             sync_messages: 5,
             sync_locks: 6,
             last_prompts: 7,

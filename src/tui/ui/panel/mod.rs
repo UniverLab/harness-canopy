@@ -15,18 +15,18 @@ use crate::tui::app::types::{AgentEntry, App, Focus, ProjectTab, SidebarLayer};
 
 pub mod background_agent;
 pub mod details;
+mod graph_live;
 pub mod home;
 pub mod log_fallback;
-mod loop_live;
 pub mod sync;
 pub mod vt100;
 pub mod warp;
 
 pub(crate) use background_agent::draw_background_agent_panel;
 pub use details::{draw_agent_details, draw_group_details};
+use graph_live::draw_graph_live_view;
 pub(crate) use home::draw_brians_brain;
 pub use log_fallback::draw_log_text;
-use loop_live::draw_loop_live_view;
 pub(crate) use sync::draw_panel_face;
 use vt100::render_vt_screen;
 #[allow(unused_imports)]
@@ -237,12 +237,12 @@ fn panel_mode_label(app: &App) -> Option<&'static str> {
     }
 }
 
-fn loop_live_mode_label(app: &App) -> Option<&'static str> {
+fn graph_live_mode_label(app: &App) -> Option<&'static str> {
     if app.sidebar_layer == SidebarLayer::Automation
-        && app.automation_kind == crate::tui::app::AutomationKind::Loop
-        && app.loop_live_state.is_some()
+        && app.automation_kind == crate::tui::app::AutomationKind::Graph
+        && app.graph_live_state.is_some()
     {
-        if app.loop_graph_follow {
+        if app.graph_live_follow {
             Some(" Auto-follow ")
         } else {
             Some(" Manual ")
@@ -262,8 +262,8 @@ fn show_home_fallback(app: &App) -> bool {
                 | Focus::ContextTransfer
                 | Focus::RagTransfer
                 | Focus::PromptTemplateDialog
-                | Focus::LoopEditorDialog
-                | Focus::LoopFormDialog
+                | Focus::GraphEditorDialog
+                | Focus::GraphFormDialog
                 | Focus::ProjectRelationDialog
         )
 }
@@ -293,8 +293,8 @@ fn draw_log_panel_focus(frame: &mut Frame, area: Rect, app: &mut App, theme: &Th
         | Focus::ContextTransfer
         | Focus::RagTransfer
         | Focus::PromptTemplateDialog
-        | Focus::LoopEditorDialog
-        | Focus::LoopFormDialog => false,
+        | Focus::GraphEditorDialog
+        | Focus::GraphFormDialog => false,
         Focus::ProjectRelationDialog => {
             draw_project_preview_card(frame, area, app, theme);
             true
@@ -314,9 +314,9 @@ fn draw_preview_panel(frame: &mut Frame, area: Rect, app: &mut App, theme: &Them
     }
 
     if app.sidebar_layer == SidebarLayer::Automation
-        && app.automation_kind == crate::tui::app::AutomationKind::Loop
+        && app.automation_kind == crate::tui::app::AutomationKind::Graph
     {
-        draw_loop_live_view(frame, area, app, theme);
+        draw_graph_live_view(frame, area, app, theme);
         return true;
     }
 
@@ -613,8 +613,8 @@ pub(super) fn draw_log_panel(frame: &mut Frame, area: Rect, app: &mut App, theme
 
     let border_color = log_panel_border_color(app, theme);
     let label_color = panel_mode_label_color(app, theme);
-    let loop_title = loop_live_mode_label(app);
-    let title = match (loop_title, panel_mode_label(app)) {
+    let graph_title = graph_live_mode_label(app);
+    let title = match (graph_title, panel_mode_label(app)) {
         (Some(lt), _) => Some(Span::styled(
             lt,
             Style::default()
@@ -811,7 +811,7 @@ fn draw_project_overview(frame: &mut Frame, area: Rect, app: &App, theme: &Theme
 
 /// Knowledge layer's Preview (project highlighted, not entered): a cheap
 /// summary card — pending backlog count, knowledge entry count, last
-/// activity, and a badge if a loop is running against this project's
+/// activity, and a badge if a graph is running against this project's
 /// workdir (functional requirement 3). Reads `App::selected_project_preview`,
 /// a cache refreshed on the normal tick cadence — never recomputed here.
 fn draw_project_preview_card(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
@@ -829,8 +829,8 @@ fn draw_project_preview_card(frame: &mut Frame, area: Rect, app: &App, theme: &T
     };
 
     let summary = app.selected_project_preview();
-    let running_badge = if summary.is_some_and(|s| s.loop_running) {
-        Span::styled("  ● loop running", Style::default().fg(STATUS_RUNNING))
+    let running_badge = if summary.is_some_and(|s| s.graph_running) {
+        Span::styled("  ● graph running", Style::default().fg(STATUS_RUNNING))
     } else {
         Span::raw("")
     };
@@ -978,7 +978,7 @@ fn draw_project_tab_bar(
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-/// Persisted per-project History tab: finished loops + past sessions for
+/// Persisted per-project History tab: finished graphs + past sessions for
 /// this project's workdir, read straight from the DB (functional
 /// requirement 5) — see `App::selected_project_history_entries`.
 fn draw_project_history_tab(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
@@ -998,7 +998,7 @@ fn draw_project_history_tab(frame: &mut Frame, area: Rect, app: &mut App, theme:
         let is_selected = idx == selected;
         let (style, marker) = selected_row_style(is_selected, theme);
         let kind_label = match entry.kind {
-            crate::db::project::ProjectHistoryKind::Loop => "loop",
+            crate::db::project::ProjectHistoryKind::Graph => "graph",
             crate::db::project::ProjectHistoryKind::InteractiveSession => "session",
             crate::db::project::ProjectHistoryKind::TerminalSession => "terminal",
         };
@@ -1024,7 +1024,7 @@ fn draw_project_history_tab(frame: &mut Frame, area: Rect, app: &mut App, theme:
 }
 
 /// Read-only preview of the selected backlog spec — name + description,
-/// same "focus already previews it" convention as `draw_loop_overview` and
+/// same "focus already previews it" convention as `draw_graph_overview` and
 /// `draw_knowledge_overview` (no dedicated confirm step needed).
 fn draw_backlog_overview(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     if app.backlog_specs.is_empty() {
@@ -1819,21 +1819,21 @@ mod tests {
     #[test]
     fn backlog_overview_previews_selected_spec_name_and_description_read_only() {
         use crate::db::Database;
-        use crate::domain::loops::{LoopSpec, LoopSpecStatus};
+        use crate::domain::graphs::{GraphSpec, GraphSpecStatus};
         use std::sync::Arc;
 
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let path = tmp.path().to_path_buf();
         std::mem::forget(tmp);
         let db = Arc::new(Database::new(&path).unwrap());
-        db.insert_loop_spec(&LoopSpec {
+        db.insert_graph_spec(&GraphSpec {
             id: "spec-1".to_string(),
-            loop_id: None,
+            graph_id: None,
             name: "Add retry backoff".to_string(),
             description: Some("## Objective\nRetry requests with backoff.".to_string()),
             position: 0,
             parallelizable: false,
-            status: LoopSpecStatus::Pending,
+            status: GraphSpecStatus::Pending,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
@@ -2498,11 +2498,11 @@ mod tests {
         assert_eq!(color, Color::Red);
     }
 
-    fn loop_live_state() -> crate::tui::app::loop_live_state::LoopLiveState {
-        crate::tui::app::loop_live_state::LoopLiveState {
-            loop_id: "lp1".to_string(),
-            loop_name: "test".to_string(),
-            loop_status: crate::domain::loops::LoopStatus::Running,
+    fn graph_live_state() -> crate::tui::app::graph_live_state::GraphLiveState {
+        crate::tui::app::graph_live_state::GraphLiveState {
+            graph_id: "lp1".to_string(),
+            graph_name: "test".to_string(),
+            graph_status: crate::domain::graphs::GraphStatus::Running,
             workdir: "/tmp".to_string(),
             trigger_type: "manual".to_string(),
             schedule_expr: None,
@@ -2524,7 +2524,7 @@ mod tests {
         }
     }
 
-    fn loop_app(follow: bool) -> App {
+    fn graph_app(follow: bool) -> App {
         let db_file = tempfile::NamedTempFile::new().unwrap();
         let db_path: std::path::PathBuf = db_file.path().to_path_buf();
         std::mem::forget(db_file);
@@ -2535,22 +2535,22 @@ mod tests {
         .unwrap();
         app.focus = Focus::Preview;
         app.sidebar_layer = SidebarLayer::Automation;
-        app.automation_kind = crate::tui::app::AutomationKind::Loop;
-        app.loop_live_state = Some(loop_live_state());
-        app.loop_graph_follow = follow;
+        app.automation_kind = crate::tui::app::AutomationKind::Graph;
+        app.graph_live_state = Some(graph_live_state());
+        app.graph_live_follow = follow;
         app
     }
 
     #[test]
-    fn loop_mode_appears_in_border_title_auto_follow() {
-        let mut app = loop_app(true);
+    fn graph_mode_appears_in_border_title_auto_follow() {
+        let mut app = graph_app(true);
         let theme = Theme::classic();
         let text = render_to_text(80, 24, |frame, area| {
             draw_log_panel(frame, area, &mut app, &theme);
         });
         assert!(
             text.contains("Auto-follow"),
-            "border title should show Auto-follow in loop view:\n{text}"
+            "border title should show Auto-follow in graph view:\n{text}"
         );
         assert!(
             !text.contains("AUTO-FOLLOW"),
@@ -2559,8 +2559,8 @@ mod tests {
     }
 
     #[test]
-    fn loop_mode_appears_in_border_title_manual() {
-        let mut app = loop_app(false);
+    fn graph_mode_appears_in_border_title_manual() {
+        let mut app = graph_app(false);
         let theme = Theme::classic();
         let text = render_to_text(80, 24, |frame, area| {
             draw_log_panel(frame, area, &mut app, &theme);
@@ -2583,9 +2583,9 @@ mod tests {
     fn narrow_pane_keeps_mode_label() {
         // At narrow width the border title must still show the mode label.
         // (FR4: mode survives when pane is too narrow for both title and label.)
-        let app = loop_app(false);
-        assert_eq!(loop_live_mode_label(&app), Some(" Manual "));
-        let title = loop_live_mode_label(&app).map(|label| {
+        let app = graph_app(false);
+        assert_eq!(graph_live_mode_label(&app), Some(" Manual "));
+        let title = graph_live_mode_label(&app).map(|label| {
             Span::styled(
                 label,
                 Style::default()
@@ -2616,27 +2616,27 @@ mod tests {
     }
 
     #[test]
-    fn loop_mode_label_changes_with_follow() {
-        let mut app = loop_app(true);
-        assert_eq!(loop_live_mode_label(&app), Some(" Auto-follow "));
-        app.loop_graph_follow = false;
-        assert_eq!(loop_live_mode_label(&app), Some(" Manual "));
+    fn graph_mode_label_changes_with_follow() {
+        let mut app = graph_app(true);
+        assert_eq!(graph_live_mode_label(&app), Some(" Auto-follow "));
+        app.graph_live_follow = false;
+        assert_eq!(graph_live_mode_label(&app), Some(" Manual "));
     }
 
     #[test]
-    fn loop_mode_not_shown_when_not_loop_view() {
-        // Outside the loop live view the loop mode must not appear; the
+    fn graph_mode_not_shown_when_not_graph_view() {
+        // Outside the graph live view the graph mode must not appear; the
         // panel falls back to the interactive session label (or none).
-        let mut app = loop_app(true);
+        let mut app = graph_app(true);
         app.sidebar_layer = SidebarLayer::Live;
-        assert_eq!(loop_live_mode_label(&app), None);
+        assert_eq!(graph_live_mode_label(&app), None);
 
-        let mut app = loop_app(true);
+        let mut app = graph_app(true);
         app.automation_kind = crate::tui::app::AutomationKind::Agent;
-        assert_eq!(loop_live_mode_label(&app), None);
+        assert_eq!(graph_live_mode_label(&app), None);
 
-        let mut app = loop_app(true);
-        app.loop_live_state = None;
-        assert_eq!(loop_live_mode_label(&app), None);
+        let mut app = graph_app(true);
+        app.graph_live_state = None;
+        assert_eq!(graph_live_mode_label(&app), None);
     }
 }

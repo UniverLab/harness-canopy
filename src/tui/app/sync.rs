@@ -268,8 +268,8 @@ mod tests {
         // Seed ONLY the bitácora — nothing in sync_messages.
         db.insert_activity_log_entry(
             "/tmp/project",
-            "loop",
-            Some("loop-7"),
+            "graph",
+            Some("graph-7"),
             "info",
             "bitacora-only event",
             None,

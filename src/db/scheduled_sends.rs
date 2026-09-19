@@ -8,13 +8,13 @@ use crate::db::Database;
 /// Structured origin of a scheduled send, stored as JSON in the nullable
 /// `provenance` column. Kept out of `prompt` so the delivered text stays
 /// exactly what the promptbuilder would submit while the recipient can still
-/// tell which loop, event, or agent sent it.
+/// tell which graph, event, or agent sent it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScheduledSendProvenance {
     /// Provenance kind: `"hook"` or `"agent"`.
     pub kind: String,
-    /// Id of the loop whose hook enqueued the send. Empty for `"agent"`.
-    pub loop_id: String,
+    /// Id of the graph whose hook enqueued the send. Empty for `"agent"`.
+    pub graph_id: String,
     /// Hook event that produced it (e.g. `"on_failed"`). Empty for `"agent"`.
     pub event: String,
     /// Id of the calling session that scheduled an agent send.
@@ -23,11 +23,11 @@ pub struct ScheduledSendProvenance {
 }
 
 impl ScheduledSendProvenance {
-    /// Provenance for a message enqueued by a loop hook.
-    pub fn hook(loop_id: &str, event: &str) -> Self {
+    /// Provenance for a message enqueued by a graph hook.
+    pub fn hook(graph_id: &str, event: &str) -> Self {
         Self {
             kind: "hook".to_string(),
-            loop_id: loop_id.to_string(),
+            graph_id: graph_id.to_string(),
             event: event.to_string(),
             session_id: None,
         }
@@ -37,7 +37,7 @@ impl ScheduledSendProvenance {
     pub fn agent(session_id: &str) -> Self {
         Self {
             kind: "agent".to_string(),
-            loop_id: String::new(),
+            graph_id: String::new(),
             event: String::new(),
             session_id: Some(session_id.to_string()),
         }
@@ -70,7 +70,7 @@ pub struct ScheduledSend {
     pub fire_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
     pub builder_state: Option<String>,
-    /// Structured hook origin, if enqueued by a loop hook. `None` for
+    /// Structured hook origin, if enqueued by a graph hook. `None` for
     /// prompt-builder sends and rows written before the column existed.
     pub provenance: Option<ScheduledSendProvenance>,
 }
@@ -87,7 +87,7 @@ pub struct FailedScheduledSend {
     pub workdir: Option<String>,
     pub failed_at: DateTime<Utc>,
     /// Hook origin retained through the dead-target path so a failed
-    /// hook send still names its loop and event.
+    /// hook send still names its graph and event.
     pub provenance: Option<ScheduledSendProvenance>,
 }
 
@@ -868,7 +868,7 @@ mod tests {
         let fire = Utc::now();
         let state_json =
             r#"{"sections":{"instruction_1":"hook says hi"},"enabled_sections":["instruction_1"]}"#;
-        let provenance = ScheduledSendProvenance::hook("loop-9", "on_failed");
+        let provenance = ScheduledSendProvenance::hook("graph-9", "on_failed");
         db.insert_scheduled_send(
             "ss-prov",
             "hook says hi",
@@ -885,7 +885,7 @@ mod tests {
         assert_eq!(due[0].builder_state.as_deref(), Some(state_json));
         assert_eq!(due[0].provenance, Some(provenance.clone()));
         assert_eq!(due[0].provenance.as_ref().unwrap().kind, "hook");
-        assert_eq!(due[0].provenance.as_ref().unwrap().loop_id, "loop-9");
+        assert_eq!(due[0].provenance.as_ref().unwrap().graph_id, "graph-9");
         assert_eq!(due[0].provenance.as_ref().unwrap().event, "on_failed");
 
         let pending = db
@@ -938,7 +938,7 @@ mod tests {
                     fire.timestamp(),
                     fire.timestamp(),
                     Option::<&str>::None,
-                    r#"{"kind":"hook","loop_id":"loop-1","event":"on_failed"}"#,
+                    r#"{"kind":"hook","graph_id":"graph-1","event":"on_failed"}"#,
                 ],
             )
             .unwrap();
@@ -949,21 +949,21 @@ mod tests {
         assert_eq!(pending.len(), 1);
         let provenance = pending[0].provenance.as_ref().unwrap();
         assert_eq!(provenance.kind, "hook");
-        assert_eq!(provenance.loop_id, "loop-1");
+        assert_eq!(provenance.graph_id, "graph-1");
         assert!(provenance.session_id.is_none());
     }
 
     /// A dead-target hook send must retain its origin metadata in the failed
-    /// table — the operator recalling it can still tell which loop/event sent it.
+    /// table — the operator recalling it can still tell which graph/event sent it.
     #[test]
     fn dead_target_preserves_hook_provenance() {
         let db = test_db();
         let fake_now = Utc::now();
         let fire = fake_now - chrono::Duration::minutes(1);
-        let provenance = ScheduledSendProvenance::hook("loop-3", "on_completed");
+        let provenance = ScheduledSendProvenance::hook("graph-3", "on_completed");
         db.insert_scheduled_send(
             "ss-hook-dead",
-            "loop finished",
+            "graph finished",
             "session-gone",
             Some("/home/user/project"),
             fire,
