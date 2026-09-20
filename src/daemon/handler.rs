@@ -10166,21 +10166,58 @@ pub(crate) fn handle_skip_next_spec(db: &Database, graph_id: &str) -> Result<(),
     Ok(())
 }
 
-/// Validate that a running spec exists for `retry_current_node` — the same
+/// Validate that a resumable spec exists for `retry_current_node` — `Running`
+/// or `Interrupted` (see [`GraphSpecStatus::is_resumable`], CB50), the same
 /// lookup shape as [`handle_skip_next_spec`] but only checks, never mutates.
+/// When nothing resumable is found, the error names whichever spec IS
+/// current (if any) and its status, and points at the verb that does apply —
+/// `loop_run` to restart a non-`Failed` spec from its entry node, `loop_reset`
+/// for a `Failed` one (FR5) — rather than a bare "not found".
 pub(crate) fn handle_retry_current_node(db: &Database, graph_id: &str) -> Result<(), McpError> {
-    let bound_running = db
-        .list_graph_specs(graph_id)
-        .map_err(internal_error)?
+    let bound_specs = db.list_graph_specs(graph_id).map_err(internal_error)?;
+    if bound_specs.iter().any(|spec| spec.status.is_resumable()) {
+        return Ok(());
+    }
+    let queue_spec = queue_current_spec(db, graph_id)?;
+    if let Some(spec) = &queue_spec {
+        if spec.status.is_resumable() {
+            return Ok(());
+        }
+    }
+
+    let current = bound_specs
         .into_iter()
-        .find(|spec| spec.status == GraphSpecStatus::Running);
-    if bound_running.is_none() && queue_running_spec(db, graph_id)?.is_none() {
-        return Err(McpError::invalid_params(
+        .find(|spec| {
+            !matches!(
+                spec.status,
+                GraphSpecStatus::Completed | GraphSpecStatus::Skipped
+            )
+        })
+        .or(queue_spec);
+
+    Err(match current {
+        Some(spec) if spec.status == GraphSpecStatus::Failed => McpError::invalid_params(
+            format!(
+                "Graph '{graph_id}': current spec '{}' is 'failed', not resumable by \
+                 loop_continue. Use loop_reset to reset it.",
+                spec.name
+            ),
+            None,
+        ),
+        Some(spec) => McpError::invalid_params(
+            format!(
+                "Graph '{graph_id}': current spec '{}' is '{}', not resumable by \
+                 loop_continue. Use loop_run to restart it from its entry node.",
+                spec.name,
+                spec.status.as_str()
+            ),
+            None,
+        ),
+        None => McpError::invalid_params(
             "No running spec found to retry from this paused graph.",
             None,
-        ));
-    }
-    Ok(())
+        ),
+    })
 }
 
 /// The `running` member of `graph_id`'s currently active queue run, if any —
@@ -10204,6 +10241,43 @@ fn queue_running_spec(db: &Database, graph_id: &str) -> Result<Option<GraphSpec>
         }
     }
     Ok(None)
+}
+
+/// The current member of `graph_id`'s active queue: the first `Running` or
+/// `Interrupted` member (either is resumable — CB50), found in queue
+/// position order. If none is resumable, falls back to the first member not
+/// yet `Completed`/`Skipped`, purely so callers building an error message
+/// (FR5) have a spec to name instead of nothing. `None` if the graph isn't
+/// drawing from a queue, or every member is terminal.
+fn queue_current_spec(db: &Database, graph_id: &str) -> Result<Option<GraphSpec>, McpError> {
+    let Some(queue_id) = db
+        .get_graph(graph_id)
+        .map_err(internal_error)?
+        .and_then(|lp| lp.active_run_queue_id)
+    else {
+        return Ok(None);
+    };
+    let mut fallback: Option<GraphSpec> = None;
+    for spec_id in db
+        .list_queue_member_spec_ids(&queue_id)
+        .map_err(internal_error)?
+    {
+        let Some(spec) = db.get_graph_spec(&spec_id).map_err(internal_error)? else {
+            continue;
+        };
+        if spec.status.is_resumable() {
+            return Ok(Some(spec));
+        }
+        if fallback.is_none()
+            && !matches!(
+                spec.status,
+                GraphSpecStatus::Completed | GraphSpecStatus::Skipped
+            )
+        {
+            fallback = Some(spec);
+        }
+    }
+    Ok(fallback)
 }
 
 /// What a graph is actually working on (CB30).
@@ -12752,6 +12826,12 @@ mod tests {
         spec
     }
 
+    fn interrupted_spec(id: &str) -> GraphSpec {
+        let mut spec = standalone_spec(id);
+        spec.status = GraphSpecStatus::Interrupted;
+        spec
+    }
+
     /// A minimal graph row, needed only to satisfy `graph_runs.graph_id`'s FK.
     fn insert_test_graph(db: &Database, id: &str) {
         db.insert_graph(&Graph {
@@ -13055,6 +13135,56 @@ mod tests {
 
         // Should succeed without error — a running spec exists.
         assert!(handle_retry_current_node(&db, "graph-owner").is_ok());
+    }
+
+    /// CB50 FR1: `retry_current_node` must accept a bound spec that is
+    /// `interrupted` — the status every interrupt-pause and every boot
+    /// reconcile leaves behind — not just `running`.
+    #[test]
+    fn retry_current_node_accepts_interrupted_bound_spec() {
+        let (_dir, db) = queue_test_db();
+        insert_test_graph(&db, "graph-owner");
+        let mut bound = interrupted_spec("spec-bound");
+        bound.graph_id = Some("graph-owner".to_string());
+        db.insert_graph_spec(&bound).unwrap();
+
+        assert!(handle_retry_current_node(&db, "graph-owner").is_ok());
+    }
+
+    /// CB50 FR1: same, but the interrupted spec is a queue member (found
+    /// through `active_run_queue_id`), not a bound spec — the queue-driven
+    /// half of the same bug (B18's own scenario).
+    #[test]
+    fn retry_current_node_finds_interrupted_queue_member() {
+        let (_dir, db) = queue_test_db();
+        insert_test_graph(&db, "graph-owner");
+        db.set_graph_active_run_queue("graph-owner", Some("queue-1"))
+            .unwrap();
+
+        db.insert_graph_spec(&interrupted_spec("spec-a")).unwrap();
+        db.insert_graph_spec(&standalone_spec("spec-b")).unwrap();
+        insert_queue(&db, "queue-1");
+        db.append_queue_member("queue-1", "spec-a", None).unwrap();
+        db.append_queue_member("queue-1", "spec-b", None).unwrap();
+
+        assert!(handle_retry_current_node(&db, "graph-owner").is_ok());
+    }
+
+    /// CB50 FR5: when nothing is resumable, the error names the spec that
+    /// IS current, its status, and the verb that applies to it.
+    #[test]
+    fn retry_current_node_error_names_spec_status_and_applicable_verb() {
+        let (_dir, db) = queue_test_db();
+        insert_test_graph(&db, "graph-owner");
+        let mut failed = standalone_spec("spec-failed");
+        failed.status = GraphSpecStatus::Failed;
+        failed.graph_id = Some("graph-owner".to_string());
+        db.insert_graph_spec(&failed).unwrap();
+
+        let error = handle_retry_current_node(&db, "graph-owner").unwrap_err();
+        assert!(error.message.contains("spec-failed"), "{}", error.message);
+        assert!(error.message.contains("failed"), "{}", error.message);
+        assert!(error.message.contains("loop_reset"), "{}", error.message);
     }
 
     #[test]

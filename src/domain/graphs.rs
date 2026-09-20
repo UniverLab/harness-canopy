@@ -115,6 +115,12 @@ pub enum GraphSpecStatus {
     /// like any other runnable spec (queue selection treats this exactly
     /// like `Pending`), with its node prompt telling the agent a prior
     /// attempt exists so it continues rather than restarts.
+    ///
+    /// Contract: `loop_continue` { retry_current_node } resumes a spec in
+    /// this status at its cursor (the node/ensemble its last run was on,
+    /// via [`GraphSpecStatus::is_resumable`]); `loop_run` restarts it from
+    /// the entry node instead. The two verbs stay distinct on purpose — see
+    /// CB50.
     Interrupted,
 }
 
@@ -128,6 +134,19 @@ impl GraphSpecStatus {
             Self::Skipped => "skipped",
             Self::Interrupted => "interrupted",
         }
+    }
+
+    /// Whether `loop_continue` { retry_current_node } may resume a spec in
+    /// this status at its cursor — `Running` (already active) or
+    /// `Interrupted` (paused by an explicit interrupt or left behind by
+    /// `reconcile_orphaned_graphs`). Any other status (`Pending`, `Failed`,
+    /// `Completed`, `Skipped`) is not resumable: nothing has started, or the
+    /// spec is finished. The single source of truth for this distinction —
+    /// used by both `handle_retry_current_node`
+    /// (`daemon::handler`) and `resolve_spec_start` (`graph_engine`) so the
+    /// two can't diverge (CB50).
+    pub fn is_resumable(self) -> bool {
+        matches!(self, Self::Running | Self::Interrupted)
     }
 
     /// Infallible: an unrecognized value (e.g. a status written by a newer

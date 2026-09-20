@@ -1830,7 +1830,7 @@ impl GraphEngine {
         let existing_runs = self.db.list_graph_runs_for_spec(&spec.id)?;
         let all_node_names: Vec<String> = nodes.iter().map(|n| n.name.clone()).collect();
         let (mut cursor, mut node_outputs, resume_previous_output, mut iterations) =
-            resolve_spec_start(nodes, edges, spec, &existing_runs, &ensembles)?;
+            resolve_spec_start(nodes, edges, spec, &existing_runs, &ensembles, is_resume)?;
         // Name of the node whose output most recently became `previous_output`.
         // Empty until the first node steps; until then a resumed spec falls
         // back to `resume_previous_output` (the interrupted node's own input).
@@ -7799,13 +7799,21 @@ fn resolve_spec_start(
     spec: &GraphSpec,
     existing_runs: &[GraphNodeRun],
     ensembles: &[EnsembleDetails],
+    is_resume: bool,
 ) -> Result<(
     SpecCursor,
     HashMap<String, Value>,
     Option<Value>,
     HashMap<String, usize>,
 )> {
-    if spec.status == GraphSpecStatus::Running {
+    // CB50 FR4: `Interrupted` resumes at its cursor only via `loop_continue`
+    // (`is_resume: true`); `loop_run` (`is_resume: false`) restarts it from the
+    // entry node. `Running` keeps its historic unconditional resume — a stale
+    // `Running` from an abandoned attempt still resumes, which is the pre-CB50
+    // behaviour for bound specs and is intentionally preserved.
+    let should_resume = spec.status == GraphSpecStatus::Running
+        || (spec.status == GraphSpecStatus::Interrupted && is_resume);
+    if should_resume {
         if let Some(last_run) = existing_runs.last() {
             // An ensemble's N members (+ its join) each get their own
             // `graph_runs` row sharing the same `iteration` number — dedupe
@@ -9902,8 +9910,10 @@ mod tests {
             executed_model: None,
         }];
 
+        // CB50 FR4: a `Running` spec resumes regardless of `is_resume` —
+        // historic behaviour, unchanged. Pass `false` to prove it.
         let (cursor, node_outputs, resume_previous_output, iterations) =
-            resolve_spec_start(&details.nodes, &details.edges, &spec, &runs, &[]).unwrap();
+            resolve_spec_start(&details.nodes, &details.edges, &spec, &runs, &[], false).unwrap();
 
         assert_eq!(cursor, SpecCursor::Node("node-1".to_string()));
         assert_eq!(iterations.get("node-1"), Some(&1));
@@ -9922,6 +9932,211 @@ mod tests {
                 .and_then(|value| value.get("verdict").cloned()),
             Some(serde_json::json!("fail"))
         );
+    }
+
+    /// CB50 FR2: an `Interrupted` spec resumes at the node its last run was
+    /// on — never restarted from the entry node the way `loop_run` restarts
+    /// it. Two-node graph so entry ("node-1") and cursor ("node-2") are
+    /// provably different ids.
+    #[test]
+    fn resolve_spec_start_resumes_interrupted_spec_at_cursor() {
+        let spec = GraphSpec {
+            id: "spec".to_string(),
+            graph_id: Some("wf".to_string()),
+            name: "Spec".to_string(),
+            description: None,
+            position: 1,
+            parallelizable: false,
+            status: GraphSpecStatus::Interrupted,
+            started_at: None,
+            completed_at: None,
+            spec_start_head: None,
+            spec_committed_head: None,
+            workdir: None,
+            completed_via: None,
+            completed_via_reason: None,
+            completed_via_at: None,
+        };
+        let nodes = vec![
+            GraphNode {
+                id: "node-1".to_string(),
+                spec_id: Some(spec.id.clone()),
+                graph_id: None,
+                name: "Entry".to_string(),
+                kind: GraphNodeKind::Check,
+                config: serde_json::json!({"command": "true"}),
+                position: 1,
+                created_at: chrono::Utc::now(),
+            },
+            GraphNode {
+                id: "node-2".to_string(),
+                spec_id: Some(spec.id.clone()),
+                graph_id: None,
+                name: "Second".to_string(),
+                kind: GraphNodeKind::Check,
+                config: serde_json::json!({"command": "true"}),
+                position: 2,
+                created_at: chrono::Utc::now(),
+            },
+        ];
+        let edges = vec![GraphEdge {
+            id: "e1".to_string(),
+            spec_id: Some(spec.id.clone()),
+            graph_id: None,
+            from_node: "node-1".to_string(),
+            to_node: "node-2".to_string(),
+            condition: crate::domain::graphs::GraphEdgeCondition::Pass,
+        }];
+        // The interrupted attempt had already passed node-1 and was cut
+        // short mid node-2 (the daemon-restart artifact: a run with no
+        // terminal status).
+        let runs = vec![
+            GraphNodeRun {
+                id: "run-1".to_string(),
+                graph_id: "wf".to_string(),
+                spec_id: spec.id.clone(),
+                node_id: "node-1".to_string(),
+                status: GraphRunStatus::Pass,
+                input: None,
+                output: Some(serde_json::json!({"ok": true})),
+                started_at: chrono::Utc::now(),
+                completed_at: Some(chrono::Utc::now()),
+                iteration: 1,
+                pid: None,
+                boot_id: None,
+                session_id: None,
+                executed_platform: None,
+                executed_model: None,
+            },
+            GraphNodeRun {
+                id: "run-2".to_string(),
+                graph_id: "wf".to_string(),
+                spec_id: spec.id.clone(),
+                node_id: "node-2".to_string(),
+                status: GraphRunStatus::Fail,
+                input: Some(serde_json::json!({"from": "node-1"})),
+                output: None,
+                started_at: chrono::Utc::now(),
+                completed_at: Some(chrono::Utc::now()),
+                iteration: 1,
+                pid: None,
+                boot_id: None,
+                session_id: None,
+                executed_platform: None,
+                executed_model: None,
+            },
+        ];
+
+        // CB50 FR2: `loop_continue` (`is_resume: true`) must resume at the cursor.
+        let (cursor, _node_outputs, _resume_previous_output, _iterations) =
+            resolve_spec_start(&nodes, &edges, &spec, &runs, &[], true).unwrap();
+
+        assert_eq!(
+            cursor,
+            SpecCursor::Node("node-2".to_string()),
+            "an interrupted spec must resume where its last run stopped, not at the entry node"
+        );
+    }
+
+    /// CB50 FR4: `loop_run` (`is_resume: false`) on an `Interrupted` spec
+    /// must restart from the entry node, not resume at the cursor — the two
+    /// verbs stay distinct by design.
+    #[test]
+    fn resolve_spec_start_restarts_interrupted_spec_on_loop_run() {
+        let spec = GraphSpec {
+            id: "spec".to_string(),
+            graph_id: Some("wf".to_string()),
+            name: "Spec".to_string(),
+            description: None,
+            position: 1,
+            parallelizable: false,
+            status: GraphSpecStatus::Interrupted,
+            started_at: None,
+            completed_at: None,
+            spec_start_head: None,
+            spec_committed_head: None,
+            workdir: None,
+            completed_via: None,
+            completed_via_reason: None,
+            completed_via_at: None,
+        };
+        let nodes = vec![
+            GraphNode {
+                id: "node-1".to_string(),
+                spec_id: Some(spec.id.clone()),
+                graph_id: None,
+                name: "Entry".to_string(),
+                kind: GraphNodeKind::Check,
+                config: serde_json::json!({"command": "true"}),
+                position: 1,
+                created_at: chrono::Utc::now(),
+            },
+            GraphNode {
+                id: "node-2".to_string(),
+                spec_id: Some(spec.id.clone()),
+                graph_id: None,
+                name: "Second".to_string(),
+                kind: GraphNodeKind::Check,
+                config: serde_json::json!({"command": "true"}),
+                position: 2,
+                created_at: chrono::Utc::now(),
+            },
+        ];
+        let edges = vec![GraphEdge {
+            id: "e1".to_string(),
+            spec_id: Some(spec.id.clone()),
+            graph_id: None,
+            from_node: "node-1".to_string(),
+            to_node: "node-2".to_string(),
+            condition: crate::domain::graphs::GraphEdgeCondition::Pass,
+        }];
+        let runs = vec![
+            GraphNodeRun {
+                id: "run-1".to_string(),
+                graph_id: "wf".to_string(),
+                spec_id: spec.id.clone(),
+                node_id: "node-1".to_string(),
+                status: GraphRunStatus::Pass,
+                input: None,
+                output: Some(serde_json::json!({"ok": true})),
+                started_at: chrono::Utc::now(),
+                completed_at: Some(chrono::Utc::now()),
+                iteration: 1,
+                pid: None,
+                boot_id: None,
+                session_id: None,
+                executed_platform: None,
+                executed_model: None,
+            },
+            GraphNodeRun {
+                id: "run-2".to_string(),
+                graph_id: "wf".to_string(),
+                spec_id: spec.id.clone(),
+                node_id: "node-2".to_string(),
+                status: GraphRunStatus::Fail,
+                input: Some(serde_json::json!({"from": "node-1"})),
+                output: None,
+                started_at: chrono::Utc::now(),
+                completed_at: Some(chrono::Utc::now()),
+                iteration: 1,
+                pid: None,
+                boot_id: None,
+                session_id: None,
+                executed_platform: None,
+                executed_model: None,
+            },
+        ];
+
+        let (cursor, _node_outputs, resume_previous_output, iterations) =
+            resolve_spec_start(&nodes, &edges, &spec, &runs, &[], false).unwrap();
+
+        assert_eq!(
+            cursor,
+            SpecCursor::Node("node-1".to_string()),
+            "loop_run on an interrupted spec must restart from the entry node, not the cursor"
+        );
+        assert!(resume_previous_output.is_none());
+        assert!(iterations.is_empty());
     }
 
     #[test]
@@ -9980,7 +10195,7 @@ mod tests {
             .collect();
 
         let (cursor, node_outputs, _resume_previous_output, iterations) =
-            resolve_spec_start(&details.nodes, &details.edges, &spec, &runs, &[]).unwrap();
+            resolve_spec_start(&details.nodes, &details.edges, &spec, &runs, &[], false).unwrap();
 
         assert_eq!(cursor, SpecCursor::Node("node-1".to_string()));
         assert!(node_outputs.is_empty());
@@ -13636,6 +13851,195 @@ echo done
             next_final.spec_start_head.as_deref(),
             Some(initial_head.as_str()),
             "the next queued member must still run, but only after the interrupted one"
+        );
+    }
+
+    /// CB50 FR2+FR3, end to end: a daemon crash mid-ensemble (one member
+    /// still `running`, no pid/boot_id — reconcile's dangling-run signature)
+    /// followed by a resume (`run_graph_dispatch(is_resume: true)`, what
+    /// `graph_continue`'s `retry_current_node` triggers via
+    /// `resume_background`) must re-dispatch the WHOLE ensemble — every
+    /// current member, not just the one that was still running (FR3) — and
+    /// must not re-run "kickoff", which had already completed before the
+    /// crash. The two new member runs must share one iteration number (F1:
+    /// one ensemble dispatch is one iteration, not N).
+    #[tokio::test]
+    async fn graph_engine_resume_redispatches_full_ensemble_after_interrupt() {
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+        let data_dir = tempdir().unwrap();
+        let fake_home = setup_multi_cli_home(&[
+            (
+                "member-ok-a",
+                &write_member_script(dir.path(), "a.sh", "printf ok"),
+            ),
+            (
+                "member-ok-b",
+                &write_member_script(dir.path(), "b.sh", "printf ok"),
+            ),
+        ]);
+        db.insert_graph_node(&touch_marker_node(
+            "on-pass",
+            &spec_id,
+            &dir.path().join("pass.marker"),
+            100,
+        ))
+        .unwrap();
+        insert_test_ensemble(
+            &db,
+            &spec_id,
+            "kickoff",
+            "ens1",
+            "join1",
+            &[("m-a", "member-ok-a"), ("m-b", "member-ok-b")],
+            1,
+            Some(1),
+            None,
+            "on-pass",
+            None,
+        );
+
+        // Graph + spec mid-run: kickoff and member m-a already finished,
+        // m-b is the crash artifact (running, no pid/boot_id — exactly what
+        // a dead daemon leaves for reconcile to find). Explicit, well-spread
+        // `started_at` values so `list_graph_runs_for_spec`'s
+        // `ORDER BY started_at ASC` deterministically puts m-b last.
+        db.update_graph_status(
+            &graph_id,
+            GraphStatus::Running,
+            Some(chrono::Utc::now()),
+            None,
+        )
+        .unwrap();
+        db.update_graph_spec_status(
+            &spec_id,
+            GraphSpecStatus::Running,
+            Some(chrono::Utc::now()),
+            None,
+        )
+        .unwrap();
+        let t0 = chrono::Utc::now() - chrono::Duration::seconds(3);
+        db.insert_graph_run(&GraphNodeRun {
+            id: "run-kickoff".to_string(),
+            graph_id: graph_id.clone(),
+            spec_id: spec_id.clone(),
+            node_id: "kickoff".to_string(),
+            status: GraphRunStatus::Pass,
+            input: None,
+            output: Some(serde_json::json!({"ok": true})),
+            started_at: t0,
+            completed_at: Some(t0),
+            iteration: 1,
+            pid: None,
+            boot_id: None,
+            session_id: None,
+            executed_platform: None,
+            executed_model: None,
+        })
+        .unwrap();
+        let t1 = t0 + chrono::Duration::seconds(1);
+        db.insert_graph_run(&GraphNodeRun {
+            id: "run-m-a-1".to_string(),
+            graph_id: graph_id.clone(),
+            spec_id: spec_id.clone(),
+            node_id: "m-a".to_string(),
+            status: GraphRunStatus::Pass,
+            input: Some(serde_json::json!({})),
+            output: Some(serde_json::json!({"ok": true})),
+            started_at: t1,
+            completed_at: Some(t1),
+            iteration: 1,
+            pid: None,
+            boot_id: None,
+            session_id: None,
+            executed_platform: None,
+            executed_model: None,
+        })
+        .unwrap();
+        let t2 = t1 + chrono::Duration::seconds(1);
+        db.insert_graph_run(&GraphNodeRun {
+            id: "run-m-b-1".to_string(),
+            graph_id: graph_id.clone(),
+            spec_id: spec_id.clone(),
+            node_id: "m-b".to_string(),
+            status: GraphRunStatus::Running,
+            input: Some(serde_json::json!({})),
+            output: None,
+            started_at: t2,
+            completed_at: None,
+            iteration: 1,
+            pid: None,
+            boot_id: None,
+            session_id: None,
+            executed_platform: None,
+            executed_model: None,
+        })
+        .unwrap();
+
+        // Boot reconcile: marks m-b's dangling run Fail (with an
+        // "interrupted" marker output), the spec Interrupted, the graph
+        // Paused. This is exactly what a real daemon restart mid-ensemble
+        // leaves behind.
+        assert_eq!(db.reconcile_orphaned_graphs(data_dir.path()).unwrap(), 1);
+        let spec_after_reconcile = db.get_graph_spec(&spec_id).unwrap().unwrap();
+        assert_eq!(spec_after_reconcile.status, GraphSpecStatus::Interrupted);
+
+        // Resume: same call `resume_background` makes internally with
+        // `is_resume: true`.
+        let _home = HomeGuard::set(fake_home.path());
+        engine
+            .run_graph_dispatch(graph_id.clone(), None, None, true, None, None)
+            .await
+            .unwrap();
+        drop(_home);
+
+        let kickoff_runs: Vec<_> = db
+            .list_graph_runs_for_spec(&spec_id)
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.node_id == "kickoff")
+            .collect();
+        assert_eq!(
+            kickoff_runs.len(),
+            1,
+            "kickoff had already completed before the crash and must not re-run on resume"
+        );
+
+        let m_a_runs: Vec<_> = db
+            .list_graph_runs_for_spec(&spec_id)
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.node_id == "m-a")
+            .collect();
+        let m_b_runs: Vec<_> = db
+            .list_graph_runs_for_spec(&spec_id)
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.node_id == "m-b")
+            .collect();
+        // The member scripts are unreported (CM13: script-backed test doubles
+        // never call `graph_complete_node`), so each fresh dispatch is an
+        // infra crash that exhausts the default retry_limit (2) before the
+        // ensemble gives up on it: 3 rows (attempts 0, 1, 2) per member, all
+        // sharing the resumed dispatch's one iteration (`begin_infra_retry`
+        // passes the same `iteration` through every retry).
+        assert_eq!(
+            m_a_runs.len(),
+            4,
+            "m-a already had one Pass run before the crash — resume must dispatch the whole \
+             ensemble (FR3), so it gets 3 fresh (retry-exhausted) runs even though it wasn't the \
+             member that was still running when the daemon died"
+        );
+        assert_eq!(
+            m_b_runs.len(),
+            4,
+            "m-b's run count: the original (now Fail, from reconcile) plus 3 fresh \
+             (retry-exhausted) runs from the resumed dispatch"
+        );
+        let new_m_a_iteration = m_a_runs.last().unwrap().iteration;
+        let new_m_b_iteration = m_b_runs.last().unwrap().iteration;
+        assert_eq!(
+            new_m_a_iteration, new_m_b_iteration,
+            "the two members re-dispatched together on resume must share one iteration number (F1)"
         );
     }
 
