@@ -493,22 +493,7 @@ fn try_cycle_from_playground(app: &mut App, forward: bool) -> bool {
 }
 
 fn try_cycle_through_focusable(app: &mut App, forward: bool) -> bool {
-    let focusable: Vec<usize> = app
-        .agents
-        .iter()
-        .enumerate()
-        .filter(|(_, entry)| {
-            matches!(
-                entry,
-                AgentEntry::Interactive(_)
-                    | AgentEntry::Terminal(_)
-                    | AgentEntry::Group(_)
-                    | AgentEntry::Agent(_)
-                    | AgentEntry::Orphaned(_)
-            )
-        })
-        .map(|(idx, _)| idx)
-        .collect();
+    let focusable = app.cycle_focus_indices();
 
     if focusable.is_empty() {
         app.activate_playground();
@@ -1328,6 +1313,89 @@ mod tests {
         assert!(!dismisses_exited_session(KeyCode::F(10), true, true));
         // f10, split, not exited
         assert!(!dismisses_exited_session(KeyCode::F(10), true, false));
+    }
+
+    #[test]
+    fn shift_cycle_on_live_wraps_within_live_and_skips_background_agent() {
+        // CT20 regression: on Live, Shift+Up/Down must walk exactly
+        // live_indices() (Interactive/Terminal/Orphaned/Group) — never the
+        // background Agent row, even though it sits earlier in app.agents.
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        app.agents = vec![
+            AgentEntry::Agent(cron_agent("bg-1")),
+            AgentEntry::Interactive(0),
+            AgentEntry::Interactive(1),
+        ];
+        app.sidebar_layer = SidebarLayer::Live;
+        app.selected = 1; // Interactive(0)
+        app.focus = Focus::Agent;
+
+        assert!(handle_agent_cycle_shortcut(
+            &mut app,
+            KeyCode::Up,
+            KeyModifiers::SHIFT
+        ));
+        assert_eq!(
+            app.selected, 2,
+            "Shift+Up from the first Live item wraps to the last Live item (Interactive(1)), not the background agent"
+        );
+
+        assert!(handle_agent_cycle_shortcut(
+            &mut app,
+            KeyCode::Down,
+            KeyModifiers::SHIFT
+        ));
+        assert_eq!(
+            app.selected, 1,
+            "Shift+Down from Interactive(1) returns to Interactive(0)"
+        );
+    }
+
+    #[test]
+    fn shift_cycle_on_automation_stays_within_automation_entries() {
+        // CT20: on Automation, the cycle must stay inside that tab's own
+        // agent entries and never step onto a Live-tab entry that happens to
+        // share the app.agents list.
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        app.agents = vec![
+            AgentEntry::Group(0), // a Live entry that must never be visited here
+            AgentEntry::Agent(cron_agent("bg-1")),
+            AgentEntry::Agent(cron_agent("bg-2")),
+        ];
+        app.sidebar_layer = SidebarLayer::Automation;
+        app.selected = 1; // first background agent
+        app.focus = Focus::Agent;
+
+        assert!(handle_agent_cycle_shortcut(
+            &mut app,
+            KeyCode::Down,
+            KeyModifiers::SHIFT
+        ));
+        assert_eq!(app.selected, 2, "steps to the second background agent");
+
+        assert!(handle_agent_cycle_shortcut(
+            &mut app,
+            KeyCode::Down,
+            KeyModifiers::SHIFT
+        ));
+        assert_eq!(
+            app.selected, 1,
+            "wraps back to the first background agent, never to the Group at index 0"
+        );
     }
 }
 

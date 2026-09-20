@@ -491,6 +491,19 @@ impl App {
             .collect()
     }
 
+    /// Ordered index set that the in-focus `Shift+Up`/`Shift+Down` cycle
+    /// (`agent_focus::handle_agent_cycle_shortcut`) walks — the same set the
+    /// active tab's own arrow navigation shows, so cycling can never land on an
+    /// entry rendered under a different tab (CT20). Knowledge has no live
+    /// sessions to focus into, so it contributes nothing.
+    pub(crate) fn cycle_focus_indices(&self) -> Vec<usize> {
+        match self.sidebar_layer {
+            SidebarLayer::Live => self.live_indices(),
+            SidebarLayer::Automation => self.automation_agent_indices(),
+            SidebarLayer::Knowledge => Vec::new(),
+        }
+    }
+
     /// Arrows never change the active tab (decisions 1–2): running off
     /// either end of `Live`'s own list wraps within it. The one exception is
     /// backing off the first item, which instead focuses the pinned RAG
