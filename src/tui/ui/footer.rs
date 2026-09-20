@@ -392,7 +392,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        App::new(db, data_dir.path()).unwrap()
+        App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap()
     }
 
     fn render_footer_to_text(

@@ -2067,7 +2067,12 @@ mod tests {
         .unwrap();
 
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).unwrap();
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         app.sidebar_layer = active_layer;
         assert!(
             !app.sidebar_graphs().is_empty(),
@@ -2165,7 +2170,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(db, data_dir.path()).unwrap();
+        let mut app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         let theme = Theme::modern();
         let backend = TestBackend::new(45, 40);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -2194,7 +2204,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).unwrap();
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         // Seed Live with one interactive and one terminal so both sub-panels allocate.
         let mut interactive = InteractiveAgent::spawn_terminal(
             "cat",
@@ -2301,7 +2316,12 @@ mod tests {
         seed(&db);
 
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).unwrap();
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         app.sidebar_layer = SidebarLayer::Automation;
 
         let backend = TestBackend::new(50, 40);
@@ -2485,7 +2505,12 @@ mod tests {
         db.insert_graph(&running).unwrap();
 
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).unwrap();
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         app.sidebar_layer = SidebarLayer::Automation;
         app.automation_kind = AutomationKind::Graph;
 
@@ -2680,7 +2705,12 @@ mod tests {
         }
 
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).unwrap();
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         assert_eq!(app.projects.len(), 2, "projects should be loaded from db");
         // Only the active tab's body renders now — Knowledge must be active
         // for its project rows to draw at all.
@@ -2828,7 +2858,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).unwrap();
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
 
         let mut ok_agent = InteractiveAgent::spawn_terminal(
             "cat",
@@ -3007,7 +3042,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).unwrap();
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
 
         let backend = TestBackend::new(33, 40);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -3054,7 +3094,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).unwrap();
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         app.sidebar_layer = SidebarLayer::Live;
 
         let theme = Theme::classic();
@@ -3440,7 +3485,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).unwrap();
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         app.rag_paused = true;
         assert_eq!(rag_info_title(&app), " ragInfo ⏸ ");
     }
@@ -3453,7 +3503,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).unwrap();
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         app.rag_paused = false;
         assert_eq!(rag_info_title(&app), " ragInfo ");
     }
@@ -3466,7 +3521,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).unwrap();
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         app.rag_info.queued_items = 5;
         assert_eq!(rag_queue_text(&app), "5 queued");
     }
@@ -3479,7 +3539,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).unwrap();
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         app.rag_info.queued_items = 0;
         assert_eq!(rag_queue_text(&app), "");
     }
@@ -3510,7 +3575,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).unwrap();
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         let backend = TestBackend::new(33, 20);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
@@ -3530,7 +3600,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).unwrap();
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         let backend = TestBackend::new(33, 20);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
@@ -3548,7 +3623,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).unwrap();
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         app.rag_embeddings_model = "text-embedding-3-small".to_string();
         app.rag_model_loaded = true;
         app.rag_acquisition_state =
@@ -3568,7 +3648,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).unwrap();
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         app.rag_embeddings_model = "text-embedding-3-small".to_string();
         app.rag_acquisition_state = Some(crate::rag::status::AcquisitionState::Failed {
             reason: "boom".to_string(),
@@ -3797,7 +3882,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = crate::tui::app::App::new(Arc::clone(&db), data_dir.path()).unwrap();
+        let mut app = crate::tui::app::App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
 
         // Cursor sits on a terminal row while stored focus claims Interactive.
         app.agents = vec![

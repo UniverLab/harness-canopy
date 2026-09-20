@@ -144,7 +144,12 @@ mod tests {
     fn app_with_split(session_a: &str, session_b: &str, right_focused: bool) -> App {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.terminal_agents.push(spawn_test_terminal(session_a));
         app.terminal_agents.push(spawn_test_terminal(session_b));
         app.split_groups.push(SplitGroup {
@@ -213,7 +218,12 @@ mod tests {
     fn prompt_builder_paste_lands_in_the_focused_section() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
 
         let mut dialog = crate::tui::app::dialog::SimplePromptDialog::new();
         dialog.add_section_with_content("context", String::new());
@@ -234,7 +244,12 @@ mod tests {
     fn prompt_builder_large_paste_collapses_in_focused_section() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
 
         let mut dialog = crate::tui::app::dialog::SimplePromptDialog::new();
         dialog.add_section_with_content("context", String::new());
@@ -273,7 +288,12 @@ mod tests {
         for (_label, text) in variants {
             let db = test_db();
             let data_dir = tempdir().expect("create data dir");
-            let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+            let mut app = App::new(
+                Arc::clone(&db),
+                data_dir.path(),
+                &crate::domain::canopy_config::CanopyConfig::default(),
+            )
+            .expect("create app");
             app.focus = Focus::PromptTemplateDialog;
             app.simple_prompt_dialog = Some(crate::tui::app::dialog::SimplePromptDialog::new());
 
@@ -319,7 +339,12 @@ mod tests {
     fn single_line_paste_with_cr_stays_inline_and_clean() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.focus = Focus::PromptTemplateDialog;
         app.simple_prompt_dialog = Some(crate::tui::app::dialog::SimplePromptDialog::new());
 
@@ -335,7 +360,12 @@ mod tests {
     fn new_agent_dialog_paste_preserves_cr_only_line_breaks() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.focus = Focus::NewAgentDialog;
         app.new_agent_dialog = Some(crate::tui::app::dialog::NewAgentDialog::new(None));
 

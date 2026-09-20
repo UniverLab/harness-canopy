@@ -340,11 +340,32 @@ mod tests {
     fn test_app() -> App {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         // App::new already ran one tick (seeding baselines); keep the db
         // handle alive via the app itself.
         let _ = &mut app;
         app
+    }
+
+    #[test]
+    fn app_new_honors_pinned_panel_face_from_config_parameter() {
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let config = crate::domain::canopy_config::CanopyConfig {
+            pinned_panel_face: Some("knowledge".to_string()),
+            ..Default::default()
+        };
+        let app = App::new(Arc::clone(&db), data_dir.path(), &config).expect("create app");
+        assert_eq!(
+            app.panel_pinned,
+            Some(PanelFace::Knowledge),
+            "an explicit config value passed as a parameter must be honoured, independent of ~/.canopy/config.toml"
+        );
     }
 
     fn knowledge_input(id: &str, body: &str) -> IntelligenceNodeInput {
@@ -371,7 +392,12 @@ mod tests {
         }
 
         let data_dir = tempdir().unwrap();
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).unwrap();
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         app.projects = vec![Project {
             hash: "panel-project".to_string(),
             path: "/tmp/panel-project".to_string(),
@@ -408,7 +434,12 @@ mod tests {
                 .unwrap();
         }
         let data_dir = tempdir().unwrap();
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).unwrap();
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         app.projects = vec![Project {
             hash: "panel-project".to_string(),
             path: "/tmp/panel-project".to_string(),
@@ -437,7 +468,12 @@ mod tests {
                 .unwrap();
         }
         let data_dir = tempdir().unwrap();
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).unwrap();
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         app.projects = vec![Project {
             hash: "panel-project".to_string(),
             path: "/tmp/panel-project".to_string(),
@@ -484,7 +520,12 @@ mod tests {
     fn backlog_signal_add_edit_delete() {
         let db = test_db();
         let data_dir = tempdir().unwrap();
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).unwrap();
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         app.projects = vec![Project {
             hash: "panel-project".to_string(),
             path: "/tmp/panel-project".to_string(),

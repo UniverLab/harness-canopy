@@ -234,7 +234,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let _app = App::new(db, data_dir.path()).unwrap();
+        let _app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
 
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -259,7 +264,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let _app = App::new(db, data_dir.path()).unwrap();
+        let _app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
 
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -284,7 +294,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let _app = App::new(db, data_dir.path()).unwrap();
+        let _app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
 
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -423,7 +438,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(db, data_dir.path()).unwrap();
+        let mut app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
 
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -448,7 +468,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(db, data_dir.path()).unwrap();
+        let mut app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         app.legend_selected = 0;
 
         let backend = TestBackend::new(80, 24);

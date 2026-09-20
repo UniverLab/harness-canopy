@@ -943,7 +943,12 @@ mod tests {
         db.upsert_agent(&agent).expect("seed agent");
 
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.agents = vec![AgentEntry::Agent(agent)];
         app.selected = 0;
         app.focus = Focus::Agent;
@@ -953,7 +958,12 @@ mod tests {
     fn app_with_project_focus(tab: ProjectTab) -> App {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.projects = vec![crate::domain::project::Project::new("/tmp/proj")];
         app.sidebar_layer = SidebarLayer::Knowledge;
         app.selected_project = 0;
@@ -1365,7 +1375,12 @@ mod focus_shortcuts_keyboard_claim_tests {
     fn app_with_interactive_agent(agent: InteractiveAgent) -> App {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.interactive_agents = vec![agent];
         app.agents = vec![AgentEntry::Interactive(0)];
         app.selected = 0;
@@ -1536,7 +1551,12 @@ mod focus_shortcuts_keyboard_claim_tests {
     fn no_focused_agent_is_unaffected() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.focus = Focus::Agent;
 
         assert!(!focused_child_claimed_keyboard(&app));
@@ -1554,7 +1574,12 @@ mod focus_shortcuts_keyboard_claim_tests {
 
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.interactive_agents = vec![left, right];
         app.split_groups.push(SplitGroup {
             id: "split-1".to_string(),
@@ -1753,7 +1778,12 @@ mod focus_shortcuts_keyboard_claim_tests {
     fn app_with_split(left: InteractiveAgent, right: InteractiveAgent) -> App {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.interactive_agents = vec![left, right];
         app.split_groups.push(SplitGroup {
             id: "split-1".to_string(),
@@ -1893,7 +1923,12 @@ mod focus_shortcuts_keyboard_claim_tests {
     fn app_with_terminal_agent(agent: InteractiveAgent) -> App {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.terminal_agents = vec![agent];
         app.agents = vec![AgentEntry::Terminal(0)];
         app.selected = 0;

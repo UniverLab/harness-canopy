@@ -1319,7 +1319,12 @@ mod close_terminal_session_tests {
     fn app_with_history(name: &str) -> (App, TempDir) {
         let db = test_db();
         let data_dir = tempdir().expect("tempdir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         let hist = load_history(data_dir.path(), name);
         app.terminal_histories.insert(name.to_string(), hist);
         (app, data_dir)
@@ -1513,7 +1518,12 @@ mod ct16_warp_fullscreen_handover_tests {
         // are resolved eagerly), so the temp dir need not outlive this call
         // for these resize-only tests. Keep construction local.
         let data_dir = tempdir().expect("tempdir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.terminal_agents.push(agent);
         app
     }

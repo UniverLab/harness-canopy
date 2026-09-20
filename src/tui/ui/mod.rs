@@ -607,7 +607,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = std::sync::Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let app = App::new(db, data_dir.path()).unwrap();
+        let app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         (app, data_dir)
     }
 

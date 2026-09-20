@@ -316,7 +316,12 @@ mod tests {
 
     fn test_app(db: &Arc<Database>) -> (App, tempfile::TempDir) {
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(Arc::clone(db), data_dir.path()).expect("create app");
+        let app = App::new(
+            Arc::clone(db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         (app, data_dir)
     }
 

@@ -1895,7 +1895,12 @@ mod tests {
         .unwrap();
 
         let data_dir = tempfile::tempdir().unwrap();
-        let app = App::new(Arc::clone(&db), data_dir.path()).unwrap();
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         assert_eq!(app.backlog_specs.len(), 1, "backlog spec should be loaded");
 
         let text = render_to_text(50, 10, |frame, area| {
@@ -2183,7 +2188,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(db, data_dir.path()).unwrap();
+        let mut app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         app.focus = Focus::Preview;
         assert_eq!(panel_mode_label(&app), Some(" Preview "));
     }
@@ -2195,7 +2205,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(db, data_dir.path()).unwrap();
+        let mut app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         app.focus = Focus::Agent;
         assert_eq!(panel_mode_label(&app), Some(" Focus "));
     }
@@ -2207,7 +2222,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(db, data_dir.path()).unwrap();
+        let mut app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         app.focus = Focus::Home;
         assert_eq!(panel_mode_label(&app), None);
     }
@@ -2219,7 +2239,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(db, data_dir.path()).unwrap();
+        let mut app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         let theme = Theme::modern();
         let area = Rect::new(0, 0, 30, 8);
 
@@ -2255,7 +2280,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(db, data_dir.path()).unwrap();
+        let mut app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         app.focus = Focus::Agent;
         // Prevent the home fallback (empty workspace) from taking over the
         // panel and hiding the rail/title distinction we want to assert.
@@ -2328,7 +2358,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(db, data_dir.path()).unwrap();
+        let mut app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         app.focus = Focus::Home;
         assert!(show_home_fallback(&app));
     }
@@ -2340,7 +2375,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(db, data_dir.path()).unwrap();
+        let mut app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         app.focus = Focus::NewAgentDialog;
         assert!(!show_home_fallback(&app));
     }
@@ -2352,7 +2392,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(db, data_dir.path()).unwrap();
+        let mut app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         let backend = TestBackend::new(20, 10);
         let mut terminal = Terminal::new(backend).unwrap();
         let theme = Theme::classic();
@@ -2371,7 +2416,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(db, data_dir.path()).unwrap();
+        let mut app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         let backend = TestBackend::new(20, 10);
         let mut terminal = Terminal::new(backend).unwrap();
         let theme = Theme::classic();
@@ -2420,7 +2470,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let app = App::new(db, data_dir.path()).unwrap();
+        let app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
@@ -2533,7 +2588,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let app = App::new(db, data_dir.path()).unwrap();
+        let app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         assert_eq!(playground_scope_label(&app), "Global");
     }
 
@@ -2558,7 +2618,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(db, data_dir.path()).unwrap();
+        let mut app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         app.rag_info.queued_items = 0;
         let theme = Theme::classic();
         let lines = rag_summary_lines(&app, "● ready", theme.header_color, String::new(), &theme);
@@ -2572,7 +2637,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let app = App::new(db, data_dir.path()).unwrap();
+        let app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         let theme = Theme::classic();
         let lines = rag_summary_lines(
             &app,
@@ -2592,7 +2662,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(db, data_dir.path()).unwrap();
+        let mut app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         // Even a "loaded" daemon state must not mask the capability gap.
         app.rag_embeddings_model = "baai/bge-small-en-v1.5".to_string();
         app.rag_model_loaded = true;
@@ -2609,7 +2684,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(db, data_dir.path()).unwrap();
+        let mut app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         app.rag_embeddings_model = "text-embedding-3-small".to_string();
         // Even a "loaded" daemon state must not hide an in-progress download.
         app.rag_model_loaded = true;
@@ -2628,7 +2708,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(db, data_dir.path()).unwrap();
+        let mut app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         app.rag_embeddings_model = "text-embedding-3-small".to_string();
         app.rag_acquisition_state =
             Some(crate::rag::status::AcquisitionState::Preparing { started_at: 0 });
@@ -2645,7 +2730,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(db, data_dir.path()).unwrap();
+        let mut app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         app.rag_embeddings_model = "text-embedding-3-small".to_string();
         app.rag_acquisition_state = Some(crate::rag::status::AcquisitionState::Failed {
             reason: "connection reset".to_string(),
@@ -2689,6 +2779,7 @@ mod tests {
         let mut app = App::new(
             Arc::new(crate::db::Database::new(&db_path).unwrap()),
             tempfile::tempdir().unwrap().path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
         )
         .unwrap();
         app.focus = Focus::Preview;

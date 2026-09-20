@@ -1813,7 +1813,12 @@ mod recall_last_prompt_tests {
         std::mem::forget(tmp);
         let db = Arc::new(Database::new(&path).expect("create test db"));
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(db, data_dir.path()).expect("create app");
+        let app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         (app, data_dir)
     }
 
@@ -2133,7 +2138,12 @@ mod session_protocol_tests {
         std::mem::forget(tmp);
         let db = Arc::new(Database::new(&path).expect("create test db"));
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(db, data_dir.path()).expect("create app");
+        let app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         (app, data_dir)
     }
 

@@ -136,7 +136,12 @@ mod split_focus_tests {
     fn app_with_split_group(right_focused: bool) -> App {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.split_groups.push(SplitGroup {
             id: "split-1".to_string(),
             orientation: SplitOrientation::Horizontal,
@@ -165,7 +170,12 @@ mod split_focus_tests {
     fn none_when_no_split_is_active() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         assert_eq!(active_split_session_name(&app), None);
     }
 

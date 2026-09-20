@@ -1364,7 +1364,12 @@ mod sidebar_mouse_tests {
     fn app_with_agents(count: usize) -> App {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.agents = (0..count)
             .map(|i| AgentEntry::Agent(cron_agent(&format!("agent-{i}"))))
             .collect();
@@ -1742,7 +1747,12 @@ mod project_panel_mouse_tests {
     fn app_with_project_backlog(count: usize) -> App {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.projects = vec![Project::new("/tmp/project")];
         app.sidebar_layer = crate::tui::app::SidebarLayer::Knowledge;
         app.selected_project = 0;
@@ -1932,7 +1942,12 @@ mod graph_live_panel_mouse_tests {
     fn app_on_graph_live_view() -> App {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.focus = Focus::Preview;
         app.sidebar_layer = SidebarLayer::Automation;
         app.automation_kind = AutomationKind::Graph;
@@ -2076,7 +2091,12 @@ mod split_selection_tests {
     fn app_with_split_terminals(right_focused: bool) -> App {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.terminal_agents.push(spawn_test_terminal("left-term"));
         app.terminal_agents.push(spawn_test_terminal("right-term"));
         app.split_groups.push(SplitGroup {
@@ -2234,7 +2254,12 @@ mod tick_duration_tests {
         let path = tmp.path().to_path_buf();
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(db, dir.path()).unwrap();
+        let mut app = App::new(
+            db,
+            dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         app.focus = focus;
         app
     }
@@ -2369,7 +2394,12 @@ mod sidebar_tab_at_tests {
         let path = tmp.path().to_path_buf();
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let dir = tempfile::tempdir().unwrap();
-        App::new(db, dir.path()).unwrap()
+        App::new(
+            db,
+            dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -2406,7 +2436,12 @@ mod sidebar_agent_at_tests {
         let path = tmp.path().to_path_buf();
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(db, dir.path()).unwrap();
+        let mut app = App::new(
+            db,
+            dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         app.sidebar_click_map = vec![(0, 0, 3), (1, 4, 7), (2, 8, 11)];
 
         assert_eq!(sidebar_agent_at(&app, 1), Some(0));
@@ -2427,7 +2462,12 @@ mod is_terminal_agent_selected_tests {
         let path = tmp.path().to_path_buf();
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let dir = tempfile::tempdir().unwrap();
-        let app = App::new(db, dir.path()).unwrap();
+        let app = App::new(
+            db,
+            dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         assert!(!is_terminal_agent_selected(&app));
     }
 }
@@ -2451,7 +2491,12 @@ mod mouse_pty_position_tests {
         let path = tmp.path().to_path_buf();
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let dir = tempfile::tempdir().unwrap();
-        App::new(db, dir.path()).unwrap()
+        App::new(
+            db,
+            dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -2489,7 +2534,12 @@ mod clamped_pty_position_tests {
         let path = tmp.path().to_path_buf();
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(db, dir.path()).unwrap();
+        let mut app = App::new(
+            db,
+            dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         app.last_panel_x = 10;
         app.last_panel_y = 5;
         app.last_panel_inner = (40, 20);
@@ -2614,7 +2664,12 @@ mod preview_focus_click_tests {
         std::mem::forget(tmp);
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(db, dir.path()).unwrap();
+        let mut app = App::new(
+            db,
+            dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         app.interactive_agents = vec![spawn_cat_interactive("ct6-click")];
         app.agents = vec![AgentEntry::Interactive(0)];
         app.selected = 0;
@@ -2821,7 +2876,12 @@ mod ct14_sidebar_tests {
         // non-Knowledge layer. Both wrappers must clear it idempotently.
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
 
         app.sidebar_layer = SidebarLayer::Live;
         app.project_focus = Some(ProjectTab::Backlog);
@@ -2859,7 +2919,12 @@ mod ct19_panel_region_scroll_tests {
     fn test_app() -> App {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        App::new(Arc::clone(&db), data_dir.path()).expect("create app")
+        App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app")
     }
 
     fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {

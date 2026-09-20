@@ -233,7 +233,12 @@ mod tests {
         // caches, so leaking it for the test's lifetime is fine.
         let dir_path = data_dir.path().to_path_buf();
         std::mem::forget(data_dir);
-        App::new(db, &dir_path).expect("create app")
+        App::new(
+            db,
+            &dir_path,
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app")
     }
 
     #[test]

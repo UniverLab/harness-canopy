@@ -1079,7 +1079,12 @@ mod tests {
         db.upsert_agent(&agent).expect("seed agent");
 
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.agents = vec![AgentEntry::Agent(agent)];
         app.selected = 0;
 
@@ -1098,7 +1103,12 @@ mod tests {
         db.upsert_agent(&agent).expect("seed agent");
 
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.agents = vec![AgentEntry::Agent(agent)];
         app.selected = 0;
 
@@ -1118,7 +1128,12 @@ mod tests {
         db.upsert_agent(&agent).expect("seed agent");
 
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.agents = vec![AgentEntry::Agent(agent)];
         app.selected = 0;
 
@@ -1248,7 +1263,12 @@ mod tests {
     fn close_new_agent_dialog_with_prev_focus() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         let mut dialog = NewAgentDialog::new(None);
         dialog.prev_focus = Some(Focus::Agent);
         app.new_agent_dialog = Some(dialog);
@@ -1261,7 +1281,12 @@ mod tests {
     fn close_new_agent_dialog_without_prev_focus() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         let dialog = NewAgentDialog::new(None);
         app.new_agent_dialog = Some(dialog);
         app.close_new_agent_dialog();
@@ -1273,7 +1298,12 @@ mod tests {
     fn close_new_agent_dialog_none() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.close_new_agent_dialog();
         assert!(matches!(app.focus, Focus::Home));
     }
@@ -1284,7 +1314,12 @@ mod tests {
     fn close_launchpad_dialog_clears_both() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         // Set up both dialogs via the normal open path
         app.new_agent_dialog = Some(NewAgentDialog::new(None));
         app.launchpad_dialog = app
@@ -1303,7 +1338,12 @@ mod tests {
     fn close_simple_prompt_dialog_persists_session() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         let mut dialog = SimplePromptDialog::new();
         dialog.set_section_content("instruction_1", "test prompt".to_string());
         dialog.prev_focus = Some(Focus::Agent);
@@ -1321,7 +1361,12 @@ mod tests {
     fn discard_simple_prompt_dialog_does_not_persist() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         let mut dialog = SimplePromptDialog::new();
         dialog.set_section_content("instruction_1", "test prompt".to_string());
         dialog.prev_focus = Some(Focus::Agent);
@@ -1337,7 +1382,12 @@ mod tests {
     fn close_simple_prompt_dialog_no_dialog() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.close_simple_prompt_dialog();
         assert!(matches!(app.focus, Focus::Agent));
     }
@@ -1348,7 +1398,12 @@ mod tests {
     fn launch_scheduled_empty_prompt_does_nothing() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         let mut dialog = NewAgentDialog::new(None);
         dialog.prompt = String::new();
         dialog.task_type = NewTaskType::Background;
@@ -1366,7 +1421,12 @@ mod tests {
     fn launch_watcher_empty_prompt_does_nothing() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         let mut dialog = NewAgentDialog::new(None);
         dialog.prompt = String::new();
         dialog.watch_path = "/tmp".to_string();
@@ -1381,7 +1441,12 @@ mod tests {
     fn launch_watcher_empty_watch_path_does_nothing() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         let mut dialog = NewAgentDialog::new(None);
         dialog.prompt = "test".to_string();
         dialog.watch_path = String::new();
@@ -1396,7 +1461,12 @@ mod tests {
     fn launch_watcher_empty_events_does_nothing() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         let mut dialog = NewAgentDialog::new(None);
         dialog.prompt = "test".to_string();
         dialog.watch_path = "/tmp".to_string();
@@ -1414,7 +1484,12 @@ mod tests {
     fn launch_new_agent_no_dialog_does_nothing() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.launch_new_agent().expect("should not error");
         assert!(app.new_agent_dialog.is_none());
     }
@@ -1425,7 +1500,12 @@ mod tests {
     fn open_new_agent_dialog_sets_focus() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.open_new_agent_dialog();
         assert!(app.new_agent_dialog.is_some());
         assert!(matches!(app.focus, Focus::NewAgentDialog));
@@ -1435,7 +1515,12 @@ mod tests {
     fn open_new_agent_dialog_captures_prev_focus() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.focus = Focus::Agent;
         app.open_new_agent_dialog();
         let dialog = app.new_agent_dialog.as_ref().unwrap();
@@ -1448,7 +1533,12 @@ mod tests {
     fn open_edit_dialog_no_selection_does_nothing() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.open_edit_dialog();
         assert!(app.new_agent_dialog.is_none());
     }
@@ -1457,7 +1547,12 @@ mod tests {
     fn open_edit_dialog_non_agent_entry_does_nothing() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         // Add a non-agent entry (terminal index 0, but no terminal agents exist)
         app.agents = vec![AgentEntry::Terminal(0)];
         app.selected = 0;
@@ -1561,7 +1656,12 @@ mod tests {
     fn build_system_context_parts_fallback_when_no_activity() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         let (workdir, intents, chatter) = app.build_system_context_parts();
         assert!(!workdir.is_empty());
         assert!(intents.is_empty());
@@ -1590,7 +1690,12 @@ mod tests {
         db.upsert_agent(&agent).expect("seed");
 
         let data_dir = tempdir().expect("data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("app");
         app.agents = vec![AgentEntry::Agent(agent)];
         app.selected = 0;
 

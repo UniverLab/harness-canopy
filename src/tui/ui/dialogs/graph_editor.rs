@@ -330,7 +330,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(db, data_dir.path()).unwrap();
+        let mut app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         app.graph_editor_dialog = Some(GraphEditorDialog::new_router_routes(
             "router1".to_string(),
             "Classify".to_string(),

@@ -74,7 +74,9 @@ pub fn run_tui() -> Result<()> {
     }
 
     let db = Arc::new(Database::new_safe(&db_path, &data_dir).context("Failed to open database")?);
-    let mut app = App::new(Arc::clone(&db), &data_dir)?;
+    let home = dirs::home_dir().unwrap_or_default();
+    let canopy_config = crate::domain::canopy_config::CanopyConfig::load(&home.join(".canopy"));
+    let mut app = App::new(Arc::clone(&db), &data_dir, &canopy_config)?;
 
     // Reap bridge sidecars whose owning process died without cleaning up
     app.reconcile_bridge_sessions();

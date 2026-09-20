@@ -608,7 +608,12 @@ mod playground_key_tests {
     fn app_with_agents() -> App {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.agents = vec![AgentEntry::Agent(cron_agent("a1"))];
         app.selected = 0;
         app
@@ -951,7 +956,12 @@ mod home_key_tests {
     fn app_with_agents() -> App {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.agents = vec![AgentEntry::Agent(cron_agent("a1"))];
         app.selected = 0;
         app
@@ -1104,7 +1114,12 @@ mod preview_key_tests {
     fn app_with_agents() -> App {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.agents = vec![AgentEntry::Agent(cron_agent("a1"))];
         app.selected = 0;
         app
@@ -1710,7 +1725,12 @@ mod preview_key_tests {
 
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.interactive_agents = vec![first, second];
         app.agents = vec![AgentEntry::Interactive(0), AgentEntry::Interactive(1)];
         app.selected = 0;

@@ -249,7 +249,12 @@ mod tests {
         .unwrap();
 
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.agents = vec![AgentEntry::Agent(sample_agent("bg-1", "/tmp/project"))];
         app.selected = 0;
 
@@ -277,7 +282,12 @@ mod tests {
         .unwrap();
 
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.agents = vec![AgentEntry::Agent(sample_agent("bg-1", "/tmp/project"))];
         app.selected = 0;
 
@@ -325,7 +335,12 @@ mod tests {
         .unwrap();
 
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
 
         let intents = app.active_missions_for_workdir("/tmp/project");
         assert_eq!(intents.len(), 1);
@@ -354,7 +369,12 @@ mod tests {
         .expect("insert intent");
 
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.agents = vec![AgentEntry::Agent(sample_agent("bg-1", "/tmp/project"))];
         app.selected = 0;
 
@@ -382,7 +402,12 @@ mod tests {
         }
 
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.agents = vec![AgentEntry::Agent(sample_agent("bg-1", "/tmp/project"))];
         app.selected = 0;
 
@@ -402,7 +427,12 @@ mod tests {
     fn selected_activity_workdir_uses_selected_project_in_projects_mode() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         let project = sample_project("/tmp/project");
         app.projects = vec![project];
         app.sidebar_layer = SidebarLayer::Knowledge;
@@ -414,7 +444,12 @@ mod tests {
     fn activity_panel_stays_visible_in_projects_mode_without_messages() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         let project = sample_project("/tmp/project");
         app.projects = vec![project];
         app.sidebar_layer = SidebarLayer::Knowledge;
@@ -432,7 +467,12 @@ mod tests {
     fn toggle_activity_panel_is_ignored_in_projects_mode() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         let project = sample_project("/tmp/project");
         app.projects = vec![project];
         app.sidebar_layer = SidebarLayer::Knowledge;
@@ -456,7 +496,12 @@ mod tests {
         .unwrap();
 
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.agents = vec![AgentEntry::Agent(sample_agent("bg-1", "/tmp/project"))];
         app.selected = 0;
         app.hidden_activity_workdirs
@@ -485,7 +530,12 @@ mod tests {
         .unwrap();
 
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.agents = vec![AgentEntry::Agent(sample_agent("bg-1", "/tmp/project"))];
         app.selected = 0;
         app.term_width = 60;
@@ -509,7 +559,12 @@ mod tests {
     fn activity_panel_width_is_30_percent_clamped_between_24_and_80() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
 
         assert_eq!(app.activity_panel_layout_width(100, true), 30);
         assert_eq!(app.activity_panel_layout_width(70, true), 0);
@@ -519,7 +574,12 @@ mod tests {
     fn activity_panel_width_grows_proportionally_past_the_old_fixed_cap() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
 
         // Narrow: below the minimum, panel is hidden.
         assert_eq!(app.activity_panel_layout_width(70, true), 0);
@@ -553,7 +613,12 @@ mod tests {
         .unwrap();
 
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.agents = vec![AgentEntry::Agent(sample_agent("bg-1", "/tmp/project"))];
         app.selected = 0;
         app.hidden_activity_workdirs

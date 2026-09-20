@@ -46,11 +46,11 @@ pub use types::{
 use types::{GraphSidebarMeta, RagTransferModal, SidebarStepMemory};
 
 impl App {
-    pub fn new(db: Arc<Database>, data_dir: &Path) -> Result<Self> {
-        let home = dirs::home_dir().unwrap_or_default();
-        let canopy_dir = home.join(".canopy");
-        let canopy_config = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir);
-
+    pub fn new(
+        db: Arc<Database>,
+        data_dir: &Path,
+        canopy_config: &crate::domain::canopy_config::CanopyConfig,
+    ) -> Result<Self> {
         let system_monitor_active = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let system_info_rx = spawn_system_monitor(&system_monitor_active);
         let mission_manager = Self::init_mission_manager(Arc::clone(&db))?;
@@ -4425,7 +4425,12 @@ mod tests {
         .unwrap();
 
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.reconcile_bridge_sessions();
 
         let still_active = db.get_active_sessions_by_type("bridge").unwrap();
@@ -4799,7 +4804,12 @@ mod tests {
         db.insert_graph(&running).unwrap();
 
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
 
         let ids: Vec<&str> = app
             .sidebar_graphs()
@@ -4829,7 +4839,12 @@ mod tests {
             .unwrap();
 
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         assert_eq!(app.selected_project, 0);
         assert_eq!(
             app.backlog_specs
@@ -4858,7 +4873,12 @@ mod tests {
             .unwrap();
 
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         assert!(app.project_focus.is_none(), "starts on Preview, not Focus");
 
         app.enter_project_focus(ProjectTab::Overview);
@@ -4879,7 +4899,12 @@ mod tests {
     fn cycle_project_tab_wraps_through_all_four_tabs() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.enter_project_focus(ProjectTab::Overview);
 
         app.cycle_project_tab(true);
@@ -4905,7 +4930,12 @@ mod tests {
         // must not land there.
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.agents = vec![
             AgentEntry::Group(0),
             AgentEntry::Group(1),
@@ -4928,7 +4958,12 @@ mod tests {
     fn navigate_live_wraps_at_both_ends() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.agents = vec![AgentEntry::Group(0), AgentEntry::Group(1)];
         app.sidebar_layer = SidebarLayer::Live;
         app.selected = 0;
@@ -4957,7 +4992,12 @@ mod tests {
         ))
         .unwrap();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.agents = vec![AgentEntry::Agent(bg_agent("bg-1"))];
         app.sidebar_layer = SidebarLayer::Automation;
         app.automation_kind = AutomationKind::Agent;
@@ -4986,7 +5026,12 @@ mod tests {
         db.upsert_project(&make_project("hash1", "/tmp/proj1"))
             .unwrap();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.sidebar_layer = SidebarLayer::Knowledge;
         app.selected_project = 0;
 
@@ -5005,7 +5050,12 @@ mod tests {
     fn rag_reachable_upward_from_live_first_item_returns_to_live() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.agents = vec![AgentEntry::Group(0), AgentEntry::Group(1)];
         app.sidebar_layer = SidebarLayer::Live;
         app.selected = 0;
@@ -5035,7 +5085,12 @@ mod tests {
     fn rag_reachable_upward_from_automation_first_item_returns_to_automation() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.agents = vec![AgentEntry::Agent(bg_agent("bg-1"))];
         app.sidebar_layer = SidebarLayer::Automation;
         app.automation_kind = AutomationKind::Agent;
@@ -5062,7 +5117,12 @@ mod tests {
         db.upsert_project(&make_project("hash0", "/tmp/proj0"))
             .unwrap();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.sidebar_layer = SidebarLayer::Knowledge;
         app.selected_project = 0;
         app.rag_info = crate::db::project::RagInfoSummary {
@@ -5088,7 +5148,12 @@ mod tests {
         // Automation with nothing running, so its empty state is reachable.
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         assert_eq!(app.sidebar_layer, SidebarLayer::Live);
 
         app.switch_sidebar_tab(SidebarLayer::Automation);
@@ -5102,7 +5167,12 @@ mod tests {
         db.upsert_project(&make_project("hash0", "/tmp/proj0"))
             .unwrap();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
 
         app.switch_sidebar_tab(SidebarLayer::Knowledge);
 
@@ -5552,7 +5622,12 @@ mod tests {
     fn filtered_knowledge_indices_empty_filter_returns_all() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.project_knowledge = vec![
             crate::db::intelligence::IntelligenceNodeRecord {
                 id: "n1".into(),
@@ -5588,7 +5663,12 @@ mod tests {
     fn filtered_knowledge_indices_filter_matches_title() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.project_knowledge = vec![
             crate::db::intelligence::IntelligenceNodeRecord {
                 id: "n1".into(),
@@ -5624,7 +5704,12 @@ mod tests {
     fn filtered_knowledge_indices_filter_matches_body() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.project_knowledge = vec![crate::db::intelligence::IntelligenceNodeRecord {
             id: "n1".into(),
             kind: "fact".into(),
@@ -5646,7 +5731,12 @@ mod tests {
     fn filtered_knowledge_indices_filter_matches_kind() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.project_knowledge = vec![
             crate::db::intelligence::IntelligenceNodeRecord {
                 id: "n1".into(),
@@ -5682,7 +5772,12 @@ mod tests {
     fn filtered_knowledge_indices_no_match() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.project_knowledge = vec![crate::db::intelligence::IntelligenceNodeRecord {
             id: "n1".into(),
             kind: "fact".into(),
@@ -5729,7 +5824,12 @@ mod tests {
     fn agent_entry_id_for_agent() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         let entry = AgentEntry::Agent(crate::domain::models::Agent {
             id: "bg-1".to_string(),
             prompt: String::new(),
@@ -5756,7 +5856,12 @@ mod tests {
     fn agent_entry_id_for_corrupt() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         let entry = AgentEntry::Corrupt(crate::domain::models::CorruptAgent {
             id: "corrupt-1".to_string(),
             enabled: false,
@@ -5769,7 +5874,12 @@ mod tests {
     fn agent_entry_id_for_group_out_of_bounds() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         let entry = AgentEntry::Group(99);
         assert_eq!(entry.id(&app), "?");
     }
@@ -5778,7 +5888,12 @@ mod tests {
     fn agent_entry_id_for_interactive_out_of_bounds() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         let entry = AgentEntry::Interactive(99);
         assert_eq!(entry.id(&app), "?");
     }
@@ -5787,7 +5902,12 @@ mod tests {
     fn agent_entry_id_for_terminal_out_of_bounds() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         let entry = AgentEntry::Terminal(99);
         assert_eq!(entry.id(&app), "?");
     }
@@ -5796,7 +5916,12 @@ mod tests {
     fn agent_entry_id_for_orphaned_out_of_bounds() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         let entry = AgentEntry::Orphaned(99);
         assert_eq!(entry.id(&app), "?");
     }
@@ -5807,7 +5932,12 @@ mod tests {
     fn select_next_empty_agents_stays_put() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.agents.clear();
         app.selected = 0;
         app.sidebar_layer = SidebarLayer::Live;
@@ -5820,7 +5950,12 @@ mod tests {
     fn select_prev_empty_agents_stays_put() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.agents.clear();
         app.selected = 0;
         app.sidebar_layer = SidebarLayer::Live;
@@ -5832,7 +5967,12 @@ mod tests {
     fn select_agent_at_out_of_bounds_does_nothing() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.agents.clear();
         let prev = app.selected;
         app.select_agent_at(999);
@@ -5843,7 +5983,12 @@ mod tests {
     fn scroll_log_down_and_up() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.log_scroll = 10;
         app.scroll_log_down();
         assert_eq!(app.log_scroll, 13);
@@ -5855,7 +6000,12 @@ mod tests {
     fn scroll_log_up_at_zero_stays_zero() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.log_scroll = 0;
         app.scroll_log_up();
         assert_eq!(app.log_scroll, 0);
@@ -5879,7 +6029,12 @@ mod tests {
             .unwrap();
 
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         let listed: Vec<&str> = app
             .sidebar_graphs()
             .iter()
@@ -5905,7 +6060,12 @@ mod tests {
     fn activate_deactivate_playground() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         assert!(!app.playground_active);
 
         app.playground_query = "test query".to_string();
@@ -5927,7 +6087,12 @@ mod tests {
     fn poll_playground_search_no_rx_returns_early() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.playground_search_rx = None;
         // Should not panic
         app.poll_playground_search();
@@ -5937,7 +6102,12 @@ mod tests {
     fn poll_playground_search_disconnected_cleans_up() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         let (tx, rx) = std::sync::mpsc::channel();
         app.playground_search_rx = Some(rx);
         app.playground_search_pending = true;
@@ -5988,7 +6158,12 @@ mod tests {
         .unwrap();
 
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.selected_graph_id = Some("graph-1".to_string());
         app.graph_details = db.get_graph_details("graph-1").unwrap();
         app.graph_selected_spec = 0;
@@ -6022,7 +6197,12 @@ mod tests {
     fn sidebar_graphs_empty_when_no_graphs() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         assert!(app.sidebar_graphs().is_empty());
     }
 
@@ -6030,7 +6210,12 @@ mod tests {
     fn live_indices_empty_when_no_agents() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         assert!(app.live_indices().is_empty());
     }
 
@@ -6038,7 +6223,12 @@ mod tests {
     fn automation_agent_indices_empty_when_no_agents() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         assert!(app.automation_agent_indices().is_empty());
     }
 
@@ -6046,7 +6236,12 @@ mod tests {
     fn step_sidebar_tab_forward_wraps() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.sidebar_layer = SidebarLayer::Knowledge;
         app.step_sidebar_tab(true);
         assert_eq!(app.sidebar_layer, SidebarLayer::Live);
@@ -6056,7 +6251,12 @@ mod tests {
     fn step_sidebar_tab_backward_wraps() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.sidebar_layer = SidebarLayer::Live;
         app.step_sidebar_tab(false);
         assert_eq!(app.sidebar_layer, SidebarLayer::Knowledge);
@@ -6094,7 +6294,12 @@ mod tests {
         // leaving one for the other would otherwise clobber it.
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.agents = vec![
             AgentEntry::Group(0),
             AgentEntry::Group(1),
@@ -6125,7 +6330,12 @@ mod tests {
         // stale/invalid index — it should behave like a fresh jump instead.
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.agents = vec![
             AgentEntry::Group(0),
             AgentEntry::Group(1),
@@ -6152,7 +6362,12 @@ mod tests {
     fn reset_log_scroll_sets_to_zero() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.log_scroll = 50;
         app.sidebar_scroll_offset = 10;
         app.reset_log_scroll();
@@ -6164,7 +6379,12 @@ mod tests {
     fn cycle_sidebar_layer_skips_empty_tabs() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.sidebar_layer = SidebarLayer::Live;
         // No agents, no projects, no graphs → cycle may stay or move
         app.cycle_sidebar_layer();
@@ -6175,7 +6395,12 @@ mod tests {
     fn selected_project_out_of_bounds() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         assert!(app.selected_project().is_none());
     }
 
@@ -6183,7 +6408,12 @@ mod tests {
     fn selected_graph_none_when_no_graphs() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         assert!(app.selected_graph().is_none());
     }
 
@@ -6191,7 +6421,12 @@ mod tests {
     fn selected_graph_spec_none_when_no_details() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         assert!(app.selected_graph_spec().is_none());
     }
 
@@ -6199,7 +6434,12 @@ mod tests {
     fn selected_graph_node_none_when_no_details() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         assert!(app.selected_graph_node().is_none());
     }
 
@@ -6212,7 +6452,12 @@ mod tests {
         db.insert_graph(&make_graph("l2", "B", GraphStatus::Completed))
             .unwrap();
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         assert_eq!(app.visible_graphs().len(), 2);
     }
 
@@ -6220,7 +6465,12 @@ mod tests {
     fn selected_agent_none_when_empty() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         assert!(app.selected_agent().is_none());
     }
 
@@ -6228,7 +6478,12 @@ mod tests {
     fn selected_id_empty_when_no_agent() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         assert_eq!(app.selected_id(), "—");
     }
 
@@ -6236,7 +6491,12 @@ mod tests {
     fn focused_agent_name_empty_when_no_agent() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         assert!(app.focused_agent_name().is_empty());
     }
 
@@ -6244,7 +6504,12 @@ mod tests {
     fn graph_live_highlighted_node_id_none_when_no_live_state() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         assert!(app.graph_live_highlighted_node_id().is_none());
     }
 
@@ -6252,7 +6517,12 @@ mod tests {
     fn graph_live_reset_follow_clears_selection() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.graph_live_follow = false;
         app.graph_live_selected_node = Some("some-node".to_string());
         app.graph_live_reset_follow();
@@ -6264,7 +6534,12 @@ mod tests {
     fn graph_live_highlighted_node_run_info_default_when_no_live_state() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         let info = app.graph_live_highlighted_node_run_info();
         assert!(info.status.is_none());
         assert!(info.output_tail.is_none());
@@ -6282,7 +6557,12 @@ mod tests {
     fn app_with_spec_queue(ids: &[&str]) -> App {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.graph_live_state = Some(GraphLiveState {
             graph_id: "lp1".to_string(),
             graph_name: "graph".to_string(),
@@ -6370,7 +6650,12 @@ mod tests {
     fn graph_live_toggle_focus_toggles_between_graph_and_spec_strip() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         assert_eq!(app.graph_live_focus, GraphLiveFocus::Graph);
         app.graph_live_toggle_focus();
         assert_eq!(app.graph_live_focus, GraphLiveFocus::SpecStrip);
@@ -6382,7 +6667,12 @@ mod tests {
     fn cancel_graph_editor_dialog() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.graph_editor_dialog = Some(crate::tui::app::types::GraphEditorDialog::new(
             "n1".into(),
             "node1".into(),
@@ -6400,7 +6690,12 @@ mod tests {
     fn toggle_rag_pause_flips() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         assert!(!app.rag_paused);
         app.toggle_rag_pause();
         assert!(app.rag_paused);
@@ -6412,7 +6707,12 @@ mod tests {
     fn normalize_selected_knowledge_clamps_to_first_filtered() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.project_knowledge = vec![
             crate::db::intelligence::IntelligenceNodeRecord {
                 id: "n1".into(),
@@ -6449,7 +6749,12 @@ mod tests {
     fn enter_exit_knowledge_filter_mode() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         assert!(!app.knowledge_filter_mode);
         app.enter_knowledge_filter_mode();
         assert!(app.knowledge_filter_mode);
@@ -6461,7 +6766,12 @@ mod tests {
     fn dismiss_copied_recent_does_not_clear() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.show_copied = true;
         app.copied_at = std::time::Instant::now();
         app.dismiss_copied();
@@ -6472,7 +6782,12 @@ mod tests {
     fn dismiss_copied_old_enough_clears() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.show_copied = true;
         app.copied_at = std::time::Instant::now() - std::time::Duration::from_secs(5);
         app.dismiss_copied();
@@ -6554,7 +6869,12 @@ mod tests {
     }
 
     fn app_on_plain_node(db: &Arc<Database>, data_dir: &std::path::Path, node_index: usize) -> App {
-        let mut app = App::new(Arc::clone(db), data_dir).expect("create app");
+        let mut app = App::new(
+            Arc::clone(db),
+            data_dir,
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.refresh_graphs().expect("refresh graphs");
         app.graph_selected_spec = 0;
         app.graph_selected_node = node_index;
@@ -6748,7 +7068,12 @@ mod tests {
     }
 
     fn app_on_router_node(db: &Arc<Database>, data_dir: &std::path::Path) -> App {
-        let mut app = App::new(Arc::clone(db), data_dir).expect("create app");
+        let mut app = App::new(
+            Arc::clone(db),
+            data_dir,
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.refresh_graphs().expect("refresh graphs");
         app.graph_selected_spec = 0;
         app.graph_selected_node = 0; // "router" is position 0
@@ -7003,7 +7328,12 @@ mod tests {
         .unwrap();
 
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.refresh_graphs().expect("refresh graphs");
         app.graph_selected_spec = 0;
         app.graph_selected_node = 0;
@@ -7050,7 +7380,12 @@ mod tests {
     fn graph_live_view_scroll_step_clamps_at_zero() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.graph_live_view_scroll = 0;
         app.graph_live_view_total_lines = 50;
         app.last_panel_inner = (80, 20);
@@ -7062,7 +7397,12 @@ mod tests {
     fn graph_live_view_scroll_step_clamps_at_max() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.graph_live_view_total_lines = 50;
         app.last_panel_inner = (80, 20);
         app.graph_live_view_scroll = 30;
@@ -7142,7 +7482,12 @@ mod tests {
     fn navigate_child_follows_pass_edge() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         let state = graph_state(
             &[("a", "A"), ("b", "B"), ("c", "C")],
             &[
@@ -7163,7 +7508,12 @@ mod tests {
     fn navigate_parent_follows_incoming_edge() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         let state = graph_state(
             &[("a", "A"), ("b", "B")],
             &[("a", "b", crate::domain::graphs::GraphEdgeCondition::Pass)],
@@ -7180,7 +7530,12 @@ mod tests {
     fn navigate_child_no_op_at_leaf() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         let state = graph_state(&[("a", "A")], &[], Some("a"));
         app.graph_live_state = Some(state);
         app.graph_live_follow = false;
@@ -7197,7 +7552,12 @@ mod tests {
     fn navigate_parent_no_op_at_root() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         let state = graph_state(
             &[("a", "A"), ("b", "B")],
             &[("a", "b", crate::domain::graphs::GraphEdgeCondition::Pass)],
@@ -7220,7 +7580,12 @@ mod tests {
         // DFS order should be a,b,d,c
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         let state = graph_state(
             &[("a", "A"), ("b", "B"), ("c", "C"), ("d", "D")],
             &[
@@ -7342,7 +7707,12 @@ mod ct14_sidebar_tests {
         db.upsert_project(&make_project("hash0", "/tmp/proj0"))
             .unwrap();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.agents = vec![AgentEntry::Group(0), AgentEntry::Group(1)];
         app.sidebar_layer = SidebarLayer::Knowledge;
         app.selected_project = 0;
@@ -7384,7 +7754,12 @@ mod ct14_sidebar_tests {
         let db = test_db();
         db.insert_graph(&make_graph("graph-1", "Graph 1")).unwrap();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.refresh_graphs().expect("refresh graphs");
         app.agents = vec![AgentEntry::Agent(bg_agent("bg-1"))];
         app.automation_kind = AutomationKind::Agent;
@@ -7425,7 +7800,12 @@ mod ct14_sidebar_tests {
         // the focus that `fair_section_heights` turns into a floor.
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
 
         app.agents = vec![AgentEntry::Terminal(0)];
         app.agent_section_focus = AgentSectionFocus::Terminal;
@@ -7453,7 +7833,12 @@ mod ct14_sidebar_tests {
         // moment of use instead of failing silently.
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
 
         // `selected` past the end of a shrunk agent list.
         app.agents = vec![
@@ -7525,7 +7910,12 @@ mod ct14_sidebar_tests {
         // failed restore, not re-probed on every revisit.
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.agents = vec![AgentEntry::Group(0)];
 
         app.sidebar_step_memory.live_selected = Some(99);
@@ -7553,7 +7943,12 @@ mod ct14_sidebar_tests {
             .unwrap();
         db.insert_graph(&make_graph("graph-1", "Graph 1")).unwrap();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.refresh_graphs().expect("refresh graphs");
         app.agents = vec![
             AgentEntry::Group(0),

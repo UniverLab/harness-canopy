@@ -577,7 +577,12 @@ mod tests {
     fn knowledge_graph_height_caps_so_activity_never_starves() {
         let db = test_db();
         let data_dir = tempfile::tempdir().expect("create data dir");
-        let mut app = App::new(std::sync::Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            std::sync::Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
 
         // No edges: one placeholder row + header.
         assert_eq!(knowledge_graph_height(&app, 30), 2);
@@ -600,7 +605,12 @@ mod tests {
     fn knowledge_list_min_height_keeps_rows_for_the_cursor() {
         let db = test_db();
         let data_dir = tempfile::tempdir().expect("create data dir");
-        let app = App::new(std::sync::Arc::clone(&db), data_dir.path()).expect("create app");
+        let app = App::new(
+            std::sync::Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         // Empty: header + placeholder only.
         assert_eq!(knowledge_list_min_height(&app), 2);
     }

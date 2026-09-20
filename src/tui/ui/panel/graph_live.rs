@@ -1680,7 +1680,12 @@ mod tests {
         let (db, data_dir) = test_db_and_dir();
         seed_running_graph(&db);
 
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).unwrap();
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         let auto_node = app.graph_live_highlighted_node_id().map(str::to_string);
         assert!(app.graph_live_follow);
 

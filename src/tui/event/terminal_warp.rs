@@ -918,7 +918,12 @@ mod alternate_screen_key_routing_tests {
         let tmp = NamedTempFile::new().expect("create temp database");
         let db = Arc::new(Database::new(&tmp.path().to_path_buf()).expect("create database"));
         let data_dir = tempdir().expect("create data directory");
-        let mut app = App::new(db, data_dir.path()).expect("create app");
+        let mut app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.terminal_agents.push(agent);
         app.agents = vec![AgentEntry::Terminal(0)];
         app.selected = 0;

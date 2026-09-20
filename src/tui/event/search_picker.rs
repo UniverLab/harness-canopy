@@ -275,7 +275,12 @@ mod tests {
     fn app_with_focused_terminal(agent: InteractiveAgent) -> App {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.terminal_agents.push(agent);
         app.agents = vec![AgentEntry::Terminal(0)];
         app.selected = 0;
