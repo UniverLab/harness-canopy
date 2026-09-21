@@ -1,15 +1,15 @@
 ---
 title: MCP Tools
-description: All 88 MCP tools exposed by the canopy daemon, by category.
+description: All 95 MCP tools exposed by the canopy daemon, by category.
 order: 11
 ---
 
 # MCP Tools
 
-The daemon exposes **88 MCP tools** over Streamable HTTP (port 7755) and
+The daemon exposes **95 MCP tools** over Streamable HTTP (port 7755) and
 stdio. Connect any MCP-capable AI CLI with `canopy mcp`.
 
-## Agent management (15)
+## Agent management (17)
 
 | Tool | Description |
 |---|---|
@@ -17,8 +17,9 @@ stdio. Connect any MCP-capable AI CLI with `canopy mcp`.
 | `agent_watch` | Create a file-watcher-triggered agent |
 | `agent_list` | List registered agents |
 | `agent_remove` | Remove an agent |
-| `agent_enable` / `agent_disable` | Toggle an agent |
+| `agent_enable` | Enable an agent |
 | `agent_schedule_enable` | Schedule a one-shot enable at a future time |
+| `agent_disable` | Disable an agent |
 | `agent_run` | Run an agent immediately |
 | `agent_status` | Daemon health and agent status |
 | `agent_models` | List available models per CLI |
@@ -27,6 +28,8 @@ stdio. Connect any MCP-capable AI CLI with `canopy mcp`.
 | `agent_report` | Report execution status for scheduled tasks |
 | `agent_probe` | Test platform+model liveness before graph_run |
 | `agent_probe_recent` | Sweep recently-used platform+model pairs before a run |
+| `subagent_spawn` | Launch an ephemeral subagent, asynchronously or blocking |
+| `subagent_collect` | Collect an ephemeral subagent result and mark it for cleanup |
 
 ## Multi-agent sync (4)
 
@@ -56,23 +59,57 @@ stdio. Connect any MCP-capable AI CLI with `canopy mcp`.
 |---|---|
 | `get_identity` | Read the bound seed identity |
 | `evolve_identity` | Refine the identity over time |
-| `create_seed` / `list_seeds` / `remove_seed` | Manage the seed nursery |
+| `create_seed` | Create a seed identity |
+| `list_seeds` | List seed identities |
+| `remove_seed` | Remove a seed identity |
 
-## Graph engine (33)
+## Skills (2)
 
-`graph_create`, `graph_update`, `graph_add_spec`,
-`graph_update_spec`, `graph_add_node`, `graph_update_node`,
-`graph_add_edge`, `graph_update_edge`, `graph_delete_edge`,
-`graph_delete_node`, `graph_add_ensemble`,
-`graph_update_ensemble`, `graph_delete_ensemble`, `graph_get`,
-`graph_list`, `graph_run`, `graph_reset`, `graph_schedule_autorun`,
-`graph_pause`, `graph_continue`,
-`graph_complete_node`, `graph_report_blocker`,
-`graph_export`, `graph_import`, `graph_archive`, `graph_restore`,
-`graph_node_runs_list`, `graph_node_run_get`,
-`graph_copy_node`, `graph_copy_ensemble`,
-`graph_audit_node_configs`, `graph_schedule_continue`,
-`graph_preflight` — see [Graphs](graphs.md).
+| Tool | Description |
+|---|---|
+| `skill_list` | List skills available from the dynamic skill store and configured catalogs |
+| `skill_get` | Fetch a skill's full instructions by name, cloning or refreshing it on demand |
+
+## Graph engine (34)
+
+| Tool | Description |
+|---|---|
+| `graph_create` | Create a graph container |
+| `graph_update` | Update graph metadata and hooks |
+| `graph_add_spec` | Add an ordered spec to a graph |
+| `graph_update_spec` | Update a graph spec |
+| `graph_remove_spec` | Unbind a spec from a graph, making it a standalone backlog spec; execution history is preserved. |
+| `graph_add_node` | Add a node to a graph |
+| `graph_update_node` | Update a graph node |
+| `graph_add_edge` | Connect graph nodes |
+| `graph_update_edge` | Update a graph edge |
+| `graph_delete_edge` | Delete a graph edge |
+| `graph_delete_node` | Delete a graph node |
+| `graph_add_ensemble` | Add an ensemble to a graph |
+| `graph_update_ensemble` | Update an ensemble |
+| `graph_delete_ensemble` | Delete an ensemble |
+| `graph_get` | Get a graph with its specs, nodes, and edges |
+| `graph_list` | List graphs |
+| `graph_run` | Run a graph |
+| `graph_reset` | Reset a graph's pending specs |
+| `graph_schedule_autorun` | Schedule a graph to resume or run |
+| `graph_pause` | Pause a running graph |
+| `graph_continue` | Continue a paused graph |
+| `graph_complete_node` | Complete an active graph node |
+| `graph_report_blocker` | Report a blocker for an active graph node |
+| `graph_export` | Export a graph design |
+| `graph_import` | Import a graph design |
+| `graph_archive` | Archive a graph |
+| `graph_restore` | Restore an archived graph |
+| `graph_node_runs_list` | List a graph's node run history |
+| `graph_node_run_get` | Fetch a graph node run's full input and output |
+| `graph_copy_node` | Copy a graph node configuration |
+| `graph_copy_ensemble` | Copy an ensemble configuration |
+| `graph_audit_node_configs` | Audit graph node configurations |
+| `graph_schedule_continue` | Schedule a paused graph to continue |
+| `graph_preflight` | Probe graph agent platforms and models before running |
+
+See [Graphs](graphs.md).
 
 ### Hook placeholders and shell safety
 
