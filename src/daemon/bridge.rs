@@ -1710,27 +1710,43 @@ mod tests {
         );
     }
 
-    /// Reproduces the measured scenario exactly: the daemon is fully stopped so
-    /// connects are refused, then the operator restarts it on the same port with
-    /// a fresh (empty) session table and a new PID. A bridge call that spans the
-    /// outage must still be served — no client restart, no re-registration.
+    /// Guards two races that made this test flake under parallel load
+    /// (measured 2026-09-17, spec CT17):
+    /// 1. Port-reuse (TOCTOU). The old version bound a port, read it, then
+    ///    dropped the listener and rebound it 200ms later — any other
+    ///    process/test could take the freed port in that window. Fixed by
+    ///    never dropping the listener: the same bound socket is held from
+    ///    before the client's first attempt to when the fake daemon
+    ///    genuinely serves on it.
+    /// 2. Time-budget race. A fixed 200ms sleep before the daemon came up
+    ///    raced the bridge's reconnect budget (~1.3-2.5s) — under load the
+    ///    daemon's spawned task could be scheduled late enough to miss the
+    ///    window. Fixed by making the daemon come up exactly when the
+    ///    bridge's first connection attempt is observed (accept it, then
+    ///    drop it) instead of on a timer, and by widening the reconnect
+    ///    budget to a tens-of-seconds ceiling so CI scheduling jitter can
+    ///    never exhaust it before that signal fires.
     ///
-    /// This also guards the regression where dead-session recovery was gated on
-    /// still holding a `session_id`: the connection-refused blip nulls it, so
-    /// without the fix the 404 from the restarted daemon falls through to a bare
-    /// transport error and the bridge never reconnects.
+    /// Do not reintroduce a bind/drop/rebind pair or a fixed sleep here —
+    /// that is exactly what made this test flaky.
     #[tokio::test]
     async fn bridge_recovers_when_daemon_stops_then_restarts_on_same_port() {
-        // Reserve a port, then drop the listener so connects are refused.
+        // Reserve the port and keep this exact listener bound for the whole
+        // test. It is moved into the spawned task below and handed straight
+        // to `axum::serve` — never dropped, so nothing else can steal the
+        // port.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        drop(listener);
         let endpoint = format!("http://127.0.0.1:{port}/mcp");
 
+        // Tens-of-seconds worst-case budget (FR3): a slow CI scheduler can
+        // never exhaust this before the signaled daemon comes up. The happy
+        // path below only ever needs two attempts, so this ceiling does not
+        // slow the normal case (NFR2).
         let policy = ReconnectPolicy {
-            max_attempts: 50,
+            max_attempts: 40,
             backoff_base: Duration::from_millis(25),
-            backoff_max: Duration::from_millis(50),
+            backoff_max: Duration::from_millis(1_000),
         };
         // The client already completed its handshake against the *old* daemon.
         let mut state = ProxyState {
@@ -1749,11 +1765,14 @@ mod tests {
         }
         let fake_for_task = fake.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(200)).await;
+            // "Down" phase: refuse the bridge's first connection attempt (it
+            // observes a connection failure and starts its reconnect
+            // backoff), then come up for real on the very same listener —
+            // never an unbound gap, never a timer.
+            if let Ok((stream, _)) = listener.accept().await {
+                drop(stream);
+            }
             let router = fake_daemon_router(fake_for_task);
-            let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
-                .await
-                .unwrap();
             let _ = axum::serve(listener, router).await;
         });
 
