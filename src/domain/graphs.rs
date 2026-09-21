@@ -1055,6 +1055,12 @@ pub struct Ensemble {
     pub on_fail_to: Option<String>,
     pub kind: EnsembleKind,
     pub round_robin_index: Option<i64>,
+    /// CM28: whether this ensemble is the graph's designated committer
+    /// (B37) — whichever member the strategy (parallel/cascade/round_robin)
+    /// runs for a given dispatch is the committer for that dispatch. A
+    /// per-member flag is deliberately never stored: the right belongs to
+    /// the role (the ensemble), not to whichever CLI happens to fill it.
+    pub commit_rights: bool,
     pub created_at: DateTime<Utc>,
 }
 
@@ -1206,6 +1212,7 @@ mod tests {
     #[test]
     fn ensemble_straggler_timeout_defaults_to_member_timeout() {
         let ensemble = super::Ensemble {
+            commit_rights: false,
             id: "ens1".to_string(),
             spec_id: Some("spec1".to_string()),
             graph_id: None,
@@ -1236,6 +1243,7 @@ mod tests {
     #[test]
     fn ensemble_quorum_grace_none_by_default() {
         let ensemble = super::Ensemble {
+            commit_rights: false,
             id: "ens1".to_string(),
             spec_id: Some("spec1".to_string()),
             graph_id: None,

@@ -849,6 +849,11 @@ pub struct GraphAddEnsembleParams {
     /// Existing node ID the quorum routes to on `fail`. Omit for a dead end on
     /// fail, same as any other node with no matching outgoing edge.
     pub on_fail_to: Option<String>,
+    /// CM28/B37: whether this ensemble is the graph's designated committer.
+    /// Whichever member the strategy runs for a dispatch is the committer
+    /// for that dispatch — never set per-member. Defaults to false, same as
+    /// an ordinary node with no `commit_rights` key.
+    pub commit_rights: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -900,6 +905,8 @@ pub struct GraphUpdateEnsembleParams {
     /// member. Refused when it is the ensemble's last entry source — an
     /// ensemble always keeps at least one entry.
     pub remove_entry_from: Option<String>,
+    /// New commit_rights value, or omit to leave unchanged.
+    pub commit_rights: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]

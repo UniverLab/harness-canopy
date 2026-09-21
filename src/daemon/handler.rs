@@ -597,6 +597,7 @@ struct EnsembleUnitSpec<'a> {
     quorum_grace_minutes: Option<i64>,
     start_position: i64,
     kind: EnsembleKind,
+    commit_rights: bool,
 }
 
 /// The concrete graph pieces of one ensemble unit, all with fresh ids: the
@@ -743,6 +744,7 @@ fn build_ensemble_unit(spec: &EnsembleUnitSpec) -> BuiltEnsembleUnit {
         } else {
             None
         },
+        commit_rights: spec.commit_rights,
         created_at: now,
     };
 
@@ -1007,7 +1009,7 @@ fn validate_node_not_ensemble_owned(db: &Database, node_id: &str) -> Result<(), 
         .map_err(|e| e.to_string())?
     {
         return Err(format!(
-            "Node '{node_id}' is a member of ensemble '{}' ('{}'); edit it via graph_update_ensemble instead (entry wiring: from_node/add_entry_from/remove_entry_from), and delete the whole unit with graph_delete_ensemble instead of this node.",
+            "Node '{node_id}' is a member of ensemble '{}' ('{}'); edit it via graph_update_ensemble instead (entry wiring: from_node/add_entry_from/remove_entry_from; commit rights: the commit_rights field, applying to whichever member the strategy runs), and delete the whole unit with graph_delete_ensemble instead of this node.",
             details.ensemble.id, details.ensemble.name
         ));
     }
@@ -2405,6 +2407,11 @@ fn plan_ensemble_copy(
         quorum_grace_minutes,
         start_position,
         kind: copy_kind,
+        // CM28: never copied from the source — graph_copy_ensemble is out of
+        // scope for commit rights, and silently duplicating the designation
+        // would create two committers by accident. Set explicitly afterward
+        // via graph_update_ensemble if the copy should also commit.
+        commit_rights: false,
     });
 
     Ok(EnsembleCopyPlan {
@@ -6184,7 +6191,7 @@ impl TaskTriggerHandler {
 
     #[tool(
         name = "graph_add_ensemble",
-        description = "Create an ensemble in ONE call: N (2-8) parallel agent-node members sharing one prompt by default, plus the quorum that waits for all of them, consolidates their outputs (attributed per member), and routes onward. Members differ by platform/model, and each may set its own prompt_override to review the same input from a different angle instead of sharing the template. Each member may also set its own timeout_minutes, overriding the ensemble's shared value for that member only. (Formerly called 'fusion' — retired to avoid colliding with OpenRouter's fusion technology.) on_pass_to/on_fail_to accept a node id or another ensemble's id (chained: the quorum fans out to every member of that ensemble, no intermediate node). Entry rewiring, extra entry sources, and deletion are graph_update_ensemble/graph_delete_ensemble."
+        description = "Create an ensemble in ONE call: N (2-8) parallel agent-node members sharing one prompt by default, plus the quorum that waits for all of them, consolidates their outputs (attributed per member), and routes onward. Set `commit_rights: true` to make this ensemble the graph's designated committer (B37) — whichever member the running strategy dispatches becomes the committer for that run. Members differ by platform/model, and each may set its own prompt_override to review the same input from a different angle instead of sharing the template. Each member may also set its own timeout_minutes, overriding the ensemble's shared value for that member only. (Formerly called 'fusion' — retired to avoid colliding with OpenRouter's fusion technology.) on_pass_to/on_fail_to accept a node id or another ensemble's id (chained: the quorum fans out to every member of that ensemble, no intermediate node). Entry rewiring, extra entry sources, and deletion are graph_update_ensemble/graph_delete_ensemble."
     )]
     async fn graph_add_ensemble(
         &self,
@@ -6455,6 +6462,7 @@ impl TaskTriggerHandler {
             quorum_grace_minutes,
             start_position,
             kind,
+            commit_rights: params.commit_rights.unwrap_or(false),
         });
 
         self.db
@@ -6599,7 +6607,7 @@ impl TaskTriggerHandler {
 
     #[tool(
         name = "graph_update_ensemble",
-        description = "Update an ensemble's shared prompt (propagated to every member without its own prompt_override), member list (platform/model/prompt_override/timeout_minutes — added/removed/replaced by position), quorum config (min_pass, straggler_timeout_minutes, timeout_minutes), entry wiring (from_node/condition replaces every entry; add_entry_from/remove_entry_from add or detach one entry source so several nodes can enter with no relay), and/or exit wiring (on_pass_to/on_fail_to take a node id or another ensemble's id to chain quorums with no intermediate node) — all in one call, without touching individual member nodes directly."
+        description = "Update an ensemble's shared prompt (propagated to every member without its own prompt_override), member list (platform/model/prompt_override/timeout_minutes — added/removed/replaced by position), quorum config (min_pass, straggler_timeout_minutes, timeout_minutes), entry wiring (from_node/condition replaces every entry; add_entry_from/remove_entry_from add or detach one entry source so several nodes can enter with no relay), and/or exit wiring (on_pass_to/on_fail_to take a node id or another ensemble's id to chain quorums with no intermediate node) — all in one call, without touching individual member nodes directly. `commit_rights` sets whether this ensemble is the graph's designated committer (B37); editable on a running graph, same as prompt/quorum config."
     )]
     async fn graph_update_ensemble(
         &self,
@@ -6640,6 +6648,7 @@ impl TaskTriggerHandler {
                 params.add_entry_from.is_some(),
                 params.add_entry_condition.is_some(),
                 params.remove_entry_from.is_some(),
+                params.commit_rights.is_some(),
             ],
             "graph_update_ensemble",
         ) {
@@ -6720,6 +6729,16 @@ impl TaskTriggerHandler {
             } else {
                 details.ensemble.round_robin_index = None;
             }
+        }
+
+        // CM28: `commit_rights` is CONFIG, not topology — free to edit on a
+        // running graph, same as prompt/quorum config, so deliberately not
+        // gated by `validate_topology_mutation_allowed`.
+        if let Some(commit_rights) = params.commit_rights {
+            self.db
+                .update_ensemble_commit_rights(&ensemble_id, commit_rights)
+                .map_err(internal_error)?;
+            details.ensemble.commit_rights = commit_rights;
         }
 
         let owner_nodes = match (&details.ensemble.spec_id, &details.ensemble.graph_id) {
@@ -7786,9 +7805,37 @@ impl TaskTriggerHandler {
             }));
         }
 
+        let commit_rights_nodes: Vec<serde_json::Value> = nodes
+            .iter()
+            .filter(|n| n.config.get("commit_rights").and_then(|v| v.as_bool()) == Some(true))
+            .map(|n| {
+                serde_json::json!({
+                    "node_id": n.id,
+                    "name": n.name,
+                    "spec_id": n.spec_id,
+                    "graph_id": n.graph_id,
+                })
+            })
+            .collect();
+        let all_ensembles = self.db.list_all_ensembles().map_err(internal_error)?;
+        let commit_rights_ensembles: Vec<serde_json::Value> = all_ensembles
+            .iter()
+            .filter(|e| e.ensemble.commit_rights)
+            .map(|e| {
+                serde_json::json!({
+                    "ensemble_id": e.ensemble.id,
+                    "name": e.ensemble.name,
+                    "spec_id": e.ensemble.spec_id,
+                    "graph_id": e.ensemble.graph_id,
+                })
+            })
+            .collect();
+
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&serde_json::json!({
                 "flagged_nodes": flagged,
+                "commit_rights_nodes": commit_rights_nodes,
+                "commit_rights_ensembles": commit_rights_ensembles,
             }))
             .unwrap_or_default(),
         )]))
@@ -8311,6 +8358,60 @@ impl TaskTriggerHandler {
             }
         }
 
+        // CM28 / FR3: name whichever node or ensemble in this graph holds commit
+        // rights, across the top-level graph and every spec's own graph. A node
+        // owned by an ensemble is never listed on its own — only the ensemble is.
+        let commit_rights_holders: Vec<serde_json::Value> = {
+            fn holders_for(
+                nodes: &[crate::domain::graphs::GraphNode],
+                ensembles: &[crate::domain::graphs::EnsembleDetails],
+            ) -> Vec<serde_json::Value> {
+                let owned_ids: std::collections::HashSet<&str> = ensembles
+                    .iter()
+                    .flat_map(|d| {
+                        d.members
+                            .iter()
+                            .map(|m| m.node_id.as_str())
+                            .chain(std::iter::once(d.ensemble.join_node_id.as_str()))
+                    })
+                    .collect();
+                let mut out = Vec::new();
+                for node in nodes {
+                    if owned_ids.contains(node.id.as_str()) {
+                        continue;
+                    }
+                    if node.config.get("commit_rights").and_then(|v| v.as_bool()) == Some(true) {
+                        out.push(
+                            serde_json::json!({ "kind": "node", "id": node.id, "name": node.name }),
+                        );
+                    }
+                }
+                for details in ensembles {
+                    if details.ensemble.commit_rights {
+                        out.push(serde_json::json!({
+                            "kind": "ensemble",
+                            "id": details.ensemble.id,
+                            "name": details.ensemble.name,
+                        }));
+                    }
+                }
+                out
+            }
+            let graph_ensembles_for_report = self
+                .db
+                .list_ensembles_for_graph(&details.lp.id)
+                .map_err(internal_error)?;
+            let mut holders = holders_for(&details.graph_nodes, &graph_ensembles_for_report);
+            for spec in &details.specs {
+                let spec_ensembles = self
+                    .db
+                    .list_ensembles_for_spec(&spec.spec.id)
+                    .map_err(internal_error)?;
+                holders.extend(holders_for(&spec.nodes, &spec_ensembles));
+            }
+            holders
+        };
+
         // (CB22) Bound-spec content warnings: advisory only, never a tool
         // error and never spending probe quota. Computed before the
         // no-target early return so a graph with no agent nodes still reports
@@ -8367,6 +8468,7 @@ impl TaskTriggerHandler {
                     "graph_warnings": graph_warnings,
                     "review": reviewer_out,
                     "terminals": terminal_list,
+                    "commit_rights_holders": commit_rights_holders,
                 }))
                 .unwrap_or_default(),
             )]));
@@ -8447,6 +8549,7 @@ impl TaskTriggerHandler {
                 "graph_warnings": graph_warnings,
                 "review": reviewer_out,
                 "terminals": terminal_list,
+                "commit_rights_holders": commit_rights_holders,
             }))
             .unwrap_or_default(),
         )]))
@@ -10665,6 +10768,7 @@ fn ensemble_details_json(
         "id": ensemble.id,
         "name": ensemble.name,
         "kind": ensemble.kind.as_str(),
+        "commit_rights": ensemble.commit_rights,
         "prompt_template": ensemble.prompt_template,
         "join_node_id": ensemble.join_node_id,
         "entry_from_node": ensemble.entry_from_node,
@@ -11614,6 +11718,7 @@ mod tests {
             },
         ];
         let ensemble = Ensemble {
+            commit_rights: false,
             id: "ens1".to_string(),
             spec_id: Some("spec-1".to_string()),
             graph_id: None,
@@ -14153,6 +14258,7 @@ mod tests {
             quorum_grace_minutes: None,
             start_position: 10,
             kind: EnsembleKind::Parallel,
+            commit_rights: false,
         });
         db.insert_ensemble_unit(
             &built.ensemble,
@@ -17934,6 +18040,7 @@ mod coverage_tests {
     fn ensemble_json_full() {
         let details = EnsembleDetails {
             ensemble: Ensemble {
+                commit_rights: false,
                 id: "ens1".into(),
                 spec_id: Some("s1".into()),
                 graph_id: None,
@@ -17993,6 +18100,7 @@ mod coverage_tests {
     fn ensemble_json_no_straggler() {
         let details = EnsembleDetails {
             ensemble: Ensemble {
+                commit_rights: false,
                 id: "ens2".into(),
                 spec_id: None,
                 graph_id: Some("l1".into()),
@@ -18249,6 +18357,7 @@ mod coverage_tests {
             quorum_grace_minutes: None,
             start_position: 1,
             kind: EnsembleKind::Parallel,
+            commit_rights: false,
         });
         assert_eq!(built.ensemble.on_fail_to.as_deref(), Some("cleanup"));
         assert_eq!(built.ensemble.straggler_timeout_minutes, Some(10));
@@ -18281,6 +18390,7 @@ mod coverage_tests {
             quorum_grace_minutes: None,
             start_position: 5,
             kind: EnsembleKind::Parallel,
+            commit_rights: false,
         });
         assert!(built.ensemble.on_fail_to.is_none());
         let fail_edges: Vec<_> = built
@@ -18316,6 +18426,7 @@ mod coverage_tests {
             quorum_grace_minutes: None,
             start_position: 10,
             kind: EnsembleKind::Parallel,
+            commit_rights: false,
         });
         for (i, member) in built.members.iter().enumerate() {
             assert_eq!(member.position, i as i64);
@@ -21313,6 +21424,7 @@ mod endpoint_tests {
 
         let ensemble = handler
             .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                commit_rights: None,
                 spec_id: None,
                 graph_id: Some(graph_id.clone()),
                 kind: None,
@@ -21385,6 +21497,121 @@ mod endpoint_tests {
         // Identical except the name (decision 4 renamed it on collision).
         second_doc["name"] = first_doc["name"].clone();
         assert_eq!(first_doc, second_doc);
+    }
+
+    #[tokio::test]
+    async fn graph_export_import_round_trip_preserves_ensemble_commit_rights() {
+        // NFR1(d): an ensemble created with `commit_rights: true` keeps the
+        // flag through export (document) and import (new graph's DB row).
+        let (dir, db, handler) = endpoint_test_handler();
+        let workdir = dir.path().to_string_lossy().to_string();
+
+        let created = handler
+            .graph_create(Parameters(GraphCreateParams {
+                name: "Commit Rights Ensemble Graph".to_string(),
+                description: None,
+                workdir: workdir.clone(),
+                trigger: None,
+                infra_node_id: None,
+            }))
+            .await
+            .unwrap();
+        let graph_id = extract_id(&created, "graph_id");
+
+        let kickoff = handler
+            .graph_add_node(Parameters(GraphAddNodeParams {
+                spec_id: None,
+                graph_id: Some(graph_id.clone()),
+                name: "kickoff".to_string(),
+                kind: Some("check".to_string()),
+                config: Some(check_node_config("true")),
+                blueprint: None,
+                config_overrides: None,
+            }))
+            .await
+            .unwrap();
+        let kickoff_id = extract_id(&kickoff, "node_id");
+
+        let downstream = handler
+            .graph_add_node(Parameters(GraphAddNodeParams {
+                spec_id: None,
+                graph_id: Some(graph_id.clone()),
+                name: "downstream".to_string(),
+                kind: Some("agent".to_string()),
+                config: Some(agent_node_config("claude")),
+                blueprint: None,
+                config_overrides: None,
+            }))
+            .await
+            .unwrap();
+        let downstream_id = extract_id(&downstream, "node_id");
+
+        let ensemble = handler
+            .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                commit_rights: Some(true),
+                spec_id: None,
+                graph_id: Some(graph_id.clone()),
+                kind: None,
+                name: "Committer".to_string(),
+                prompt_template: Some("draft it".to_string()),
+                blueprint: None,
+                members: Some(vec![
+                    EnsembleMemberParams {
+                        platform: "openrouter".to_string(),
+                        model: Some("model-a".to_string()),
+                        prompt_override: None,
+                        timeout_minutes: None,
+                    },
+                    EnsembleMemberParams {
+                        platform: "openrouter".to_string(),
+                        model: Some("model-b".to_string()),
+                        prompt_override: None,
+                        timeout_minutes: None,
+                    },
+                ]),
+                condition: "always".to_string(),
+                from_node: kickoff_id.clone(),
+                on_pass_to: downstream_id.clone(),
+                on_fail_to: None,
+                min_pass: None,
+                timeout_minutes: None,
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&ensemble), "{}", text(&ensemble));
+
+        let exported = handler
+            .graph_export(Parameters(GraphExportParams { graph_id }))
+            .await
+            .unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&raw_text(&exported)).unwrap();
+        assert_eq!(doc["ensembles"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            doc["ensembles"][0]["commit_rights"],
+            serde_json::json!(true),
+            "export must carry the ensemble's commit_rights: {doc}"
+        );
+
+        let imported = handler
+            .graph_import(Parameters(GraphImportParams {
+                document: doc,
+                workdir: workdir.clone(),
+                name: Some("Commit Rights Ensemble Graph Imported".to_string()),
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&imported), "{}", text(&imported));
+        let imported_body: serde_json::Value = serde_json::from_str(&raw_text(&imported)).unwrap();
+        let new_graph_id = imported_body["graph_id"].as_str().unwrap().to_string();
+
+        let imported_ensembles = db.list_ensembles_for_graph(&new_graph_id).unwrap();
+        assert_eq!(imported_ensembles.len(), 1);
+        assert!(
+            imported_ensembles[0].ensemble.commit_rights,
+            "imported ensemble must hold commit rights"
+        );
     }
 
     #[tokio::test]
@@ -23732,6 +23959,7 @@ mod endpoint_tests {
 
         let created = handler
             .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                commit_rights: None,
                 spec_id: Some(spec.id.clone()),
                 graph_id: None,
                 name: "Review Ensemble".to_string(),
@@ -23755,6 +23983,7 @@ mod endpoint_tests {
 
         let missing_prompt = handler
             .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                commit_rights: None,
                 spec_id: Some(spec.id.clone()),
                 graph_id: None,
                 name: "No Prompt".to_string(),
@@ -23778,6 +24007,7 @@ mod endpoint_tests {
 
         let bad_min_pass = handler
             .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                commit_rights: None,
                 spec_id: Some(spec.id.clone()),
                 graph_id: None,
                 name: "Bad Min Pass".to_string(),
@@ -23801,6 +24031,7 @@ mod endpoint_tests {
 
         let unknown_entry = handler
             .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                commit_rights: None,
                 spec_id: Some(spec.id.clone()),
                 graph_id: None,
                 name: "Bad Entry".to_string(),
@@ -23824,6 +24055,7 @@ mod endpoint_tests {
 
         let too_few_members = handler
             .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                commit_rights: None,
                 spec_id: Some(spec.id),
                 graph_id: None,
                 name: "Too Few".to_string(),
@@ -23864,6 +24096,7 @@ mod endpoint_tests {
 
         let negative = handler
             .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                commit_rights: None,
                 spec_id: Some(spec.id.clone()),
                 graph_id: None,
                 name: "Negative Grace".to_string(),
@@ -23891,6 +24124,7 @@ mod endpoint_tests {
 
         let immediate = handler
             .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                commit_rights: None,
                 spec_id: Some(spec.id.clone()),
                 graph_id: None,
                 name: "Immediate Grace".to_string(),
@@ -23933,6 +24167,7 @@ mod endpoint_tests {
         };
         let created = handler
             .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                commit_rights: None,
                 spec_id: Some(spec.id.clone()),
                 graph_id: None,
                 name: "Grace Update".to_string(),
@@ -24791,6 +25026,7 @@ mod endpoint_tests {
 
         let created = handler
             .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                commit_rights: None,
                 spec_id: Some(spec.id.clone()),
                 graph_id: None,
                 name: "Source Ensemble".to_string(),
@@ -24891,6 +25127,7 @@ mod endpoint_tests {
 
         let created = handler
             .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                commit_rights: None,
                 spec_id: Some(spec.id.clone()),
                 graph_id: None,
                 name: "Panel".to_string(),
@@ -25013,6 +25250,7 @@ mod endpoint_tests {
 
         let created = handler
             .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                commit_rights: None,
                 spec_id: Some(spec.id.clone()),
                 graph_id: None,
                 name: "Ensemble".to_string(),
@@ -25049,6 +25287,7 @@ mod endpoint_tests {
         // No fields at all -> rejected.
         let no_op = handler
             .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+                commit_rights: None,
                 ensemble_id: ensemble_id.clone(),
                 kind: None,
                 prompt_template: None,
@@ -25073,6 +25312,7 @@ mod endpoint_tests {
         // Prompt-only update, propagated to existing members without a resize.
         let prompt_updated = handler
             .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+                commit_rights: None,
                 ensemble_id: ensemble_id.clone(),
                 kind: None,
                 prompt_template: Some("New prompt".to_string()),
@@ -25098,6 +25338,7 @@ mod endpoint_tests {
         // Grow membership 2 -> 3.
         let grown = handler
             .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+                commit_rights: None,
                 ensemble_id: ensemble_id.clone(),
                 kind: None,
                 prompt_template: None,
@@ -25162,6 +25403,7 @@ mod endpoint_tests {
         // Shrink membership 3 -> 2.
         let shrunk = handler
             .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+                commit_rights: None,
                 ensemble_id: ensemble_id.clone(),
                 kind: None,
                 prompt_template: None,
@@ -25200,6 +25442,7 @@ mod endpoint_tests {
         // min_pass out of bounds.
         let bad_min_pass = handler
             .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+                commit_rights: None,
                 ensemble_id: ensemble_id.clone(),
                 kind: None,
                 prompt_template: None,
@@ -25223,6 +25466,7 @@ mod endpoint_tests {
         // Negative straggler timeout.
         let bad_straggler = handler
             .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+                commit_rights: None,
                 ensemble_id: ensemble_id.clone(),
                 kind: None,
                 prompt_template: None,
@@ -25246,6 +25490,7 @@ mod endpoint_tests {
         // Re-wire on_pass_to to a new valid target.
         let rewired = handler
             .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+                commit_rights: None,
                 ensemble_id: ensemble_id.clone(),
                 kind: None,
                 prompt_template: None,
@@ -25271,6 +25516,7 @@ mod endpoint_tests {
         // Unknown on_pass_to target.
         let bad_target = handler
             .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+                commit_rights: None,
                 ensemble_id: ensemble_id.clone(),
                 kind: None,
                 prompt_template: None,
@@ -25293,6 +25539,7 @@ mod endpoint_tests {
 
         let missing_ensemble = handler
             .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+                commit_rights: None,
                 ensemble_id: "ghost-ensemble".to_string(),
                 kind: None,
                 prompt_template: Some("x".to_string()),
@@ -25329,6 +25576,7 @@ mod endpoint_tests {
 
         let created = handler
             .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                commit_rights: None,
                 spec_id: Some(spec.id.clone()),
                 graph_id: None,
                 name: "Ensemble".to_string(),
@@ -25364,6 +25612,7 @@ mod endpoint_tests {
 
         let updated = handler
             .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+                commit_rights: None,
                 ensemble_id: ensemble_id.clone(),
                 kind: None,
                 prompt_template: None,
@@ -25437,6 +25686,7 @@ mod endpoint_tests {
     ) -> String {
         let created = handler
             .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                commit_rights: None,
                 spec_id: Some(spec_id.to_string()),
                 graph_id: None,
                 name: name.to_string(),
@@ -25489,6 +25739,7 @@ mod endpoint_tests {
             add_entry_from: None,
             add_entry_condition: None,
             remove_entry_from: None,
+            commit_rights: None,
         }
     }
 
@@ -25510,6 +25761,7 @@ mod endpoint_tests {
 
         let created = handler
             .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                commit_rights: None,
                 spec_id: Some(spec.id.clone()),
                 graph_id: None,
                 name: "Shrink Ensemble".to_string(),
@@ -25533,6 +25785,7 @@ mod endpoint_tests {
 
         let shrunk = handler
             .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+                commit_rights: None,
                 ensemble_id: ensemble_id.clone(),
                 kind: None,
                 prompt_template: None,
@@ -25578,6 +25831,7 @@ mod endpoint_tests {
 
         let created = handler
             .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                commit_rights: None,
                 spec_id: Some(spec.id.clone()),
                 graph_id: None,
                 name: "Raise Ensemble".to_string(),
@@ -25601,6 +25855,7 @@ mod endpoint_tests {
 
         let raised = handler
             .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+                commit_rights: None,
                 ensemble_id: ensemble_id.clone(),
                 kind: None,
                 prompt_template: None,
@@ -25646,6 +25901,7 @@ mod endpoint_tests {
 
         let created = handler
             .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                commit_rights: None,
                 spec_id: Some(spec.id.clone()),
                 graph_id: None,
                 name: "Adjust Ensemble".to_string(),
@@ -25669,6 +25925,7 @@ mod endpoint_tests {
 
         let shrunk = handler
             .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+                commit_rights: None,
                 ensemble_id: ensemble_id.clone(),
                 kind: None,
                 prompt_template: None,
@@ -25711,6 +25968,7 @@ mod endpoint_tests {
 
         let created = handler
             .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                commit_rights: None,
                 spec_id: Some(spec.id.clone()),
                 graph_id: None,
                 name: "Stale Ensemble".to_string(),
@@ -25746,6 +26004,44 @@ mod endpoint_tests {
         let msg = text(&result);
         assert!(msg.contains("Stale Ensemble"), "{msg}");
         assert!(msg.contains("invalid min_pass"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn graph_preflight_names_ensemble_as_commit_rights_holder() {
+        // NFR1(e): preflight's `commit_rights_holders` names the ensemble
+        // (kind + name), not its members, as the graph's committer.
+        let (dir, db, handler) = endpoint_test_handler();
+        let lp = insert_test_graph(&db, dir.path());
+        let spec = insert_test_spec(&db, &lp.id, 1);
+        let entry = add_agent_node(&handler, &spec.id, "Entry").await;
+        let arbiter = add_agent_node(&handler, &spec.id, "Arbiter").await;
+        let ensemble_id =
+            add_two_member_ensemble(&handler, &spec.id, "Committer Ensemble", &entry, &arbiter)
+                .await;
+        db.update_ensemble_commit_rights(&ensemble_id, true)
+            .unwrap();
+
+        let result = handler
+            .graph_preflight(Parameters(GraphPreflightParams {
+                graph_id: lp.id.clone(),
+                timeout_seconds: Some(5),
+                reviewer: None,
+            }))
+            .await
+            .unwrap();
+        assert!(
+            !is_err(&result),
+            "preflight must succeed: {}",
+            text(&result)
+        );
+        let body: serde_json::Value = serde_json::from_str(&raw_text(&result)).unwrap();
+        let holders = body["commit_rights_holders"].as_array().unwrap();
+        assert!(
+            holders
+                .iter()
+                .any(|h| h["kind"] == "ensemble" && h["name"] == "Committer Ensemble"),
+            "preflight must name the ensemble as committer: {body}"
+        );
     }
 
     /// `from_node` moves every entry edge to the new source with the new
@@ -28693,6 +28989,7 @@ mod endpoint_tests {
 
         let result = handler
             .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                commit_rights: None,
                 spec_id: Some(spec.id.clone()),
                 graph_id: None,
                 name: "Cascade".to_string(),
@@ -28733,6 +29030,7 @@ mod endpoint_tests {
 
         let result = handler
             .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                commit_rights: None,
                 spec_id: Some(spec.id.clone()),
                 graph_id: None,
                 name: "Parallel".to_string(),
@@ -28772,6 +29070,7 @@ mod endpoint_tests {
 
         let created = handler
             .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                commit_rights: None,
                 spec_id: Some(spec.id.clone()),
                 graph_id: None,
                 name: "Ensemble".to_string(),
@@ -28807,6 +29106,7 @@ mod endpoint_tests {
 
         let updated = handler
             .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+                commit_rights: None,
                 ensemble_id: ensemble_id.clone(),
                 kind: Some("cascade".to_string()),
                 prompt_template: None,

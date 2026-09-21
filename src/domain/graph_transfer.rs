@@ -114,6 +114,11 @@ pub struct GraphExportEnsemble {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
+    /// CM28: whether this ensemble holds commit rights (B37). Always
+    /// written (unlike `kind`, which hides its default) so an export makes
+    /// the graph's committer visible without cross-referencing nodes.
+    #[serde(default)]
+    pub commit_rights: bool,
     pub prompt_template: String,
     pub entry_from_node: GraphExportEnsembleTarget,
     pub entry_condition: GraphEdgeCondition,
@@ -307,6 +312,7 @@ pub fn build_export_document(
             } else {
                 Some(ensemble.kind.as_str().to_string())
             },
+            commit_rights: ensemble.commit_rights,
             prompt_template: ensemble.prompt_template.clone(),
             entry_from_node: resolve_target(&ensemble.entry_from_node)?,
             entry_condition: ensemble.entry_condition.clone(),
@@ -834,6 +840,7 @@ pub fn build_import_plan(
                 } else {
                     None
                 },
+                commit_rights: doc_ensemble.commit_rights,
                 created_at: now,
             },
             members,
@@ -1425,6 +1432,7 @@ mod tests {
         member_ids: &[&str],
     ) -> EnsembleDetails {
         let ensemble = Ensemble {
+            commit_rights: false,
             id: ensemble_id.to_string(),
             spec_id: None,
             graph_id: Some("graph-1".to_string()),
@@ -1719,6 +1727,7 @@ mod tests {
             ],
             edges: vec![],
             ensembles: vec![GraphExportEnsemble {
+                commit_rights: false,
                 name: "Reviewer 1".to_string(),
                 kind: None,
                 prompt_template: "review".to_string(),
@@ -2031,6 +2040,7 @@ mod tests {
             ],
             edges: vec![],
             ensembles: vec![GraphExportEnsemble {
+                commit_rights: false,
                 name: "solo".to_string(),
                 kind: None,
                 prompt_template: "go".to_string(),
@@ -2080,6 +2090,7 @@ mod tests {
             ],
             edges: vec![],
             ensembles: vec![GraphExportEnsemble {
+                commit_rights: false,
                 name: "team".to_string(),
                 kind: None,
                 prompt_template: "go".to_string(),
@@ -2140,6 +2151,7 @@ mod tests {
             ],
             edges: vec![],
             ensembles: vec![GraphExportEnsemble {
+                commit_rights: false,
                 name: "team".to_string(),
                 kind: None,
                 prompt_template: "go".to_string(),
@@ -2198,6 +2210,7 @@ mod tests {
             ],
             edges: vec![],
             ensembles: vec![GraphExportEnsemble {
+                commit_rights: false,
                 name: "team".to_string(),
                 kind: None,
                 prompt_template: "go".to_string(),

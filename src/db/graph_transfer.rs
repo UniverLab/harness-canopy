@@ -66,8 +66,8 @@ impl Database {
         for ensemble_plan in &plan.ensembles {
             let ensemble = &ensemble_plan.ensemble;
             tx.execute(
-                "INSERT INTO ensembles (id, spec_id, graph_id, name, prompt_template, join_node_id, entry_from_node, entry_condition, min_pass, straggler_timeout_minutes, quorum_grace_minutes, timeout_minutes, on_pass_to, on_fail_to, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                "INSERT INTO ensembles (id, spec_id, graph_id, name, prompt_template, join_node_id, entry_from_node, entry_condition, min_pass, straggler_timeout_minutes, quorum_grace_minutes, timeout_minutes, on_pass_to, on_fail_to, commit_rights, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
                 params![
                     &ensemble.id,
                     &ensemble.spec_id,
@@ -83,6 +83,7 @@ impl Database {
                     ensemble.timeout_minutes,
                     &ensemble.on_pass_to,
                     &ensemble.on_fail_to,
+                    ensemble.commit_rights,
                     ensemble.created_at.timestamp(),
                 ],
             )?;
@@ -281,6 +282,7 @@ mod tests {
             ],
             edges: vec![],
             ensembles: vec![GraphExportEnsemble {
+                commit_rights: false,
                 name: "Proposers".to_string(),
                 kind: None,
                 prompt_template: "draft it".to_string(),

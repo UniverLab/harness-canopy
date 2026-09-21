@@ -697,6 +697,7 @@ impl Database {
                 timeout_minutes INTEGER NOT NULL,
                 on_pass_to TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE,
                 on_fail_to TEXT REFERENCES graph_nodes(id) ON DELETE SET NULL,
+                commit_rights INTEGER NOT NULL DEFAULT 0,
                 created_at INTEGER NOT NULL,
                 CHECK ((spec_id IS NULL) <> (graph_id IS NULL))
             );
@@ -1869,6 +1870,21 @@ impl Database {
                 ON subagent_runs(platform, started_at DESC);",
         )
         .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
+
+        let has_ensemble_commit_rights: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('ensembles') WHERE name = 'commit_rights'",
+                [],
+                |row| Ok(row.get::<_, i32>(0)? > 0),
+            )
+            .unwrap_or(false);
+        if !has_ensemble_commit_rights {
+            conn.execute(
+                "ALTER TABLE ensembles ADD COLUMN commit_rights INTEGER NOT NULL DEFAULT 0",
+                [],
+            )
+            .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
+        }
 
         Self::set_schema_version(&conn)?;
 

@@ -145,6 +145,7 @@ mod ensemble_graph {
     /// A well-formed ensemble: kickoff -> {m1, m2} -> join -> arbiter (pass).
     fn valid_fixture() -> (Vec<EnsembleDetails>, Vec<GraphNode>, Vec<GraphEdge>) {
         let ensemble = Ensemble {
+            commit_rights: false,
             id: "ens1".to_string(),
             spec_id: Some("spec".to_string()),
             graph_id: None,
@@ -243,6 +244,7 @@ mod ensemble_graph {
         kind: crate::domain::graphs::EnsembleKind,
     ) -> (Vec<EnsembleDetails>, Vec<GraphNode>, Vec<GraphEdge>) {
         let ensemble = Ensemble {
+            commit_rights: false,
             id: "ens1".to_string(),
             spec_id: Some("spec".to_string()),
             graph_id: None,
@@ -311,6 +313,7 @@ mod ensemble_graph {
         // Second ensemble: gate -> {r1} -> join2 -> arbiter. Single member is
         // fine for a cascade unit.
         let target = Ensemble {
+            commit_rights: false,
             id: "ens2".to_string(),
             spec_id: Some("spec".to_string()),
             graph_id: None,
@@ -360,6 +363,7 @@ mod ensemble_graph {
     fn chained_exit_missing_a_member_edge_is_rejected() {
         let (mut details, mut nodes, mut edges) = valid_fixture();
         let target = Ensemble {
+            commit_rights: false,
             id: "ens2".to_string(),
             spec_id: Some("spec".to_string()),
             graph_id: None,

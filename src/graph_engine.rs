@@ -1826,7 +1826,7 @@ impl GraphEngine {
         // B37: whether this graph designates a committer at all. Resolved
         // once from whichever graph won the precedence above, so a spec-level
         // graph and the top-level fallback each answer for themselves.
-        let enforce_commit_rights = graph_enforces_commit_rights(nodes);
+        let enforce_commit_rights = graph_enforces_commit_rights(nodes, &ensembles);
         let existing_runs = self.db.list_graph_runs_for_spec(&spec.id)?;
         let all_node_names: Vec<String> = nodes.iter().map(|n| n.name.clone()).collect();
         let (mut cursor, mut node_outputs, resume_previous_output, mut iterations) =
@@ -2166,7 +2166,7 @@ impl GraphEngine {
                     // violation as a first attempt that does.
                     let commit_watch = CommitRightsWatch::begin(
                         enforce_commit_rights,
-                        node_has_commit_rights(node),
+                        node_has_commit_rights(node, &ensembles),
                         workdir,
                     )
                     .await;
@@ -2177,7 +2177,7 @@ impl GraphEngine {
                     // `commit_rights: true` — otherwise there is nothing to
                     // attribute a HEAD move to, so `spec_committed_head`
                     // stays whatever it already was.
-                    let committer_head_before = if node_has_commit_rights(node) {
+                    let committer_head_before = if node_has_commit_rights(node, &ensembles) {
                         capture_workdir_head(workdir).await
                     } else {
                         None
@@ -2532,7 +2532,6 @@ impl GraphEngine {
                             lp,
                             spec,
                             details,
-                            &nodes_by_id,
                             previous_output.as_ref(),
                             iteration_value,
                             workdir,
@@ -2856,7 +2855,6 @@ impl GraphEngine {
         lp: &crate::domain::graphs::Graph,
         spec: &GraphSpec,
         details: &EnsembleDetails,
-        nodes_by_id: &HashMap<&str, &GraphNode>,
         previous_output: Option<&Value>,
         iteration: usize,
         workdir: &str,
@@ -2875,7 +2873,6 @@ impl GraphEngine {
                         lp,
                         spec,
                         details,
-                        nodes_by_id,
                         previous_output,
                         iteration,
                         workdir,
@@ -2892,7 +2889,6 @@ impl GraphEngine {
                         lp,
                         spec,
                         details,
-                        nodes_by_id,
                         previous_output,
                         iteration,
                         workdir,
@@ -2915,10 +2911,7 @@ impl GraphEngine {
         // graph_update_ensemble between two dispatches of this step lands on the
         // second (FR2), and this dispatch can never see a half-applied member
         // set (NFR3). See the load-point comment in run_spec's
-        // SpecCursor::Ensemble arm. `nodes_by_id` (launch snapshot) is still used
-        // for the commit-rights roster below because an ensemble member's
-        // commit_rights cannot change on a running graph — graph_update_node
-        // refuses ensemble-owned nodes and graph_update_ensemble has no such field.
+        // SpecCursor::Ensemble arm.
         let mut member_nodes: HashMap<String, GraphNode> = HashMap::new();
         for member in &details.members {
             let n = self
@@ -2937,12 +2930,8 @@ impl GraphEngine {
         // B37: members run concurrently against one workdir, so a moved HEAD
         // cannot be attributed to a single member — enforcement is therefore
         // at ensemble granularity, and the quorum fails as a whole. Skipped
-        // if any member is itself a designated committer.
-        let any_member_may_commit = details.members.iter().any(|member| {
-            nodes_by_id
-                .get(member.node_id.as_str())
-                .is_some_and(|node| node_has_commit_rights(node))
-        });
+        // when the ensemble itself (CM28) is the graph's designated committer.
+        let any_member_may_commit = details.ensemble.commit_rights;
         let commit_watch =
             CommitRightsWatch::begin(enforce_commit_rights, any_member_may_commit, workdir).await;
 
@@ -3662,7 +3651,6 @@ impl GraphEngine {
         lp: &crate::domain::graphs::Graph,
         spec: &GraphSpec,
         details: &EnsembleDetails,
-        nodes_by_id: &HashMap<&str, &GraphNode>,
         previous_output: Option<&Value>,
         iteration: usize,
         workdir: &str,
@@ -3679,10 +3667,7 @@ impl GraphEngine {
         // graph_update_ensemble between two dispatches of this step lands on the
         // second (FR2), and this dispatch can never see a half-applied member
         // set (NFR3). See the load-point comment in run_spec's
-        // SpecCursor::Ensemble arm. `nodes_by_id` (launch snapshot) is still used
-        // for the commit-rights roster below because an ensemble member's
-        // commit_rights cannot change on a running graph — graph_update_node
-        // refuses ensemble-owned nodes and graph_update_ensemble has no such field.
+        // SpecCursor::Ensemble arm.
         let mut member_nodes: HashMap<String, GraphNode> = HashMap::new();
         for member in &details.members {
             let n = self
@@ -3698,11 +3683,7 @@ impl GraphEngine {
             member_nodes.insert(member.node_id.clone(), n);
         }
 
-        let any_member_may_commit = details.members.iter().any(|member| {
-            nodes_by_id
-                .get(member.node_id.as_str())
-                .is_some_and(|node| node_has_commit_rights(node))
-        });
+        let any_member_may_commit = details.ensemble.commit_rights;
         let commit_watch =
             CommitRightsWatch::begin(enforce_commit_rights, any_member_may_commit, workdir).await;
 
@@ -3913,7 +3894,6 @@ impl GraphEngine {
         lp: &crate::domain::graphs::Graph,
         spec: &GraphSpec,
         details: &EnsembleDetails,
-        nodes_by_id: &HashMap<&str, &GraphNode>,
         previous_output: Option<&Value>,
         iteration: usize,
         workdir: &str,
@@ -3996,10 +3976,7 @@ impl GraphEngine {
         // graph_update_ensemble between two dispatches of this step lands on the
         // second (FR2), and this dispatch can never see a half-applied member
         // set (NFR3). See the load-point comment in run_spec's
-        // SpecCursor::Ensemble arm. `nodes_by_id` (launch snapshot) is still used
-        // for the commit-rights roster below because an ensemble member's
-        // commit_rights cannot change on a running graph — graph_update_node
-        // refuses ensemble-owned nodes and graph_update_ensemble has no such field.
+        // SpecCursor::Ensemble arm.
         let mut member_nodes: HashMap<String, GraphNode> = HashMap::new();
         for member in &details.members {
             let n = self
@@ -4017,11 +3994,7 @@ impl GraphEngine {
 
         // The failover walk may run any member, so watch commits across the
         // whole roster, exactly as cascade does.
-        let any_member_may_commit = details.members.iter().any(|member| {
-            nodes_by_id
-                .get(member.node_id.as_str())
-                .is_some_and(|node| node_has_commit_rights(node))
-        });
+        let any_member_may_commit = details.ensemble.commit_rights;
         let commit_watch =
             CommitRightsWatch::begin(enforce_commit_rights, any_member_may_commit, workdir).await;
 
@@ -7599,23 +7572,38 @@ async fn check_start_head_ancestry(workdir: &str, start_head: &str) -> Option<bo
     Some(output.status.success())
 }
 
-/// Whether this node is a designated committer (B37): explicit graph
-/// configuration, `commit_rights: true`, never inferred from the node's name,
-/// kind, or prompt. Absent the key, a node has no commit rights.
-fn node_has_commit_rights(node: &GraphNode) -> bool {
-    node.config.get("commit_rights").and_then(Value::as_bool) == Some(true)
+/// Whether this node is a designated committer (B37): its own
+/// `commit_rights: true` config, or — for a node owned by an ensemble —
+/// that ensemble's own `commit_rights` flag (CM28). Never inferred from
+/// name, kind, or prompt. A member's own config never carries
+/// `commit_rights`: the right is the ensemble's, resolved through
+/// `ensemble_owning_node`.
+pub(crate) fn node_has_commit_rights(node: &GraphNode, ensembles: &[EnsembleDetails]) -> bool {
+    if node.config.get("commit_rights").and_then(Value::as_bool) == Some(true) {
+        return true;
+    }
+    match ensemble_owning_node(&node.id, ensembles) {
+        Some(ensemble_id) => ensembles
+            .iter()
+            .any(|d| d.ensemble.id == ensemble_id && d.ensemble.commit_rights),
+        None => false,
+    }
 }
 
 /// Whether a graph opts into commit-rights enforcement (B37) — i.e. whether
-/// any of its nodes declares `commit_rights: true`.
+/// any of its nodes (or the ensemble owning it) declares `commit_rights:
+/// true`.
 ///
 /// Enforcement is per-graph opt-in on purpose. A graph that designates nobody
 /// cannot be told apart from one whose committer simply predates this key, so
 /// enforcing there would fail exactly the node the graph relies on to land
-/// work. Once ONE node declares the right, the graph's intent is unambiguous
-/// and every other node in it is held to it.
-fn graph_enforces_commit_rights(nodes: &[GraphNode]) -> bool {
-    nodes.iter().any(node_has_commit_rights)
+/// work. Once ONE node or ensemble declares the right, the graph's intent is
+/// unambiguous and every other node in it is held to it.
+pub(crate) fn graph_enforces_commit_rights(
+    nodes: &[GraphNode],
+    ensembles: &[EnsembleDetails],
+) -> bool {
+    nodes.iter().any(|n| node_has_commit_rights(n, ensembles))
 }
 
 /// A pre/post `git rev-parse HEAD` comparison around one node's execution
@@ -8522,6 +8510,166 @@ mod tests {
             .is_none_or(|o| o.get("commit_rights_violation").is_none()));
     }
 
+    /// CM28 / NFR1(b): an ensemble member's commit must pass the B37 watch
+    /// once the ensemble itself is the designated committer. Two members are
+    /// used (rather than one) because `select_next_step` only resolves to
+    /// `SpecCursor::Ensemble` when the entry edge fans out to more than one
+    /// distinct target — a single-member roster would instead execute its
+    /// one member as an ordinary node, never exercising the ensemble commit
+    /// watch this test targets.
+    #[tokio::test]
+    async fn ensemble_member_commit_passes_when_ensemble_holds_commit_rights() {
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+        init_git_repo(dir.path());
+        let head_before = git_head(dir.path());
+
+        let workdir = dir.path().to_string_lossy().to_string();
+        let fake_home = setup_multi_cli_home(&[
+            (
+                "member-committer",
+                // The fake CLI declares `supports_working_dir: false`, so the
+                // member inherits the test runner's cwd (the harness-canopy
+                // checkout, whose gitkit hook blocks foreign commits) — target
+                // this test's repo explicitly with `git -C`.
+                &write_member_script(
+                    dir.path(),
+                    "member.sh",
+                    &format!(
+                        "git -C '{workdir}' commit -q --allow-empty -m member; printf ok; exit 0"
+                    ),
+                ),
+            ),
+            (
+                "member-plain",
+                &write_member_script(dir.path(), "plain.sh", "printf ok; exit 0"),
+            ),
+        ]);
+
+        db.insert_graph_node(&rights_node(&spec_id, "done", "true", None, 100))
+            .unwrap();
+        insert_test_ensemble(
+            &db,
+            &spec_id,
+            "kickoff",
+            "ens1",
+            "join1",
+            &[("m1", "member-committer"), ("m2", "member-plain")],
+            1,
+            None,
+            None,
+            "done",
+            None,
+        );
+        db.update_ensemble_commit_rights("ens1", true).unwrap();
+
+        let _home = HomeGuard::set(fake_home.path());
+        engine
+            .run_graph(graph_id.clone(), None, None, None, None)
+            .await
+            .unwrap();
+        drop(_home);
+
+        assert_ne!(
+            git_head(dir.path()),
+            head_before,
+            "the member must really have committed"
+        );
+        let join = join_run(&db, &spec_id, "join1");
+        assert!(
+            join.output
+                .as_ref()
+                .is_none_or(|o| o.get("commit_rights_violation").is_none()),
+            "a member of a commit-rights ensemble must not be flagged"
+        );
+    }
+
+    /// CM28 / NFR1(c): with an ensemble holding commit rights, a plain node
+    /// outside the ensemble that commits is still flagged and routed via the
+    /// fail edge — the ensemble's right does not leak to unrelated nodes.
+    #[tokio::test]
+    async fn non_member_commit_flagged_when_only_an_ensemble_holds_commit_rights() {
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+        init_git_repo(dir.path());
+        let head_before = git_head(dir.path());
+
+        db.insert_graph_node(&rights_node(&spec_id, "worker", COMMIT_CMD, None, 0))
+            .unwrap();
+        db.insert_graph_node(&rights_node(&spec_id, "triage", "true", None, 100))
+            .unwrap();
+        db.insert_graph_node(&rights_node(&spec_id, "ens_done", "true", None, 4))
+            .unwrap();
+
+        insert_test_ensemble(
+            &db,
+            &spec_id,
+            "ens_kickoff",
+            "ens1",
+            "ens_join",
+            &[("m1", "unused")],
+            1,
+            None,
+            None,
+            "ens_done",
+            None,
+        );
+        db.update_ensemble_commit_rights("ens1", true).unwrap();
+
+        db.insert_graph_edge(&GraphEdge {
+            id: "e-pass".to_string(),
+            spec_id: Some(spec_id.clone()),
+            graph_id: None,
+            from_node: "worker".to_string(),
+            to_node: "ens_kickoff".to_string(),
+            condition: crate::domain::graphs::GraphEdgeCondition::Pass,
+        })
+        .unwrap();
+        db.insert_graph_edge(&GraphEdge {
+            id: "e-fail".to_string(),
+            spec_id: Some(spec_id.clone()),
+            graph_id: None,
+            from_node: "worker".to_string(),
+            to_node: "triage".to_string(),
+            condition: crate::domain::graphs::GraphEdgeCondition::Fail,
+        })
+        .unwrap();
+
+        engine
+            .run_graph(graph_id.clone(), None, None, None, None)
+            .await
+            .unwrap();
+
+        let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
+        let worker = runs.iter().find(|r| r.node_id == "worker").unwrap();
+        assert_eq!(
+            worker.status,
+            GraphRunStatus::Fail,
+            "committing without commit rights must be a deterministic fail"
+        );
+        assert!(
+            worker
+                .output
+                .as_ref()
+                .and_then(|o| o.get("commit_rights_violation"))
+                .is_some(),
+            "the violation must be recorded on the run's output"
+        );
+        assert!(
+            runs.iter().any(|r| r.node_id == "triage"),
+            "the fail edge must have been taken"
+        );
+        assert!(
+            !runs.iter().any(|r| r.node_id == "ens_kickoff"
+                || r.node_id == "m1"
+                || r.node_id == "ens_join"),
+            "the ensemble must never have been reached"
+        );
+        assert_ne!(
+            git_head(dir.path()),
+            head_before,
+            "the illegal commit is reported, never rewritten away"
+        );
+    }
+
     #[tokio::test]
     async fn node_that_changes_files_without_committing_is_unaffected() {
         let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
@@ -8614,24 +8762,80 @@ mod tests {
     fn commit_rights_are_explicit_configuration_only() {
         let named_committer = rights_node("s", "Commit and push", "true", None, 1);
         assert!(
-            !node_has_commit_rights(&named_committer),
+            !node_has_commit_rights(&named_committer, &[]),
             "a node's name must never grant it commit rights"
         );
-        assert!(!graph_enforces_commit_rights(std::slice::from_ref(
-            &named_committer
-        )));
+        assert!(!graph_enforces_commit_rights(
+            std::slice::from_ref(&named_committer),
+            &[]
+        ));
 
         let designated = rights_node("s", "committer", "true", Some(true), 1);
-        assert!(node_has_commit_rights(&designated));
-        assert!(graph_enforces_commit_rights(&[named_committer, designated]));
+        assert!(node_has_commit_rights(&designated, &[]));
+        assert!(graph_enforces_commit_rights(
+            &[named_committer, designated],
+            &[]
+        ));
 
-        assert!(!node_has_commit_rights(&rights_node(
-            "s",
-            "n",
-            "true",
-            Some(false),
-            1
-        )));
+        assert!(!node_has_commit_rights(
+            &rights_node("s", "n", "true", Some(false), 1),
+            &[]
+        ));
+    }
+
+    #[test]
+    fn graph_enforces_commit_rights_when_only_an_ensemble_carries_it() {
+        let ensemble = crate::domain::graphs::Ensemble {
+            id: "ens1".to_string(),
+            spec_id: Some("s".to_string()),
+            graph_id: None,
+            name: "Test Ensemble".to_string(),
+            prompt_template: "p".to_string(),
+            join_node_id: "join1".to_string(),
+            entry_from_node: "kickoff".to_string(),
+            entry_condition: crate::domain::graphs::GraphEdgeCondition::Always,
+            min_pass: 1,
+            straggler_timeout_minutes: None,
+            quorum_grace_minutes: None,
+            timeout_minutes: 5,
+            on_pass_to: "done".to_string(),
+            on_fail_to: None,
+            kind: crate::domain::graphs::EnsembleKind::Parallel,
+            round_robin_index: None,
+            commit_rights: true,
+            created_at: chrono::Utc::now(),
+        };
+        let member = EnsembleMember {
+            ensemble_id: "ens1".to_string(),
+            node_id: "m1".to_string(),
+            position: 0,
+            platform: "claude".to_string(),
+            model: None,
+            prompt_override: None,
+            timeout_minutes: None,
+        };
+        let details = EnsembleDetails {
+            ensemble,
+            members: vec![member],
+        };
+
+        let nodes = vec![
+            rights_node("s", "m1", "true", None, 1),
+            rights_node("s", "other", "true", None, 2),
+        ];
+
+        assert!(graph_enforces_commit_rights(
+            &nodes,
+            std::slice::from_ref(&details)
+        ));
+        assert!(
+            node_has_commit_rights(&nodes[0], std::slice::from_ref(&details)),
+            "a member resolves commit rights through its owning ensemble"
+        );
+        assert!(
+            !node_has_commit_rights(&nodes[1], std::slice::from_ref(&details)),
+            "an unrelated node must not inherit another ensemble's commit rights"
+        );
     }
 
     // ── CB39: spec_start_head ancestry verification ──────────────────────
@@ -13247,6 +13451,7 @@ echo done
     ) -> crate::domain::graphs::EnsembleDetails {
         crate::domain::graphs::EnsembleDetails {
             ensemble: crate::domain::graphs::Ensemble {
+                commit_rights: false,
                 id: ensemble_id.to_string(),
                 spec_id: Some("spec".to_string()),
                 graph_id: None,
@@ -19170,6 +19375,7 @@ echo done
         }
 
         let ensemble = crate::domain::graphs::Ensemble {
+            commit_rights: false,
             id: ensemble_id.to_string(),
             spec_id: Some(spec_id.to_string()),
             graph_id: None,
@@ -19313,6 +19519,7 @@ echo done
         });
 
         let ensemble = crate::domain::graphs::Ensemble {
+            commit_rights: false,
             id: "ens1".to_string(),
             spec_id: Some(spec_id.to_string()),
             graph_id: None,
@@ -20015,6 +20222,7 @@ echo done
         }
 
         let ensemble = crate::domain::graphs::Ensemble {
+            commit_rights: false,
             id: "ens1".to_string(),
             spec_id: Some(spec_id.clone()),
             graph_id: None,
@@ -20557,6 +20765,7 @@ echo done
             condition: GraphEdgeCondition::Pass,
         });
         let ensemble = crate::domain::graphs::Ensemble {
+            commit_rights: false,
             id: "ens1".to_string(),
             spec_id: Some(spec_id.clone()),
             graph_id: None,
@@ -21097,6 +21306,7 @@ echo done
         .unwrap();
 
         let ensemble = crate::domain::graphs::Ensemble {
+            commit_rights: false,
             id: "ens1".to_string(),
             spec_id: Some(spec_id.to_string()),
             graph_id: None,
@@ -21253,6 +21463,7 @@ echo done
         }
 
         let ensemble = crate::domain::graphs::Ensemble {
+            commit_rights: false,
             id: "ens1".to_string(),
             spec_id: Some(spec_id.to_string()),
             graph_id: None,
@@ -21401,6 +21612,7 @@ echo done
         }
 
         let ensemble = crate::domain::graphs::Ensemble {
+            commit_rights: false,
             id: "ens1".to_string(),
             spec_id: Some(spec_id.to_string()),
             graph_id: None,

@@ -1051,6 +1051,7 @@ mod tests {
             });
         }
         let ensemble = Ensemble {
+            commit_rights: false,
             id: "ens1".to_string(),
             spec_id: Some(spec_id.to_string()),
             graph_id: None,

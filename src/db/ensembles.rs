@@ -85,8 +85,8 @@ impl Database {
         }
 
         tx.execute(
-            "INSERT INTO ensembles (id, spec_id, graph_id, name, prompt_template, join_node_id, entry_from_node, entry_condition, min_pass, straggler_timeout_minutes, quorum_grace_minutes, timeout_minutes, on_pass_to, on_fail_to, kind, round_robin_index, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            "INSERT INTO ensembles (id, spec_id, graph_id, name, prompt_template, join_node_id, entry_from_node, entry_condition, min_pass, straggler_timeout_minutes, quorum_grace_minutes, timeout_minutes, on_pass_to, on_fail_to, kind, round_robin_index, commit_rights, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             params![
                 &ensemble.id,
                 &ensemble.spec_id,
@@ -104,6 +104,7 @@ impl Database {
                 &ensemble.on_fail_to,
                 ensemble.kind.as_str(),
                 ensemble.round_robin_index,
+                ensemble.commit_rights,
                 ensemble.created_at.timestamp(),
             ],
         )?;
@@ -134,7 +135,7 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, spec_id, graph_id, name, prompt_template, join_node_id, entry_from_node, entry_condition, min_pass, straggler_timeout_minutes, quorum_grace_minutes, timeout_minutes, on_pass_to, on_fail_to, kind, round_robin_index, created_at
+            "SELECT id, spec_id, graph_id, name, prompt_template, join_node_id, entry_from_node, entry_condition, min_pass, straggler_timeout_minutes, quorum_grace_minutes, timeout_minutes, on_pass_to, on_fail_to, kind, round_robin_index, commit_rights, created_at
              FROM ensembles WHERE id = ?1",
         )?;
         stmt.query_row(params![ensemble_id], map_ensemble_row)
@@ -189,6 +190,23 @@ impl Database {
                 .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
             let mut stmt = conn.prepare("SELECT id FROM ensembles WHERE graph_id = ?1")?;
             let rows = stmt.query_map(params![graph_id], |row| row.get::<_, String>(0))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        ids.iter()
+            .filter_map(|id| self.get_ensemble_details(id).transpose())
+            .collect()
+    }
+
+    /// Every ensemble across every graph — CM28's global reporting surface
+    /// for `graph_audit_node_configs`, mirroring `list_all_graph_nodes`.
+    pub fn list_all_ensembles(&self) -> Result<Vec<EnsembleDetails>> {
+        let ids: Vec<String> = {
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+            let mut stmt = conn.prepare("SELECT id FROM ensembles")?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
         ids.iter()
@@ -339,6 +357,22 @@ impl Database {
                 round_robin_index.flatten(),
                 ensemble_id,
             ],
+        )?;
+        Ok(rows > 0)
+    }
+
+    pub fn update_ensemble_commit_rights(
+        &self,
+        ensemble_id: &str,
+        commit_rights: bool,
+    ) -> Result<bool> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let rows = conn.execute(
+            "UPDATE ensembles SET commit_rights = ?1 WHERE id = ?2",
+            params![commit_rights, ensemble_id],
         )?;
         Ok(rows > 0)
     }
@@ -970,7 +1004,8 @@ fn map_ensemble_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Ensemble> {
         on_fail_to: row.get(13)?,
         kind,
         round_robin_index: row.get(15)?,
-        created_at: from_timestamp(row.get(16)?)?,
+        commit_rights: row.get(16)?,
+        created_at: from_timestamp(row.get(17)?)?,
     })
 }
 
@@ -1281,6 +1316,7 @@ mod tests {
             condition: GraphEdgeCondition::Pass,
         });
         let ensemble = Ensemble {
+            commit_rights: false,
             id: "ens1".to_string(),
             spec_id: Some("spec-1".to_string()),
             graph_id: None,
@@ -1450,6 +1486,7 @@ mod tests {
             },
         ];
         let ensemble = Ensemble {
+            commit_rights: false,
             id: "ens1".to_string(),
             spec_id: Some("spec-1".to_string()),
             graph_id: None,
@@ -1598,6 +1635,7 @@ mod tests {
             },
         ];
         let ensemble = Ensemble {
+            commit_rights: false,
             id: "ens1".to_string(),
             spec_id: Some("spec-1".to_string()),
             graph_id: None,
@@ -1730,6 +1768,7 @@ mod tests {
             condition: GraphEdgeCondition::Pass,
         });
         let ensemble = Ensemble {
+            commit_rights: false,
             id: "ens1".to_string(),
             spec_id: Some("spec-1".to_string()),
             graph_id: None,
@@ -2070,6 +2109,7 @@ mod tests {
             },
         ];
         let ensemble = Ensemble {
+            commit_rights: false,
             id: "ens1".to_string(),
             spec_id: Some("spec-1".to_string()),
             graph_id: None,
@@ -2225,6 +2265,7 @@ mod tests {
             },
         ];
         let ensemble = Ensemble {
+            commit_rights: false,
             id: "ens1".to_string(),
             spec_id: Some("spec-1".to_string()),
             graph_id: None,
@@ -2351,6 +2392,7 @@ mod tests {
             },
         ];
         let ensemble = Ensemble {
+            commit_rights: false,
             id: "ens1".to_string(),
             spec_id: Some("spec-1".to_string()),
             graph_id: None,
@@ -2473,6 +2515,7 @@ mod tests {
             },
         ];
         let ensemble = Ensemble {
+            commit_rights: false,
             id: "ens1".to_string(),
             spec_id: Some("spec-1".to_string()),
             graph_id: None,
@@ -2626,6 +2669,7 @@ mod tests {
             condition: GraphEdgeCondition::Always,
         };
         let ensemble = Ensemble {
+            commit_rights: false,
             id: "ens1".to_string(),
             spec_id: Some(spec_id),
             graph_id: None,
@@ -2720,6 +2764,7 @@ mod tests {
             condition: GraphEdgeCondition::Always,
         };
         let ensemble = Ensemble {
+            commit_rights: false,
             id: "ens1".to_string(),
             spec_id: Some(spec_id),
             graph_id: None,
@@ -2814,6 +2859,7 @@ mod tests {
             condition: GraphEdgeCondition::Always,
         };
         let ensemble = Ensemble {
+            commit_rights: false,
             id: "ens1".to_string(),
             spec_id: Some(spec_id),
             graph_id: None,
@@ -2911,6 +2957,7 @@ mod tests {
             condition: GraphEdgeCondition::Always,
         };
         let ensemble = Ensemble {
+            commit_rights: false,
             id: "ens1".to_string(),
             spec_id: Some(spec_id),
             graph_id: None,
