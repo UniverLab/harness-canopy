@@ -441,6 +441,30 @@ impl Database {
         Ok(())
     }
 
+    /// Shortens a `rusqlite` batch/statement failure to the SQLite error
+    /// reason plus just the failing statement's first line. Without this,
+    /// `rusqlite::Error::SqlInputError`'s `Display` embeds the *entire
+    /// remaining* SQL text passed to the failing `prepare()` call — for a
+    /// failure early in the base schema batch that's hundreds of lines
+    /// (this is what `canopy doctor` dumped for CB56). Because
+    /// `execute_batch` re-slices its input to start at the next
+    /// unconsumed statement each iteration, the remaining SQL always
+    /// *starts* with the statement that just failed, so its first line is
+    /// exactly the right thing to show.
+    fn describe_sql_failure(step: &str, e: &rusqlite::Error) -> anyhow::Error {
+        match e {
+            rusqlite::Error::SqlInputError { msg, sql, .. } => {
+                let first_line = sql
+                    .lines()
+                    .map(str::trim)
+                    .find(|line| !line.is_empty())
+                    .unwrap_or("");
+                anyhow::anyhow!("{step}: {msg} (statement: {first_line})")
+            }
+            other => anyhow::anyhow!("{step}: {other}"),
+        }
+    }
+
     fn init(&self) -> Result<()> {
         let conn = self
             .conn
@@ -615,8 +639,6 @@ impl Database {
                 ON intelligence_nodes(kind, updated_at DESC);
             CREATE INDEX IF NOT EXISTS idx_intelligence_nodes_project_hash
                 ON intelligence_nodes(project_hash);
-            CREATE INDEX IF NOT EXISTS idx_intelligence_nodes_project_hash_touched
-                ON intelligence_nodes(project_hash, content_touched_at DESC);
             CREATE INDEX IF NOT EXISTS idx_intelligence_nodes_session_id
                 ON intelligence_nodes(session_id);
 
@@ -970,7 +992,8 @@ impl Database {
                 status TEXT NOT NULL DEFAULT 'active',
                 cleanup_error TEXT
             );",
-        )?;
+        )
+        .map_err(|e| Self::describe_sql_failure("base schema batch", &e))?;
 
         // CB42: record cleanup failures on the sandbox run (req 6). A fresh DB
         // gets the column above; an existing one is migrated idempotently here
@@ -1738,16 +1761,18 @@ impl Database {
                 "ALTER TABLE intelligence_nodes ADD COLUMN content_touched_at INTEGER NOT NULL DEFAULT 0",
                 [],
             )
-            .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
+            .map_err(|e| Self::describe_sql_failure("CT17 content_touched_at migration", &e))?;
         }
         conn.execute(
             "DROP INDEX IF EXISTS idx_intelligence_nodes_project_hash_updated",
             [],
-        )?;
+        )
+        .map_err(|e| Self::describe_sql_failure("CT17 content_touched_at migration", &e))?;
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_intelligence_nodes_project_hash_touched ON intelligence_nodes(project_hash, content_touched_at DESC)",
             [],
-        )?;
+        )
+        .map_err(|e| Self::describe_sql_failure("CT17 content_touched_at migration", &e))?;
 
         let has_ensemble_kind: bool = conn
             .query_row(
