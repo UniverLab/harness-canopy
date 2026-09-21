@@ -15,7 +15,7 @@ use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Frame;
 
 use super::super::theme::Theme;
-use super::{compact_cwd, truncate_str};
+use super::compact_cwd;
 use crate::domain::graphs::{
     GraphEdgeCondition, GraphNode, GraphNodeKind, GraphRunStatus, GraphSpecStatus, GraphStatus,
 };
@@ -24,6 +24,7 @@ use crate::tui::app::graph_live_state::{
 };
 use crate::tui::app::types::App;
 use crate::tui::ui::sidebar::draw_scroll_indicators;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 pub(crate) fn draw_graph_live_view(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     if area.width == 0 || area.height == 0 {
@@ -567,6 +568,50 @@ fn edge_condition_priority(condition: &GraphEdgeCondition) -> (u8, Option<String
     }
 }
 
+/// Truncates `content` to at most `max_width` display columns (per
+/// `unicode-width`), appending `…` when it doesn't fit. Unlike
+/// `truncate_str`, this measures render columns rather than
+/// `chars().count()`, so a wide character (CJK, emoji) is never counted as
+/// one column when it occupies two — the miscount that let a wide label
+/// desync a box border.
+fn truncate_str_width(s: &str, max_width: usize) -> String {
+    if UnicodeWidthStr::width(s) <= max_width {
+        return s.to_string();
+    }
+    if max_width == 0 {
+        return String::new();
+    }
+    let budget = max_width - 1; // reserve 1 column for the ellipsis
+    let mut out = String::new();
+    let mut width = 0usize;
+    for ch in s.chars() {
+        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width + cw > budget {
+            break;
+        }
+        out.push(ch);
+        width += cw;
+    }
+    out.push('…');
+    out
+}
+
+/// Fits `content` into a box row that already has `leading` display columns
+/// of fixed prefix before it (a marker+space, or a two-space indent):
+/// truncates `content` by display width to leave room for one mandatory
+/// blank column before the closing border, then right-pads with spaces and
+/// appends that blank column. The result's display width is always
+/// `inner - leading`, so `leading + width(fit_row(...)) == inner` for every
+/// row built this way — this is what keeps member rows exactly as wide as
+/// the title and border rows (previously short by 2 columns because the
+/// padding math didn't add up to `inner`).
+fn fit_row(content: &str, inner: usize, leading: usize) -> String {
+    let budget = inner.saturating_sub(leading + 1);
+    let truncated = truncate_str_width(content, budget);
+    let pad = budget.saturating_sub(UnicodeWidthStr::width(truncated.as_str()));
+    format!("{truncated}{} ", " ".repeat(pad))
+}
+
 fn node_box_lines(
     node: &GraphNode,
     is_highlighted: bool,
@@ -578,9 +623,7 @@ fn node_box_lines(
     let prefix = depth_prefix(depth);
     let (border_style, text_style, marker) = node_style(is_highlighted, follow, theme);
     let kind_tag = format!("[{}]", node.kind.display_str());
-    let max_name = inner.saturating_sub(2 + kind_tag.len());
-    let name_display = truncate_str(&node.name, max_name);
-    let spaces = inner.saturating_sub(2 + name_display.len() + kind_tag.len());
+    let kind_tag_width = UnicodeWidthStr::width(kind_tag.as_str());
     let kind_tag_style = if node.kind == GraphNodeKind::Router {
         Style::default()
             .fg(theme.kind_router)
@@ -588,6 +631,11 @@ fn node_box_lines(
     } else {
         text_style
     };
+    // Budget reserves: marker+space (2, "leading"), kind_tag_width, and one
+    // mandatory trailing blank column before the border.
+    let name_budget = inner.saturating_sub(2 + kind_tag_width + 1);
+    let name_display = truncate_str_width(&node.name, name_budget);
+    let pad = name_budget.saturating_sub(UnicodeWidthStr::width(name_display.as_str()));
 
     vec![
         Line::from(Span::styled(
@@ -596,11 +644,11 @@ fn node_box_lines(
         )),
         Line::from(vec![
             Span::styled(
-                format!("{prefix}│{marker} {name_display}{}", " ".repeat(spaces)),
+                format!("{prefix}│{marker} {name_display}{}", " ".repeat(pad)),
                 text_style,
             ),
             Span::styled(kind_tag, kind_tag_style),
-            Span::styled("│", text_style),
+            Span::styled(" │", text_style),
         ]),
         Line::from(Span::styled(
             format!("{prefix}└{}┘", "─".repeat(inner)),
@@ -627,9 +675,6 @@ fn ensemble_box_lines(
     let prefix = depth_prefix(depth);
     let (border_style, text_style, marker) = node_style(is_highlighted, follow, theme);
     let title = format!("{} [{} models]", ensemble.name, ensemble.members.len());
-    let max_title = inner.saturating_sub(2);
-    let title_display = truncate_str(&title, max_title);
-    let title_spaces = inner.saturating_sub(2 + title_display.chars().count());
 
     let mut lines = vec![
         Line::from(Span::styled(
@@ -637,23 +682,15 @@ fn ensemble_box_lines(
             border_style,
         )),
         Line::from(Span::styled(
-            format!(
-                "{prefix}│{} {}{}│",
-                marker,
-                title_display,
-                " ".repeat(title_spaces)
-            ),
+            format!("{prefix}│{marker} {}│", fit_row(&title, inner, 2)),
             text_style,
         )),
     ];
     for member in &ensemble.members {
         let (tag, color) = ensemble_member_status_tag(member.status, theme);
         let label = format!("{} {tag}", member.label);
-        let max_label = inner.saturating_sub(4);
-        let label_display = truncate_str(&label, max_label);
-        let spaces = inner.saturating_sub(4 + label_display.chars().count());
         lines.push(Line::from(Span::styled(
-            format!("{prefix}│  {}{}│", label_display, " ".repeat(spaces)),
+            format!("{prefix}│  {}│", fit_row(&label, inner, 2)),
             Style::default().fg(color),
         )));
     }
@@ -1919,6 +1956,127 @@ mod tests {
         // routing to the arbiter still renders.
         assert!(text.contains("Kickoff"), "{text}");
         assert!(text.contains("Arbiter"), "{text}");
+    }
+
+    fn ensemble_fixture_with_labels(labels: &[&str]) -> EnsembleLiveInfo {
+        EnsembleLiveInfo {
+            ensemble_id: "ens1".to_string(),
+            name: "Implementer".to_string(),
+            join_node_id: "join1".to_string(),
+            straggler_timeout_minutes: None,
+            quorum_grace_minutes: None,
+            members: labels
+                .iter()
+                .enumerate()
+                .map(
+                    |(i, label)| crate::tui::app::graph_live_state::EnsembleMemberLiveInfo {
+                        node_id: format!("m{i}"),
+                        label: label.to_string(),
+                        status: Some(GraphRunStatus::Pass),
+                    },
+                )
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn ensemble_box_rows_share_one_width_with_a_trailing_blank_column() {
+        let long = "openrouter/very-long-model-name-that-will-not-fit-in-the-box";
+        let ensemble = ensemble_fixture_with_labels(&[long, long, long, long]);
+        let inner = 20;
+        let lines = ensemble_box_lines(&ensemble, false, false, inner, &Theme::classic(), 0);
+
+        // top border, title, 4 members, bottom border
+        assert_eq!(lines.len(), 7);
+        let expected_width = lines[0].width();
+        for (i, line) in lines.iter().enumerate() {
+            assert_eq!(
+                line.width(),
+                expected_width,
+                "line {i} width mismatch: {line}"
+            );
+        }
+        // Every content row (not the pure border rows) has a space just before
+        // the closing │.
+        for (i, line) in lines.iter().enumerate().skip(1).take(5) {
+            let text = line.to_string();
+            let before_border = text.chars().rev().nth(1);
+            assert_eq!(
+                before_border,
+                Some(' '),
+                "line {i} touches border: {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ensemble_box_rows_equal_width_with_wide_characters() {
+        let wide = "漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字";
+        let ensemble = ensemble_fixture_with_labels(&[wide, wide, wide, wide]);
+        let inner = 20;
+        let lines = ensemble_box_lines(&ensemble, false, false, inner, &Theme::classic(), 0);
+        let expected_width = lines[0].width();
+        for (i, line) in lines.iter().enumerate() {
+            assert_eq!(
+                line.width(),
+                expected_width,
+                "line {i} width mismatch: {line}"
+            );
+        }
+    }
+
+    fn node_fixture(name: &str, kind: GraphNodeKind) -> GraphNode {
+        GraphNode {
+            id: "n1".to_string(),
+            spec_id: Some("spec-1".to_string()),
+            graph_id: None,
+            name: name.to_string(),
+            kind,
+            config: json!({}),
+            position: 0,
+            created_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn node_box_rows_share_one_width_with_a_trailing_blank_column() {
+        let node = node_fixture(
+            "A very long node name that will not fit in the box at all",
+            GraphNodeKind::Router,
+        );
+        let inner = 20;
+        let lines = node_box_lines(&node, false, false, inner, &Theme::classic(), 0);
+        assert_eq!(lines.len(), 3);
+        let expected_width = lines[0].width();
+        for (i, line) in lines.iter().enumerate() {
+            assert_eq!(
+                line.width(),
+                expected_width,
+                "line {i} width mismatch: {line}"
+            );
+        }
+        let text = lines[1].to_string();
+        let before_border = text.chars().rev().nth(1);
+        assert_eq!(
+            before_border,
+            Some(' '),
+            "name row touches border: {text:?}"
+        );
+    }
+
+    #[test]
+    fn node_box_rows_equal_width_with_wide_characters() {
+        let node = node_fixture("漢字漢字漢字漢字漢字漢字漢字漢字", GraphNodeKind::Agent);
+        let inner = 20;
+        let lines = node_box_lines(&node, false, false, inner, &Theme::classic(), 0);
+        let expected_width = lines[0].width();
+        for (i, line) in lines.iter().enumerate() {
+            assert_eq!(
+                line.width(),
+                expected_width,
+                "line {i} width mismatch: {line}"
+            );
+        }
     }
 
     #[test]

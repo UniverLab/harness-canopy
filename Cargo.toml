@@ -89,6 +89,11 @@ tokio-util = { version = "0.7", features = ["rt"] }
 # TUI
 ratatui = "0.30"
 
+# Display-width measurement for TUI box rendering (unicode-width is already
+# pulled in transitively by ratatui; this makes it a direct dependency so it
+# can be `use`d).
+unicode-width = "0.2"
+
 # PTY for interactive agents
 portable-pty = "0.9"
 

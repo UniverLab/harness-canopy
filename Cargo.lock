@@ -2954,6 +2954,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "unicode-width",
  "uuid",
  "vt100",
  "walkdir",
