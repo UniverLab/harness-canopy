@@ -275,6 +275,12 @@ pub(crate) async fn run_doctor() -> Result<()> {
     // doctor reads the unit itself and says so.
     report_service_unit(&home, &mut issues);
 
+    // ── Orphaned joins (CB52) ─────────────────────────────────────
+    // Databases damaged before the entry/exit FKs became RESTRICT hold join
+    // nodes with no ensemble row. Never auto-repaired (C1) — listed here
+    // per graph so the operator can delete or rewire them by hand.
+    report_orphan_joins(&canopy_dir, &mut issues);
+
     // ── Duplicate Binaries (C17) ────────────────────────────────────
     // A tool installed by both the install script (~/.local/bin) and
     // `cargo install` (~/.cargo/bin) leaves two binaries on PATH — updating
@@ -1023,6 +1029,52 @@ fn report_service_unit(home: &Path, issues: &mut Vec<String>) {
     }
 }
 
+/// CB52 FR5: list orphaned join nodes — `join`-kind nodes with no ensemble
+/// row, the state databases damaged before the entry/exit FKs became
+/// `RESTRICT` are left in — grouped per graph. Silent when there is no
+/// database yet, when it cannot be opened, or when nothing is orphaned.
+/// Never auto-repairs (C1): the issue pushed names the manual verbs.
+fn report_orphan_joins(canopy_dir: &Path, issues: &mut Vec<String>) {
+    let db_path = database_path(canopy_dir);
+    if !db_path.exists() {
+        return;
+    }
+    let Ok(db) = Database::new_safe(&db_path, canopy_dir) else {
+        return;
+    };
+    let Ok(orphans) = db.list_all_orphan_join_nodes() else {
+        return;
+    };
+    if orphans.is_empty() {
+        return;
+    }
+    println!(
+        " \x1b[31m✗\x1b[0m Orphaned join nodes (CB52): {} join node(s) belong to no ensemble",
+        orphans.len()
+    );
+    for node in &orphans {
+        let scope = match (&node.spec_id, &node.graph_id) {
+            (Some(spec_id), _) => match db.get_graph_spec(spec_id) {
+                Ok(Some(spec)) => format!("spec '{}' ({spec_id})", spec.name),
+                _ => format!("spec '{spec_id}'"),
+            },
+            (_, Some(graph_id)) => match db.get_graph(graph_id) {
+                Ok(Some(graph)) => format!("graph '{}' ({graph_id})", graph.name),
+                _ => format!("graph '{graph_id}'"),
+            },
+            _ => "no graph scope".to_string(),
+        };
+        println!(
+            "     - '{}' ({}) in {} — belongs to no ensemble",
+            node.name, node.id, scope
+        );
+    }
+    issues.push(
+        "Orphaned join nodes belong to no ensemble — run 'graph_get' to see orphan_join_warnings and delete them with graph_delete_node or repair via graph_update_ensemble (see CB52)."
+            .to_string(),
+    );
+}
+
 /// Every `canopy` executable found on `path_var`, in the order the shell
 /// would resolve them — first match wins. Backed by `which::which_in_all`,
 /// which already applies the rule this check needs: a PATH entry that
@@ -1525,6 +1577,95 @@ mod tests {
         assert_eq!(issues.len(), 1);
         assert!(
             issues[0].contains("no daemon running"),
+            "issue was: {}",
+            issues[0]
+        );
+    }
+
+    /// CB52 FR5: `report_orphan_joins` pushes the CB52 issue for a database
+    /// holding a join node with no ensemble row, and stays silent when there
+    /// is no database yet or nothing is orphaned. Asserts on `issues` (not
+    /// captured stdout) so it runs in CI, unlike the `#[ignore]`d black-box
+    /// `run_doctor` tests.
+    #[test]
+    fn report_orphan_joins_flags_orphans_and_stays_silent_when_healthy() {
+        use crate::domain::graphs::{
+            Graph, GraphNode, GraphNodeKind, GraphSpec, GraphSpecStatus, GraphStatus,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let canopy_dir = dir.path().join(".canopy");
+        std::fs::create_dir_all(&canopy_dir).unwrap();
+
+        // No database yet: silent, no issue.
+        let mut issues = Vec::new();
+        report_orphan_joins(&canopy_dir, &mut issues);
+        assert!(issues.is_empty());
+
+        let db = Database::new(&database_path(&canopy_dir)).unwrap();
+        db.insert_graph(&Graph {
+            archived: false,
+            paused_by_reconciliation: false,
+            infra_node_id: None,
+            id: "g1".to_string(),
+            name: "Graph".to_string(),
+            description: None,
+            workdir: dir.path().to_string_lossy().to_string(),
+            status: GraphStatus::Draft,
+            trigger: None,
+            created_at: chrono::Utc::now(),
+            started_at: None,
+            completed_at: None,
+            autorun_at: None,
+            auto_continue_at: None,
+            auto_continue_action: None,
+            active_run_queue_id: None,
+            hooks: std::collections::BTreeMap::new(),
+        })
+        .unwrap();
+        db.insert_graph_spec(&GraphSpec {
+            id: "s1".to_string(),
+            graph_id: Some("g1".to_string()),
+            name: "Spec".to_string(),
+            description: Some("desc".to_string()),
+            position: 1,
+            parallelizable: false,
+            status: GraphSpecStatus::Pending,
+            started_at: None,
+            completed_at: None,
+            spec_start_head: None,
+            spec_committed_head: None,
+            workdir: None,
+            completed_via: None,
+            completed_via_reason: None,
+            completed_via_at: None,
+        })
+        .unwrap();
+
+        // Healthy database, no orphans: silent.
+        let mut issues = Vec::new();
+        report_orphan_joins(&canopy_dir, &mut issues);
+        assert!(issues.is_empty());
+
+        // Simulated pre-CB52 damage: a join row with no ensemble row.
+        db.insert_graph_node(&GraphNode {
+            id: "orphan-join".to_string(),
+            spec_id: Some("s1".to_string()),
+            graph_id: None,
+            name: "orphaned quorum".to_string(),
+            kind: GraphNodeKind::Join,
+            config: serde_json::json!({"ensemble_id": "gone"}),
+            position: 1,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+        drop(db);
+
+        let mut issues = Vec::new();
+        report_orphan_joins(&canopy_dir, &mut issues);
+        assert_eq!(issues.len(), 1);
+        assert!(
+            issues[0].contains("Orphaned join nodes"),
             "issue was: {}",
             issues[0]
         );

@@ -1025,6 +1025,34 @@ fn validate_node_not_ensemble_owned(db: &Database, node_id: &str) -> Result<(), 
     Ok(())
 }
 
+/// CB52: refuse to delete a plain node that an ensemble references without
+/// owning — as primary entry (`entry_from_node`), as an extra entry source,
+/// or as an exit target (`on_pass_to`/`on_fail_to`). Before this guard the
+/// `ensembles` FKs were `ON DELETE CASCADE`, so the delete silently removed
+/// the ensemble row (and its `ensemble_members` rows) while the member/join
+/// nodes survived as orphans; the next dispatch then died with an
+/// "ambiguous outgoing edges" message naming none of the cause. The schema
+/// is now `ON DELETE RESTRICT` as the last line; this check is the readable
+/// first line, naming each ensemble, the role, and the detaching verbs.
+fn validate_node_not_ensemble_referenced(db: &Database, node_id: &str) -> Result<(), String> {
+    let refs = db
+        .ensembles_referencing_node(node_id)
+        .map_err(|e| e.to_string())?;
+    if refs.is_empty() {
+        return Ok(());
+    }
+    let parts: Vec<String> = refs
+        .iter()
+        .map(|(details, role)| {
+            format!(
+                "Node '{node_id}' is referenced by ensemble '{}' ('{}') as {role}; detach it first with graph_update_ensemble (entry wiring: from_node/add_entry_from/remove_entry_from for entry_from_node/entry_source; exit wiring: on_pass_to/on_fail_to for on_pass_to/on_fail_to). Deleting this node would silently delete the ensemble and orphan its members/join.",
+                details.ensemble.name, details.ensemble.id
+            )
+        })
+        .collect();
+    Err(parts.join("; "))
+}
+
 /// Resolve the [`GraphStatus`] (and id) of the graph that owns a spec-scoped or
 /// graph-scoped graph object. A node/edge always has exactly one of
 /// `spec_id`/`graph_id` set. `None` means the object belongs to a standalone
@@ -1175,6 +1203,7 @@ pub(crate) fn delete_graph_node_checked(db: &Database, node_id: &str) -> Result<
     let node = validate_node_exists(db, node_id)?;
     validate_topology_mutation_allowed(db, node.spec_id.as_deref(), node.graph_id.as_deref())?;
     validate_node_not_ensemble_owned(db, &node.id)?;
+    validate_node_not_ensemble_referenced(db, &node.id)?;
     validate_node_not_entry_point(db, &node)?;
     db.delete_graph_node(&node.id).map_err(|e| e.to_string())?;
     Ok(node)
@@ -8358,6 +8387,33 @@ impl TaskTriggerHandler {
             }
         }
 
+        // ── CB52 FR4: refuse a graph with orphaned joins before spending ──
+        // probe quota on it. A join node with no ensemble row means the next
+        // dispatch through that point dies with "ambiguous outgoing edges" —
+        // report the cause instead. List it with graph_get's
+        // orphan_join_warnings and delete it with graph_delete_node, or
+        // repair the graph manually (never auto-repaired, C1).
+        {
+            let mut orphans = self
+                .db
+                .list_orphan_join_nodes_for_graph(&details.lp.id)
+                .map_err(internal_error)?;
+            for spec in &details.specs {
+                orphans.extend(
+                    self.db
+                        .list_orphan_join_nodes_for_spec(&spec.spec.id)
+                        .map_err(internal_error)?,
+                );
+            }
+            if !orphans.is_empty() {
+                let parts: Vec<String> = orphans.iter().map(orphan_join_warning_text).collect();
+                return Ok(error_result(&format!(
+                    "Preflight: {}. List it with graph_get's orphan_join_warnings and delete it with graph_delete_node, or repair the graph manually.",
+                    parts.join("; ")
+                )));
+            }
+        }
+
         // CM28 / FR3: name whichever node or ensemble in this graph holds commit
         // rights, across the top-level graph and every spec's own graph. A node
         // owned by an ensemble is never listed on its own — only the ensemble is.
@@ -10647,6 +10703,28 @@ fn sync_message_json(message: &crate::domain::sync::SyncMessage) -> serde_json::
     })
 }
 
+/// CB52 FR4: one `orphan_join_warnings` entry for a join node with no
+/// ensemble row. Shared by `graph_get` (advisory, always reported) and
+/// `graph_preflight` (refusal — a graph in this state would die with
+/// "ambiguous outgoing edges", so no probe quota is spent on it).
+fn orphan_join_warning_text(node: &GraphNode) -> String {
+    format!(
+        "join node '{}' ({}) belongs to no ensemble — it was orphaned when an ensemble that owned or referenced its entry/exit was deleted. Delete this orphan node with graph_delete_node or wire it into a repaired graph; do not re-create an ensemble around it automatically. (canopy doctor also lists orphaned joins per graph.)",
+        node.name, node.id
+    )
+}
+
+fn orphan_join_warning_json(node: &GraphNode) -> serde_json::Value {
+    serde_json::json!({
+        "node_id": node.id,
+        "name": node.name,
+        "kind": "join",
+        "spec_id": node.spec_id,
+        "graph_id": node.graph_id,
+        "warning": orphan_join_warning_text(node),
+    })
+}
+
 fn graph_details_json(db: &Database, lp: &GraphDetails) -> anyhow::Result<serde_json::Value> {
     let mut specs = lp
         .specs
@@ -10690,6 +10768,21 @@ fn graph_details_json(db: &Database, lp: &GraphDetails) -> anyhow::Result<serde_
         .map(|details| ensemble_details_json(details, &lp.graph_edges))
         .collect::<Vec<_>>();
 
+    // CB52 FR4: join nodes that belong to no ensemble — the state left
+    // behind when an ensemble row was deleted (pre-fix: silently, via `ON
+    // DELETE CASCADE` from a referenced node) while its member/join nodes
+    // survived. Never an error here: the graph must stay inspectable so the
+    // operator can repair it. Never auto-repaired (C1).
+    let mut orphan_join_warnings = Vec::new();
+    for node in db.list_orphan_join_nodes_for_graph(&lp.lp.id)? {
+        orphan_join_warnings.push(orphan_join_warning_json(&node));
+    }
+    for spec in &lp.specs {
+        for node in db.list_orphan_join_nodes_for_spec(&spec.spec.id)? {
+            orphan_join_warnings.push(orphan_join_warning_json(&node));
+        }
+    }
+
     let mut out = serde_json::json!({
         "id": lp.lp.id,
         "name": lp.lp.name,
@@ -10722,6 +10815,7 @@ fn graph_details_json(db: &Database, lp: &GraphDetails) -> anyhow::Result<serde_
             .iter()
             .map(graph_completion_hook_run_json)
             .collect::<Vec<_>>(),
+        "orphan_join_warnings": orphan_join_warnings,
     });
     // CB30: when the graph draws from a queue, say so and name it; when it
     // runs a loose idea, say that instead of leaving an empty `specs` to be
@@ -23484,6 +23578,371 @@ mod endpoint_tests {
             .unwrap();
         assert!(is_err(&result));
         assert!(db.get_graph_node(&a).unwrap().is_some());
+    }
+
+    /// CB52 helper: a 2-member ensemble on this spec's graph, entered from
+    /// `entry`, exiting to `arbiter` (pass) and optionally `fallback`
+    /// (fail).
+    async fn add_cb52_ensemble(
+        handler: &TaskTriggerHandler,
+        spec_id: &str,
+        name: &str,
+        entry: &str,
+        arbiter: &str,
+        on_fail_to: Option<&str>,
+    ) -> String {
+        let member = || crate::daemon::params::EnsembleMemberParams {
+            platform: "claude".to_string(),
+            model: None,
+            prompt_override: None,
+            timeout_minutes: None,
+        };
+        let result = handler
+            .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                commit_rights: None,
+                spec_id: Some(spec_id.to_string()),
+                graph_id: None,
+                name: name.to_string(),
+                kind: None,
+                prompt_template: Some("Review {{spec_name}}".to_string()),
+                members: Some(vec![member(), member()]),
+                blueprint: None,
+                from_node: entry.to_string(),
+                condition: "always".to_string(),
+                min_pass: Some(2),
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
+                timeout_minutes: None,
+                on_pass_to: arbiter.to_string(),
+                on_fail_to: on_fail_to.map(str::to_string),
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&result), "{}", text(&result));
+        extract_id(&result, "ensemble_id")
+    }
+
+    /// CB52 NFR1(a): deleting the ensemble's primary entry node is refused
+    /// and names the ensemble, the role, and the detaching verbs. Would
+    /// still pass with the feature removed only if deletion succeeded — it
+    /// must not.
+    #[tokio::test]
+    async fn graph_delete_node_refuses_entry_from_node_referenced_by_ensemble() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let lp = insert_test_graph(&db, dir.path());
+        let spec = insert_test_spec(&db, &lp.id, 1);
+        let entry = add_agent_node(&handler, &spec.id, "Entry").await;
+        let arbiter = add_agent_node(&handler, &spec.id, "Arbiter").await;
+        let ensemble_id =
+            add_cb52_ensemble(&handler, &spec.id, "Reviewers", &entry, &arbiter, None).await;
+
+        let result = handler
+            .graph_delete_node(Parameters(GraphDeleteNodeParams {
+                node_id: entry.clone(),
+            }))
+            .await
+            .unwrap();
+        assert!(is_err(&result), "{}", text(&result));
+        let msg = text(&result);
+        assert!(msg.contains("entry_from_node"), "{msg}");
+        assert!(msg.contains("Reviewers"), "{msg}");
+        assert!(msg.contains(&ensemble_id), "{msg}");
+        assert!(msg.contains("remove_entry_from"), "{msg}");
+        assert!(msg.contains("from_node"), "{msg}");
+
+        // Nothing was deleted: the node and the ensemble both survive.
+        assert!(db.get_graph_node(&entry).unwrap().is_some());
+        assert!(db.get_ensemble(&ensemble_id).unwrap().is_some());
+    }
+
+    /// CB52 NFR1(a-extra): same refusal for an extra entry source added via
+    /// `add_entry_from` — role `entry_source`.
+    #[tokio::test]
+    async fn graph_delete_node_refuses_extra_entry_source() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let lp = insert_test_graph(&db, dir.path());
+        let spec = insert_test_spec(&db, &lp.id, 1);
+        let entry = add_agent_node(&handler, &spec.id, "Entry").await;
+        let alt = add_agent_node(&handler, &spec.id, "Alt").await;
+        let arbiter = add_agent_node(&handler, &spec.id, "Arbiter").await;
+        let ensemble_id =
+            add_cb52_ensemble(&handler, &spec.id, "Reviewers", &entry, &arbiter, None).await;
+
+        let added = handler
+            .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+                ensemble_id: ensemble_id.clone(),
+                kind: None,
+                prompt_template: None,
+                members: None,
+                min_pass: None,
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
+                timeout_minutes: None,
+                on_pass_to: None,
+                on_fail_to: None,
+                from_node: None,
+                condition: None,
+                add_entry_from: Some(alt.clone()),
+                add_entry_condition: None,
+                remove_entry_from: None,
+                commit_rights: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&added), "{}", text(&added));
+
+        let result = handler
+            .graph_delete_node(Parameters(GraphDeleteNodeParams {
+                node_id: alt.clone(),
+            }))
+            .await
+            .unwrap();
+        assert!(is_err(&result), "{}", text(&result));
+        let msg = text(&result);
+        assert!(msg.contains("entry_source"), "{msg}");
+        assert!(msg.contains("Reviewers"), "{msg}");
+        assert!(msg.contains(&ensemble_id), "{msg}");
+
+        assert!(db.get_graph_node(&alt).unwrap().is_some());
+        assert!(db.get_ensemble(&ensemble_id).unwrap().is_some());
+    }
+
+    /// CB52 NFR1(b): deleting the pass-exit target is refused as `on_pass_to`.
+    #[tokio::test]
+    async fn graph_delete_node_refuses_on_pass_to() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let lp = insert_test_graph(&db, dir.path());
+        let spec = insert_test_spec(&db, &lp.id, 1);
+        let entry = add_agent_node(&handler, &spec.id, "Entry").await;
+        let arbiter = add_agent_node(&handler, &spec.id, "Arbiter").await;
+        let ensemble_id =
+            add_cb52_ensemble(&handler, &spec.id, "Reviewers", &entry, &arbiter, None).await;
+
+        let result = handler
+            .graph_delete_node(Parameters(GraphDeleteNodeParams {
+                node_id: arbiter.clone(),
+            }))
+            .await
+            .unwrap();
+        assert!(is_err(&result), "{}", text(&result));
+        let msg = text(&result);
+        assert!(msg.contains("on_pass_to"), "{msg}");
+        assert!(msg.contains("Reviewers"), "{msg}");
+        assert!(msg.contains(&ensemble_id), "{msg}");
+
+        assert!(db.get_graph_node(&arbiter).unwrap().is_some());
+        assert!(db.get_ensemble(&ensemble_id).unwrap().is_some());
+    }
+
+    /// CB52 NFR1(b): deleting the fail-exit target is refused as `on_fail_to`.
+    #[tokio::test]
+    async fn graph_delete_node_refuses_on_fail_to() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let lp = insert_test_graph(&db, dir.path());
+        let spec = insert_test_spec(&db, &lp.id, 1);
+        let entry = add_agent_node(&handler, &spec.id, "Entry").await;
+        let arbiter = add_agent_node(&handler, &spec.id, "Arbiter").await;
+        let fallback = add_agent_node(&handler, &spec.id, "Fallback").await;
+        let ensemble_id = add_cb52_ensemble(
+            &handler,
+            &spec.id,
+            "Reviewers",
+            &entry,
+            &arbiter,
+            Some(&fallback),
+        )
+        .await;
+
+        let result = handler
+            .graph_delete_node(Parameters(GraphDeleteNodeParams {
+                node_id: fallback.clone(),
+            }))
+            .await
+            .unwrap();
+        assert!(is_err(&result), "{}", text(&result));
+        let msg = text(&result);
+        assert!(msg.contains("on_fail_to"), "{msg}");
+        assert!(msg.contains("Reviewers"), "{msg}");
+        assert!(msg.contains(&ensemble_id), "{msg}");
+
+        assert!(db.get_graph_node(&fallback).unwrap().is_some());
+        assert!(db.get_ensemble(&ensemble_id).unwrap().is_some());
+    }
+
+    /// CB52 NFR1(c): detaching the primary entry via `remove_entry_from`
+    /// repoints `entry_from_node` at a remaining source (FR3), after which
+    /// the old primary deletes cleanly and the ensemble survives.
+    #[tokio::test]
+    async fn after_remove_entry_from_primary_repoints_and_allows_deletion() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let lp = insert_test_graph(&db, dir.path());
+        let spec = insert_test_spec(&db, &lp.id, 1);
+        let entry = add_agent_node(&handler, &spec.id, "Entry").await;
+        let alt = add_agent_node(&handler, &spec.id, "Alt").await;
+        let arbiter = add_agent_node(&handler, &spec.id, "Arbiter").await;
+        let ensemble_id =
+            add_cb52_ensemble(&handler, &spec.id, "Reviewers", &entry, &arbiter, None).await;
+
+        let added = handler
+            .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+                ensemble_id: ensemble_id.clone(),
+                kind: None,
+                prompt_template: None,
+                members: None,
+                min_pass: None,
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
+                timeout_minutes: None,
+                on_pass_to: None,
+                on_fail_to: None,
+                from_node: None,
+                condition: None,
+                add_entry_from: Some(alt.clone()),
+                add_entry_condition: None,
+                remove_entry_from: None,
+                commit_rights: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&added), "{}", text(&added));
+
+        let detached = handler
+            .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+                ensemble_id: ensemble_id.clone(),
+                kind: None,
+                prompt_template: None,
+                members: None,
+                min_pass: None,
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
+                timeout_minutes: None,
+                on_pass_to: None,
+                on_fail_to: None,
+                from_node: None,
+                condition: None,
+                add_entry_from: None,
+                add_entry_condition: None,
+                remove_entry_from: Some(entry.clone()),
+                commit_rights: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&detached), "{}", text(&detached));
+        assert_eq!(
+            db.get_ensemble(&ensemble_id)
+                .unwrap()
+                .unwrap()
+                .entry_from_node,
+            alt
+        );
+
+        let deleted = handler
+            .graph_delete_node(Parameters(GraphDeleteNodeParams {
+                node_id: entry.clone(),
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&deleted), "{}", text(&deleted));
+        assert!(db.get_graph_node(&entry).unwrap().is_none());
+        assert!(db.get_ensemble(&ensemble_id).unwrap().is_some());
+    }
+
+    /// CB52: an ensemble's own member is still refused with the owned-node
+    /// message (FR2 second half) — not with the FR1 reference message.
+    #[tokio::test]
+    async fn graph_delete_node_still_refuses_ensemble_owned_nodes() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let lp = insert_test_graph(&db, dir.path());
+        let spec = insert_test_spec(&db, &lp.id, 1);
+        let entry = add_agent_node(&handler, &spec.id, "Entry").await;
+        let arbiter = add_agent_node(&handler, &spec.id, "Arbiter").await;
+        let ensemble_id =
+            add_cb52_ensemble(&handler, &spec.id, "Reviewers", &entry, &arbiter, None).await;
+        let member_id = db
+            .get_ensemble_details(&ensemble_id)
+            .unwrap()
+            .unwrap()
+            .members[0]
+            .node_id
+            .clone();
+
+        let result = handler
+            .graph_delete_node(Parameters(GraphDeleteNodeParams {
+                node_id: member_id.clone(),
+            }))
+            .await
+            .unwrap();
+        assert!(is_err(&result), "{}", text(&result));
+        let msg = text(&result);
+        assert!(msg.contains("is a member of ensemble"), "{msg}");
+        assert!(db.get_graph_node(&member_id).unwrap().is_some());
+    }
+
+    /// CB52 NFR1(d): `graph_preflight` on a graph with an orphan join
+    /// (simulated pre-CB52 damage: a `join` row with no ensemble row)
+    /// reports it instead of spending probe quota.
+    #[tokio::test]
+    async fn graph_preflight_reports_orphan_join() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let lp = insert_test_graph(&db, dir.path());
+        let spec = insert_test_spec(&db, &lp.id, 1);
+        db.insert_graph_node(&GraphNode {
+            id: "orphan-join".to_string(),
+            spec_id: Some(spec.id.clone()),
+            graph_id: None,
+            name: "orphaned quorum".to_string(),
+            kind: GraphNodeKind::Join,
+            config: serde_json::json!({"ensemble_id": "gone"}),
+            position: 99,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+
+        let result = handler
+            .graph_preflight(Parameters(GraphPreflightParams {
+                graph_id: lp.id.clone(),
+                timeout_seconds: None,
+                reviewer: None,
+            }))
+            .await
+            .unwrap();
+        assert!(is_err(&result), "{}", text(&result));
+        let msg = text(&result);
+        assert!(msg.contains("belongs to no ensemble"), "{msg}");
+        assert!(msg.contains("orphaned quorum"), "{msg}");
+        assert!(msg.contains("orphan-join"), "{msg}");
+    }
+
+    /// CB52 FR4: `graph_get` surfaces the same orphan under
+    /// `orphan_join_warnings` without failing.
+    #[tokio::test]
+    async fn graph_get_includes_orphan_join_warnings() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let lp = insert_test_graph(&db, dir.path());
+        let spec = insert_test_spec(&db, &lp.id, 1);
+        db.insert_graph_node(&GraphNode {
+            id: "orphan-join".to_string(),
+            spec_id: Some(spec.id.clone()),
+            graph_id: None,
+            name: "orphaned quorum".to_string(),
+            kind: GraphNodeKind::Join,
+            config: serde_json::json!({"ensemble_id": "gone"}),
+            position: 99,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+
+        let result = handler
+            .graph_get(Parameters(GraphGetParams {
+                graph_id: lp.id.clone(),
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&result), "{}", text(&result));
+        let body = raw_text(&result);
+        assert!(body.contains("orphan_join_warnings"), "{body}");
+        assert!(body.contains("orphan-join"), "{body}");
+        assert!(body.contains("belongs to no ensemble"), "{body}");
     }
 
     #[tokio::test]

@@ -20,6 +20,132 @@ fn test_db() -> Database {
     Database::new(&path).expect("create test db")
 }
 
+/// CB52: an existing database whose `ensembles` entry/exit FKs are still
+/// `ON DELETE CASCADE` / `ON DELETE SET NULL` is rebuilt to `ON DELETE
+/// RESTRICT` — data preserved, migration idempotent, and afterwards a
+/// direct SQL delete of a referenced node fails instead of silently
+/// deleting the ensemble.
+#[test]
+fn cb52_ensemble_fk_migration_rebuilds_entry_exit_to_restrict() {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "PRAGMA foreign_keys = ON;
+         CREATE TABLE graphs (id TEXT PRIMARY KEY);
+         CREATE TABLE graph_specs (id TEXT PRIMARY KEY);
+         CREATE TABLE graph_nodes (id TEXT PRIMARY KEY);
+         CREATE TABLE ensembles (
+             id TEXT PRIMARY KEY,
+             spec_id TEXT REFERENCES graph_specs(id) ON DELETE CASCADE,
+             graph_id TEXT REFERENCES graphs(id) ON DELETE CASCADE,
+             name TEXT NOT NULL,
+             prompt_template TEXT NOT NULL,
+             join_node_id TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE,
+             entry_from_node TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE,
+             entry_condition TEXT NOT NULL,
+             min_pass INTEGER NOT NULL,
+             timeout_minutes INTEGER NOT NULL,
+             on_pass_to TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE,
+             on_fail_to TEXT REFERENCES graph_nodes(id) ON DELETE SET NULL,
+             created_at INTEGER NOT NULL,
+             CHECK ((spec_id IS NULL) <> (graph_id IS NULL))
+         );
+         CREATE INDEX idx_ensembles_join_node ON ensembles(join_node_id);
+         INSERT INTO graphs VALUES ('g1');
+         INSERT INTO graph_nodes VALUES ('kickoff'), ('join1'), ('arbiter'), ('loner');
+         INSERT INTO ensembles VALUES ('ens1', NULL, 'g1', 'Ens', 'tmpl', 'join1', 'kickoff', 'always', 2, 30, 'arbiter', NULL, 0);",
+    )
+    .unwrap();
+
+    Database::migrate_cb52_ensemble_fk(&conn).unwrap();
+    // Idempotent: a second run is a no-op.
+    Database::migrate_cb52_ensemble_fk(&conn).unwrap();
+
+    let ddl: String = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'ensembles'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        ddl.contains("entry_from_node TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE RESTRICT"),
+        "{ddl}"
+    );
+    assert!(
+        ddl.contains("on_pass_to TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE RESTRICT"),
+        "{ddl}"
+    );
+    assert!(
+        ddl.contains("on_fail_to TEXT REFERENCES graph_nodes(id) ON DELETE RESTRICT"),
+        "{ddl}"
+    );
+    // The ensemble still owns its join: that cascade stays.
+    assert!(
+        ddl.contains("join_node_id TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE"),
+        "{ddl}"
+    );
+
+    // Data survived the rebuild.
+    let entry: String = conn
+        .query_row(
+            "SELECT entry_from_node FROM ensembles WHERE id = 'ens1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(entry, "kickoff");
+
+    // The helper index survived the drop/rename.
+    let index_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_ensembles_join_node'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(index_count, 1);
+
+    // RESTRICT now bites: deleting a referenced node fails instead of
+    // silently deleting the ensemble row.
+    assert!(conn
+        .execute("DELETE FROM graph_nodes WHERE id = 'kickoff'", [])
+        .is_err());
+    assert!(conn
+        .execute("DELETE FROM graph_nodes WHERE id = 'arbiter'", [])
+        .is_err());
+    let remaining: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM ensembles WHERE id = 'ens1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(remaining, 1);
+
+    // An unreferenced node still deletes fine.
+    assert_eq!(
+        conn.execute("DELETE FROM graph_nodes WHERE id = 'loner'", [])
+            .unwrap(),
+        1
+    );
+
+    // The join cascade (FR2 exception) still works: deleting the join
+    // removes the ensemble row it owns.
+    assert_eq!(
+        conn.execute("DELETE FROM graph_nodes WHERE id = 'join1'", [])
+            .unwrap(),
+        1
+    );
+    let remaining: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM ensembles WHERE id = 'ens1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(remaining, 0);
+}
+
 // RETIRED-SCHEMA-NAME-BEGIN (CC3 loop → graph migration: the old names below
 // are the pre-migration schema this test simulates, so they are exempt from
 // the retired-vocabulary guard by design)

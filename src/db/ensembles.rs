@@ -12,7 +12,7 @@ use crate::db::Database;
 use crate::domain::blueprints::{builtin_ensemble_blueprint_specs, EnsembleBlueprint};
 use crate::domain::graphs::{
     Ensemble, EnsembleDetails, EnsembleKind, EnsembleMember, EnsembleMemberSpec, GraphEdge,
-    GraphEdgeCondition, GraphNode,
+    GraphEdgeCondition, GraphNode, GraphNodeKind,
 };
 
 impl Database {
@@ -254,6 +254,120 @@ impl Database {
             Some(id) => self.get_ensemble_details(&id),
             None => Ok(None),
         }
+    }
+
+    /// CB52: every ensemble that references `node_id` without owning it —
+    /// as primary entry (`entry_from_node`), as an extra entry source (an
+    /// edge from `node_id` into a member), or as an exit target
+    /// (`on_pass_to`/`on_fail_to`). Returns one `(details, role)` entry per
+    /// role, where role is `entry_from_node` | `entry_source` | `on_pass_to`
+    /// | `on_fail_to`. Deleting such a node through the public surface is
+    /// refused (`delete_graph_node_checked`); the schema additionally
+    /// declares these FKs `ON DELETE RESTRICT` so a direct SQL delete can
+    /// never silently cascade the ensemble row away and orphan its
+    /// members/join.
+    pub fn ensembles_referencing_node(
+        &self,
+        node_id: &str,
+    ) -> Result<Vec<(EnsembleDetails, String)>> {
+        let all = self.list_all_ensembles()?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let mut out = Vec::new();
+        for details in &all {
+            let ensemble = &details.ensemble;
+            if ensemble.entry_from_node == node_id {
+                out.push((details.clone(), "entry_from_node".to_string()));
+            }
+            if ensemble.on_pass_to == node_id {
+                out.push((details.clone(), "on_pass_to".to_string()));
+            }
+            if let Some(on_fail_to) = &ensemble.on_fail_to {
+                if on_fail_to == node_id {
+                    out.push((details.clone(), "on_fail_to".to_string()));
+                }
+            }
+            // An extra entry source: an edge from this node into a member,
+            // where the node is neither the row's primary entry (already
+            // reported above) nor a node the ensemble owns (a member or the
+            // join — those are refused with the owned-node message instead).
+            if ensemble.entry_from_node != node_id
+                && !details.members.iter().any(|m| m.node_id == node_id)
+                && ensemble.join_node_id != node_id
+            {
+                let edge_count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM graph_edges WHERE from_node = ?1 AND to_node IN (
+                         SELECT node_id FROM ensemble_members WHERE ensemble_id = ?2
+                     )",
+                    params![node_id, ensemble.id],
+                    |row| row.get(0),
+                )?;
+                if edge_count > 0 {
+                    out.push((details.clone(), "entry_source".to_string()));
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// CB52: every `join`-kind node with no `ensembles` row — the state left
+    /// behind when an ensemble row was deleted (pre-fix: silently, via `ON
+    /// DELETE CASCADE` from a referenced node) while its member/join nodes
+    /// survived. Never auto-repaired (C1); reported via `graph_get`'s
+    /// `orphan_join_warnings`, `graph_preflight`, and `canopy doctor`.
+    pub fn list_all_orphan_join_nodes(&self) -> Result<Vec<GraphNode>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let mut stmt = conn.prepare(
+            "SELECT id, spec_id, graph_id, name, kind, config, position, created_at
+             FROM graph_nodes
+             WHERE kind = 'join' AND id NOT IN (SELECT join_node_id FROM ensembles)
+             ORDER BY created_at ASC",
+        )?;
+        let rows = stmt.query_map([], map_orphan_join_node_row)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    /// CB52: [`Self::list_all_orphan_join_nodes`], scoped to one graph's
+    /// top-level graph.
+    pub fn list_orphan_join_nodes_for_graph(&self, graph_id: &str) -> Result<Vec<GraphNode>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let mut stmt = conn.prepare(
+            "SELECT id, spec_id, graph_id, name, kind, config, position, created_at
+             FROM graph_nodes
+             WHERE kind = 'join' AND id NOT IN (SELECT join_node_id FROM ensembles)
+               AND graph_id = ?1
+             ORDER BY created_at ASC",
+        )?;
+        let rows = stmt.query_map(params![graph_id], map_orphan_join_node_row)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    /// CB52: [`Self::list_all_orphan_join_nodes`], scoped to one spec's graph.
+    pub fn list_orphan_join_nodes_for_spec(&self, spec_id: &str) -> Result<Vec<GraphNode>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let mut stmt = conn.prepare(
+            "SELECT id, spec_id, graph_id, name, kind, config, position, created_at
+             FROM graph_nodes
+             WHERE kind = 'join' AND id NOT IN (SELECT join_node_id FROM ensembles)
+               AND spec_id = ?1
+             ORDER BY created_at ASC",
+        )?;
+        let rows = stmt.query_map(params![spec_id], map_orphan_join_node_row)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 
     /// Update the shared prompt on the `ensembles` row itself. Propagating it
@@ -596,6 +710,9 @@ impl Database {
     /// entry source (an ensemble always keeps at least one entry), and when
     /// the detached source was the row's primary entry promotes another
     /// remaining source so the row never names a source with no edges.
+    /// CB52 FR3: this repoint is the load-bearing behavior — `entry_from_node`
+    /// is never left dangling when its source is detached via
+    /// `remove_entry_from`.
     pub fn remove_ensemble_entry_source(&self, ensemble_id: &str, from_node: &str) -> Result<()> {
         let mut conn = self
             .conn
@@ -737,11 +854,13 @@ impl Database {
             tx.execute("DELETE FROM graph_nodes WHERE id = ?1", params![node_id])?;
         }
         // The `ensembles` row is typically already gone here: its
-        // `join_node_id`/`entry_from_node`/`on_pass_to` foreign keys are all
-        // `ON DELETE CASCADE`, so deleting the owned nodes above cascades to
-        // the row itself (existence was verified up front by
-        // `tx_ensemble_graph_scope`). Delete explicitly anyway for the case
-        // where a foreign key was deferred — affecting zero rows is fine.
+        // `join_node_id` foreign key is `ON DELETE CASCADE`, so deleting the
+        // owned nodes above cascades to the row itself (existence was verified
+        // up front by `tx_ensemble_graph_scope`). The entry/exit FKs
+        // (`entry_from_node`/`on_pass_to`/`on_fail_to`) are CB52 `ON DELETE
+        // RESTRICT` — they name nodes this unit does not own, so they never
+        // fire here. Delete explicitly anyway for the case where a foreign
+        // key was deferred — affecting zero rows is fine.
         tx.execute("DELETE FROM ensembles WHERE id = ?1", params![ensemble_id])?;
         tx.commit()?;
         Ok(DeletedEnsembleUnit {
@@ -1018,6 +1137,37 @@ fn map_ensemble_member_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Ensemble
         model: row.get(4)?,
         prompt_override: row.get(5)?,
         timeout_minutes: row.get(6)?,
+    })
+}
+
+/// CB52: map a `graph_nodes` row for the orphan-join helpers — same column
+/// order as `map_graph_node_row` (`id, spec_id, graph_id, name, kind,
+/// config, position, created_at`), duplicated here because that mapper is
+/// private to `db::graphs`.
+fn map_orphan_join_node_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<GraphNode> {
+    let kind = GraphNodeKind::from_str(&row.get::<_, String>(4)?).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            4,
+            rusqlite::types::Type::Text,
+            Box::new(IoError::new(
+                ErrorKind::InvalidData,
+                "Invalid graph node kind",
+            )),
+        )
+    })?;
+    let config_raw: String = row.get(5)?;
+    let config = serde_json::from_str(&config_raw).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, Box::new(error))
+    })?;
+    Ok(GraphNode {
+        id: row.get(0)?,
+        spec_id: row.get(1)?,
+        graph_id: row.get(2)?,
+        name: row.get(3)?,
+        kind,
+        config,
+        position: row.get(6)?,
+        created_at: from_timestamp(row.get(7)?)?,
     })
 }
 
@@ -1376,6 +1526,211 @@ mod tests {
                 .collect::<Vec<_>>(),
             member_ids
         );
+    }
+
+    /// CB52 fixture: a spec-scoped ensemble with two entry sources
+    /// (`kickoff` primary, `alt_entry` extra), `on_pass_to = arbiter`,
+    /// `on_fail_to = fallback`, plus an unrelated node.
+    fn insert_cb52_ensemble(db: &Database) {
+        insert_spec(db, "spec-1");
+        for (id, kind, position) in [
+            ("kickoff", GraphNodeKind::Check, 1),
+            ("alt_entry", GraphNodeKind::Check, 2),
+            ("arbiter", GraphNodeKind::Agent, 6),
+            ("fallback", GraphNodeKind::Agent, 7),
+            ("unrelated", GraphNodeKind::Agent, 8),
+        ] {
+            db.insert_graph_node(&GraphNode {
+                id: id.to_string(),
+                spec_id: Some("spec-1".to_string()),
+                graph_id: None,
+                name: id.to_string(),
+                kind,
+                config: serde_json::json!({}),
+                position,
+                created_at: Utc::now(),
+            })
+            .unwrap();
+        }
+        let now = Utc::now();
+        let member_ids = ["m1", "m2"];
+        let member_nodes: Vec<GraphNode> = member_ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| GraphNode {
+                id: id.to_string(),
+                spec_id: Some("spec-1".to_string()),
+                graph_id: None,
+                name: format!("member-{}", i + 1),
+                kind: GraphNodeKind::Agent,
+                config: serde_json::json!({
+                    "platform": "openrouter",
+                    "prompt_template": "draft it",
+                }),
+                position: 3 + i as i64,
+                created_at: now,
+            })
+            .collect();
+        let join_node = GraphNode {
+            id: "join1".to_string(),
+            spec_id: Some("spec-1".to_string()),
+            graph_id: None,
+            name: "quorum".to_string(),
+            kind: GraphNodeKind::Join,
+            config: serde_json::json!({"ensemble_id": "ens1"}),
+            position: 5,
+            created_at: now,
+        };
+        let mut edges = Vec::new();
+        for entry in ["kickoff", "alt_entry"] {
+            for id in &member_ids {
+                edges.push(GraphEdge {
+                    id: format!("{entry}->{id}"),
+                    spec_id: Some("spec-1".to_string()),
+                    graph_id: None,
+                    from_node: entry.to_string(),
+                    to_node: id.to_string(),
+                    condition: GraphEdgeCondition::Always,
+                });
+            }
+        }
+        for id in &member_ids {
+            edges.push(GraphEdge {
+                id: format!("{id}->join1"),
+                spec_id: Some("spec-1".to_string()),
+                graph_id: None,
+                from_node: id.to_string(),
+                to_node: "join1".to_string(),
+                condition: GraphEdgeCondition::Always,
+            });
+        }
+        edges.push(GraphEdge {
+            id: "join1->arbiter".to_string(),
+            spec_id: Some("spec-1".to_string()),
+            graph_id: None,
+            from_node: "join1".to_string(),
+            to_node: "arbiter".to_string(),
+            condition: GraphEdgeCondition::Pass,
+        });
+        edges.push(GraphEdge {
+            id: "join1->fallback".to_string(),
+            spec_id: Some("spec-1".to_string()),
+            graph_id: None,
+            from_node: "join1".to_string(),
+            to_node: "fallback".to_string(),
+            condition: GraphEdgeCondition::Fail,
+        });
+        let ensemble = Ensemble {
+            commit_rights: false,
+            id: "ens1".to_string(),
+            spec_id: Some("spec-1".to_string()),
+            graph_id: None,
+            name: "Proposers".to_string(),
+            prompt_template: "draft it".to_string(),
+            join_node_id: "join1".to_string(),
+            entry_from_node: "kickoff".to_string(),
+            entry_condition: GraphEdgeCondition::Always,
+            min_pass: 2,
+            straggler_timeout_minutes: None,
+            quorum_grace_minutes: None,
+            timeout_minutes: 30,
+            on_pass_to: "arbiter".to_string(),
+            on_fail_to: Some("fallback".to_string()),
+            kind: EnsembleKind::Parallel,
+            round_robin_index: None,
+            created_at: now,
+        };
+        let members: Vec<EnsembleMember> = member_ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| EnsembleMember {
+                ensemble_id: "ens1".to_string(),
+                node_id: id.to_string(),
+                position: i as i64,
+                platform: "openrouter".to_string(),
+                model: Some(format!("model-{i}")),
+                prompt_override: None,
+                timeout_minutes: None,
+            })
+            .collect();
+        db.insert_ensemble_unit(&ensemble, &members, &member_nodes, &join_node, &edges)
+            .unwrap();
+    }
+
+    /// CB52 FR1 (DB half): every reference role is reported — primary entry,
+    /// extra entry source, pass exit, fail exit — and nothing else is.
+    /// A test that only covered one role would still pass with the other
+    /// three roles' checks removed.
+    #[test]
+    fn ensembles_referencing_node_reports_all_four_roles() {
+        let db = test_db();
+        insert_cb52_ensemble(&db);
+
+        let roles_for = |node_id: &str| {
+            let mut roles: Vec<String> = db
+                .ensembles_referencing_node(node_id)
+                .unwrap()
+                .into_iter()
+                .map(|(_, role)| role)
+                .collect();
+            roles.sort();
+            roles
+        };
+        assert_eq!(roles_for("kickoff"), vec!["entry_from_node"]);
+        assert_eq!(roles_for("alt_entry"), vec!["entry_source"]);
+        assert_eq!(roles_for("arbiter"), vec!["on_pass_to"]);
+        assert_eq!(roles_for("fallback"), vec!["on_fail_to"]);
+        assert!(roles_for("unrelated").is_empty());
+        // Owned nodes are not "references": the member/join guard owns them.
+        assert!(roles_for("m1").is_empty());
+        assert!(roles_for("join1").is_empty());
+
+        // Each hit names the ensemble it belongs to.
+        let hits = db.ensembles_referencing_node("kickoff").unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].0.ensemble.id, "ens1");
+        assert_eq!(hits[0].0.ensemble.name, "Proposers");
+    }
+
+    /// CB52 FR4 (DB half): only a join node with no ensemble row is listed —
+    /// a healthy ensemble's own join never is — and the per-graph/per-spec
+    /// scopes agree with the global one.
+    #[test]
+    fn orphan_join_detection_lists_only_unowned_joins() {
+        let db = test_db();
+        insert_cb52_ensemble(&db);
+        assert!(db.list_all_orphan_join_nodes().unwrap().is_empty());
+
+        db.insert_graph_node(&GraphNode {
+            id: "orphan-join".to_string(),
+            spec_id: Some("spec-1".to_string()),
+            graph_id: None,
+            name: "orphaned quorum".to_string(),
+            kind: GraphNodeKind::Join,
+            config: serde_json::json!({"ensemble_id": "gone"}),
+            position: 9,
+            created_at: Utc::now(),
+        })
+        .unwrap();
+
+        let all = db.list_all_orphan_join_nodes().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].id, "orphan-join");
+        assert_eq!(all[0].name, "orphaned quorum");
+
+        let for_spec = db.list_orphan_join_nodes_for_spec("spec-1").unwrap();
+        assert_eq!(for_spec.len(), 1);
+        assert_eq!(for_spec[0].id, "orphan-join");
+
+        // Wrong scopes see nothing.
+        assert!(db
+            .list_orphan_join_nodes_for_spec("no-such-spec")
+            .unwrap()
+            .is_empty());
+        assert!(db
+            .list_orphan_join_nodes_for_graph("no-such-graph")
+            .unwrap()
+            .is_empty());
     }
 
     /// `graph_update_ensemble`'s prompt-propagation contract: updating the

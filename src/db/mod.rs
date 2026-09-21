@@ -10,7 +10,10 @@ use std::sync::{Arc, Mutex};
 /// the `activity_log` table (CM20 bitácora).
 /// Version 5 renames the loop→graph schema (tables, `loop_id` columns, and
 /// `break`→`error` edge conditions) — see `migrate_loop_to_graph_schema` (CC3).
-const SCHEMA_VERSION: i64 = 5;
+/// Version 6 changes the `ensembles` entry/exit FKs from `ON DELETE CASCADE`
+/// / `ON DELETE SET NULL` to `ON DELETE RESTRICT` — see
+/// `migrate_cb52_ensemble_fk` (CB52).
+const SCHEMA_VERSION: i64 = 6;
 
 /// Thread-safe `SQLite` database wrapper.
 ///
@@ -332,6 +335,112 @@ impl Database {
     }
     // RETIRED-SCHEMA-NAME-END
 
+    /// CB52: the `ensembles` entry/exit FKs (`entry_from_node`, `on_pass_to`,
+    /// `on_fail_to`) used to be `ON DELETE CASCADE` / `ON DELETE SET NULL`,
+    /// so deleting a plain node silently deleted every ensemble referencing
+    /// it and orphaned its members/join. Fresh databases get `ON DELETE
+    /// RESTRICT` from the `CREATE TABLE` batch below; this rebuilds the table
+    /// on existing databases. SQLite cannot `ALTER` FK actions, so the table
+    /// is copied and renamed — the documented procedure (foreign keys off
+    /// during the rebuild, `foreign_key_check` after). The replacement table
+    /// is derived from the stored DDL by swapping exactly the three FK
+    /// actions, so later columns (`kind`, `round_robin_index`,
+    /// `quorum_grace_minutes`, `commit_rights`, ...) survive untouched.
+    /// Never auto-repairs orphans (C1): pre-existing orphan joins are
+    /// reported by `canopy doctor` instead.
+    fn migrate_cb52_ensemble_fk(conn: &Connection) -> Result<()> {
+        let sql: Option<String> = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'ensembles'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(sql) = sql else {
+            return Ok(());
+        };
+        const ENTRY_CASCADE: &str =
+            "entry_from_node TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE";
+        const PASS_CASCADE: &str =
+            "on_pass_to TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE";
+        const FAIL_SET_NULL: &str = "on_fail_to TEXT REFERENCES graph_nodes(id) ON DELETE SET NULL";
+        if !sql.contains(ENTRY_CASCADE)
+            && !sql.contains(PASS_CASCADE)
+            && !sql.contains(FAIL_SET_NULL)
+        {
+            return Ok(());
+        }
+        // The first `ensembles` in the stored DDL is the table name itself.
+        let new_sql = sql
+            .replacen("ensembles", "ensembles_new", 1)
+            .replace(
+                ENTRY_CASCADE,
+                "entry_from_node TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE RESTRICT",
+            )
+            .replace(
+                PASS_CASCADE,
+                "on_pass_to TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE RESTRICT",
+            )
+            .replace(
+                FAIL_SET_NULL,
+                "on_fail_to TEXT REFERENCES graph_nodes(id) ON DELETE RESTRICT",
+            );
+        if !new_sql.contains("ensembles_new")
+            || !new_sql.contains("ON DELETE RESTRICT")
+            || new_sql.contains(ENTRY_CASCADE)
+            || new_sql.contains(PASS_CASCADE)
+            || new_sql.contains(FAIL_SET_NULL)
+        {
+            anyhow::bail!("CB52 ensemble FK migration failed: unexpected stored ensembles DDL");
+        }
+        let mut stmt = conn.prepare("SELECT name FROM pragma_table_info('ensembles')")?;
+        let cols: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if cols.is_empty() {
+            anyhow::bail!("CB52 ensemble FK migration failed: ensembles table has no columns");
+        }
+        let collist = cols.join(", ");
+
+        conn.execute_batch("PRAGMA foreign_keys=OFF;")?;
+        let rebuild = (|| -> Result<()> {
+            conn.execute_batch("BEGIN TRANSACTION;")?;
+            let steps = [
+                new_sql.clone(),
+                format!("INSERT INTO ensembles_new ({collist}) SELECT {collist} FROM ensembles;"),
+                "DROP TABLE ensembles;".to_string(),
+                "ALTER TABLE ensembles_new RENAME TO ensembles;".to_string(),
+                "CREATE INDEX IF NOT EXISTS idx_ensembles_join_node ON ensembles(join_node_id);"
+                    .to_string(),
+            ];
+            for step in &steps {
+                if let Err(e) = conn.execute_batch(step) {
+                    let _ = conn.execute_batch("ROLLBACK;");
+                    anyhow::bail!("CB52 ensemble FK migration failed: {e}");
+                }
+            }
+            if let Err(e) = conn.execute_batch("COMMIT;") {
+                let _ = conn.execute_batch("ROLLBACK;");
+                anyhow::bail!("CB52 ensemble FK migration failed: {e}");
+            }
+            Ok(())
+        })();
+        conn.execute_batch("PRAGMA foreign_keys=ON;")?;
+        rebuild?;
+
+        let fk_violations: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
+            .map_err(|e| anyhow::anyhow!("CB52 ensemble FK migration failed: {e}"))?;
+        if fk_violations > 0 {
+            anyhow::bail!(
+                "CB52 ensemble FK migration failed: {fk_violations} foreign key violation(s) detected after migration"
+            );
+        }
+        Ok(())
+    }
+
     fn init(&self) -> Result<()> {
         let conn = self
             .conn
@@ -341,6 +450,7 @@ impl Database {
         Self::check_schema_version(&conn)?;
         Self::migrate_legacy_queue_schema(&conn)?;
         Self::migrate_loop_to_graph_schema(&conn)?;
+        Self::migrate_cb52_ensemble_fk(&conn)?;
 
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS agents (
@@ -689,14 +799,14 @@ impl Database {
                 name TEXT NOT NULL,
                 prompt_template TEXT NOT NULL,
                 join_node_id TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE,
-                entry_from_node TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE,
+                entry_from_node TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE RESTRICT,
                 entry_condition TEXT NOT NULL,
                 min_pass INTEGER NOT NULL,
                 straggler_timeout_minutes INTEGER,
                 quorum_grace_minutes INTEGER,
                 timeout_minutes INTEGER NOT NULL,
-                on_pass_to TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE,
-                on_fail_to TEXT REFERENCES graph_nodes(id) ON DELETE SET NULL,
+                on_pass_to TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE RESTRICT,
+                on_fail_to TEXT REFERENCES graph_nodes(id) ON DELETE RESTRICT,
                 commit_rights INTEGER NOT NULL DEFAULT 0,
                 created_at INTEGER NOT NULL,
                 CHECK ((spec_id IS NULL) <> (graph_id IS NULL))
