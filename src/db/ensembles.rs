@@ -491,66 +491,131 @@ impl Database {
         Ok(rows > 0)
     }
 
-    /// Add one new member — its node, `ensemble_members` row, entry edge
-    /// (from the ensemble's own `entry_from_node`/`entry_condition`), and
-    /// join edge — in one transaction. Used by `graph_update_ensemble` when
-    /// growing the member list.
-    pub fn add_ensemble_member(
+    /// Replace the complete member list and rebuild entry fan-out in one
+    /// transaction. Entry sources are derived from the existing edges before
+    /// membership changes, so secondary sources and their conditions survive
+    /// resizes.
+    pub fn replace_ensemble_members(
         &self,
-        member: &EnsembleMember,
-        node: &GraphNode,
-        entry_edge: &GraphEdge,
-        join_edge: &GraphEdge,
+        ensemble_id: &str,
+        members: &[EnsembleMember],
+        member_nodes: &[GraphNode],
     ) -> Result<()> {
+        if members.len() != member_nodes.len() {
+            anyhow::bail!("Member and member-node plans must have the same length.");
+        }
+
         let mut conn = self
             .conn
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let tx = conn.transaction()?;
+        let (spec_id, graph_id, join_node_id, old_member_ids) =
+            tx_ensemble_graph_scope(&tx, ensemble_id)?;
+        let sources = tx_entry_sources(&tx, ensemble_id, &old_member_ids, &join_node_id)?;
 
-        tx.execute(
-            "INSERT INTO graph_nodes (id, spec_id, graph_id, name, kind, config, position, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![
-                &node.id,
-                &node.spec_id,
-                &node.graph_id,
-                &node.name,
-                node.kind.as_str(),
-                serde_json::to_string(&node.config)?,
-                node.position,
-                node.created_at.timestamp(),
-            ],
-        )?;
+        delete_entry_edges(&tx, &old_member_ids, &join_node_id)?;
 
-        for edge in [entry_edge, join_edge] {
+        for old_member_id in old_member_ids.iter().skip(members.len()) {
             tx.execute(
-                "INSERT INTO graph_edges (id, spec_id, graph_id, from_node, to_node, condition)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    &edge.id,
-                    &edge.spec_id,
-                    &edge.graph_id,
-                    &edge.from_node,
-                    &edge.to_node,
-                    edge.condition.as_str(),
-                ],
+                "DELETE FROM graph_nodes WHERE id = ?1",
+                params![old_member_id],
             )?;
         }
 
-        tx.execute(
-            "INSERT INTO ensemble_members (ensemble_id, node_id, position, platform, model, prompt_override, timeout_minutes)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                &member.ensemble_id,
-                &member.node_id,
-                member.position,
-                &member.platform,
-                &member.model,
-                &member.prompt_override,
-                &member.timeout_minutes,
-            ],
-        )?;
+        for (index, (member, node)) in members.iter().zip(member_nodes).enumerate() {
+            if index < old_member_ids.len() {
+                tx.execute(
+                    "UPDATE graph_nodes
+                     SET spec_id = ?1, graph_id = ?2, name = ?3, kind = ?4,
+                         config = ?5, position = ?6, created_at = ?7
+                     WHERE id = ?8",
+                    params![
+                        &node.spec_id,
+                        &node.graph_id,
+                        &node.name,
+                        node.kind.as_str(),
+                        serde_json::to_string(&node.config)?,
+                        node.position,
+                        node.created_at.timestamp(),
+                        &member.node_id,
+                    ],
+                )?;
+                tx.execute(
+                    "UPDATE ensemble_members
+                     SET node_id = ?1, position = ?2, platform = ?3, model = ?4,
+                         prompt_override = ?5, timeout_minutes = ?6
+                     WHERE ensemble_id = ?7 AND position = ?8",
+                    params![
+                        &member.node_id,
+                        member.position,
+                        &member.platform,
+                        &member.model,
+                        &member.prompt_override,
+                        &member.timeout_minutes,
+                        ensemble_id,
+                        member.position,
+                    ],
+                )?;
+            } else {
+                tx.execute(
+                    "INSERT INTO graph_nodes (id, spec_id, graph_id, name, kind, config, position, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    params![
+                        &node.id,
+                        &node.spec_id,
+                        &node.graph_id,
+                        &node.name,
+                        node.kind.as_str(),
+                        serde_json::to_string(&node.config)?,
+                        node.position,
+                        node.created_at.timestamp(),
+                    ],
+                )?;
+                tx.execute(
+                    "INSERT INTO ensemble_members
+                     (ensemble_id, node_id, position, platform, model, prompt_override, timeout_minutes)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        &member.ensemble_id,
+                        &member.node_id,
+                        member.position,
+                        &member.platform,
+                        &member.model,
+                        &member.prompt_override,
+                        &member.timeout_minutes,
+                    ],
+                )?;
+                tx.execute(
+                    "INSERT INTO graph_edges
+                     (id, spec_id, graph_id, from_node, to_node, condition)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        uuid::Uuid::new_v4().to_string(),
+                        &node.spec_id,
+                        &node.graph_id,
+                        &node.id,
+                        &join_node_id,
+                        GraphEdgeCondition::Always.as_str(),
+                    ],
+                )?;
+            }
+        }
+
+        let resulting_member_ids: Vec<String> = members
+            .iter()
+            .map(|member| member.node_id.clone())
+            .collect();
+        for (from_node, condition) in sources {
+            insert_missing_entry_fan_out(
+                &tx,
+                spec_id.as_deref(),
+                graph_id.as_deref(),
+                &from_node,
+                &condition,
+                &resulting_member_ids,
+            )?;
+        }
 
         tx.commit()?;
         Ok(())
@@ -558,19 +623,20 @@ impl Database {
 
     /// Remove a member outright: deletes its `graph_nodes` row, which cascades
     /// away its `ensemble_members` row and both wiring edges (entry, join) —
-    /// every one of those FKs is `ON DELETE CASCADE`. Used by
-    /// `graph_update_ensemble` when shrinking the member list.
+    /// every one of those FKs is `ON DELETE CASCADE`. Test-only helper since
+    /// `graph_update_ensemble` moved to [`Self::replace_ensemble_members`].
+    #[allow(dead_code)]
     pub fn remove_ensemble_member(&self, node_id: &str) -> Result<bool> {
         self.delete_graph_node(node_id)
     }
 
     /// Update an existing member's `platform`/`model`/`prompt_override`/
-    /// `timeout_minutes` in place — used by `graph_update_ensemble` when the
-    /// member count is unchanged (only the fields at a given position
-    /// changed). Always sets `prompt_override`/`timeout_minutes` outright
-    /// (never "leave unchanged") since a replacement member list is always
-    /// given in full. The caller separately updates the member node's own
-    /// `config` via [`Self::update_graph_node_details`].
+    /// `timeout_minutes` in place. Always sets `prompt_override`/
+    /// `timeout_minutes` outright (never "leave unchanged"). The caller
+    /// separately updates the member node's own `config` via
+    /// [`Self::update_graph_node_details`]. Test-only helper since
+    /// `graph_update_ensemble` moved to [`Self::replace_ensemble_members`].
+    #[allow(dead_code)]
     pub fn update_ensemble_member(
         &self,
         ensemble_id: &str,
@@ -665,8 +731,9 @@ impl Database {
     /// Add one more entry source to an ensemble, atomically: entry edges from
     /// `from_node` to every member are inserted alongside the existing ones,
     /// so the ensemble can be entered from several places with no relay node.
-    /// Refuses a node that is already an entry source. The `ensembles` row is
-    /// untouched — it keeps naming the primary entry.
+    /// Existing sources are completed idempotently; a partial source gets the
+    /// missing edges for each condition already represented by its edges.
+    /// The `ensembles` row is untouched — it keeps naming the primary entry.
     pub fn add_ensemble_entry_source(
         &self,
         ensemble_id: &str,
@@ -678,29 +745,35 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let tx = conn.transaction()?;
-        let (spec_id, graph_id, _, member_ids) = tx_ensemble_graph_scope(&tx, ensemble_id)?;
-
-        let already: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM graph_edges WHERE from_node = ?1 AND to_node IN (
-                 SELECT node_id FROM ensemble_members WHERE ensemble_id = ?2
-             )",
-            params![from_node, ensemble_id],
-            |row| row.get(0),
-        )?;
-        if already > 0 {
-            anyhow::bail!(
-                "Node '{from_node}' is already an entry source of ensemble '{ensemble_id}'; pass a different node, or detach it first with remove_entry_from."
-            );
+        let (spec_id, graph_id, join_node_id, member_ids) =
+            tx_ensemble_graph_scope(&tx, ensemble_id)?;
+        let existing_sources = tx_entry_sources(&tx, ensemble_id, &member_ids, &join_node_id)?;
+        let conditions: Vec<GraphEdgeCondition> = existing_sources
+            .iter()
+            .filter(|(node, _)| node == from_node)
+            .map(|(_, condition)| condition.clone())
+            .collect();
+        if conditions.is_empty() {
+            insert_missing_entry_fan_out(
+                &tx,
+                spec_id.as_deref(),
+                graph_id.as_deref(),
+                from_node,
+                condition,
+                &member_ids,
+            )?;
+        } else {
+            for existing_condition in conditions {
+                insert_missing_entry_fan_out(
+                    &tx,
+                    spec_id.as_deref(),
+                    graph_id.as_deref(),
+                    from_node,
+                    &existing_condition,
+                    &member_ids,
+                )?;
+            }
         }
-
-        insert_entry_fan_out(
-            &tx,
-            spec_id.as_deref(),
-            graph_id.as_deref(),
-            from_node,
-            condition,
-            &member_ids,
-        )?;
         tx.commit()?;
         Ok(())
     }
@@ -1339,6 +1412,36 @@ fn insert_entry_fan_out(
             ],
         )?;
     }
+
+    Ok(())
+}
+
+fn insert_missing_entry_fan_out(
+    tx: &rusqlite::Transaction<'_>,
+    spec_id: Option<&str>,
+    graph_id: Option<&str>,
+    from_node: &str,
+    condition: &GraphEdgeCondition,
+    member_ids: &[String],
+) -> Result<()> {
+    for member_id in member_ids {
+        tx.execute(
+            "INSERT INTO graph_edges (id, spec_id, graph_id, from_node, to_node, condition)
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM graph_edges
+                 WHERE from_node = ?4 AND to_node = ?5 AND condition = ?6
+             )",
+            params![
+                uuid::Uuid::new_v4().to_string(),
+                spec_id,
+                graph_id,
+                from_node,
+                member_id,
+                condition.as_str(),
+            ],
+        )?;
+    }
     Ok(())
 }
 
@@ -1658,6 +1761,162 @@ mod tests {
             .collect();
         db.insert_ensemble_unit(&ensemble, &members, &member_nodes, &join_node, &edges)
             .unwrap();
+    }
+
+    #[test]
+    fn replace_ensemble_members_preserves_all_entry_sources_on_resize() {
+        let db = test_db();
+        insert_cb52_ensemble(&db);
+        let now = Utc::now();
+        let mut members = db.list_ensemble_members("ens1").unwrap();
+        let mut nodes: Vec<GraphNode> = members
+            .iter()
+            .map(|member| db.get_graph_node(&member.node_id).unwrap().unwrap())
+            .collect();
+        for (position, id) in [(2, "m3"), (3, "m4")] {
+            members.push(EnsembleMember {
+                ensemble_id: "ens1".to_string(),
+                node_id: id.to_string(),
+                position,
+                platform: "openrouter".to_string(),
+                model: Some(format!("model-{position}")),
+                prompt_override: None,
+                timeout_minutes: None,
+            });
+            nodes.push(GraphNode {
+                id: id.to_string(),
+                spec_id: Some("spec-1".to_string()),
+                graph_id: None,
+                name: format!("member-{}", position + 1),
+                kind: GraphNodeKind::Agent,
+                config: serde_json::json!({
+                    "platform": "openrouter",
+                    "prompt_template": "draft it",
+                }),
+                position: 9 + position,
+                created_at: now,
+            });
+        }
+
+        db.replace_ensemble_members("ens1", &members, &nodes)
+            .unwrap();
+        let four_ids: std::collections::HashSet<_> = members
+            .iter()
+            .map(|member| member.node_id.as_str())
+            .collect();
+        let entry_edges = db
+            .list_graph_edges("spec-1")
+            .unwrap()
+            .into_iter()
+            .filter(|edge| {
+                ["kickoff", "alt_entry"].contains(&edge.from_node.as_str())
+                    && four_ids.contains(edge.to_node.as_str())
+            })
+            .count();
+        assert_eq!(entry_edges, 8);
+
+        let shrunk_members = members[..3].to_vec();
+        let shrunk_nodes = nodes[..3].to_vec();
+        db.replace_ensemble_members("ens1", &shrunk_members, &shrunk_nodes)
+            .unwrap();
+        let three_ids: std::collections::HashSet<_> = shrunk_members
+            .iter()
+            .map(|member| member.node_id.as_str())
+            .collect();
+        let entry_edges = db
+            .list_graph_edges("spec-1")
+            .unwrap()
+            .into_iter()
+            .filter(|edge| {
+                ["kickoff", "alt_entry"].contains(&edge.from_node.as_str())
+                    && three_ids.contains(edge.to_node.as_str())
+            })
+            .count();
+        assert_eq!(entry_edges, 6);
+        assert!(db.get_graph_node("m4").unwrap().is_none());
+    }
+
+    #[test]
+    fn replace_ensemble_members_rolls_back_on_insert_failure() {
+        let db = test_db();
+        insert_cb52_ensemble(&db);
+        let before_members = db.list_ensemble_members("ens1").unwrap();
+        let before_edges = db.list_graph_edges("spec-1").unwrap();
+        let now = Utc::now();
+        let mut members = before_members.clone();
+        members.push(EnsembleMember {
+            ensemble_id: "ens1".to_string(),
+            node_id: "kickoff".to_string(),
+            position: 2,
+            platform: "openrouter".to_string(),
+            model: Some("bad-member".to_string()),
+            prompt_override: None,
+            timeout_minutes: None,
+        });
+        let mut nodes: Vec<GraphNode> = before_members
+            .iter()
+            .map(|member| db.get_graph_node(&member.node_id).unwrap().unwrap())
+            .collect();
+        nodes.push(GraphNode {
+            id: "kickoff".to_string(),
+            spec_id: Some("spec-1".to_string()),
+            graph_id: None,
+            name: "duplicate".to_string(),
+            kind: GraphNodeKind::Agent,
+            config: serde_json::json!({}),
+            position: 99,
+            created_at: now,
+        });
+
+        assert!(db
+            .replace_ensemble_members("ens1", &members, &nodes)
+            .is_err());
+        let member_ids = |members: Vec<EnsembleMember>| {
+            members
+                .into_iter()
+                .map(|member| (member.node_id, member.position))
+                .collect::<Vec<_>>()
+        };
+        let edge_ids = |edges: Vec<GraphEdge>| {
+            edges
+                .into_iter()
+                .map(|edge| (edge.id, edge.from_node, edge.to_node, edge.condition))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            member_ids(db.list_ensemble_members("ens1").unwrap()),
+            member_ids(before_members)
+        );
+        assert_eq!(
+            edge_ids(db.list_graph_edges("spec-1").unwrap()),
+            edge_ids(before_edges)
+        );
+    }
+
+    #[test]
+    fn add_ensemble_entry_source_repairs_partial_source_idempotently() {
+        let db = test_db();
+        insert_cb52_ensemble(&db);
+        let missing = db
+            .list_graph_edges("spec-1")
+            .unwrap()
+            .into_iter()
+            .find(|edge| edge.from_node == "alt_entry" && edge.to_node == "m2")
+            .unwrap();
+        assert!(db.delete_graph_edge(&missing.id).unwrap());
+
+        db.add_ensemble_entry_source("ens1", "alt_entry", &GraphEdgeCondition::Always)
+            .unwrap();
+        db.add_ensemble_entry_source("ens1", "alt_entry", &GraphEdgeCondition::Pass)
+            .unwrap();
+        let repaired = db
+            .list_graph_edges("spec-1")
+            .unwrap()
+            .into_iter()
+            .filter(|edge| edge.from_node == "alt_entry")
+            .collect::<Vec<_>>();
+        assert_eq!(repaired.len(), 2);
+        assert!(repaired.iter().any(|edge| edge.to_node == "m2"));
     }
 
     /// CB52 FR1 (DB half): every reference role is reported — primary entry,

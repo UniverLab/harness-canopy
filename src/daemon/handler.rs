@@ -6839,101 +6839,60 @@ impl TaskTriggerHandler {
             let old_members = details.members.clone();
             let old_len = old_members.len();
             let new_len = members.len();
-
+            let start_position = owner_nodes
+                .last()
+                .map(|node| node.position + 1)
+                .unwrap_or(1);
+            let mut resulting_members = Vec::with_capacity(new_len);
+            let mut resulting_nodes = Vec::with_capacity(new_len);
             for (index, (platform, model, prompt_override, member_timeout_minutes)) in
-                members.iter().enumerate().take(old_len.min(new_len))
+                members.iter().enumerate()
             {
-                let existing = &old_members[index];
-                self.db
-                    .update_ensemble_member(
-                        &ensemble_id,
-                        &existing.node_id,
-                        platform,
-                        model.as_deref(),
-                        prompt_override.as_deref(),
-                        *member_timeout_minutes,
-                    )
-                    .map_err(internal_error)?;
                 let effective_prompt =
                     effective_member_prompt(prompt_override.as_deref(), prompt_template);
                 let effective_timeout_minutes = member_timeout_minutes.unwrap_or(timeout_minutes);
-                let config = member_node_config(
-                    platform,
-                    model.as_deref(),
-                    effective_prompt,
-                    effective_timeout_minutes,
-                );
-                self.db
-                    .update_graph_node_details(&existing.node_id, None, None, Some(&config), None)
-                    .map_err(internal_error)?;
+                let node_id = old_members
+                    .get(index)
+                    .map(|member| member.node_id.clone())
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                let existing_node = owner_nodes.iter().find(|node| node.id == node_id);
+                let position = match existing_node {
+                    Some(node) => node.position,
+                    None => start_position + (index - old_len) as i64,
+                };
+                let node = GraphNode {
+                    id: node_id.clone(),
+                    spec_id: details.ensemble.spec_id.clone(),
+                    graph_id: details.ensemble.graph_id.clone(),
+                    name: existing_node
+                        .map(|node| node.name.clone())
+                        .unwrap_or_else(|| format!("{} [{}]", details.ensemble.name, index + 1)),
+                    kind: GraphNodeKind::Agent,
+                    config: member_node_config(
+                        platform,
+                        model.as_deref(),
+                        effective_prompt,
+                        effective_timeout_minutes,
+                    ),
+                    position,
+                    created_at: existing_node
+                        .map(|node| node.created_at)
+                        .unwrap_or_else(chrono::Utc::now),
+                };
+                resulting_members.push(EnsembleMember {
+                    ensemble_id: ensemble_id.to_string(),
+                    node_id,
+                    position: index as i64,
+                    platform: platform.clone(),
+                    model: model.clone(),
+                    prompt_override: prompt_override.clone(),
+                    timeout_minutes: *member_timeout_minutes,
+                });
+                resulting_nodes.push(node);
             }
-
-            if new_len > old_len {
-                let start_position = owner_nodes
-                    .last()
-                    .map(|node| node.position + 1)
-                    .unwrap_or(1);
-                for (i, (platform, model, prompt_override, member_timeout_minutes)) in
-                    members[old_len..new_len].iter().enumerate()
-                {
-                    let next_position = start_position + i as i64;
-                    let next_member_position = old_len as i64 + i as i64;
-                    let node_id = uuid::Uuid::new_v4().to_string();
-                    let effective_prompt =
-                        effective_member_prompt(prompt_override.as_deref(), prompt_template);
-                    let effective_timeout_minutes =
-                        member_timeout_minutes.unwrap_or(timeout_minutes);
-                    let node = GraphNode {
-                        id: node_id.clone(),
-                        spec_id: details.ensemble.spec_id.clone(),
-                        graph_id: details.ensemble.graph_id.clone(),
-                        name: format!("{} [{}]", details.ensemble.name, next_member_position + 1),
-                        kind: GraphNodeKind::Agent,
-                        config: member_node_config(
-                            platform,
-                            model.as_deref(),
-                            effective_prompt,
-                            effective_timeout_minutes,
-                        ),
-                        position: next_position,
-                        created_at: chrono::Utc::now(),
-                    };
-                    let entry_edge = GraphEdge {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        spec_id: details.ensemble.spec_id.clone(),
-                        graph_id: details.ensemble.graph_id.clone(),
-                        from_node: details.ensemble.entry_from_node.clone(),
-                        to_node: node_id.clone(),
-                        condition: details.ensemble.entry_condition.clone(),
-                    };
-                    let join_edge = GraphEdge {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        spec_id: details.ensemble.spec_id.clone(),
-                        graph_id: details.ensemble.graph_id.clone(),
-                        from_node: node_id.clone(),
-                        to_node: details.ensemble.join_node_id.clone(),
-                        condition: GraphEdgeCondition::Always,
-                    };
-                    let member = EnsembleMember {
-                        ensemble_id: ensemble_id.to_string(),
-                        node_id,
-                        position: next_member_position,
-                        platform: platform.clone(),
-                        model: model.clone(),
-                        prompt_override: prompt_override.clone(),
-                        timeout_minutes: *member_timeout_minutes,
-                    };
-                    self.db
-                        .add_ensemble_member(&member, &node, &entry_edge, &join_edge)
-                        .map_err(internal_error)?;
-                }
-            } else if new_len < old_len {
-                for existing in &old_members[new_len..old_len] {
-                    self.db
-                        .remove_ensemble_member(&existing.node_id)
-                        .map_err(internal_error)?;
-                }
-            }
+            self.db
+                .replace_ensemble_members(&ensemble_id, &resulting_members, &resulting_nodes)
+                .map_err(internal_error)?;
 
             details = self
                 .db
@@ -8402,6 +8361,12 @@ impl TaskTriggerHandler {
                     }
                 }
             }
+        }
+
+        // Ensemble-owned wiring must be complete before any platform probes
+        // spend quota. This is the same structural check graph_run performs.
+        if let Err(e) = validate_graph_ensembles_for_run(&self.db, &details.lp.id, None) {
+            return Ok(error_result(&format!("Preflight: {e}")));
         }
 
         // ── CB40: report pre-existing ensembles with invalid min_pass (FR5) ──────────
@@ -26206,6 +26171,7 @@ mod endpoint_tests {
         let lp = insert_test_graph(&db, dir.path());
         let spec = insert_test_spec(&db, &lp.id, 1);
         let entry = add_agent_node(&handler, &spec.id, "Entry").await;
+        let alt_entry = add_agent_node(&handler, &spec.id, "AltEntry").await;
         let arbiter = add_agent_node(&handler, &spec.id, "Arbiter").await;
         let alt_exit = add_agent_node(&handler, &spec.id, "AltExit").await;
 
@@ -26232,7 +26198,7 @@ mod endpoint_tests {
                     },
                 ]),
                 blueprint: None,
-                from_node: entry,
+                from_node: entry.clone(),
                 condition: "always".to_string(),
                 min_pass: Some(2),
                 straggler_timeout_minutes: None,
@@ -26244,6 +26210,29 @@ mod endpoint_tests {
             .await
             .unwrap();
         let ensemble_id = extract_id(&created, "ensemble_id");
+
+        let added_entry = handler
+            .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+                commit_rights: None,
+                ensemble_id: ensemble_id.clone(),
+                kind: None,
+                prompt_template: None,
+                members: None,
+                min_pass: None,
+                straggler_timeout_minutes: None,
+                timeout_minutes: None,
+                quorum_grace_minutes: None,
+                on_pass_to: None,
+                on_fail_to: None,
+                from_node: None,
+                condition: None,
+                add_entry_from: Some(alt_entry.clone()),
+                add_entry_condition: None,
+                remove_entry_from: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&added_entry), "{}", text(&added_entry));
 
         // No fields at all -> rejected.
         let no_op = handler
@@ -26296,8 +26285,94 @@ mod endpoint_tests {
         let details = db.get_ensemble_details(&ensemble_id).unwrap().unwrap();
         assert_eq!(details.ensemble.prompt_template, "New prompt");
 
-        // Grow membership 2 -> 3.
+        // Grow membership 2 -> 4 while preserving both entry sources.
         let grown = handler
+            .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+                commit_rights: None,
+                ensemble_id: ensemble_id.clone(),
+                kind: None,
+                prompt_template: None,
+                members: Some(vec![
+                    crate::daemon::params::EnsembleMemberParams {
+                        platform: "claude".to_string(),
+                        model: None,
+                        prompt_override: None,
+                        timeout_minutes: None,
+                    },
+                    crate::daemon::params::EnsembleMemberParams {
+                        platform: "opencode".to_string(),
+                        model: None,
+                        prompt_override: None,
+                        timeout_minutes: None,
+                    },
+                    crate::daemon::params::EnsembleMemberParams {
+                        platform: "gemini".to_string(),
+                        model: None,
+                        prompt_override: Some("Review only for test coverage gaps.".to_string()),
+                        timeout_minutes: None,
+                    },
+                    crate::daemon::params::EnsembleMemberParams {
+                        platform: "claude".to_string(),
+                        model: Some("growth-test".to_string()),
+                        prompt_override: None,
+                        timeout_minutes: None,
+                    },
+                ]),
+                min_pass: None,
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
+                timeout_minutes: None,
+                on_pass_to: None,
+                on_fail_to: None,
+                from_node: None,
+                condition: None,
+                add_entry_from: None,
+                add_entry_condition: None,
+                remove_entry_from: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&grown), "{}", text(&grown));
+        let details = db.get_ensemble_details(&ensemble_id).unwrap().unwrap();
+        assert_eq!(details.members.len(), 4);
+        // The new member's own prompt_override is persisted on the ensemble
+        // row and propagated into its node config as the effective prompt,
+        // while the other two still carry no override.
+        assert_eq!(details.members[0].prompt_override, None);
+        assert_eq!(details.members[1].prompt_override, None);
+        assert_eq!(
+            details.members[2].prompt_override.as_deref(),
+            Some("Review only for test coverage gaps.")
+        );
+        let gemini_node = db
+            .get_graph_node(&details.members[2].node_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            gemini_node
+                .config
+                .get("prompt_template")
+                .and_then(|v| v.as_str()),
+            Some("Review only for test coverage gaps.")
+        );
+        let member_ids: std::collections::HashSet<_> = details
+            .members
+            .iter()
+            .map(|member| member.node_id.as_str())
+            .collect();
+        let entry_edges = db
+            .list_graph_edges(&spec.id)
+            .unwrap()
+            .into_iter()
+            .filter(|edge| {
+                [entry.as_str(), alt_entry.as_str()].contains(&edge.from_node.as_str())
+                    && member_ids.contains(edge.to_node.as_str())
+            })
+            .count();
+        assert_eq!(entry_edges, 8);
+
+        // Shrink membership 4 -> 3 and retain complete fan-out.
+        let shrunk = handler
             .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
                 commit_rights: None,
                 ensemble_id: ensemble_id.clone(),
@@ -26337,68 +26412,24 @@ mod endpoint_tests {
             }))
             .await
             .unwrap();
-        assert!(!is_err(&grown), "{}", text(&grown));
-        let details = db.get_ensemble_details(&ensemble_id).unwrap().unwrap();
-        assert_eq!(details.members.len(), 3);
-        // The new member's own prompt_override is persisted on the ensemble
-        // row and propagated into its node config as the effective prompt,
-        // while the other two still carry no override.
-        assert_eq!(details.members[0].prompt_override, None);
-        assert_eq!(details.members[1].prompt_override, None);
-        assert_eq!(
-            details.members[2].prompt_override.as_deref(),
-            Some("Review only for test coverage gaps.")
-        );
-        let gemini_node = db
-            .get_graph_node(&details.members[2].node_id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            gemini_node
-                .config
-                .get("prompt_template")
-                .and_then(|v| v.as_str()),
-            Some("Review only for test coverage gaps.")
-        );
-
-        // Shrink membership 3 -> 2.
-        let shrunk = handler
-            .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
-                commit_rights: None,
-                ensemble_id: ensemble_id.clone(),
-                kind: None,
-                prompt_template: None,
-                members: Some(vec![
-                    crate::daemon::params::EnsembleMemberParams {
-                        platform: "claude".to_string(),
-                        model: None,
-                        prompt_override: None,
-                        timeout_minutes: None,
-                    },
-                    crate::daemon::params::EnsembleMemberParams {
-                        platform: "opencode".to_string(),
-                        model: None,
-                        prompt_override: None,
-                        timeout_minutes: None,
-                    },
-                ]),
-                min_pass: None,
-                straggler_timeout_minutes: None,
-                quorum_grace_minutes: None,
-                timeout_minutes: None,
-                on_pass_to: None,
-                on_fail_to: None,
-                from_node: None,
-                condition: None,
-                add_entry_from: None,
-                add_entry_condition: None,
-                remove_entry_from: None,
-            }))
-            .await
-            .unwrap();
         assert!(!is_err(&shrunk), "{}", text(&shrunk));
         let details = db.get_ensemble_details(&ensemble_id).unwrap().unwrap();
-        assert_eq!(details.members.len(), 2);
+        assert_eq!(details.members.len(), 3);
+        let member_ids: std::collections::HashSet<_> = details
+            .members
+            .iter()
+            .map(|member| member.node_id.as_str())
+            .collect();
+        let entry_edges = db
+            .list_graph_edges(&spec.id)
+            .unwrap()
+            .into_iter()
+            .filter(|edge| {
+                [entry.as_str(), alt_entry.as_str()].contains(&edge.from_node.as_str())
+                    && member_ids.contains(edge.to_node.as_str())
+            })
+            .count();
+        assert_eq!(entry_edges, 6);
 
         // min_pass out of bounds.
         let bad_min_pass = handler
@@ -27202,6 +27233,301 @@ mod endpoint_tests {
         assert!(is_err(&refused));
         assert!(text(&refused).contains("last entry source"));
         assert_eq!(db.list_graph_edges(&spec.id).unwrap().len(), edge_count);
+    }
+
+    /// Builds a graph with one spec, two candidate entry nodes (`entry`,
+    /// `alt_entry`), an `arbiter` exit node, and a parallel ensemble entered
+    /// from both with `member_count` members. Returns (graph, spec, ensemble_id,
+    /// entry, alt_entry).
+    async fn build_two_source_ensemble_graph(
+        db: &Database,
+        handler: &TaskTriggerHandler,
+        git_workdir: &std::path::Path,
+        member_count: usize,
+    ) -> (Graph, GraphSpec, String, String, String) {
+        let lp = insert_test_graph(db, git_workdir);
+        let spec = insert_test_spec(db, &lp.id, 1);
+        let entry = add_agent_node(handler, &spec.id, "Entry").await;
+        let alt_entry = add_agent_node(handler, &spec.id, "AltEntry").await;
+        let arbiter = add_agent_node(handler, &spec.id, "Arbiter").await;
+        let member = || crate::daemon::params::EnsembleMemberParams {
+            platform: "claude".to_string(),
+            model: None,
+            prompt_override: None,
+            timeout_minutes: None,
+        };
+        let created = handler
+            .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                commit_rights: None,
+                spec_id: Some(spec.id.clone()),
+                graph_id: None,
+                name: "Proposers".to_string(),
+                kind: None,
+                prompt_template: Some("Draft it".to_string()),
+                members: Some((0..member_count).map(|_| member()).collect()),
+                blueprint: None,
+                from_node: entry.clone(),
+                condition: "always".to_string(),
+                min_pass: None,
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
+                timeout_minutes: None,
+                on_pass_to: arbiter.clone(),
+                on_fail_to: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&created), "{}", text(&created));
+        let ensemble_id = extract_id(&created, "ensemble_id");
+        let mut add_alt = blank_ensemble_update(&ensemble_id);
+        add_alt.add_entry_from = Some(alt_entry.clone());
+        let added = handler
+            .graph_update_ensemble(Parameters(add_alt))
+            .await
+            .unwrap();
+        assert!(!is_err(&added), "{}", text(&added));
+        (lp, spec, ensemble_id, entry, alt_entry)
+    }
+
+    /// CB54 FR5/FR6a (handler level, not just validate_ensembles_in_graph):
+    /// growing then shrinking a two-source ensemble keeps `graph_run` accepting
+    /// it at every member count, through the real graph_update_ensemble +
+    /// graph_run tool path, with no manual rewiring in between.
+    ///
+    /// Uses three independent graphs (one per step) rather than three
+    /// sequential `graph_run` calls on one graph: `graph_run` returns as soon
+    /// as it spawns the background run task, so calling it twice on the same
+    /// graph_id would race a real background run against the next resize.
+    /// Three independent graphs keep each `graph_run` call deterministic
+    /// while still exercising resize-then-launch for every member count
+    /// through the real tool path.
+    #[tokio::test]
+    async fn graph_run_accepts_two_source_ensemble_through_grow_and_shrink() {
+        let (_dir, db, handler) = endpoint_test_handler();
+        let git_dir = tempdir().unwrap();
+        init_git_repo(git_dir.path());
+
+        async fn run_and_assert_accepted(
+            db: &Database,
+            handler: &TaskTriggerHandler,
+            git_dir: &std::path::Path,
+            member_count: usize,
+            resize_to: Option<usize>,
+            resize_again_to: Option<usize>,
+        ) {
+            let member = || crate::daemon::params::EnsembleMemberParams {
+                platform: "claude".to_string(),
+                model: None,
+                prompt_override: None,
+                timeout_minutes: None,
+            };
+            let (lp, spec, ensemble_id, entry, alt_entry) =
+                build_two_source_ensemble_graph(db, handler, git_dir, member_count).await;
+            for target in [resize_to, resize_again_to].into_iter().flatten() {
+                let mut update = blank_ensemble_update(&ensemble_id);
+                update.members = Some((0..target).map(|_| member()).collect());
+                let resized = handler
+                    .graph_update_ensemble(Parameters(update))
+                    .await
+                    .unwrap();
+                assert!(!is_err(&resized), "resize to {target}: {}", text(&resized));
+            }
+            let details = db.get_ensemble_details(&ensemble_id).unwrap().unwrap();
+            let final_count = resize_again_to.or(resize_to).unwrap_or(member_count);
+            assert_eq!(details.members.len(), final_count);
+            let member_ids: std::collections::HashSet<_> =
+                details.members.iter().map(|m| m.node_id.as_str()).collect();
+            let entry_edges = db
+                .list_graph_edges(&spec.id)
+                .unwrap()
+                .into_iter()
+                .filter(|e| {
+                    [entry.as_str(), alt_entry.as_str()].contains(&e.from_node.as_str())
+                        && member_ids.contains(e.to_node.as_str())
+                })
+                .count();
+            assert_eq!(entry_edges, 2 * final_count);
+
+            let result = handler
+                .graph_run(Parameters(GraphRunParams {
+                    graph_id: lp.id.clone(),
+                    queue_id: None,
+                    workdir: None,
+                    idea: None,
+                    sandbox: None,
+                }))
+                .await
+                .unwrap();
+            assert!(
+                !is_err(&result),
+                "graph_run must accept a fully-fanned-out {final_count}-member ensemble: {}",
+                text(&result)
+            );
+        }
+
+        // Step 1: freshly built at 3 members, 2 sources.
+        run_and_assert_accepted(&db, &handler, git_dir.path(), 3, None, None).await;
+        // Step 2: built at 3, grown to 4.
+        run_and_assert_accepted(&db, &handler, git_dir.path(), 3, Some(4), None).await;
+        // Step 3: built at 3, grown to 4, shrunk back to 3.
+        run_and_assert_accepted(&db, &handler, git_dir.path(), 3, Some(4), Some(3)).await;
+    }
+
+    /// CB54 FR3/FR6b (handler level): a source that already reaches some but
+    /// not all members — e.g. after a hand edit deleted one of its edges — is
+    /// completed by add_entry_from, not refused as "already an entry source".
+    #[tokio::test]
+    async fn graph_update_ensemble_add_entry_from_completes_partial_source() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let lp = insert_test_graph(&db, dir.path());
+        let spec = insert_test_spec(&db, &lp.id, 1);
+        let entry = add_agent_node(&handler, &spec.id, "Entry").await;
+        let alt_entry = add_agent_node(&handler, &spec.id, "AltEntry").await;
+        let arbiter = add_agent_node(&handler, &spec.id, "Arbiter").await;
+        let ensemble_id =
+            add_two_member_ensemble(&handler, &spec.id, "Workers", &entry, &arbiter).await;
+
+        let mut add_alt = blank_ensemble_update(&ensemble_id);
+        add_alt.add_entry_from = Some(alt_entry.clone());
+        let added = handler
+            .graph_update_ensemble(Parameters(add_alt))
+            .await
+            .unwrap();
+        assert!(!is_err(&added), "{}", text(&added));
+
+        let member_ids: Vec<String> = db
+            .get_ensemble_details(&ensemble_id)
+            .unwrap()
+            .unwrap()
+            .members
+            .iter()
+            .map(|m| m.node_id.clone())
+            .collect();
+        assert_eq!(member_ids.len(), 2);
+
+        // Hand-delete alt_entry's edge to the first member only — simulating the
+        // exact partial state CB54 is about (some, not all, members reachable).
+        let stale_edge = db
+            .list_graph_edges(&spec.id)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.from_node == alt_entry && e.to_node == member_ids[0])
+            .expect("alt_entry -> first member edge must exist before deletion");
+        assert!(db.delete_graph_edge(&stale_edge.id).unwrap());
+
+        // Re-adding the same source must complete the missing edge, not refuse
+        // with "already an entry source".
+        let mut repair = blank_ensemble_update(&ensemble_id);
+        repair.add_entry_from = Some(alt_entry.clone());
+        let repaired = handler
+            .graph_update_ensemble(Parameters(repair))
+            .await
+            .unwrap();
+        assert!(
+            !is_err(&repaired),
+            "add_entry_from must complete a partial source, not refuse it: {}",
+            text(&repaired)
+        );
+
+        let edges = db.list_graph_edges(&spec.id).unwrap();
+        for member_id in &member_ids {
+            assert!(
+                edges.iter().any(|e| e.from_node == alt_entry
+                    && &e.to_node == member_id
+                    && e.condition == GraphEdgeCondition::Always),
+                "alt_entry must reach member '{member_id}' after the repair"
+            );
+        }
+    }
+
+    /// CB54 FR4/FR6c (handler level): graph_preflight refuses a partially-wired
+    /// multi-source ensemble (a source that reaches some but not all members)
+    /// before spending any probe quota, naming the source and the exact reach
+    /// count.
+    #[tokio::test]
+    async fn graph_preflight_refuses_partial_multi_source_ensemble() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let lp = insert_test_graph(&db, dir.path());
+        let spec = insert_test_spec(&db, &lp.id, 1);
+        let entry = add_agent_node(&handler, &spec.id, "Entry").await;
+        let alt_entry = add_agent_node(&handler, &spec.id, "AltEntry").await;
+        let arbiter = add_agent_node(&handler, &spec.id, "Arbiter").await;
+        let member = || crate::daemon::params::EnsembleMemberParams {
+            platform: "claude".to_string(),
+            model: None,
+            prompt_override: None,
+            timeout_minutes: None,
+        };
+
+        let created = handler
+            .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                commit_rights: None,
+                spec_id: Some(spec.id.clone()),
+                graph_id: None,
+                name: "Proposers".to_string(),
+                kind: None,
+                prompt_template: Some("Draft it".to_string()),
+                members: Some(vec![member(), member(), member()]),
+                blueprint: None,
+                from_node: entry.clone(),
+                condition: "always".to_string(),
+                min_pass: None,
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
+                timeout_minutes: None,
+                on_pass_to: arbiter.clone(),
+                on_fail_to: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&created), "{}", text(&created));
+        let ensemble_id = extract_id(&created, "ensemble_id");
+
+        let mut add_alt = blank_ensemble_update(&ensemble_id);
+        add_alt.add_entry_from = Some(alt_entry.clone());
+        let added = handler
+            .graph_update_ensemble(Parameters(add_alt))
+            .await
+            .unwrap();
+        assert!(!is_err(&added), "{}", text(&added));
+
+        let member_ids: Vec<String> = db
+            .get_ensemble_details(&ensemble_id)
+            .unwrap()
+            .unwrap()
+            .members
+            .iter()
+            .map(|m| m.node_id.clone())
+            .collect();
+        assert_eq!(member_ids.len(), 3);
+
+        // Hand-break alt_entry's wiring to exactly 2 of 3 members.
+        let stale_edge = db
+            .list_graph_edges(&spec.id)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.from_node == alt_entry && e.to_node == member_ids[2])
+            .expect("alt_entry -> third member edge must exist before deletion");
+        assert!(db.delete_graph_edge(&stale_edge.id).unwrap());
+
+        let result = handler
+            .graph_preflight(Parameters(GraphPreflightParams {
+                graph_id: lp.id.clone(),
+                timeout_seconds: None,
+                reviewer: None,
+            }))
+            .await
+            .unwrap();
+        assert!(
+            is_err(&result),
+            "partial multi-source ensemble must refuse preflight"
+        );
+        let msg = text(&result);
+        assert!(
+            msg.contains(&alt_entry),
+            "message must name the partial source: {msg}"
+        );
+        assert!(msg.contains("reaches 2 of 3 members"), "{msg}");
     }
 
     /// `graph_delete_ensemble` removes members, quorum and all their edges as

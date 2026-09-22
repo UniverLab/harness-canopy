@@ -214,7 +214,7 @@ pub fn validate_ensembles_in_graph(
             }
         }
         {
-            let mut reached: HashMap<&str, HashSet<&str>> = HashMap::new();
+            let mut reached: HashMap<(&str, GraphEdgeCondition), HashSet<&str>> = HashMap::new();
             for edge in edges {
                 if !member_ids.contains(edge.to_node.as_str()) {
                     continue;
@@ -225,14 +225,20 @@ pub fn validate_ensembles_in_graph(
                     continue;
                 }
                 reached
-                    .entry(edge.from_node.as_str())
+                    .entry((edge.from_node.as_str(), edge.condition.clone()))
                     .or_default()
                     .insert(edge.to_node.as_str());
             }
-            let mut sources: Vec<(&str, usize)> =
-                reached.iter().map(|(from, to)| (*from, to.len())).collect();
-            sources.sort_unstable();
-            for (from, count) in sources {
+            let mut sources: Vec<((&str, GraphEdgeCondition), usize)> = reached
+                .iter()
+                .map(|(source, to)| (source.clone(), to.len()))
+                .collect();
+            sources.sort_by(|a, b| {
+                a.0 .0
+                    .cmp(b.0 .0)
+                    .then(a.0 .1.as_str().cmp(b.0 .1.as_str()))
+            });
+            for ((from, _condition), count) in sources {
                 if count != member_ids.len() {
                     return Err(format!(
                         "{label} has incomplete entry wiring from '{from}': reaches {count} of {} members — rewire with graph_update_ensemble (from_node/add_entry_from).",

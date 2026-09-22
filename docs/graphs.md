@@ -138,7 +138,12 @@ quorum config (`min_pass`, `straggler_timeout_minutes`,
 quorums with no intermediate node), and entry wiring (`from_node` replaces
 every entry; `add_entry_from`/`remove_entry_from` add or detach one source so
 several nodes can enter with no relay), all without touching member nodes
-directly. `graph_delete_ensemble` removes the whole unit. `graph_get` returns the
+directly. Every entry source fans out to every member after a member-list
+growth or shrink, and that replacement is atomic. `add_entry_from` completes
+missing edges when the source already exists, so it does not require a
+remove-then-add cycle. `graph_preflight` reports incomplete source reachability
+with the source and member counts before `graph_run` spends probe quota.
+`graph_delete_ensemble` removes the whole unit. `graph_get` returns the
 ensemble as one unit (`ensemble_id`, members, quorum config, every entry
 source) alongside its expanded nodes.
 

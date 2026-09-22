@@ -434,6 +434,29 @@ mod ensemble_graph {
         assert!(err.contains("incomplete entry wiring"), "{err}");
     }
 
+    #[test]
+    fn incomplete_entry_source_reports_source_and_exact_reach_count() {
+        let (details, nodes, mut edges) = valid_fixture();
+        edges.push(edge("gate", "m1", GraphEdgeCondition::Always));
+        let mut nodes = nodes;
+        nodes.push(node("gate"));
+        let err = validate_ensembles_in_graph(&details, &nodes, &edges).unwrap_err();
+        assert!(err.contains("from 'gate': reaches 1 of 2 members"), "{err}");
+    }
+
+    #[test]
+    fn entry_conditions_are_validated_as_distinct_sources() {
+        let (details, nodes, mut edges) = valid_fixture();
+        edges.extend([
+            edge("gate", "m1", GraphEdgeCondition::Always),
+            edge("gate", "m2", GraphEdgeCondition::Pass),
+        ]);
+        let mut nodes = nodes;
+        nodes.push(node("gate"));
+        let err = validate_ensembles_in_graph(&details, &nodes, &edges).unwrap_err();
+        assert!(err.contains("from 'gate': reaches 1 of 2 members"), "{err}");
+    }
+
     /// CM14: every entry source reaching every member validates.
     #[test]
     fn complete_multi_source_entry_passes() {
