@@ -122,8 +122,10 @@ available as `CANOPY_HOOK_LOOP_NAME` (alias `CANOPY_HOOK_GRAPH_NAME`),
 `CANOPY_HOOK_COMPLETED_SPECS`, `CANOPY_HOOK_NODE`, `CANOPY_HOOK_BLOCKER`, and
 `CANOPY_HOOK_EVENT` environment variables, so hooks can use
 `"$CANOPY_HOOK_SPEC_NAME"` without interpolation.
-Agent and interactive prompt hooks keep literal marker substitution and are not
-shell-quoted.
+Agent, interactive, and graph-idea hooks substitute the same markers without
+shell quoting. A known marker with no value for the event renders `(none)` in
+all hook modes. Unknown marker names are rejected during `graph_update`, so a
+hook never fires with a marker left literal.
 
 An interactive hook targets a session by `target_session_id` or by
 `target_session_name` (exactly one) — see [Graphs](graphs.md#event-keyed-hooks)

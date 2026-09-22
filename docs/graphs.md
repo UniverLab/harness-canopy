@@ -332,13 +332,17 @@ was (`event`, `hook_index`), and is readable from `graph_get`'s
 `completion_hook_runs` and `canopy graph info`'s hook-runs listing alongside
 the graph's node runs.
 
-Each event exposes what its consumer needs, in addition to `{{graph_name}}`
-and `{{workdir}}`: `on_completed` keeps `{{completed_specs}}` (name +
-one-line summary of each spec this run completed, one per line, `(none)` if
-the run completed zero specs); `on_spec_completed` gets `{{spec_name}}` and
-`{{spec_id}}`; `on_failed` and `on_blocked` get `{{blocker}}` and `{{node}}`
-(the name of the node that ended the run). A prompt carrying a marker its
-event cannot bind is refused and recorded as a failed hook run.
+Hooks accept the complete marker vocabulary `{{graph_name}}`, `{{workdir}}`,
+`{{completed_specs}}`, `{{spec_name}}`, `{{spec_id}}`, `{{blocker}}`, and
+`{{node}}`. Event context determines which values are populated:
+`on_completed` provides `{{completed_specs}}` (name + one-line summary of
+each spec this run completed, one per line); `on_spec_completed` provides
+`{{spec_name}}` and `{{spec_id}}`; and `on_failed`/`on_blocked` provide
+`{{blocker}}` and `{{node}}` (the name of the node that ended the run).
+Every known marker with no value for the event renders exactly `(none)` in
+command, agent, interactive, and graph-idea hooks. Unknown marker names are
+rejected by `graph_update` with the marker name and supported list; no hook
+firing leaves a marker literal.
 
 The existing configuration keeps working, unchanged and unattended:
 whatever a graph has in its `on_completed` column becomes a hook on the

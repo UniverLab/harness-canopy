@@ -7521,8 +7521,27 @@ struct HookContext<'a> {
     node_name: Option<&'a str>,
 }
 
+pub(crate) const GRAPH_HOOK_BINDINGS: &[&str] = &[
+    "graph_name",
+    "workdir",
+    "completed_specs",
+    "spec_name",
+    "spec_id",
+    "blocker",
+    "node",
+];
+
 fn hook_env_vars(event: &GraphHookEvent, ctx: &HookContext<'_>) -> Vec<(String, String)> {
-    let mut vars = vec![
+    let completed_specs = if ctx.completed_specs.is_empty() {
+        "(none)".to_string()
+    } else {
+        ctx.completed_specs
+            .iter()
+            .map(|(name, summary)| format!("- {name}: {summary}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let vars = vec![
         (
             "CANOPY_HOOK_GRAPH_NAME".to_string(),
             ctx.graph_name.to_string(),
@@ -7532,45 +7551,32 @@ fn hook_env_vars(event: &GraphHookEvent, ctx: &HookContext<'_>) -> Vec<(String, 
             ctx.graph_name.to_string(),
         ),
         ("CANOPY_HOOK_WORKDIR".to_string(), ctx.workdir.to_string()),
+        ("CANOPY_HOOK_COMPLETED_SPECS".to_string(), completed_specs),
+        (
+            "CANOPY_HOOK_SPEC_NAME".to_string(),
+            ctx.spec_name.unwrap_or("(none)").to_string(),
+        ),
+        (
+            "CANOPY_HOOK_SPEC_ID".to_string(),
+            ctx.spec_id.unwrap_or("(none)").to_string(),
+        ),
+        (
+            "CANOPY_HOOK_BLOCKER".to_string(),
+            ctx.blocker.unwrap_or("(none)").to_string(),
+        ),
+        (
+            "CANOPY_HOOK_NODE".to_string(),
+            ctx.node_name.unwrap_or("(none)").to_string(),
+        ),
         ("CANOPY_HOOK_EVENT".to_string(), event.as_str().to_string()),
     ];
-
-    if let Some(value) = ctx.spec_name {
-        vars.push(("CANOPY_HOOK_SPEC_NAME".to_string(), value.to_string()));
-    }
-    if let Some(value) = ctx.spec_id {
-        vars.push(("CANOPY_HOOK_SPEC_ID".to_string(), value.to_string()));
-    }
-    if let Some(value) = ctx.blocker {
-        vars.push(("CANOPY_HOOK_BLOCKER".to_string(), value.to_string()));
-    }
-    if let Some(value) = ctx.node_name {
-        vars.push(("CANOPY_HOOK_NODE".to_string(), value.to_string()));
-    }
-    if hook_bindings_for_event(event).contains(&"completed_specs") {
-        let value = if ctx.completed_specs.is_empty() {
-            "(none)".to_string()
-        } else {
-            ctx.completed_specs
-                .iter()
-                .map(|(name, summary)| format!("- {name}: {summary}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
-        vars.push(("CANOPY_HOOK_COMPLETED_SPECS".to_string(), value));
-    }
     vars
 }
 
-/// The supported `{{...}}` markers per event.
+/// The supported `{{...}}` markers for graph hooks.
 fn hook_bindings_for_event(event: &GraphHookEvent) -> &'static [&'static str] {
-    match event {
-        GraphHookEvent::OnCompleted => &["graph_name", "workdir", "completed_specs"],
-        GraphHookEvent::OnFailed | GraphHookEvent::OnBlocked => {
-            &["graph_name", "workdir", "blocker", "node"]
-        }
-        GraphHookEvent::OnSpecCompleted => &["graph_name", "workdir", "spec_name", "spec_id"],
-    }
+    let _ = event;
+    GRAPH_HOOK_BINDINGS
 }
 
 /// Render a hook prompt for the given event, binding only the placeholders
@@ -7605,10 +7611,10 @@ fn render_hook_prompt(
             "graph_name" => Some(ctx.graph_name.to_string()),
             "workdir" => Some(ctx.workdir.to_string()),
             "completed_specs" => Some(completed_specs_text.clone()),
-            "spec_name" => ctx.spec_name.map(str::to_string),
-            "spec_id" => ctx.spec_id.map(str::to_string),
-            "blocker" => ctx.blocker.map(str::to_string),
-            "node" => ctx.node_name.map(str::to_string),
+            "spec_name" => Some(ctx.spec_name.unwrap_or("(none)").to_string()),
+            "spec_id" => Some(ctx.spec_id.unwrap_or("(none)").to_string()),
+            "blocker" => Some(ctx.blocker.unwrap_or("(none)").to_string()),
+            "node" => Some(ctx.node_name.unwrap_or("(none)").to_string()),
             _ => None,
         },
     ))
@@ -7655,10 +7661,10 @@ fn render_hook_command(
             "graph_name" => Some(shell_quote(ctx.graph_name)),
             "workdir" => Some(shell_quote(ctx.workdir)),
             "completed_specs" => Some(shell_quote(&completed_specs_text)),
-            "spec_name" => ctx.spec_name.map(shell_quote),
-            "spec_id" => ctx.spec_id.map(shell_quote),
-            "blocker" => ctx.blocker.map(shell_quote),
-            "node" => ctx.node_name.map(shell_quote),
+            "spec_name" => Some(shell_quote(ctx.spec_name.unwrap_or("(none)"))),
+            "spec_id" => Some(shell_quote(ctx.spec_id.unwrap_or("(none)"))),
+            "blocker" => Some(shell_quote(ctx.blocker.unwrap_or("(none)"))),
+            "node" => Some(shell_quote(ctx.node_name.unwrap_or("(none)"))),
             _ => None,
         },
     ))
@@ -7696,10 +7702,10 @@ fn render_hook_idea(
             "graph_name" => Some(ctx.graph_name.to_string()),
             "workdir" => Some(ctx.workdir.to_string()),
             "completed_specs" => Some(completed_specs_text.clone()),
-            "spec_name" => ctx.spec_name.map(str::to_string),
-            "spec_id" => ctx.spec_id.map(str::to_string),
-            "blocker" => ctx.blocker.map(str::to_string),
-            "node" => ctx.node_name.map(str::to_string),
+            "spec_name" => Some(ctx.spec_name.unwrap_or("(none)").to_string()),
+            "spec_id" => Some(ctx.spec_id.unwrap_or("(none)").to_string()),
+            "blocker" => Some(ctx.blocker.unwrap_or("(none)").to_string()),
+            "node" => Some(ctx.node_name.unwrap_or("(none)").to_string()),
             _ => None,
         },
     ))
@@ -18399,6 +18405,61 @@ echo done
     }
 
     #[test]
+    fn render_hook_prompt_missing_optional_values_use_none() {
+        let ctx = HookContext {
+            graph_name: "TestGraph",
+            workdir: "/tmp/test",
+            completed_specs: &[],
+            spec_name: None,
+            spec_id: None,
+            blocker: None,
+            node_name: None,
+        };
+        let result =
+            render_hook_prompt(&GraphHookEvent::OnFailed, &ctx, "{{blocker}}/{{node}}").unwrap();
+        assert_eq!(result, "(none)/(none)");
+        assert!(!result.contains("{{"));
+    }
+
+    #[test]
+    fn render_hook_command_missing_node_uses_none() {
+        let ctx = HookContext {
+            graph_name: "TestGraph",
+            workdir: "/tmp/test",
+            completed_specs: &[],
+            spec_name: None,
+            spec_id: None,
+            blocker: Some("graph failed"),
+            node_name: None,
+        };
+        let result =
+            render_hook_command(&GraphHookEvent::OnFailed, &ctx, "echo {{node}} {{blocker}}")
+                .unwrap();
+        assert_eq!(result, "echo '(none)' 'graph failed'");
+    }
+
+    #[test]
+    fn render_hook_idea_missing_event_values_use_none() {
+        let ctx = HookContext {
+            graph_name: "TestGraph",
+            workdir: "/tmp/test",
+            completed_specs: &[],
+            spec_name: None,
+            spec_id: None,
+            blocker: None,
+            node_name: None,
+        };
+        let result = render_hook_idea(
+            &GraphHookEvent::OnCompleted,
+            &ctx,
+            "{{spec_name}}/{{spec_id}}/{{blocker}}/{{node}}",
+        )
+        .unwrap();
+        assert_eq!(result, "(none)/(none)/(none)/(none)");
+        assert!(!result.contains("{{"));
+    }
+
+    #[test]
     fn render_hook_prompt_on_spec_completed_binds_spec_name_and_id() {
         let ctx = HookContext {
             graph_name: "TestGraph",
@@ -18429,7 +18490,7 @@ echo done
             blocker: None,
             node_name: None,
         };
-        // {{unknown}} is not supported by on_completed
+        // {{unknown}} is not supported by graph hooks.
         let result = render_hook_prompt(
             &GraphHookEvent::OnCompleted,
             &ctx,
@@ -18439,7 +18500,7 @@ echo done
     }
 
     #[test]
-    fn render_hook_prompt_cross_event_marker_rejected() {
+    fn render_hook_prompt_cross_event_marker_is_bound_to_none() {
         let ctx = HookContext {
             graph_name: "TestGraph",
             workdir: "/tmp/test",
@@ -18449,12 +18510,26 @@ echo done
             blocker: None,
             node_name: None,
         };
-        // {{completed_specs}} is not supported by on_failed
         let result = render_hook_prompt(
             &GraphHookEvent::OnFailed,
             &ctx,
             "{{graph_name}} {{completed_specs}}",
         );
+        assert_eq!(result.unwrap(), "TestGraph (none)");
+    }
+
+    #[test]
+    fn render_hook_prompt_rejects_unknown_marker() {
+        let ctx = HookContext {
+            graph_name: "TestGraph",
+            workdir: "/tmp/test",
+            completed_specs: &[],
+            spec_name: None,
+            spec_id: None,
+            blocker: None,
+            node_name: None,
+        };
+        let result = render_hook_prompt(&GraphHookEvent::OnFailed, &ctx, "{{nodee}}");
         assert!(result.is_err());
     }
 
@@ -19664,6 +19739,55 @@ echo done
             content, "A live session's id",
             "placeholder must be substituted"
         );
+    }
+
+    #[tokio::test]
+    async fn command_hook_graph_failure_without_node_renders_none_and_blocker() {
+        let (dir, db, engine, graph_id, _spec_id) = graph_fixture().unwrap();
+        let output_file = dir.path().join("graph_failure_hook_output");
+        let output_path = output_file.to_string_lossy().to_string();
+        let hook = crate::domain::graphs::GraphCompletionHook {
+            platform: None,
+            model: None,
+            effort: None,
+            prompt: None,
+            command: Some(format!(
+                "printf '%s %s' {{{{node}}}} {{{{blocker}}}} > \"{}\"",
+                output_path
+            )),
+            target_session_id: None,
+            target_session_name: None,
+            timeout_minutes: Some(1),
+            target_graph_id: None,
+            queue_id: None,
+            workdir_override: None,
+            idea: None,
+        };
+        let mut hooks = std::collections::BTreeMap::new();
+        hooks.insert(GraphHookEvent::OnFailed, vec![hook]);
+        db.update_graph_hooks(&graph_id, &hooks).unwrap();
+
+        let graph = db.get_graph(&graph_id).unwrap().unwrap();
+        let ctx = HookContext {
+            graph_name: &graph.name,
+            workdir: &graph.workdir,
+            completed_specs: &[],
+            spec_name: None,
+            spec_id: None,
+            blocker: Some("Reviewer join has ambiguous outgoing edges"),
+            node_name: None,
+        };
+        engine
+            .fire_hooks(&graph, GraphHookEvent::OnFailed, &ctx)
+            .await;
+
+        assert_eq!(
+            std::fs::read_to_string(output_file).unwrap(),
+            "(none) Reviewer join has ambiguous outgoing edges"
+        );
+        let hook_runs = db.list_graph_completion_hook_runs(&graph_id).unwrap();
+        assert_eq!(hook_runs.len(), 1);
+        assert_eq!(hook_runs[0].status, GraphRunStatus::Pass);
     }
 
     #[tokio::test]
@@ -27562,9 +27686,9 @@ exit 0
         assert_eq!(result, "Graph MyGraph finished");
     }
 
-    /// CH4: render_hook_idea rejects unbindable markers.
+    /// CH4: render_hook_idea renders known markers with no event value.
     #[test]
-    fn render_hook_idea_rejects_unbindable_markers() {
+    fn render_hook_idea_renders_missing_event_value_as_none() {
         let ctx = HookContext {
             graph_name: "MyGraph",
             workdir: "/tmp",
@@ -27575,10 +27699,7 @@ exit 0
             node_name: None,
         };
         let result = render_hook_idea(&GraphHookEvent::OnCompleted, &ctx, "Blocker: {{blocker}}");
-        assert!(
-            result.is_err(),
-            "should reject unbindable {{blocker}} on on_completed"
-        );
+        assert_eq!(result.unwrap(), "Blocker: (none)");
     }
 
     /// CH4: Verify that a graph with a spec can be found by list_graph_specs.

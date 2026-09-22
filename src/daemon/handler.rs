@@ -68,7 +68,7 @@ use crate::domain::specs::{
 use crate::domain::sync::{MessageKind, MissionImpact, WorkspaceStatus};
 use crate::domain::validation::validate_id;
 use crate::executor::Executor;
-use crate::graph_engine::GraphEngine;
+use crate::graph_engine::{GraphEngine, GRAPH_HOOK_BINDINGS};
 use crate::rag::rate_limiter::RateLimiter;
 use crate::shared::sync_identity::{
     header_str, CANOPY_AGENT_ID_ENV, CANOPY_AGENT_ID_HEADER, CANOPY_CLIENT_NAME_ENV,
@@ -258,9 +258,38 @@ pub(crate) fn build_graph_trigger(
 /// interactive message (prompt + target_session_id), or a graph launch
 /// (target_graph_id). Exactly one mode must be configured; any other
 /// combination is rejected.
+fn validate_graph_hook_templates(params: &GraphCompletionHookParams) -> Result<(), String> {
+    let templates = [
+        ("prompt", params.prompt.as_deref()),
+        ("command", params.command.as_deref()),
+        ("idea", params.idea.as_deref()),
+    ];
+    for (field, template) in templates {
+        let Some(template) = template else {
+            continue;
+        };
+        let unknown =
+            crate::domain::prompts::unbindable_placeholders(template, GRAPH_HOOK_BINDINGS);
+        if !unknown.is_empty() {
+            return Err(format!(
+                "Hook {field} contains unknown placeholder(s): {}. Supported graph hook placeholders: {}.",
+                unknown.join(", "),
+                GRAPH_HOOK_BINDINGS
+                    .iter()
+                    .map(|name| format!("{{{{{name}}}}}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn build_graph_completion_hook(
     params: &GraphCompletionHookParams,
 ) -> Result<crate::domain::graphs::GraphCompletionHook, String> {
+    validate_graph_hook_templates(params)?;
+
     let has_platform = params
         .platform
         .as_deref()
@@ -15170,6 +15199,29 @@ mod tests {
     }
 
     #[test]
+    fn build_graph_completion_hook_rejects_unknown_placeholder() {
+        let params = GraphCompletionHookParams {
+            platform: Some("claude".to_string()),
+            model: None,
+            effort: None,
+            prompt: Some("failure at {{nodee}}".to_string()),
+            command: None,
+            target_session_id: None,
+            target_session_name: None,
+            timeout_minutes: None,
+            target_graph_id: None,
+            queue_id: None,
+            workdir_override: None,
+            idea: None,
+        };
+        let err = build_graph_completion_hook(&params).unwrap_err();
+        assert!(err.contains("nodee"), "{err}");
+        for marker in crate::graph_engine::GRAPH_HOOK_BINDINGS {
+            assert!(err.contains(marker), "{err}");
+        }
+    }
+
+    #[test]
     fn build_graph_completion_hook_strips_whitespace() {
         let params = GraphCompletionHookParams {
             platform: Some("  claude  ".to_string()),
@@ -21228,6 +21280,103 @@ mod endpoint_tests {
         assert_eq!(
             db.get_graph(&graph_id).unwrap().unwrap().name,
             "Renamed Graph"
+        );
+    }
+
+    #[tokio::test]
+    async fn graph_update_rejects_unknown_hook_placeholder_before_persisting() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let workdir = dir.path().to_string_lossy().to_string();
+        let created = handler
+            .graph_create(Parameters(GraphCreateParams {
+                name: "Hook Graph".to_string(),
+                description: None,
+                workdir,
+                trigger: None,
+                infra_node_id: None,
+                allow_dirty_start: false,
+            }))
+            .await
+            .unwrap();
+        let graph_id = extract_id(&created, "graph_id");
+
+        let mut valid_hooks = std::collections::BTreeMap::new();
+        valid_hooks.insert(
+            "on_failed".to_string(),
+            vec![GraphCompletionHookParams {
+                platform: None,
+                model: None,
+                effort: None,
+                prompt: None,
+                command: Some("printf '{{node}}'".to_string()),
+                target_session_id: None,
+                target_session_name: None,
+                timeout_minutes: Some(1),
+                target_graph_id: None,
+                queue_id: None,
+                workdir_override: None,
+                idea: None,
+            }],
+        );
+        let updated = handler
+            .graph_update(Parameters(GraphUpdateParams {
+                graph_id: graph_id.clone(),
+                name: None,
+                description: None,
+                workdir: None,
+                trigger: None,
+                on_completed: None,
+                hooks: Some(valid_hooks),
+                infra_node_id: None,
+                allow_dirty_start: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&updated), "{}", text(&updated));
+        let before = db.get_graph(&graph_id).unwrap().unwrap().hooks;
+
+        let mut invalid_hooks = std::collections::BTreeMap::new();
+        invalid_hooks.insert(
+            "on_failed".to_string(),
+            vec![GraphCompletionHookParams {
+                platform: None,
+                model: None,
+                effort: None,
+                prompt: Some("failure at {{nodee}}".to_string()),
+                command: None,
+                target_session_id: None,
+                target_session_name: None,
+                timeout_minutes: Some(1),
+                target_graph_id: None,
+                queue_id: None,
+                workdir_override: None,
+                idea: None,
+            }],
+        );
+        let rejected = handler
+            .graph_update(Parameters(GraphUpdateParams {
+                graph_id: graph_id.clone(),
+                name: None,
+                description: None,
+                workdir: None,
+                trigger: None,
+                on_completed: None,
+                hooks: Some(invalid_hooks),
+                infra_node_id: None,
+                allow_dirty_start: None,
+            }))
+            .await
+            .unwrap();
+        assert!(is_err(&rejected));
+        let message = text(&rejected);
+        assert!(message.contains("nodee"), "{message}");
+        for marker in crate::graph_engine::GRAPH_HOOK_BINDINGS {
+            assert!(message.contains(marker), "{message}");
+        }
+        let after = db.get_graph(&graph_id).unwrap().unwrap().hooks;
+        assert_eq!(
+            serde_json::to_value(before).unwrap(),
+            serde_json::to_value(after).unwrap()
         );
     }
 
