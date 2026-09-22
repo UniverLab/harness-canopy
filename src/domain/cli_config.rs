@@ -139,15 +139,24 @@ pub struct CliConfig {
     #[serde(default = "default_paste_submit_presses")]
     pub paste_submit_presses: u8,
     /// Declarative template for argv assembly. Whitespace-separated tokens;
-    /// each token may contain `{{marker}}` placeholders. Markers:
-    /// `{{prompt}}`, `{{model}}`, `{{effort}}`, `{{mcp_config}}`,
-    /// `{{session_id}}`, `{{session_flag}}`, `{{workdir}}`. Headless mode
-    /// flags (`headless_mode`) are always prepended before the template tokens;
-    /// they are not part of the template. When `None`, falls back to the legacy
-    /// fixed-order assembly (backward compat for platforms not yet migrated).
+    /// each token may contain `{{marker}}` (required) or `{{marker?}}`
+    /// (optional) placeholders. Markers: `{{prompt}}`, `{{model}}`,
+    /// `{{effort}}`, `{{mcp_config}}`, `{{session_id}}`, `{{session_flag}}`,
+    /// `{{workdir}}`. Headless mode flags (`headless_mode`) are always
+    /// prepended before the template tokens; they are not part of the
+    /// template. When `None`, falls back to the legacy fixed-order assembly
+    /// (backward compat for platforms not yet migrated).
     ///
     /// Substitution rules:
-    /// - A token containing any unavailable marker is dropped entirely.
+    /// - A token containing any unavailable REQUIRED marker (`{{marker}}`)
+    ///   is dropped entirely.
+    /// - An unavailable OPTIONAL marker (`{{marker?}}`) is removed from its
+    ///   token along with the literal text bound to it — the run of
+    ///   non-marker characters immediately before it inside the token
+    ///   (e.g. the `#` in `{{model}}#{{effort?}}`) — and the rest of the
+    ///   token still renders from its remaining markers.
+    /// - A token that renders empty (all its markers were optional and
+    ///   unavailable) is dropped entirely, same as a required-marker drop.
     /// - A literal flag token (starts with `-`) immediately followed by a
     ///   dropped token is also dropped (prevents orphan flags).
     /// - A token like `--flag={{marker}}` is dropped as a unit if the marker
@@ -155,6 +164,10 @@ pub struct CliConfig {
     /// - A token like `{{model}}[effort={{effort}}]` is dropped if either
     ///   marker is unavailable; if both are available, the result is one
     ///   argv word (no shell reinterpretation).
+    /// - `{{model}}` must always stay required in a model-bearing token —
+    ///   spelling it `{{model?}}` is rejected (see
+    ///   `CliStrategy::unsafe_optional_model_token`): it would let the
+    ///   model argument silently vanish when model is absent.
     #[serde(default)]
     pub invocation_template: Option<String>,
     /// Declarative effort support. See [`EffortDeclaration`].

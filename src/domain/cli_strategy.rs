@@ -397,6 +397,13 @@ pub async fn verify_identity_async(
     }
 }
 
+/// One parsed piece of a template token: either literal text, or a
+/// `{{marker}}` (required) / `{{marker?}}` (optional) reference.
+enum TokenPart<'a> {
+    Literal(&'a str),
+    Marker { name: &'a str, optional: bool },
+}
+
 impl CliStrategy {
     /// Build a strategy straight from a registry [`CliConfig`] entry — the
     /// one place that lists every field this struct mirrors from it, so
@@ -578,11 +585,9 @@ impl CliStrategy {
             let token = tokens[i];
             let has_marker = token.contains("{{");
             if !has_marker {
-                // Literal token: check if it's a flag that should be dropped
-                // because the next token (which contains a marker) is unavailable.
                 let next_dropped = if i + 1 < tokens.len() {
                     let next = tokens[i + 1];
-                    next.contains("{{") && !Self::all_markers_available(next, &markers)
+                    next.contains("{{") && Self::resolve_token(next, &markers).is_none()
                 } else {
                     false
                 };
@@ -593,9 +598,8 @@ impl CliStrategy {
                 argv.push(token.to_string());
                 i += 1;
             } else {
-                // Token contains markers: drop entirely if any marker unavailable.
-                if Self::all_markers_available(token, &markers) {
-                    argv.push(Self::substitute_token(token, &markers));
+                if let Some(rendered) = Self::resolve_token(token, &markers) {
+                    argv.push(rendered);
                 }
                 i += 1;
             }
@@ -603,27 +607,137 @@ impl CliStrategy {
         argv
     }
 
-    /// Check if all `{{marker}}` references in a token have available values.
-    fn all_markers_available(token: &str, markers: &HashMap<&str, Option<&str>>) -> bool {
-        for (name, value) in markers {
-            let placeholder = format!("{{{{{}}}}}", name);
-            if token.contains(&placeholder) && value.is_none() {
-                return false;
+    /// FR4: a template's "model-bearing" token (the one carrying the `model`
+    /// marker) must never be able to render empty — that would silently drop
+    /// the whole model argument, the exact defect this spec exists to fix,
+    /// just hidden behind the `?` spelling instead of the old
+    /// drop-whole-token-on-any-missing-marker rule. A token where EVERY marker
+    /// in it (including `model` itself, i.e. spelled `{{model?}}`) is optional
+    /// can do exactly that when model is absent. `{{model}}` (required, the
+    /// only spelling a model-bearing token should ever use) is always safe and
+    /// never triggers this.
+    ///
+    /// `template` is the raw `invocation_template` string (no `None` case here
+    /// — callers only invoke this when a template exists). Returns `Some(msg)`
+    /// naming the platform and the offending token; `None` when the template
+    /// has no unsafe model-bearing token.
+    pub fn unsafe_optional_model_token(template: &str, platform: &str) -> Option<String> {
+        for token in template.split_whitespace() {
+            let parts = Self::parse_token_parts(token);
+            let has_model_marker = parts
+                .iter()
+                .any(|p| matches!(p, TokenPart::Marker { name, .. } if *name == "model"));
+            if !has_model_marker {
+                continue;
+            }
+            let all_optional = parts.iter().all(|p| match p {
+                TokenPart::Marker { optional, .. } => *optional,
+                TokenPart::Literal(_) => true,
+            });
+            if all_optional {
+                return Some(format!(
+                    "platform '{platform}' invocation_template token '{token}' has only \
+                     optional markers including {{{{model?}}}} — it would render empty \
+                     (silently dropping the model argument) whenever model is absent. \
+                     Spell the model marker as required: '{{{{model}}}}'."
+                ));
             }
         }
-        true
+        None
     }
 
-    /// Substitute all `{{marker}}` references in a token with their values.
-    fn substitute_token(token: &str, markers: &HashMap<&str, Option<&str>>) -> String {
-        let mut result = token.to_string();
-        for (name, value) in markers {
-            if let Some(val) = value {
-                let placeholder = format!("{{{{{}}}}}", name);
-                result = result.replace(&placeholder, val);
+    /// One parsed piece of a template token: either literal text, or a
+    /// `{{marker}}` (required) / `{{marker?}}` (optional) reference.
+    fn parse_token_parts(token: &str) -> Vec<TokenPart<'_>> {
+        let mut parts = Vec::new();
+        let mut rest = token;
+        loop {
+            let Some(start) = rest.find("{{") else {
+                if !rest.is_empty() {
+                    parts.push(TokenPart::Literal(rest));
+                }
+                break;
+            };
+            if start > 0 {
+                parts.push(TokenPart::Literal(&rest[..start]));
+            }
+            let after_open = &rest[start + 2..];
+            let Some(end) = after_open.find("}}") else {
+                parts.push(TokenPart::Literal(&rest[start..]));
+                break;
+            };
+            let raw_name = &after_open[..end];
+            let (name, optional) = match raw_name.strip_suffix('?') {
+                Some(n) => (n, true),
+                None => (raw_name, false),
+            };
+            parts.push(TokenPart::Marker { name, optional });
+            rest = &after_open[end + 2..];
+        }
+        parts
+    }
+
+    /// Resolve one template token against the marker values. `None` means the
+    /// token is dropped entirely — either because a REQUIRED marker in it is
+    /// unavailable (today's rule, unchanged: FR3), or because after removing
+    /// every unavailable OPTIONAL marker and its bound literal glue (FR1/FR2)
+    /// nothing is left to render (FR2: "a token that becomes empty is
+    /// dropped"). `Some(rendered)` is the fully substituted token.
+    fn resolve_token(token: &str, markers: &HashMap<&str, Option<&str>>) -> Option<String> {
+        let parts = Self::parse_token_parts(token);
+
+        // FR3: any unavailable REQUIRED marker drops the whole token, exactly
+        // as `all_markers_available` did before — optional markers never
+        // participate in this check.
+        for part in &parts {
+            if let TokenPart::Marker {
+                name,
+                optional: false,
+            } = part
+            {
+                markers.get(name).copied().flatten()?;
             }
         }
-        result
+
+        // FR1/FR2: render left to right. A literal immediately followed by an
+        // unavailable OPTIONAL marker is the "glue bound to" that marker (FR2)
+        // — both are dropped as a pair. Every other literal, and every
+        // available marker's value, is emitted normally.
+        let mut out = String::new();
+        let mut i = 0;
+        while i < parts.len() {
+            match &parts[i] {
+                TokenPart::Literal(s) => {
+                    let glue_drops = matches!(
+                        parts.get(i + 1),
+                        Some(TokenPart::Marker { name, optional: true })
+                            if markers.get(name).copied().flatten().is_none()
+                    );
+                    if glue_drops {
+                        i += 2;
+                    } else {
+                        out.push_str(s);
+                        i += 1;
+                    }
+                }
+                TokenPart::Marker { name, .. } => {
+                    if let Some(val) = markers.get(name).copied().flatten() {
+                        out.push_str(val);
+                    }
+                    // Unavailable here can only be an optional marker (a
+                    // required-unavailable one already returned above) — skip
+                    // it silently, its own glue (if any) was already consumed
+                    // in the Literal arm above, or there was none to consume.
+                    i += 1;
+                }
+            }
+        }
+
+        if out.is_empty() {
+            None
+        } else {
+            Some(out)
+        }
     }
 
     /// Shared core for every headless spawn (cold or resume). `session_arg`,
@@ -1538,6 +1652,114 @@ mod tests {
         assert!(cmd_str2.contains("the prompt"));
     }
 
+    #[test]
+    fn template_optional_marker_glue_renders_when_available() {
+        let s = sample_strategy();
+        let argv = s.build_argv_from_template(
+            "-m {{model}}#{{effort?}} {{prompt}}",
+            "implement",
+            Some("opencode/big-pickle"),
+            None,
+            None,
+            Some("high"),
+            None,
+        );
+        assert_eq!(argv, vec!["-m", "opencode/big-pickle#high", "implement"]);
+    }
+
+    #[test]
+    fn template_optional_marker_glue_elided_when_absent() {
+        let s = sample_strategy();
+        let argv = s.build_argv_from_template(
+            "-m {{model}}#{{effort?}} {{prompt}}",
+            "implement",
+            Some("opencode/big-pickle"),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(argv, vec!["-m", "opencode/big-pickle", "implement"]);
+        assert!(argv.contains(&"opencode/big-pickle".to_string()));
+        assert!(!argv.iter().any(|w| w.contains('#')));
+    }
+
+    #[test]
+    fn template_optional_marker_hyphen_glue() {
+        let s = sample_strategy();
+        let template = "--model {{model}}-{{effort?}} {{prompt}}";
+        let with_effort = s.build_argv_from_template(
+            template,
+            "go",
+            Some("claude-sonnet-5"),
+            None,
+            None,
+            Some("high"),
+            None,
+        );
+        assert_eq!(with_effort, vec!["--model", "claude-sonnet-5-high", "go"]);
+        let without_effort = s.build_argv_from_template(
+            template,
+            "go",
+            Some("claude-sonnet-5"),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(without_effort, vec!["--model", "claude-sonnet-5", "go"]);
+    }
+
+    #[test]
+    fn template_required_marker_still_drops_token_and_flag() {
+        let s = sample_strategy();
+        let template = "--variant {{effort}} {{prompt}}";
+        let argv = s.build_argv_from_template(template, "go", None, None, None, None, None);
+        assert_eq!(argv, vec!["go"]);
+        assert!(!argv.contains(&"--variant".to_string()));
+    }
+
+    #[test]
+    fn template_optional_marker_alone_in_token_drops_with_flag() {
+        let s = sample_strategy();
+        let template = "--variant {{effort?}} {{prompt}}";
+        let argv = s.build_argv_from_template(template, "go", None, None, None, None, None);
+        assert_eq!(argv, vec!["go"]);
+        let argv2 =
+            s.build_argv_from_template(template, "go", None, None, None, Some("high"), None);
+        assert_eq!(argv2, vec!["--variant", "high", "go"]);
+    }
+
+    #[test]
+    fn unsafe_optional_model_token_rejects_all_optional_model_bearing_token() {
+        let msg = CliStrategy::unsafe_optional_model_token(
+            "-m {{model?}}#{{effort?}} {{prompt}}",
+            "opencode",
+        );
+        assert!(msg.is_some());
+        let msg = msg.unwrap();
+        assert!(msg.contains("opencode"));
+        assert!(msg.contains("{{model?}}#{{effort?}}"));
+    }
+
+    #[test]
+    fn unsafe_optional_model_token_allows_required_model_with_optional_effort() {
+        assert!(CliStrategy::unsafe_optional_model_token(
+            "-m {{model}}#{{effort?}} {{prompt}}",
+            "opencode",
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn unsafe_optional_model_token_none_when_no_model_marker() {
+        assert!(CliStrategy::unsafe_optional_model_token(
+            "-p {{prompt}} --add-dir {{workdir}}",
+            "antigravity",
+        )
+        .is_none());
+    }
+
     // ── CB3: real registry templates as fixtures ─────────────────
     // All `invocation_template` strings below are copied verbatim from
     // `canopy-registry` commit `0f90d39` (branch `feat/invocation-template`),
@@ -1828,10 +2050,11 @@ mod tests {
     }
 
     #[test]
-    fn real_template_opencode_variant_flag() {
-        // Source: canopy-registry/platforms/opencode.toml @ 0f90d39
-        // Template: "-m {{model}} --dir {{workdir}} --variant {{effort}} {{prompt}}"
-        let template = "-m {{model}} --dir {{workdir}} --variant {{effort}} {{prompt}}";
+    fn real_template_opencode_v2_effort_in_model() {
+        // Source: CM31 — opencode v2 removed `--variant`; reasoning level now
+        // rides inside `-m provider/model#variant`. `{{effort?}}` optional so a
+        // dispatch with no effort still gets `-m <model>` (not a dropped flag).
+        let template = "-m {{model}}#{{effort?}} --dir {{workdir}} {{prompt}}";
         let s = strategy_with_template(template);
         let argv = s.build_argv_from_template(
             template,
@@ -1846,15 +2069,14 @@ mod tests {
             argv,
             vec![
                 "-m",
-                "opencode/big-pickle",
+                "opencode/big-pickle#max",
                 "--dir",
                 "/proj",
-                "--variant",
-                "max",
                 "implement"
             ]
         );
-        // Without effort: --variant elided.
+        // Without effort: `-m opencode/big-pickle` survives whole — this is
+        // the CM31 fix; the old template lost `-m` and the model entirely here.
         let argv2 = s.build_argv_from_template(
             template,
             "implement",
@@ -1868,7 +2090,7 @@ mod tests {
             argv2,
             vec!["-m", "opencode/big-pickle", "--dir", "/proj", "implement"]
         );
-        assert!(!argv2.contains(&"--variant".to_string()));
+        assert!(!argv2.iter().any(|w| w.contains('#')));
     }
 
     #[test]

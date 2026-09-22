@@ -8745,6 +8745,38 @@ impl TaskTriggerHandler {
             .collect();
 
         let graph_targets = crate::daemon::probe::distinct_targets_for_graph(&details);
+
+        // FR4/CM31: reject before spending any probe quota — this is a static
+        // defect in the platform's template, not a runtime reachability
+        // question, so there is nothing a probe could tell us that changes the
+        // verdict.
+        {
+            let Some(home) = dirs::home_dir() else {
+                return Err(internal_error("No home directory"));
+            };
+            let config = crate::domain::canopy_config::CanopyConfig::load(&home.join(".canopy"));
+            let mut seen_platforms = std::collections::HashSet::new();
+            for gt in &graph_targets {
+                let platform = gt.target.platform.as_str();
+                if !seen_platforms.insert(platform) {
+                    continue;
+                }
+                let Some(cli) = config.get_cli(platform) else {
+                    continue;
+                };
+                let Some(template) = cli.invocation_template.as_deref() else {
+                    continue;
+                };
+                if let Some(msg) =
+                    crate::domain::cli_strategy::CliStrategy::unsafe_optional_model_token(
+                        template, platform,
+                    )
+                {
+                    return Ok(error_result(&format!("Preflight: {msg}")));
+                }
+            }
+        }
+
         // (CB25) Spawn the design reviewer BEFORE the no-target early return
         // so a review is available on both success shapes. `spawn_subagent`
         // returns an id immediately and never blocks, so the reviewer works
@@ -28088,6 +28120,53 @@ mod endpoint_tests {
         let msg = text(&result);
         assert!(msg.contains("Stale Ensemble"), "{msg}");
         assert!(msg.contains("invalid min_pass"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn graph_preflight_rejects_unsafe_optional_model_token() {
+        let home = tempdir().unwrap();
+        let canopy_dir = home.path().join(".canopy");
+        std::fs::create_dir_all(&canopy_dir).unwrap();
+        let config = crate::domain::canopy_config::CanopyConfig {
+            clis: vec![crate::domain::cli_config::CliConfig {
+                name: "bad-template-cli".to_string(),
+                binary: "/bin/echo".to_string(),
+                invocation_template: Some("-m {{model?}}#{{effort?}} {{prompt}}".to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        config.save(&canopy_dir).unwrap();
+        let _home_guard = HomeVar::set(home.path());
+
+        let (dir, db, handler) = endpoint_test_handler();
+        let lp = insert_test_graph(&db, dir.path());
+        let spec = insert_test_spec(&db, &lp.id, 1);
+        handler
+            .graph_add_node(Parameters(GraphAddNodeParams {
+                spec_id: Some(spec.id.clone()),
+                graph_id: None,
+                name: "Entry".to_string(),
+                kind: Some("agent".to_string()),
+                config: Some(agent_node_config("bad-template-cli")),
+                blueprint: None,
+                config_overrides: None,
+            }))
+            .await
+            .unwrap();
+
+        let result = handler
+            .graph_preflight(Parameters(GraphPreflightParams {
+                graph_id: lp.id.clone(),
+                timeout_seconds: None,
+                reviewer: None,
+            }))
+            .await
+            .unwrap();
+        assert!(is_err(&result), "{}", text(&result));
+        let msg = text(&result);
+        assert!(msg.contains("bad-template-cli"), "{msg}");
+        assert!(msg.contains("{{model?}}"), "{msg}");
     }
 
     #[tokio::test]
