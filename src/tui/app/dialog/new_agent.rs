@@ -1018,6 +1018,9 @@ mod tests {
             paste_submit_presses: 1,
             invocation_template: None,
             effort_declaration: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
         }
     }
 
@@ -1143,6 +1146,9 @@ mod tests {
             paste_submit_presses: 1,
             invocation_template: None,
             effort_declaration: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
         })];
         dialog.cli_index = 0;
         dialog.task_mode = NewTaskMode::Interactive;
@@ -1191,6 +1197,9 @@ mod tests {
             paste_submit_presses: 1,
             invocation_template: None,
             effort_declaration: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
         })];
         dialog.cli_index = 0;
         assert_eq!(
@@ -1240,6 +1249,9 @@ mod tests {
             paste_submit_presses: 1,
             invocation_template: None,
             effort_declaration: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
         })];
         dialog.cli_index = 0;
         assert_eq!(dialog.selected_yolo_flag().as_deref(), Some("--yolo"));
@@ -1308,6 +1320,9 @@ mod tests {
             paste_submit_presses: 1,
             invocation_template: None,
             effort_declaration: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
         })];
         dialog.cli_index = 0;
         assert!(!dialog.resume_unconfigured());
@@ -1517,6 +1532,9 @@ mod tests {
             paste_submit_presses: 1,
             invocation_template: None,
             effort_declaration: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
         };
         let result = dialog.build_resume_args(&config, Some("--tui".to_string()));
         assert_eq!(result.as_deref(), Some("--tui"));
@@ -1554,6 +1572,9 @@ mod tests {
             paste_submit_presses: 1,
             invocation_template: None,
             effort_declaration: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
         };
         let result = dialog.build_resume_args(&config, Some("--tui".to_string()));
         assert_eq!(result.as_deref(), Some("--tui --resume"));
@@ -1591,6 +1612,9 @@ mod tests {
             paste_submit_presses: 1,
             invocation_template: None,
             effort_declaration: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
         };
         let result = dialog.build_resume_args(&config, Some("--tui".to_string()));
         assert_eq!(result.as_deref(), Some("--tui"));
@@ -1628,6 +1652,9 @@ mod tests {
             paste_submit_presses: 1,
             invocation_template: None,
             effort_declaration: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
         };
         let result = dialog.build_resume_args(&config, None);
         assert_eq!(result.as_deref(), Some("--resume"));
@@ -1665,6 +1692,9 @@ mod tests {
             paste_submit_presses: 1,
             invocation_template: None,
             effort_declaration: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
         };
         let result = dialog.build_resume_args(&config, None);
         assert!(result.is_none());
@@ -1703,6 +1733,9 @@ mod tests {
             paste_submit_presses: 1,
             invocation_template: None,
             effort_declaration: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
         };
         let result = dialog.build_resume_args(&config, Some("--tui".to_string()));
         assert_eq!(result.as_deref(), Some("--tui --conversation ses_abc123"));
@@ -1774,6 +1807,9 @@ mod tests {
             paste_submit_presses: 1,
             invocation_template: None,
             effort_declaration: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
         })];
         dialog.cli_index = 0;
         let theme = Theme::classic();
@@ -1815,6 +1851,9 @@ mod tests {
             paste_submit_presses: 1,
             invocation_template: None,
             effort_declaration: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
         };
         // With session but no resume_cmd, falls back to generic resume
         let result = dialog.build_resume_args(&config, Some("--tui".to_string()));
@@ -1883,6 +1922,9 @@ mod tests {
             paste_submit_presses: 1,
             invocation_template: None,
             effort_declaration: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
         })];
         dialog.cli_index = 0;
         dialog.apply_resume_choice(resumable_session("opencode", "/proj", Some("--tui --yolo")));
@@ -1928,6 +1970,9 @@ mod tests {
             paste_submit_presses: 1,
             invocation_template: None,
             effort_declaration: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
         })];
         dialog.cli_index = 0;
         // The recorded session's own args already carry the resume flag.

@@ -760,6 +760,9 @@ pub fn build_import_plan(
                 model: member.model.clone(),
                 prompt_override: member.prompt_override.clone(),
                 timeout_minutes: member.timeout_minutes,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
             });
             next_position += 1;
         }
@@ -832,6 +835,9 @@ pub fn build_import_plan(
                 straggler_timeout_minutes: doc_ensemble.straggler_timeout_minutes,
                 quorum_grace_minutes: doc_ensemble.quorum_grace_minutes,
                 timeout_minutes: doc_ensemble.timeout_minutes,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
                 on_pass_to,
                 on_fail_to,
                 kind: import_kind,
@@ -1171,6 +1177,9 @@ mod tests {
             model: Some("opencode/muse-spark".to_string()),
             prompt_override: Some("custom angle".to_string()),
             timeout_minutes: Some(3),
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
         });
         ensemble_details.members[0] = EnsembleMember {
             ensemble_id: "ens1".to_string(),
@@ -1180,6 +1189,9 @@ mod tests {
             model: None,
             prompt_override: None,
             timeout_minutes: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
         };
         ensemble_details.members[1] = EnsembleMember {
             ensemble_id: "ens1".to_string(),
@@ -1189,6 +1201,9 @@ mod tests {
             model: Some("opencode-go/qwen3.7-plus".to_string()),
             prompt_override: None,
             timeout_minutes: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
         };
         // Shuffle the stored order so the test pins the sort, not the input.
         ensemble_details.members.swap(0, 2);
@@ -1446,6 +1461,9 @@ mod tests {
             straggler_timeout_minutes: None,
             quorum_grace_minutes: None,
             timeout_minutes: 30,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
             on_pass_to: on_pass_to.to_string(),
             on_fail_to: None,
             kind: EnsembleKind::Parallel,
@@ -1463,6 +1481,9 @@ mod tests {
                 model: Some(format!("model-{i}")),
                 prompt_override: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
             })
             .collect();
         EnsembleDetails { ensemble, members }

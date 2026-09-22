@@ -85,8 +85,8 @@ impl Database {
         }
 
         tx.execute(
-            "INSERT INTO ensembles (id, spec_id, graph_id, name, prompt_template, join_node_id, entry_from_node, entry_condition, min_pass, straggler_timeout_minutes, quorum_grace_minutes, timeout_minutes, on_pass_to, on_fail_to, kind, round_robin_index, commit_rights, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+            "INSERT INTO ensembles (id, spec_id, graph_id, name, prompt_template, join_node_id, entry_from_node, entry_condition, min_pass, straggler_timeout_minutes, quorum_grace_minutes, timeout_minutes, infra_retry_limit, infra_crash_max_seconds, infra_backoff_seconds, on_pass_to, on_fail_to, kind, round_robin_index, commit_rights, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
             params![
                 &ensemble.id,
                 &ensemble.spec_id,
@@ -100,6 +100,9 @@ impl Database {
                 ensemble.straggler_timeout_minutes,
                 ensemble.quorum_grace_minutes,
                 ensemble.timeout_minutes,
+                ensemble.infra_retry_limit,
+                ensemble.infra_crash_max_seconds,
+                ensemble.infra_backoff_seconds,
                 &ensemble.on_pass_to,
                 &ensemble.on_fail_to,
                 ensemble.kind.as_str(),
@@ -111,8 +114,8 @@ impl Database {
 
         for member in members {
             tx.execute(
-                "INSERT INTO ensemble_members (ensemble_id, node_id, position, platform, model, prompt_override, timeout_minutes)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO ensemble_members (ensemble_id, node_id, position, platform, model, prompt_override, timeout_minutes, infra_retry_limit, infra_crash_max_seconds, infra_backoff_seconds)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
                     &member.ensemble_id,
                     &member.node_id,
@@ -121,6 +124,9 @@ impl Database {
                     &member.model,
                     &member.prompt_override,
                     &member.timeout_minutes,
+                    &member.infra_retry_limit,
+                    &member.infra_crash_max_seconds,
+                    &member.infra_backoff_seconds,
                 ],
             )?;
         }
@@ -135,7 +141,7 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, spec_id, graph_id, name, prompt_template, join_node_id, entry_from_node, entry_condition, min_pass, straggler_timeout_minutes, quorum_grace_minutes, timeout_minutes, on_pass_to, on_fail_to, kind, round_robin_index, commit_rights, created_at
+            "SELECT id, spec_id, graph_id, name, prompt_template, join_node_id, entry_from_node, entry_condition, min_pass, straggler_timeout_minutes, quorum_grace_minutes, timeout_minutes, infra_retry_limit, infra_crash_max_seconds, infra_backoff_seconds, on_pass_to, on_fail_to, kind, round_robin_index, commit_rights, created_at
              FROM ensembles WHERE id = ?1",
         )?;
         stmt.query_row(params![ensemble_id], map_ensemble_row)
@@ -149,7 +155,7 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT ensemble_id, node_id, position, platform, model, prompt_override, timeout_minutes
+            "SELECT ensemble_id, node_id, position, platform, model, prompt_override, timeout_minutes, infra_retry_limit, infra_crash_max_seconds, infra_backoff_seconds
              FROM ensemble_members WHERE ensemble_id = ?1 ORDER BY position ASC",
         )?;
         let rows = stmt.query_map(params![ensemble_id], map_ensemble_member_row)?;
@@ -389,6 +395,7 @@ impl Database {
     /// Update the join's own config: pass threshold, straggler timeout, and
     /// shared member timeout. `None` means "leave unchanged" for each field —
     /// same convention as [`Self::update_graph_node_details`].
+    #[allow(clippy::too_many_arguments)]
     pub fn update_ensemble_join_config(
         &self,
         ensemble_id: &str,
@@ -396,6 +403,9 @@ impl Database {
         straggler_timeout_minutes: Option<Option<i64>>,
         quorum_grace_minutes: Option<Option<i64>>,
         timeout_minutes: Option<i64>,
+        infra_retry_limit: Option<Option<i64>>,
+        infra_crash_max_seconds: Option<Option<i64>>,
+        infra_backoff_seconds: Option<Option<i64>>,
     ) -> Result<bool> {
         let conn = self
             .conn
@@ -406,8 +416,11 @@ impl Database {
              SET min_pass = COALESCE(?1, min_pass),
                  straggler_timeout_minutes = CASE WHEN ?2 IS NULL THEN straggler_timeout_minutes ELSE ?3 END,
                  quorum_grace_minutes = CASE WHEN ?4 IS NULL THEN quorum_grace_minutes ELSE ?5 END,
-                 timeout_minutes = COALESCE(?6, timeout_minutes)
-             WHERE id = ?7",
+                 timeout_minutes = COALESCE(?6, timeout_minutes),
+                 infra_retry_limit = CASE WHEN ?7 IS NULL THEN infra_retry_limit ELSE ?8 END,
+                 infra_crash_max_seconds = CASE WHEN ?9 IS NULL THEN infra_crash_max_seconds ELSE ?10 END,
+                 infra_backoff_seconds = CASE WHEN ?11 IS NULL THEN infra_backoff_seconds ELSE ?12 END
+             WHERE id = ?13",
             params![
                 min_pass,
                 straggler_timeout_minutes.map(|_| 1),
@@ -415,6 +428,12 @@ impl Database {
                 quorum_grace_minutes.map(|_| 1),
                 quorum_grace_minutes.flatten(),
                 timeout_minutes,
+                infra_retry_limit.map(|_| 1),
+                infra_retry_limit.flatten(),
+                infra_crash_max_seconds.map(|_| 1),
+                infra_crash_max_seconds.flatten(),
+                infra_backoff_seconds.map(|_| 1),
+                infra_backoff_seconds.flatten(),
                 ensemble_id,
             ],
         )?;
@@ -544,8 +563,8 @@ impl Database {
                 tx.execute(
                     "UPDATE ensemble_members
                      SET node_id = ?1, position = ?2, platform = ?3, model = ?4,
-                         prompt_override = ?5, timeout_minutes = ?6
-                     WHERE ensemble_id = ?7 AND position = ?8",
+                         prompt_override = ?5, timeout_minutes = ?6, infra_retry_limit = ?7, infra_crash_max_seconds = ?8, infra_backoff_seconds = ?9
+                     WHERE ensemble_id = ?10 AND position = ?11",
                     params![
                         &member.node_id,
                         member.position,
@@ -553,6 +572,9 @@ impl Database {
                         &member.model,
                         &member.prompt_override,
                         &member.timeout_minutes,
+                        &member.infra_retry_limit,
+                        &member.infra_crash_max_seconds,
+                        &member.infra_backoff_seconds,
                         ensemble_id,
                         member.position,
                     ],
@@ -574,8 +596,8 @@ impl Database {
                 )?;
                 tx.execute(
                     "INSERT INTO ensemble_members
-                     (ensemble_id, node_id, position, platform, model, prompt_override, timeout_minutes)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                     (ensemble_id, node_id, position, platform, model, prompt_override, timeout_minutes, infra_retry_limit, infra_crash_max_seconds, infra_backoff_seconds)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                     params![
                         &member.ensemble_id,
                         &member.node_id,
@@ -584,6 +606,9 @@ impl Database {
                         &member.model,
                         &member.prompt_override,
                         &member.timeout_minutes,
+                        &member.infra_retry_limit,
+                        &member.infra_crash_max_seconds,
+                        &member.infra_backoff_seconds,
                     ],
                 )?;
                 tx.execute(
@@ -1066,6 +1091,9 @@ impl Database {
                         model.map(str::to_string),
                         prompt_override.map(str::to_string),
                         None,
+                        None,
+                        None,
+                        None,
                     )
                 })
                 .collect();
@@ -1110,9 +1138,12 @@ impl Database {
 /// pre-prompt-override 2-element `[platform, model]` shape, the
 /// pre-member-timeout 3-element `[platform, model, prompt_override]` shape
 /// (rows seeded before this field existed — including a builtin blueprint
-/// from an older daemon), and the current 4-element
-/// `[platform, model, prompt_override, timeout_minutes]` shape, so an
-/// upgrade never needs a data migration for blueprints already in the DB.
+/// from an older daemon), the pre-CM30 4-element
+/// `[platform, model, prompt_override, timeout_minutes]` shape, and the
+/// current 7-element `[platform, model, prompt_override, timeout_minutes,
+/// infra_retry_limit, infra_crash_max_seconds, infra_backoff_seconds]`
+/// shape, so an upgrade never needs a data migration for blueprints
+/// already in the DB.
 fn parse_ensemble_blueprint_members(
     raw: &str,
 ) -> Result<Vec<EnsembleMemberSpec>, serde_json::Error> {
@@ -1134,7 +1165,18 @@ fn parse_ensemble_blueprint_members(
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string);
             let timeout_minutes = entry.get(3).and_then(serde_json::Value::as_i64);
-            (platform, model, prompt_override, timeout_minutes)
+            let infra_retry_limit = entry.get(4).and_then(serde_json::Value::as_i64);
+            let infra_crash_max_seconds = entry.get(5).and_then(serde_json::Value::as_i64);
+            let infra_backoff_seconds = entry.get(6).and_then(serde_json::Value::as_i64);
+            (
+                platform,
+                model,
+                prompt_override,
+                timeout_minutes,
+                infra_retry_limit,
+                infra_crash_max_seconds,
+                infra_backoff_seconds,
+            )
         })
         .collect())
 }
@@ -1168,10 +1210,10 @@ fn map_ensemble_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Ensemble> {
                 )),
             )
         })?;
-    let kind_str: String = row.get(14)?;
+    let kind_str: String = row.get(17)?;
     let kind = EnsembleKind::from_str(&kind_str).ok_or_else(|| {
         rusqlite::Error::FromSqlConversionFailure(
-            14,
+            17,
             rusqlite::types::Type::Text,
             Box::new(IoError::new(
                 ErrorKind::InvalidData,
@@ -1192,12 +1234,15 @@ fn map_ensemble_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Ensemble> {
         straggler_timeout_minutes: row.get(9)?,
         quorum_grace_minutes: row.get(10)?,
         timeout_minutes: row.get(11)?,
-        on_pass_to: row.get(12)?,
-        on_fail_to: row.get(13)?,
+        infra_retry_limit: row.get(12)?,
+        infra_crash_max_seconds: row.get(13)?,
+        infra_backoff_seconds: row.get(14)?,
+        on_pass_to: row.get(15)?,
+        on_fail_to: row.get(16)?,
         kind,
-        round_robin_index: row.get(15)?,
-        commit_rights: row.get(16)?,
-        created_at: from_timestamp(row.get(17)?)?,
+        round_robin_index: row.get(18)?,
+        commit_rights: row.get(19)?,
+        created_at: from_timestamp(row.get(20)?)?,
     })
 }
 
@@ -1210,6 +1255,9 @@ fn map_ensemble_member_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Ensemble
         model: row.get(4)?,
         prompt_override: row.get(5)?,
         timeout_minutes: row.get(6)?,
+        infra_retry_limit: row.get(7)?,
+        infra_crash_max_seconds: row.get(8)?,
+        infra_backoff_seconds: row.get(9)?,
     })
 }
 
@@ -1585,6 +1633,9 @@ mod tests {
             straggler_timeout_minutes: None,
             quorum_grace_minutes: None,
             timeout_minutes: 30,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
             on_pass_to: "arbiter".to_string(),
             on_fail_to: None,
             kind: EnsembleKind::Parallel,
@@ -1602,6 +1653,9 @@ mod tests {
                 model: Some(format!("model-{i}")),
                 prompt_override: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
             })
             .collect();
 
@@ -1740,6 +1794,9 @@ mod tests {
             straggler_timeout_minutes: None,
             quorum_grace_minutes: None,
             timeout_minutes: 30,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
             on_pass_to: "arbiter".to_string(),
             on_fail_to: Some("fallback".to_string()),
             kind: EnsembleKind::Parallel,
@@ -1757,6 +1814,9 @@ mod tests {
                 model: Some(format!("model-{i}")),
                 prompt_override: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
             })
             .collect();
         db.insert_ensemble_unit(&ensemble, &members, &member_nodes, &join_node, &edges)
@@ -1782,6 +1842,9 @@ mod tests {
                 model: Some(format!("model-{position}")),
                 prompt_override: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
             });
             nodes.push(GraphNode {
                 id: id.to_string(),
@@ -1852,6 +1915,9 @@ mod tests {
             model: Some("bad-member".to_string()),
             prompt_override: None,
             timeout_minutes: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
         });
         let mut nodes: Vec<GraphNode> = before_members
             .iter()
@@ -2116,6 +2182,9 @@ mod tests {
             straggler_timeout_minutes: None,
             quorum_grace_minutes: None,
             timeout_minutes: 30,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
             on_pass_to: "arbiter".to_string(),
             on_fail_to: None,
             kind: EnsembleKind::Parallel,
@@ -2131,6 +2200,9 @@ mod tests {
                 model: None,
                 prompt_override: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
             },
             EnsembleMember {
                 ensemble_id: "ens1".to_string(),
@@ -2140,6 +2212,9 @@ mod tests {
                 model: None,
                 prompt_override: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
             },
         ];
         db.insert_ensemble_unit(&ensemble, &members, &member_nodes, &join_node, &edges)
@@ -2265,6 +2340,9 @@ mod tests {
             straggler_timeout_minutes: Some(15),
             quorum_grace_minutes: None,
             timeout_minutes: 30,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
             on_pass_to: "arbiter".to_string(),
             on_fail_to: None,
             kind: EnsembleKind::Parallel,
@@ -2279,12 +2357,15 @@ mod tests {
             model: None,
             prompt_override: None,
             timeout_minutes: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
         }];
         db.insert_ensemble_unit(&ensemble, &members, &member_nodes, &join_node, &edges)
             .unwrap();
 
         // Only min_pass changes; straggler_timeout_minutes/timeout_minutes omitted.
-        db.update_ensemble_join_config("ens1", Some(1), None, None, None)
+        db.update_ensemble_join_config("ens1", Some(1), None, None, None, None, None, None)
             .unwrap();
         let after = db.get_ensemble("ens1").unwrap().unwrap();
         assert_eq!(after.min_pass, 1);
@@ -2292,7 +2373,7 @@ mod tests {
         assert_eq!(after.timeout_minutes, 30);
 
         // Explicitly clear straggler_timeout_minutes back to "defer to timeout_minutes".
-        db.update_ensemble_join_config("ens1", None, Some(None), None, None)
+        db.update_ensemble_join_config("ens1", None, Some(None), None, None, None, None, None)
             .unwrap();
         let cleared = db.get_ensemble("ens1").unwrap().unwrap();
         assert_eq!(cleared.straggler_timeout_minutes, None);
@@ -2398,6 +2479,9 @@ mod tests {
             straggler_timeout_minutes: None,
             quorum_grace_minutes: None,
             timeout_minutes: 30,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
             on_pass_to: "arbiter".to_string(),
             on_fail_to: None,
             kind: EnsembleKind::Parallel,
@@ -2415,6 +2499,9 @@ mod tests {
                 model: None,
                 prompt_override: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
             })
             .collect();
         db.insert_ensemble_unit(&ensemble, &members, &member_nodes, &join_node, &edges)
@@ -2544,16 +2631,25 @@ mod tests {
                     Some("deepseek/deepseek-chat-v3.1:free".to_string()),
                     None,
                     None,
+                    None,
+                    None,
+                    None,
                 ),
                 (
                     "openrouter".to_string(),
                     Some("qwen/qwen3-coder:free".to_string()),
                     None,
                     None,
+                    None,
+                    None,
+                    None,
                 ),
                 (
                     "openrouter".to_string(),
                     Some("meta-llama/llama-3.3-70b-instruct:free".to_string()),
+                    None,
+                    None,
+                    None,
                     None,
                     None,
                 ),
@@ -2572,7 +2668,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(migrated.members.len(), 3);
-        for (platform, model, _, _) in &migrated.members {
+        for (platform, model, _, _, _, _, _) in &migrated.members {
             assert_eq!(platform, "openrouter");
             assert!(model.is_none(), "model identity must be reconciled away");
         }
@@ -2599,7 +2695,7 @@ mod tests {
             id: uuid::Uuid::new_v4().to_string(),
             name: "ensemble-proposers".to_string(),
             prompt_template: "my own take".to_string(),
-            members: vec![("claude".to_string(), None, None, None)],
+            members: vec![("claude".to_string(), None, None, None, None, None, None)],
             min_pass: Some(1),
             quorum_grace_minutes: None,
             builtin: false,
@@ -2739,6 +2835,9 @@ mod tests {
             straggler_timeout_minutes: None,
             quorum_grace_minutes: None,
             timeout_minutes: 30,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
             on_pass_to: "arbiter".to_string(),
             on_fail_to: None,
             kind: EnsembleKind::Parallel,
@@ -2754,6 +2853,9 @@ mod tests {
                 model: None,
                 prompt_override: Some("review for security".to_string()),
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
             },
             EnsembleMember {
                 ensemble_id: "ens1".to_string(),
@@ -2763,6 +2865,9 @@ mod tests {
                 model: None,
                 prompt_override: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
             },
         ];
         db.insert_ensemble_unit(&ensemble, &members, &member_nodes, &join_node, &edges)
@@ -2895,6 +3000,9 @@ mod tests {
             straggler_timeout_minutes: None,
             quorum_grace_minutes: None,
             timeout_minutes: 30,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
             on_pass_to: "arbiter".to_string(),
             on_fail_to: None,
             kind: EnsembleKind::Parallel,
@@ -2910,6 +3018,9 @@ mod tests {
                 model: None,
                 prompt_override: None,
                 timeout_minutes: Some(7),
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
             },
             EnsembleMember {
                 ensemble_id: "ens1".to_string(),
@@ -2919,6 +3030,9 @@ mod tests {
                 model: None,
                 prompt_override: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
             },
         ];
         db.insert_ensemble_unit(&ensemble, &members, &member_nodes, &join_node, &edges)
@@ -3022,6 +3136,9 @@ mod tests {
             straggler_timeout_minutes: None,
             quorum_grace_minutes: None,
             timeout_minutes: 30,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
             on_pass_to: "arbiter".to_string(),
             on_fail_to: None,
             kind: EnsembleKind::Parallel,
@@ -3036,6 +3153,9 @@ mod tests {
             model: None,
             prompt_override: None,
             timeout_minutes: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
         }];
         db.insert_ensemble_unit(&ensemble, &members, &member_nodes, &join_node, &edges)
             .unwrap();
@@ -3145,6 +3265,9 @@ mod tests {
             straggler_timeout_minutes: None,
             quorum_grace_minutes: None,
             timeout_minutes: 30,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
             on_pass_to: "arbiter".to_string(),
             on_fail_to: None,
             kind: EnsembleKind::Parallel,
@@ -3159,6 +3282,9 @@ mod tests {
             model: None,
             prompt_override: None,
             timeout_minutes: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
         }];
         db.insert_ensemble_unit(&ensemble, &members, &member_nodes, &join_node, &edges)
             .unwrap();
@@ -3191,9 +3317,12 @@ mod tests {
                     "openrouter".to_string(),
                     Some("deepseek/deepseek-chat-v3.1:free".to_string()),
                     None,
+                    None,
+                    None,
+                    None,
                     None
                 ),
-                ("claude".to_string(), None, None, None),
+                ("claude".to_string(), None, None, None, None, None, None),
             ]
         );
 
@@ -3206,9 +3335,12 @@ mod tests {
                     "openrouter".to_string(),
                     Some("deepseek/deepseek-chat-v3.1:free".to_string()),
                     Some("review it".to_string()),
+                    None,
+                    None,
+                    None,
                     None
                 ),
-                ("claude".to_string(), None, None, None),
+                ("claude".to_string(), None, None, None, None, None, None),
             ]
         );
 
@@ -3221,9 +3353,12 @@ mod tests {
                     "openrouter".to_string(),
                     Some("deepseek/deepseek-chat-v3.1:free".to_string()),
                     Some("review it".to_string()),
-                    Some(3)
+                    Some(3),
+                    None,
+                    None,
+                    None
                 ),
-                ("claude".to_string(), None, None, None),
+                ("claude".to_string(), None, None, None, None, None, None),
             ]
         );
     }
@@ -3299,6 +3434,9 @@ mod tests {
             straggler_timeout_minutes: None,
             quorum_grace_minutes: None,
             timeout_minutes: 30,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
             on_pass_to: "arbiter".to_string(),
             on_fail_to: None,
             kind: EnsembleKind::Cascade,
@@ -3313,6 +3451,9 @@ mod tests {
             model: None,
             prompt_override: None,
             timeout_minutes: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
         }];
 
         db.insert_ensemble_unit(&ensemble, &members, &[member_node], &join_node, &[edge])
@@ -3394,6 +3535,9 @@ mod tests {
             straggler_timeout_minutes: None,
             quorum_grace_minutes: None,
             timeout_minutes: 30,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
             on_pass_to: "arbiter".to_string(),
             on_fail_to: None,
             kind: EnsembleKind::RoundRobin,
@@ -3408,6 +3552,9 @@ mod tests {
             model: None,
             prompt_override: None,
             timeout_minutes: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
         }];
 
         db.insert_ensemble_unit(&ensemble, &members, &[member_node], &join_node, &[edge])
@@ -3489,6 +3636,9 @@ mod tests {
             straggler_timeout_minutes: None,
             quorum_grace_minutes: None,
             timeout_minutes: 30,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
             on_pass_to: "arbiter".to_string(),
             on_fail_to: None,
             kind: EnsembleKind::RoundRobin,
@@ -3503,6 +3653,9 @@ mod tests {
             model: None,
             prompt_override: None,
             timeout_minutes: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
         }];
 
         db.insert_ensemble_unit(&ensemble, &members, &[member_node], &join_node, &[edge])
@@ -3587,6 +3740,9 @@ mod tests {
             straggler_timeout_minutes: None,
             quorum_grace_minutes: None,
             timeout_minutes: 30,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
             on_pass_to: "arbiter".to_string(),
             on_fail_to: None,
             kind: EnsembleKind::RoundRobin,
@@ -3601,6 +3757,9 @@ mod tests {
             model: None,
             prompt_override: None,
             timeout_minutes: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
         }];
 
         db.insert_ensemble_unit(&ensemble, &members, &[member_node], &join_node, &[edge])

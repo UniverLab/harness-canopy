@@ -830,6 +830,9 @@ impl Database {
                 straggler_timeout_minutes INTEGER,
                 quorum_grace_minutes INTEGER,
                 timeout_minutes INTEGER NOT NULL,
+                infra_retry_limit INTEGER,
+                infra_crash_max_seconds INTEGER,
+                infra_backoff_seconds INTEGER,
                 on_pass_to TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE RESTRICT,
                 on_fail_to TEXT REFERENCES graph_nodes(id) ON DELETE RESTRICT,
                 commit_rights INTEGER NOT NULL DEFAULT 0,
@@ -845,6 +848,9 @@ impl Database {
                 model TEXT,
                 prompt_override TEXT,
                 timeout_minutes INTEGER,
+                infra_retry_limit INTEGER,
+                infra_crash_max_seconds INTEGER,
+                infra_backoff_seconds INTEGER,
                 PRIMARY KEY (ensemble_id, node_id)
             );
 
@@ -2089,6 +2095,58 @@ impl Database {
                 [],
             )
             .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
+        }
+
+        // CM30: platform-level infra-retry override lives in config.toml's
+        // CliConfig; these columns are the ensemble-level default and the
+        // per-member override in the same precedence chain (member ->
+        // ensemble -> node config -> platform -> engine default). NULL for
+        // every pre-existing row, which is exactly "defer further down the
+        // chain" — no behavioural migration needed alongside the column add.
+        for column in [
+            "infra_retry_limit",
+            "infra_crash_max_seconds",
+            "infra_backoff_seconds",
+        ] {
+            let has_column: bool = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) FROM pragma_table_info('ensembles') WHERE name = '{column}'"
+                    ),
+                    [],
+                    |row| Ok(row.get::<_, i32>(0)? > 0),
+                )
+                .unwrap_or(false);
+            if !has_column {
+                conn.execute(
+                    &format!("ALTER TABLE ensembles ADD COLUMN {column} INTEGER"),
+                    [],
+                )
+                .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
+            }
+        }
+
+        for column in [
+            "infra_retry_limit",
+            "infra_crash_max_seconds",
+            "infra_backoff_seconds",
+        ] {
+            let has_column: bool = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) FROM pragma_table_info('ensemble_members') WHERE name = '{column}'"
+                    ),
+                    [],
+                    |row| Ok(row.get::<_, i32>(0)? > 0),
+                )
+                .unwrap_or(false);
+            if !has_column {
+                conn.execute(
+                    &format!("ALTER TABLE ensemble_members ADD COLUMN {column} INTEGER"),
+                    [],
+                )
+                .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
+            }
         }
 
         Self::set_schema_version(&conn)?;

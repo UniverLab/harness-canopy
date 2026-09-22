@@ -1070,6 +1070,15 @@ pub struct Ensemble {
     pub quorum_grace_minutes: Option<i64>,
     /// Shared agent timeout (minutes) applied to every member's node config.
     pub timeout_minutes: i64,
+    // Ensemble — CM30: ensemble-level default infra-retry override, applied
+    // to every member unless the member sets its own (see EnsembleMember).
+    // `None` means "defer further down the chain" — NOT "use the engine
+    // default": a member could still override, or the platform could still
+    // apply. Mirrors `straggler_timeout_minutes`'s "None = defer" shape,
+    // unlike `timeout_minutes` which is never optional.
+    pub infra_retry_limit: Option<i64>,
+    pub infra_crash_max_seconds: Option<i64>,
+    pub infra_backoff_seconds: Option<i64>,
     /// Join-node outgoing routing: where a `pass`/`fail` join result routes
     /// to next. `on_pass_to` is required at creation; `on_fail_to` is
     /// optional (a dead end on fail, same as any other node with no
@@ -1096,15 +1105,27 @@ impl Ensemble {
     }
 }
 
-/// `(platform, model, prompt_override, timeout_minutes)` — the normalized
-/// shape of one ensemble member's identity, shared by `graph_add_ensemble`/
+/// `(platform, model, prompt_override, timeout_minutes, infra_retry_limit,
+/// infra_crash_max_seconds, infra_backoff_seconds)` — the normalized shape
+/// of one ensemble member's identity, shared by `graph_add_ensemble`/
 /// `graph_update_ensemble`'s validated input, [`EnsembleBlueprint`]'s stored
 /// members, and [`EnsembleMember`] itself. `timeout_minutes` is this
 /// member's own timeout override, or `None` to use the ensemble's shared
-/// `timeout_minutes`.
+/// `timeout_minutes`. `infra_retry_limit`, `infra_crash_max_seconds` and
+/// `infra_backoff_seconds` are this member's own infra-retry overrides, or
+/// `None` to use the ensemble's own default (which may itself defer to the
+/// platform's config.toml value, then the engine default).
 ///
 /// [`EnsembleBlueprint`]: crate::domain::blueprints::EnsembleBlueprint
-pub type EnsembleMemberSpec = (String, Option<String>, Option<String>, Option<i64>);
+pub type EnsembleMemberSpec = (
+    String,
+    Option<String>,
+    Option<String>,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+);
 
 /// One member of an [`Ensemble`] — differs from its siblings in
 /// `platform`/`model` and, optionally, its own prompt; `node_id` points at
@@ -1131,6 +1152,13 @@ pub struct EnsembleMember {
     /// (the default) means "use the ensemble's `timeout_minutes`", exactly
     /// as every member behaved before this field existed.
     pub timeout_minutes: Option<i64>,
+    // EnsembleMember — CM30: this member's own infra-retry override,
+    // overriding the ensemble's own default for this member only. `None`
+    // means "use the ensemble's value" (which may itself be `None`, meaning
+    // "use the platform's/engine's"). Same shape as `timeout_minutes` above.
+    pub infra_retry_limit: Option<i64>,
+    pub infra_crash_max_seconds: Option<i64>,
+    pub infra_backoff_seconds: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1248,6 +1276,9 @@ mod tests {
             straggler_timeout_minutes: None,
             quorum_grace_minutes: None,
             timeout_minutes: 30,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
             on_pass_to: "arbiter".to_string(),
             on_fail_to: None,
             kind: super::EnsembleKind::Parallel,
@@ -1279,6 +1310,9 @@ mod tests {
             straggler_timeout_minutes: None,
             quorum_grace_minutes: None,
             timeout_minutes: 30,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
             on_pass_to: "arbiter".to_string(),
             on_fail_to: None,
             kind: super::EnsembleKind::Parallel,

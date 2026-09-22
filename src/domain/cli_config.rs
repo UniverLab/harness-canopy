@@ -160,6 +160,22 @@ pub struct CliConfig {
     /// Declarative effort support. See [`EffortDeclaration`].
     #[serde(default)]
     pub effort_declaration: Option<EffortDeclaration>,
+    /// CM30: infra-retry budget for every agent node/member dispatched on
+    /// this platform, absent a more specific override (node config, ensemble
+    /// default, member override — see `graph_engine::resolve_node_infra_config`).
+    /// `None` means "defer to the engine default" (`DEFAULT_INFRA_RETRY_LIMIT`
+    /// = 2). Read fresh from `~/.canopy/config.toml` on every dispatch — no
+    /// caching, no daemon restart needed to pick up an edit.
+    #[serde(default)]
+    pub infra_retry_limit: Option<u32>,
+    /// CM30: see `infra_retry_limit`. `None` defers to
+    /// `DEFAULT_INFRA_CRASH_MAX_SECONDS` (60).
+    #[serde(default)]
+    pub infra_crash_max_seconds: Option<u64>,
+    /// CM30: see `infra_retry_limit`. `None` defers to
+    /// `DEFAULT_INFRA_BACKOFF_SECONDS` (30).
+    #[serde(default)]
+    pub infra_backoff_seconds: Option<u64>,
 }
 
 /// Identity check proving the resolved binary is the intended AI CLI.
@@ -446,6 +462,9 @@ mod tests {
             paste_submit_presses: 1,
             invocation_template: None,
             effort_declaration: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
         }
     }
 
@@ -670,6 +689,9 @@ mod tests {
         assert_eq!(config.paste_submit_presses, 0);
         assert!(config.invocation_template.is_none());
         assert!(config.effort_declaration.is_none());
+        assert!(config.infra_retry_limit.is_none());
+        assert!(config.infra_crash_max_seconds.is_none());
+        assert!(config.infra_backoff_seconds.is_none());
     }
 
     #[test]
@@ -799,6 +821,19 @@ mod tests {
         let json = serde_json::to_string(&config).unwrap();
         let deserialized: CliConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.effort_declaration, config.effort_declaration);
+    }
+
+    #[test]
+    fn infra_retry_fields_serde_roundtrip() {
+        let mut config = sample_cli_config();
+        config.infra_retry_limit = Some(0);
+        config.infra_crash_max_seconds = Some(120);
+        config.infra_backoff_seconds = Some(15);
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: CliConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.infra_retry_limit, Some(0));
+        assert_eq!(deserialized.infra_crash_max_seconds, Some(120));
+        assert_eq!(deserialized.infra_backoff_seconds, Some(15));
     }
 
     #[test]

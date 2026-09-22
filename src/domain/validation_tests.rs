@@ -158,6 +158,9 @@ mod ensemble_graph {
             straggler_timeout_minutes: None,
             quorum_grace_minutes: None,
             timeout_minutes: 30,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
             on_pass_to: "arbiter".to_string(),
             on_fail_to: None,
             kind: crate::domain::graphs::EnsembleKind::Parallel,
@@ -173,6 +176,9 @@ mod ensemble_graph {
                 model: None,
                 prompt_override: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
             },
             EnsembleMember {
                 ensemble_id: "ens1".to_string(),
@@ -182,6 +188,9 @@ mod ensemble_graph {
                 model: None,
                 prompt_override: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
             },
         ];
         let details = vec![EnsembleDetails { ensemble, members }];
@@ -257,6 +266,9 @@ mod ensemble_graph {
             straggler_timeout_minutes: None,
             quorum_grace_minutes: None,
             timeout_minutes: 30,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
             on_pass_to: "sink".to_string(),
             on_fail_to: None,
             kind,
@@ -271,6 +283,9 @@ mod ensemble_graph {
             model: None,
             prompt_override: None,
             timeout_minutes: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
         }];
         let details = vec![EnsembleDetails { ensemble, members }];
         let nodes = vec![node("kickoff"), node("m1"), node("join1"), node("sink")];
@@ -326,6 +341,9 @@ mod ensemble_graph {
             straggler_timeout_minutes: None,
             quorum_grace_minutes: None,
             timeout_minutes: 30,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
             on_pass_to: "arbiter".to_string(),
             on_fail_to: None,
             kind: crate::domain::graphs::EnsembleKind::Cascade,
@@ -340,6 +358,9 @@ mod ensemble_graph {
             model: None,
             prompt_override: None,
             timeout_minutes: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
         }];
         // ens1's quorum now routes into ens2 instead of the arbiter.
         details[0].ensemble.on_pass_to = "join2".to_string();
@@ -376,6 +397,9 @@ mod ensemble_graph {
             straggler_timeout_minutes: None,
             quorum_grace_minutes: None,
             timeout_minutes: 30,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
             on_pass_to: "arbiter".to_string(),
             on_fail_to: None,
             kind: crate::domain::graphs::EnsembleKind::Parallel,
@@ -391,6 +415,9 @@ mod ensemble_graph {
                 model: None,
                 prompt_override: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
             },
             EnsembleMember {
                 ensemble_id: "ens2".to_string(),
@@ -400,6 +427,9 @@ mod ensemble_graph {
                 model: None,
                 prompt_override: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
             },
         ];
         details[0].ensemble.on_pass_to = "join2".to_string();

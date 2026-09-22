@@ -566,11 +566,25 @@ fn validate_ensemble_members(
                     );
                 }
             }
+            for (field_name, value) in [
+                ("infra_retry_limit", member.infra_retry_limit),
+                ("infra_crash_max_seconds", member.infra_crash_max_seconds),
+                ("infra_backoff_seconds", member.infra_backoff_seconds),
+            ] {
+                if value.is_some_and(|v| v < 0) {
+                    return Err(format!(
+                        "Ensemble member '{field_name}' must not be negative."
+                    ));
+                }
+            }
             Ok((
                 platform.to_string(),
                 model,
                 prompt_override,
                 member.timeout_minutes,
+                member.infra_retry_limit,
+                member.infra_crash_max_seconds,
+                member.infra_backoff_seconds,
             ))
         })
         .collect()
@@ -591,13 +605,28 @@ fn member_node_config(
     model: Option<&str>,
     effective_prompt: &str,
     timeout_minutes: i64,
+    infra_retry_limit: Option<i64>,
+    infra_crash_max_seconds: Option<i64>,
+    infra_backoff_seconds: Option<i64>,
 ) -> serde_json::Value {
-    serde_json::json!({
+    let mut config = serde_json::json!({
         "platform": platform,
         "model": model,
         "prompt_template": effective_prompt,
         "timeout_minutes": timeout_minutes,
-    })
+    });
+    if let serde_json::Value::Object(ref mut map) = config {
+        if let Some(v) = infra_retry_limit {
+            map.insert("infra_retry_limit".to_string(), serde_json::json!(v));
+        }
+        if let Some(v) = infra_crash_max_seconds {
+            map.insert("infra_crash_max_seconds".to_string(), serde_json::json!(v));
+        }
+        if let Some(v) = infra_backoff_seconds {
+            map.insert("infra_backoff_seconds".to_string(), serde_json::json!(v));
+        }
+    }
+    config
 }
 
 /// Validated inputs for assembling one ensemble unit — see
@@ -624,6 +653,9 @@ struct EnsembleUnitSpec<'a> {
     timeout_minutes: i64,
     straggler_timeout_minutes: Option<i64>,
     quorum_grace_minutes: Option<i64>,
+    infra_retry_limit: Option<i64>,
+    infra_crash_max_seconds: Option<i64>,
+    infra_backoff_seconds: Option<i64>,
     start_position: i64,
     kind: EnsembleKind,
     commit_rights: bool,
@@ -656,13 +688,28 @@ fn build_ensemble_unit(spec: &EnsembleUnitSpec) -> BuiltEnsembleUnit {
     let mut ensemble_members = Vec::with_capacity(spec.members.len());
     let mut edges = Vec::new();
 
-    for (index, (platform, model, prompt_override, member_timeout_minutes)) in
-        spec.members.iter().enumerate()
+    for (
+        index,
+        (
+            platform,
+            model,
+            prompt_override,
+            member_timeout_minutes,
+            member_infra_retry_limit,
+            member_infra_crash_max_seconds,
+            member_infra_backoff_seconds,
+        ),
+    ) in spec.members.iter().enumerate()
     {
         let node_id = uuid::Uuid::new_v4().to_string();
         let effective_prompt =
             effective_member_prompt(prompt_override.as_deref(), spec.prompt_template);
         let effective_timeout_minutes = member_timeout_minutes.unwrap_or(spec.timeout_minutes);
+        let effective_infra_retry_limit = member_infra_retry_limit.or(spec.infra_retry_limit);
+        let effective_infra_crash_max_seconds =
+            member_infra_crash_max_seconds.or(spec.infra_crash_max_seconds);
+        let effective_infra_backoff_seconds =
+            member_infra_backoff_seconds.or(spec.infra_backoff_seconds);
         member_nodes.push(GraphNode {
             id: node_id.clone(),
             spec_id: spec.spec_id.clone(),
@@ -674,6 +721,9 @@ fn build_ensemble_unit(spec: &EnsembleUnitSpec) -> BuiltEnsembleUnit {
                 model.as_deref(),
                 effective_prompt,
                 effective_timeout_minutes,
+                effective_infra_retry_limit,
+                effective_infra_crash_max_seconds,
+                effective_infra_backoff_seconds,
             ),
             position: next_position,
             created_at: now,
@@ -702,6 +752,9 @@ fn build_ensemble_unit(spec: &EnsembleUnitSpec) -> BuiltEnsembleUnit {
             model: model.clone(),
             prompt_override: prompt_override.clone(),
             timeout_minutes: *member_timeout_minutes,
+            infra_retry_limit: *member_infra_retry_limit,
+            infra_crash_max_seconds: *member_infra_crash_max_seconds,
+            infra_backoff_seconds: *member_infra_backoff_seconds,
         });
         next_position += 1;
     }
@@ -765,6 +818,9 @@ fn build_ensemble_unit(spec: &EnsembleUnitSpec) -> BuiltEnsembleUnit {
         straggler_timeout_minutes: spec.straggler_timeout_minutes,
         quorum_grace_minutes: spec.quorum_grace_minutes,
         timeout_minutes: spec.timeout_minutes,
+        infra_retry_limit: spec.infra_retry_limit,
+        infra_crash_max_seconds: spec.infra_crash_max_seconds,
+        infra_backoff_seconds: spec.infra_backoff_seconds,
         on_pass_to: spec.on_pass_to.to_string(),
         on_fail_to: spec.on_fail_to.map(str::to_string),
         kind: spec.kind,
@@ -1300,7 +1356,11 @@ fn config_has_agent_harness(map: &serde_json::Map<String, serde_json::Value>) ->
 /// on every kind since the engine checks it uniformly regardless of which
 /// node in the graph actually moves HEAD. `require_report` (boolean, default
 /// `false`) exists because a harness can exit 0 having done nothing — see
-/// `agent_finished_execution` in `graph_engine.rs`.
+/// `agent_finished_execution` in `graph_engine.rs`. CM30:
+/// `infra_retry_limit`/`infra_crash_max_seconds`/`infra_backoff_seconds`
+/// override the infra-crash retry budget for this node alone (validated as
+/// non-negative integers); absent, the platform's config.toml value applies,
+/// then the engine default (2/60/30).
 const AGENT_CONFIG_KEYS: &[&str] = &[
     "platform",
     "cli",
@@ -1314,6 +1374,9 @@ const AGENT_CONFIG_KEYS: &[&str] = &[
     "require_report",
     "commit_rights",
     "skills",
+    "infra_retry_limit",
+    "infra_crash_max_seconds",
+    "infra_backoff_seconds",
 ];
 /// Every config key a `check` node is read for — see `execute_check_node`.
 const CHECK_CONFIG_KEYS: &[&str] = &[
@@ -1438,6 +1501,19 @@ pub(crate) fn validate_node_config(
                 return Err(
                     "Graph node config for kind 'agent' must include a non-empty 'platform' (or 'cli') field.".to_string(),
                 );
+            }
+            for key in [
+                "infra_retry_limit",
+                "infra_crash_max_seconds",
+                "infra_backoff_seconds",
+            ] {
+                if let Some(value) = map.get(key) {
+                    if value.as_u64().is_none() {
+                        return Err(format!(
+                            "Graph node config field '{key}' must be a non-negative integer."
+                        ));
+                    }
+                }
             }
         }
         GraphNodeKind::Check => {
@@ -2350,6 +2426,9 @@ fn plan_ensemble_copy(
                     m.model.clone(),
                     m.prompt_override.clone(),
                     m.timeout_minutes,
+                    m.infra_retry_limit,
+                    m.infra_crash_max_seconds,
+                    m.infra_backoff_seconds,
                 )
             })
             .collect(),
@@ -2428,6 +2507,9 @@ fn plan_ensemble_copy(
     if timeout_minutes < 0 {
         return Err("timeout_minutes must not be negative.".to_string());
     }
+    let infra_retry_limit = source.infra_retry_limit;
+    let infra_crash_max_seconds = source.infra_crash_max_seconds;
+    let infra_backoff_seconds = source.infra_backoff_seconds;
     let straggler_timeout_minutes = params
         .straggler_timeout_minutes
         .or(source.straggler_timeout_minutes);
@@ -2463,6 +2545,9 @@ fn plan_ensemble_copy(
         timeout_minutes,
         straggler_timeout_minutes,
         quorum_grace_minutes,
+        infra_retry_limit,
+        infra_crash_max_seconds,
+        infra_backoff_seconds,
         start_position,
         kind: copy_kind,
         // CM28: never copied from the source — graph_copy_ensemble is out of
@@ -5783,7 +5868,7 @@ impl TaskTriggerHandler {
 
     #[tool(
         name = "graph_add_node",
-        description = "Add a graph node to an existing graph spec, or (via graph_id instead of spec_id) to the graph's top-level graph. Provide either a full 'config' (with 'kind'), or a 'blueprint' name (see blueprint_list) optionally shallow-merged with 'config_overrides'."
+        description = "Add a graph node to an existing graph spec, or (via graph_id instead of spec_id) to the graph's top-level graph. Provide either a full 'config' (with 'kind'), or a 'blueprint' name (see blueprint_list) optionally shallow-merged with 'config_overrides'. An agent node also accepts `infra_retry_limit`/`infra_crash_max_seconds`/`infra_backoff_seconds` (defaults 2/60/30) to override the infra-crash retry budget for this node alone, taking precedence over its platform's config.toml value."
     )]
     async fn graph_add_node(
         &self,
@@ -6263,7 +6348,7 @@ impl TaskTriggerHandler {
 
     #[tool(
         name = "graph_add_ensemble",
-        description = "Create an ensemble in ONE call: N (2-8) parallel agent-node members sharing one prompt by default, plus the quorum that waits for all of them, consolidates their outputs (attributed per member), and routes onward. Set `commit_rights: true` to make this ensemble the graph's designated committer (B37) — whichever member the running strategy dispatches becomes the committer for that run. Members differ by platform/model, and each may set its own prompt_override to review the same input from a different angle instead of sharing the template. Each member may also set its own timeout_minutes, overriding the ensemble's shared value for that member only. (Formerly called 'fusion' — retired to avoid colliding with OpenRouter's fusion technology.) on_pass_to/on_fail_to accept a node id or another ensemble's id (chained: the quorum fans out to every member of that ensemble, no intermediate node). Entry rewiring, extra entry sources, and deletion are graph_update_ensemble/graph_delete_ensemble."
+        description = "Create an ensemble in ONE call: N (2-8) parallel agent-node members sharing one prompt by default, plus the quorum that waits for all of them, consolidates their outputs (attributed per member), and routes onward. Set `commit_rights: true` to make this ensemble the graph's designated committer (B37) — whichever member the running strategy dispatches becomes the committer for that run. Members differ by platform/model, and each may set its own prompt_override to review the same input from a different angle instead of sharing the template. Each member may also set its own timeout_minutes, overriding the ensemble's shared value for that member only. Each member (and the ensemble as a whole) may also set `infra_retry_limit`/`infra_crash_max_seconds`/`infra_backoff_seconds`, overriding the platform's config.toml value (then the engine default 2/60/30) for the infra-crash retry budget — member wins over ensemble. (Formerly called 'fusion' — retired to avoid colliding with OpenRouter's fusion technology.) on_pass_to/on_fail_to accept a node id or another ensemble's id (chained: the quorum fans out to every member of that ensemble, no intermediate node). Entry rewiring, extra entry sources, and deletion are graph_update_ensemble/graph_delete_ensemble."
     )]
     async fn graph_add_ensemble(
         &self,
@@ -6495,6 +6580,15 @@ impl TaskTriggerHandler {
                 return Ok(error_result("quorum_grace_minutes must not be negative."));
             }
         }
+        for (field_name, value) in [
+            ("infra_retry_limit", params.infra_retry_limit),
+            ("infra_crash_max_seconds", params.infra_crash_max_seconds),
+            ("infra_backoff_seconds", params.infra_backoff_seconds),
+        ] {
+            if value.is_some_and(|v| v < 0) {
+                return Ok(error_result(&format!("{field_name} must not be negative.")));
+            }
+        }
 
         let (spec_id, graph_id) = match &target {
             GraphTarget::Spec(spec_id) => (Some(spec_id.clone()), None),
@@ -6532,6 +6626,9 @@ impl TaskTriggerHandler {
             timeout_minutes,
             straggler_timeout_minutes: params.straggler_timeout_minutes,
             quorum_grace_minutes,
+            infra_retry_limit: params.infra_retry_limit,
+            infra_crash_max_seconds: params.infra_crash_max_seconds,
+            infra_backoff_seconds: params.infra_backoff_seconds,
             start_position,
             kind,
             commit_rights: params.commit_rights.unwrap_or(false),
@@ -6679,7 +6776,7 @@ impl TaskTriggerHandler {
 
     #[tool(
         name = "graph_update_ensemble",
-        description = "Update an ensemble's shared prompt (propagated to every member without its own prompt_override), member list (platform/model/prompt_override/timeout_minutes — added/removed/replaced by position), quorum config (min_pass, straggler_timeout_minutes, timeout_minutes), entry wiring (from_node/condition replaces every entry; add_entry_from/remove_entry_from add or detach one entry source so several nodes can enter with no relay), and/or exit wiring (on_pass_to/on_fail_to take a node id or another ensemble's id to chain quorums with no intermediate node) — all in one call, without touching individual member nodes directly. `commit_rights` sets whether this ensemble is the graph's designated committer (B37); editable on a running graph, same as prompt/quorum config."
+        description = "Update an ensemble's shared prompt (propagated to every member without its own prompt_override), member list (platform/model/prompt_override/timeout_minutes/infra_retry_limit/infra_crash_max_seconds/infra_backoff_seconds — added/removed/replaced by position), quorum config (min_pass, straggler_timeout_minutes, timeout_minutes, infra_retry_limit, infra_crash_max_seconds, infra_backoff_seconds — clearable with null like straggler_timeout_minutes), entry wiring (from_node/condition replaces every entry; add_entry_from/remove_entry_from add or detach one entry source so several nodes can enter with no relay), and/or exit wiring (on_pass_to/on_fail_to take a node id or another ensemble's id to chain quorums with no intermediate node) — all in one call, without touching individual member nodes directly. `commit_rights` sets whether this ensemble is the graph's designated committer (B37); editable on a running graph, same as prompt/quorum config."
     )]
     async fn graph_update_ensemble(
         &self,
@@ -6713,6 +6810,9 @@ impl TaskTriggerHandler {
                 params.straggler_timeout_minutes.is_some(),
                 params.quorum_grace_minutes.is_some(),
                 params.timeout_minutes.is_some(),
+                params.infra_retry_limit.is_some(),
+                params.infra_crash_max_seconds.is_some(),
+                params.infra_backoff_seconds.is_some(),
                 params.on_pass_to.is_some(),
                 params.on_fail_to.is_some(),
                 params.from_node.is_some(),
@@ -6725,6 +6825,25 @@ impl TaskTriggerHandler {
             "graph_update_ensemble",
         ) {
             return Ok(error_result(&e));
+        }
+
+        // CM30: validated here, before the member-resize/propagate branches
+        // below read these values to bake them into member configs and write
+        // them via `replace_ensemble_members`/`update_graph_node_details` — a
+        // rejected value must never land in the DB first. (The join-config
+        // block further down still owns straggler_timeout_minutes/
+        // quorum_grace_minutes/timeout_minutes, which only ever get written
+        // in that same block, so their late validation has no such gap.)
+        for (field_name, value) in [
+            ("infra_retry_limit", params.infra_retry_limit),
+            ("infra_crash_max_seconds", params.infra_crash_max_seconds),
+            ("infra_backoff_seconds", params.infra_backoff_seconds),
+        ] {
+            if let Some(Some(v)) = value {
+                if v < 0 {
+                    return Ok(error_result(&format!("{field_name} must not be negative.")));
+                }
+            }
         }
 
         // ── CB40 / FR1–FR4: refuse a write whose RESULTING (min_pass, member count)
@@ -6835,6 +6954,18 @@ impl TaskTriggerHandler {
             let timeout_minutes = params
                 .timeout_minutes
                 .unwrap_or(details.ensemble.timeout_minutes);
+            let infra_retry_limit = match params.infra_retry_limit {
+                Some(inner) => inner,
+                None => details.ensemble.infra_retry_limit,
+            };
+            let infra_crash_max_seconds = match params.infra_crash_max_seconds {
+                Some(inner) => inner,
+                None => details.ensemble.infra_crash_max_seconds,
+            };
+            let infra_backoff_seconds = match params.infra_backoff_seconds {
+                Some(inner) => inner,
+                None => details.ensemble.infra_backoff_seconds,
+            };
 
             let old_members = details.members.clone();
             let old_len = old_members.len();
@@ -6845,12 +6976,27 @@ impl TaskTriggerHandler {
                 .unwrap_or(1);
             let mut resulting_members = Vec::with_capacity(new_len);
             let mut resulting_nodes = Vec::with_capacity(new_len);
-            for (index, (platform, model, prompt_override, member_timeout_minutes)) in
-                members.iter().enumerate()
+            for (
+                index,
+                (
+                    platform,
+                    model,
+                    prompt_override,
+                    member_timeout_minutes,
+                    member_infra_retry_limit,
+                    member_infra_crash_max_seconds,
+                    member_infra_backoff_seconds,
+                ),
+            ) in members.iter().enumerate()
             {
                 let effective_prompt =
                     effective_member_prompt(prompt_override.as_deref(), prompt_template);
                 let effective_timeout_minutes = member_timeout_minutes.unwrap_or(timeout_minutes);
+                let effective_infra_retry_limit = member_infra_retry_limit.or(infra_retry_limit);
+                let effective_infra_crash_max_seconds =
+                    member_infra_crash_max_seconds.or(infra_crash_max_seconds);
+                let effective_infra_backoff_seconds =
+                    member_infra_backoff_seconds.or(infra_backoff_seconds);
                 let node_id = old_members
                     .get(index)
                     .map(|member| member.node_id.clone())
@@ -6873,6 +7019,9 @@ impl TaskTriggerHandler {
                         model.as_deref(),
                         effective_prompt,
                         effective_timeout_minutes,
+                        effective_infra_retry_limit,
+                        effective_infra_crash_max_seconds,
+                        effective_infra_backoff_seconds,
                     ),
                     position,
                     created_at: existing_node
@@ -6887,6 +7036,9 @@ impl TaskTriggerHandler {
                     model: model.clone(),
                     prompt_override: prompt_override.clone(),
                     timeout_minutes: *member_timeout_minutes,
+                    infra_retry_limit: *member_infra_retry_limit,
+                    infra_crash_max_seconds: *member_infra_crash_max_seconds,
+                    infra_backoff_seconds: *member_infra_backoff_seconds,
                 });
                 resulting_nodes.push(node);
             }
@@ -6901,7 +7053,12 @@ impl TaskTriggerHandler {
                 .ok_or_else(|| {
                     internal_error(format!("Ensemble '{ensemble_id}' vanished mid-update."))
                 })?;
-        } else if params.prompt_template.is_some() || params.timeout_minutes.is_some() {
+        } else if params.prompt_template.is_some()
+            || params.timeout_minutes.is_some()
+            || params.infra_retry_limit.is_some()
+            || params.infra_crash_max_seconds.is_some()
+            || params.infra_backoff_seconds.is_some()
+        {
             // Prompt and/or shared timeout changed without a member-list
             // resize: propagate onto every existing member's config as-is,
             // except a member with its own prompt_override keeps rendering
@@ -6913,15 +7070,35 @@ impl TaskTriggerHandler {
             let timeout_minutes = params
                 .timeout_minutes
                 .unwrap_or(details.ensemble.timeout_minutes);
+            let infra_retry_limit = match params.infra_retry_limit {
+                Some(inner) => inner,
+                None => details.ensemble.infra_retry_limit,
+            };
+            let infra_crash_max_seconds = match params.infra_crash_max_seconds {
+                Some(inner) => inner,
+                None => details.ensemble.infra_crash_max_seconds,
+            };
+            let infra_backoff_seconds = match params.infra_backoff_seconds {
+                Some(inner) => inner,
+                None => details.ensemble.infra_backoff_seconds,
+            };
             for member in &details.members {
                 let effective_prompt =
                     effective_member_prompt(member.prompt_override.as_deref(), prompt_template);
                 let effective_timeout_minutes = member.timeout_minutes.unwrap_or(timeout_minutes);
+                let effective_infra_retry_limit = member.infra_retry_limit.or(infra_retry_limit);
+                let effective_infra_crash_max_seconds =
+                    member.infra_crash_max_seconds.or(infra_crash_max_seconds);
+                let effective_infra_backoff_seconds =
+                    member.infra_backoff_seconds.or(infra_backoff_seconds);
                 let config = member_node_config(
                     &member.platform,
                     member.model.as_deref(),
                     effective_prompt,
                     effective_timeout_minutes,
+                    effective_infra_retry_limit,
+                    effective_infra_crash_max_seconds,
+                    effective_infra_backoff_seconds,
                 );
                 self.db
                     .update_graph_node_details(&member.node_id, None, None, Some(&config), None)
@@ -6935,11 +7112,14 @@ impl TaskTriggerHandler {
                 .map_err(internal_error)?;
         }
 
-        // ── join config: min_pass / straggler_timeout_minutes / quorum_grace_minutes / timeout_minutes ──
+        // ── join config: min_pass / straggler_timeout_minutes / quorum_grace_minutes / timeout_minutes / infra_retry_* ──
         if params.min_pass.is_some()
             || params.timeout_minutes.is_some()
             || params.straggler_timeout_minutes.is_some()
             || params.quorum_grace_minutes.is_some()
+            || params.infra_retry_limit.is_some()
+            || params.infra_crash_max_seconds.is_some()
+            || params.infra_backoff_seconds.is_some()
         {
             if let Some(Some(straggler)) = params.straggler_timeout_minutes {
                 if straggler < 0 {
@@ -6959,6 +7139,9 @@ impl TaskTriggerHandler {
                     return Ok(error_result("timeout_minutes must not be negative."));
                 }
             }
+            // infra_retry_limit/infra_crash_max_seconds/infra_backoff_seconds
+            // are already validated above, before the member-resize/propagate
+            // branches that read them.
             self.db
                 .update_ensemble_join_config(
                     &ensemble_id,
@@ -6966,6 +7149,9 @@ impl TaskTriggerHandler {
                     params.straggler_timeout_minutes,
                     params.quorum_grace_minutes,
                     params.timeout_minutes,
+                    params.infra_retry_limit,
+                    params.infra_crash_max_seconds,
+                    params.infra_backoff_seconds,
                 )
                 .map_err(internal_error)?;
         }
@@ -7799,7 +7985,7 @@ impl TaskTriggerHandler {
 
     #[tool(
         name = "graph_audit_node_configs",
-        description = "Scan every graph node in the database for a config key its kind will never read (e.g. 'prompt' on an agent node, which the engine silently ignores in favor of 'prompt_template'). Write-time validation (graph_add_node/graph_update_node) rejects this going forward; this tool finds nodes that predate it and are still silently degraded."
+        description = "Scan every graph node in the database for a config key its kind will never read (e.g. 'prompt' on an agent node, which the engine silently ignores in favor of 'prompt_template'). Write-time validation (graph_add_node/graph_update_node) rejects this going forward; this tool finds nodes that predate it and are still silently degraded. Also lists every agent node/member whose effective infra-retry budget (infra_retry_limit/infra_crash_max_seconds/infra_backoff_seconds) differs from its platform's own value."
     )]
     async fn graph_audit_node_configs(&self) -> Result<CallToolResult, McpError> {
         let nodes = self.db.list_all_graph_nodes().map_err(internal_error)?;
@@ -7837,6 +8023,47 @@ impl TaskTriggerHandler {
             }));
         }
 
+        let mut infra_overrides = Vec::new();
+        for node in &nodes {
+            if node.kind != GraphNodeKind::Agent {
+                continue;
+            }
+            let effective = crate::graph_engine::resolve_node_infra_config(node);
+            let platform = node
+                .config
+                .get("platform")
+                .or_else(|| node.config.get("cli"))
+                .and_then(serde_json::Value::as_str);
+            let baseline = crate::graph_engine::resolve_platform_only_infra_config(platform);
+            let differs = effective.retry_limit.value != baseline.retry_limit.value
+                || effective.crash_max_seconds.value != baseline.crash_max_seconds.value
+                || effective.backoff_seconds.value != baseline.backoff_seconds.value;
+            if !differs {
+                continue;
+            }
+            let graph_id = match &node.graph_id {
+                Some(graph_id) => Some(graph_id.clone()),
+                None => match &node.spec_id {
+                    Some(spec_id) => self
+                        .db
+                        .get_graph_spec(spec_id)
+                        .map_err(internal_error)?
+                        .and_then(|spec| spec.graph_id),
+                    None => None,
+                },
+            };
+            infra_overrides.push(serde_json::json!({
+                "node_id": node.id,
+                "name": node.name,
+                "spec_id": node.spec_id,
+                "graph_id": graph_id,
+                "platform": platform,
+                "infra_retry_limit": { "value": effective.retry_limit.value, "source": effective.retry_limit.source, "platform_value": baseline.retry_limit.value },
+                "infra_crash_max_seconds": { "value": effective.crash_max_seconds.value, "source": effective.crash_max_seconds.source, "platform_value": baseline.crash_max_seconds.value },
+                "infra_backoff_seconds": { "value": effective.backoff_seconds.value, "source": effective.backoff_seconds.source, "platform_value": baseline.backoff_seconds.value },
+            }));
+        }
+
         let commit_rights_nodes: Vec<serde_json::Value> = nodes
             .iter()
             .filter(|n| n.config.get("commit_rights").and_then(|v| v.as_bool()) == Some(true))
@@ -7868,6 +8095,7 @@ impl TaskTriggerHandler {
                 "flagged_nodes": flagged,
                 "commit_rights_nodes": commit_rights_nodes,
                 "commit_rights_ensembles": commit_rights_ensembles,
+                "infra_config_overrides": infra_overrides,
             }))
             .unwrap_or_default(),
         )]))
@@ -10931,6 +11159,9 @@ fn ensemble_details_json(
         "effective_straggler_timeout_minutes": ensemble.effective_straggler_timeout_minutes(),
         "quorum_grace_minutes": ensemble.quorum_grace_minutes,
         "timeout_minutes": ensemble.timeout_minutes,
+        "infra_retry_limit": ensemble.infra_retry_limit,
+        "infra_crash_max_seconds": ensemble.infra_crash_max_seconds,
+        "infra_backoff_seconds": ensemble.infra_backoff_seconds,
         "on_pass_to": ensemble.on_pass_to,
         "on_fail_to": ensemble.on_fail_to,
         "round_robin_index": ensemble.round_robin_index,
@@ -10946,6 +11177,9 @@ fn ensemble_details_json(
             // so a client can tell the two apart without diffing member config
             // against the ensemble row itself.
             "prompt_source": if member.prompt_override.is_some() { "override" } else { "shared" },
+            "infra_retry_limit_override": member.infra_retry_limit,
+            "infra_crash_max_seconds_override": member.infra_crash_max_seconds,
+            "infra_backoff_seconds_override": member.infra_backoff_seconds,
         })).collect::<Vec<_>>(),
     })
 }
@@ -11054,7 +11288,35 @@ fn graph_node_json(node: &GraphNode, edges: &[GraphEdge]) -> serde_json::Value {
         "created_at": node.created_at.to_rfc3339(),
         "routes": router_routes_json(node, edges),
         "prompt_source": agent_prompt_source_json(node),
+        "infra_config": infra_config_json(node),
     })
+}
+
+/// CM30/FR3: an agent node's effective infra-retry config plus where each
+/// field came from — `"node"` (this node's own config key, which for an
+/// ensemble member may be a baked-in member/ensemble override — see the
+/// ensemble's own `infra_retry_limit`/members[].infra_retry_limit_override
+/// fields for which), `"platform"`, or `"default"`. `None` for every other
+/// node kind.
+fn infra_config_json(node: &GraphNode) -> Option<serde_json::Value> {
+    if node.kind != GraphNodeKind::Agent {
+        return None;
+    }
+    let resolved = crate::graph_engine::resolve_node_infra_config(node);
+    Some(serde_json::json!({
+        "infra_retry_limit": {
+            "value": resolved.retry_limit.value,
+            "source": resolved.retry_limit.source,
+        },
+        "infra_crash_max_seconds": {
+            "value": resolved.crash_max_seconds.value,
+            "source": resolved.crash_max_seconds.source,
+        },
+        "infra_backoff_seconds": {
+            "value": resolved.backoff_seconds.value,
+            "source": resolved.backoff_seconds.source,
+        },
+    }))
 }
 
 /// For an agent node, which branch of `resolve_node_prompt_template`'s
@@ -11591,6 +11853,9 @@ mod tests {
             model: None,
             prompt_override: None,
             timeout_minutes: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
         }
     }
 
@@ -11603,6 +11868,9 @@ mod tests {
             model: None,
             prompt_override: Some(prompt_override.to_string()),
             timeout_minutes: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
         }
     }
 
@@ -11909,6 +12177,9 @@ mod tests {
             straggler_timeout_minutes: None,
             quorum_grace_minutes: None,
             timeout_minutes: 30,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
             on_pass_to: "arbiter".to_string(),
             on_fail_to: None,
             kind: EnsembleKind::Parallel,
@@ -11924,6 +12195,9 @@ mod tests {
                 model: None,
                 prompt_override: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
             },
             EnsembleMember {
                 ensemble_id: "ens1".to_string(),
@@ -11933,6 +12207,9 @@ mod tests {
                 model: None,
                 prompt_override: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
             },
         ];
         db.insert_ensemble_unit(&ensemble, &members, &member_nodes, &join_node, &edges)
@@ -14438,8 +14715,16 @@ mod tests {
         to: &str,
     ) -> BuiltEnsembleUnit {
         let members = [
-            ("claude".to_string(), None, None, None),
-            ("codex".to_string(), Some("o1".to_string()), None, None),
+            ("claude".to_string(), None, None, None, None, None, None),
+            (
+                "codex".to_string(),
+                Some("o1".to_string()),
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
         ];
         let built = build_ensemble_unit(&EnsembleUnitSpec {
             spec_id: spec_id.map(str::to_string),
@@ -14455,6 +14740,9 @@ mod tests {
             on_fail_fan_out: None,
             min_pass: 2,
             timeout_minutes: 30,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
             straggler_timeout_minutes: None,
             quorum_grace_minutes: None,
             start_position: 10,
@@ -15513,7 +15801,15 @@ mod tests {
 
     #[test]
     fn member_node_config_produces_correct_shape() {
-        let config = member_node_config("claude", Some("opus-4"), "do the thing", 30);
+        let config = member_node_config(
+            "claude",
+            Some("opus-4"),
+            "do the thing",
+            30,
+            None,
+            None,
+            None,
+        );
         assert_eq!(config["platform"], "claude");
         assert_eq!(config["model"], "opus-4");
         assert_eq!(config["prompt_template"], "do the thing");
@@ -15522,7 +15818,7 @@ mod tests {
 
     #[test]
     fn member_node_config_null_model_when_none() {
-        let config = member_node_config("claude", None, "prompt", 15);
+        let config = member_node_config("claude", None, "prompt", 15, None, None, None);
         assert_eq!(config["platform"], "claude");
         assert!(config["model"].is_null());
     }
@@ -17071,12 +17367,18 @@ mod additional_tests {
                 model: None,
                 prompt_override: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
             },
             EnsembleMemberParams {
                 platform: "\t\n".to_string(),
                 model: None,
                 prompt_override: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
             },
         ];
         let err = validate_ensemble_members(&members, EnsembleKind::Parallel).unwrap_err();
@@ -17093,12 +17395,18 @@ mod additional_tests {
                 model: Some("  opus-4  ".to_string()),
                 prompt_override: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
             },
             EnsembleMemberParams {
                 platform: "mimo".to_string(),
                 model: Some("   ".to_string()),
                 prompt_override: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
             },
         ];
         let result = validate_ensemble_members(&members, EnsembleKind::Parallel).unwrap();
@@ -18304,6 +18612,9 @@ mod coverage_tests {
                 straggler_timeout_minutes: Some(10),
                 quorum_grace_minutes: None,
                 timeout_minutes: 30,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
                 on_pass_to: "arbiter".into(),
                 on_fail_to: Some("cleanup".into()),
                 kind: EnsembleKind::Parallel,
@@ -18319,6 +18630,9 @@ mod coverage_tests {
                     model: None,
                     prompt_override: Some("review for security issues only".into()),
                     timeout_minutes: None,
+                    infra_retry_limit: None,
+                    infra_crash_max_seconds: None,
+                    infra_backoff_seconds: None,
                 },
                 EnsembleMember {
                     ensemble_id: "ens1".into(),
@@ -18328,6 +18642,9 @@ mod coverage_tests {
                     model: Some("o1".into()),
                     prompt_override: None,
                     timeout_minutes: None,
+                    infra_retry_limit: None,
+                    infra_crash_max_seconds: None,
+                    infra_backoff_seconds: None,
                 },
             ],
         };
@@ -18364,6 +18681,9 @@ mod coverage_tests {
                 straggler_timeout_minutes: None,
                 quorum_grace_minutes: None,
                 timeout_minutes: 45,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
                 on_pass_to: "to".into(),
                 on_fail_to: None,
                 kind: EnsembleKind::Parallel,
@@ -18378,6 +18698,9 @@ mod coverage_tests {
                 model: None,
                 prompt_override: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
             }],
         };
         let json = super::ensemble_details_json(&details, &[]);
@@ -18587,8 +18910,16 @@ mod coverage_tests {
     #[test]
     fn ensemble_unit_with_fail_to() {
         let members = vec![
-            ("claude".into(), None, None, None),
-            ("codex".into(), Some("o1".into()), None, None),
+            ("claude".into(), None, None, None, None, None, None),
+            (
+                "codex".into(),
+                Some("o1".into()),
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
         ];
         let built = build_ensemble_unit(&EnsembleUnitSpec {
             spec_id: Some("s1".into()),
@@ -18604,6 +18935,9 @@ mod coverage_tests {
             on_fail_fan_out: None,
             min_pass: 1,
             timeout_minutes: 30,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
             straggler_timeout_minutes: Some(10),
             quorum_grace_minutes: None,
             start_position: 1,
@@ -18622,7 +18956,7 @@ mod coverage_tests {
 
     #[test]
     fn ensemble_unit_no_fail_to() {
-        let members = vec![("claude".into(), None, None, None)];
+        let members = vec![("claude".into(), None, None, None, None, None, None)];
         let built = build_ensemble_unit(&EnsembleUnitSpec {
             spec_id: None,
             graph_id: Some("l1".into()),
@@ -18637,6 +18971,9 @@ mod coverage_tests {
             on_fail_fan_out: None,
             min_pass: 1,
             timeout_minutes: 15,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
             straggler_timeout_minutes: None,
             quorum_grace_minutes: None,
             start_position: 5,
@@ -18655,9 +18992,9 @@ mod coverage_tests {
     #[test]
     fn ensemble_unit_positions_sequential() {
         let members = vec![
-            ("p1".into(), None, None, None),
-            ("p2".into(), None, None, None),
-            ("p3".into(), None, None, None),
+            ("p1".into(), None, None, None, None, None, None),
+            ("p2".into(), None, None, None, None, None, None),
+            ("p3".into(), None, None, None, None, None, None),
         ];
         let built = build_ensemble_unit(&EnsembleUnitSpec {
             spec_id: None,
@@ -18673,6 +19010,9 @@ mod coverage_tests {
             on_fail_fan_out: None,
             min_pass: 3,
             timeout_minutes: 30,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
             straggler_timeout_minutes: None,
             quorum_grace_minutes: None,
             start_position: 10,
@@ -19018,6 +19358,9 @@ mod coverage_tests {
                 model: None,
                 prompt_override: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
             })
             .collect();
         assert!(validate_ensemble_members(&m, EnsembleKind::Parallel).is_ok());
@@ -19031,6 +19374,9 @@ mod coverage_tests {
                 model: None,
                 prompt_override: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
             })
             .collect();
         assert!(validate_ensemble_members(&m, EnsembleKind::Parallel).is_ok());
@@ -19044,6 +19390,9 @@ mod coverage_tests {
                 model: None,
                 prompt_override: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
             })
             .collect();
         assert!(validate_ensemble_members(&m, EnsembleKind::Parallel)
@@ -19059,12 +19408,18 @@ mod coverage_tests {
                 model: Some("".into()),
                 prompt_override: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
             },
             EnsembleMemberParams {
                 platform: "mimo".into(),
                 model: None,
                 prompt_override: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
             },
         ];
         let result = validate_ensemble_members(&m, EnsembleKind::Parallel).unwrap();
@@ -19174,7 +19529,7 @@ mod coverage_tests {
 
     #[test]
     fn member_config_zero_timeout() {
-        let c = member_node_config("claude", None, "p", 0);
+        let c = member_node_config("claude", None, "p", 0, None, None, None);
         assert_eq!(c["timeout_minutes"], 0);
     }
 
@@ -21792,12 +22147,18 @@ mod endpoint_tests {
                         model: Some("model-a".to_string()),
                         prompt_override: None,
                         timeout_minutes: None,
+                        infra_retry_limit: None,
+                        infra_crash_max_seconds: None,
+                        infra_backoff_seconds: None,
                     },
                     EnsembleMemberParams {
                         platform: "openrouter".to_string(),
                         model: Some("model-b".to_string()),
                         prompt_override: None,
                         timeout_minutes: None,
+                        infra_retry_limit: None,
+                        infra_crash_max_seconds: None,
+                        infra_backoff_seconds: None,
                     },
                 ]),
                 condition: "always".to_string(),
@@ -21806,6 +22167,9 @@ mod endpoint_tests {
                 on_fail_to: None,
                 min_pass: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
                 straggler_timeout_minutes: None,
                 quorum_grace_minutes: None,
             }))
@@ -21917,12 +22281,18 @@ mod endpoint_tests {
                         model: Some("model-a".to_string()),
                         prompt_override: None,
                         timeout_minutes: None,
+                        infra_retry_limit: None,
+                        infra_crash_max_seconds: None,
+                        infra_backoff_seconds: None,
                     },
                     EnsembleMemberParams {
                         platform: "openrouter".to_string(),
                         model: Some("model-b".to_string()),
                         prompt_override: None,
                         timeout_minutes: None,
+                        infra_retry_limit: None,
+                        infra_crash_max_seconds: None,
+                        infra_backoff_seconds: None,
                     },
                 ]),
                 condition: "always".to_string(),
@@ -21931,6 +22301,9 @@ mod endpoint_tests {
                 on_fail_to: None,
                 min_pass: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
                 straggler_timeout_minutes: None,
                 quorum_grace_minutes: None,
             }))
@@ -24063,6 +24436,9 @@ mod endpoint_tests {
             model: None,
             prompt_override: None,
             timeout_minutes: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
         };
         let result = handler
             .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
@@ -24080,6 +24456,9 @@ mod endpoint_tests {
                 straggler_timeout_minutes: None,
                 quorum_grace_minutes: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
                 on_pass_to: arbiter.to_string(),
                 on_fail_to: on_fail_to.map(str::to_string),
             }))
@@ -24145,6 +24524,9 @@ mod endpoint_tests {
                 straggler_timeout_minutes: None,
                 quorum_grace_minutes: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
                 on_pass_to: None,
                 on_fail_to: None,
                 from_node: None,
@@ -24260,6 +24642,9 @@ mod endpoint_tests {
                 straggler_timeout_minutes: None,
                 quorum_grace_minutes: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
                 on_pass_to: None,
                 on_fail_to: None,
                 from_node: None,
@@ -24283,6 +24668,9 @@ mod endpoint_tests {
                 straggler_timeout_minutes: None,
                 quorum_grace_minutes: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
                 on_pass_to: None,
                 on_fail_to: None,
                 from_node: None,
@@ -24586,12 +24974,18 @@ mod endpoint_tests {
                         model: None,
                         prompt_override: None,
                         timeout_minutes: None,
+                        infra_retry_limit: None,
+                        infra_crash_max_seconds: None,
+                        infra_backoff_seconds: None,
                     },
                     EnsembleMemberParams {
                         platform: "opencode".to_string(),
                         model: None,
                         prompt_override: None,
                         timeout_minutes: None,
+                        infra_retry_limit: None,
+                        infra_crash_max_seconds: None,
+                        infra_backoff_seconds: None,
                     },
                 ]),
                 ..blank_ensemble_update(&ens)
@@ -24874,12 +25268,18 @@ mod endpoint_tests {
                 model: None,
                 prompt_override: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
             },
             crate::daemon::params::EnsembleMemberParams {
                 platform: "opencode".to_string(),
                 model: None,
                 prompt_override: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
             },
         ];
 
@@ -24899,6 +25299,9 @@ mod endpoint_tests {
                 straggler_timeout_minutes: None,
                 quorum_grace_minutes: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
                 on_pass_to: arbiter.clone(),
                 on_fail_to: None,
             }))
@@ -24923,6 +25326,9 @@ mod endpoint_tests {
                 straggler_timeout_minutes: None,
                 quorum_grace_minutes: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
                 on_pass_to: arbiter.clone(),
                 on_fail_to: None,
             }))
@@ -24947,6 +25353,9 @@ mod endpoint_tests {
                 straggler_timeout_minutes: None,
                 quorum_grace_minutes: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
                 on_pass_to: arbiter.clone(),
                 on_fail_to: None,
             }))
@@ -24971,6 +25380,9 @@ mod endpoint_tests {
                 straggler_timeout_minutes: None,
                 quorum_grace_minutes: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
                 on_pass_to: arbiter.clone(),
                 on_fail_to: None,
             }))
@@ -24995,6 +25407,9 @@ mod endpoint_tests {
                 straggler_timeout_minutes: None,
                 quorum_grace_minutes: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
                 on_pass_to: arbiter,
                 on_fail_to: None,
             }))
@@ -25018,6 +25433,9 @@ mod endpoint_tests {
             model: None,
             prompt_override: None,
             timeout_minutes: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
         };
 
         let negative = handler
@@ -25036,6 +25454,9 @@ mod endpoint_tests {
                 straggler_timeout_minutes: None,
                 quorum_grace_minutes: Some(-1),
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
                 on_pass_to: arbiter.clone(),
                 on_fail_to: None,
             }))
@@ -25064,6 +25485,9 @@ mod endpoint_tests {
                 straggler_timeout_minutes: None,
                 quorum_grace_minutes: Some(0),
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
                 on_pass_to: arbiter,
                 on_fail_to: None,
             }))
@@ -25090,6 +25514,9 @@ mod endpoint_tests {
             model: None,
             prompt_override: None,
             timeout_minutes: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
         };
         let created = handler
             .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
@@ -25107,6 +25534,9 @@ mod endpoint_tests {
                 straggler_timeout_minutes: None,
                 quorum_grace_minutes: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
                 on_pass_to: arbiter,
                 on_fail_to: None,
             }))
@@ -25964,12 +26394,18 @@ mod endpoint_tests {
                         model: None,
                         prompt_override: None,
                         timeout_minutes: None,
+                        infra_retry_limit: None,
+                        infra_crash_max_seconds: None,
+                        infra_backoff_seconds: None,
                     },
                     crate::daemon::params::EnsembleMemberParams {
                         platform: "opencode".to_string(),
                         model: None,
                         prompt_override: None,
                         timeout_minutes: None,
+                        infra_retry_limit: None,
+                        infra_crash_max_seconds: None,
+                        infra_backoff_seconds: None,
                     },
                 ]),
                 blueprint: None,
@@ -25979,6 +26415,9 @@ mod endpoint_tests {
                 straggler_timeout_minutes: None,
                 quorum_grace_minutes: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
                 on_pass_to: arbiter,
                 on_fail_to: None,
             }))
@@ -26065,12 +26504,18 @@ mod endpoint_tests {
                         model: None,
                         prompt_override: Some("review for security issues".to_string()),
                         timeout_minutes: None,
+                        infra_retry_limit: None,
+                        infra_crash_max_seconds: None,
+                        infra_backoff_seconds: None,
                     },
                     crate::daemon::params::EnsembleMemberParams {
                         platform: "codex".to_string(),
                         model: None,
                         prompt_override: None,
                         timeout_minutes: None,
+                        infra_retry_limit: None,
+                        infra_crash_max_seconds: None,
+                        infra_backoff_seconds: None,
                     },
                 ]),
                 blueprint: None,
@@ -26080,6 +26525,9 @@ mod endpoint_tests {
                 straggler_timeout_minutes: None,
                 quorum_grace_minutes: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
                 on_pass_to: arbiter,
                 on_fail_to: None,
             }))
@@ -26189,12 +26637,18 @@ mod endpoint_tests {
                         model: None,
                         prompt_override: None,
                         timeout_minutes: None,
+                        infra_retry_limit: None,
+                        infra_crash_max_seconds: None,
+                        infra_backoff_seconds: None,
                     },
                     crate::daemon::params::EnsembleMemberParams {
                         platform: "opencode".to_string(),
                         model: None,
                         prompt_override: None,
                         timeout_minutes: None,
+                        infra_retry_limit: None,
+                        infra_crash_max_seconds: None,
+                        infra_backoff_seconds: None,
                     },
                 ]),
                 blueprint: None,
@@ -26204,6 +26658,9 @@ mod endpoint_tests {
                 straggler_timeout_minutes: None,
                 quorum_grace_minutes: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
                 on_pass_to: arbiter,
                 on_fail_to: None,
             }))
@@ -26221,6 +26678,9 @@ mod endpoint_tests {
                 min_pass: None,
                 straggler_timeout_minutes: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
                 quorum_grace_minutes: None,
                 on_pass_to: None,
                 on_fail_to: None,
@@ -26246,6 +26706,9 @@ mod endpoint_tests {
                 straggler_timeout_minutes: None,
                 quorum_grace_minutes: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
                 on_pass_to: None,
                 on_fail_to: None,
                 from_node: None,
@@ -26271,6 +26734,9 @@ mod endpoint_tests {
                 straggler_timeout_minutes: None,
                 quorum_grace_minutes: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
                 on_pass_to: None,
                 on_fail_to: None,
                 from_node: None,
@@ -26298,30 +26764,45 @@ mod endpoint_tests {
                         model: None,
                         prompt_override: None,
                         timeout_minutes: None,
+                        infra_retry_limit: None,
+                        infra_crash_max_seconds: None,
+                        infra_backoff_seconds: None,
                     },
                     crate::daemon::params::EnsembleMemberParams {
                         platform: "opencode".to_string(),
                         model: None,
                         prompt_override: None,
                         timeout_minutes: None,
+                        infra_retry_limit: None,
+                        infra_crash_max_seconds: None,
+                        infra_backoff_seconds: None,
                     },
                     crate::daemon::params::EnsembleMemberParams {
                         platform: "gemini".to_string(),
                         model: None,
                         prompt_override: Some("Review only for test coverage gaps.".to_string()),
                         timeout_minutes: None,
+                        infra_retry_limit: None,
+                        infra_crash_max_seconds: None,
+                        infra_backoff_seconds: None,
                     },
                     crate::daemon::params::EnsembleMemberParams {
                         platform: "claude".to_string(),
                         model: Some("growth-test".to_string()),
                         prompt_override: None,
                         timeout_minutes: None,
+                        infra_retry_limit: None,
+                        infra_crash_max_seconds: None,
+                        infra_backoff_seconds: None,
                     },
                 ]),
                 min_pass: None,
                 straggler_timeout_minutes: None,
                 quorum_grace_minutes: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
                 on_pass_to: None,
                 on_fail_to: None,
                 from_node: None,
@@ -26384,24 +26865,36 @@ mod endpoint_tests {
                         model: None,
                         prompt_override: None,
                         timeout_minutes: None,
+                        infra_retry_limit: None,
+                        infra_crash_max_seconds: None,
+                        infra_backoff_seconds: None,
                     },
                     crate::daemon::params::EnsembleMemberParams {
                         platform: "opencode".to_string(),
                         model: None,
                         prompt_override: None,
                         timeout_minutes: None,
+                        infra_retry_limit: None,
+                        infra_crash_max_seconds: None,
+                        infra_backoff_seconds: None,
                     },
                     crate::daemon::params::EnsembleMemberParams {
                         platform: "gemini".to_string(),
                         model: None,
                         prompt_override: Some("Review only for test coverage gaps.".to_string()),
                         timeout_minutes: None,
+                        infra_retry_limit: None,
+                        infra_crash_max_seconds: None,
+                        infra_backoff_seconds: None,
                     },
                 ]),
                 min_pass: None,
                 straggler_timeout_minutes: None,
                 quorum_grace_minutes: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
                 on_pass_to: None,
                 on_fail_to: None,
                 from_node: None,
@@ -26443,6 +26936,9 @@ mod endpoint_tests {
                 straggler_timeout_minutes: None,
                 quorum_grace_minutes: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
                 on_pass_to: None,
                 on_fail_to: None,
                 from_node: None,
@@ -26467,6 +26963,9 @@ mod endpoint_tests {
                 straggler_timeout_minutes: Some(Some(-1)),
                 quorum_grace_minutes: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
                 on_pass_to: None,
                 on_fail_to: None,
                 from_node: None,
@@ -26491,6 +26990,9 @@ mod endpoint_tests {
                 straggler_timeout_minutes: None,
                 quorum_grace_minutes: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
                 on_pass_to: Some(alt_exit.clone()),
                 on_fail_to: None,
                 from_node: None,
@@ -26517,6 +27019,9 @@ mod endpoint_tests {
                 straggler_timeout_minutes: None,
                 quorum_grace_minutes: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
                 on_pass_to: Some("not-a-node".to_string()),
                 on_fail_to: None,
                 from_node: None,
@@ -26540,6 +27045,9 @@ mod endpoint_tests {
                 straggler_timeout_minutes: None,
                 quorum_grace_minutes: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
                 on_pass_to: None,
                 on_fail_to: None,
                 from_node: None,
@@ -26580,12 +27088,18 @@ mod endpoint_tests {
                         model: None,
                         prompt_override: None,
                         timeout_minutes: None,
+                        infra_retry_limit: None,
+                        infra_crash_max_seconds: None,
+                        infra_backoff_seconds: None,
                     },
                     crate::daemon::params::EnsembleMemberParams {
                         platform: "opencode".to_string(),
                         model: None,
                         prompt_override: None,
                         timeout_minutes: None,
+                        infra_retry_limit: None,
+                        infra_crash_max_seconds: None,
+                        infra_backoff_seconds: None,
                     },
                 ]),
                 blueprint: None,
@@ -26595,6 +27109,9 @@ mod endpoint_tests {
                 straggler_timeout_minutes: None,
                 quorum_grace_minutes: None,
                 timeout_minutes: Some(20),
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
                 on_pass_to: arbiter,
                 on_fail_to: None,
             }))
@@ -26614,18 +27131,27 @@ mod endpoint_tests {
                         model: None,
                         prompt_override: None,
                         timeout_minutes: Some(3),
+                        infra_retry_limit: None,
+                        infra_crash_max_seconds: None,
+                        infra_backoff_seconds: None,
                     },
                     crate::daemon::params::EnsembleMemberParams {
                         platform: "opencode".to_string(),
                         model: None,
                         prompt_override: None,
                         timeout_minutes: None,
+                        infra_retry_limit: None,
+                        infra_crash_max_seconds: None,
+                        infra_backoff_seconds: None,
                     },
                 ]),
                 min_pass: None,
                 straggler_timeout_minutes: None,
                 quorum_grace_minutes: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
                 on_pass_to: None,
                 on_fail_to: None,
                 from_node: None,
@@ -26665,6 +27191,527 @@ mod endpoint_tests {
         );
     }
 
+    /// CM30: `graph_add_node`/`graph_update_node` accept and validate the
+    /// three infra-retry keys on a plain agent node.
+    #[test]
+    fn validate_node_config_accepts_infra_retry_keys_on_agent() {
+        let config = serde_json::json!({
+            "platform": "claude",
+            "infra_retry_limit": 0,
+            "infra_crash_max_seconds": 120,
+            "infra_backoff_seconds": 0,
+        });
+        assert!(validate_node_config(GraphNodeKind::Agent, &config).is_ok());
+    }
+
+    /// CM30: non-integer or negative infra-retry values are rejected with
+    /// the new error message (mirrors the timeout_minutes convention: 0 is
+    /// legitimate, negatives and strings are not).
+    #[test]
+    fn validate_node_config_rejects_bad_infra_retry_values() {
+        for (key, bad) in [
+            ("infra_retry_limit", serde_json::json!(-1)),
+            ("infra_retry_limit", serde_json::json!("3")),
+            ("infra_retry_limit", serde_json::json!(1.5)),
+            ("infra_crash_max_seconds", serde_json::json!(-2)),
+            ("infra_backoff_seconds", serde_json::json!("30")),
+        ] {
+            let config = serde_json::json!({"platform": "claude", key: bad});
+            let err = validate_node_config(GraphNodeKind::Agent, &config).unwrap_err();
+            assert!(
+                err.contains(key) && err.contains("non-negative integer"),
+                "unexpected error for {key}={bad}: {err}"
+            );
+        }
+    }
+
+    /// CM30: member-level and ensemble-level infra fields round-trip through
+    /// `get_ensemble_details`, bake into member node configs member-wins,
+    /// and negative values are rejected at both levels.
+    #[tokio::test]
+    async fn graph_add_ensemble_infra_fields_round_trip_and_reject_negative() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let lp = insert_test_graph(&db, dir.path());
+        let spec = insert_test_spec(&db, &lp.id, 1);
+        let entry = add_agent_node(&handler, &spec.id, "Entry").await;
+        let arbiter = add_agent_node(&handler, &spec.id, "Arbiter").await;
+
+        let bad_member = handler
+            .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                commit_rights: None,
+                spec_id: Some(spec.id.clone()),
+                graph_id: None,
+                name: "Bad Member".to_string(),
+                kind: None,
+                prompt_template: Some("Review".to_string()),
+                members: Some(vec![
+                    crate::daemon::params::EnsembleMemberParams {
+                        platform: "claude".to_string(),
+                        model: None,
+                        prompt_override: None,
+                        timeout_minutes: None,
+                        infra_retry_limit: Some(-1),
+                        infra_crash_max_seconds: None,
+                        infra_backoff_seconds: None,
+                    },
+                    crate::daemon::params::EnsembleMemberParams {
+                        platform: "opencode".to_string(),
+                        model: None,
+                        prompt_override: None,
+                        timeout_minutes: None,
+                        infra_retry_limit: None,
+                        infra_crash_max_seconds: None,
+                        infra_backoff_seconds: None,
+                    },
+                ]),
+                blueprint: None,
+                from_node: entry.clone(),
+                condition: "always".to_string(),
+                min_pass: None,
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
+                timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
+                on_pass_to: arbiter.clone(),
+                on_fail_to: None,
+            }))
+            .await
+            .unwrap();
+        assert!(is_err(&bad_member), "{}", text(&bad_member));
+        assert!(
+            text(&bad_member).contains("infra_retry_limit"),
+            "{}",
+            text(&bad_member)
+        );
+
+        let bad_ensemble = handler
+            .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                commit_rights: None,
+                spec_id: Some(spec.id.clone()),
+                graph_id: None,
+                name: "Bad Ensemble".to_string(),
+                kind: None,
+                prompt_template: Some("Review".to_string()),
+                members: Some(vec![
+                    crate::daemon::params::EnsembleMemberParams {
+                        platform: "claude".to_string(),
+                        model: None,
+                        prompt_override: None,
+                        timeout_minutes: None,
+                        infra_retry_limit: None,
+                        infra_crash_max_seconds: None,
+                        infra_backoff_seconds: None,
+                    },
+                    crate::daemon::params::EnsembleMemberParams {
+                        platform: "opencode".to_string(),
+                        model: None,
+                        prompt_override: None,
+                        timeout_minutes: None,
+                        infra_retry_limit: None,
+                        infra_crash_max_seconds: None,
+                        infra_backoff_seconds: None,
+                    },
+                ]),
+                blueprint: None,
+                from_node: entry.clone(),
+                condition: "always".to_string(),
+                min_pass: None,
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
+                timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: Some(-5),
+                infra_backoff_seconds: None,
+                on_pass_to: arbiter.clone(),
+                on_fail_to: None,
+            }))
+            .await
+            .unwrap();
+        assert!(is_err(&bad_ensemble), "{}", text(&bad_ensemble));
+        assert!(
+            text(&bad_ensemble).contains("infra_crash_max_seconds"),
+            "{}",
+            text(&bad_ensemble)
+        );
+
+        let created = handler
+            .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                commit_rights: None,
+                spec_id: Some(spec.id.clone()),
+                graph_id: None,
+                name: "Infra Ensemble".to_string(),
+                kind: None,
+                prompt_template: Some("Review".to_string()),
+                members: Some(vec![
+                    crate::daemon::params::EnsembleMemberParams {
+                        platform: "claude".to_string(),
+                        model: None,
+                        prompt_override: None,
+                        timeout_minutes: None,
+                        infra_retry_limit: Some(1),
+                        infra_crash_max_seconds: None,
+                        infra_backoff_seconds: Some(7),
+                    },
+                    crate::daemon::params::EnsembleMemberParams {
+                        platform: "opencode".to_string(),
+                        model: None,
+                        prompt_override: None,
+                        timeout_minutes: None,
+                        infra_retry_limit: None,
+                        infra_crash_max_seconds: None,
+                        infra_backoff_seconds: None,
+                    },
+                ]),
+                blueprint: None,
+                from_node: entry,
+                condition: "always".to_string(),
+                min_pass: None,
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
+                timeout_minutes: None,
+                infra_retry_limit: Some(0),
+                infra_crash_max_seconds: Some(120),
+                infra_backoff_seconds: None,
+                on_pass_to: arbiter,
+                on_fail_to: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&created), "{}", text(&created));
+        let ensemble_id = extract_id(&created, "ensemble_id");
+        let details = db.get_ensemble_details(&ensemble_id).unwrap().unwrap();
+        assert_eq!(details.ensemble.infra_retry_limit, Some(0));
+        assert_eq!(details.ensemble.infra_crash_max_seconds, Some(120));
+        assert_eq!(details.ensemble.infra_backoff_seconds, None);
+        assert_eq!(details.members[0].infra_retry_limit, Some(1));
+        assert_eq!(details.members[0].infra_backoff_seconds, Some(7));
+        assert_eq!(details.members[1].infra_retry_limit, None);
+
+        // Member wins over ensemble in the baked node config; a member with
+        // no override inherits the ensemble default; an unset ensemble field
+        // bakes nothing at all.
+        let first = db
+            .get_graph_node(&details.members[0].node_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            first
+                .config
+                .get("infra_retry_limit")
+                .and_then(|v| v.as_i64()),
+            Some(1)
+        );
+        assert_eq!(
+            first
+                .config
+                .get("infra_crash_max_seconds")
+                .and_then(|v| v.as_i64()),
+            Some(120)
+        );
+        assert_eq!(
+            first
+                .config
+                .get("infra_backoff_seconds")
+                .and_then(|v| v.as_i64()),
+            Some(7)
+        );
+        let second = db
+            .get_graph_node(&details.members[1].node_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            second
+                .config
+                .get("infra_retry_limit")
+                .and_then(|v| v.as_i64()),
+            Some(0)
+        );
+        assert_eq!(
+            second
+                .config
+                .get("infra_crash_max_seconds")
+                .and_then(|v| v.as_i64()),
+            Some(120)
+        );
+        assert!(second.config.get("infra_backoff_seconds").is_none());
+    }
+
+    /// CM30: `graph_update_ensemble` sets, propagates (prompt-only branch)
+    /// and clears (null) the ensemble-level infra defaults, rebaking member
+    /// node configs each time.
+    #[tokio::test]
+    async fn graph_update_ensemble_sets_propagates_and_clears_infra_defaults() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let lp = insert_test_graph(&db, dir.path());
+        let spec = insert_test_spec(&db, &lp.id, 1);
+        let entry = add_agent_node(&handler, &spec.id, "Entry").await;
+        let arbiter = add_agent_node(&handler, &spec.id, "Arbiter").await;
+        let ensemble_id =
+            add_two_member_ensemble(&handler, &spec.id, "Infra Update", &entry, &arbiter).await;
+
+        // Infra-only update (no members/prompt/timeout): the prompt-only
+        // branch must still rebake every member's node config.
+        let mut update = blank_ensemble_update(&ensemble_id);
+        update.infra_retry_limit = Some(Some(0));
+        update.infra_crash_max_seconds = Some(Some(90));
+        let updated = handler
+            .graph_update_ensemble(Parameters(update))
+            .await
+            .unwrap();
+        assert!(!is_err(&updated), "{}", text(&updated));
+        let details = db.get_ensemble_details(&ensemble_id).unwrap().unwrap();
+        assert_eq!(details.ensemble.infra_retry_limit, Some(0));
+        assert_eq!(details.ensemble.infra_crash_max_seconds, Some(90));
+        for member in &details.members {
+            let node = db.get_graph_node(&member.node_id).unwrap().unwrap();
+            assert_eq!(
+                node.config
+                    .get("infra_retry_limit")
+                    .and_then(|v| v.as_i64()),
+                Some(0)
+            );
+            assert_eq!(
+                node.config
+                    .get("infra_crash_max_seconds")
+                    .and_then(|v| v.as_i64()),
+                Some(90)
+            );
+        }
+
+        // Clear back to deferring: null removes the row value AND the baked key.
+        let mut clear = blank_ensemble_update(&ensemble_id);
+        clear.infra_retry_limit = Some(None);
+        clear.infra_crash_max_seconds = Some(None);
+        let cleared = handler
+            .graph_update_ensemble(Parameters(clear))
+            .await
+            .unwrap();
+        assert!(!is_err(&cleared), "{}", text(&cleared));
+        let details = db.get_ensemble_details(&ensemble_id).unwrap().unwrap();
+        assert_eq!(details.ensemble.infra_retry_limit, None);
+        assert_eq!(details.ensemble.infra_crash_max_seconds, None);
+        for member in &details.members {
+            let node = db.get_graph_node(&member.node_id).unwrap().unwrap();
+            assert!(node.config.get("infra_retry_limit").is_none());
+            assert!(node.config.get("infra_crash_max_seconds").is_none());
+        }
+
+        // Negative ensemble-level values are rejected, and rejected BEFORE
+        // the propagate branch bakes them into every member's node config —
+        // a refusal must change nothing, same guarantee CB40 gives min_pass.
+        let mut negative = blank_ensemble_update(&ensemble_id);
+        negative.infra_backoff_seconds = Some(Some(-1));
+        let rejected = handler
+            .graph_update_ensemble(Parameters(negative))
+            .await
+            .unwrap();
+        assert!(is_err(&rejected), "{}", text(&rejected));
+        assert!(
+            text(&rejected).contains("infra_backoff_seconds"),
+            "{}",
+            text(&rejected)
+        );
+        for member in &details.members {
+            let node = db.get_graph_node(&member.node_id).unwrap().unwrap();
+            assert!(
+                node.config.get("infra_backoff_seconds").is_none(),
+                "rejected update must not bake infra_backoff_seconds into member config"
+            );
+        }
+
+        // Same guarantee on the member-resize branch: a negative
+        // ensemble-level value paired with a `members` resize must reject
+        // before `replace_ensemble_members` runs, leaving the old members in
+        // place.
+        let mut negative_resize = blank_ensemble_update(&ensemble_id);
+        negative_resize.infra_retry_limit = Some(Some(-1));
+        negative_resize.members = Some(vec![
+            crate::daemon::params::EnsembleMemberParams {
+                platform: "claude".to_string(),
+                model: None,
+                prompt_override: None,
+                timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
+            },
+            crate::daemon::params::EnsembleMemberParams {
+                platform: "opencode".to_string(),
+                model: None,
+                prompt_override: None,
+                timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
+            },
+            crate::daemon::params::EnsembleMemberParams {
+                platform: "codex".to_string(),
+                model: None,
+                prompt_override: None,
+                timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
+            },
+        ]);
+        let rejected_resize = handler
+            .graph_update_ensemble(Parameters(negative_resize))
+            .await
+            .unwrap();
+        assert!(is_err(&rejected_resize), "{}", text(&rejected_resize));
+        let details_after = db.get_ensemble_details(&ensemble_id).unwrap().unwrap();
+        assert_eq!(
+            details_after.members.len(),
+            details.members.len(),
+            "rejected update must not resize the member list"
+        );
+    }
+
+    /// CM30/FR3: `graph_get` reports the effective infra budget and its
+    /// source per node — `"node"` for an explicit key, `"default"` when
+    /// nothing (neither node nor platform) sets it.
+    #[tokio::test]
+    async fn graph_get_reports_infra_config_with_source() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let lp = insert_test_graph(&db, dir.path());
+        let spec = insert_test_spec(&db, &lp.id, 1);
+
+        let mut explicit_config = agent_node_config("cm30-test-platform-xyz");
+        explicit_config.insert("infra_retry_limit".to_string(), serde_json::Value::from(5));
+        let explicit_id = extract_id(
+            &handler
+                .graph_add_node(Parameters(GraphAddNodeParams {
+                    spec_id: Some(spec.id.clone()),
+                    graph_id: None,
+                    name: "Explicit".to_string(),
+                    kind: Some("agent".to_string()),
+                    config: Some(explicit_config),
+                    blueprint: None,
+                    config_overrides: None,
+                }))
+                .await
+                .unwrap(),
+            "node_id",
+        );
+        let plain_id = extract_id(
+            &handler
+                .graph_add_node(Parameters(GraphAddNodeParams {
+                    spec_id: Some(spec.id.clone()),
+                    graph_id: None,
+                    name: "Plain".to_string(),
+                    kind: Some("agent".to_string()),
+                    config: Some(agent_node_config("cm30-test-platform-xyz")),
+                    blueprint: None,
+                    config_overrides: None,
+                }))
+                .await
+                .unwrap(),
+            "node_id",
+        );
+
+        let got = handler
+            .graph_get(Parameters(GraphGetParams {
+                graph_id: lp.id.clone(),
+            }))
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_str(&raw_text(&got)).unwrap();
+        let nodes = json["specs"][0]["nodes"].as_array().unwrap();
+        let infra_of = |node_id: &str| -> serde_json::Value {
+            nodes
+                .iter()
+                .find(|n| n["id"] == node_id)
+                .unwrap_or_else(|| panic!("node {node_id} not found in {nodes:?}"))["infra_config"]
+                .clone()
+        };
+        let explicit = infra_of(&explicit_id);
+        assert_eq!(explicit["infra_retry_limit"]["value"], 5);
+        assert_eq!(explicit["infra_retry_limit"]["source"], "node");
+        assert_eq!(explicit["infra_crash_max_seconds"]["value"], 60);
+        assert_eq!(explicit["infra_crash_max_seconds"]["source"], "default");
+        let plain = infra_of(&plain_id);
+        assert_eq!(plain["infra_retry_limit"]["value"], 2);
+        assert_eq!(plain["infra_retry_limit"]["source"], "default");
+        assert_eq!(plain["infra_backoff_seconds"]["value"], 30);
+        assert_eq!(plain["infra_backoff_seconds"]["source"], "default");
+    }
+
+    /// CM30/FR5: `graph_audit_node_configs` lists a node/member whose
+    /// effective budget differs from its platform's own, and omits one
+    /// whose override merely restates the platform value (or that sets
+    /// nothing). The platform here is unconfigured, so its baseline is the
+    /// engine default.
+    #[tokio::test]
+    async fn graph_audit_node_configs_lists_infra_overrides() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let lp = insert_test_graph(&db, dir.path());
+        let spec = insert_test_spec(&db, &lp.id, 1);
+
+        let mut differing = agent_node_config("cm30-test-platform-xyz");
+        differing.insert("infra_retry_limit".to_string(), serde_json::Value::from(0));
+        let differing_id = extract_id(
+            &handler
+                .graph_add_node(Parameters(GraphAddNodeParams {
+                    spec_id: Some(spec.id.clone()),
+                    graph_id: None,
+                    name: "Differing".to_string(),
+                    kind: Some("agent".to_string()),
+                    config: Some(differing),
+                    blueprint: None,
+                    config_overrides: None,
+                }))
+                .await
+                .unwrap(),
+            "node_id",
+        );
+        let mut restating = agent_node_config("cm30-test-platform-xyz");
+        restating.insert("infra_retry_limit".to_string(), serde_json::Value::from(2));
+        let restating_id = extract_id(
+            &handler
+                .graph_add_node(Parameters(GraphAddNodeParams {
+                    spec_id: Some(spec.id.clone()),
+                    graph_id: None,
+                    name: "Restating".to_string(),
+                    kind: Some("agent".to_string()),
+                    config: Some(restating),
+                    blueprint: None,
+                    config_overrides: None,
+                }))
+                .await
+                .unwrap(),
+            "node_id",
+        );
+        let plain_id = extract_id(
+            &handler
+                .graph_add_node(Parameters(GraphAddNodeParams {
+                    spec_id: Some(spec.id.clone()),
+                    graph_id: None,
+                    name: "Plain".to_string(),
+                    kind: Some("agent".to_string()),
+                    config: Some(agent_node_config("cm30-test-platform-xyz")),
+                    blueprint: None,
+                    config_overrides: None,
+                }))
+                .await
+                .unwrap(),
+            "node_id",
+        );
+
+        let audited = handler.graph_audit_node_configs().await.unwrap();
+        assert!(!is_err(&audited), "{}", text(&audited));
+        let json: serde_json::Value = serde_json::from_str(&raw_text(&audited)).unwrap();
+        let overrides = json["infra_config_overrides"].as_array().unwrap();
+        assert_eq!(overrides.len(), 1, "{overrides:?}");
+        assert_eq!(overrides[0]["node_id"], differing_id);
+        assert_eq!(overrides[0]["infra_retry_limit"]["value"], 0);
+        assert_eq!(overrides[0]["infra_retry_limit"]["source"], "node");
+        assert_eq!(overrides[0]["infra_retry_limit"]["platform_value"], 2);
+        assert!(overrides.iter().all(|n| n["node_id"] != restating_id));
+        assert!(overrides.iter().all(|n| n["node_id"] != plain_id));
+    }
+
     // ── CM14: ensemble entry rewiring, multi-source entry, deletion ──
 
     /// Build a two-member ensemble for the CM14 tests: `name` entered from
@@ -26690,12 +27737,18 @@ mod endpoint_tests {
                         model: None,
                         prompt_override: None,
                         timeout_minutes: None,
+                        infra_retry_limit: None,
+                        infra_crash_max_seconds: None,
+                        infra_backoff_seconds: None,
                     },
                     crate::daemon::params::EnsembleMemberParams {
                         platform: "opencode".to_string(),
                         model: None,
                         prompt_override: None,
                         timeout_minutes: None,
+                        infra_retry_limit: None,
+                        infra_crash_max_seconds: None,
+                        infra_backoff_seconds: None,
                     },
                 ]),
                 blueprint: None,
@@ -26705,6 +27758,9 @@ mod endpoint_tests {
                 straggler_timeout_minutes: None,
                 quorum_grace_minutes: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
                 on_pass_to: on_pass_to.to_string(),
                 on_fail_to: None,
             }))
@@ -26724,6 +27780,9 @@ mod endpoint_tests {
             straggler_timeout_minutes: None,
             quorum_grace_minutes: None,
             timeout_minutes: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
             on_pass_to: None,
             on_fail_to: None,
             from_node: None,
@@ -26749,6 +27808,9 @@ mod endpoint_tests {
             model: None,
             prompt_override: None,
             timeout_minutes: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
         };
 
         let created = handler
@@ -26767,6 +27829,9 @@ mod endpoint_tests {
                 straggler_timeout_minutes: None,
                 quorum_grace_minutes: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
                 on_pass_to: arbiter,
                 on_fail_to: None,
             }))
@@ -26786,6 +27851,9 @@ mod endpoint_tests {
                 straggler_timeout_minutes: None,
                 quorum_grace_minutes: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
                 on_pass_to: None,
                 on_fail_to: None,
                 from_node: None,
@@ -26819,6 +27887,9 @@ mod endpoint_tests {
             model: None,
             prompt_override: None,
             timeout_minutes: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
         };
 
         let created = handler
@@ -26837,6 +27908,9 @@ mod endpoint_tests {
                 straggler_timeout_minutes: None,
                 quorum_grace_minutes: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
                 on_pass_to: arbiter,
                 on_fail_to: None,
             }))
@@ -26856,6 +27930,9 @@ mod endpoint_tests {
                 straggler_timeout_minutes: None,
                 quorum_grace_minutes: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
                 on_pass_to: None,
                 on_fail_to: None,
                 from_node: None,
@@ -26889,6 +27966,9 @@ mod endpoint_tests {
             model: None,
             prompt_override: None,
             timeout_minutes: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
         };
 
         let created = handler
@@ -26907,6 +27987,9 @@ mod endpoint_tests {
                 straggler_timeout_minutes: None,
                 quorum_grace_minutes: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
                 on_pass_to: arbiter,
                 on_fail_to: None,
             }))
@@ -26926,6 +28009,9 @@ mod endpoint_tests {
                 straggler_timeout_minutes: None,
                 quorum_grace_minutes: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
                 on_pass_to: None,
                 on_fail_to: None,
                 from_node: None,
@@ -26956,6 +28042,9 @@ mod endpoint_tests {
             model: None,
             prompt_override: None,
             timeout_minutes: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
         };
 
         let created = handler
@@ -26974,6 +28063,9 @@ mod endpoint_tests {
                 straggler_timeout_minutes: None,
                 quorum_grace_minutes: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
                 on_pass_to: arbiter,
                 on_fail_to: None,
             }))
@@ -26981,7 +28073,7 @@ mod endpoint_tests {
             .unwrap();
         assert!(!is_err(&created), "{}", text(&created));
         let ensemble_id = extract_id(&created, "ensemble_id");
-        db.update_ensemble_join_config(&ensemble_id, Some(3), None, None, None)
+        db.update_ensemble_join_config(&ensemble_id, Some(3), None, None, None, None, None, None)
             .unwrap();
 
         let result = handler
@@ -27255,6 +28347,9 @@ mod endpoint_tests {
             model: None,
             prompt_override: None,
             timeout_minutes: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
         };
         let created = handler
             .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
@@ -27272,6 +28367,9 @@ mod endpoint_tests {
                 straggler_timeout_minutes: None,
                 quorum_grace_minutes: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
                 on_pass_to: arbiter.clone(),
                 on_fail_to: None,
             }))
@@ -27320,6 +28418,9 @@ mod endpoint_tests {
                 model: None,
                 prompt_override: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
             };
             let (lp, spec, ensemble_id, entry, alt_entry) =
                 build_two_source_ensemble_graph(db, handler, git_dir, member_count).await;
@@ -27457,6 +28558,9 @@ mod endpoint_tests {
             model: None,
             prompt_override: None,
             timeout_minutes: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
         };
 
         let created = handler
@@ -27475,6 +28579,9 @@ mod endpoint_tests {
                 straggler_timeout_minutes: None,
                 quorum_grace_minutes: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
                 on_pass_to: arbiter.clone(),
                 on_fail_to: None,
             }))
@@ -30306,6 +31413,9 @@ mod endpoint_tests {
                     model: None,
                     prompt_override: None,
                     timeout_minutes: None,
+                    infra_retry_limit: None,
+                    infra_crash_max_seconds: None,
+                    infra_backoff_seconds: None,
                 }]),
                 blueprint: None,
                 from_node: entry.clone(),
@@ -30314,6 +31424,9 @@ mod endpoint_tests {
                 straggler_timeout_minutes: None,
                 quorum_grace_minutes: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
                 on_pass_to: arbiter.clone(),
                 on_fail_to: None,
             }))
@@ -30347,6 +31460,9 @@ mod endpoint_tests {
                     model: None,
                     prompt_override: None,
                     timeout_minutes: None,
+                    infra_retry_limit: None,
+                    infra_crash_max_seconds: None,
+                    infra_backoff_seconds: None,
                 }]),
                 blueprint: None,
                 from_node: entry.clone(),
@@ -30355,6 +31471,9 @@ mod endpoint_tests {
                 straggler_timeout_minutes: None,
                 quorum_grace_minutes: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
                 on_pass_to: arbiter.clone(),
                 on_fail_to: None,
             }))
@@ -30388,12 +31507,18 @@ mod endpoint_tests {
                         model: None,
                         prompt_override: None,
                         timeout_minutes: None,
+                        infra_retry_limit: None,
+                        infra_crash_max_seconds: None,
+                        infra_backoff_seconds: None,
                     },
                     EnsembleMemberParams {
                         platform: "openrouter".to_string(),
                         model: None,
                         prompt_override: None,
                         timeout_minutes: None,
+                        infra_retry_limit: None,
+                        infra_crash_max_seconds: None,
+                        infra_backoff_seconds: None,
                     },
                 ]),
                 blueprint: None,
@@ -30403,6 +31528,9 @@ mod endpoint_tests {
                 straggler_timeout_minutes: None,
                 quorum_grace_minutes: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
                 on_pass_to: arbiter.clone(),
                 on_fail_to: None,
             }))
@@ -30421,6 +31549,9 @@ mod endpoint_tests {
                 straggler_timeout_minutes: None,
                 quorum_grace_minutes: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
                 on_pass_to: None,
                 on_fail_to: None,
                 from_node: None,

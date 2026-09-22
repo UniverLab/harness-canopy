@@ -2367,8 +2367,19 @@ impl GraphEngine {
                         // itself a no-verdict infra crash — a retry that
                         // recovered (Pass) or a genuine negative verdict (Fail)
                         // must NOT take the `Error` edge.
-                        let had_infra_crash =
-                            is_infra_crash_shape(node, &execution, &run, crash_max_secs);
+                        let mut execution = execution;
+                        let mut run = run;
+                        let had_infra_crash = finalize_infra_crash_shape(
+                            &self.db,
+                            &run_id,
+                            node,
+                            &mut execution,
+                            &mut run,
+                            attempt,
+                            retry_limit,
+                            crash_max_secs,
+                        )
+                        .await?;
 
                         break (execution, run, had_infra_crash);
                     };
@@ -3219,6 +3230,12 @@ impl GraphEngine {
                                 attempt += 1;
                                 continue;
                             }
+                            let mut execution = execution;
+                            let mut run = run;
+                            let _ = finalize_infra_crash_shape(
+                                &db, &member_run_id, &node, &mut execution, &mut run, attempt, retry_limit, crash_max_secs,
+                            )
+                            .await?;
                             break Ok::<_, anyhow::Error>((execution, run, member_run_id.clone()));
                         }
                     },
@@ -3679,8 +3696,19 @@ impl GraphEngine {
                     // The member is settled. It still counts as "no verdict"
                     // when the settled shape is a retry-exhausted infra crash —
                     // the same check cascade keys its fallthrough off.
-                    let member_had_no_verdict =
-                        is_infra_crash_shape(&node, &execution, &run, crash_max_secs);
+                    let mut execution = execution;
+                    let mut run = run;
+                    let member_had_no_verdict = finalize_infra_crash_shape(
+                        &db,
+                        &member_run_id,
+                        &node,
+                        &mut execution,
+                        &mut run,
+                        attempt,
+                        retry_limit,
+                        crash_max_secs,
+                    )
+                    .await?;
                     break Ok::<_, anyhow::Error>((
                         execution,
                         run,
@@ -4821,22 +4849,131 @@ impl GraphEngine {
 }
 
 fn read_infra_config(node: &GraphNode) -> (u32, u64, u64) {
-    let retry_limit = node
-        .config
-        .get("infra_retry_limit")
-        .and_then(Value::as_u64)
-        .unwrap_or(DEFAULT_INFRA_RETRY_LIMIT as u64) as u32;
-    let crash_max_secs = node
-        .config
-        .get("infra_crash_max_seconds")
-        .and_then(Value::as_u64)
-        .unwrap_or(DEFAULT_INFRA_CRASH_MAX_SECONDS);
-    let backoff_secs = node
-        .config
-        .get("infra_backoff_seconds")
-        .and_then(Value::as_u64)
-        .unwrap_or(DEFAULT_INFRA_BACKOFF_SECONDS);
-    (retry_limit, crash_max_secs, backoff_secs)
+    let resolved = resolve_node_infra_config(node);
+    (
+        resolved.retry_limit.value as u32,
+        resolved.crash_max_seconds.value,
+        resolved.backoff_seconds.value,
+    )
+}
+
+/// CM30: one resolved infra-retry field plus where it came from. `"node"`
+/// covers a plain node's own config key AND an already-baked member/ensemble
+/// override (see the design doc in canopy-design.md for why those two can't
+/// be told apart here). `"platform"` and `"default"` are unambiguous.
+pub(crate) struct ResolvedInfraField {
+    pub value: u64,
+    pub source: &'static str,
+}
+
+/// CM30: the three infra-retry fields resolved together, in
+/// `read_infra_config`'s own order.
+pub(crate) struct NodeInfraConfig {
+    pub retry_limit: ResolvedInfraField,
+    pub crash_max_seconds: ResolvedInfraField,
+    pub backoff_seconds: ResolvedInfraField,
+}
+
+fn resolve_infra_field(
+    node_config: &Value,
+    key: &str,
+    platform_cli: Option<&crate::domain::cli_config::CliConfig>,
+    platform_value: impl Fn(&crate::domain::cli_config::CliConfig) -> Option<u64>,
+    default: u64,
+) -> ResolvedInfraField {
+    if let Some(v) = node_config.get(key).and_then(Value::as_u64) {
+        return ResolvedInfraField {
+            value: v,
+            source: "node",
+        };
+    }
+    if let Some(cli) = platform_cli {
+        if let Some(v) = platform_value(cli) {
+            return ResolvedInfraField {
+                value: v,
+                source: "platform",
+            };
+        }
+    }
+    ResolvedInfraField {
+        value: default,
+        source: "default",
+    }
+}
+
+/// CM30: the platform named by `node.config`'s `platform` (or `cli`) field,
+/// resolved to its `CliConfig` via a freshly-loaded `~/.canopy/config.toml`
+/// — same lookup `cli_model_flag` (below) already does, plus the
+/// `CANOPY_HOME_OVERRIDE` test hook from `Cli::strategy`, so a `config.toml`
+/// edit applies on the very next dispatch with no daemon restart (FR1).
+/// `None` when the node names no platform, or the platform has no registry
+/// entry.
+fn platform_cli_for_node(node_config: &Value) -> Option<crate::domain::cli_config::CliConfig> {
+    let platform = node_config
+        .get("platform")
+        .or_else(|| node_config.get("cli"))
+        .and_then(Value::as_str)?;
+    // `CANOPY_HOME_OVERRIDE` lets tests point this at a fixture
+    // `.canopy/config.toml` — same pattern as `Cli::strategy`. Unset in
+    // production, where this is just `dirs::home_dir()`.
+    let home = std::env::var_os("CANOPY_HOME_OVERRIDE")
+        .map(std::path::PathBuf::from)
+        .or_else(dirs::home_dir)?;
+    let config = crate::domain::canopy_config::CanopyConfig::load(&home.join(".canopy"));
+    config.get_cli(platform).cloned()
+}
+
+/// CM30: resolve a node's effective infra-retry config with provenance —
+/// used by `read_infra_config` (dispatch, values only) and by
+/// `graph_get`/`graph_audit_node_configs` in `daemon::handler` (values +
+/// source, for read-back). `node_config` is `node.config` for a real node,
+/// or a bare `{"platform": ...}`/`Value::Null` to resolve a platform-only
+/// baseline (see `resolve_platform_only_infra_config`, used by the audit
+/// tool to detect "differs from platform's own value").
+fn resolve_infra_config_from(node_config: &Value) -> NodeInfraConfig {
+    let platform_cli = platform_cli_for_node(node_config);
+    NodeInfraConfig {
+        retry_limit: resolve_infra_field(
+            node_config,
+            "infra_retry_limit",
+            platform_cli.as_ref(),
+            |c| c.infra_retry_limit.map(u64::from),
+            DEFAULT_INFRA_RETRY_LIMIT as u64,
+        ),
+        crash_max_seconds: resolve_infra_field(
+            node_config,
+            "infra_crash_max_seconds",
+            platform_cli.as_ref(),
+            |c| c.infra_crash_max_seconds,
+            DEFAULT_INFRA_CRASH_MAX_SECONDS,
+        ),
+        backoff_seconds: resolve_infra_field(
+            node_config,
+            "infra_backoff_seconds",
+            platform_cli.as_ref(),
+            |c| c.infra_backoff_seconds,
+            DEFAULT_INFRA_BACKOFF_SECONDS,
+        ),
+    }
+}
+
+/// CM30: resolve a real node's effective config (node.config first, then
+/// its platform, then the engine default). Used by `read_infra_config` and
+/// by `graph_get`'s per-node `infra_config` block.
+pub(crate) fn resolve_node_infra_config(node: &GraphNode) -> NodeInfraConfig {
+    resolve_infra_config_from(&node.config)
+}
+
+/// CM30: resolve what `platform` alone would give (node-level config never
+/// consulted) — the baseline `graph_audit_node_configs` compares the real
+/// effective value against to decide "differs from platform's own value"
+/// (FR5). `platform: None` resolves straight to the engine default.
+pub(crate) fn resolve_platform_only_infra_config(platform: Option<&str>) -> NodeInfraConfig {
+    let bare = match platform {
+        Some(p) => serde_json::json!({ "platform": p }),
+        None => Value::Null,
+    };
+    resolve_infra_config_from(&bare)
 }
 
 fn merge_attempt_marker(output: &Value, attempt: u32, is_crash: bool) -> Value {
@@ -4899,6 +5036,45 @@ fn is_infra_crash_shape(
     // and the time check. A run that never reported is infrastructure at
     // any duration, with any output, at any exit code.
     !self_reported && !permanent && node.kind == GraphNodeKind::Agent
+}
+
+/// CM30/FR4: tag a retry-skipped infra crash's own run row with
+/// `infra_crash: true, infra_attempt: 0, infra_retry_skipped: "limit 0"` —
+/// the shape `begin_infra_retry` would have written had a retry actually
+/// been attempted, for the one case (`infra_retry_limit: 0`) where no retry
+/// ever runs to write it. Mutates `execution`/`run` in place (both the
+/// in-memory value used for immediate routing/consolidation and the value a
+/// later `graph_node_run_get`/`graph_audit_node_configs` reads must agree)
+/// and persists the tagged output. A no-op — returns the plain
+/// `is_infra_crash_shape` result — for every other case, including a
+/// retry_limit > 0 exhaustion (already partially visible via the retried
+/// attempts' own markers) and any non-crash outcome, so a config that sets
+/// nothing behaves exactly as today (no new fields appear).
+#[allow(clippy::too_many_arguments)]
+async fn finalize_infra_crash_shape(
+    db: &Database,
+    run_id: &str,
+    node: &GraphNode,
+    execution: &mut NodeExecution,
+    run: &mut GraphNodeRun,
+    attempt: u32,
+    retry_limit: u32,
+    crash_max_secs: u64,
+) -> Result<bool> {
+    let is_crash = is_infra_crash_shape(node, execution, run, crash_max_secs);
+    if is_crash && attempt == 0 && retry_limit == 0 {
+        let mut tagged = merge_attempt_marker(&execution.output, attempt, true);
+        if let Value::Object(ref mut map) = tagged {
+            map.insert(
+                "infra_retry_skipped".to_string(),
+                Value::String("limit 0".to_string()),
+            );
+        }
+        db.update_graph_run_result(run_id, run.status, Some(&tagged), Some(chrono::Utc::now()))?;
+        execution.output = tagged.clone();
+        run.output = Some(tagged);
+    }
+    Ok(is_crash)
 }
 
 /// C19: whether `output` reflects an infrastructure failure — a crash,
@@ -9310,6 +9486,9 @@ mod tests {
             straggler_timeout_minutes: None,
             quorum_grace_minutes: None,
             timeout_minutes: 5,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
             on_pass_to: "done".to_string(),
             on_fail_to: None,
             kind: crate::domain::graphs::EnsembleKind::Parallel,
@@ -9325,6 +9504,9 @@ mod tests {
             model: None,
             prompt_override: None,
             timeout_minutes: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
         };
         let details = EnsembleDetails {
             ensemble,
@@ -14006,6 +14188,9 @@ echo done
                 straggler_timeout_minutes: None,
                 quorum_grace_minutes: None,
                 timeout_minutes: 30,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
                 on_pass_to: "arbiter".to_string(),
                 on_fail_to: None,
                 kind: crate::domain::graphs::EnsembleKind::Parallel,
@@ -14023,6 +14208,9 @@ echo done
                     model: None,
                     prompt_override: None,
                     timeout_minutes: None,
+                    infra_retry_limit: None,
+                    infra_crash_max_seconds: None,
+                    infra_backoff_seconds: None,
                 })
                 .collect(),
         }
@@ -19951,6 +20139,56 @@ echo done
         fake_home
     }
 
+    /// CM30: one fake-home CLI entry with a platform-level infra-retry
+    /// budget: `(name, binary, infra_retry_limit, infra_crash_max_seconds,
+    /// infra_backoff_seconds)`.
+    type InfraCliEntry<'a> = (&'a str, &'a str, Option<u32>, Option<u64>, Option<u64>);
+
+    /// CM30: like [`setup_multi_cli_home`] but each entry also carries the
+    /// platform-level infra-retry budget
+    /// `(name, binary, infra_retry_limit, infra_crash_max_seconds,
+    /// infra_backoff_seconds)` — `None` per field means "platform sets
+    /// nothing, the engine default applies". A separate helper (rather than
+    /// an extended signature) so the 20+ existing `setup_multi_cli_home`
+    /// callers keep working positionally.
+    fn setup_multi_cli_home_with_infra(clis: &[InfraCliEntry<'_>]) -> tempfile::TempDir {
+        let fake_home = tempfile::tempdir().unwrap();
+        let canopy_dir = fake_home.path().join(".canopy");
+        std::fs::create_dir_all(&canopy_dir).unwrap();
+        let config = crate::domain::canopy_config::CanopyConfig {
+            configured_at: Some(chrono::Utc::now().to_rfc3339()),
+            clis: clis
+                .iter()
+                .map(|(name, binary, retry_limit, crash_max, backoff)| {
+                    crate::domain::cli_config::CliConfig {
+                        name: name.to_string(),
+                        binary: binary.to_string(),
+                        headless_mode: String::new(),
+                        model_flag: None,
+                        supports_working_dir: false,
+                        working_dir_flag: None,
+                        env_vars: std::collections::HashMap::new(),
+                        interactive_args: None,
+                        fallback_interactive_args: None,
+                        resume_args: None,
+                        session_list_cmd: None,
+                        session_resume_cmd: None,
+                        accent_color: None,
+                        yolo_flag: None,
+                        prompt_via_stdin: true,
+                        infra_retry_limit: *retry_limit,
+                        infra_crash_max_seconds: *crash_max,
+                        infra_backoff_seconds: *backoff,
+                        ..Default::default()
+                    }
+                })
+                .collect(),
+            ..Default::default()
+        };
+        config.save(&canopy_dir).unwrap();
+        fake_home
+    }
+
     /// Like [`setup_multi_cli_home`] but for CM26 resume tests: the caller
     /// builds each member's full [`crate::domain::cli_config::CliConfig`]
     /// (session_resume_cmd / session_id_set_flag / per-member env such as its
@@ -20096,6 +20334,9 @@ echo done
             straggler_timeout_minutes,
             quorum_grace_minutes,
             timeout_minutes: 5,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
             on_pass_to: on_pass_to.to_string(),
             on_fail_to: on_fail_to.map(str::to_string),
             kind: crate::domain::graphs::EnsembleKind::Parallel,
@@ -20113,6 +20354,9 @@ echo done
                 model: None,
                 prompt_override: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
             })
             .collect();
 
@@ -20240,6 +20484,9 @@ echo done
             straggler_timeout_minutes,
             quorum_grace_minutes: None,
             timeout_minutes: 5,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
             on_pass_to: on_pass_to.to_string(),
             on_fail_to: Some(on_fail_to.to_string()),
             kind,
@@ -20257,6 +20504,9 @@ echo done
                 model: None,
                 prompt_override: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
             })
             .collect();
 
@@ -20943,6 +21193,9 @@ echo done
             straggler_timeout_minutes: Some(1),
             quorum_grace_minutes: None,
             timeout_minutes: 5,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
             on_pass_to: "gate".to_string(),
             on_fail_to: Some("done".to_string()),
             kind: EnsembleKind::Parallel,
@@ -20958,6 +21211,9 @@ echo done
                 model: None,
                 prompt_override: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
             },
             EnsembleMember {
                 ensemble_id: "ens1".to_string(),
@@ -20967,6 +21223,9 @@ echo done
                 model: None,
                 prompt_override: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
             },
         ];
         db.insert_ensemble_unit(
@@ -21486,6 +21745,9 @@ echo done
             straggler_timeout_minutes: None,
             quorum_grace_minutes: None,
             timeout_minutes: 5,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
             on_pass_to: "on-pass".to_string(),
             on_fail_to: None,
             kind: crate::domain::graphs::EnsembleKind::Parallel,
@@ -21503,6 +21765,9 @@ echo done
                 model: None,
                 prompt_override: Some(prompt.to_string()),
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
             })
             .collect();
         db.insert_ensemble_unit(
@@ -21874,7 +22139,7 @@ echo done
             crate::domain::graphs::EnsembleKind::Cascade,
             &[("m-crash", "m-crash"), ("m-ok", "m-ok")],
         );
-        db.update_ensemble_join_config("ens1", None, None, Some(Some(0)), None)
+        db.update_ensemble_join_config("ens1", None, None, Some(Some(0)), None, None, None, None)
             .unwrap();
 
         let _filer = VerdictFiler::spawn(&db, vec![("m-ok".to_string(), None)]);
@@ -22027,6 +22292,9 @@ echo done
             straggler_timeout_minutes,
             quorum_grace_minutes,
             timeout_minutes: 5,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
             on_pass_to: "done".to_string(),
             on_fail_to: None,
             kind: crate::domain::graphs::EnsembleKind::Parallel,
@@ -22044,6 +22312,9 @@ echo done
                 model: None,
                 prompt_override: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
             })
             .collect();
 
@@ -22184,6 +22455,9 @@ echo done
             straggler_timeout_minutes: Some(1),
             quorum_grace_minutes: None,
             timeout_minutes: 5,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
             on_pass_to: "done-pass".to_string(),
             on_fail_to: Some("done-fail".to_string()),
             kind,
@@ -22205,6 +22479,9 @@ echo done
                 model: None,
                 prompt_override: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
             })
             .collect();
 
@@ -22333,6 +22610,9 @@ echo done
             straggler_timeout_minutes: Some(1),
             quorum_grace_minutes: None,
             timeout_minutes: 5,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
             on_pass_to: "done-pass".to_string(),
             on_fail_to: Some("done-fail".to_string()),
             kind,
@@ -22354,6 +22634,9 @@ echo done
                 model: None,
                 prompt_override: None,
                 timeout_minutes: *member_timeout,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
             })
             .collect();
 
@@ -23256,6 +23539,207 @@ echo done
         );
         assert_eq!(dead[0].output.as_ref().unwrap()["infra_attempt"], 0);
         assert_eq!(dead[1].output.as_ref().unwrap()["infra_attempt"], 1);
+    }
+
+    /// CM30: node config wins over platform wins over default — independently
+    /// per key — with provenance (`"node"`/`"platform"`/`"default"`).
+    #[test]
+    fn resolve_node_infra_config_precedence_and_source() {
+        let fake_home =
+            setup_multi_cli_home_with_infra(&[("plat-a", "true", Some(0), Some(120), Some(5))]);
+        let _home = HomeGuard::set(fake_home.path());
+
+        let node_with = |config: serde_json::Value| GraphNode {
+            id: "n1".to_string(),
+            spec_id: None,
+            graph_id: None,
+            name: "test".to_string(),
+            kind: GraphNodeKind::Agent,
+            config,
+            position: 1,
+            created_at: chrono::Utc::now(),
+        };
+
+        // No platform named anywhere: engine defaults, source "default".
+        let resolved = resolve_node_infra_config(&node_with(serde_json::json!({})));
+        assert_eq!(resolved.retry_limit.value, DEFAULT_INFRA_RETRY_LIMIT as u64);
+        assert_eq!(resolved.retry_limit.source, "default");
+        assert_eq!(
+            resolved.crash_max_seconds.value,
+            DEFAULT_INFRA_CRASH_MAX_SECONDS
+        );
+        assert_eq!(resolved.crash_max_seconds.source, "default");
+        assert_eq!(
+            resolved.backoff_seconds.value,
+            DEFAULT_INFRA_BACKOFF_SECONDS
+        );
+        assert_eq!(resolved.backoff_seconds.source, "default");
+
+        // Platform named, no node keys: platform values, source "platform".
+        let resolved =
+            resolve_node_infra_config(&node_with(serde_json::json!({"platform": "plat-a"})));
+        assert_eq!(resolved.retry_limit.value, 0);
+        assert_eq!(resolved.retry_limit.source, "platform");
+        assert_eq!(resolved.crash_max_seconds.value, 120);
+        assert_eq!(resolved.crash_max_seconds.source, "platform");
+        assert_eq!(resolved.backoff_seconds.value, 5);
+        assert_eq!(resolved.backoff_seconds.source, "platform");
+
+        // Node key beats platform for that key only; the other keys still
+        // resolve to the platform.
+        let resolved = resolve_node_infra_config(&node_with(serde_json::json!({
+            "platform": "plat-a",
+            "infra_retry_limit": 3,
+        })));
+        assert_eq!(resolved.retry_limit.value, 3);
+        assert_eq!(resolved.retry_limit.source, "node");
+        assert_eq!(resolved.crash_max_seconds.value, 120);
+        assert_eq!(resolved.crash_max_seconds.source, "platform");
+        assert_eq!(resolved.backoff_seconds.value, 5);
+        assert_eq!(resolved.backoff_seconds.source, "platform");
+
+        // Unknown platform: straight to the engine default.
+        let resolved = resolve_node_infra_config(&node_with(
+            serde_json::json!({"platform": "no-such-platform"}),
+        ));
+        assert_eq!(resolved.retry_limit.value, DEFAULT_INFRA_RETRY_LIMIT as u64);
+        assert_eq!(resolved.retry_limit.source, "default");
+    }
+
+    /// CM30/FR6: a cascade ensemble with one member on a platform configured
+    /// at `infra_retry_limit: 0` and one on a platform at the default
+    /// dispatches one attempt for the first and three for the second under
+    /// the same crash. The limit-0 member's single row carries
+    /// `infra_crash: true, infra_attempt: 0, infra_retry_skipped: "limit 0"`;
+    /// the default member's exhausted third row carries NO
+    /// `infra_retry_skipped` key (a config that sets nothing behaves exactly
+    /// as today).
+    #[tokio::test]
+    async fn ensemble_platform_retry_limit_zero_skips_retries_while_default_retries() {
+        let (dir, db, engine, _graph_id, spec_id) = graph_fixture().unwrap();
+        let fake_home = setup_multi_cli_home_with_infra(&[
+            (
+                "plat-zero",
+                &write_member_script(dir.path(), "zero.sh", "exit 1"),
+                Some(0),
+                None,
+                None,
+            ),
+            (
+                "plat-default",
+                &write_member_script(dir.path(), "default.sh", "exit 1"),
+                None,
+                None,
+                None,
+            ),
+        ]);
+        insert_kind_ensemble(
+            &db,
+            &spec_id,
+            crate::domain::graphs::EnsembleKind::Cascade,
+            &[("m-zero", "plat-zero"), ("m-default", "plat-default")],
+        );
+
+        let _home = HomeGuard::set(fake_home.path());
+        engine
+            .run_graph("wf-test".to_string(), None, None, None, None)
+            .await
+            .unwrap();
+        drop(_home);
+
+        let join = join_run(&db, &spec_id, "join1");
+        assert_eq!(
+            join.status,
+            GraphRunStatus::Fail,
+            "both members are unreported infra -> 0/2 -> join fails"
+        );
+
+        let zero = member_runs(&db, &spec_id, "m-zero");
+        assert_eq!(
+            zero.len(),
+            1,
+            "platform infra_retry_limit 0 means one attempt, no retry"
+        );
+        let zero_out = zero[0].output.as_ref().unwrap();
+        assert_eq!(zero_out["infra_crash"], serde_json::Value::Bool(true));
+        assert_eq!(zero_out["infra_attempt"], 0);
+        assert_eq!(zero_out["infra_retry_skipped"], "limit 0");
+
+        let default = member_runs(&db, &spec_id, "m-default");
+        assert_eq!(
+            default.len(),
+            3,
+            "platform default (limit 2) means initial + 2 retries"
+        );
+        assert!(
+            default[2]
+                .output
+                .as_ref()
+                .unwrap()
+                .get("infra_retry_skipped")
+                .is_none(),
+            "retry_limit > 0 exhaustion must not gain new fields: {:?}",
+            default[2].output
+        );
+    }
+
+    /// CM30: a member-level value (baked into the member node's own config by
+    /// `graph_add_ensemble`/`graph_update_ensemble`, which is all the engine
+    /// ever reads) overrides its platform: platform limit 5, node limit 0 —
+    /// one attempt, tagged as retry-skipped.
+    #[tokio::test]
+    async fn ensemble_node_config_retry_limit_zero_overrides_platform() {
+        let (dir, db, engine, _graph_id, spec_id) = graph_fixture().unwrap();
+        let fake_home = setup_multi_cli_home_with_infra(&[
+            (
+                "plat-five",
+                &write_member_script(dir.path(), "five.sh", "exit 1"),
+                Some(5),
+                None,
+                None,
+            ),
+            (
+                "plat-ok",
+                &write_member_script(dir.path(), "ok.sh", "sleep 1"),
+                None,
+                None,
+                None,
+            ),
+        ]);
+        insert_kind_ensemble(
+            &db,
+            &spec_id,
+            crate::domain::graphs::EnsembleKind::Cascade,
+            &[("m-overridden", "plat-five"), ("m-ok", "plat-ok")],
+        );
+        // Simulate the baked member override: the member's own node config
+        // carries the winning value, exactly as `member_node_config` writes it.
+        let mut node = db.get_graph_node("m-overridden").unwrap().unwrap();
+        if let serde_json::Value::Object(ref mut map) = node.config {
+            map.insert("infra_retry_limit".to_string(), serde_json::json!(0));
+        }
+        db.update_graph_node_details(&node.id, None, None, Some(&node.config), None)
+            .unwrap();
+
+        let _filer = VerdictFiler::spawn(&db, vec![("m-ok".to_string(), None)]);
+
+        let _home = HomeGuard::set(fake_home.path());
+        engine
+            .run_graph("wf-test".to_string(), None, None, None, None)
+            .await
+            .unwrap();
+        drop(_home);
+        drop(_filer);
+
+        let runs = member_runs(&db, &spec_id, "m-overridden");
+        assert_eq!(
+            runs.len(),
+            1,
+            "node-level infra_retry_limit 0 wins over the platform's 5"
+        );
+        let out = runs[0].output.as_ref().unwrap();
+        assert_eq!(out["infra_crash"], serde_json::Value::Bool(true));
+        assert_eq!(out["infra_retry_skipped"], "limit 0");
     }
 
     /// The `mimocode`/`mimo-auto` incident inside an ensemble: a member that

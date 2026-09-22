@@ -805,6 +805,18 @@ pub struct EnsembleMemberParams {
     /// immediate timeout, same convention as the ensemble's own
     /// `timeout_minutes`).
     pub timeout_minutes: Option<i64>,
+    /// CM30: this member's own infra-retry-limit override, overriding the
+    /// ensemble's own default (which may itself defer to the platform's
+    /// config.toml value, then the engine default of 2). Omit to use the
+    /// ensemble's value. Must not be negative; 0 means "one attempt, no
+    /// retry" — see graph_add_node's infra_retry_limit doc.
+    pub infra_retry_limit: Option<i64>,
+    /// CM30: see infra_retry_limit. Overrides infra_crash_max_seconds
+    /// (engine default 60).
+    pub infra_crash_max_seconds: Option<i64>,
+    /// CM30: see infra_retry_limit. Overrides infra_backoff_seconds
+    /// (engine default 30).
+    pub infra_backoff_seconds: Option<i64>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -851,6 +863,16 @@ pub struct GraphAddEnsembleParams {
     /// Shared agent timeout (minutes) applied to every member. Defaults to
     /// 30, matching an ordinary agent node.
     pub timeout_minutes: Option<i64>,
+    /// CM30: ensemble-level default infra-retry budget, applied to every
+    /// member unless that member sets its own; omit to defer to the
+    /// platform's config.toml value, then the engine default (2).
+    pub infra_retry_limit: Option<i64>,
+    /// CM30: see infra_retry_limit. Ensemble-level default for
+    /// infra_crash_max_seconds (engine default 60).
+    pub infra_crash_max_seconds: Option<i64>,
+    /// CM30: see infra_retry_limit. Ensemble-level default for
+    /// infra_backoff_seconds (engine default 30).
+    pub infra_backoff_seconds: Option<i64>,
     /// Existing node ID the quorum routes to on `pass` (e.g. an arbiter node).
     pub on_pass_to: String,
     /// Existing node ID the quorum routes to on `fail`. Omit for a dead end on
@@ -887,6 +909,13 @@ pub struct GraphUpdateEnsembleParams {
     pub quorum_grace_minutes: Option<Option<i64>>,
     /// New shared member agent timeout in minutes.
     pub timeout_minutes: Option<i64>,
+    /// CM30: new ensemble-level infra-retry default, or null to clear back
+    /// to deferring to the platform/engine default.
+    pub infra_retry_limit: Option<Option<i64>>,
+    /// CM30: see infra_retry_limit (infra_crash_max_seconds).
+    pub infra_crash_max_seconds: Option<Option<i64>>,
+    /// CM30: see infra_retry_limit (infra_backoff_seconds).
+    pub infra_backoff_seconds: Option<Option<i64>>,
     /// New `pass` exit target node ID — or an ensemble ID to chain this
     /// ensemble's quorum directly into another ensemble (every member of the
     /// target gets a pass edge from this quorum, no intermediate node).

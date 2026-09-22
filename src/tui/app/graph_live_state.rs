@@ -1074,6 +1074,9 @@ mod tests {
             straggler_timeout_minutes: None,
             quorum_grace_minutes: None,
             timeout_minutes: 30,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
             on_pass_to: "n2".to_string(),
             on_fail_to: None,
             kind: crate::domain::graphs::EnsembleKind::Parallel,
@@ -1091,6 +1094,9 @@ mod tests {
                 model: Some(format!("model-{i}")),
                 prompt_override: None,
                 timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
             })
             .collect();
         db.insert_ensemble_unit(&ensemble, &members, &member_nodes, &join_node, &edges)

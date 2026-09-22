@@ -272,6 +272,45 @@ tell "the harness ran and chose not to report" apart from "the harness
 never ran," without needing `require_report` itself. Ensemble members
 are judged individually, exactly like a lone node.
 
+## Infra-retry budget
+
+An agent attempt that never files a verdict (no `graph_complete_node`,
+no `graph_report_blocker`) is an infrastructure crash, retried with a
+doubling backoff. Three keys control the budget, with engine defaults
+of **2 retries / 60 s crash-shape window / 30 s backoff**:
+
+```
+infra_retry_limit: 0
+infra_crash_max_seconds: 60
+infra_backoff_seconds: 30
+```
+
+`infra_retry_limit: 0` means one attempt and no retry: a member that
+exits with the infra-crash signature falls through to the next cascade
+member immediately.
+
+Precedence, most specific first: **member → ensemble → node config →
+platform config → engine default.** A member's own value wins over the
+ensemble's default; a plain node's own config key wins over its
+platform; the platform value lives in `config.toml`'s `[[clis]]`
+entries (`infra_retry_limit`, `infra_crash_max_seconds`,
+`infra_backoff_seconds`) and is read fresh on every dispatch, so editing
+`config.toml` needs no daemon restart. More specific ensemble/member/node
+overrides win; absent everything, the engine default (2/60/30) applies.
+
+A retry-skipped (`infra_retry_limit: 0`) crash is recorded with
+`infra_retry_skipped: "limit 0"` alongside `infra_crash`/`infra_attempt`,
+readable via `graph_node_run_get` (which already surfaces the
+`infra_attempt`/`infra_crash` markers when present).
+
+`graph_get` reports the effective value and its source
+(`"node"`/`"platform"`/`"default"`) per node under `infra_config`, and
+the ensemble's own JSON carries the raw ensemble-level fields plus each
+member's `*_override` fields so member vs ensemble vs platform can be
+told apart. `graph_audit_node_configs` lists every node/member whose
+effective budget differs from its platform's own under
+`infra_config_overrides`.
+
 ## Lifecycle
 
 Create → run → (pause / continue) → complete. `graph_continue`
