@@ -453,6 +453,10 @@ pub struct GraphCreateParams {
     /// When set, every new agent/check/gate node auto-creates a `Error` edge
     /// to this node.
     pub infra_node_id: Option<String>,
+    /// CM29: when true, graph_run/autorun downgrade the dirty-worktree
+    /// refusal to a warning instead of refusing to launch. Default false.
+    #[serde(default)]
+    pub allow_dirty_start: bool,
 }
 
 /// Config for a graph hook — an agent-node-style payload
@@ -559,6 +563,9 @@ pub struct GraphUpdateParams {
     /// New pre-wired target for infrastructure failures (`Error` edges), or
     /// null to clear. Omit to leave unchanged.
     pub infra_node_id: Option<Option<String>>,
+    /// CM29: set to change whether graph_run/autorun downgrade the
+    /// dirty-worktree refusal to a warning. Omit to leave unchanged.
+    pub allow_dirty_start: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]

@@ -1525,6 +1525,7 @@ mod tests {
         crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: id.to_string(),
             name: format!("graph-{id}"),

@@ -508,6 +508,9 @@ mod tests {
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: Some(workdir.to_string()),
             completed_via: None,
@@ -596,6 +599,7 @@ mod tests {
             hooks: std::collections::BTreeMap::new(),
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
         }
     }

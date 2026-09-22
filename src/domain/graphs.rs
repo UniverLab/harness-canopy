@@ -538,6 +538,12 @@ pub struct Graph {
     /// `None` preserves pre-CM2 behavior — no auto-wiring, no `Error` edges.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub infra_node_id: Option<String>,
+    /// CM29: when true, `graph_run`/autorun downgrade the dirty-start
+    /// refusal to a warning instead of refusing to launch. `false` for
+    /// every pre-existing graph (never silently permissive). Set through
+    /// `graph_update`.
+    #[serde(default)]
+    pub allow_dirty_start: bool,
 }
 
 /// Config for a graph completion hook — an agent payload
@@ -766,6 +772,23 @@ pub struct GraphSpec {
     /// isn't a git repo or the spec hasn't started yet.
     #[serde(default)]
     pub spec_start_head: Option<String>,
+    /// Number of non-ignored git status entries captured when the spec began.
+    /// `None` is unknown for legacy rows and non-git workdirs.
+    #[serde(default)]
+    pub spec_start_dirty: Option<i64>,
+    /// Number of non-ignored git status entries at the moment this spec's
+    /// attempt actually ended (Completed, Failed, or Interrupted) — same
+    /// `git status --porcelain` count as `spec_start_dirty`, captured once
+    /// more at the other boundary. `None` for legacy rows, non-git workdirs,
+    /// or a spec that hasn't ended yet.
+    #[serde(default)]
+    pub spec_end_dirty: Option<i64>,
+    /// The first 20 paths from that same `git status --porcelain` output,
+    /// in the order git reported them. `None` alongside `spec_end_dirty ==
+    /// None`; `Some(vec![])` is impossible (a dirty count of 0 never
+    /// persists paths — see `dirty_tree_note`).
+    #[serde(default)]
+    pub spec_end_dirty_paths: Option<Vec<String>>,
     /// The workdir's git HEAD immediately after a `commit_rights: true`
     /// node's own execution actually moved it during this attempt (C15).
     /// Unlike `spec_start_head` — which only proves *some* commit landed
@@ -1316,6 +1339,7 @@ mod tests {
         super::Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: "wf".to_string(),
             name: "Graph".to_string(),

@@ -343,6 +343,7 @@ fn sample_graph(id: &str) -> Graph {
     Graph {
         archived: false,
         paused_by_reconciliation: false,
+        allow_dirty_start: false,
         infra_node_id: None,
         id: id.to_string(),
         name: "Auth graph".to_string(),
@@ -373,6 +374,9 @@ fn sample_graph_spec(graph_id: &str, id: &str, position: i64) -> GraphSpec {
         started_at: None,
         completed_at: None,
         spec_start_head: None,
+        spec_start_dirty: None,
+        spec_end_dirty: None,
+        spec_end_dirty_paths: None,
         spec_committed_head: None,
         workdir: None,
         completed_via: None,
@@ -1360,6 +1364,9 @@ fn graph_specs_migration_relaxes_graph_id_and_adds_workdir_and_is_idempotent() {
         started_at: None,
         completed_at: None,
         spec_start_head: None,
+        spec_start_dirty: None,
+        spec_end_dirty: None,
+        spec_end_dirty_paths: None,
         spec_committed_head: None,
         workdir: Some("/tmp/project".to_string()),
         completed_via: None,
@@ -1370,6 +1377,83 @@ fn graph_specs_migration_relaxes_graph_id_and_adds_workdir_and_is_idempotent() {
     let standalone = db.get_graph_spec("standalone-spec").unwrap().unwrap();
     assert_eq!(standalone.graph_id, None);
     assert_eq!(standalone.workdir.as_deref(), Some("/tmp/project"));
+}
+
+#[test]
+fn graph_specs_migration_carries_spec_end_dirty_columns() {
+    // Same pre-R3 legacy shape as the sibling migration test above, missing
+    // every column CM29 adds — `spec_end_dirty`/`spec_end_dirty_paths` on
+    // `graph_specs` and `allow_dirty_start` on `graphs`.
+    let tmp = NamedTempFile::new().expect("create temp file");
+    let path = tmp.path().to_path_buf();
+    std::mem::forget(tmp);
+
+    {
+        let conn = rusqlite::Connection::open(&path).expect("open raw legacy db");
+        conn.execute_batch(
+            "CREATE TABLE graphs (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT,
+                workdir TEXT NOT NULL,
+                status TEXT NOT NULL,
+                trigger_type TEXT,
+                trigger_config TEXT,
+                created_at INTEGER NOT NULL,
+                started_at INTEGER,
+                completed_at INTEGER,
+                autorun_at INTEGER
+             );
+             CREATE TABLE graph_specs (
+                id TEXT PRIMARY KEY,
+                graph_id TEXT NOT NULL REFERENCES graphs(id) ON DELETE CASCADE,
+                name TEXT NOT NULL,
+                description TEXT,
+                position INTEGER NOT NULL,
+                parallelizable INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL,
+                started_at INTEGER,
+                completed_at INTEGER
+             );
+             INSERT INTO graphs (id, name, workdir, status, created_at)
+                 VALUES ('legacy-graph', 'Legacy', '/tmp', 'draft', 0);
+             INSERT INTO graph_specs (id, graph_id, name, position, status)
+                 VALUES ('legacy-spec', 'legacy-graph', 'Spec', 1, 'pending');",
+        )
+        .expect("seed legacy schema");
+    }
+
+    let has_column = |table: &str, column: &str| -> bool {
+        let conn = rusqlite::Connection::open(&path).expect("open db for pragma check");
+        conn.query_row(
+            &format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = '{column}'"),
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .expect("pragma_table_info query")
+            > 0
+    };
+
+    let db = Database::new(&path).expect("open db, running migration");
+    // Existing rows read back as unknown, not as clean (non-functional
+    // requirement) — `None`, not `Some(0)`.
+    let spec = db.get_graph_spec("legacy-spec").unwrap().unwrap();
+    assert_eq!(spec.spec_end_dirty, None);
+    assert_eq!(spec.spec_end_dirty_paths, None);
+    let lp = db.get_graph("legacy-graph").unwrap().unwrap();
+    assert!(!lp.allow_dirty_start);
+    drop(db);
+
+    assert!(has_column("graph_specs", "spec_end_dirty"));
+    assert!(has_column("graph_specs", "spec_end_dirty_paths"));
+    assert!(has_column("graphs", "allow_dirty_start"));
+
+    // Running the migration again (reopening) must be a no-op.
+    let db = Database::new(&path).expect("reopen db after migration already applied");
+    let spec = db.get_graph_spec("legacy-spec").unwrap().unwrap();
+    assert_eq!(spec.spec_end_dirty, None);
+    assert!(has_column("graph_specs", "spec_end_dirty"));
+    assert!(has_column("graphs", "allow_dirty_start"));
 }
 
 fn sample_standalone_spec(id: &str, workdir: Option<&str>) -> GraphSpec {
@@ -1386,6 +1470,9 @@ fn sample_standalone_spec(id: &str, workdir: Option<&str>) -> GraphSpec {
         started_at: None,
         completed_at: None,
         spec_start_head: None,
+        spec_start_dirty: None,
+        spec_end_dirty: None,
+        spec_end_dirty_paths: None,
         spec_committed_head: None,
         workdir: workdir.map(str::to_string),
         completed_via: None,
@@ -2987,6 +3074,9 @@ fn legacy_queue_table_rename_is_a_noop_on_an_already_migrated_database() {
         started_at: None,
         completed_at: None,
         spec_start_head: None,
+        spec_start_dirty: None,
+        spec_end_dirty: None,
+        spec_end_dirty_paths: None,
         spec_committed_head: None,
         workdir: None,
         completed_via: None,
@@ -6787,6 +6877,7 @@ mod hooks_tests {
         Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: id.to_string(),
             name: format!("Graph {id}"),

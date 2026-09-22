@@ -232,7 +232,7 @@ impl GraphEngine {
                 } else {
                     tracing::error!("Graph '{}' failed to run: {error:#}", graph_id);
                     let _ = self
-                        .fail_graph(&graph_id, None, None, &error.to_string())
+                        .fail_graph(&graph_id, None, None, None, &error.to_string())
                         .await;
                 }
             }
@@ -576,6 +576,7 @@ impl GraphEngine {
                                         &graph_id,
                                         Some(claimed_at),
                                         Some(&spec.name),
+                                        Some(&spec.id),
                                         &summary,
                                     )
                                     .await?;
@@ -624,6 +625,7 @@ impl GraphEngine {
                                 &graph_id,
                                 Some(claimed_at),
                                 Some(&spec.name),
+                                Some(&spec.id),
                                 &summary,
                             )
                             .await?;
@@ -683,13 +685,13 @@ impl GraphEngine {
                         // this before the claim. Unwind the claim rather than
                         // leaving the graph `Running` with nothing to execute.
                         let message = self.empty_spec_set_message(&lp, None)?;
-                        self.fail_graph(&graph_id, Some(claimed_at), None, &message)
+                        self.fail_graph(&graph_id, Some(claimed_at), None, None, &message)
                             .await?;
                         return Err(EmptySpecSetError(message).into());
                     };
                     if idea_text.trim().is_empty() {
                         let message = self.empty_spec_set_message(&lp, None)?;
-                        self.fail_graph(&graph_id, Some(claimed_at), None, &message)
+                        self.fail_graph(&graph_id, Some(claimed_at), None, None, &message)
                             .await?;
                         return Err(EmptySpecSetError(message).into());
                     }
@@ -723,6 +725,7 @@ impl GraphEngine {
                                 &graph_id,
                                 Some(claimed_at),
                                 Some(&spec.name),
+                                Some(&spec.id),
                                 &summary,
                             )
                             .await?;
@@ -1475,7 +1478,7 @@ impl GraphEngine {
                 } else {
                     tracing::error!("Hook-launched graph '{}' failed: {error:#}", graph_id);
                     let _ = engine
-                        .fail_graph(&graph_id, None, None, &error.to_string())
+                        .fail_graph(&graph_id, None, None, None, &error.to_string())
                         .await;
                 }
             }
@@ -1667,6 +1670,99 @@ impl GraphEngine {
         Ok(Some(self.empty_spec_set_message(&lp, None)?))
     }
 
+    /// CM29: the spec `graph_run`/autorun would dispatch or resume next,
+    /// without actually starting it — used only to exclude that spec from
+    /// the dirty-start refusal's "previous spec" search (see
+    /// `find_dirty_predecessor_spec`). Mirrors the picking logic in
+    /// `run_graph_dispatch` exactly: for a queue, the currently-running
+    /// member if any, else the next pending/interrupted one; for bound
+    /// specs, the first one (by position) that isn't `Completed`/`Skipped`.
+    /// `Ok(None)` means nothing is runnable — the dirty-start check then has
+    /// no "next spec" to exclude, which is fine (an empty graph never
+    /// matches a `failed`/`interrupted`/`skipped` predecessor query anyway).
+    pub fn preview_next_spec_id(
+        &self,
+        graph_id: &str,
+        queue_id: Option<&str>,
+    ) -> Result<Option<String>> {
+        if let Some(queue_id) = queue_id {
+            if let Some(id) = self.db.queue_running_spec_id(queue_id)? {
+                return Ok(Some(id));
+            }
+            return self.db.queue_next_pending_spec_id(queue_id);
+        }
+        Ok(self
+            .db
+            .list_graph_specs(graph_id)?
+            .into_iter()
+            .find(|s| {
+                !matches!(
+                    s.status,
+                    GraphSpecStatus::Completed | GraphSpecStatus::Skipped
+                )
+            })
+            .map(|s| s.id))
+    }
+
+    /// CM29: whether launching the next spec in `workdir` should be refused
+    /// (or, with `allow_dirty_start`, merely warned about) because a
+    /// different, earlier spec on this same workdir ended without
+    /// completing and left the tree dirty. `next_spec_id` — from
+    /// `preview_next_spec_id` — is excluded from the search so a spec
+    /// resuming its own `Interrupted` self is never mistaken for its own
+    /// bad predecessor. Read-only: one live `git status --porcelain` call
+    /// (never persisted here — the per-spec boundary capture already owns
+    /// persistence) plus a DB lookup.
+    pub async fn dirty_start_check(
+        &self,
+        workdir: &str,
+        next_spec_id: Option<&str>,
+        allow_dirty_start: bool,
+    ) -> Result<Option<DirtyStartNotice>> {
+        let Some(prev) = self.db.find_dirty_predecessor_spec(workdir, next_spec_id)? else {
+            return Ok(None);
+        };
+        let (dirty, _paths) = capture_workdir_dirty_with_paths(workdir).await;
+        let Some(count) = dirty.filter(|n| *n > 0) else {
+            return Ok(None);
+        };
+        let name = if prev.name.trim().is_empty() {
+            prev.id.clone()
+        } else {
+            prev.name.clone()
+        };
+        let plural = if count == 1 { "y" } else { "ies" };
+        let message = format!(
+            "workdir '{workdir}' is dirty ({count} entr{plural}) — spec '{name}' ended {} \
+             without cleaning up. Set allow_dirty_start on the graph to launch anyway.",
+            prev.status.as_str(),
+        );
+        Ok(Some(DirtyStartNotice {
+            refuse: !allow_dirty_start,
+            message,
+        }))
+    }
+
+    /// CM29: called once at daemon boot, right after
+    /// `reconcile_orphaned_graphs`/`reconcile_stranded_queue_specs` — those
+    /// two live in `src/db/graphs.rs` and do no process I/O, so the
+    /// end-of-spec git capture for a spec they just marked `Interrupted`
+    /// happens here instead, with real async git access.
+    pub async fn capture_end_dirty_for_interrupted_specs(&self) -> Result<()> {
+        for (spec, workdir) in self.db.list_interrupted_specs_missing_end_dirty()? {
+            let Some(workdir) = workdir else { continue };
+            let (dirty, paths) = capture_workdir_dirty_with_paths(&workdir).await;
+            if let Err(e) = self.db.set_graph_spec_end_state(&spec.id, dirty, &paths) {
+                tracing::warn!(
+                    "Failed to record end-dirty state for interrupted spec '{}': {}",
+                    spec.id,
+                    e
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Build the actionable error text for [`Self::empty_launch_check`].
     ///
     /// Queue membership doesn't record which graph(s) normally draw from it
@@ -1755,7 +1851,7 @@ impl GraphEngine {
                 } else {
                     tracing::error!("Graph '{}' failed to run: {error:#}", graph_id);
                     let _ = self
-                        .fail_graph(&graph_id, None, None, &error.to_string())
+                        .fail_graph(&graph_id, None, None, None, &error.to_string())
                         .await;
                 }
             }
@@ -1816,6 +1912,11 @@ impl GraphEngine {
                     Some(chrono::Utc::now()),
                     Some(chrono::Utc::now()),
                 )?;
+                let (dirty, paths) = self.record_spec_end_dirty(&spec.id, workdir).await;
+                let summary = match dirty_tree_note(dirty, &paths) {
+                    Some(note) => format!("{summary} ({note})"),
+                    None => summary,
+                };
                 return Ok(SpecExecutionOutcome::Failed(summary));
             };
 
@@ -1867,14 +1968,19 @@ impl GraphEngine {
         // for every node execution and every review/check retry of this
         // attempt, amend or no amend — it is never touched again until the
         // next spec attempt captures its own.
-        let spec_start_head = if is_resume && spec.status == GraphSpecStatus::Running {
-            spec_details.spec.spec_start_head.clone()
-        } else {
-            let head = capture_workdir_head(workdir).await;
-            self.db
-                .set_graph_spec_start_head(&spec.id, head.as_deref())?;
-            head
-        };
+        let (spec_start_head, _spec_start_dirty) =
+            if is_resume && spec.status == GraphSpecStatus::Running {
+                (
+                    spec_details.spec.spec_start_head.clone(),
+                    spec_details.spec.spec_start_dirty,
+                )
+            } else {
+                let head = capture_workdir_head(workdir).await;
+                let dirty = capture_workdir_dirty(workdir).await;
+                self.db
+                    .set_graph_spec_start_state(&spec.id, head.as_deref(), dirty)?;
+                (head, dirty)
+            };
 
         // C15: `spec_committed_head` follows the exact same same-attempt-vs-
         // fresh-attempt rule as `spec_start_head` above — a genuine resume of
@@ -2040,6 +2146,11 @@ impl GraphEngine {
                         None,
                         Some(chrono::Utc::now()),
                     )?;
+                    let (dirty, paths) = self.record_spec_end_dirty(&spec.id, workdir).await;
+                    let blocker = match dirty_tree_note(dirty, &paths) {
+                        Some(note) => format!("{blocker} ({note})"),
+                        None => blocker,
+                    };
                     return Ok(SpecExecutionOutcome::Blocked(blocker));
                 }
                 self.db.update_graph_spec_status(
@@ -2048,6 +2159,11 @@ impl GraphEngine {
                     None,
                     Some(chrono::Utc::now()),
                 )?;
+                let (dirty, paths) = self.record_spec_end_dirty(&spec.id, workdir).await;
+                let iteration_budget_blocker = match dirty_tree_note(dirty, &paths) {
+                    Some(note) => format!("{iteration_budget_blocker} ({note})"),
+                    None => iteration_budget_blocker,
+                };
                 return Ok(SpecExecutionOutcome::Failed(iteration_budget_blocker));
             }
             let iteration_value = *iteration;
@@ -2484,6 +2600,7 @@ impl GraphEngine {
                             None,
                             Some(chrono::Utc::now()),
                         )?;
+                        self.record_spec_end_dirty(&spec.id, workdir).await;
                         self.notify_spec_completed(lp, spec, queue_id)?;
                         activity::publish(
                             &self.db,
@@ -2682,6 +2799,7 @@ impl GraphEngine {
                         None,
                         Some(chrono::Utc::now()),
                     )?;
+                    self.record_spec_end_dirty(&spec.id, workdir).await;
                     self.notify_spec_completed(lp, spec, queue_id)?;
                     activity::publish(
                         &self.db,
@@ -2725,6 +2843,11 @@ impl GraphEngine {
                             None,
                             Some(chrono::Utc::now()),
                         )?;
+                        let (dirty, paths) = self.record_spec_end_dirty(&spec.id, workdir).await;
+                        let blocker = match dirty_tree_note(dirty, &paths) {
+                            Some(note) => format!("{blocker} ({note})"),
+                            None => blocker,
+                        };
                         return Ok(SpecExecutionOutcome::Blocked(blocker));
                     }
                     self.db.update_graph_spec_status(
@@ -2733,10 +2856,36 @@ impl GraphEngine {
                         None,
                         Some(chrono::Utc::now()),
                     )?;
-                    return Ok(SpecExecutionOutcome::Failed(final_execution.summary));
+                    let (dirty, paths) = self.record_spec_end_dirty(&spec.id, workdir).await;
+                    let final_summary = match dirty_tree_note(dirty, &paths) {
+                        Some(note) => format!("{} ({note})", final_execution.summary),
+                        None => final_execution.summary,
+                    };
+                    return Ok(SpecExecutionOutcome::Failed(final_summary));
                 }
             }
         }
+    }
+
+    /// CM29: capture + persist the workdir's git-dirty state at the exact
+    /// moment `spec_id`'s attempt ends — mirrors `spec_start_head`/
+    /// `spec_start_dirty`'s capture at the other boundary. Never errors the
+    /// caller: a failed capture or DB write only logs, the spec's own
+    /// outcome is unaffected.
+    async fn record_spec_end_dirty(
+        &self,
+        spec_id: &str,
+        workdir: &str,
+    ) -> (Option<i64>, Vec<String>) {
+        let (dirty, paths) = capture_workdir_dirty_with_paths(workdir).await;
+        if let Err(e) = self.db.set_graph_spec_end_state(spec_id, dirty, &paths) {
+            tracing::warn!(
+                "Failed to record spec end dirty state for '{}': {}",
+                spec_id,
+                e
+            );
+        }
+        (dirty, paths)
     }
 
     /// A spec that terminates because a FAILING node had no outgoing edge
@@ -4326,6 +4475,7 @@ impl GraphEngine {
         graph_id: &str,
         dispatch_started_at: Option<chrono::DateTime<chrono::Utc>>,
         spec_name: Option<&str>,
+        spec_id: Option<&str>,
         summary: &str,
     ) -> Result<()> {
         if let Some(expected) = dispatch_started_at {
@@ -4389,6 +4539,19 @@ impl GraphEngine {
 
         // Fire `on_failed` hooks if any are registered.
         if let Ok(Some(lp)) = self.db.get_graph(graph_id) {
+            let ending_node_with_dirty_note = spec_id
+                .and_then(|id| self.db.get_graph_spec(id).ok().flatten())
+                .and_then(|spec| {
+                    dirty_tree_note(
+                        spec.spec_end_dirty,
+                        &spec.spec_end_dirty_paths.unwrap_or_default(),
+                    )
+                })
+                .map(|note| match ending_node.as_deref() {
+                    Some(node) => format!("{node} ({note})"),
+                    None => note,
+                })
+                .or_else(|| ending_node.clone());
             let ctx = HookContext {
                 graph_name: &lp.name,
                 workdir: &lp.workdir,
@@ -4396,7 +4559,7 @@ impl GraphEngine {
                 spec_name: None,
                 spec_id: None,
                 blocker: Some(summary),
-                node_name: ending_node.as_deref(),
+                node_name: ending_node_with_dirty_note.as_deref(),
             };
             self.fire_hooks(&lp, GraphHookEvent::OnFailed, &ctx).await;
         }
@@ -4981,6 +5144,13 @@ async fn execute_check_node(
         .ok_or_else(|| anyhow!("Check node '{}' is missing a command.", node.name))?;
     let command = raw_command
         .replace("{{spec_start_head}}", spec_start_head.unwrap_or(""))
+        .replace(
+            "{{spec_start_dirty}}",
+            &spec
+                .spec_start_dirty
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+        )
         .replace("{{spec_committed_head}}", spec_committed_head.unwrap_or(""));
 
     let success_condition = node
@@ -7550,8 +7720,68 @@ async fn capture_workdir_head(workdir: &str) -> Option<String> {
     if !output.status.success() {
         return None;
     }
+
     let head = String::from_utf8_lossy(&output.stdout).trim().to_string();
     (!head.is_empty()).then_some(head)
+}
+
+async fn capture_workdir_dirty(workdir: &str) -> Option<i64> {
+    let output = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(workdir)
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).lines().count() as i64)
+}
+
+/// CM29: same `git status --porcelain` call as `capture_workdir_dirty`, but
+/// also keeps the first 20 paths (stripped of the 2-character status prefix
+/// and the following space) for the failure report. Used only at spec end
+/// and by the dirty-start refusal check — never per node.
+pub(crate) async fn capture_workdir_dirty_with_paths(workdir: &str) -> (Option<i64>, Vec<String>) {
+    let Ok(output) = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(workdir)
+        .output()
+        .await
+    else {
+        return (None, Vec::new());
+    };
+    if !output.status.success() {
+        return (None, Vec::new());
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let all_paths: Vec<String> = text
+        .lines()
+        .map(|line| line.get(3..).unwrap_or(line).trim().to_string())
+        .collect();
+    let count = all_paths.len() as i64;
+    (Some(count), all_paths.into_iter().take(20).collect())
+}
+
+/// CM29: the result of `GraphEngine::dirty_start_check` — `refuse == true`
+/// means the caller must not launch; `refuse == false` (an
+/// `allow_dirty_start` graph) means launch, but surface `message` to the
+/// operator.
+pub struct DirtyStartNotice {
+    pub refuse: bool,
+    pub message: String,
+}
+
+/// CM29: the one-line dirty-tree note folded onto a failed/interrupted
+/// spec's terminal report and (for `on_failed`) the hook's `{{node}}`
+/// payload. `None` when the tree was clean (or unknown — non-git workdir).
+fn dirty_tree_note(dirty: Option<i64>, paths: &[String]) -> Option<String> {
+    let count = dirty.filter(|n| *n > 0)?;
+    let plural = if count == 1 { "y" } else { "ies" };
+    Some(format!(
+        "worktree left dirty: {count} entr{plural}: {}",
+        paths.join(", ")
+    ))
 }
 
 /// CB39: whether `start_head` is still an ancestor of the workdir's current
@@ -7762,6 +7992,9 @@ fn no_spec_placeholder(graph_id: &str) -> GraphSpec {
         started_at: None,
         completed_at: None,
         spec_start_head: None,
+        spec_start_dirty: None,
+        spec_end_dirty: None,
+        spec_end_dirty_paths: None,
         spec_committed_head: None,
         workdir: None,
         completed_via: None,
@@ -7992,6 +8225,7 @@ mod tests {
         let lp = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: "wf-test".to_string(),
             name: "Graph".to_string(),
@@ -8021,6 +8255,9 @@ mod tests {
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -8188,6 +8425,7 @@ mod tests {
         let lp = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: "wf-test".to_string(),
             name: "Graph".to_string(),
@@ -8215,6 +8453,9 @@ mod tests {
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -8365,6 +8606,271 @@ mod tests {
         assert_eq!(lp.status, GraphStatus::Completed);
         assert_eq!(spec.status, GraphSpecStatus::Completed);
         assert_eq!(spec.spec_start_head, None);
+    }
+
+    // ── CM29: spec-end dirty-tree capture and dirty-start refusal ────────
+
+    #[tokio::test]
+    async fn run_spec_records_spec_end_dirty_on_completed() {
+        let (_fixture_dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+        let git_dir = tempdir().unwrap();
+        init_git_repo(git_dir.path());
+        let workdir = git_dir.path().to_string_lossy().to_string();
+
+        db.insert_graph_node(&GraphNode {
+            id: "node-check".to_string(),
+            spec_id: Some(spec_id.clone()),
+            graph_id: None,
+            name: "check".to_string(),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({
+                "command": "true",
+                "success_condition": "exit_code_0"
+            }),
+            position: 1,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+
+        engine
+            .run_graph(graph_id, None, Some(workdir), None, None)
+            .await
+            .unwrap();
+
+        let spec = db.get_graph_spec(&spec_id).unwrap().unwrap();
+        assert_eq!(spec.spec_end_dirty, Some(0));
+    }
+
+    #[tokio::test]
+    async fn run_spec_records_spec_end_dirty_and_paths_on_failed() {
+        let (_fixture_dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+        let git_dir = tempdir().unwrap();
+        init_git_repo(git_dir.path());
+        let workdir = git_dir.path().to_string_lossy().to_string();
+        std::fs::write(git_dir.path().join("a.txt"), "a").unwrap();
+        std::fs::write(git_dir.path().join("b.txt"), "b").unwrap();
+        std::fs::write(git_dir.path().join("c.txt"), "c").unwrap();
+
+        db.insert_graph_node(&GraphNode {
+            id: "node-check".to_string(),
+            spec_id: Some(spec_id.clone()),
+            graph_id: None,
+            name: "check".to_string(),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({
+                "command": "false",
+                "success_condition": "exit_code_0"
+            }),
+            position: 1,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+
+        engine
+            .run_graph(graph_id, None, Some(workdir), None, None)
+            .await
+            .unwrap();
+
+        let spec = db.get_graph_spec(&spec_id).unwrap().unwrap();
+        assert_eq!(spec.spec_end_dirty, Some(3));
+        let paths = spec.spec_end_dirty_paths.unwrap();
+        assert_eq!(paths.len(), 3);
+        assert!(paths.contains(&"a.txt".to_string()));
+        assert!(paths.contains(&"b.txt".to_string()));
+        assert!(paths.contains(&"c.txt".to_string()));
+
+        let entries = db.list_recent_activity_log_entries(50).unwrap();
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.message.contains("worktree left dirty")),
+            "expected an activity entry with the dirty-tree note: {entries:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_spec_end_dirty_none_for_non_git_workdir() {
+        let (_dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+
+        db.insert_graph_node(&GraphNode {
+            id: "node-check".to_string(),
+            spec_id: Some(spec_id.clone()),
+            graph_id: None,
+            name: "check".to_string(),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({
+                "command": "true",
+                "success_condition": "exit_code_0"
+            }),
+            position: 1,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+
+        engine
+            .run_graph(graph_id, None, None, None, None)
+            .await
+            .unwrap();
+
+        let spec = db.get_graph_spec(&spec_id).unwrap().unwrap();
+        assert_eq!(spec.spec_end_dirty, None);
+    }
+
+    /// A spec not bound to `graph_id` at all, tagged with its own `workdir`
+    /// (the shape `find_dirty_predecessor_spec` also matches) — the minimal
+    /// "previous spec" fixture the `dirty_start_check` tests need, without
+    /// having to actually run anything through it.
+    fn dirty_predecessor_spec(id: &str, workdir: &str, status: GraphSpecStatus) -> GraphSpec {
+        GraphSpec {
+            id: id.to_string(),
+            graph_id: None,
+            name: "Predecessor".to_string(),
+            description: None,
+            position: 1,
+            parallelizable: false,
+            status,
+            started_at: None,
+            completed_at: None,
+            spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
+            spec_committed_head: None,
+            workdir: Some(workdir.to_string()),
+            completed_via: None,
+            completed_via_reason: None,
+            completed_via_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn dirty_start_check_refuses_when_predecessor_failed_dirty() {
+        let (_dir, db, engine, _graph_id, _spec_id) = graph_fixture().unwrap();
+        let dir = tempdir().unwrap();
+        init_git_repo(dir.path());
+        let workdir = dir.path().to_string_lossy().to_string();
+        db.insert_graph_spec(&dirty_predecessor_spec(
+            "pred-a",
+            &workdir,
+            GraphSpecStatus::Failed,
+        ))
+        .unwrap();
+        std::fs::write(dir.path().join("x.txt"), "x").unwrap();
+        std::fs::write(dir.path().join("y.txt"), "y").unwrap();
+
+        let notice = engine
+            .dirty_start_check(&workdir, None, false)
+            .await
+            .unwrap()
+            .expect("expected a dirty-start notice");
+        assert!(notice.refuse);
+        assert!(notice.message.contains("Predecessor"));
+        assert!(notice.message.contains('2'));
+    }
+
+    #[tokio::test]
+    async fn dirty_start_check_warns_instead_of_refusing_with_allow_dirty_start() {
+        let (_dir, db, engine, _graph_id, _spec_id) = graph_fixture().unwrap();
+        let dir = tempdir().unwrap();
+        init_git_repo(dir.path());
+        let workdir = dir.path().to_string_lossy().to_string();
+        db.insert_graph_spec(&dirty_predecessor_spec(
+            "pred-a",
+            &workdir,
+            GraphSpecStatus::Failed,
+        ))
+        .unwrap();
+        std::fs::write(dir.path().join("x.txt"), "x").unwrap();
+        std::fs::write(dir.path().join("y.txt"), "y").unwrap();
+
+        let notice = engine
+            .dirty_start_check(&workdir, None, true)
+            .await
+            .unwrap()
+            .expect("expected a dirty-start notice");
+        assert!(!notice.refuse);
+        assert!(!notice.message.is_empty());
+    }
+
+    #[tokio::test]
+    async fn dirty_start_check_ignores_clean_workdir() {
+        let (_dir, db, engine, _graph_id, _spec_id) = graph_fixture().unwrap();
+        let dir = tempdir().unwrap();
+        init_git_repo(dir.path());
+        let workdir = dir.path().to_string_lossy().to_string();
+        db.insert_graph_spec(&dirty_predecessor_spec(
+            "pred-a",
+            &workdir,
+            GraphSpecStatus::Failed,
+        ))
+        .unwrap();
+
+        let notice = engine
+            .dirty_start_check(&workdir, None, false)
+            .await
+            .unwrap();
+        assert!(notice.is_none());
+    }
+
+    #[tokio::test]
+    async fn dirty_start_check_ignores_non_git_workdir() {
+        let (_dir, db, engine, _graph_id, _spec_id) = graph_fixture().unwrap();
+        let dir = tempdir().unwrap();
+        let workdir = dir.path().to_string_lossy().to_string();
+        db.insert_graph_spec(&dirty_predecessor_spec(
+            "pred-a",
+            &workdir,
+            GraphSpecStatus::Failed,
+        ))
+        .unwrap();
+
+        let notice = engine
+            .dirty_start_check(&workdir, None, false)
+            .await
+            .unwrap();
+        assert!(notice.is_none());
+    }
+
+    #[tokio::test]
+    async fn dirty_start_check_excludes_the_next_spec_itself() {
+        let (_dir, db, engine, _graph_id, _spec_id) = graph_fixture().unwrap();
+        let dir = tempdir().unwrap();
+        init_git_repo(dir.path());
+        let workdir = dir.path().to_string_lossy().to_string();
+        db.insert_graph_spec(&dirty_predecessor_spec(
+            "spec-b",
+            &workdir,
+            GraphSpecStatus::Interrupted,
+        ))
+        .unwrap();
+        std::fs::write(dir.path().join("x.txt"), "x").unwrap();
+
+        let notice = engine
+            .dirty_start_check(&workdir, Some("spec-b"), false)
+            .await
+            .unwrap();
+        assert!(notice.is_none());
+    }
+
+    #[tokio::test]
+    async fn dirty_start_check_ignores_a_completed_predecessor() {
+        let (_dir, db, engine, _graph_id, _spec_id) = graph_fixture().unwrap();
+        let dir = tempdir().unwrap();
+        init_git_repo(dir.path());
+        let workdir = dir.path().to_string_lossy().to_string();
+        db.insert_graph_spec(&dirty_predecessor_spec(
+            "pred-a",
+            &workdir,
+            GraphSpecStatus::Completed,
+        ))
+        .unwrap();
+        std::fs::write(dir.path().join("x.txt"), "x").unwrap();
+
+        let notice = engine
+            .dirty_start_check(&workdir, None, false)
+            .await
+            .unwrap();
+        assert!(notice.is_none());
     }
 
     // ── B37: node-level commit rights, enforced by the engine ────────────
@@ -9733,6 +10239,9 @@ mod tests {
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             workdir: None,
             completed_via: None,
             completed_via_reason: None,
@@ -10074,6 +10583,9 @@ mod tests {
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -10155,6 +10667,9 @@ mod tests {
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -10258,6 +10773,9 @@ mod tests {
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -10356,6 +10874,9 @@ mod tests {
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -10422,6 +10943,9 @@ mod tests {
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -10478,6 +11002,7 @@ mod tests {
         let lp = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: "wf".to_string(),
             name: "Graph".to_string(),
@@ -10505,6 +11030,9 @@ mod tests {
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -10553,6 +11081,7 @@ mod tests {
         let lp = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: "wf".to_string(),
             name: "Graph".to_string(),
@@ -10580,6 +11109,9 @@ mod tests {
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -10743,6 +11275,7 @@ mod tests {
         let lp = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: "wf".to_string(),
             name: "Graph".to_string(),
@@ -10770,6 +11303,9 @@ mod tests {
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -13500,6 +14036,9 @@ echo done
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -13792,6 +14331,7 @@ echo done
         let lp = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: "wf-test".to_string(),
             name: "Graph".to_string(),
@@ -13833,6 +14373,9 @@ echo done
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -14261,6 +14804,7 @@ echo done
         let lp = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: "wf-workdir".to_string(),
             name: "Graph".to_string(),
@@ -14780,6 +15324,7 @@ echo done
         let lp = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: "wf".to_string(),
             name: "Graph".to_string(),
@@ -14807,6 +15352,9 @@ echo done
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -15601,6 +16149,7 @@ echo done
                 &graph_id,
                 Some(claim_a),
                 Some("spec"),
+                None,
                 "dispatch A's late failure",
             )
             .await
@@ -15660,7 +16209,13 @@ echo done
         .unwrap();
 
         engine
-            .fail_graph(&graph_id, Some(claim), Some("spec"), "genuine failure")
+            .fail_graph(
+                &graph_id,
+                Some(claim),
+                Some("spec"),
+                None,
+                "genuine failure",
+            )
             .await
             .unwrap();
 
@@ -16933,6 +17488,9 @@ echo done
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -17003,6 +17561,9 @@ echo done
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -17038,6 +17599,9 @@ echo done
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -17086,6 +17650,9 @@ echo done
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -17144,6 +17711,9 @@ echo done
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -17327,6 +17897,9 @@ echo done
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -17347,6 +17920,9 @@ echo done
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -17402,6 +17978,9 @@ echo done
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -17699,6 +18278,7 @@ echo done
         let lp = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: "wf".to_string(),
             name: "MyGraph".to_string(),
@@ -17740,6 +18320,7 @@ echo done
         let lp = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: "wf".to_string(),
             name: "Graph".to_string(),
@@ -18870,6 +19451,9 @@ echo done
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -22787,6 +23371,7 @@ echo done
         let lp = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: "wf-queue-ensemble".to_string(),
             name: "Graph".to_string(),
@@ -24147,6 +24732,7 @@ echo done
         let graph_a = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: "wf-graph-a".to_string(),
             name: "Graph A".to_string(),
@@ -24174,6 +24760,9 @@ echo done
             started_at: Some(chrono::Utc::now()),
             completed_at: None,
             spec_start_head: Some("deadbeef".to_string()),
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             workdir: None,
             completed_via: None,
             completed_via_reason: None,
@@ -24226,6 +24815,7 @@ echo done
         let graph_b = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: "wf-graph-b".to_string(),
             name: "Graph B".to_string(),
@@ -24253,6 +24843,9 @@ echo done
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -24371,6 +24964,7 @@ echo done
         let graph_a = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: "wf-signal-a".to_string(),
             name: "Graph A".to_string(),
@@ -24398,6 +24992,9 @@ echo done
             started_at: Some(chrono::Utc::now()),
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -24445,6 +25042,7 @@ echo done
         let graph_b = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: "wf-signal-b".to_string(),
             name: "Graph B".to_string(),
@@ -24472,6 +25070,9 @@ echo done
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -25312,6 +25913,7 @@ echo done
         let lp = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: "wf".to_string(),
             name: "Graph".to_string(),
@@ -25339,6 +25941,9 @@ echo done
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -25389,6 +25994,7 @@ echo done
         let lp = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: "wf".to_string(),
             name: "Graph".to_string(),
@@ -25416,6 +26022,9 @@ echo done
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -25467,6 +26076,7 @@ echo done
         let lp = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: "wf".to_string(),
             name: "Graph".to_string(),
@@ -25494,6 +26104,9 @@ echo done
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -25553,6 +26166,7 @@ echo done
         let lp = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: "wf-test".to_string(),
             name: "Graph".to_string(),
@@ -25580,6 +26194,9 @@ echo done
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -25674,6 +26291,7 @@ echo done
         let lp = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: "wf-test".to_string(),
             name: "Graph".to_string(),
@@ -25701,6 +26319,9 @@ echo done
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -25754,6 +26375,7 @@ echo done
         let lp = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: "wf-test".to_string(),
             name: "Graph".to_string(),
@@ -25781,6 +26403,9 @@ echo done
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -25824,6 +26449,7 @@ echo done
         let lp = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: "wf-test".to_string(),
             name: "Graph".to_string(),
@@ -25851,6 +26477,9 @@ echo done
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -26207,6 +26836,7 @@ exit 0
         let lp = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: "wf".to_string(),
             name: "Graph".to_string(),
@@ -26235,6 +26865,9 @@ exit 0
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -26278,6 +26911,7 @@ exit 0
         let lp = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: id.to_string(),
             name: name.to_string(),
@@ -26319,6 +26953,9 @@ exit 0
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -26333,6 +26970,7 @@ exit 0
         let lp = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: id.to_string(),
             name: name.to_string(),
@@ -26392,6 +27030,7 @@ exit 0
         let lp = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: source_id.to_string(),
             name: format!("Source {source_id}"),
@@ -26433,6 +27072,9 @@ exit 0
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -26647,6 +27289,7 @@ exit 0
         let lp_b = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: "graph-b".to_string(),
             name: "Graph B".to_string(),
@@ -26688,6 +27331,9 @@ exit 0
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -26943,6 +27589,7 @@ exit 0
         let lp = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: "test-graph".to_string(),
             name: "Test".to_string(),
@@ -26971,6 +27618,9 @@ exit 0
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -27010,6 +27660,7 @@ exit 0
         let lp = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: "source-compl".to_string(),
             name: "Source".to_string(),
@@ -27040,6 +27691,9 @@ exit 0
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,

@@ -358,7 +358,7 @@ impl CronScheduler {
         }
 
         self.fire_due_enable_at(now_utc)?;
-        self.fire_due_autorun_graphs(now_utc)?;
+        self.fire_due_autorun_graphs(now_utc).await?;
         self.fire_due_auto_continue_graphs(now_utc)?;
 
         Ok(())
@@ -395,7 +395,7 @@ impl CronScheduler {
     /// docs). A `completed` graph is deliberately left alone — re-running a
     /// finished graph is a human decision via `graph_reset` + `graph_run` — so
     /// firing on one only logs a WARN and clears the schedule.
-    fn fire_due_autorun_graphs(&self, now_utc: chrono::DateTime<Utc>) -> anyhow::Result<()> {
+    async fn fire_due_autorun_graphs(&self, now_utc: chrono::DateTime<Utc>) -> anyhow::Result<()> {
         let Some(graph_engine) = self.graph_engine.as_ref() else {
             return Ok(());
         };
@@ -468,6 +468,41 @@ impl CronScheduler {
                 &lp.name,
                 "Autorun fired; resuming.",
             );
+
+            let next_spec_preview = graph_engine
+                .preview_next_spec_id(&lp.id, lp.active_run_queue_id.as_deref())
+                .unwrap_or(None);
+            match graph_engine
+                .dirty_start_check(
+                    &lp.workdir,
+                    next_spec_preview.as_deref(),
+                    lp.allow_dirty_start,
+                )
+                .await
+            {
+                Ok(Some(notice)) if notice.refuse => {
+                    tracing::warn!(
+                        "Graph '{}' autorun refused: {}. The schedule was one-shot and is \
+                         already cleared — relaunch manually via graph_run (or graph_continue) \
+                         once resolved.",
+                        lp.id,
+                        notice.message
+                    );
+                    continue;
+                }
+                Ok(Some(notice)) => {
+                    tracing::warn!(
+                        "Graph '{}' autorun launching with a warning: {}",
+                        lp.id,
+                        notice.message
+                    );
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::error!("Graph '{}' autorun dirty-start check failed: {}", lp.id, e);
+                }
+            }
+
             // Resume with the graph's persisted run context (its queue, if any)
             // rather than a fresh `start_background`, which would fall back
             // to the graph's own bound specs — empty for a queue run, and
@@ -971,6 +1006,7 @@ mod tests {
         crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: id.to_string(),
             name: "Autorun test graph".to_string(),
@@ -1001,7 +1037,7 @@ mod tests {
         db.schedule_graph_autorun("future-autorun", Utc::now() + chrono::Duration::hours(1))
             .unwrap();
 
-        scheduler.fire_due_autorun_graphs(Utc::now()).unwrap();
+        scheduler.fire_due_autorun_graphs(Utc::now()).await.unwrap();
 
         let lp = db.get_graph("future-autorun").unwrap().unwrap();
         assert_eq!(lp.status, GraphStatus::Failed, "must not launch yet");
@@ -1023,7 +1059,7 @@ mod tests {
         db.schedule_graph_autorun("past-autorun", Utc::now() - chrono::Duration::minutes(1))
             .unwrap();
 
-        scheduler.fire_due_autorun_graphs(Utc::now()).unwrap();
+        scheduler.fire_due_autorun_graphs(Utc::now()).await.unwrap();
 
         let lp = db.get_graph("past-autorun").unwrap().unwrap();
         assert!(
@@ -1058,7 +1094,7 @@ mod tests {
         .unwrap();
         db.clear_graph_autorun("cancelled-autorun").unwrap();
 
-        scheduler.fire_due_autorun_graphs(Utc::now()).unwrap();
+        scheduler.fire_due_autorun_graphs(Utc::now()).await.unwrap();
 
         let lp = db.get_graph("cancelled-autorun").unwrap().unwrap();
         assert_eq!(
@@ -1083,7 +1119,7 @@ mod tests {
             db.schedule_graph_autorun(&id, Utc::now() - chrono::Duration::minutes(1))
                 .unwrap();
 
-            scheduler.fire_due_autorun_graphs(Utc::now()).unwrap();
+            scheduler.fire_due_autorun_graphs(Utc::now()).await.unwrap();
 
             let lp = db.get_graph(&id).unwrap().unwrap();
             assert_eq!(lp.status, status, "status must be untouched");
@@ -1114,6 +1150,7 @@ mod tests {
         db.insert_graph(&Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: graph_id.clone(),
             name: "Autorun test graph".to_string(),
@@ -1144,6 +1181,9 @@ mod tests {
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -1168,7 +1208,7 @@ mod tests {
         db.schedule_graph_autorun(&graph_id, Utc::now() - chrono::Duration::minutes(1))
             .unwrap();
 
-        scheduler.fire_due_autorun_graphs(Utc::now()).unwrap();
+        scheduler.fire_due_autorun_graphs(Utc::now()).await.unwrap();
 
         // The reset happens synchronously, before the resumed run is spawned
         // in the background.
@@ -1216,6 +1256,7 @@ mod tests {
         db.insert_graph(&Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: graph_id.clone(),
             name: "Autorun admin-skip test".to_string(),
@@ -1247,6 +1288,9 @@ mod tests {
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -1266,6 +1310,9 @@ mod tests {
             started_at: None,
             completed_at: Some(Utc::now()),
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: Some("admin".to_string()),
@@ -1290,7 +1337,7 @@ mod tests {
         db.schedule_graph_autorun(&graph_id, Utc::now() - chrono::Duration::minutes(1))
             .unwrap();
 
-        scheduler.fire_due_autorun_graphs(Utc::now()).unwrap();
+        scheduler.fire_due_autorun_graphs(Utc::now()).await.unwrap();
 
         // Synchronous assertions — before the background resume can finish.
         let lp = db.get_graph(&graph_id).unwrap().unwrap();
@@ -1372,6 +1419,9 @@ mod tests {
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -1431,7 +1481,7 @@ mod tests {
         db.schedule_graph_autorun(&graph_id, Utc::now() - chrono::Duration::minutes(1))
             .unwrap();
 
-        scheduler.fire_due_autorun_graphs(Utc::now()).unwrap();
+        scheduler.fire_due_autorun_graphs(Utc::now()).await.unwrap();
 
         let lp_fired = db.get_graph(&graph_id).unwrap().unwrap();
         assert!(
@@ -1478,7 +1528,7 @@ mod tests {
         db.schedule_graph_autorun(&graph_id, Utc::now() - chrono::Duration::minutes(1))
             .unwrap();
 
-        scheduler.fire_due_autorun_graphs(Utc::now()).unwrap();
+        scheduler.fire_due_autorun_graphs(Utc::now()).await.unwrap();
         let pending = db.list_pending_autorun_graphs().unwrap();
         assert!(
             pending.iter().all(|l| l.id != graph_id),
@@ -1501,7 +1551,7 @@ mod tests {
         db.schedule_graph_autorun(&graph_id, Utc::now() - chrono::Duration::minutes(1))
             .unwrap();
 
-        scheduler.fire_due_autorun_graphs(Utc::now()).unwrap();
+        scheduler.fire_due_autorun_graphs(Utc::now()).await.unwrap();
 
         let lp_after = db.get_graph(&graph_id).unwrap().unwrap();
         assert_eq!(lp_after.status, GraphStatus::Paused, "must stay paused");
@@ -1529,6 +1579,7 @@ mod tests {
         db.insert_graph(&Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: graph_id.clone(),
             name: "C19 blocked autorun test".to_string(),
@@ -1564,6 +1615,9 @@ mod tests {
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -1603,7 +1657,7 @@ mod tests {
         db.schedule_graph_autorun(&graph_id, Utc::now() - chrono::Duration::minutes(1))
             .unwrap();
 
-        scheduler.fire_due_autorun_graphs(Utc::now()).unwrap();
+        scheduler.fire_due_autorun_graphs(Utc::now()).await.unwrap();
 
         let lp_after = db.get_graph(&graph_id).unwrap().unwrap();
         assert_eq!(
@@ -1637,6 +1691,7 @@ mod tests {
         db.insert_graph(&Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: graph_id.clone(),
             name: "Autorun queue test graph".to_string(),
@@ -1666,6 +1721,9 @@ mod tests {
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -1708,7 +1766,7 @@ mod tests {
         db.schedule_graph_autorun(&graph_id, Utc::now() - chrono::Duration::minutes(1))
             .unwrap();
 
-        scheduler.fire_due_autorun_graphs(Utc::now()).unwrap();
+        scheduler.fire_due_autorun_graphs(Utc::now()).await.unwrap();
 
         let lp = db.get_graph(&graph_id).unwrap().unwrap();
         assert!(lp.autorun_at.is_none(), "firing must clear autorun_at");
@@ -1760,6 +1818,86 @@ mod tests {
         );
     }
 
+    fn init_git_repo(path: &std::path::Path) {
+        let run = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(path)
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .status()
+                .expect("git command failed to run");
+            assert!(status.success(), "git {:?} failed", args);
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.name", "Test"]);
+        run(&["config", "user.email", "test@example.com"]);
+        std::fs::write(path.join("README.md"), "test").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", "init"]);
+    }
+
+    /// CM29: a predecessor spec left the shared workdir dirty on a failed
+    /// attempt; autorun on a *different* graph pointed at the same workdir
+    /// must refuse to launch rather than pile onto the mess. The one-shot
+    /// schedule is still cleared (never retried automatically) — a human
+    /// must relaunch manually once the tree is resolved.
+    #[tokio::test]
+    async fn fire_due_autorun_graphs_refuses_dirty_predecessor_and_stays_cleared() {
+        use crate::domain::graphs::{GraphSpec, GraphSpecStatus, GraphStatus};
+
+        let (db, scheduler) = test_scheduler_with_graphs();
+        let git_dir = tempfile::tempdir().unwrap();
+        init_git_repo(git_dir.path());
+        let workdir = git_dir.path().to_string_lossy().to_string();
+
+        // A predecessor spec, standalone, tagged with the shared workdir,
+        // left `failed` by an earlier (unrelated) attempt.
+        db.insert_graph_spec(&GraphSpec {
+            id: "pred-spec".to_string(),
+            graph_id: None,
+            name: "Predecessor".to_string(),
+            description: None,
+            position: 1,
+            parallelizable: false,
+            status: GraphSpecStatus::Failed,
+            started_at: None,
+            completed_at: None,
+            spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
+            spec_committed_head: None,
+            workdir: Some(workdir.clone()),
+            completed_via: None,
+            completed_via_reason: None,
+            completed_via_at: None,
+        })
+        .unwrap();
+        std::fs::write(git_dir.path().join("dirty.txt"), "dirty").unwrap();
+
+        let mut lp = sample_graph("dirty-autorun", GraphStatus::Draft);
+        lp.workdir = workdir;
+        db.insert_graph(&lp).unwrap();
+        db.schedule_graph_autorun(&lp.id, Utc::now() - chrono::Duration::minutes(1))
+            .unwrap();
+
+        scheduler.fire_due_autorun_graphs(Utc::now()).await.unwrap();
+
+        let after = db.get_graph(&lp.id).unwrap().unwrap();
+        assert!(
+            after.autorun_at.is_none(),
+            "the one-shot schedule must still be cleared, refused or not"
+        );
+        assert_eq!(
+            after.status,
+            GraphStatus::Draft,
+            "a refused autorun must never have launched (status would have moved off Draft)"
+        );
+    }
+
     /// Firing autorun on an already-`completed` graph must not silently
     /// re-run it — that's a human decision via `graph_reset` + `graph_run`.
     /// The scheduler should warn and clear the schedule instead.
@@ -1774,7 +1912,7 @@ mod tests {
         db.schedule_graph_autorun(&graph_id, Utc::now() - chrono::Duration::minutes(1))
             .unwrap();
 
-        scheduler.fire_due_autorun_graphs(Utc::now()).unwrap();
+        scheduler.fire_due_autorun_graphs(Utc::now()).await.unwrap();
 
         // Give any (unexpected) spawned background run a chance to run.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -1902,6 +2040,7 @@ mod tests {
         db.insert_graph(&Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: graph_id.clone(),
             name: "Auto-continue test graph".to_string(),
@@ -1934,6 +2073,9 @@ mod tests {
             started_at: Some(Utc::now()),
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -2015,6 +2157,7 @@ mod tests {
         db.insert_graph(&Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: graph_id.clone(),
             name: "Auto-continue skip test graph".to_string(),
@@ -2043,6 +2186,9 @@ mod tests {
             started_at: Some(Utc::now()),
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,

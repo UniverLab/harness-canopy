@@ -55,6 +55,28 @@ by this spec's own work. A check node that exists to gate "did this
 spec's work actually get committed" should use
 `{{spec_committed_head}}` instead:
 
+`{{spec_start_dirty}}` is the number of non-ignored entries reported by
+`git status --porcelain` at the spec boundary. It is empty when the
+workdir is not a Git repository or when reading a legacy run, rather
+than being reported as clean.
+
+`spec_end_dirty`/`spec_end_dirty_paths` (readable via `graph_get`/
+`graph_node_runs_list`, not a template placeholder) record the same count and
+the first 20 paths at the moment the spec's attempt actually ends —
+`Completed`, `Failed`, or `Interrupted`. A spec that ends `Failed` or
+`Interrupted` with a dirty tree folds a one-line note onto its own failure
+summary/blocker text and (for a plain `Failed` ending) onto the `on_failed`
+hook's `{{node}}` value.
+
+`graph_run` and the autorun scheduler refuse to launch the next spec when the
+workdir is currently dirty and the most recently touched spec on that same
+workdir ended `Failed`, `Interrupted`, or `Skipped` (never `Completed`) —
+naming that spec and the current dirty count. Set `allow_dirty_start: true` via
+`graph_update` to downgrade this from a refusal to a warning. `graph_preflight`
+separately reports a dirty workdir as a warning unconditionally, with no
+"previous spec" logic — call it before `graph_run` to see this regardless of
+history.
+
 ```bash
 test -z "$(git status --porcelain -- src/)" \
   && test -n "{{spec_committed_head}}" \

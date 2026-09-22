@@ -2048,6 +2048,7 @@ mod tests {
         db.insert_graph(&Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: "wf-probe".to_string(),
             name: "Probe Graph".to_string(),
@@ -2340,6 +2341,7 @@ mod tests {
         Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: id.to_string(),
             name: format!("Graph {id}"),
@@ -2386,6 +2388,9 @@ mod tests {
             started_at: Some(started_at),
             completed_at: Some(started_at),
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,

@@ -708,11 +708,14 @@ impl Database {
                 started_at INTEGER,
                 completed_at INTEGER,
                 spec_start_head TEXT,
+                spec_start_dirty INTEGER,
                 workdir TEXT,
                 completed_via TEXT,
                 completed_via_reason TEXT,
                 completed_via_at INTEGER,
                 spec_committed_head TEXT,
+                spec_end_dirty INTEGER,
+                spec_end_dirty_paths TEXT,
                 cross_run_attempts INTEGER NOT NULL DEFAULT 0,
                 -- CT17: monotonic change signal for the panel's backlog event.
                 -- Milliseconds since epoch; every write to this row refreshes
@@ -1294,6 +1297,20 @@ impl Database {
             )
             .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         }
+        let has_spec_start_dirty: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('graph_specs') WHERE name = 'spec_start_dirty'",
+                [],
+                |row| Ok(row.get::<_, i32>(0)? > 0),
+            )
+            .unwrap_or(false);
+        if !has_spec_start_dirty {
+            conn.execute(
+                "ALTER TABLE graph_specs ADD COLUMN spec_start_dirty INTEGER",
+                [],
+            )
+            .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
+        }
 
         // Standalone specs (R3): a spec no longer must belong to a graph — it
         // can exist as a backlog item (optionally tagged to a workdir)
@@ -1324,10 +1341,11 @@ impl Database {
                      status TEXT NOT NULL,
                      started_at INTEGER,
                      completed_at INTEGER,
-                     spec_start_head TEXT
+                     spec_start_head TEXT,
+                     spec_start_dirty INTEGER
                  );
-                 INSERT INTO graph_specs_new (id, graph_id, name, description, position, parallelizable, status, started_at, completed_at, spec_start_head)
-                     SELECT id, graph_id, name, description, position, parallelizable, status, started_at, completed_at, spec_start_head FROM graph_specs;
+                 INSERT INTO graph_specs_new (id, graph_id, name, description, position, parallelizable, status, started_at, completed_at, spec_start_head, spec_start_dirty)
+                     SELECT id, graph_id, name, description, position, parallelizable, status, started_at, completed_at, spec_start_head, spec_start_dirty FROM graph_specs;
                  DROP TABLE graph_specs;
                  ALTER TABLE graph_specs_new RENAME TO graph_specs;
 
@@ -1674,6 +1692,24 @@ impl Database {
                 .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         }
 
+        // CM29: downgrades the dirty-start refusal (graph_run/autorun) to a
+        // warning instead of refusing to launch. `DEFAULT 0` — every
+        // pre-existing graph keeps today's (implicit) refusal behavior.
+        let has_allow_dirty_start: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('graphs') WHERE name = 'allow_dirty_start'",
+                [],
+                |row| Ok(row.get::<_, i32>(0)? > 0),
+            )
+            .unwrap_or(false);
+        if !has_allow_dirty_start {
+            conn.execute(
+                "ALTER TABLE graphs ADD COLUMN allow_dirty_start INTEGER NOT NULL DEFAULT 0",
+                [],
+            )
+            .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
+        }
+
         // `spec_committed_head` (C15): the workdir's git HEAD immediately
         // after a `commit_rights: true` node's own execution actually moved
         // it — as opposed to `spec_start_head`, which only proves *some*
@@ -1692,6 +1728,40 @@ impl Database {
         if !has_spec_committed_head {
             conn.execute(
                 "ALTER TABLE graph_specs ADD COLUMN spec_committed_head TEXT",
+                [],
+            )
+            .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
+        }
+
+        // CM29: git state captured once more when a spec's attempt actually
+        // ends (Completed/Failed/Interrupted), alongside the existing
+        // `spec_start_dirty`. `spec_end_dirty_paths` is the first 20 dirty
+        // paths, newline-joined (never contains a literal newline itself —
+        // git status paths don't). `NULL` on every pre-existing row.
+        let has_spec_end_dirty: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('graph_specs') WHERE name = 'spec_end_dirty'",
+                [],
+                |row| Ok(row.get::<_, i32>(0)? > 0),
+            )
+            .unwrap_or(false);
+        if !has_spec_end_dirty {
+            conn.execute(
+                "ALTER TABLE graph_specs ADD COLUMN spec_end_dirty INTEGER",
+                [],
+            )
+            .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
+        }
+        let has_spec_end_dirty_paths: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('graph_specs') WHERE name = 'spec_end_dirty_paths'",
+                [],
+                |row| Ok(row.get::<_, i32>(0)? > 0),
+            )
+            .unwrap_or(false);
+        if !has_spec_end_dirty_paths {
+            conn.execute(
+                "ALTER TABLE graph_specs ADD COLUMN spec_end_dirty_paths TEXT",
                 [],
             )
             .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;

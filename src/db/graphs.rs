@@ -83,8 +83,8 @@ impl Database {
         )?;
         let hooks = encode_graph_hooks(&lp.hooks)?;
         conn.execute(
-            "INSERT INTO graphs (id, name, description, workdir, status, trigger_type, trigger_config, created_at, started_at, completed_at, autorun_at, active_run_queue_id, on_completed, auto_continue_at, auto_continue_action, archived, paused_by_reconciliation, infra_node_id, hooks)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+            "INSERT INTO graphs (id, name, description, workdir, status, trigger_type, trigger_config, created_at, started_at, completed_at, autorun_at, active_run_queue_id, on_completed, auto_continue_at, auto_continue_action, archived, paused_by_reconciliation, infra_node_id, hooks, allow_dirty_start)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
             params![
                 &lp.id,
                 &lp.name,
@@ -105,6 +105,7 @@ impl Database {
                 lp.paused_by_reconciliation,
                 &lp.infra_node_id,
                 hooks,
+                lp.allow_dirty_start,
             ],
         )?;
         Ok(())
@@ -145,7 +146,7 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, name, description, workdir, status, trigger_config, created_at, started_at, completed_at, autorun_at, active_run_queue_id, on_completed, auto_continue_at, auto_continue_action, archived, paused_by_reconciliation, infra_node_id, hooks
+            "SELECT id, name, description, workdir, status, trigger_config, created_at, started_at, completed_at, autorun_at, active_run_queue_id, on_completed, auto_continue_at, auto_continue_action, archived, paused_by_reconciliation, infra_node_id, hooks, allow_dirty_start
              FROM graphs WHERE autorun_at IS NOT NULL",
         )?;
         let rows = stmt.query_map([], map_graph_row)?;
@@ -200,7 +201,7 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, name, description, workdir, status, trigger_config, created_at, started_at, completed_at, autorun_at, active_run_queue_id, on_completed, auto_continue_at, auto_continue_action, archived, paused_by_reconciliation, infra_node_id, hooks
+            "SELECT id, name, description, workdir, status, trigger_config, created_at, started_at, completed_at, autorun_at, active_run_queue_id, on_completed, auto_continue_at, auto_continue_action, archived, paused_by_reconciliation, infra_node_id, hooks, allow_dirty_start
              FROM graphs WHERE auto_continue_at IS NOT NULL",
         )?;
         let rows = stmt.query_map([], map_graph_row)?;
@@ -306,7 +307,7 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, name, description, workdir, status, trigger_config, created_at, started_at, completed_at, autorun_at, active_run_queue_id, on_completed, auto_continue_at, auto_continue_action, archived, paused_by_reconciliation, infra_node_id, hooks
+            "SELECT id, name, description, workdir, status, trigger_config, created_at, started_at, completed_at, autorun_at, active_run_queue_id, on_completed, auto_continue_at, auto_continue_action, archived, paused_by_reconciliation, infra_node_id, hooks, allow_dirty_start
              FROM graphs WHERE trigger_type = ?1 ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map(params![trigger_type], map_graph_row)?;
@@ -361,13 +362,25 @@ impl Database {
         Ok(rows > 0)
     }
 
+    pub fn update_graph_allow_dirty_start(&self, graph_id: &str, value: bool) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        conn.execute(
+            "UPDATE graphs SET allow_dirty_start = ?1 WHERE id = ?2",
+            params![value, graph_id],
+        )?;
+        Ok(())
+    }
+
     pub fn get_graph(&self, graph_id: &str) -> Result<Option<Graph>> {
         let conn = self
             .conn
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, name, description, workdir, status, trigger_config, created_at, started_at, completed_at, autorun_at, active_run_queue_id, on_completed, auto_continue_at, auto_continue_action, archived, paused_by_reconciliation, infra_node_id, hooks
+            "SELECT id, name, description, workdir, status, trigger_config, created_at, started_at, completed_at, autorun_at, active_run_queue_id, on_completed, auto_continue_at, auto_continue_action, archived, paused_by_reconciliation, infra_node_id, hooks, allow_dirty_start
              FROM graphs WHERE id = ?1",
         )?;
 
@@ -396,12 +409,12 @@ impl Database {
         };
         let sql = if workdir.is_some() {
             format!(
-                "SELECT id, name, description, workdir, status, trigger_config, created_at, started_at, completed_at, autorun_at, active_run_queue_id, on_completed, auto_continue_at, auto_continue_action, archived, paused_by_reconciliation, infra_node_id, hooks
+                "SELECT id, name, description, workdir, status, trigger_config, created_at, started_at, completed_at, autorun_at, active_run_queue_id, on_completed, auto_continue_at, auto_continue_action, archived, paused_by_reconciliation, infra_node_id, hooks, allow_dirty_start
                  FROM graphs WHERE workdir = ?1{archived_clause} ORDER BY created_at DESC"
             )
         } else {
             format!(
-                "SELECT id, name, description, workdir, status, trigger_config, created_at, started_at, completed_at, autorun_at, active_run_queue_id, on_completed, auto_continue_at, auto_continue_action, archived, paused_by_reconciliation, infra_node_id, hooks
+                "SELECT id, name, description, workdir, status, trigger_config, created_at, started_at, completed_at, autorun_at, active_run_queue_id, on_completed, auto_continue_at, auto_continue_action, archived, paused_by_reconciliation, infra_node_id, hooks, allow_dirty_start
                  FROM graphs WHERE 1=1{archived_clause} ORDER BY created_at DESC"
             )
         };
@@ -879,8 +892,8 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         conn.execute(
-            "INSERT INTO graph_specs (id, graph_id, name, description, position, parallelizable, status, started_at, completed_at, spec_start_head, workdir, spec_committed_head, completed_via, completed_via_reason, completed_via_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+            "INSERT INTO graph_specs (id, graph_id, name, description, position, parallelizable, status, started_at, completed_at, spec_start_head, spec_start_dirty, workdir, spec_committed_head, spec_end_dirty, spec_end_dirty_paths, completed_via, completed_via_reason, completed_via_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             params![
                 &spec.id,
                 &spec.graph_id,
@@ -892,8 +905,11 @@ impl Database {
                 spec.started_at.map(|value| value.timestamp()),
                 spec.completed_at.map(|value| value.timestamp()),
                 &spec.spec_start_head,
+                spec.spec_start_dirty,
                 &spec.workdir,
                 &spec.spec_committed_head,
+                spec.spec_end_dirty,
+                spec.spec_end_dirty_paths.as_ref().map(|paths| paths.join("\n")),
                 &spec.completed_via,
                 &spec.completed_via_reason,
                 spec.completed_via_at.map(|value| value.timestamp()),
@@ -909,7 +925,7 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, graph_id, name, description, position, parallelizable, status, started_at, completed_at, spec_start_head, workdir, completed_via, completed_via_reason, completed_via_at, spec_committed_head
+            "SELECT id, graph_id, name, description, position, parallelizable, status, started_at, completed_at, spec_start_head, spec_start_dirty, workdir, completed_via, completed_via_reason, completed_via_at, spec_committed_head, spec_end_dirty, spec_end_dirty_paths
              FROM graph_specs WHERE graph_id = ?1 ORDER BY position ASC",
         )?;
         let rows = stmt.query_map(params![graph_id], map_graph_spec_row)?;
@@ -924,7 +940,7 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, graph_id, name, description, position, parallelizable, status, started_at, completed_at, spec_start_head, workdir, completed_via, completed_via_reason, completed_via_at, spec_committed_head
+            "SELECT id, graph_id, name, description, position, parallelizable, status, started_at, completed_at, spec_start_head, spec_start_dirty, workdir, completed_via, completed_via_reason, completed_via_at, spec_committed_head, spec_end_dirty, spec_end_dirty_paths
              FROM graph_specs WHERE id = ?1",
         )?;
 
@@ -961,7 +977,7 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, graph_id, name, description, position, parallelizable, status, started_at, completed_at, spec_start_head, workdir, completed_via, completed_via_reason, completed_via_at, spec_committed_head
+            "SELECT id, graph_id, name, description, position, parallelizable, status, started_at, completed_at, spec_start_head, spec_start_dirty, workdir, completed_via, completed_via_reason, completed_via_at, spec_committed_head, spec_end_dirty, spec_end_dirty_paths
              FROM graph_specs
              WHERE (?1 IS NULL OR workdir = ?1)
                AND (?2 IS NULL OR status = ?2)
@@ -1039,7 +1055,7 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, graph_id, name, description, position, parallelizable, status, started_at, completed_at, spec_start_head, workdir, completed_via, completed_via_reason, completed_via_at, spec_committed_head
+            "SELECT id, graph_id, name, description, position, parallelizable, status, started_at, completed_at, spec_start_head, spec_start_dirty, workdir, completed_via, completed_via_reason, completed_via_at, spec_committed_head, spec_end_dirty, spec_end_dirty_paths
              FROM graph_specs
              ORDER BY rowid ASC",
         )?;
@@ -1095,6 +1111,7 @@ impl Database {
     /// Called once per spec (not per node) — see [`crate::graph_engine`]'s
     /// `{{spec_start_head}}` placeholder. `head = None` means the workdir
     /// isn't a git repo; the column is cleared rather than left stale.
+    #[allow(dead_code)]
     pub fn set_graph_spec_start_head(&self, spec_id: &str, head: Option<&str>) -> Result<bool> {
         let conn = self
             .conn
@@ -1105,6 +1122,115 @@ impl Database {
             params![head, spec_id, Utc::now().timestamp_millis()],
         )?;
         Ok(rows > 0)
+    }
+
+    pub fn set_graph_spec_start_state(
+        &self,
+        spec_id: &str,
+        head: Option<&str>,
+        dirty: Option<i64>,
+    ) -> Result<bool> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let rows = conn.execute(
+            "UPDATE graph_specs SET spec_start_head = ?1, spec_start_dirty = ?2, updated_at = ?3 WHERE id = ?4",
+            params![head, dirty, Utc::now().timestamp_millis(), spec_id],
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// CM29: the workdir's git-dirty state captured once, at the moment
+    /// this spec's attempt actually ends (Completed/Failed/Interrupted) —
+    /// same lifecycle as `set_graph_spec_start_state`, the other boundary.
+    /// `paths` is truncated to 20 entries by the caller before this is
+    /// called; stored newline-joined.
+    pub fn set_graph_spec_end_state(
+        &self,
+        spec_id: &str,
+        dirty: Option<i64>,
+        paths: &[String],
+    ) -> Result<bool> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let joined = (!paths.is_empty()).then(|| paths.join("\n"));
+        let rows = conn.execute(
+            "UPDATE graph_specs SET spec_end_dirty = ?1, spec_end_dirty_paths = ?2, updated_at = ?3 WHERE id = ?4",
+            params![dirty, joined, Utc::now().timestamp_millis(), spec_id],
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// CM29: the most-recently-touched spec that ended without completing,
+    /// for `workdir` — either a graph-bound spec whose graph's `workdir`
+    /// matches, or a standalone spec whose own `workdir` tag matches.
+    /// Excludes `exclude_spec_id` (the spec about to be dispatched next) so
+    /// a spec that is itself `Interrupted` and about to be legitimately
+    /// resumed is never mistaken for "the previous spec" that left the mess
+    /// (CM29 guideline). `pending`/`running` are never candidates — those
+    /// are either not-yet-run or still in flight, never "previous".
+    pub fn find_dirty_predecessor_spec(
+        &self,
+        workdir: &str,
+        exclude_spec_id: Option<&str>,
+    ) -> Result<Option<GraphSpec>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        conn.query_row(
+            "SELECT gs.id, gs.graph_id, gs.name, gs.description, gs.position, gs.parallelizable, gs.status, gs.started_at, gs.completed_at, gs.spec_start_head, gs.spec_start_dirty, gs.workdir, gs.completed_via, gs.completed_via_reason, gs.completed_via_at, gs.spec_committed_head, gs.spec_end_dirty, gs.spec_end_dirty_paths
+             FROM graph_specs gs
+             LEFT JOIN graphs g ON g.id = gs.graph_id
+             WHERE (g.workdir = ?1 OR gs.workdir = ?1)
+               AND gs.status IN ('failed', 'interrupted', 'skipped')
+               AND (?2 IS NULL OR gs.id != ?2)
+             ORDER BY gs.updated_at DESC
+             LIMIT 1",
+            params![workdir, exclude_spec_id],
+            map_graph_spec_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// CM29: specs reconciliation just marked `Interrupted` that haven't had
+    /// their end-dirty state captured yet — `spec_end_dirty IS NULL` is the
+    /// idempotency guard (a spec resumed and re-ended later overwrites this
+    /// again through the normal `run_spec` path, so this only ever picks up
+    /// genuinely-uncaptured rows, including ones a previous boot's capture
+    /// pass somehow missed). Returns each spec paired with its resolved
+    /// workdir (graph's `workdir`, or its own `workdir` tag), `None` when
+    /// neither is known.
+    pub fn list_interrupted_specs_missing_end_dirty(
+        &self,
+    ) -> Result<Vec<(GraphSpec, Option<String>)>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let mut stmt = conn.prepare(
+            "SELECT gs.id, gs.graph_id, gs.name, gs.description, gs.position, gs.parallelizable, gs.status, gs.started_at, gs.completed_at, gs.spec_start_head, gs.spec_start_dirty, gs.workdir, gs.completed_via, gs.completed_via_reason, gs.completed_via_at, gs.spec_committed_head, gs.spec_end_dirty, gs.spec_end_dirty_paths, g.workdir
+             FROM graph_specs gs
+             LEFT JOIN graphs g ON g.id = gs.graph_id
+             WHERE gs.status = 'interrupted' AND gs.spec_end_dirty IS NULL",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let spec = map_graph_spec_row(row)?;
+            let graph_workdir: Option<String> = row.get(18)?;
+            Ok((spec, graph_workdir))
+        })?;
+        rows.map(|r| {
+            r.map(|(spec, graph_workdir)| {
+                let resolved = graph_workdir.or_else(|| spec.workdir.clone());
+                (spec, resolved)
+            })
+            .map_err(Into::into)
+        })
+        .collect()
     }
 
     /// Record the workdir's git HEAD immediately after a `commit_rights:
@@ -2545,7 +2671,7 @@ impl Database {
 
         let orphaned: Vec<Graph> = {
             let mut stmt = tx.prepare(
-                "SELECT id, name, description, workdir, status, trigger_config, created_at, started_at, completed_at, autorun_at, active_run_queue_id, on_completed, auto_continue_at, auto_continue_action, archived, paused_by_reconciliation, infra_node_id, hooks
+                "SELECT id, name, description, workdir, status, trigger_config, created_at, started_at, completed_at, autorun_at, active_run_queue_id, on_completed, auto_continue_at, auto_continue_action, archived, paused_by_reconciliation, infra_node_id, hooks, allow_dirty_start
                  FROM graphs WHERE status IN (?1, ?2)",
             )?;
             // CB31: a graph caught mid-`Pausing` (wait-for-completion pause
@@ -3014,6 +3140,7 @@ fn map_graph_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Graph> {
         archived: row.get(14)?,
         paused_by_reconciliation: row.get(15)?,
         infra_node_id: row.get(16)?,
+        allow_dirty_start: row.get(18)?,
     })
 }
 
@@ -3109,14 +3236,19 @@ fn map_graph_spec_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<GraphSpec> {
             .map(from_timestamp)
             .transpose()?,
         spec_start_head: row.get(9)?,
-        workdir: row.get(10)?,
-        completed_via: row.get(11)?,
-        completed_via_reason: row.get(12)?,
+        spec_start_dirty: row.get(10)?,
+        workdir: row.get(11)?,
+        completed_via: row.get(12)?,
+        completed_via_reason: row.get(13)?,
         completed_via_at: row
-            .get::<_, Option<i64>>(13)?
+            .get::<_, Option<i64>>(14)?
             .map(from_timestamp)
             .transpose()?,
-        spec_committed_head: row.get(14)?,
+        spec_committed_head: row.get(15)?,
+        spec_end_dirty: row.get(16)?,
+        spec_end_dirty_paths: row
+            .get::<_, Option<String>>(17)?
+            .map(|raw| raw.lines().map(str::to_string).collect()),
     })
 }
 
@@ -3291,6 +3423,7 @@ mod tests {
         Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: id.to_string(),
             name: format!("Graph {id}"),
@@ -3654,6 +3787,9 @@ mod tests {
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -3696,6 +3832,63 @@ mod tests {
         assert!(all_ids.contains(&"node-graph".to_string()));
     }
 
+    #[test]
+    fn find_dirty_predecessor_spec_excludes_given_id_and_completed_status() {
+        let db = test_db();
+        let workdir = "/tmp/dirty-predecessor-test";
+        let mk = |id: &str, status: GraphSpecStatus, workdir: Option<&str>| GraphSpec {
+            id: id.to_string(),
+            graph_id: None,
+            name: id.to_string(),
+            description: None,
+            position: 1,
+            parallelizable: false,
+            status,
+            started_at: None,
+            completed_at: None,
+            spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
+            spec_committed_head: None,
+            workdir: workdir.map(str::to_string),
+            completed_via: None,
+            completed_via_reason: None,
+            completed_via_at: None,
+        };
+        // Completed shares the workdir but is never a candidate; Interrupted
+        // sits on an unrelated workdir so it can never be mistaken for this
+        // workdir's predecessor either — leaving exactly one qualifying spec.
+        db.insert_graph_spec(&mk(
+            "spec-completed",
+            GraphSpecStatus::Completed,
+            Some(workdir),
+        ))
+        .unwrap();
+        db.insert_graph_spec(&mk("spec-failed", GraphSpecStatus::Failed, Some(workdir)))
+            .unwrap();
+        db.insert_graph_spec(&mk(
+            "spec-interrupted",
+            GraphSpecStatus::Interrupted,
+            Some("/tmp/unrelated-workdir"),
+        ))
+        .unwrap();
+
+        let found = db
+            .find_dirty_predecessor_spec(workdir, None)
+            .unwrap()
+            .expect("the failed spec on this workdir should be found");
+        assert_eq!(found.id, "spec-failed");
+
+        let excluded = db
+            .find_dirty_predecessor_spec(workdir, Some("spec-failed"))
+            .unwrap();
+        assert!(
+            excluded.is_none(),
+            "excluding the only qualifying spec must fall through to None"
+        );
+    }
+
     // ── CT3: live tail storage ──────────────────────────────────────
 
     fn tail_test_run(db: &Database, run_id: &str) {
@@ -3712,6 +3905,9 @@ mod tests {
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,

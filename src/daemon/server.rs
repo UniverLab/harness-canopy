@@ -91,6 +91,13 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
         Err(e) => tracing::error!("Failed to reconcile stranded queue specs: {}", e),
     }
 
+    if let Err(e) = graph_engine.capture_end_dirty_for_interrupted_specs().await {
+        tracing::error!(
+            "Failed to capture dirty-tree state for interrupted specs: {}",
+            e
+        );
+    }
+
     if let Err(e) = watcher_engine.reload_from_db().await {
         tracing::error!("Failed to reload watchers: {}", e);
     }
@@ -857,6 +864,7 @@ mod hang_repro {
         db.insert_graph(&Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: graph_id.clone(),
             name: "Repro Graph".to_string(),
@@ -885,6 +893,9 @@ mod hang_repro {
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -1393,6 +1404,7 @@ mod stdio_startup_reconciliation_tests {
         let lp = Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: format!("wf-stdio-startup-{suffix}"),
             name: format!("Stdio startup test loop {suffix}"),
@@ -1420,6 +1432,9 @@ mod stdio_startup_reconciliation_tests {
             started_at: None,
             completed_at: None,
             spec_start_head: Some(head),
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             workdir: None,
             completed_via: None,
             completed_via_reason: None,

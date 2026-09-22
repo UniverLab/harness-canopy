@@ -1367,6 +1367,7 @@ mod preview_key_tests {
         crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: "lp1".to_string(),
             name: "Nightly review".to_string(),

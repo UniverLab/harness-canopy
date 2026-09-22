@@ -1002,6 +1002,7 @@ mod tests {
         Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: "graph-1".to_string(),
             name: name.to_string(),

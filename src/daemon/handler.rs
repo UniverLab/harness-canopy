@@ -4818,6 +4818,7 @@ impl TaskTriggerHandler {
             infra_node_id: params
                 .infra_node_id
                 .filter(|value| !value.trim().is_empty()),
+            allow_dirty_start: params.allow_dirty_start,
             id: uuid::Uuid::new_v4().to_string(),
             name: name.to_string(),
             description: params.description.filter(|value| !value.trim().is_empty()),
@@ -4962,6 +4963,7 @@ impl TaskTriggerHandler {
                 new_completion_hook.is_some(),
                 new_hooks.is_some(),
                 new_infra_node_id.is_some(),
+                params.allow_dirty_start.is_some(),
             ],
             "graph_update",
         ) {
@@ -5007,6 +5009,12 @@ impl TaskTriggerHandler {
         if let Some(infra_node_id) = new_infra_node_id {
             self.db
                 .update_graph_infra_node_id(&graph_id, infra_node_id.as_deref())
+                .map_err(internal_error)?;
+        }
+
+        if let Some(value) = params.allow_dirty_start {
+            self.db
+                .update_graph_allow_dirty_start(&graph_id, value)
                 .map_err(internal_error)?;
         }
 
@@ -5084,6 +5092,9 @@ impl TaskTriggerHandler {
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -5239,6 +5250,9 @@ impl TaskTriggerHandler {
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir,
             completed_via: None,
@@ -7756,6 +7770,7 @@ impl TaskTriggerHandler {
         let lp = Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: plan.infra_node_id.clone(),
             id: graph_id.clone(),
             name: final_name.clone(),
@@ -8205,6 +8220,21 @@ impl TaskTriggerHandler {
             Err(e) => return Err(internal_error(e.to_string())),
         };
 
+        let dirty_workdir_warning: Option<serde_json::Value> = {
+            let (dirty, _paths) =
+                crate::graph_engine::capture_workdir_dirty_with_paths(&details.lp.workdir).await;
+            dirty.filter(|n| *n > 0).map(|count| {
+                let plural = if count == 1 { "y" } else { "ies" };
+                serde_json::json!({
+                    "count": count,
+                    "warning": format!(
+                        "Workdir '{}' has {} uncommitted git entr{}.",
+                        details.lp.workdir, count, plural
+                    ),
+                })
+            })
+        };
+
         // Graph-level structural validation (CB8) — same validate_graph
         // used by graph_import, before spending quota on platform probes.
         let (terminal_list, graph_warnings): (Vec<String>, Vec<serde_json::Value>) = {
@@ -8522,6 +8552,7 @@ impl TaskTriggerHandler {
                     ),
                     "spec_warnings": spec_warnings,
                     "graph_warnings": graph_warnings,
+                    "dirty_workdir_warning": dirty_workdir_warning.clone(),
                     "review": reviewer_out,
                     "terminals": terminal_list,
                     "commit_rights_holders": commit_rights_holders,
@@ -8603,6 +8634,7 @@ impl TaskTriggerHandler {
                 "effort_warnings": effort_warnings,
                 "spec_warnings": spec_warnings,
                 "graph_warnings": graph_warnings,
+                "dirty_workdir_warning": dirty_workdir_warning,
                 "review": reviewer_out,
                 "terminals": terminal_list,
                 "commit_rights_holders": commit_rights_holders,
@@ -8726,6 +8758,32 @@ impl TaskTriggerHandler {
             Err(e) => return Err(internal_error(e.to_string())),
         }
 
+        let effective_workdir = workdir.unwrap_or(&lp.workdir);
+        let next_spec_preview = self
+            .graph_engine
+            .preview_next_spec_id(&graph_id, queue_id)
+            .map_err(internal_error)?;
+        let mut launch_warning: Option<String> = None;
+        match self
+            .graph_engine
+            .dirty_start_check(
+                effective_workdir,
+                next_spec_preview.as_deref(),
+                lp.allow_dirty_start,
+            )
+            .await
+            .map_err(internal_error)?
+        {
+            Some(notice) if notice.refuse => {
+                return Ok(error_result(&format!(
+                    "Refusing to launch graph '{}': {}",
+                    graph_id, notice.message
+                )));
+            }
+            Some(notice) => launch_warning = Some(notice.message),
+            None => {}
+        }
+
         let sandbox = if params.sandbox == Some(true) {
             // The instruction file is per-worktree and the worktree is shared
             // across the graph's nodes, so it must carry the *first* agent
@@ -8778,10 +8836,13 @@ impl TaskTriggerHandler {
             idea,
             sandbox,
         );
-        Ok(success_result(&format!(
-            "Graph '{}' launched in background.",
-            graph_id
-        )))
+        Ok(success_result(&match launch_warning {
+            Some(warning) => format!(
+                "Graph '{}' launched in background. WARNING: {}",
+                graph_id, warning
+            ),
+            None => format!("Graph '{}' launched in background.", graph_id),
+        }))
     }
 
     /// Reset a `completed`/`failed` (or otherwise stalled) graph back to
@@ -10975,6 +11036,9 @@ fn graph_spec_details_json(
         // behind (C15), if any — `{{spec_committed_head}}` in a check node.
         // `null` means no node this run trusts to commit has moved HEAD yet.
         "spec_committed_head": spec.spec.spec_committed_head,
+        "spec_start_dirty": spec.spec.spec_start_dirty,
+        "spec_end_dirty": spec.spec.spec_end_dirty,
+        "spec_end_dirty_paths": spec.spec.spec_end_dirty_paths,
         "started_at": spec.spec.started_at.map(|value| value.to_rfc3339()),
         "completed_at": spec.spec.completed_at.map(|value| value.to_rfc3339()),
         "nodes": spec.nodes.iter().map(|node| graph_node_json(node, &spec.edges)).collect::<Vec<_>>(),
@@ -11105,12 +11169,11 @@ fn graph_node_run_summary_json(
             serde_json::Value::String(model.to_string()),
         );
     }
+    let spec = db.get_graph_spec(&run.spec_id).ok().flatten();
+    let spec_end_dirty = spec.as_ref().and_then(|s| s.spec_end_dirty);
+    let spec_end_dirty_paths = spec.as_ref().and_then(|s| s.spec_end_dirty_paths.clone());
     if compact {
-        let spec_name = db
-            .get_graph_spec(&run.spec_id)
-            .ok()
-            .flatten()
-            .map(|s| s.name);
+        let spec_name = spec.as_ref().map(|s| s.name.clone());
         let mut obj = serde_json::Map::from_iter([
             ("id".to_string(), serde_json::json!(run.id)),
             (
@@ -11134,6 +11197,18 @@ fn graph_node_run_summary_json(
             (
                 "completed_at".to_string(),
                 serde_json::json!(run.completed_at.map(|value| value.to_rfc3339())),
+            ),
+            (
+                "spec_end_dirty".to_string(),
+                spec_end_dirty
+                    .map(serde_json::Value::from)
+                    .unwrap_or(serde_json::Value::Null),
+            ),
+            (
+                "spec_end_dirty_paths".to_string(),
+                spec_end_dirty_paths
+                    .map(|paths| serde_json::json!(paths))
+                    .unwrap_or(serde_json::Value::Null),
             ),
         ]);
         obj.extend(executed);
@@ -11160,6 +11235,18 @@ fn graph_node_run_summary_json(
                 serde_json::json!(run.completed_at.map(|value| value.to_rfc3339())),
             ),
             ("session_id".to_string(), serde_json::json!(run.session_id)),
+            (
+                "spec_end_dirty".to_string(),
+                spec_end_dirty
+                    .map(serde_json::Value::from)
+                    .unwrap_or(serde_json::Value::Null),
+            ),
+            (
+                "spec_end_dirty_paths".to_string(),
+                spec_end_dirty_paths
+                    .map(|paths| serde_json::json!(paths))
+                    .unwrap_or(serde_json::Value::Null),
+            ),
         ]);
         obj.extend(executed);
         serde_json::Value::Object(obj)
@@ -11707,6 +11794,9 @@ mod tests {
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -11877,6 +11967,9 @@ mod tests {
             started_at: None,
             completed_at: Some(chrono::Utc::now()),
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -11920,6 +12013,7 @@ mod tests {
         db.insert_graph(&Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: graph_id.clone(),
             name: "Graph".to_string(),
@@ -12033,6 +12127,9 @@ mod tests {
             started_at: None,
             completed_at: Some(chrono::Utc::now()),
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: Some("admin".to_string()),
@@ -12110,6 +12207,9 @@ mod tests {
             started_at: None,
             completed_at: Some(chrono::Utc::now()),
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: Some("admin".to_string()),
@@ -12176,6 +12276,7 @@ mod tests {
         db.insert_graph(&Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: graph_id.clone(),
             name: "Graph".to_string(),
@@ -12205,6 +12306,9 @@ mod tests {
             started_at: None,
             completed_at: Some(chrono::Utc::now()),
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -12847,6 +12951,9 @@ mod tests {
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -13036,6 +13143,7 @@ mod tests {
         db.insert_graph(&Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: id.to_string(),
             name: id.to_string(),
@@ -13541,6 +13649,7 @@ mod tests {
         db.insert_graph(&Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: graph_id.clone(),
             name: "Graph".to_string(),
@@ -13586,6 +13695,7 @@ mod tests {
         Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: id.to_string(),
             name: id.to_string(),
@@ -13864,6 +13974,7 @@ mod tests {
         db.insert_graph(&Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: graph_id.clone(),
             name: "Graph".to_string(),
@@ -13917,6 +14028,7 @@ mod tests {
         db.insert_graph(&Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: graph_id.clone(),
             name: "Graph".to_string(),
@@ -13960,6 +14072,7 @@ mod tests {
         Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: graph_id.to_string(),
             name: graph_id.to_string(),
@@ -14475,6 +14588,7 @@ mod tests {
         db.insert_graph(&Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: Some("infra".to_string()),
             id: "graph-1".to_string(),
             name: "graph-1".to_string(),
@@ -15497,6 +15611,9 @@ mod tests {
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -15862,6 +15979,9 @@ mod tests {
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: Some("/tmp/project".to_string()),
             completed_via: None,
@@ -15893,6 +16013,9 @@ mod tests {
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: Some("graph_reset".to_string()),
@@ -15966,6 +16089,7 @@ mod tests {
         Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: "graph-1".to_string(),
             name: "Test Graph".to_string(),
@@ -16314,6 +16438,9 @@ mod additional_tests {
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -16326,6 +16453,7 @@ mod additional_tests {
         db.insert_graph(&Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: id.to_string(),
             name: id.to_string(),
@@ -16904,6 +17032,9 @@ mod additional_tests {
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -17025,6 +17156,9 @@ mod additional_tests {
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -17558,6 +17692,7 @@ mod additional_tests {
         let lp = Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: "l1".to_string(),
             name: "l1".to_string(),
@@ -17584,6 +17719,7 @@ mod additional_tests {
         let lp = Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: "l1".to_string(),
             name: "l1".to_string(),
@@ -17701,6 +17837,9 @@ mod coverage_tests {
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -17741,6 +17880,7 @@ mod coverage_tests {
         Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: graph_id.to_string(),
             name: graph_id.to_string(),
@@ -21062,6 +21202,7 @@ mod endpoint_tests {
                 workdir: workdir.clone(),
                 trigger: None,
                 infra_node_id: None,
+                allow_dirty_start: false,
             }))
             .await
             .unwrap();
@@ -21079,6 +21220,7 @@ mod endpoint_tests {
                 on_completed: None,
                 hooks: None,
                 infra_node_id: None,
+                allow_dirty_start: None,
             }))
             .await
             .unwrap();
@@ -21100,6 +21242,7 @@ mod endpoint_tests {
                 workdir: "/tmp".to_string(),
                 trigger: None,
                 infra_node_id: None,
+                allow_dirty_start: false,
             }))
             .await
             .unwrap();
@@ -21112,6 +21255,7 @@ mod endpoint_tests {
                 workdir: "relative/dir".to_string(),
                 trigger: None,
                 infra_node_id: None,
+                allow_dirty_start: false,
             }))
             .await
             .unwrap();
@@ -21142,6 +21286,7 @@ mod endpoint_tests {
                 workdir: workdir.to_string(),
                 trigger: None,
                 infra_node_id: None,
+                allow_dirty_start: false,
             }))
             .await
             .unwrap();
@@ -21260,6 +21405,7 @@ mod endpoint_tests {
                 workdir,
                 trigger: None,
                 infra_node_id: None,
+                allow_dirty_start: false,
             }))
             .await
             .unwrap();
@@ -21483,6 +21629,7 @@ mod endpoint_tests {
                 workdir: workdir.clone(),
                 trigger: None,
                 infra_node_id: None,
+                allow_dirty_start: false,
             }))
             .await
             .unwrap();
@@ -21607,6 +21754,7 @@ mod endpoint_tests {
                 workdir: workdir.clone(),
                 trigger: None,
                 infra_node_id: None,
+                allow_dirty_start: false,
             }))
             .await
             .unwrap();
@@ -21723,6 +21871,7 @@ mod endpoint_tests {
                 workdir,
                 trigger: None,
                 infra_node_id: None,
+                allow_dirty_start: false,
             }))
             .await
             .unwrap();
@@ -21806,6 +21955,7 @@ mod endpoint_tests {
                 workdir,
                 trigger: None,
                 infra_node_id: None,
+                allow_dirty_start: false,
             }))
             .await
             .unwrap();
@@ -21968,6 +22118,7 @@ mod endpoint_tests {
                 on_completed: None,
                 hooks: None,
                 infra_node_id: None,
+                allow_dirty_start: None,
             }))
             .await
             .unwrap();
@@ -21984,6 +22135,7 @@ mod endpoint_tests {
                 on_completed: None,
                 hooks: None,
                 infra_node_id: None,
+                allow_dirty_start: None,
             }))
             .await
             .unwrap();
@@ -21995,6 +22147,7 @@ mod endpoint_tests {
         let lp = Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
             id: uuid::Uuid::new_v4().to_string(),
             name: "Test Graph".to_string(),
@@ -22027,6 +22180,9 @@ mod endpoint_tests {
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -22035,6 +22191,203 @@ mod endpoint_tests {
         };
         db.insert_graph_spec(&spec).unwrap();
         spec
+    }
+
+    fn insert_named_spec(
+        db: &Database,
+        graph_id: &str,
+        name: &str,
+        position: i64,
+        status: GraphSpecStatus,
+    ) -> GraphSpec {
+        let spec = GraphSpec {
+            id: uuid::Uuid::new_v4().to_string(),
+            graph_id: Some(graph_id.to_string()),
+            name: name.to_string(),
+            description: Some(valid_spec_description()),
+            position,
+            parallelizable: false,
+            status,
+            started_at: None,
+            completed_at: None,
+            spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
+            spec_committed_head: None,
+            workdir: None,
+            completed_via: None,
+            completed_via_reason: None,
+            completed_via_at: None,
+        };
+        db.insert_graph_spec(&spec).unwrap();
+        spec
+    }
+
+    fn init_git_repo(path: &std::path::Path) {
+        let run = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(path)
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .status()
+                .expect("git command failed to run");
+            assert!(status.success(), "git {:?} failed", args);
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.name", "Test"]);
+        run(&["config", "user.email", "test@example.com"]);
+        std::fs::write(path.join("README.md"), "test").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", "init"]);
+    }
+
+    // ── CM29: dirty-workdir warning/refusal ─────────────────────────
+
+    #[tokio::test]
+    async fn graph_preflight_reports_dirty_workdir_warning() {
+        let (_dir, db, handler) = endpoint_test_handler();
+        let git_dir = tempdir().unwrap();
+        init_git_repo(git_dir.path());
+        let lp = insert_test_graph(&db, git_dir.path());
+        std::fs::write(git_dir.path().join("a.txt"), "a").unwrap();
+        std::fs::write(git_dir.path().join("b.txt"), "b").unwrap();
+
+        let result = handler
+            .graph_preflight(Parameters(GraphPreflightParams {
+                graph_id: lp.id.clone(),
+                timeout_seconds: None,
+                reviewer: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&result), "{}", text(&result));
+        let body: serde_json::Value = serde_json::from_str(&raw_text(&result)).unwrap();
+        assert_eq!(body["dirty_workdir_warning"]["count"], 2);
+    }
+
+    #[tokio::test]
+    async fn graph_run_refuses_when_previous_spec_left_workdir_dirty() {
+        let (_dir, db, handler) = endpoint_test_handler();
+        let git_dir = tempdir().unwrap();
+        init_git_repo(git_dir.path());
+
+        let failed_lp = insert_test_graph(&db, git_dir.path());
+        insert_named_spec(&db, &failed_lp.id, "Spec A", 1, GraphSpecStatus::Failed);
+
+        let lp = insert_test_graph(&db, git_dir.path());
+        insert_named_spec(&db, &lp.id, "Spec B", 1, GraphSpecStatus::Pending);
+
+        std::fs::write(git_dir.path().join("a.txt"), "a").unwrap();
+        std::fs::write(git_dir.path().join("b.txt"), "b").unwrap();
+        std::fs::write(git_dir.path().join("c.txt"), "c").unwrap();
+
+        let result = handler
+            .graph_run(Parameters(GraphRunParams {
+                graph_id: lp.id.clone(),
+                queue_id: None,
+                workdir: None,
+                idea: None,
+                sandbox: None,
+            }))
+            .await
+            .unwrap();
+        assert!(is_err(&result), "{}", text(&result));
+        let msg = text(&result);
+        assert!(
+            msg.contains("Spec A"),
+            "refusal should name the failed predecessor spec: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn graph_run_allow_dirty_start_launches_with_warning() {
+        let (_dir, db, handler) = endpoint_test_handler();
+        let git_dir = tempdir().unwrap();
+        init_git_repo(git_dir.path());
+
+        let failed_lp = insert_test_graph(&db, git_dir.path());
+        insert_named_spec(&db, &failed_lp.id, "Spec A", 1, GraphSpecStatus::Failed);
+
+        let lp = insert_test_graph(&db, git_dir.path());
+        insert_named_spec(&db, &lp.id, "Spec B", 1, GraphSpecStatus::Pending);
+        db.update_graph_allow_dirty_start(&lp.id, true).unwrap();
+
+        std::fs::write(git_dir.path().join("a.txt"), "a").unwrap();
+        std::fs::write(git_dir.path().join("b.txt"), "b").unwrap();
+        std::fs::write(git_dir.path().join("c.txt"), "c").unwrap();
+
+        let result = handler
+            .graph_run(Parameters(GraphRunParams {
+                graph_id: lp.id.clone(),
+                queue_id: None,
+                workdir: None,
+                idea: None,
+                sandbox: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&result), "{}", text(&result));
+        let msg = text(&result);
+        assert!(
+            msg.contains("WARNING") && msg.contains("Spec A"),
+            "launch should succeed with a warning naming the dirty predecessor: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn graph_run_clean_workdir_unaffected_by_old_failure() {
+        let (_dir, db, handler) = endpoint_test_handler();
+        let git_dir = tempdir().unwrap();
+        init_git_repo(git_dir.path());
+
+        let failed_lp = insert_test_graph(&db, git_dir.path());
+        insert_named_spec(&db, &failed_lp.id, "Spec A", 1, GraphSpecStatus::Failed);
+
+        let lp = insert_test_graph(&db, git_dir.path());
+        insert_named_spec(&db, &lp.id, "Spec B", 1, GraphSpecStatus::Pending);
+
+        // No untracked files this time — the workdir is clean.
+        let result = handler
+            .graph_run(Parameters(GraphRunParams {
+                graph_id: lp.id.clone(),
+                queue_id: None,
+                workdir: None,
+                idea: None,
+                sandbox: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&result), "{}", text(&result));
+    }
+
+    #[tokio::test]
+    async fn graph_run_never_refused_for_non_git_workdir() {
+        let (_dir, db, handler) = endpoint_test_handler();
+        let plain_dir = tempdir().unwrap();
+
+        let failed_lp = insert_test_graph(&db, plain_dir.path());
+        insert_named_spec(&db, &failed_lp.id, "Spec A", 1, GraphSpecStatus::Failed);
+
+        let lp = insert_test_graph(&db, plain_dir.path());
+        insert_named_spec(&db, &lp.id, "Spec B", 1, GraphSpecStatus::Pending);
+
+        std::fs::write(plain_dir.path().join("a.txt"), "a").unwrap();
+
+        let result = handler
+            .graph_run(Parameters(GraphRunParams {
+                graph_id: lp.id.clone(),
+                queue_id: None,
+                workdir: None,
+                idea: None,
+                sandbox: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&result), "{}", text(&result));
     }
 
     // ── graph_add_spec / graph_update_spec ─────────────────────────
@@ -28799,6 +29152,9 @@ mod endpoint_tests {
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -29191,6 +29547,9 @@ mod endpoint_tests {
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -29237,6 +29596,9 @@ mod endpoint_tests {
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -29282,6 +29644,9 @@ mod endpoint_tests {
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -29337,6 +29702,9 @@ mod endpoint_tests {
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -29355,6 +29723,9 @@ mod endpoint_tests {
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -29427,6 +29798,7 @@ mod endpoint_tests {
             auto_continue_action: None,
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
             infra_node_id: None,
         };
         db.insert_graph(&lp2).unwrap();
@@ -29639,6 +30011,9 @@ mod endpoint_tests {
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -29703,6 +30078,9 @@ mod endpoint_tests {
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -29800,6 +30178,9 @@ mod endpoint_tests {
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -29819,6 +30200,9 @@ mod endpoint_tests {
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -29871,6 +30255,9 @@ mod endpoint_tests {
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -29927,6 +30314,9 @@ mod endpoint_tests {
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
