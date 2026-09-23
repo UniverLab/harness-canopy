@@ -730,15 +730,17 @@ fn handle_graph_info(db: &Database, id_or_name: &str) -> Result<()> {
         // with its own icon and note, including how to recover any
         // quarantined worktree changes.
         let interrupted_note = interrupted_note(run.output.as_ref());
+        let no_verdict = no_verdict_note(run.output.as_ref());
         println!(
-            " {} {}  {}{}{}{}{}",
+            " {} {}  {}{}{}{}{}{}",
             run_status_icon(run.status, run.output.as_ref()),
             node_name,
             format_dt(run.started_at),
             sid,
             group_note,
             commit_note,
-            interrupted_note
+            interrupted_note,
+            no_verdict
         );
     }
 
@@ -788,6 +790,21 @@ fn interrupted_note(output: Option<&serde_json::Value>) -> String {
         return String::new();
     }
     "  \x1b[33m(interrupted — not a node failure)\x1b[0m".to_string()
+}
+
+/// The `graph info` annotation for a quorum join that settled with no filed
+/// verdict (CB66), or an empty string for every other run. Pairs with the
+/// distinct icon `run_status_icon` gives `Error`, so a no-verdict exit never
+/// reads as an ordinary fail.
+fn no_verdict_note(output: Option<&serde_json::Value>) -> String {
+    let is_no_verdict = output
+        .and_then(|o| o.get("no_verdict"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if !is_no_verdict {
+        return String::new();
+    }
+    "  \x1b[33merror (no verdict)\x1b[0m".to_string()
 }
 
 /// Count of specs that have reached a final `completed` state, alongside the
@@ -984,6 +1001,7 @@ fn run_status_icon(status: GraphRunStatus, output: Option<&serde_json::Value>) -
         GraphRunStatus::Pass => "\x1b[32m✓\x1b[0m",
         GraphRunStatus::Fail => "\x1b[31m✗\x1b[0m",
         GraphRunStatus::Interrupted => "\x1b[33m⚑\x1b[0m",
+        GraphRunStatus::Error => "\x1b[33m⚠\x1b[0m",
     }
 }
 
@@ -1670,6 +1688,28 @@ mod tests {
         assert!(run_status_icon(GraphRunStatus::Pass, None).contains("✓"));
         assert!(run_status_icon(GraphRunStatus::Fail, None).contains("✗"));
         assert!(run_status_icon(GraphRunStatus::Running, None).contains("▶"));
+    }
+
+    #[test]
+    fn run_status_icon_error_is_warning_not_fail() {
+        let icon = run_status_icon(GraphRunStatus::Error, None);
+        assert!(
+            icon.contains("⚠"),
+            "Error must render a warning icon, got {icon:?}"
+        );
+        assert!(!icon.contains("✗"), "Error must not render the fail icon");
+    }
+
+    #[test]
+    fn no_verdict_note_renders_only_for_no_verdict() {
+        let out = serde_json::json!({"no_verdict": true});
+        assert!(
+            no_verdict_note(Some(&out)).contains("error (no verdict)"),
+            "no_verdict output must render the note"
+        );
+        let plain = serde_json::json!({"kind": "quorum"});
+        assert_eq!(no_verdict_note(Some(&plain)), "");
+        assert_eq!(no_verdict_note(None), "");
     }
 
     #[test]

@@ -52,6 +52,7 @@ pub(crate) fn tail_status_line(
             "■ finished: TIMED OUT — output below ends at the kill point".to_string()
         }
         GraphRunStatus::Fail => "■ finished: failed — Esc/t to close".to_string(),
+        GraphRunStatus::Error => "■ finished: error (no verdict) — Esc/t to close".to_string(),
         GraphRunStatus::Interrupted => {
             "■ finished: interrupted by operator — Esc/t to close".to_string()
         }
@@ -118,6 +119,9 @@ pub(crate) fn draw_node_tail_dialog(
             .fg(theme.warning)
             .add_modifier(Modifier::BOLD),
         GraphRunStatus::Pass => Style::default().fg(theme.header_color),
+        GraphRunStatus::Error => Style::default()
+            .fg(theme.status_interrupted)
+            .add_modifier(Modifier::BOLD),
         GraphRunStatus::Fail | GraphRunStatus::Interrupted => Style::default()
             .fg(theme.error)
             .add_modifier(Modifier::BOLD),

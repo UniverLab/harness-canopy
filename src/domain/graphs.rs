@@ -426,6 +426,11 @@ pub enum GraphRunStatus {
     /// Operator-interrupted: the node was explicitly stopped by an operator
     /// via `graph_pause(interrupt: true)`, not a failure of the node's work.
     Interrupted,
+    /// Quorum/ensemble settled with no filed verdict: every member ended as
+    /// an infrastructure failure (crash, unreported, interrupted,
+    /// straggler-terminated or timed out). Routes via `Error` edges, never
+    /// `Fail`.
+    Error,
 }
 
 impl GraphRunStatus {
@@ -435,6 +440,7 @@ impl GraphRunStatus {
             Self::Pass => "pass",
             Self::Fail => "fail",
             Self::Interrupted => "interrupted",
+            Self::Error => "error",
         }
     }
 
@@ -443,6 +449,7 @@ impl GraphRunStatus {
             "pass" => Self::Pass,
             "fail" => Self::Fail,
             "interrupted" => Self::Interrupted,
+            "error" => Self::Error,
             _ => Self::Running,
         }
     }

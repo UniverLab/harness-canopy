@@ -709,6 +709,7 @@ fn ensemble_member_status_tag(
         Some(GraphRunStatus::Pass) => ("[pass]", theme.status_ok),
         Some(GraphRunStatus::Fail) => ("[fail]", theme.status_fail),
         Some(GraphRunStatus::Interrupted) => ("[interrupted]", theme.status_fail),
+        Some(GraphRunStatus::Error) => ("[error]", theme.status_interrupted),
         Some(GraphRunStatus::Running) => ("[running]", theme.status_running),
         None => ("[pending]", theme.dim_text),
     }
@@ -1058,6 +1059,10 @@ fn run_status_span(status: Option<GraphRunStatus>, theme: &Theme) -> Span<'stati
         }
         Some(GraphRunStatus::Pass) => Span::styled("pass", Style::default().fg(theme.status_ok)),
         Some(GraphRunStatus::Fail) => Span::styled("fail", Style::default().fg(theme.status_fail)),
+        Some(GraphRunStatus::Error) => Span::styled(
+            "error (no verdict)",
+            Style::default().fg(theme.status_interrupted),
+        ),
         Some(GraphRunStatus::Interrupted) => {
             Span::styled("interrupted", Style::default().fg(theme.status_fail))
         }

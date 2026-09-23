@@ -2070,7 +2070,7 @@ impl GraphEngine {
                 }
             }
 
-            let iteration = iterations.entry(budget_key).or_insert(0);
+            let iteration = iterations.entry(budget_key.clone()).or_insert(0);
 
             // CB31: an operator pause or interrupt is not a node attempt. If
             // the previous run at this cursor was ended by the operator —
@@ -2699,6 +2699,118 @@ impl GraphEngine {
                 }
             };
 
+            // CB66: an ensemble join that settled with zero filed verdicts is
+            // not a rejection — it never follows the `fail` edge. Read AFTER
+            // commit-rights/ancestry overrides: an override replaces output
+            // wholesale, so a HEAD-moving ensemble is Fail here and routes as
+            // fail. Correct.
+            let is_no_verdict = final_execution
+                .output
+                .get("no_verdict")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if is_no_verdict {
+                // FR4: this exit was not a review cycle — undo the loop-top
+                // increment. The ceiling guard above still fires on every
+                // re-entry, so a permanently dead crew cannot loop forever.
+                if let Some(c) = iterations.get_mut(&budget_key) {
+                    *c = c.saturating_sub(1);
+                }
+                if let Some(sel) = select_next_step_with_condition(
+                    edges,
+                    &ensembles,
+                    &from_node_id,
+                    &GraphEdgeCondition::Error,
+                )? {
+                    match &sel.cursor {
+                        SpecCursor::Node(target) => {
+                            tracing::info!(
+                                run_id = run_id.as_deref().unwrap_or(""),
+                                from_node = %from_node_id,
+                                to_node = %target,
+                                status = ?final_execution.status,
+                                edge_condition = sel.edge_condition.as_str(),
+                                route = sel.edge_condition.route_label().unwrap_or(""),
+                                "edge traversed"
+                            );
+                        }
+                        SpecCursor::Ensemble(eid) => {
+                            tracing::info!(
+                                run_id = run_id.as_deref().unwrap_or(""),
+                                from_node = %from_node_id,
+                                to_ensemble = %eid,
+                                status = ?final_execution.status,
+                                edge_condition = sel.edge_condition.as_str(),
+                                "edge traversed to ensemble"
+                            );
+                        }
+                    }
+                    let from_node_name = nodes_by_id
+                        .get(from_node_id.as_str())
+                        .map(|n| n.name.clone())
+                        .unwrap_or_default();
+                    node_outputs.insert(from_node_name.clone(), final_execution.output.clone());
+                    previous_node_name = Some(from_node_name);
+                    cursor = sel.cursor;
+                    continue;
+                }
+                // FR2: no error edge — pause with a blocker naming the
+                // ensemble + member reasons. `Blocked` converts via
+                // `block_graph`, which pauses the graph and fires on_blocked
+                // hooks — the same mechanism as `graph_report_blocker`. Never
+                // touches the C19 cross-run budget: infra never consumes it.
+                let member_texts: Vec<String> = final_execution
+                    .output
+                    .get("members")
+                    .and_then(Value::as_array)
+                    .map(|arr| {
+                        arr.iter()
+                            .map(|m| {
+                                let node = m.get("node").and_then(Value::as_str).unwrap_or("?");
+                                let platform =
+                                    m.get("platform").and_then(Value::as_str).unwrap_or("?");
+                                let reason = m
+                                    .get("reason")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("no reason recorded");
+                                format!("{node} ({platform}): {reason}")
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let ensemble_name = ensembles
+                    .iter()
+                    .find(|d| d.ensemble.join_node_id == from_node_id)
+                    .map(|d| d.ensemble.name.clone())
+                    .unwrap_or_else(|| from_node_id.clone());
+                let blocker = format!(
+                    "Ensemble '{}' produced no verdict ({} members, none filed a verdict): {}. The graph is paused; inspect member runs and retry or rewire the ensemble.",
+                    ensemble_name,
+                    member_texts.len(),
+                    member_texts.join("; "),
+                );
+                if let Some(run) = self.db.list_graph_runs_for_spec(&spec.id)?.last() {
+                    self.set_run_blocker(
+                        &run.id,
+                        GraphRunStatus::Error,
+                        run.output.as_ref().unwrap_or(&serde_json::json!({})),
+                        &blocker,
+                    )?;
+                }
+                self.db.update_graph_spec_status(
+                    &spec.id,
+                    GraphSpecStatus::Failed,
+                    None,
+                    Some(chrono::Utc::now()),
+                )?;
+                let (dirty, paths) = self.record_spec_end_dirty(&spec.id, workdir).await;
+                let blocker = match dirty_tree_note(dirty, &paths) {
+                    Some(note) => format!("{blocker} ({note})"),
+                    None => blocker,
+                };
+                return Ok(SpecExecutionOutcome::Blocked(blocker));
+            }
+
             // A router that finished `Pass` routes by its chosen label
             // (`select_router_step`), never by Pass/Fail/Always
             // (`select_next_step`) — a router's verdict has no notion of
@@ -3232,18 +3344,18 @@ impl GraphEngine {
                             }
                             let mut execution = execution;
                             let mut run = run;
-                            let _ = finalize_infra_crash_shape(
+                            let member_had_no_verdict = finalize_infra_crash_shape(
                                 &db, &member_run_id, &node, &mut execution, &mut run, attempt, retry_limit, crash_max_secs,
                             )
                             .await?;
-                            break Ok::<_, anyhow::Error>((execution, run, member_run_id.clone()));
+                            break Ok::<_, anyhow::Error>((execution, run, member_run_id.clone(), member_had_no_verdict));
                         }
                     },
                 )
                 .await;
 
-                let (execution, member_session_id) = match outcome {
-                    Ok(Ok((execution, run, final_run_id))) => {
+                let (execution, member_session_id, member_had_no_verdict) = match outcome {
+                    Ok(Ok((execution, run, final_run_id, no_verdict))) => {
                         tracing::info!(
                             run_id = %final_run_id,
                             status = ?execution.status,
@@ -3267,7 +3379,7 @@ impl GraphEngine {
                                 summary: execution.summary,
                             }
                         };
-                        (execution, session_id)
+                        (execution, session_id, no_verdict)
                     }
                     // A DB error (or other hard error) from within the retry
                     // graph — reuse the finalized row output if there is one.
@@ -3285,6 +3397,7 @@ impl GraphEngine {
                                 summary: format!("Ensemble member '{}' failed: {error}", node.name),
                             },
                             None,
+                            true,
                         )
                     }
                     // This ensemble's own straggler timeout elapsed before the
@@ -3313,6 +3426,7 @@ impl GraphEngine {
                                 ),
                             },
                             None,
+                            true,
                         )
                     }
                 };
@@ -3323,7 +3437,7 @@ impl GraphEngine {
                         _ => format!("Ensemble member '{}' failed: {}", node.name, failure_reason_text(&execution.output, &execution.summary).unwrap_or_default()),
                     },
                 );
-                (node.id, label, execution, member_session_id)
+                (node.id, label, execution, member_session_id, member_had_no_verdict)
             });
         }
 
@@ -3333,7 +3447,8 @@ impl GraphEngine {
         // behaviour below exactly. Cascade/round_robin never reach here
         // (early returns above), so the grace is parallel-only per spec.
         let quorum_grace: Option<i64> = ensemble.quorum_grace_minutes;
-        let mut results: HashMap<String, (String, NodeExecution, Option<String>)> = HashMap::new();
+        let mut results: HashMap<String, (String, NodeExecution, Option<String>, bool)> =
+            HashMap::new();
         // Set only when the grace path actually fired (quorum reached while
         // members were still pending); drives the `quorum_met_at` /
         // `grace_minutes` join-output fields.
@@ -3345,7 +3460,7 @@ impl GraphEngine {
                 if results.len() >= details.members.len() {
                     break;
                 }
-                let completed: Option<(String, String, NodeExecution, Option<String>)> =
+                let completed: Option<(String, String, NodeExecution, Option<String>, bool)> =
                     match grace_deadline {
                         Some(deadline) => {
                             tokio::select! {
@@ -3366,11 +3481,11 @@ impl GraphEngine {
                             None => break,
                         },
                     };
-                if let Some((node_id, label, execution, session_id)) = completed {
+                if let Some((node_id, label, execution, session_id, had_no_verdict)) = completed {
                     if execution.status == GraphRunStatus::Pass {
                         passed_so_far += 1;
                     }
-                    results.insert(node_id, (label, execution, session_id));
+                    results.insert(node_id, (label, execution, session_id, had_no_verdict));
                     // The grace window is measured from the instant the
                     // quorum is met, not from ensemble start.
                     if grace_deadline.is_none() && passed_so_far >= ensemble.min_pass {
@@ -3417,6 +3532,7 @@ impl GraphEngine {
                             ),
                         },
                         None,
+                        true,
                     ),
                 );
                 activity::publish(
@@ -3437,9 +3553,9 @@ impl GraphEngine {
                 // never exceeded early): drain normally. `quorum_met_at` was
                 // still set above, so the join output records the grace path.
                 while let Some(joined) = set.join_next().await {
-                    let (node_id, label, execution, session_id) = joined
+                    let (node_id, label, execution, session_id, had_no_verdict) = joined
                         .map_err(|error| anyhow!("Ensemble member task panicked: {error}"))?;
-                    results.insert(node_id, (label, execution, session_id));
+                    results.insert(node_id, (label, execution, session_id, had_no_verdict));
                 }
             }
         } else {
@@ -3447,23 +3563,28 @@ impl GraphEngine {
             // regardless of arrival order, so the join can never fire while
             // a member is still in flight.
             while let Some(joined) = set.join_next().await {
-                let (node_id, label, execution, session_id) =
+                let (node_id, label, execution, session_id, had_no_verdict) =
                     joined.map_err(|error| anyhow!("Ensemble member task panicked: {error}"))?;
-                results.insert(node_id, (label, execution, session_id));
+                results.insert(node_id, (label, execution, session_id, had_no_verdict));
             }
         }
 
         let mut passed = 0i64;
+        let mut verdicts = 0i64;
         let mut consolidated_doc = String::new();
         let mut member_summaries = Vec::with_capacity(details.members.len());
+        let mut no_verdict_members = Vec::with_capacity(details.members.len());
         for member in &details.members {
-            let (label, execution, session_id) =
+            let (label, execution, session_id, had_no_verdict) =
                 results.remove(&member.node_id).ok_or_else(|| {
                     anyhow!(
                         "Ensemble member '{}' produced no result after wait-all.",
                         member.node_id
                     )
                 })?;
+            if !had_no_verdict {
+                verdicts += 1;
+            }
             let status_label = if execution.status == GraphRunStatus::Pass {
                 passed += 1;
                 "pass"
@@ -3481,6 +3602,15 @@ impl GraphEngine {
                 "## {label} [{status_label}]\n\n{}\n\n",
                 member_output_text(&execution.output)
             ));
+            let member_node_name = member_nodes
+                .get(&member.node_id)
+                .map(|n| n.name.clone())
+                .unwrap_or_else(|| member.node_id.clone());
+            no_verdict_members.push(serde_json::json!({
+                "node": member_node_name,
+                "platform": member.platform,
+                "reason": no_verdict_reason(&execution.output, &execution.summary),
+            }));
             member_summaries.push(serde_json::json!({
                 "node_id": member.node_id,
                 "platform": member.platform,
@@ -3488,6 +3618,78 @@ impl GraphEngine {
                 "status": status_label,
                 "output": execution.output,
             }));
+        }
+
+        if verdicts == 0 {
+            let mut join_output = serde_json::json!({
+                "kind": "quorum",
+                "ensemble_id": ensemble.id,
+                "members": no_verdict_members,
+                "no_verdict": true,
+                "passed": 0,
+                "min_pass": ensemble.min_pass,
+                "consolidated_doc": consolidated_doc,
+            });
+            if let Some(met_at) = quorum_met_at {
+                join_output["quorum_met_at"] = serde_json::json!(met_at.to_rfc3339());
+                join_output["grace_minutes"] = serde_json::json!(quorum_grace.unwrap_or(0));
+            }
+            let mut execution = NodeExecution {
+                status: GraphRunStatus::Error,
+                output: join_output,
+                summary: format!(
+                    "Ensemble '{}' produced no verdict ({} members, all infrastructure failures).",
+                    ensemble.name,
+                    details.members.len(),
+                ),
+            };
+            if let Some(watch) = &commit_watch {
+                if let Some(head_after) = watch.violation(workdir).await {
+                    tracing::warn!(
+                        ensemble = %ensemble.name,
+                        head_before = %watch.head_before,
+                        head_after = %head_after,
+                        "ensemble member committed but has no commit rights"
+                    );
+                    execution = commit_rights_failure(
+                        &format!("Ensemble '{}' (one of its members)", ensemble.name),
+                        &ensemble.join_node_id,
+                        &watch.head_before,
+                        &head_after,
+                        execution.output,
+                    );
+                }
+            }
+            self.db.insert_graph_run(&GraphNodeRun {
+                id: uuid::Uuid::new_v4().to_string(),
+                graph_id: lp.id.clone(),
+                spec_id: spec.id.clone(),
+                node_id: ensemble.join_node_id.clone(),
+                status: execution.status,
+                input: previous_output.cloned(),
+                output: Some(execution.output.clone()),
+                started_at: chrono::Utc::now(),
+                completed_at: Some(chrono::Utc::now()),
+                iteration: iteration as i64,
+                pid: None,
+                boot_id: crate::system::boot_id(),
+                session_id: None,
+                executed_platform: None,
+                executed_model: None,
+            })?;
+            activity::publish(
+                &self.db,
+                workdir,
+                &lp.id,
+                &lp.name,
+                format!(
+                    "Ensemble '{}' produced no verdict ({}/{} members, all infrastructure failures).",
+                    ensemble.name,
+                    details.members.len(),
+                    details.members.len()
+                ),
+            );
+            return Ok(execution);
         }
 
         let join_status = if passed >= ensemble.min_pass {
@@ -3878,6 +4080,8 @@ impl GraphEngine {
             resume_start.and_then(|p| resumable_sessions.get(&details.members[p].node_id).cloned());
         let walk_start = resume_start.unwrap_or(0);
 
+        let mut saw_verdict = false;
+        let mut tried_members: Vec<(String, String, Value, String)> = Vec::new();
         for (offset, member) in details.members.iter().enumerate().skip(walk_start) {
             let is_resume_start = offset == walk_start;
             let candidate = if is_resume_start {
@@ -3914,6 +4118,13 @@ impl GraphEngine {
                 && candidate.is_some()
                 && !member_had_no_verdict
                 && execution.status != GraphRunStatus::Pass;
+            saw_verdict |= !member_had_no_verdict;
+            tried_members.push((
+                node.name.clone(),
+                member.platform.clone(),
+                execution.output.clone(),
+                execution.summary.clone(),
+            ));
             if !member_had_no_verdict && !resumed_start_failed {
                 let join_status = execution.status;
                 let join_output = serde_json::json!({
@@ -4005,22 +4216,57 @@ impl GraphEngine {
             }
         }
 
-        let join_output = serde_json::json!({
-            "kind": "cascade",
-            "ensemble_id": ensemble.id,
-            "error": "no member produced a passing verdict",
-            "members_tried": details.members.len() - walk_start,
-            "members_total": details.members.len(),
-        });
+        let (join_output, join_status, join_summary) = if !saw_verdict {
+            let members: Vec<Value> = tried_members
+                .iter()
+                .map(|(name, platform, output, summary)| {
+                    serde_json::json!({
+                        "node": name,
+                        "platform": platform,
+                        "reason": no_verdict_reason(output, summary),
+                    })
+                })
+                .collect();
+            let tried = tried_members.len();
+            (
+                serde_json::json!({
+                    "kind": "cascade",
+                    "ensemble_id": ensemble.id,
+                    "no_verdict": true,
+                    "members": members,
+                    "members_tried": tried,
+                    "members_total": details.members.len(),
+                }),
+                GraphRunStatus::Error,
+                format!(
+                    "Cascade ensemble '{}' produced no verdict: no member from position {} onward filed a verdict ({} tried, all infrastructure failures).",
+                    ensemble.name,
+                    walk_start + 1,
+                    tried,
+                ),
+            )
+        } else {
+            (
+                serde_json::json!({
+                    "kind": "cascade",
+                    "ensemble_id": ensemble.id,
+                    "error": "no member produced a passing verdict",
+                    "members_tried": details.members.len() - walk_start,
+                    "members_total": details.members.len(),
+                }),
+                GraphRunStatus::Fail,
+                format!(
+                    "Cascade ensemble '{}' failed: no member from position {} onward produced a passing verdict.",
+                    ensemble.name,
+                    walk_start + 1,
+                ),
+            )
+        };
 
         let mut execution = NodeExecution {
-            status: GraphRunStatus::Fail,
+            status: join_status,
             output: join_output,
-            summary: format!(
-                "Cascade ensemble '{}' failed: no member from position {} onward produced a passing verdict.",
-                ensemble.name,
-                walk_start + 1,
-            ),
+            summary: join_summary,
         };
 
         if let Some(watch) = &commit_watch {
@@ -4181,6 +4427,7 @@ impl GraphEngine {
         // verdict (infra crash after its own retries, or a straggler kill),
         // fall through to the next member in rotation order, wrapping around.
         // A real verdict — pass OR fail — stops the walk immediately.
+        let mut tried_no_verdict: Vec<(String, String, Value, String)> = Vec::new();
         for offset in 0..member_count {
             let current_index = (start_index + offset).rem_euclid(member_count);
             let member = &details.members[current_index as usize];
@@ -4217,6 +4464,12 @@ impl GraphEngine {
                     position = member.position,
                     "round-robin member infra-crashed, trying next"
                 );
+                tried_no_verdict.push((
+                    node.name.clone(),
+                    member.platform.clone(),
+                    execution.output.clone(),
+                    execution.summary.clone(),
+                ));
                 continue;
             }
 
@@ -4309,21 +4562,32 @@ impl GraphEngine {
         }
 
         // Every member in the rotation produced no verdict — the ensemble
-        // fails, in the same spirit as cascade's "all N members infra-crashed".
+        // exits as no-verdict (Error), never Fail.
+        let members: Vec<Value> = tried_no_verdict
+            .iter()
+            .map(|(name, platform, output, summary)| {
+                serde_json::json!({
+                    "node": name,
+                    "platform": platform,
+                    "reason": no_verdict_reason(output, summary),
+                })
+            })
+            .collect();
         let join_output = serde_json::json!({
             "kind": "round_robin",
             "ensemble_id": ensemble.id,
-            "error": "all members infra-crashed",
+            "no_verdict": true,
+            "members": members,
             "next_index": next_index,
             "members_tried": details.members.len(),
             "members_total": details.members.len(),
         });
 
         let mut execution = NodeExecution {
-            status: GraphRunStatus::Fail,
+            status: GraphRunStatus::Error,
             output: join_output,
             summary: format!(
-                "Round-robin ensemble '{}' failed: all {} members infra-crashed.",
+                "Round-robin ensemble '{}' produced no verdict: all {} members failed without filing a verdict.",
                 ensemble.name,
                 details.members.len(),
             ),
@@ -5096,6 +5360,10 @@ fn execution_is_infra_failure(output: &Value) -> bool {
             .unwrap_or(false)
         || output.get("failure_kind").and_then(Value::as_str) == Some("no_report")
         || output.get("failure_kind").and_then(Value::as_str) == Some("unreported")
+        || output
+            .get("no_verdict")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
 }
 
 /// Persist a crashed agent attempt with B19 `infra_attempt`/`infra_crash`
@@ -6948,6 +7216,7 @@ fn select_next_step(
                 edge.condition == GraphEdgeCondition::Fail
                     || edge.condition == GraphEdgeCondition::Always
             }
+            GraphRunStatus::Error => edge.condition == GraphEdgeCondition::Error,
             GraphRunStatus::Running => false,
         })
         .collect::<Vec<_>>();
@@ -7137,6 +7406,32 @@ fn failure_reason_text(output: &serde_json::Value, summary: &str) -> Option<Stri
     }
 }
 
+/// First line of `failure_reason_text(output, summary)` (or `summary`),
+/// trimmed and truncated to 200 chars; never empty (falls back to `summary`
+/// or "no reason recorded"). Used for the per-member `reason` in a
+/// no-verdict join output.
+fn no_verdict_reason(output: &Value, summary: &str) -> String {
+    let text = failure_reason_text(output, summary).unwrap_or_else(|| summary.to_string());
+    let first = text.lines().next().unwrap_or("").trim();
+    let fallback = if summary.trim().is_empty() {
+        "no reason recorded".to_string()
+    } else {
+        summary.lines().next().unwrap_or("").trim().to_string()
+    };
+    let chosen = if first.is_empty() {
+        fallback
+    } else {
+        first.to_string()
+    };
+    let mut out: String = chosen.chars().take(200).collect();
+    out = out.trim().to_string();
+    if out.is_empty() {
+        "no reason recorded".to_string()
+    } else {
+        out
+    }
+}
+
 /// Human-readable label for a cursor step, for failure summaries.
 fn cursor_label(cursor: &SpecCursor, ensembles: &[EnsembleDetails]) -> String {
     match cursor {
@@ -7238,7 +7533,7 @@ fn should_advance_to_next_spec(node: &GraphNode, status: GraphRunStatus) -> bool
     let route_key = match status {
         GraphRunStatus::Pass => "pass_route",
         GraphRunStatus::Fail | GraphRunStatus::Interrupted => "fail_route",
-        GraphRunStatus::Running => return false,
+        GraphRunStatus::Running | GraphRunStatus::Error => return false,
     };
 
     node.kind == GraphNodeKind::Gate
@@ -21523,15 +21818,20 @@ echo done
             "join must not fire before the slow member finishes (elapsed: {elapsed:?})"
         );
         // CM13: bare member scripts never call graph_complete_node, so both
-        // members are unreported infra and the join fails. Wait-all is still
-        // proven by the elapsed wall-clock time above and the doc below.
+        // members are unreported infra and the join is Error with no_verdict
+        // (CB66). Wait-all is still proven by the elapsed wall-clock time
+        // above and the doc below.
         assert!(
             !pass_marker.exists(),
             "CM13: unreported members are infra, so the ensemble cannot pass"
         );
 
         let join = join_run(&db, &spec_id, "join1");
-        assert_eq!(join.status, GraphRunStatus::Fail);
+        assert_eq!(join.status, GraphRunStatus::Error);
+        assert_eq!(
+            join.output.as_ref().unwrap()["no_verdict"],
+            serde_json::json!(true)
+        );
         let doc = join.output.unwrap()["consolidated_doc"]
             .as_str()
             .unwrap()
@@ -21599,15 +21899,20 @@ echo done
             "a concurrency cap of 1 must serialize all three members (elapsed: {elapsed:?})"
         );
         // CM13: bare member scripts never call graph_complete_node, so every
-        // member is unreported infra and the join fails (0/3). Serialization
-        // is still proven by the elapsed wall-clock time above.
+        // member is unreported infra and the join is Error with no_verdict
+        // (CB66: 0/3 verdicts, never Fail). Serialization is still proven by
+        // the elapsed wall-clock time above.
         assert!(
             !pass_marker.exists(),
             "CM13: unreported members are infra, so the ensemble cannot pass"
         );
 
         let join = join_run(&db, &spec_id, "join1");
-        assert_eq!(join.status, GraphRunStatus::Fail);
+        assert_eq!(join.status, GraphRunStatus::Error);
+        assert_eq!(
+            join.output.as_ref().unwrap()["no_verdict"],
+            serde_json::json!(true)
+        );
         let doc = join.output.unwrap()["consolidated_doc"]
             .as_str()
             .unwrap()
@@ -21616,10 +21921,11 @@ echo done
     }
 
     /// CM13: bare member scripts never call graph_complete_node, so no member
-    /// can pass — the min_pass quorum sees 0 passed, the join fails and routes
-    /// to on_fail_to even though a majority "exited ok". Quorum counting itself
-    /// is covered by unit tests over NodeExecution; the join Pass -> on_pass_to
-    /// edge is covered live by
+    /// can pass — the quorum sees 0 filed verdicts, the join is Error with
+    /// `no_verdict` (CB66) and the graph pauses with a blocker instead of
+    /// routing to on_fail_to, even though a majority "exited ok". Quorum
+    /// counting itself is covered by unit tests over NodeExecution; the join
+    /// Pass -> on_pass_to edge is covered live by
     /// [`cm13_round_robin_falls_through_unreported_member_then_passes_on_next`].
     #[tokio::test]
     async fn ensemble_execute_unreported_members_route_to_on_fail_to() {
@@ -21671,14 +21977,24 @@ echo done
 
         let join = join_run(&db, &spec_id, "join1");
         // CM13: script-backed members never self-report, so the quorum sees
-        // 0 passes and routes to on_fail_to.
-        assert_eq!(join.status, GraphRunStatus::Fail);
+        // 0 filed verdicts -> Error with no_verdict (CB66), pausing the graph
+        // instead of routing to on_fail_to.
+        assert_eq!(join.status, GraphRunStatus::Error);
+        assert_eq!(
+            join.output.as_ref().unwrap()["no_verdict"],
+            serde_json::json!(true)
+        );
         assert_eq!(join.output.unwrap()["passed"], 0);
         assert!(!pass_marker.exists(), "must not route to on_pass_to");
-        assert!(fail_marker.exists(), "must route to on_fail_to");
+        assert!(
+            !fail_marker.exists(),
+            "CB66: a verdictless join never follows the Fail edge to on_fail_to"
+        );
     }
 
     /// min_pass routing: too few members pass -> join Fail -> on_fail_to.
+    /// (CB66: when NO member files a verdict at all, the join is Error and
+    /// pauses instead — see the no_verdict assertions below.)
     #[tokio::test]
     async fn ensemble_execute_min_pass_not_met_routes_to_on_fail_to() {
         let (dir, db, engine, _graph_id, spec_id) = graph_fixture().unwrap();
@@ -21728,11 +22044,18 @@ echo done
         drop(_home);
 
         let join = join_run(&db, &spec_id, "join1");
-        assert_eq!(join.status, GraphRunStatus::Fail);
+        assert_eq!(join.status, GraphRunStatus::Error);
+        assert_eq!(
+            join.output.as_ref().unwrap()["no_verdict"],
+            serde_json::json!(true)
+        );
         // CM13: the script-backed member never self-reports, so passed is 0.
         assert_eq!(join.output.unwrap()["passed"], 0);
         assert!(!pass_marker.exists(), "must not route to on_pass_to");
-        assert!(fail_marker.exists(), "must route to on_fail_to");
+        assert!(
+            !fail_marker.exists(),
+            "CB66: a verdictless join never follows the Fail edge to on_fail_to"
+        );
     }
 
     /// Consolidation order is deterministic (member position order), not
@@ -21946,9 +22269,14 @@ echo done
 
         let join = join_run(&db, &spec_id, "join1");
         // CM13: the cat-backed members never call graph_complete_node, so each
-        // is unreported infra and the join fails. Attribution is still proven
-        // by the position-numbered headings and per-member prompt text below.
-        assert_eq!(join.status, GraphRunStatus::Fail);
+        // is unreported infra and the join is Error with no_verdict (CB66).
+        // Attribution is still proven by the position-numbered headings and
+        // per-member prompt text below.
+        assert_eq!(join.status, GraphRunStatus::Error);
+        assert_eq!(
+            join.output.as_ref().unwrap()["no_verdict"],
+            serde_json::json!(true)
+        );
         assert!(!pass_marker.exists());
         let doc = join.output.unwrap()["consolidated_doc"]
             .as_str()
@@ -21975,10 +22303,10 @@ echo done
         assert!(!doc.contains("shared prompt (unused"));
     }
 
-    /// Straggler kill + fail counting (B12): a member that hangs past the
-    /// ensemble's straggler timeout is killed at the OS level (not just
-    /// marked failed while the process keeps running), and counts as a
-    /// failed member in the join's tally. Both members hang here — using a
+    /// Straggler kill + no-verdict counting (B12, CB66): a member that hangs
+    /// past the ensemble's straggler timeout is killed at the OS level (not
+    /// just marked failed while the process keeps running), and produces no
+    /// verdict — so an all-straggler join is Error with no_verdict, never Fail. Both members hang here — using a
     /// `straggler_timeout_minutes: 0` (immediate) alongside a member that's
     /// meant to finish quickly would race the timeout against real work;
     /// isolating the straggler behavior to every member avoids that.
@@ -22039,11 +22367,18 @@ echo done
         let join = join_run(&db, &spec_id, "join1");
         assert_eq!(
             join.status,
-            GraphRunStatus::Fail,
-            "both members killed as stragglers -> zero passed -> join fails"
+            GraphRunStatus::Error,
+            "both members killed as stragglers -> zero verdicts -> join is Error (CB66)"
+        );
+        assert_eq!(
+            join.output.as_ref().unwrap()["no_verdict"],
+            serde_json::json!(true)
         );
         assert_eq!(join.output.as_ref().unwrap()["passed"], 0);
-        assert!(fail_marker.exists(), "must route to on_fail_to");
+        assert!(
+            !fail_marker.exists(),
+            "CB66: a verdictless join never follows the Fail edge to on_fail_to"
+        );
 
         // Give the OS a moment past the members' scripted 3s sleep to prove
         // the processes were actually killed, not merely marked failed
@@ -23023,14 +23358,16 @@ echo done
         let join = join_run(&db, &spec_id, "join1");
         // CM13: m-crash exhausts infra retries → no verdict → cascade falls
         // through to m-ok. m-ok is also unreported infra → exhausts retries
-        // → no verdict → join fails (0/2).
+        // → no verdict → join is Error with no_verdict (CB66: a reviewer
+        // that could not run is not a reviewer that rejected).
         assert_eq!(
             join.status,
-            GraphRunStatus::Fail,
-            "CM13: both members are unreported infra; join fails after retry exhaustion"
+            GraphRunStatus::Error,
+            "CM13: both members are unreported infra; join is Error after retry exhaustion"
         );
         let out = join.output.as_ref().unwrap();
         assert_eq!(out["kind"], "cascade");
+        assert_eq!(out["no_verdict"], serde_json::json!(true));
 
         assert_eq!(
             member_runs(&db, &spec_id, "m-crash").len(),
@@ -23080,14 +23417,17 @@ echo done
         let join = join_run(&db, &spec_id, "join1");
         // CM13: m-noout is unreported infra → exhausts retries → no verdict.
         // Cascade falls through to m-ok. m-ok is also unreported infra →
-        // exhausts retries → no verdict → join fails (0/2).
+        // exhausts retries → no verdict → join is Error with no_verdict
+        // (CB66: a reviewer that could not run is not a reviewer that
+        // rejected).
         assert_eq!(
             join.status,
-            GraphRunStatus::Fail,
-            "CM13: both members are unreported infra; join fails after retry exhaustion"
+            GraphRunStatus::Error,
+            "CM13: both members are unreported infra; join is Error after retry exhaustion"
         );
         let out = join.output.as_ref().unwrap();
         assert_eq!(out["kind"], "cascade");
+        assert_eq!(out["no_verdict"], serde_json::json!(true));
 
         // Both members exhaust retries (3 runs each with default retry_limit=2).
         let m_noout_runs = member_runs(&db, &spec_id, "m-noout");
@@ -23150,8 +23490,13 @@ echo done
             assert_eq!(out["kind"], "round_robin");
             assert_eq!(
                 join.status,
-                GraphRunStatus::Fail,
-                "CM13: all members are unreported infra, so every invocation fails"
+                GraphRunStatus::Error,
+                "CM13: all members are unreported infra, so every invocation is Error (CB66)"
+            );
+            assert_eq!(
+                out["no_verdict"],
+                serde_json::json!(true),
+                "invocation {i} filed zero verdicts"
             );
             assert_eq!(
                 out["members_tried"], 3,
@@ -23207,11 +23552,12 @@ echo done
 
         let join = join_run(&db, &spec_id, "join1");
         // CM13: rr-ok never self-reports either, so both members are
-        // verdict-less and the join fails after the fallthrough.
+        // verdict-less and the join is Error with no_verdict (CB66) after
+        // the fallthrough.
         assert_eq!(
             join.status,
-            GraphRunStatus::Fail,
-            "CM13: both members are unreported infra; join fails after fallthrough"
+            GraphRunStatus::Error,
+            "CM13: both members are unreported infra; join is Error after fallthrough"
         );
         let out = join.output.as_ref().unwrap();
         assert_eq!(out["kind"], "round_robin");
@@ -23262,11 +23608,12 @@ echo done
 
         let join = join_run(&db, &spec_id, "join1");
         // CM13: rr-noout never filed a verdict, so it is verdict-less and the
-        // walk falls through to rr-ok — which is also unreported infra.
+        // walk falls through to rr-ok — which is also unreported infra, so
+        // the join is Error with no_verdict (CB66).
         assert_eq!(
             join.status,
-            GraphRunStatus::Fail,
-            "CM13: both members are verdict-less; the ensemble fails after fallthrough"
+            GraphRunStatus::Error,
+            "CM13: both members are verdict-less; the ensemble is Error after fallthrough"
         );
         let out = join.output.as_ref().unwrap();
         assert_eq!(out["kind"], "round_robin");
@@ -23278,7 +23625,8 @@ echo done
     }
 
     /// CM3: when every member in the rotation produces no verdict the ensemble
-    /// fails, in the same spirit as cascade's "all N members infra-crashed".
+    /// is Error with no_verdict (CB66), in the same spirit as cascade's
+    /// "all N members infra-crashed".
     #[tokio::test]
     async fn round_robin_fails_with_all_members_message_when_none_produce_a_verdict() {
         let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
@@ -23302,10 +23650,17 @@ echo done
         drop(_home);
 
         let join = join_run(&db, &spec_id, "join1");
-        assert_eq!(join.status, GraphRunStatus::Fail);
+        assert_eq!(join.status, GraphRunStatus::Error);
         let out = join.output.as_ref().unwrap();
         assert_eq!(out["kind"], "round_robin");
-        assert_eq!(out["error"], "all members infra-crashed");
+        assert_eq!(out["no_verdict"], serde_json::json!(true));
+        assert_eq!(
+            out["members"]
+                .as_array()
+                .expect("no-verdict lists members")
+                .len(),
+            3
+        );
         assert_eq!(out["members_tried"], 3);
         assert_eq!(out["members_total"], 3);
         for m in ["rr-c1", "rr-c2", "rr-c3"] {
@@ -23348,9 +23703,9 @@ echo done
 
         let join = join_run(&db, &spec_id, "join1");
         // CM13: rr-ok never self-reports, so all three members are
-        // verdict-less and the join fails — but the walk still tried all
-        // three in order before giving up.
-        assert_eq!(join.status, GraphRunStatus::Fail);
+        // verdict-less and the join is Error (CB66) — but the walk still
+        // tried all three in order before giving up.
+        assert_eq!(join.status, GraphRunStatus::Error);
         let out = join.output.as_ref().unwrap();
         assert_eq!(
             out["members_tried"], 3,
@@ -23407,9 +23762,9 @@ echo done
 
         let join = join_run(&db, &spec_id, "join1");
         // CM13: every member is script-backed and unreported, so the walk
-        // tries all three starting from the last and the join fails — but the
-        // wrap itself still happened (rr-ok at index 0 ran).
-        assert_eq!(join.status, GraphRunStatus::Fail);
+        // tries all three starting from the last and the join is Error
+        // (CB66) — but the wrap itself still happened (rr-ok at index 0 ran).
+        assert_eq!(join.status, GraphRunStatus::Error);
         let out = join.output.as_ref().unwrap();
         assert_eq!(out["members_tried"], 3);
 
@@ -23608,14 +23963,17 @@ echo done
 
         let join = join_run(&db, &spec_id, "join1");
         // CM13: script-backed members never self-report, so both are
-        // unreported infra and the join fails with 0 passed.
-        assert_eq!(join.status, GraphRunStatus::Fail);
+        // unreported infra and the join is Error with no_verdict (CB66:
+        // 0 filed verdicts). The quorum shape itself (kind/passed/min_pass/
+        // consolidated_doc) is unchanged for verdict-bearing joins.
+        assert_eq!(join.status, GraphRunStatus::Error);
         let out = join.output.as_ref().unwrap();
         assert_eq!(
             out["kind"], "quorum",
             "parallel keeps the quorum join shape"
         );
         assert_eq!(out["passed"], 0);
+        assert_eq!(out["no_verdict"], serde_json::json!(true));
         assert!(!member_runs(&db, &spec_id, "p-a").is_empty());
         assert!(!member_runs(&db, &spec_id, "p-b").is_empty());
     }
@@ -23662,11 +24020,16 @@ echo done
         drop(_home);
 
         let join = join_run(&db, &spec_id, "join1");
-        // CM13: neither member self-reports, so both exhaust retries and fail.
+        // CM13: neither member self-reports, so both exhaust retries with no
+        // verdict and the join is Error with no_verdict (CB66).
         assert_eq!(
             join.status,
-            GraphRunStatus::Fail,
-            "CM13: unreported runs are infra; both members exhaust retries"
+            GraphRunStatus::Error,
+            "CM13: unreported runs are infra; both members exhaust retries with no verdict"
+        );
+        assert_eq!(
+            join.output.as_ref().unwrap()["no_verdict"],
+            serde_json::json!(true)
         );
         assert_eq!(join.output.as_ref().unwrap()["passed"], 0);
 
@@ -23727,8 +24090,12 @@ echo done
         let join = join_run(&db, &spec_id, "join1");
         assert_eq!(
             join.status,
-            GraphRunStatus::Fail,
-            "CM13: both members are unreported infra -> 0/2 -> join fails"
+            GraphRunStatus::Error,
+            "CM13: both members are unreported infra -> 0/2 verdicts -> join is Error (CB66)"
+        );
+        assert_eq!(
+            join.output.as_ref().unwrap()["no_verdict"],
+            serde_json::json!(true)
         );
         assert_eq!(join.output.as_ref().unwrap()["passed"], 0);
 
@@ -23862,8 +24229,12 @@ echo done
         let join = join_run(&db, &spec_id, "join1");
         assert_eq!(
             join.status,
-            GraphRunStatus::Fail,
-            "both members are unreported infra -> 0/2 -> join fails"
+            GraphRunStatus::Error,
+            "both members are unreported infra -> 0/2 verdicts -> join is Error (CB66)"
+        );
+        assert_eq!(
+            join.output.as_ref().unwrap()["no_verdict"],
+            serde_json::json!(true)
         );
 
         let zero = member_runs(&db, &spec_id, "m-zero");
@@ -24005,8 +24376,12 @@ echo done
         let join = join_run(&db, &spec_id, "join1");
         assert_eq!(
             join.status,
-            GraphRunStatus::Fail,
-            "CM13: both members are unreported infra -> 0/2 -> join fails"
+            GraphRunStatus::Error,
+            "CM13: both members are unreported infra -> 0/2 verdicts -> join is Error (CB66)"
+        );
+        assert_eq!(
+            join.output.as_ref().unwrap()["no_verdict"],
+            serde_json::json!(true)
         );
         assert_eq!(join.output.as_ref().unwrap()["passed"], 0);
 
@@ -24076,8 +24451,12 @@ echo done
         let join = join_run(&db, &spec_id, "join1");
         assert_eq!(
             join.status,
-            GraphRunStatus::Fail,
-            "require_report members that exit 0 with real stdout but never self-report must fail the join"
+            GraphRunStatus::Error,
+            "require_report members that exit 0 with real stdout but never self-report file no verdict -> join is Error (CB66)"
+        );
+        assert_eq!(
+            join.output.as_ref().unwrap()["no_verdict"],
+            serde_json::json!(true)
         );
         assert_eq!(join.output.as_ref().unwrap()["passed"], 0);
 
@@ -24164,8 +24543,12 @@ echo done
         let join = join_run(&db, &spec_id, "join1");
         assert_eq!(
             join.status,
-            GraphRunStatus::Fail,
-            "straggler window expired before any member resolved -> 0/2 -> join fails"
+            GraphRunStatus::Error,
+            "straggler window expired before any member resolved -> 0/2 verdicts -> join is Error (CB66)"
+        );
+        assert_eq!(
+            join.output.as_ref().unwrap()["no_verdict"],
+            serde_json::json!(true)
         );
         assert_eq!(join.output.as_ref().unwrap()["passed"], 0);
 
@@ -24261,8 +24644,9 @@ echo done
 
         let lp = db.get_graph(&lp.id).unwrap().unwrap();
         // CM13: script-backed members never self-report, so the ensemble
-        // join fails and the spec fails with it.
-        assert_eq!(lp.status, GraphStatus::Failed);
+        // join is Error with no_verdict (CB66) and the spec pauses with a
+        // blocker instead of failing.
+        assert_eq!(lp.status, GraphStatus::Paused);
         assert_eq!(
             db.queue_next_pending_spec_id("queue-1").unwrap(),
             None,
@@ -29146,6 +29530,343 @@ exit 0
             1,
             "a reported fail must not be retried as infra"
         );
+    }
+
+    /// CB66.1: a round-robin ensemble whose members all crash (exit 1, never
+    /// reporting) settles with no verdict: the join is `Error` carrying
+    /// `no_verdict` + per-member reasons, and the run routes through the
+    /// `Error` edge — never the `Fail` edge.
+    #[tokio::test]
+    async fn cb66_no_verdict_round_robin_routes_error_edge_not_fail() {
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+        let crash_a = write_member_script(dir.path(), "a.sh", "exit 1");
+        let crash_b = write_member_script(dir.path(), "b.sh", "exit 1");
+        let fake_home =
+            setup_multi_cli_home(&[("rr-a", crash_a.as_str()), ("rr-b", crash_b.as_str())]);
+        insert_kind_ensemble(
+            &db,
+            &spec_id,
+            crate::domain::graphs::EnsembleKind::RoundRobin,
+            &[("rr-a", "rr-a"), ("rr-b", "rr-b")],
+        );
+        db.insert_graph_node(&GraphNode {
+            id: "done-error".to_string(),
+            spec_id: Some(spec_id.clone()),
+            graph_id: None,
+            name: "done-error".to_string(),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({ "command": "printf ok", "success_condition": "exit_code_0" }),
+            position: 102,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+        db.insert_graph_edge(&GraphEdge {
+            id: "join1->done-error".to_string(),
+            spec_id: Some(spec_id.clone()),
+            graph_id: None,
+            from_node: "join1".to_string(),
+            to_node: "done-error".to_string(),
+            condition: GraphEdgeCondition::Error,
+        })
+        .unwrap();
+
+        let _home = HomeGuard::set(fake_home.path());
+        let result = engine
+            .run_graph(graph_id.clone(), None, None, None, None)
+            .await;
+        drop(_home);
+        result.unwrap();
+
+        let join = join_run(&db, &spec_id, "join1");
+        assert_eq!(
+            join.status,
+            GraphRunStatus::Error,
+            "a verdictless join must be Error, not Fail"
+        );
+        let out = join.output.as_ref().unwrap();
+        assert_eq!(out["no_verdict"], serde_json::json!(true));
+        let members = out["members"]
+            .as_array()
+            .expect("no-verdict join lists members");
+        assert_eq!(members.len(), 2, "both members must be listed");
+        for m in members {
+            assert!(
+                m.get("node")
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| !s.is_empty()),
+                "member entry must name the node: {m:?}"
+            );
+            assert!(
+                m.get("platform")
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| !s.is_empty()),
+                "member entry must name the platform: {m:?}"
+            );
+            assert!(
+                m.get("reason")
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| !s.is_empty()),
+                "member entry must carry a reason: {m:?}"
+            );
+        }
+        assert!(
+            member_runs(&db, &spec_id, "done-error")
+                .iter()
+                .any(|r| r.status == GraphRunStatus::Pass),
+            "the Error edge must route to done-error"
+        );
+        assert!(
+            member_runs(&db, &spec_id, "done-fail").is_empty(),
+            "the Fail edge must never fire on a no-verdict exit"
+        );
+        assert!(
+            member_runs(&db, &spec_id, "done-pass").is_empty(),
+            "the Pass edge must never fire on a no-verdict exit"
+        );
+    }
+
+    /// CB66.2: same verdictless fixture with NO `Error` edge — the graph
+    /// pauses with a blocker naming both members instead of following `Fail`.
+    #[tokio::test]
+    async fn cb66_no_verdict_without_error_edge_pauses_with_blocker() {
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+        let crash_a = write_member_script(dir.path(), "a.sh", "exit 1");
+        let crash_b = write_member_script(dir.path(), "b.sh", "exit 1");
+        let fake_home =
+            setup_multi_cli_home(&[("rr-a", crash_a.as_str()), ("rr-b", crash_b.as_str())]);
+        insert_kind_ensemble(
+            &db,
+            &spec_id,
+            crate::domain::graphs::EnsembleKind::RoundRobin,
+            &[("rr-a", "rr-a"), ("rr-b", "rr-b")],
+        );
+
+        let _home = HomeGuard::set(fake_home.path());
+        let result = engine
+            .run_graph(graph_id.clone(), None, None, None, None)
+            .await;
+        drop(_home);
+        result.unwrap();
+
+        let lp = db.get_graph(&graph_id).unwrap().expect("graph must exist");
+        assert_eq!(
+            lp.status,
+            GraphStatus::Paused,
+            "a no-verdict exit with no Error edge must pause, not fail"
+        );
+        let join = join_run(&db, &spec_id, "join1");
+        assert_eq!(join.status, GraphRunStatus::Error);
+        let blocker = join
+            .output
+            .as_ref()
+            .and_then(|o| o.get("blocker"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        assert!(
+            blocker.contains("rr-a") && blocker.contains("rr-b"),
+            "blocker must name both members, got: {blocker:?}"
+        );
+        assert!(
+            blocker.to_lowercase().contains("verdict"),
+            "blocker must say no verdict was filed, got: {blocker:?}"
+        );
+        assert!(
+            member_runs(&db, &spec_id, "done-fail").is_empty(),
+            "the Fail edge must never fire on a no-verdict exit"
+        );
+    }
+
+    /// CB66.3 (FR3): one member crashes, the other files a real `fail`
+    /// verdict — the join stays `Fail` and routes to F, not E.
+    #[tokio::test]
+    async fn cb66_verdict_plus_crash_stays_fail() {
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+        let db_path = dir.path().join(TEST_DB_FILENAME);
+        let crash_path = write_member_script(dir.path(), "crash.sh", "exit 1");
+        let fail_path = write_self_reporting_member_script(
+            dir.path(),
+            "saysno.sh",
+            "sleep 1",
+            &db_path,
+            "rr-b",
+            "fail",
+            None,
+        );
+        let fake_home =
+            setup_multi_cli_home(&[("rr-a", crash_path.as_str()), ("rr-b", fail_path.as_str())]);
+        insert_kind_ensemble(
+            &db,
+            &spec_id,
+            crate::domain::graphs::EnsembleKind::RoundRobin,
+            &[("rr-a", "rr-a"), ("rr-b", "rr-b")],
+        );
+        db.insert_graph_node(&GraphNode {
+            id: "done-error".to_string(),
+            spec_id: Some(spec_id.clone()),
+            graph_id: None,
+            name: "done-error".to_string(),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({ "command": "printf ok", "success_condition": "exit_code_0" }),
+            position: 102,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+        db.insert_graph_edge(&GraphEdge {
+            id: "join1->done-error".to_string(),
+            spec_id: Some(spec_id.clone()),
+            graph_id: None,
+            from_node: "join1".to_string(),
+            to_node: "done-error".to_string(),
+            condition: GraphEdgeCondition::Error,
+        })
+        .unwrap();
+
+        let _home = HomeGuard::set(fake_home.path());
+        let _result = engine
+            .run_graph(graph_id.clone(), None, None, None, None)
+            .await;
+        drop(_home);
+
+        let join = join_run(&db, &spec_id, "join1");
+        assert_eq!(
+            join.status,
+            GraphRunStatus::Fail,
+            "a genuine fail verdict plus a crash must stay Fail"
+        );
+        let out = join.output.as_ref().unwrap();
+        assert!(
+            !out.get("no_verdict")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            "a verdict-bearing join must not carry no_verdict"
+        );
+        assert_eq!(
+            out["members_tried"].as_u64().unwrap(),
+            2,
+            "the walk must fall through the crasher to the failing member"
+        );
+        assert!(
+            !member_runs(&db, &spec_id, "done-fail").is_empty(),
+            "the Fail edge must fire on a genuine fail verdict"
+        );
+        assert!(
+            member_runs(&db, &spec_id, "done-error").is_empty(),
+            "the Error edge must not fire when a verdict exists"
+        );
+    }
+
+    /// CB66.4 (FR4): a no-verdict exit is not a review cycle — bouncing back
+    /// into the ensemble through the `Error` edge reuses the same iteration.
+    #[tokio::test]
+    async fn cb66_no_verdict_does_not_consume_iteration() {
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+        let crash_a = write_member_script(dir.path(), "a.sh", "exit 1");
+        let crash_b = write_member_script(dir.path(), "b.sh", "exit 1");
+        let fake_home =
+            setup_multi_cli_home(&[("rr-a", crash_a.as_str()), ("rr-b", crash_b.as_str())]);
+        insert_kind_ensemble(
+            &db,
+            &spec_id,
+            crate::domain::graphs::EnsembleKind::RoundRobin,
+            &[("rr-a", "rr-a"), ("rr-b", "rr-b")],
+        );
+        let counter = dir.path().join("gate-counter");
+        db.insert_graph_node(&counter_gate_node("gate", &spec_id, &counter, 60))
+            .unwrap();
+        let done_marker = dir.path().join("done.marker");
+        db.insert_graph_node(&touch_marker_node("done", &spec_id, &done_marker, 61))
+            .unwrap();
+        db.insert_graph_edge(&GraphEdge {
+            id: "join1->gate".to_string(),
+            spec_id: Some(spec_id.clone()),
+            graph_id: None,
+            from_node: "join1".to_string(),
+            to_node: "gate".to_string(),
+            condition: GraphEdgeCondition::Error,
+        })
+        .unwrap();
+        for edge in bounce_edges_into_ensemble(&spec_id, "gate", &["rr-a", "rr-b"]) {
+            db.insert_graph_edge(&edge).unwrap();
+        }
+        db.insert_graph_edge(&GraphEdge {
+            id: "gate->done".to_string(),
+            spec_id: Some(spec_id.clone()),
+            graph_id: None,
+            from_node: "gate".to_string(),
+            to_node: "done".to_string(),
+            condition: GraphEdgeCondition::Pass,
+        })
+        .unwrap();
+
+        let _home = HomeGuard::set(fake_home.path());
+        let result = engine
+            .run_graph(graph_id.clone(), None, None, None, None)
+            .await;
+        drop(_home);
+        result.unwrap();
+
+        let joins = member_runs(&db, &spec_id, "join1");
+        assert_eq!(
+            joins.len(),
+            2,
+            "the gate must bounce exactly once back into the ensemble"
+        );
+        for run in &joins {
+            assert_eq!(run.status, GraphRunStatus::Error);
+            assert_eq!(
+                run.iteration, 1,
+                "both no-verdict visits must share iteration 1 (no consumption)"
+            );
+        }
+        assert!(
+            !member_runs(&db, &spec_id, "done").is_empty(),
+            "flow must continue through the error edge to done"
+        );
+    }
+
+    /// CB66.5: an `Error` status resolves only `Error` edges — never `Fail`
+    /// or `Always` — and yields `None` when no `Error` edge exists.
+    #[test]
+    fn select_next_step_error_matches_only_error_edges() {
+        let edge = |id: &str, to: &str, condition| GraphEdge {
+            id: id.to_string(),
+            spec_id: Some("spec".to_string()),
+            graph_id: None,
+            from_node: "n1".to_string(),
+            to_node: to.to_string(),
+            condition,
+        };
+        let edges = vec![
+            edge("e-error", "e", GraphEdgeCondition::Error),
+            edge("e-fail", "f", GraphEdgeCondition::Fail),
+            edge("e-always", "a", GraphEdgeCondition::Always),
+        ];
+        let sel = select_next_step(&edges, &[], "n1", GraphRunStatus::Error)
+            .unwrap()
+            .expect("Error must resolve the Error edge");
+        assert_eq!(sel.cursor, SpecCursor::Node("e".to_string()));
+        let bare = vec![
+            edge("e-fail", "f", GraphEdgeCondition::Fail),
+            edge("e-always", "a", GraphEdgeCondition::Always),
+        ];
+        assert!(
+            select_next_step(&bare, &[], "n1", GraphRunStatus::Error)
+                .unwrap()
+                .is_none(),
+            "Error with no Error edge must match nothing (never Fail/Always)"
+        );
+    }
+
+    /// CB66.6: a join carrying `no_verdict` counts as infra for attempt
+    /// accounting.
+    #[test]
+    fn execution_is_infra_failure_no_verdict() {
+        assert!(execution_is_infra_failure(
+            &serde_json::json!({"no_verdict": true})
+        ));
+        assert!(!execution_is_infra_failure(
+            &serde_json::json!({"kind": "quorum"})
+        ));
     }
 
     /// C4: `run_self_reported` is the single source of truth for
