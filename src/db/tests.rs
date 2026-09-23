@@ -8283,3 +8283,174 @@ fn v3_close_schema_with_break_condition_migrates_loops_to_graphs() {
 
     drop(db);
 }
+
+// RETIRED-VOCAB-BEGIN (CB63 migration test — seeds rows carrying the
+// retired prefix on purpose; exempt from the vocabulary guard below)
+#[test]
+fn activity_attribution_prefix_migration_renames_old_rows_and_is_idempotent() {
+    let tmp = NamedTempFile::new().expect("create temp file");
+    let path = tmp.path().to_path_buf();
+    std::mem::forget(tmp);
+
+    // Fresh database: `init()` runs the attribution migration before the
+    // `CREATE TABLE IF NOT EXISTS` batch, so on a brand-new file the
+    // guard must make it a no-op, not an error.
+    let db = Database::new(&path).expect("fresh db opens with the attribution migration");
+    drop(db);
+
+    // Seed one row carrying the retired prefix (as a pre-CB63 binary
+    // wrote it) plus rows that must survive untouched: a plain source,
+    // a source merely starting with the letters "loop", and a source
+    // containing the old prefix NOT at position 0 (anchoring check).
+    {
+        let conn = rusqlite::Connection::open(&path).expect("reopen raw db to seed rows");
+        conn.execute_batch(
+            "INSERT INTO activity_log (workdir, source, source_id, kind, message, created_at)
+             VALUES
+                ('/wd', 'loop:Graph', 'g1', 'info', 'old engine row', 1),
+                ('/wd', 'agent', 'a1', 'info', 'agent row', 2),
+                ('/wd', 'loopish', 'x', 'info', 'not a prefix', 3),
+                ('/wd', 'my-loop:thing', 'x', 'info', 'not anchored', 4);",
+        )
+        .expect("seed activity rows");
+    }
+
+    let sources = || -> Vec<String> {
+        let conn = rusqlite::Connection::open(&path).expect("read sources");
+        let mut stmt = conn
+            .prepare("SELECT source FROM activity_log ORDER BY created_at")
+            .expect("select sources");
+        stmt.query_map([], |r| r.get::<_, String>(0))
+            .expect("map sources")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("collect sources")
+    };
+
+    // Reopen: the migration rewrites the one anchored prefix row.
+    let db = Database::new(&path).expect("reopen applies attribution migration");
+    drop(db);
+    assert_eq!(
+        sources(),
+        vec!["graph:Graph", "agent", "loopish", "my-loop:thing"],
+        "migration must rewrite only rows anchored with the retired prefix"
+    );
+
+    // Re-run must be a no-op: same rows, no error (idempotent,
+    // re-runnable — the CC3 shape requirement 1 demands).
+    let db = Database::new(&path).expect("third open must be idempotent");
+    drop(db);
+    assert_eq!(
+        sources(),
+        vec!["graph:Graph", "agent", "loopish", "my-loop:thing"]
+    );
+}
+// RETIRED-VOCAB-END
+
+// RETIRED-VOCAB-BEGIN (this guard test is the third place — with the CB63
+// migration and its test above — that must name the retired forms
+// literally, so it exempts itself with the same markers it enforces)
+/// Guards the CB63 rename from regressing in the two surfaces a person
+/// actually reads: documentation and the engine's activity attribution.
+///
+/// Scans every `docs/**/*.md` plus `README.md` for the retired word
+/// "loop" in any form (`loop lifecycle`, `` `loop:<name>` ``,
+/// `loop_complete_node`), and every `src/**/*.rs` for the retired
+/// attribution prefix inside a Rust string literal — a `"` immediately
+/// followed by `loop:`. A hit fails the test naming its file and line.
+/// The only exempt places are between marker pairs (the `RETIRED-VOCAB-`
+/// prefix plus `BEGIN` / `END`), the established convention
+/// (same shape as the queue-schema guard
+/// `no_retired_schema_name_identifiers_remain_outside_its_migration`):
+/// the migration that rewrites old rows, its test, this guard, and the
+/// 2.x alias history in `docs/mcp-tools.md`.
+///
+/// What is deliberately NOT scanned, and why (Decision D3): the Rust
+/// `loop` keyword and identifiers like `loop_id`, and the word `break`.
+/// Those forms are indistinguishable from genuine unrelated uses by any
+/// mechanical rule, they are not attribution, and the CB63 constraint
+/// forbids renaming them anyway. A stale mention that WOULD be a defect
+/// — prose "loop" in docs, a `loop:` prefix in any string — cannot hide
+/// from the patterns above.
+#[test]
+fn no_retired_vocabulary_in_user_visible_surfaces() {
+    let docs_word = regex::Regex::new(r"(?i)\bloop").unwrap();
+    // Built with `concat!` so these definition lines do not contain the
+    // marker literals themselves: a literal here would toggle the
+    // exempt-region state machine while it scans this very function
+    // (a literal end marker here would close the exemption early and the
+    // retired-prefix needles below would fail the guard against itself).
+    let begin_marker = concat!("RETIRED-VOCAB-", "BEGIN");
+    let end_marker = concat!("RETIRED-VOCAB-", "END");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+
+    // Collect: docs/**/*.md, README.md, src/**/*.rs.
+    let mut doc_files: Vec<std::path::PathBuf> = Vec::new();
+    for entry in walkdir::WalkDir::new(std::path::Path::new(manifest_dir).join("docs"))
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
+    {
+        doc_files.push(entry.path().to_path_buf());
+    }
+    doc_files.push(std::path::Path::new(manifest_dir).join("README.md"));
+    let mut src_files: Vec<std::path::PathBuf> = Vec::new();
+    for entry in walkdir::WalkDir::new(std::path::Path::new(manifest_dir).join("src"))
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "rs"))
+    {
+        src_files.push(entry.path().to_path_buf());
+    }
+
+    let mut violations = Vec::new();
+    for (is_src, path) in src_files
+        .iter()
+        .map(|p| (true, p))
+        .chain(doc_files.iter().map(|p| (false, p)))
+    {
+        let rel_path = path.strip_prefix(manifest_dir).unwrap_or(path.as_path());
+        let source = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {e}", rel_path.display()));
+        let mut exempt = false;
+        for (i, line) in source.lines().enumerate() {
+            if line.contains(end_marker) {
+                exempt = false;
+                continue;
+            }
+            if line.contains(begin_marker) {
+                exempt = true;
+                continue;
+            }
+            if exempt {
+                continue;
+            }
+            let hit = if is_src {
+                // The retired attribution appears in Rust source only
+                // inside a string literal: a double quote directly before
+                // `loop:`. Plain substring — no escaping ambiguity, and
+                // `format!("loop:{…}")` matches.
+                line.contains("\"loop:")
+                    .then(|| "\"loop: attribution prefix".to_string())
+            } else {
+                docs_word.find(line).map(|m| m.as_str()).map(Into::into)
+            };
+            if let Some(text) = hit {
+                violations.push(format!("{}:{} — {}", rel_path.display(), i + 1, text));
+            }
+        }
+        assert!(
+            !exempt,
+            "{} has an unclosed {begin_marker} region",
+            rel_path.display()
+        );
+    }
+
+    assert!(
+        violations.is_empty(),
+        "retired CB63 vocabulary found in a user-visible surface — the engine attributes activity as `graph:<name>` and the docs must say so; the only places naming the old term on purpose are wrapped in RETIRED-VOCAB-BEGIN/-END markers:\n{}",
+        violations.join("\n")
+    );
+}
+// RETIRED-VOCAB-END

@@ -63,10 +63,10 @@ Messages flow through per-workdir in-memory broadcast channels and are
 persisted to the database; relevant ones are auto-upserted as
 intelligence nodes.
 
-The graph engine narrates itself into this same stream: loop lifecycle
+The graph engine narrates itself into this same stream: graph lifecycle
 transitions, spec starts/completions, node and ensemble terminal states, and
 hook firings are written directly into the activity log the TUI's activity
-panel already reads, attributed as `loop:<name>`. No new surface, no new
+panel already reads, attributed as `graph:<name>`. No new surface, no new
 table — a running graph's history is visible in the same place agent chatter
 is, and reachable via `sync_get_context` without a live TUI session.
 

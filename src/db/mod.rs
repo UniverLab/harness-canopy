@@ -13,7 +13,10 @@ use std::sync::{Arc, Mutex};
 /// Version 6 changes the `ensembles` entry/exit FKs from `ON DELETE CASCADE`
 /// / `ON DELETE SET NULL` to `ON DELETE RESTRICT` — see
 /// `migrate_cb52_ensemble_fk` (CB52).
-const SCHEMA_VERSION: i64 = 6;
+/// Version 7 rewrites `activity_log.source` rows that carry the retired
+/// `loop:` attribution prefix to `graph:` — see
+/// `migrate_activity_attribution_prefix` (CB63).
+const SCHEMA_VERSION: i64 = 7;
 
 /// Thread-safe `SQLite` database wrapper.
 ///
@@ -335,6 +338,43 @@ impl Database {
     }
     // RETIRED-SCHEMA-NAME-END
 
+    // RETIRED-VOCAB-BEGIN (CB63: this migration rewrites stored rows and
+    // must name the retired prefix to do it; exempt from
+    // `no_retired_vocabulary_in_user_visible_surfaces`)
+    /// CB63: the engine's activity attribution was `loop:<name>` until the
+    /// loop→graph rename reached it (CC3 moved everything else). Rows written
+    /// by pre-CB63 binaries still carry the old prefix in
+    /// `activity_log.source`; rewrite the anchored prefix to `graph:`.
+    /// Idempotent by construction — the `LIKE 'loop:%'` predicate matches no
+    /// row once rewritten — so safe on every startup, the same
+    /// guarded-and-re-runnable shape as `migrate_loop_to_graph_schema` (CC3).
+    fn migrate_activity_attribution_prefix(conn: &Connection) -> Result<()> {
+        let has_activity_log: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'activity_log'",
+                [],
+                |row| Ok(row.get::<_, i32>(0)? > 0),
+            )
+            .unwrap_or(false);
+        if !has_activity_log {
+            return Ok(());
+        }
+        // Anchored prefix rewrite, deliberately not
+        // `REPLACE(source, 'loop:', 'graph:')`: REPLACE would also rewrite a
+        // graph *name* that contains "loop:" (e.g. a graph named
+        // "loop:keeper"), corrupting the attribution. `substr(source, 6)`
+        // drops the 5-byte `loop:` prefix (SQLite substr is 1-based).
+        conn.execute(
+            "UPDATE activity_log
+                SET source = 'graph:' || substr(source, 6)
+              WHERE source LIKE 'loop:%'",
+            [],
+        )
+        .map_err(|e| anyhow::anyhow!("activity attribution migration failed: {e}"))?;
+        Ok(())
+    }
+    // RETIRED-VOCAB-END
+
     /// CB52: the `ensembles` entry/exit FKs (`entry_from_node`, `on_pass_to`,
     /// `on_fail_to`) used to be `ON DELETE CASCADE` / `ON DELETE SET NULL`,
     /// so deleting a plain node silently deleted every ensemble referencing
@@ -475,6 +515,7 @@ impl Database {
         Self::migrate_legacy_queue_schema(&conn)?;
         Self::migrate_loop_to_graph_schema(&conn)?;
         Self::migrate_cb52_ensemble_fk(&conn)?;
+        Self::migrate_activity_attribution_prefix(&conn)?;
 
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS agents (

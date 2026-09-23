@@ -10983,7 +10983,7 @@ mod tests {
             "got: {messages:?}"
         );
         for entry in &entries {
-            assert_eq!(entry.source, "loop:Graph");
+            assert_eq!(entry.source, "graph:Graph");
             assert_eq!(entry.source_id.as_deref(), Some(graph_id.as_str()));
         }
     }
@@ -11027,7 +11027,7 @@ mod tests {
         );
         assert!(
             messages.iter().any(|m| m.starts_with("Failed:")),
-            "expected a loop-failed entry, got: {messages:?}"
+            "expected a graph-failed entry, got: {messages:?}"
         );
     }
 

@@ -111,6 +111,8 @@ stdio. Connect any MCP-capable AI CLI with `canopy mcp`.
 
 See [Graphs](graphs.md).
 
+<!-- RETIRED-VOCAB-BEGIN: 2.x alias history — this subsection names the retired term on purpose. -->
+
 ### Deprecated names (2.x)
 
 Kept callable for the whole 3.x line, but excluded from tool listings
@@ -128,6 +130,8 @@ field naming the rename. No other `loop_*` tool has a 3.x alias — every
 other 2.x `loop_*` MCP tool name and the `canopy loop` CLI subcommand
 (now `canopy graph`) are gone for good; `graph_preflight` and `canopy
 doctor` both warn if a stored prompt or hook still mentions one.
+
+<!-- RETIRED-VOCAB-END -->
 
 ### Hook placeholders and shell safety
 
