@@ -44,7 +44,9 @@ use crate::daemon::handler_helpers::{
     resolve_effective_project_hash, update_agent_last_run, validate_report_summary,
     validate_run_transition, watcher_restart_needed,
 };
-use crate::daemon::helpers::{data_dir, error_result, notify_run_result, success_result};
+use crate::daemon::helpers::{
+    data_dir, error_result, notify_run_result, success_result, with_deprecated_note,
+};
 use crate::daemon::params::*;
 use crate::daemon::params_extract::Parameters;
 use crate::db::intelligence::IntelligenceNodeRecord;
@@ -8565,6 +8567,105 @@ impl TaskTriggerHandler {
             (terminal_list, graph_warnings)
         };
 
+        // CB68 FR2: warn (never rewrite — FR4) about every node, ensemble and
+        // hook whose prompt/command still names a removed 2.x `loop_<tool>` or
+        // `canopy loop`, so a graph built before 3.0.0 doesn't silently produce
+        // an agent that calls a tool that no longer exists.
+        let stale_name_warnings: Vec<serde_json::Value> = {
+            let mut out = Vec::new();
+            let all_nodes = details
+                .graph_nodes
+                .iter()
+                .chain(details.specs.iter().flat_map(|s| s.nodes.iter()));
+            for node in all_nodes {
+                for field in ["prompt_template", "command"] {
+                    if let Some(text) = node.config.get(field).and_then(|v| v.as_str()) {
+                        for hit in crate::domain::validation::find_stale_2x_names(text) {
+                            out.push(serde_json::json!({
+                                "kind": "node",
+                                "id": node.id,
+                                "name": node.name,
+                                "old_name": hit.old,
+                                "new_name": hit.new,
+                                "warning": format!(
+                                    "Node '{}' {} mentions '{}', which no longer exists since 3.0.0 — use '{}'.",
+                                    node.name, field, hit.old, hit.new
+                                ),
+                            }));
+                        }
+                    }
+                }
+            }
+            for (event, hook_list) in &details.lp.hooks {
+                for hook in hook_list {
+                    for text in [hook.prompt.as_deref(), hook.command.as_deref()]
+                        .into_iter()
+                        .flatten()
+                    {
+                        for hit in crate::domain::validation::find_stale_2x_names(text) {
+                            out.push(serde_json::json!({
+                                "kind": "hook",
+                                "event": event.as_str(),
+                                "old_name": hit.old,
+                                "new_name": hit.new,
+                                "warning": format!(
+                                    "A {} hook mentions '{}', which no longer exists since 3.0.0 — use '{}'.",
+                                    event.as_str(), hit.old, hit.new
+                                ),
+                            }));
+                        }
+                    }
+                }
+            }
+            let mut ensembles = self
+                .db
+                .list_ensembles_for_graph(&details.lp.id)
+                .map_err(internal_error)?;
+            for spec in &details.specs {
+                ensembles.extend(
+                    self.db
+                        .list_ensembles_for_spec(&spec.spec.id)
+                        .map_err(internal_error)?,
+                );
+            }
+            for ens in &ensembles {
+                for hit in
+                    crate::domain::validation::find_stale_2x_names(&ens.ensemble.prompt_template)
+                {
+                    out.push(serde_json::json!({
+                        "kind": "ensemble",
+                        "id": ens.ensemble.id,
+                        "name": ens.ensemble.name,
+                        "old_name": hit.old,
+                        "new_name": hit.new,
+                        "warning": format!(
+                            "Ensemble '{}' prompt mentions '{}', which no longer exists since 3.0.0 — use '{}'.",
+                            ens.ensemble.name, hit.old, hit.new
+                        ),
+                    }));
+                }
+                for member in &ens.members {
+                    let Some(prompt_override) = &member.prompt_override else {
+                        continue;
+                    };
+                    for hit in crate::domain::validation::find_stale_2x_names(prompt_override) {
+                        out.push(serde_json::json!({
+                            "kind": "ensemble",
+                            "id": ens.ensemble.id,
+                            "name": ens.ensemble.name,
+                            "old_name": hit.old,
+                            "new_name": hit.new,
+                            "warning": format!(
+                                "Ensemble '{}' member prompt override mentions '{}', which no longer exists since 3.0.0 — use '{}'.",
+                                ens.ensemble.name, hit.old, hit.new
+                            ),
+                        }));
+                    }
+                }
+            }
+            out
+        };
+
         // CM1: validate {{output:NodeName}} references
         {
             let node_names: Vec<String> =
@@ -8806,6 +8907,7 @@ impl TaskTriggerHandler {
                     ),
                     "spec_warnings": spec_warnings,
                     "graph_warnings": graph_warnings,
+                    "stale_name_warnings": stale_name_warnings,
                     "dirty_workdir_warning": dirty_workdir_warning.clone(),
                     "review": reviewer_out,
                     "terminals": terminal_list,
@@ -8888,6 +8990,7 @@ impl TaskTriggerHandler {
                 "effort_warnings": effort_warnings,
                 "spec_warnings": spec_warnings,
                 "graph_warnings": graph_warnings,
+                "stale_name_warnings": stale_name_warnings,
                 "dirty_workdir_warning": dirty_workdir_warning,
                 "review": reviewer_out,
                 "terminals": terminal_list,
@@ -9145,11 +9248,36 @@ impl TaskTriggerHandler {
     )]
     async fn graph_schedule_autorun(
         &self,
-        Parameters(GraphScheduleAutorunParams {
-            graph_id: raw_graph_id,
-            at,
-            quota_reset_message,
-        }): Parameters<GraphScheduleAutorunParams>,
+        Parameters(params): Parameters<GraphScheduleAutorunParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.schedule_autorun_impl(params.graph_id, params.at, params.quota_reset_message)
+            .await
+    }
+
+    #[tool(
+        name = "loop_schedule_autorun",
+        description = "Deprecated: renamed graph_schedule_autorun in 3.0.0. Same parameters and \
+        behaviour as graph_schedule_autorun; `loop_id` is still accepted as the graph id. Hidden \
+        from tool listings; call graph_schedule_autorun instead."
+    )]
+    async fn loop_schedule_autorun(
+        &self,
+        Parameters(params): Parameters<LoopScheduleAutorunParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .schedule_autorun_impl(params.graph_id, params.at, params.quota_reset_message)
+            .await?;
+        Ok(with_deprecated_note(
+            result,
+            "loop_schedule_autorun was renamed graph_schedule_autorun in 3.0.0",
+        ))
+    }
+
+    async fn schedule_autorun_impl(
+        &self,
+        raw_graph_id: String,
+        at: Option<String>,
+        quota_reset_message: Option<String>,
     ) -> Result<CallToolResult, McpError> {
         let graph_id = match resolve_prefix_or_error(
             &self.db,
@@ -9506,6 +9634,34 @@ impl TaskTriggerHandler {
         &self,
         Parameters(params): Parameters<GraphCompleteNodeParams>,
     ) -> Result<CallToolResult, McpError> {
+        self.complete_node_impl(params).await
+    }
+
+    #[tool(
+        name = "loop_complete_node",
+        description = "Deprecated: renamed graph_complete_node in 3.0.0. Same parameters and \
+        behaviour as graph_complete_node — kept working for the whole 3.x line so a prompt \
+        still written against the 2.x name doesn't end unreported. Hidden from tool listings; \
+        call graph_complete_node instead."
+    )]
+    async fn loop_complete_node(
+        &self,
+        Parameters(params): Parameters<GraphCompleteNodeParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self.complete_node_impl(params).await?;
+        Ok(with_deprecated_note(
+            result,
+            "loop_complete_node was renamed graph_complete_node in 3.0.0",
+        ))
+    }
+
+    /// Shared body of `graph_complete_node` and the deprecated
+    /// `loop_complete_node` alias (CB68) — identical params, identical
+    /// behaviour; only the alias's response gets a `deprecated` note.
+    async fn complete_node_impl(
+        &self,
+        params: GraphCompleteNodeParams,
+    ) -> Result<CallToolResult, McpError> {
         let status = match params.status.trim() {
             "pass" => Some(GraphRunStatus::Pass),
             "fail" => Some(GraphRunStatus::Fail),
@@ -9543,6 +9699,30 @@ impl TaskTriggerHandler {
     async fn graph_report_blocker(
         &self,
         Parameters(params): Parameters<GraphReportBlockerParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.report_blocker_impl(params).await
+    }
+
+    #[tool(
+        name = "loop_report_blocker",
+        description = "Deprecated: renamed graph_report_blocker in 3.0.0. Same parameters and \
+        behaviour as graph_report_blocker. Hidden from tool listings; call graph_report_blocker \
+        instead."
+    )]
+    async fn loop_report_blocker(
+        &self,
+        Parameters(params): Parameters<GraphReportBlockerParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self.report_blocker_impl(params).await?;
+        Ok(with_deprecated_note(
+            result,
+            "loop_report_blocker was renamed graph_report_blocker in 3.0.0",
+        ))
+    }
+
+    async fn report_blocker_impl(
+        &self,
+        params: GraphReportBlockerParams,
     ) -> Result<CallToolResult, McpError> {
         let run = match resolve_reported_run(&self.db, &params.run_id, &params.node_id)? {
             Ok(run) => run,
@@ -11817,8 +11997,41 @@ fn inject_seed_identity(
     }
 }
 
+/// CB68 FR1: MCP tool names kept callable (see `complete_node_impl` /
+/// `report_blocker_impl` / `schedule_autorun_impl`) but excluded from
+/// `tools/list` so no new caller discovers and adopts a 2.x name. Filtering
+/// happens here — in a hand-written `list_tools` — rather than via
+/// `ToolRouter::disable_route`, because a disabled route also rejects
+/// `call()` (see `rmcp::handler::server::router::tool::ToolRouter::call`),
+/// which would break the alias's whole purpose.
+const HIDDEN_DEPRECATED_TOOLS: &[&str] = &[
+    "loop_complete_node",
+    "loop_report_blocker",
+    "loop_schedule_autorun",
+];
+
+fn visible_tool_list() -> Vec<Tool> {
+    TaskTriggerHandler::tool_router()
+        .list_all()
+        .into_iter()
+        .filter(|t| !HIDDEN_DEPRECATED_TOOLS.contains(&t.name.as_ref()))
+        .collect()
+}
+
 #[tool_handler]
 impl ServerHandler for TaskTriggerHandler {
+    async fn list_tools(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
+        Ok(rmcp::model::ListToolsResult {
+            tools: visible_tool_list(),
+            meta: None,
+            next_cursor: None,
+        })
+    }
+
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new(
@@ -26238,6 +26451,111 @@ mod endpoint_tests {
         );
     }
 
+    #[tokio::test]
+    async fn loop_complete_node_records_result_like_graph_complete_node_and_notes_deprecation() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let lp = insert_test_graph(&db, dir.path());
+        let run = insert_running_node_run(&db, &lp.id);
+
+        let result = handler
+            .loop_complete_node(Parameters(GraphCompleteNodeParams {
+                run_id: run.id.clone(),
+                node_id: run.node_id.clone(),
+                status: "pass".to_string(),
+                output: "out".to_string(),
+                summary: "sum".to_string(),
+            }))
+            .await
+            .unwrap();
+
+        assert!(!is_err(&result), "{}", text(&result));
+        let body = raw_text(&result);
+        assert!(body.contains("loop_complete_node was renamed graph_complete_node in 3.0.0"));
+
+        // Same DB effect as graph_complete_node: the run is finalized pass.
+        let stored = db.get_graph_run(&run.id).unwrap().unwrap();
+        assert_eq!(stored.status, GraphRunStatus::Pass);
+    }
+
+    #[tokio::test]
+    async fn loop_report_blocker_pauses_the_graph_and_notes_deprecation() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let lp = insert_test_graph(&db, dir.path());
+        let run = insert_running_node_run(&db, &lp.id);
+
+        let result = handler
+            .loop_report_blocker(Parameters(GraphReportBlockerParams {
+                run_id: run.id,
+                node_id: run.node_id,
+                description: "waiting on human input".to_string(),
+            }))
+            .await
+            .unwrap();
+
+        assert!(!is_err(&result), "{}", text(&result));
+        assert!(raw_text(&result)
+            .contains("loop_report_blocker was renamed graph_report_blocker in 3.0.0"));
+        assert_eq!(
+            db.get_graph(&lp.id).unwrap().unwrap().status,
+            GraphStatus::Paused
+        );
+    }
+
+    #[tokio::test]
+    async fn loop_schedule_autorun_accepts_loop_id_as_graph_id() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let lp = insert_test_graph(&db, dir.path());
+
+        // Deserialize straight from JSON using the wire field name `loop_id`,
+        // proving the `#[serde(alias = "loop_id")]` on `graph_id` actually
+        // works end to end, not just as a Rust-level convenience constructor.
+        let raw = serde_json::json!({
+            "loop_id": lp.id,
+            "at": null,
+            "quota_reset_message": null,
+        });
+        let params: LoopScheduleAutorunParams = serde_json::from_value(raw).unwrap();
+        assert_eq!(params.graph_id, lp.id);
+
+        let result = handler
+            .loop_schedule_autorun(Parameters(params))
+            .await
+            .unwrap();
+        assert!(!is_err(&result), "{}", text(&result));
+        assert!(raw_text(&result)
+            .contains("loop_schedule_autorun was renamed graph_schedule_autorun in 3.0.0"));
+    }
+
+    #[test]
+    fn tool_listing_hides_the_three_deprecated_aliases_but_keeps_them_registered() {
+        let visible = super::visible_tool_list();
+        for hidden in [
+            "loop_complete_node",
+            "loop_report_blocker",
+            "loop_schedule_autorun",
+        ] {
+            assert!(
+                !visible.iter().any(|t| t.name == hidden),
+                "{hidden} must not appear in the tool listing"
+            );
+        }
+        // Still registered in the router (i.e. still callable) — just not listed.
+        let all = TaskTriggerHandler::tool_router().list_all();
+        for still_registered in [
+            "loop_complete_node",
+            "loop_report_blocker",
+            "loop_schedule_autorun",
+        ] {
+            assert!(
+                all.iter().any(|t| t.name == still_registered),
+                "{still_registered} must remain registered in the router so call_tool still works"
+            );
+        }
+        // A real graph_* tool must still be listed — the filter must be
+        // exact-name, not a prefix/substring match that could eat something else.
+        assert!(visible.iter().any(|t| t.name == "graph_complete_node"));
+    }
+
     /// C19 FR4 (reusing the same blocker mechanism `graph_report_blocker`
     /// uses): a graph paused with an active blocker must not be silently
     /// relaunched via `graph_run` — that's the whole "not started again
@@ -28204,6 +28522,157 @@ mod endpoint_tests {
                 .iter()
                 .any(|h| h["kind"] == "ensemble" && h["name"] == "Committer Ensemble"),
             "preflight must name the ensemble as committer: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn graph_preflight_warns_on_stale_loop_complete_node_in_ensemble_prompt() {
+        // Build a graph with one ensemble whose shared prompt_template still
+        // instructs the 2.x tool name — mirrors the CB68 objective's kilo
+        // run fff7f1aa scenario (Implementer/Committer ensemble prompt).
+        let (dir, db, handler) = endpoint_test_handler();
+        let lp = insert_test_graph(&db, dir.path());
+        let spec = insert_test_spec(&db, &lp.id, 1);
+        let entry = add_agent_node(&handler, &spec.id, "Entry").await;
+        let arbiter = add_agent_node(&handler, &spec.id, "Arbiter").await;
+        let member = || crate::daemon::params::EnsembleMemberParams {
+            platform: "claude".to_string(),
+            model: None,
+            prompt_override: None,
+            timeout_minutes: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
+        };
+
+        let created = handler
+            .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                commit_rights: None,
+                spec_id: Some(spec.id.clone()),
+                graph_id: None,
+                name: "Stale Ensemble".to_string(),
+                kind: None,
+                prompt_template: Some("end with exactly one loop_complete_node call".to_string()),
+                members: Some(vec![member(), member()]),
+                blueprint: None,
+                from_node: entry,
+                condition: "always".to_string(),
+                min_pass: Some(2),
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
+                timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
+                on_pass_to: arbiter,
+                on_fail_to: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&created), "{}", text(&created));
+
+        let result = handler
+            .graph_preflight(Parameters(GraphPreflightParams {
+                graph_id: lp.id.clone(),
+                timeout_seconds: Some(5),
+                reviewer: None,
+            }))
+            .await
+            .unwrap();
+
+        assert!(!is_err(&result), "{}", text(&result));
+        let body = raw_text(&result);
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let warnings = parsed["stale_name_warnings"].as_array().unwrap();
+        assert!(
+            warnings.iter().any(|w| w["kind"] == "ensemble"
+                && w["new_name"] == "graph_complete_node"
+                && w["old_name"] == "loop_complete_node"),
+            "{body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn graph_preflight_reports_no_stale_name_warnings_on_clean_graph() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let lp = insert_test_graph(&db, dir.path());
+        let spec = insert_test_spec(&db, &lp.id, 1);
+        let entry = add_agent_node(&handler, &spec.id, "Entry").await;
+        let arbiter = add_agent_node(&handler, &spec.id, "Arbiter").await;
+        add_two_member_ensemble(&handler, &spec.id, "Clean Ensemble", &entry, &arbiter).await;
+
+        let result = handler
+            .graph_preflight(Parameters(GraphPreflightParams {
+                graph_id: lp.id.clone(),
+                timeout_seconds: Some(5),
+                reviewer: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&result), "{}", text(&result));
+        let body = raw_text(&result);
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            parsed["stale_name_warnings"],
+            serde_json::json!([]),
+            "{body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn graph_preflight_hook_warning_names_the_firing_event() {
+        // Same clean-graph fixture as above plus one stale agent hook on
+        // `on_failed`: if the hook scan were missing, `stale_name_warnings`
+        // stays empty and this fails; and a warning that labels every hook a
+        // generic "completion hook" fails the `on_failed` assertions.
+        let (dir, db, handler) = endpoint_test_handler();
+        let lp = insert_test_graph(&db, dir.path());
+        let spec = insert_test_spec(&db, &lp.id, 1);
+        let entry = add_agent_node(&handler, &spec.id, "Entry").await;
+        let arbiter = add_agent_node(&handler, &spec.id, "Arbiter").await;
+        add_two_member_ensemble(&handler, &spec.id, "Clean Ensemble", &entry, &arbiter).await;
+
+        let mut hooks = std::collections::BTreeMap::new();
+        hooks.insert(
+            crate::domain::graphs::GraphHookEvent::OnFailed,
+            vec![crate::domain::graphs::GraphCompletionHook {
+                platform: Some("claude".to_string()),
+                model: None,
+                effort: None,
+                prompt: Some("on failure, call loop_report_blocker with details".to_string()),
+                command: None,
+                target_session_id: None,
+                target_session_name: None,
+                timeout_minutes: None,
+                target_graph_id: None,
+                queue_id: None,
+                workdir_override: None,
+                idea: None,
+            }],
+        );
+        db.update_graph_hooks(&lp.id, &hooks).unwrap();
+
+        let result = handler
+            .graph_preflight(Parameters(GraphPreflightParams {
+                graph_id: lp.id.clone(),
+                timeout_seconds: Some(5),
+                reviewer: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&result), "{}", text(&result));
+        let body = raw_text(&result);
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let warnings = parsed["stale_name_warnings"].as_array().unwrap();
+        assert!(
+            warnings.iter().any(|w| w["kind"] == "hook"
+                && w["event"] == "on_failed"
+                && w["old_name"] == "loop_report_blocker"
+                && w["new_name"] == "graph_report_blocker"
+                && w["warning"]
+                    .as_str()
+                    .is_some_and(|t| t.contains("on_failed hook"))),
+            "{body}"
         );
     }
 

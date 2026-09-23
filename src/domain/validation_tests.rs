@@ -915,4 +915,61 @@ mod graph_validation {
         assert!(err.contains('4'));
         assert!(err.contains('3'));
     }
+
+    #[test]
+    fn find_stale_2x_names_matches_known_removed_tool() {
+        let hits = find_stale_2x_names("end with exactly one loop_complete_node call");
+        assert_eq!(
+            hits,
+            vec![StaleNameHit {
+                old: "loop_complete_node".to_string(),
+                new: "graph_complete_node".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn find_stale_2x_names_matches_canopy_loop_cli() {
+        let hits = find_stale_2x_names("run `canopy loop info` to check status");
+        assert_eq!(
+            hits,
+            vec![StaleNameHit {
+                old: "canopy loop".to_string(),
+                new: "canopy graph".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn find_stale_2x_names_ignores_unrelated_loop_words() {
+        // `loop_id` is not a removed tool name — must not be reported.
+        assert!(find_stale_2x_names("pass loop_id to the scheduler").is_empty());
+        assert!(find_stale_2x_names("nothing stale here").is_empty());
+    }
+
+    #[test]
+    fn find_stale_2x_names_does_not_false_positive_on_prefix_match() {
+        // "loop_run" must not match inside a longer identifier.
+        assert!(find_stale_2x_names("loop_running_total is fine").is_empty());
+    }
+
+    #[test]
+    fn find_stale_2x_names_reports_every_distinct_hit() {
+        let hits = find_stale_2x_names(
+            "call loop_schedule_autorun then loop_complete_node, never canopy loop",
+        );
+        assert_eq!(hits.len(), 3);
+        assert!(hits.contains(&StaleNameHit {
+            old: "loop_schedule_autorun".to_string(),
+            new: "graph_schedule_autorun".to_string(),
+        }));
+        assert!(hits.contains(&StaleNameHit {
+            old: "loop_complete_node".to_string(),
+            new: "graph_complete_node".to_string(),
+        }));
+        assert!(hits.contains(&StaleNameHit {
+            old: "canopy loop".to_string(),
+            new: "canopy graph".to_string(),
+        }));
+    }
 }

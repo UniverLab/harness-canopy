@@ -1311,6 +1311,19 @@ pub struct GraphScheduleAutorunParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct LoopScheduleAutorunParams {
+    /// Graph ID. Also accepts `loop_id` — the 2.x parameter name, kept
+    /// working by `loop_schedule_autorun` (deprecated alias for
+    /// `graph_schedule_autorun`, CB68).
+    #[serde(alias = "loop_id")]
+    pub graph_id: String,
+    /// Same as `graph_schedule_autorun`'s `at`.
+    pub at: Option<String>,
+    /// Same as `graph_schedule_autorun`'s `quota_reset_message`.
+    pub quota_reset_message: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GraphScheduleContinueParams {
     /// Graph ID.
     pub graph_id: String,

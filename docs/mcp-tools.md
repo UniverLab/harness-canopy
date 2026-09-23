@@ -111,6 +111,24 @@ stdio. Connect any MCP-capable AI CLI with `canopy mcp`.
 
 See [Graphs](graphs.md).
 
+### Deprecated names (2.x)
+
+Kept callable for the whole 3.x line, but excluded from tool listings
+(`tools/list`) so nothing new adopts them — call the 3.x name instead. Not
+counted in the 95 tools above.
+
+| Deprecated name | Renamed to (3.0.0) |
+|---|---|
+| `loop_complete_node` | `graph_complete_node` |
+| `loop_report_blocker` | `graph_report_blocker` |
+| `loop_schedule_autorun` | `graph_schedule_autorun` (also still accepts a `loop_id` argument as `graph_id`) |
+
+A successful call through any of these three carries an extra `deprecated`
+field naming the rename. No other `loop_*` tool has a 3.x alias — every
+other 2.x `loop_*` MCP tool name and the `canopy loop` CLI subcommand
+(now `canopy graph`) are gone for good; `graph_preflight` and `canopy
+doctor` both warn if a stored prompt or hook still mentions one.
+
 ### Hook placeholders and shell safety
 
 Command hooks substitute event-bound `{{...}}` markers as POSIX shell-quoted

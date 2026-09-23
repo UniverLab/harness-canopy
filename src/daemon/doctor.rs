@@ -51,6 +51,89 @@ pub(crate) fn diagnose_embeddings_config(model: &str) -> EmbeddingsConfigDiagnos
     }
 }
 
+/// CB68 FR3: scan every non-archived graph's node/ensemble prompts and
+/// hooks, and every scheduled agent's prompt, for a stale 2.x `loop_<name>`
+/// tool name or the gone `canopy loop` CLI. Pure over an already-open
+/// `Database` — no printing — so tests can assert on a fixture DB directly,
+/// the same reason `diagnose_embeddings_config` above is split out from
+/// `run_doctor` (stdout-fd capture is unreliable in CI; see the `#[ignore]`
+/// notes on the `run_doctor_*` fixture tests below).
+pub(crate) fn find_stale_2x_name_hits(db: &Database) -> anyhow::Result<Vec<String>> {
+    let mut hits = Vec::new();
+    for graph in db.list_graphs(None, false)? {
+        let Some(details) = db.get_graph_details(&graph.id)? else {
+            continue;
+        };
+        let all_nodes = details
+            .graph_nodes
+            .iter()
+            .chain(details.specs.iter().flat_map(|s| s.nodes.iter()));
+        for node in all_nodes {
+            for field in ["prompt_template", "command"] {
+                if let Some(text) = node.config.get(field).and_then(|v| v.as_str()) {
+                    for hit in crate::domain::validation::find_stale_2x_names(text) {
+                        hits.push(format!(
+                            "{} · {} · {} → {}",
+                            graph.name, node.name, hit.old, hit.new
+                        ));
+                    }
+                }
+            }
+        }
+        for (event, hook_list) in &details.lp.hooks {
+            for hook in hook_list {
+                for text in [hook.prompt.as_deref(), hook.command.as_deref()]
+                    .into_iter()
+                    .flatten()
+                {
+                    for hit in crate::domain::validation::find_stale_2x_names(text) {
+                        hits.push(format!(
+                            "{} · {} hook · {} → {}",
+                            graph.name,
+                            event.as_str(),
+                            hit.old,
+                            hit.new
+                        ));
+                    }
+                }
+            }
+        }
+        let mut ensembles = db.list_ensembles_for_graph(&graph.id)?;
+        for spec in &details.specs {
+            ensembles.extend(db.list_ensembles_for_spec(&spec.spec.id)?);
+        }
+        for ens in &ensembles {
+            for hit in crate::domain::validation::find_stale_2x_names(&ens.ensemble.prompt_template)
+            {
+                hits.push(format!(
+                    "{} · {} · {} → {}",
+                    graph.name, ens.ensemble.name, hit.old, hit.new
+                ));
+            }
+            for member in &ens.members {
+                let Some(prompt_override) = &member.prompt_override else {
+                    continue;
+                };
+                for hit in crate::domain::validation::find_stale_2x_names(prompt_override) {
+                    hits.push(format!(
+                        "{} · {} · {} → {}",
+                        graph.name, ens.ensemble.name, hit.old, hit.new
+                    ));
+                }
+            }
+        }
+    }
+    for agent in db.list_agents()? {
+        for hit in crate::domain::validation::find_stale_2x_names(&agent.prompt) {
+            hits.push(format!(
+                "{} · scheduled agent prompt · {} → {}",
+                agent.id, hit.old, hit.new
+            ));
+        }
+    }
+    Ok(hits)
+}
+
 /// Print doctor's "verified" line — the ✓ glyph reserved for a check that
 /// actually exercised the capability it reports on (opened the database,
 /// opened the vector store, confirmed a resolved binary is executable,
@@ -164,6 +247,27 @@ pub(crate) async fn run_doctor() -> Result<()> {
                     }
                     _ => {
                         println!(" \x1b[33m⚠\x1b[0m Daily health routine: never run");
+                    }
+                }
+
+                match find_stale_2x_name_hits(&db) {
+                    Ok(hits) if hits.is_empty() => {
+                        success("Stale 2.x names: none found");
+                    }
+                    Ok(hits) => {
+                        println!(" \x1b[31m✗\x1b[0m Stale 2.x names ({} found):", hits.len());
+                        for hit in &hits {
+                            println!("     {hit}");
+                        }
+                        issues.push(format!(
+                            "{} stale 2.x loop_*/canopy-loop reference(s) found in stored prompts, hooks, \
+                             or scheduled agent prompts (listed above) — not rewritten automatically, edit \
+                             them to the 3.x names shown.",
+                            hits.len()
+                        ));
+                    }
+                    Err(e) => {
+                        println!(" \x1b[33m⚠\x1b[0m Could not scan for stale 2.x names: {e}");
                     }
                 }
             }
@@ -2635,5 +2739,113 @@ mod tests {
             diagnose_embeddings_config("totally-unknown-embedding-model"),
             EmbeddingsConfigDiagnosis::Configured
         );
+    }
+
+    #[test]
+    fn find_stale_2x_name_hits_lists_a_stale_graph_prompt_and_a_stale_agent_prompt() {
+        use crate::domain::graphs::{
+            Graph, GraphCompletionHook, GraphHookEvent, GraphNode, GraphNodeKind, GraphStatus,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::new(&dir.path().join("test.db")).unwrap();
+
+        // One graph with one node whose prompt still names the removed tool,
+        // plus one `on_failed` hook whose agent prompt names another. The
+        // hook is deliberately not an `on_completed` one: a scanner that
+        // skipped hooks, or labelled every hook a "completion hook", is
+        // caught by the `on_failed hook` assertion below.
+        let mut hooks = std::collections::BTreeMap::new();
+        hooks.insert(
+            GraphHookEvent::OnFailed,
+            vec![GraphCompletionHook {
+                platform: Some("claude".to_string()),
+                model: None,
+                effort: None,
+                prompt: Some("on failure, call loop_report_blocker with details".to_string()),
+                command: None,
+                target_session_id: None,
+                target_session_name: None,
+                timeout_minutes: None,
+                target_graph_id: None,
+                queue_id: None,
+                workdir_override: None,
+                idea: None,
+            }],
+        );
+        let graph_id = "graph-stale-prompt";
+        db.insert_graph(&Graph {
+            archived: false,
+            paused_by_reconciliation: false,
+            allow_dirty_start: false,
+            infra_node_id: None,
+            id: graph_id.to_string(),
+            name: "Resilience Graph".to_string(),
+            description: None,
+            workdir: "/tmp".to_string(),
+            status: GraphStatus::Draft,
+            trigger: None,
+            created_at: chrono::Utc::now(),
+            started_at: None,
+            completed_at: None,
+            autorun_at: None,
+            auto_continue_at: None,
+            auto_continue_action: None,
+            active_run_queue_id: None,
+            hooks,
+        })
+        .unwrap();
+        db.insert_graph_node(&GraphNode {
+            id: "node-resilience".to_string(),
+            spec_id: None,
+            graph_id: Some(graph_id.to_string()),
+            name: "Resilience".to_string(),
+            kind: GraphNodeKind::Agent,
+            config: serde_json::json!({
+                "prompt_template": "end with exactly one loop_complete_node call",
+                "platform": "claude",
+            }),
+            position: 1,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+
+        // One scheduled agent whose prompt still names the gone CLI subcommand.
+        let mut agent = sample_agent("loop-watchdog");
+        agent.prompt = "run `canopy loop info` and alert on drift".to_string();
+        db.upsert_agent(&agent).unwrap();
+
+        let hits = find_stale_2x_name_hits(&db).unwrap();
+        assert!(
+            hits.iter().any(|h| h.contains("Resilience")
+                && h.contains("loop_complete_node")
+                && h.contains("graph_complete_node")),
+            "{hits:?}"
+        );
+        assert!(
+            hits.iter().any(|h| h.contains("loop-watchdog")
+                && h.contains("canopy loop")
+                && h.contains("canopy graph")),
+            "{hits:?}"
+        );
+        // The hook hit must name the event it fires on — labelling every
+        // hook "completion hook" would send a reader to the wrong hook.
+        assert!(
+            hits.iter().any(|h| h.contains("on_failed hook")
+                && h.contains("loop_report_blocker")
+                && h.contains("graph_report_blocker")),
+            "{hits:?}"
+        );
+    }
+
+    #[test]
+    fn find_stale_2x_name_hits_is_empty_on_a_clean_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::new(&dir.path().join("test.db")).unwrap();
+        let mut agent = sample_agent("clean-agent");
+        agent.prompt = "summarize the diff and open a PR".to_string();
+        db.upsert_agent(&agent).unwrap();
+
+        assert!(find_stale_2x_name_hits(&db).unwrap().is_empty());
     }
 }
