@@ -159,7 +159,7 @@ pipeline, all 83 MCP tools, and the complete CLI reference.
 
 ### 📚 Personal RAG Pipeline
 
-- **Semantic Search** — Embed and query personal documents (Markdown, MDX, PDF) with local ONNX models (fastembed/BGE, multilingual-e5) or remote APIs (OpenAI, Gemini).
+- **Semantic Search** — Embed and query personal documents (Markdown, MDX, PDF) with local ONNX models (fastembed/BGE, multilingual-e5). No cloud provider, no API key.
 - **Language-Aware Chunking** — Markdown split by headings with paragraph fallback, similarity-aware merging, and overlap for context preservation.
 - **PDF Extraction** — Isolated subprocess prevents parser crashes from taking down the daemon, with HTML detection and raw-text salvage fallback.
 - **Auto-Ingestion** — Background watcher monitors configured RAG roots with 3-second debounce, enqueues changes, and reconciles orphan chunks on startup.

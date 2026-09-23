@@ -13,8 +13,8 @@ into agent sessions.
 ## Capabilities
 
 - **Semantic search** — embed and query Markdown, MDX and PDF documents.
-- **Local-first embeddings** — local ONNX models (fastembed/BGE,
-  multilingual-e5) or remote APIs (OpenAI, Gemini) if you prefer.
+- **Local embeddings** — local ONNX models (fastembed/BGE, multilingual-e5).
+  No cloud provider, no API key.
 - **Language-aware chunking** — Markdown split by headings with paragraph
   fallback, similarity-aware merging, and overlap for context
   preservation.

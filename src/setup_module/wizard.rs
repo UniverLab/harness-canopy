@@ -7,7 +7,7 @@ use crate::setup_module::platform_adapter::clear_wizard_screen;
 use crate::setup_module::registry_fetch::{fetch_registry, print_banner};
 use crate::setup_module::sync_and_skills::{run_essential_skills_step, run_sync_step};
 use crate::setup_module::PlatformWithCli;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use inquire::{Confirm, CustomType, MultiSelect, Select};
 use std::io::{self, Write};
 
@@ -115,206 +115,44 @@ pub fn run_setup(force_skills: bool) -> Result<()> {
         }
     ));
 
-    // ── Step 2.3: RAG opt-in ─────────────────────────────────────
+    // ── Step 2.3: RAG configuration ──────────────────────────────
     wiz.render()?;
-    let rag_previously_configured = !existing_config.embeddings_model.is_empty()
-        || !existing_config.rag_personal_dirs.is_empty();
-    let use_rag = Confirm::new("Enable personal knowledge indexing (RAG)?")
-        .with_default(rag_previously_configured)
-        .with_help_message("Indexes your notes/docs so AI tools can search them")
-        .prompt()
-        .map_err(|e| anyhow::anyhow!("RAG selection cancelled: {}", e))?;
+    let rag_previously_configured = !existing_config.embeddings_model.is_empty();
 
-    let (embeddings_model, similarity_threshold, rag_personal_dirs, rag_max_file_mb) = if use_rag {
-        // Offer all available providers (remote are always available, local only if compiled in)
-        wiz.render()?;
-        let provider = select_embedding_provider()?;
-
-        let embeddings_model = match provider {
-            Some(crate::rag::embedding_client::EmbeddingProvider::Local) => {
-                select_local_embeddings_model(&existing_config.embeddings_model)?
-            }
-            Some(crate::rag::embedding_client::EmbeddingProvider::OpenAi) => {
-                // Refuse a broken cloud config the same way we refuse an
-                // unrunnable local model: warn, then stop — don't save a
-                // model string the daemon can't index with.
-                if !check_api_key_and_warn(crate::rag::embedding_client::EmbeddingProvider::OpenAi)?
-                {
-                    bail!(
-                        "OPENAI_API_KEY is not set. Export it and re-run setup, \
-                         or choose a different embedding provider."
-                    );
-                }
-                select_remote_embeddings_model(
-                    crate::rag::embedding_client::EmbeddingProvider::OpenAi,
-                    &existing_config.embeddings_model,
-                )?
-            }
-            Some(crate::rag::embedding_client::EmbeddingProvider::Gemini) => {
-                if !check_api_key_and_warn(crate::rag::embedding_client::EmbeddingProvider::Gemini)?
-                {
-                    bail!(
-                        "GEMINI_API_KEY is not set. Export it and re-run setup, \
-                         or choose a different embedding provider."
-                    );
-                }
-                select_remote_embeddings_model(
-                    crate::rag::embedding_client::EmbeddingProvider::Gemini,
-                    &existing_config.embeddings_model,
-                )?
-            }
-            None => {
-                // User explicitly chose "none" — disable RAG
-                wiz.add("\x1b[90m–\x1b[0m RAG: disabled (no provider selected)".to_string());
-                String::new()
-            }
-        };
-
-        let (embeddings_model, similarity_threshold, rag_personal_dirs, rag_max_file_mb) =
-            if embeddings_model.is_empty() {
-                (
-                    String::new(),
-                    existing_config.similarity_threshold,
-                    Vec::new(),
-                    existing_config.rag_max_file_mb,
-                )
-            } else {
-                // ── Model changed check ─────────────────────────────────
-                if !existing_config.embeddings_model.is_empty()
-                    && embeddings_model != existing_config.embeddings_model
-                {
-                    println!();
-                    println!("  \x1b[33m⚠  Embeddings model changed.\x1b[0m");
-                    println!(
-                    "  \x1b[90mAll previously indexed documents will need to be re-indexed.\x1b[0m"
-                );
-                    println!("  \x1b[90mThis is a heavy operation and may take a while.\x1b[0m");
-                    println!();
-                    let confirmed = Confirm::new("Continue with the new model?")
-                        .with_default(false)
-                        .with_help_message("enter: confirm")
-                        .prompt()
-                        .unwrap_or(false);
-                    if !confirmed {
-                        anyhow::bail!("Embeddings model change cancelled by user");
-                    }
-                }
-
-                wiz.add(format!(
-                    "\x1b[32m✓\x1b[0m Embeddings model: {}",
-                    embeddings_model
-                ));
-
-                // ── Model acquisition ─────────────────────────────────────────
-                // Setup never downloads the model itself — it only checks whether
-                // one's already cached, so this returns immediately either way. If
-                // it isn't cached, the daemon's background acquisition loop (see
-                // `IngestionManager::ensure_configured_model_acquired`) picks it up
-                // once it (re)starts below, so a multi-hundred-MB download never
-                // blocks this wizard. Remote (cloud) models need no download at
-                // all — the daemon only needs the provider's API key.
-                wiz.render()?;
-                let is_local_provider = matches!(
-                    provider,
-                    Some(crate::rag::embedding_client::EmbeddingProvider::Local)
-                );
-                if !is_local_provider {
+    let (embeddings_model, similarity_threshold, rag_personal_dirs, rag_max_file_mb) =
+        if rag_previously_configured && rag_keep_current_configuration(&existing_config)? {
+            let local_embeddings_available = crate::rag::embedding_client::provider_available(
+                crate::rag::embedding_client::EmbeddingProvider::Local,
+            );
+            let outcome =
+                resolve_kept_rag_configuration(&existing_config, local_embeddings_available);
+            match outcome.disabled_reason {
+                None => wiz.add(format!(
+                    "\x1b[32m✓\x1b[0m RAG: kept existing configuration ({})",
+                    outcome.embeddings_model
+                )),
+                Some(_) => {
+                    print_local_embeddings_unavailable();
                     wiz.add(
-                        "\x1b[32m✓\x1b[0m Cloud embeddings — no model download needed".to_string(),
-                    );
-                } else {
-                    #[cfg(feature = "local-embeddings")]
-                    let model_already_cached = {
-                        let model_cache_dir = canopy_dir.join("models");
-                        crate::rag::embedding_client::is_local_model_cached(
-                            &embeddings_model,
-                            &model_cache_dir,
-                        )
-                        .unwrap_or(false)
-                    };
-                    #[cfg(not(feature = "local-embeddings"))]
-                    let model_already_cached = false;
-                    if model_already_cached {
-                        wiz.add(format!(
-                            "\x1b[32m✓\x1b[0m Model ready: {embeddings_model} (already cached)"
-                        ));
-                    } else {
-                        wiz.add(
-                        "\x1b[33m⬇\x1b[0m Model will download in the background — indexing begins once it's ready"
+                        "\x1b[90m–\x1b[0m RAG: disabled (build lacks local-embeddings support)"
                             .to_string(),
                     );
-                    }
                 }
-
-                // Chunk-merge similarity threshold: internal tuning knob with no
-                // user-observable effect in its valid range, so it is not prompted.
-                // The config.toml value (default 0.4) is carried forward and can
-                // still be edited manually for experimentation.
-                let similarity_threshold = existing_config.similarity_threshold;
-
-                // ── RAG directories ─────────────────────────────────────────
-                let prev_dirs = existing_config.rag_personal_dirs.clone();
-                // Start browser at the parent of the first configured dir so the user
-                // sees their selection highlighted instead of landing inside an empty dir.
-                let browser_start = if !prev_dirs.is_empty() {
-                    prev_dirs
-                        .first()
-                        .and_then(|p| {
-                            std::path::Path::new(p)
-                                .parent()
-                                .map(|pp| pp.to_string_lossy().to_string())
-                        })
-                        .filter(|pp| std::path::Path::new(pp).is_dir())
-                        .unwrap_or_else(|| prev_dirs.first().unwrap().clone())
-                } else if !existing_config.rag_personal_root.is_empty() {
-                    std::path::Path::new(&existing_config.rag_personal_root)
-                        .parent()
-                        .map(|pp| pp.to_string_lossy().to_string())
-                        .filter(|pp| std::path::Path::new(pp).is_dir())
-                        .unwrap_or(existing_config.rag_personal_root.clone())
-                } else {
-                    String::new()
-                };
-                let rag_personal_dirs = pick_multiple_directories(
-                "Personal RAG directories (your own notes/docs — indexed for global retrieval):",
-                &browser_start,
-                &prev_dirs,
-            )?;
-                wiz.add(format!(
-                    "\x1b[32m✓\x1b[0m Personal RAG dirs: {}",
-                    rag_personal_dirs.join(", ")
-                ));
-
-                // ── Per-file indexing size limit ─────────────────────────────
-                wiz.render()?;
-                let rag_max_file_mb = select_rag_max_file_mb(existing_config.rag_max_file_mb)?;
-                wiz.add(format!(
-                    "\x1b[32m✓\x1b[0m Indexing size limit: {rag_max_file_mb} MB per file"
-                ));
-
-                (
-                    embeddings_model,
-                    similarity_threshold,
-                    rag_personal_dirs,
-                    rag_max_file_mb,
-                )
-            };
-
-        (
-            embeddings_model,
-            similarity_threshold,
-            rag_personal_dirs,
-            rag_max_file_mb,
-        )
-    } else {
-        wiz.add("\x1b[90m–\x1b[0m RAG: disabled".to_string());
-        (
-            String::new(),
-            existing_config.similarity_threshold,
-            Vec::new(),
-            existing_config.rag_max_file_mb,
-        )
-    };
+            }
+            (
+                outcome.embeddings_model,
+                outcome.similarity_threshold,
+                outcome.rag_personal_dirs,
+                outcome.rag_max_file_mb,
+            )
+        } else {
+            run_rag_setup(
+                &existing_config,
+                &canopy_dir,
+                rag_previously_configured,
+                &mut wiz,
+            )?
+        };
 
     // ── Step 3: Install MCP servers + show matrix ───────────────
     if !selected.is_empty() {
@@ -426,6 +264,244 @@ pub fn run_setup(force_skills: bool) -> Result<()> {
     println!();
 
     Ok(())
+}
+
+/// Print the RAG configuration this installation already has and ask
+/// whether to keep it as-is. Called only when a model is already configured
+/// (CB59): re-asking every RAG field from scratch on every setup run was the
+/// bug — the cursor on the embeddings-provider question always started on
+/// "OpenAI" even for an install that had been running local-only for months.
+fn rag_keep_current_configuration(
+    existing_config: &crate::domain::canopy_config::CanopyConfig,
+) -> Result<bool> {
+    println!();
+    println!("  \x1b[1mPersonal knowledge indexing (RAG)\x1b[0m — currently configured:");
+    println!("    Model:       {}", existing_config.embeddings_model);
+    println!("    Threshold:   {}", existing_config.similarity_threshold);
+    println!(
+        "    Directories: {}",
+        if existing_config.rag_personal_dirs.is_empty() {
+            "(none)".to_string()
+        } else {
+            existing_config.rag_personal_dirs.join(", ")
+        }
+    );
+    println!(
+        "    Size limit:  {} MB per file",
+        existing_config.rag_max_file_mb
+    );
+    println!();
+
+    Confirm::new("Keep this configuration?")
+        .with_default(true)
+        .with_help_message("no: reconfigure model, directories, or size limit")
+        .prompt()
+        .map_err(|e| anyhow::anyhow!("RAG keep-configuration selection cancelled: {}", e))
+}
+
+/// Print the "this build can't do local embeddings" notice. Shared by the
+/// top-level keep-path capability gate in `run_setup` and `run_rag_setup`'s
+/// own check, so both onboarding paths — an installation that already has
+/// RAG configured and answers "keep it", and a genuinely fresh or
+/// reconfigured install — show the identical message (CB59).
+fn print_local_embeddings_unavailable() {
+    println!();
+    println!("  \x1b[33mThis canopy build cannot run local embedding models.\x1b[0m");
+    println!(
+        "  \x1b[90m{}\x1b[0m",
+        crate::rag::embedding_client::LOCAL_EMBEDDINGS_UNAVAILABLE_REASON
+    );
+    println!("  \x1b[90mRAG will remain disabled.\x1b[0m");
+    println!();
+}
+
+/// The RAG step's outcome once the user has been asked "keep it?" (i.e.
+/// `rag_previously_configured` is true) and answered yes. Pure — takes
+/// `local_embeddings_available` as a parameter instead of reading
+/// `cfg!(feature = "local-embeddings")` itself — so the CB59 fix (the
+/// capability check gates this branch's *return*, not just
+/// `run_rag_setup`'s own path) is testable without a terminal.
+struct KeptRagOutcome {
+    embeddings_model: String,
+    similarity_threshold: f32,
+    rag_personal_dirs: Vec<String>,
+    rag_max_file_mb: u32,
+    /// `Some(reason)` when this build cannot do local embeddings at all:
+    /// the "kept" answer is overridden and RAG ends up disabled instead.
+    disabled_reason: Option<&'static str>,
+}
+
+fn resolve_kept_rag_configuration(
+    existing_config: &crate::domain::canopy_config::CanopyConfig,
+    local_embeddings_available: bool,
+) -> KeptRagOutcome {
+    if local_embeddings_available {
+        KeptRagOutcome {
+            embeddings_model: existing_config.embeddings_model.clone(),
+            similarity_threshold: existing_config.similarity_threshold,
+            rag_personal_dirs: existing_config.rag_personal_dirs.clone(),
+            rag_max_file_mb: existing_config.rag_max_file_mb,
+            disabled_reason: None,
+        }
+    } else {
+        KeptRagOutcome {
+            embeddings_model: String::new(),
+            similarity_threshold: existing_config.similarity_threshold,
+            rag_personal_dirs: Vec::new(),
+            rag_max_file_mb: existing_config.rag_max_file_mb,
+            disabled_reason: Some(
+                crate::rag::embedding_client::LOCAL_EMBEDDINGS_UNAVAILABLE_REASON,
+            ),
+        }
+    }
+}
+
+/// Ask whether to enable RAG at all, then — if yes and this build can run
+/// local embeddings — which local model, which directories, and what
+/// per-file size limit. `default_enable` is `true` when called because an
+/// existing configuration is being revised (so declining to keep it still
+/// defaults to staying enabled) and `false` for a genuinely fresh install.
+/// No provider question: canopy's RAG is local-only (CB59) — see
+/// `functional_requirements` 1 in the CB59 spec for why the cloud-provider
+/// question was removed rather than merely reordered.
+#[cfg_attr(not(feature = "local-embeddings"), allow(unused_variables))]
+fn run_rag_setup(
+    existing_config: &crate::domain::canopy_config::CanopyConfig,
+    canopy_dir: &std::path::Path,
+    default_enable: bool,
+    wiz: &mut WizardState,
+) -> Result<(String, f32, Vec<String>, u32)> {
+    let use_rag = Confirm::new("Enable personal knowledge indexing (RAG)?")
+        .with_default(default_enable)
+        .with_help_message("Indexes your notes/docs so AI tools can search them")
+        .prompt()
+        .map_err(|e| anyhow::anyhow!("RAG selection cancelled: {}", e))?;
+
+    if !use_rag {
+        wiz.add("\x1b[90m–\x1b[0m RAG: disabled".to_string());
+        return Ok((
+            String::new(),
+            existing_config.similarity_threshold,
+            Vec::new(),
+            existing_config.rag_max_file_mb,
+        ));
+    }
+
+    if !crate::rag::embedding_client::provider_available(
+        crate::rag::embedding_client::EmbeddingProvider::Local,
+    ) {
+        print_local_embeddings_unavailable();
+        wiz.add(
+            "\x1b[90m–\x1b[0m RAG: disabled (build lacks local-embeddings support)".to_string(),
+        );
+        return Ok((
+            String::new(),
+            existing_config.similarity_threshold,
+            Vec::new(),
+            existing_config.rag_max_file_mb,
+        ));
+    }
+
+    wiz.render()?;
+    let embeddings_model = select_local_embeddings_model(&existing_config.embeddings_model)?;
+
+    // ── Model changed check ─────────────────────────────────────────
+    if !existing_config.embeddings_model.is_empty()
+        && embeddings_model != existing_config.embeddings_model
+    {
+        println!();
+        println!("  \x1b[33m⚠  Embeddings model changed.\x1b[0m");
+        println!("  \x1b[90mAll previously indexed documents will need to be re-indexed.\x1b[0m");
+        println!("  \x1b[90mThis is a heavy operation and may take a while.\x1b[0m");
+        println!();
+        let confirmed = Confirm::new("Continue with the new model?")
+            .with_default(false)
+            .with_help_message("enter: confirm")
+            .prompt()
+            .unwrap_or(false);
+        if !confirmed {
+            anyhow::bail!("Embeddings model change cancelled by user");
+        }
+    }
+
+    wiz.add(format!(
+        "\x1b[32m✓\x1b[0m Embeddings model: {}",
+        embeddings_model
+    ));
+
+    // ── Model acquisition ─────────────────────────────────────────────
+    // Setup never downloads the model itself — it only checks whether one's
+    // already cached; the daemon's background acquisition loop picks it up
+    // once it (re)starts below, so a multi-hundred-MB download never blocks
+    // this wizard.
+    wiz.render()?;
+    #[cfg(feature = "local-embeddings")]
+    let model_already_cached = {
+        let model_cache_dir = canopy_dir.join("models");
+        crate::rag::embedding_client::is_local_model_cached(&embeddings_model, &model_cache_dir)
+            .unwrap_or(false)
+    };
+    #[cfg(not(feature = "local-embeddings"))]
+    let model_already_cached = false;
+    if model_already_cached {
+        wiz.add(format!(
+            "\x1b[32m✓\x1b[0m Model ready: {embeddings_model} (already cached)"
+        ));
+    } else {
+        wiz.add(
+            "\x1b[33m⬇\x1b[0m Model will download in the background — indexing begins once it's ready"
+                .to_string(),
+        );
+    }
+
+    // Chunk-merge similarity threshold: internal tuning knob with no
+    // user-observable effect in its valid range, so it is not prompted.
+    let similarity_threshold = existing_config.similarity_threshold;
+
+    // ── RAG directories ─────────────────────────────────────────────
+    let prev_dirs = existing_config.rag_personal_dirs.clone();
+    let browser_start = if !prev_dirs.is_empty() {
+        prev_dirs
+            .first()
+            .and_then(|p| {
+                std::path::Path::new(p)
+                    .parent()
+                    .map(|pp| pp.to_string_lossy().to_string())
+            })
+            .filter(|pp| std::path::Path::new(pp).is_dir())
+            .unwrap_or_else(|| prev_dirs.first().unwrap().clone())
+    } else if !existing_config.rag_personal_root.is_empty() {
+        std::path::Path::new(&existing_config.rag_personal_root)
+            .parent()
+            .map(|pp| pp.to_string_lossy().to_string())
+            .filter(|pp| std::path::Path::new(pp).is_dir())
+            .unwrap_or(existing_config.rag_personal_root.clone())
+    } else {
+        String::new()
+    };
+    let rag_personal_dirs = pick_multiple_directories(
+        "Personal RAG directories (your own notes/docs — indexed for global retrieval):",
+        &browser_start,
+        &prev_dirs,
+    )?;
+    wiz.add(format!(
+        "\x1b[32m✓\x1b[0m Personal RAG dirs: {}",
+        rag_personal_dirs.join(", ")
+    ));
+
+    // ── Per-file indexing size limit ─────────────────────────────────
+    wiz.render()?;
+    let rag_max_file_mb = select_rag_max_file_mb(existing_config.rag_max_file_mb)?;
+    wiz.add(format!(
+        "\x1b[32m✓\x1b[0m Indexing size limit: {rag_max_file_mb} MB per file"
+    ));
+
+    Ok((
+        embeddings_model,
+        similarity_threshold,
+        rag_personal_dirs,
+        rag_max_file_mb,
+    ))
 }
 
 /// Merge the registry's detected CLIs into `config.clis` through the same
@@ -675,11 +751,25 @@ fn local_model_label(id: &str) -> &'static str {
     }
 }
 
-fn select_local_embeddings_model(current: &str) -> Result<String> {
-    let ids = crate::rag::embedding_client::LOCAL_MODEL_IDS;
-    let options: Vec<&str> = ids.iter().map(|id| local_model_label(id)).collect();
+/// The `(id, label)` pairs the embeddings-model prompt offers: every
+/// supported local model id paired with its label, nothing else. Split out
+/// so a fresh install's model list is testable without a terminal (CB59:
+/// it must never again include a remote/API-key option).
+fn local_embeddings_model_choices() -> Vec<(&'static str, &'static str)> {
+    crate::rag::embedding_client::LOCAL_MODEL_IDS
+        .iter()
+        .map(|id| (*id, local_model_label(id)))
+        .collect()
+}
 
-    let start = ids.iter().position(|id| *id == current).unwrap_or(0);
+fn select_local_embeddings_model(current: &str) -> Result<String> {
+    let choices = local_embeddings_model_choices();
+    let options: Vec<&str> = choices.iter().map(|(_, label)| *label).collect();
+
+    let start = choices
+        .iter()
+        .position(|(id, _)| *id == current)
+        .unwrap_or(0);
 
     let selected = Select::new("Embeddings model (local, no API key required):", options)
         .with_starting_cursor(start)
@@ -689,155 +779,11 @@ fn select_local_embeddings_model(current: &str) -> Result<String> {
         .prompt()
         .map_err(|e| anyhow::anyhow!("Embeddings model selection cancelled: {}", e))?;
 
-    ids.iter()
-        .find(|id| local_model_label(id) == selected)
-        .map(|id| id.to_string())
-        .ok_or_else(|| anyhow::anyhow!("Unknown embeddings model selection"))
-}
-
-/// Model IDs for remote embedding providers.
-pub const OPENAI_MODEL_IDS: &[&str] = &[
-    "text-embedding-3-small",
-    "text-embedding-3-large",
-    "text-embedding-ada-002",
-];
-
-pub const GEMINI_MODEL_IDS: &[&str] = &["gemini-embedding-001", "gemini-embedding-2"];
-
-/// Human-readable label for a supported OpenAI model id.
-fn openai_model_label(id: &str) -> &'static str {
-    match id {
-        "text-embedding-3-small" => "text-embedding-3-small (OpenAI · 1536d) — fast, balanced",
-        "text-embedding-3-large" => "text-embedding-3-large (OpenAI · 3072d) — best quality",
-        "text-embedding-ada-002" => "text-embedding-ada-002 (OpenAI · 1536d) — legacy, reliable",
-        _ => "(unlabeled OpenAI model)",
-    }
-}
-
-/// Human-readable label for a supported Gemini model id.
-fn gemini_model_label(id: &str) -> &'static str {
-    match id {
-        "gemini-embedding-001" => "gemini-embedding-001 (Gemini · 3072d) — standard",
-        "gemini-embedding-2" => "gemini-embedding-2 (Gemini · 3072d) — latest",
-        _ => "(unlabeled Gemini model)",
-    }
-}
-
-/// Providers the wizard can offer on THIS build: remote providers are
-/// compiled into every binary, local only when built with
-/// `local-embeddings`. `select_embedding_provider` renders exactly this
-/// list (plus an explicit opt-out), so this is the testable core of the
-/// "wizard offers remote providers" requirement — the inquire prompt
-/// itself needs a TTY and can't be unit-tested.
-pub fn available_embedding_providers() -> Vec<crate::rag::embedding_client::EmbeddingProvider> {
-    use crate::rag::embedding_client::{provider_available, EmbeddingProvider};
-    let mut providers = vec![EmbeddingProvider::OpenAi, EmbeddingProvider::Gemini];
-    if provider_available(EmbeddingProvider::Local) {
-        providers.push(EmbeddingProvider::Local);
-    }
-    providers
-}
-
-/// Prompt the user to select an embedding provider.
-/// Returns None if the user explicitly opts out.
-pub fn select_embedding_provider() -> Result<Option<crate::rag::embedding_client::EmbeddingProvider>>
-{
-    let mut options: Vec<&str> = Vec::new();
-    let mut values: Vec<Option<crate::rag::embedding_client::EmbeddingProvider>> = Vec::new();
-
-    // Always offer remote providers (they're compiled into every binary)
-    for provider in available_embedding_providers() {
-        let label = match provider {
-            crate::rag::embedding_client::EmbeddingProvider::OpenAi => {
-                "OpenAI (cloud · requires API key)"
-            }
-            crate::rag::embedding_client::EmbeddingProvider::Gemini => {
-                "Gemini (cloud · requires API key)"
-            }
-            crate::rag::embedding_client::EmbeddingProvider::Local => {
-                "Local (on-machine · no API key)"
-            }
-        };
-        options.push(label);
-        values.push(Some(provider));
-    }
-
-    options.push("None (disable RAG)");
-    values.push(None);
-
-    let selected = Select::new(
-        "Which embedding provider should canopy use?",
-        options.clone(),
-    )
-    .with_help_message(
-        "Remote providers work out of the box. Local requires building with 'local-embeddings'.",
-    )
-    .prompt()
-    .map_err(|e| anyhow::anyhow!("Provider selection cancelled: {}", e))?;
-
-    // Find the corresponding value
-    let idx = options
+    choices
         .iter()
-        .position(|o| *o == selected)
-        .ok_or_else(|| anyhow::anyhow!("Unknown provider selection"))?;
-    Ok(values[idx])
-}
-
-/// Prompt the user to select a remote embedding model.
-pub fn select_remote_embeddings_model(
-    provider: crate::rag::embedding_client::EmbeddingProvider,
-    current: &str,
-) -> Result<String> {
-    let (ids, label_fn): (Vec<&str>, fn(&str) -> &'static str) = match provider {
-        crate::rag::embedding_client::EmbeddingProvider::OpenAi => {
-            (OPENAI_MODEL_IDS.to_vec(), openai_model_label)
-        }
-        crate::rag::embedding_client::EmbeddingProvider::Gemini => {
-            (GEMINI_MODEL_IDS.to_vec(), gemini_model_label)
-        }
-        _ => bail!("select_remote_embeddings_model only supports remote providers"),
-    };
-
-    let options: Vec<&str> = ids.iter().map(|id| label_fn(id)).collect();
-
-    let start = ids.iter().position(|id| *id == current).unwrap_or(0);
-
-    let selected = Select::new("Embeddings model:", options)
-        .with_starting_cursor(start)
-        .with_help_message("Select the model to use for embeddings")
-        .prompt()
-        .map_err(|e| anyhow::anyhow!("Embeddings model selection cancelled: {}", e))?;
-
-    ids.iter()
-        .find(|id| label_fn(id) == selected)
-        .map(|id| id.to_string())
+        .find(|(_, label)| *label == selected)
+        .map(|(id, _)| id.to_string())
         .ok_or_else(|| anyhow::anyhow!("Unknown embeddings model selection"))
-}
-
-/// Check if the required API key is set for the given provider, warn if not.
-/// Returns true if the key is present, false otherwise.
-pub fn check_api_key_and_warn(
-    provider: crate::rag::embedding_client::EmbeddingProvider,
-) -> Result<bool> {
-    let (key_var, key_name) = match provider {
-        crate::rag::embedding_client::EmbeddingProvider::OpenAi => ("OPENAI_API_KEY", "OpenAI"),
-        crate::rag::embedding_client::EmbeddingProvider::Gemini => ("GEMINI_API_KEY", "Gemini"),
-        crate::rag::embedding_client::EmbeddingProvider::Local => {
-            // Local models don't need an API key
-            return Ok(true);
-        }
-    };
-
-    if std::env::var(key_var).is_ok() {
-        println!("  \x1b[32m✓\x1b[0m {} API key found", key_name);
-        Ok(true)
-    } else {
-        println!(
-            "  \x1b[33m⚠\x1b[0m {} API key not set (set {} to enable indexing)",
-            key_name, key_var
-        );
-        Ok(false)
-    }
 }
 
 /// Interactively pick one or more directories for personal RAG indexing.
@@ -908,174 +854,112 @@ mod tests {
         );
     }
 
-    // ── CB19: wizard offers remote embedding providers ─────────────
+    // ── CB59: RAG step is local-only and doesn't re-interrogate ────
 
     #[test]
-    fn available_embedding_providers_always_offers_remote() {
-        // Remote providers are compiled into every binary — the wizard must
-        // offer them with or without the `local-embeddings` feature. If
-        // remote support were ever removed, OpenAi/Gemini would disappear
-        // from this list and the wizard would fall back to disabling RAG.
-        let providers = available_embedding_providers();
+    fn rag_step_has_no_provider_selector_left() {
+        let source = include_str!("wizard.rs");
+        let production = source
+            .split("mod tests {")
+            .next()
+            .expect("wizard.rs always has a tests module");
         assert!(
-            providers.contains(&crate::rag::embedding_client::EmbeddingProvider::OpenAi),
-            "OpenAI must always be offered, got: {providers:?}"
+            !production.contains("Which embedding provider should canopy use?"),
+            "the provider question must be gone — RAG is local-only now"
         );
         assert!(
-            providers.contains(&crate::rag::embedding_client::EmbeddingProvider::Gemini),
-            "Gemini must always be offered, got: {providers:?}"
+            !production
+                .to_lowercase()
+                .contains(&["requires", "api", "key"].join(" ")),
+            "no remaining option should mention needing an API key"
         );
     }
 
     #[test]
-    fn available_embedding_providers_local_matches_build_capability() {
-        // Local is offered exactly when this binary can run it — present
-        // with `local-embeddings`, omitted without. Choosing "none" (the
-        // opt-out `select_embedding_provider` appends after this list) is
-        // what disables RAG, never the absence of local support.
-        let providers = available_embedding_providers();
-        let offers_local =
-            providers.contains(&crate::rag::embedding_client::EmbeddingProvider::Local);
+    fn rag_step_no_longer_offers_cloud_fallback_on_missing_local_support() {
+        let source = include_str!("wizard.rs");
+        let production = source
+            .split("mod tests {")
+            .next()
+            .expect("wizard.rs always has a tests module");
+        assert!(
+            production.contains("This canopy build cannot run local embedding models."),
+            "missing local-embeddings must say so plainly"
+        );
+        assert!(
+            !production.contains("OpenAI (cloud"),
+            "must not fall back to a cloud provider when local-embeddings is missing"
+        );
+    }
+
+    // ── CB59: capability check gates the "keep it" branch's return ─
+
+    #[test]
+    fn keep_it_preserves_all_four_rag_values_when_local_embeddings_available() {
+        let existing = crate::domain::canopy_config::CanopyConfig {
+            embeddings_model: "baai/bge-base-en-v1.5".to_string(),
+            similarity_threshold: 0.42,
+            rag_personal_dirs: vec!["/home/x/notes".to_string()],
+            rag_max_file_mb: 25,
+            ..Default::default()
+        };
+
+        let outcome = resolve_kept_rag_configuration(&existing, true);
+
+        assert!(outcome.disabled_reason.is_none());
+        assert_eq!(outcome.embeddings_model, existing.embeddings_model);
+        assert_eq!(outcome.similarity_threshold, existing.similarity_threshold);
+        assert_eq!(outcome.rag_personal_dirs, existing.rag_personal_dirs);
+        assert_eq!(outcome.rag_max_file_mb, existing.rag_max_file_mb);
+    }
+
+    #[test]
+    fn keep_it_disables_rag_and_reports_missing_capability_even_with_existing_config() {
+        let existing = crate::domain::canopy_config::CanopyConfig {
+            embeddings_model: "baai/bge-base-en-v1.5".to_string(),
+            similarity_threshold: 0.42,
+            rag_personal_dirs: vec!["/home/x/notes".to_string()],
+            rag_max_file_mb: 25,
+            ..Default::default()
+        };
+
+        let outcome = resolve_kept_rag_configuration(&existing, false);
+
         assert_eq!(
-            offers_local,
-            crate::rag::embedding_client::provider_available(
-                crate::rag::embedding_client::EmbeddingProvider::Local
-            ),
-            "local must be offered iff this build can run it"
+            outcome.disabled_reason,
+            Some(crate::rag::embedding_client::LOCAL_EMBEDDINGS_UNAVAILABLE_REASON),
+            "must report why local embeddings can't run, not silently keep the old model"
+        );
+        assert_eq!(outcome.embeddings_model, "");
+        assert!(outcome.rag_personal_dirs.is_empty());
+        assert_eq!(
+            outcome.similarity_threshold, existing.similarity_threshold,
+            "threshold isn't the reason RAG is off, so it still carries over"
         );
     }
 
     #[test]
-    fn openai_and_gemini_model_ids_resolve_to_remote_providers() {
-        // The model ids the wizard offers for each remote provider must
-        // route back to that provider via `provider_for_model` — otherwise
-        // setup would save a config string doctor/client can't serve.
-        for id in OPENAI_MODEL_IDS {
-            assert_eq!(
-                crate::rag::embedding_client::provider_for_model(id),
-                Some(crate::rag::embedding_client::EmbeddingProvider::OpenAi),
-                "'{id}' must resolve to the OpenAI provider"
-            );
-        }
-        for id in GEMINI_MODEL_IDS {
-            assert_eq!(
-                crate::rag::embedding_client::provider_for_model(id),
-                Some(crate::rag::embedding_client::EmbeddingProvider::Gemini),
-                "'{id}' must resolve to the Gemini provider"
-            );
-        }
-    }
-
-    #[test]
-    fn every_remote_model_id_has_a_label() {
-        for id in OPENAI_MODEL_IDS {
-            assert_ne!(
-                openai_model_label(id),
-                "(unlabeled OpenAI model)",
-                "missing a descriptive label for '{id}'"
-            );
-        }
-        for id in GEMINI_MODEL_IDS {
-            assert_ne!(
-                gemini_model_label(id),
-                "(unlabeled Gemini model)",
-                "missing a descriptive label for '{id}'"
-            );
-        }
-    }
-
-    #[test]
-    fn remote_model_labels_are_unique() {
-        // `select_remote_embeddings_model` maps the chosen label back to an
-        // id and needs them distinct — same invariant as the local selector.
-        let mut labels: Vec<&str> = OPENAI_MODEL_IDS
-            .iter()
-            .map(|id| openai_model_label(id))
-            .collect();
-        labels.sort_unstable();
-        labels.dedup();
-        assert_eq!(labels.len(), OPENAI_MODEL_IDS.len());
-
-        let mut labels: Vec<&str> = GEMINI_MODEL_IDS
-            .iter()
-            .map(|id| gemini_model_label(id))
-            .collect();
-        labels.sort_unstable();
-        labels.dedup();
-        assert_eq!(labels.len(), GEMINI_MODEL_IDS.len());
-    }
-
-    #[test]
-    fn check_api_key_and_warn_local_needs_no_key() {
-        assert!(
-            check_api_key_and_warn(crate::rag::embedding_client::EmbeddingProvider::Local).unwrap(),
-            "local models need no API key"
+    fn fresh_install_model_choices_are_all_local_and_never_require_an_api_key() {
+        let choices = local_embeddings_model_choices();
+        assert_eq!(
+            choices.len(),
+            crate::rag::embedding_client::LOCAL_MODEL_IDS.len()
         );
-    }
-
-    #[test]
-    fn check_api_key_and_warn_openai_warns_when_missing() {
-        // Safe under `cargo nextest` (one process per test); the doctor
-        // module's black-box tests mutate process env vars on the same
-        // basis.
-        let prev = std::env::var("OPENAI_API_KEY").ok();
-        unsafe { std::env::remove_var("OPENAI_API_KEY") };
-        let result =
-            check_api_key_and_warn(crate::rag::embedding_client::EmbeddingProvider::OpenAi)
-                .unwrap();
-        match prev {
-            Some(v) => unsafe { std::env::set_var("OPENAI_API_KEY", v) },
-            None => unsafe { std::env::remove_var("OPENAI_API_KEY") },
+        for (id, label) in &choices {
+            assert!(
+                crate::rag::embedding_client::LOCAL_MODEL_IDS.contains(id),
+                "offered id '{id}' isn't in the supported local model list"
+            );
+            let lower = label.to_lowercase();
+            assert!(
+                !lower.contains(&["requires", "api", "key"].join(" ")),
+                "label for '{id}' must not require an API key: {label}"
+            );
+            assert!(
+                !lower.contains("openai") && !lower.contains("gemini"),
+                "label for '{id}' must not name a cloud provider: {label}"
+            );
         }
-        assert!(
-            !result,
-            "missing OPENAI_API_KEY must warn and return false, not save a config that can't run"
-        );
-    }
-
-    #[test]
-    fn check_api_key_and_warn_openai_passes_when_present() {
-        let prev = std::env::var("OPENAI_API_KEY").ok();
-        unsafe { std::env::set_var("OPENAI_API_KEY", "test-key") };
-        let result =
-            check_api_key_and_warn(crate::rag::embedding_client::EmbeddingProvider::OpenAi)
-                .unwrap();
-        match prev {
-            Some(v) => unsafe { std::env::set_var("OPENAI_API_KEY", v) },
-            None => unsafe { std::env::remove_var("OPENAI_API_KEY") },
-        }
-        assert!(result, "set OPENAI_API_KEY must pass without warning");
-    }
-
-    #[test]
-    fn check_api_key_and_warn_gemini_warns_when_missing() {
-        let prev = std::env::var("GEMINI_API_KEY").ok();
-        unsafe { std::env::remove_var("GEMINI_API_KEY") };
-        let result =
-            check_api_key_and_warn(crate::rag::embedding_client::EmbeddingProvider::Gemini)
-                .unwrap();
-        match prev {
-            Some(v) => unsafe { std::env::set_var("GEMINI_API_KEY", v) },
-            None => unsafe { std::env::remove_var("GEMINI_API_KEY") },
-        }
-        assert!(
-            !result,
-            "missing GEMINI_API_KEY must warn and return false, not save a config that can't run"
-        );
-    }
-
-    #[test]
-    fn check_api_key_and_warn_gemini_passes_when_present() {
-        let prev = std::env::var("GEMINI_API_KEY").ok();
-        unsafe { std::env::set_var("GEMINI_API_KEY", "test-key") };
-        let result =
-            check_api_key_and_warn(crate::rag::embedding_client::EmbeddingProvider::Gemini)
-                .unwrap();
-        match prev {
-            Some(v) => unsafe { std::env::set_var("GEMINI_API_KEY", v) },
-            None => unsafe { std::env::remove_var("GEMINI_API_KEY") },
-        }
-        assert!(result, "set GEMINI_API_KEY must pass without warning");
     }
 
     #[test]
@@ -1209,54 +1093,6 @@ mod tests {
         assert_eq!(
             theme_choice_to_config_value("modern (borderless)"),
             "classic"
-        );
-    }
-
-    /// CB19: the wizard must never tell the user to hand-edit config.toml
-    /// for embeddings when remote providers are available — that was the
-    /// old dead-end message when local-embeddings was missing.
-    #[test]
-    fn wizard_does_not_send_user_to_hand_edit_config_for_embeddings() {
-        let source = include_str!("wizard.rs");
-        let production = source
-            .split("mod tests {")
-            .next()
-            .expect("wizard.rs always has a tests module");
-        assert!(
-            !production.contains("configure a cloud embeddings model manually in config.toml"),
-            "old hand-edit dead-end must be gone"
-        );
-        assert!(
-            !production.contains("RAG: disabled — build lacks local-embeddings support"),
-            "wizard must not disable RAG solely because local-embeddings is missing"
-        );
-        assert!(
-            !production.contains("This canopy build cannot run local embedding models"),
-            "wizard must offer remotes instead of refusing on missing local support"
-        );
-    }
-
-    /// CB19: run_setup must gate remote providers on the key check's bool —
-    /// if someone reverts to discarding `check_api_key_and_warn`'s return,
-    /// this source scan fails. The interactive bail itself needs a TTY.
-    #[test]
-    fn run_setup_refuses_remote_provider_when_api_key_missing() {
-        let source = include_str!("wizard.rs");
-        let production = source
-            .split("mod tests {")
-            .next()
-            .expect("wizard.rs always has a tests module");
-        assert!(
-            production.contains("if !check_api_key_and_warn("),
-            "run_setup must gate on check_api_key_and_warn's bool, not discard it"
-        );
-        assert!(
-            production.contains("OPENAI_API_KEY is not set"),
-            "missing OpenAI key must bail with an actionable message"
-        );
-        assert!(
-            production.contains("GEMINI_API_KEY is not set"),
-            "missing Gemini key must bail with an actionable message"
         );
     }
 
