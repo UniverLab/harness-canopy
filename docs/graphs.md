@@ -153,8 +153,8 @@ quorum reports pass when at least `min_pass` members passed. Member
 execution is capped by a global concurrency limit (default 4) so an
 8-member ensemble queues rather than forking every member at once.
 
-By default the quorum waits for every member branch to terminate
-(pass, fail, or straggler timeout past
+By default a **parallel** quorum waits for every member branch to
+terminate (pass, fail, or straggler timeout past
 `straggler_timeout_minutes`, which kills the still-running process
 and counts it as a fail) — it never fires early. A parallel ensemble
 may instead set `quorum_grace_minutes`: the moment `passed >=
@@ -164,9 +164,20 @@ still in flight are terminated with reason `quorum met` and counted
 as fail (distinct from `ensemble straggler timeout` in run history).
 `0` terminates stragglers immediately on quorum. The join output then
 carries `quorum_met_at` and `grace_minutes`. `None` (the default)
-keeps the wait-for-all behaviour; cascade and round-robin ensembles
-ignore the field. `straggler_timeout_minutes` still caps each member
-from its own start, independently of the grace window.
+keeps the wait-for-all behaviour.
+
+`straggler_timeout_minutes` and `quorum_grace_minutes` are both
+**parallel-only** — `graph_add_ensemble`/`graph_update_ensemble` refuse
+to set either on a `cascade` or `round_robin` ensemble, and switching
+an ensemble's `kind` to one of those clears both fields automatically.
+The reason: a **cascade** or **round_robin** ensemble runs its members
+one at a time, never concurrently, so there is no "quorum" to wait for
+stragglers around and no ensemble-wide deadline is ever armed. Each
+member attempt there is bounded only by its own effective timeout —
+its own `timeout_minutes` override, or else the ensemble's shared
+`timeout_minutes` — timed from that attempt's own start, and every
+infra retry of that attempt gets that same timeout fresh. A member that
+hangs can never eat into a later member's (or its own retry's) budget.
 
 Members are agent nodes only, and nested ensembles (an ensemble wired
 into another ensemble's members or quorum) are rejected. A bounce back

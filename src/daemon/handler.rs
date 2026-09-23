@@ -6572,14 +6572,28 @@ impl TaskTriggerHandler {
                     "straggler_timeout_minutes must not be negative.",
                 ));
             }
+            // CB67/FR3: a parallel-quorum concept — meaningless once members
+            // run one at a time.
+            if kind != EnsembleKind::Parallel {
+                return Ok(error_result(&format!(
+                    "straggler_timeout_minutes has no meaning for a {} ensemble (it only bounds how long a parallel quorum waits for stragglers); omit it, or set kind: \"parallel\".",
+                    kind.as_str()
+                )));
+            }
         }
-        // CM24: refused for any kind on write; engine only honours it for parallel.
         let quorum_grace_minutes = params
             .quorum_grace_minutes
             .or_else(|| blueprint.as_ref().and_then(|bp| bp.quorum_grace_minutes));
         if let Some(grace) = quorum_grace_minutes {
             if grace < 0 {
                 return Ok(error_result("quorum_grace_minutes must not be negative."));
+            }
+            // CB67/FR3: applies only once a parallel quorum is met.
+            if kind != EnsembleKind::Parallel {
+                return Ok(error_result(&format!(
+                    "quorum_grace_minutes has no meaning for a {} ensemble (it only applies once a parallel quorum is met); omit it, or set kind: \"parallel\".",
+                    kind.as_str()
+                )));
             }
         }
         for (field_name, value) in [
@@ -6906,6 +6920,27 @@ impl TaskTriggerHandler {
         };
         let effective_kind = new_kind.unwrap_or(details.ensemble.kind);
 
+        // CB67/FR3: validated here, before any write below, same principle
+        // as the CM30 infra-field validation above — a rejected value must
+        // never land in the DB first. An explicit `null` (`Some(None)`) to
+        // CLEAR either field is allowed on any kind; only an explicit
+        // non-null value on a cascade/round_robin ensemble is rejected.
+        if effective_kind != EnsembleKind::Parallel {
+            if matches!(params.straggler_timeout_minutes, Some(Some(_))) {
+                return Ok(error_result(&format!(
+                    "straggler_timeout_minutes has no meaning for a {} ensemble (it only bounds how long a parallel quorum waits for stragglers); omit it, pass null to clear it, or keep/set kind: \"parallel\".",
+                    effective_kind.as_str()
+                )));
+            }
+            if matches!(params.quorum_grace_minutes, Some(Some(_))) {
+                return Ok(error_result(&format!(
+                    "quorum_grace_minutes has no meaning for a {} ensemble (it only applies once a parallel quorum is met); omit it, pass null to clear it, or keep/set kind: \"parallel\".",
+                    effective_kind.as_str()
+                )));
+            }
+        }
+
+        let mut cleared_grace_fields_for_kind_change = false;
         if let Some(kind) = new_kind {
             let rri = if kind == EnsembleKind::RoundRobin {
                 Some(Some(details.ensemble.round_robin_index.unwrap_or(0)))
@@ -6921,6 +6956,46 @@ impl TaskTriggerHandler {
                     Some(details.ensemble.round_robin_index.unwrap_or(0));
             } else {
                 details.ensemble.round_robin_index = None;
+            }
+
+            // CB67/FR3: switching to a sequential kind retires any stored
+            // straggler_timeout_minutes/quorum_grace_minutes from this
+            // ensemble's parallel days — left in place they would silently
+            // reappear if someone switches back to parallel later, no longer
+            // matching what this call's caller sees today. The reject-block
+            // above already returned on an explicit non-null attempt, so from
+            // here every path leaves both fields None: an untouched field is
+            // auto-cleared here, an explicit null is cleared by the
+            // join-config block below like any other explicit clear.
+            if kind != EnsembleKind::Parallel
+                && (details.ensemble.straggler_timeout_minutes.is_some()
+                    || details.ensemble.quorum_grace_minutes.is_some())
+            {
+                let clear_straggler = params.straggler_timeout_minutes.is_none()
+                    && details.ensemble.straggler_timeout_minutes.is_some();
+                let clear_grace = params.quorum_grace_minutes.is_none()
+                    && details.ensemble.quorum_grace_minutes.is_some();
+                if clear_straggler || clear_grace {
+                    self.db
+                        .update_ensemble_join_config(
+                            &ensemble_id,
+                            None,
+                            clear_straggler.then_some(None),
+                            clear_grace.then_some(None),
+                            None,
+                            None,
+                            None,
+                            None,
+                        )
+                        .map_err(internal_error)?;
+                    if clear_straggler {
+                        details.ensemble.straggler_timeout_minutes = None;
+                    }
+                    if clear_grace {
+                        details.ensemble.quorum_grace_minutes = None;
+                    }
+                }
+                cleared_grace_fields_for_kind_change = true;
             }
         }
 
@@ -7130,7 +7205,6 @@ impl TaskTriggerHandler {
                     ));
                 }
             }
-            // CM24: refused for any kind on write; engine only honours it for parallel.
             if let Some(Some(grace)) = params.quorum_grace_minutes {
                 if grace < 0 {
                     return Ok(error_result("quorum_grace_minutes must not be negative."));
@@ -7398,8 +7472,16 @@ impl TaskTriggerHandler {
             }
         }
 
+        let note = if cleared_grace_fields_for_kind_change {
+            format!(
+                " Cleared straggler_timeout_minutes/quorum_grace_minutes: not meaningful for a {} ensemble.",
+                effective_kind.as_str()
+            )
+        } else {
+            String::new()
+        };
         Ok(success_result(&format!(
-            "Ensemble '{ensemble_id}' updated."
+            "Ensemble '{ensemble_id}' updated.{note}"
         )))
     }
 
@@ -32031,6 +32113,241 @@ mod endpoint_tests {
             is_err(&result),
             "parallel ensemble with 1 member should fail"
         );
+    }
+
+    #[tokio::test]
+    async fn graph_add_ensemble_rejects_straggler_timeout_on_cascade() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let lp = insert_test_graph(&db, dir.path());
+        let spec = insert_test_spec(&db, &lp.id, 1);
+        let entry = add_agent_node(&handler, &spec.id, "Entry").await;
+        let arbiter = add_agent_node(&handler, &spec.id, "Arbiter").await;
+
+        let result = handler
+            .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                commit_rights: None,
+                spec_id: Some(spec.id.clone()),
+                graph_id: None,
+                name: "Cascade".to_string(),
+                kind: Some("cascade".to_string()),
+                prompt_template: Some("do it".to_string()),
+                members: Some(vec![EnsembleMemberParams {
+                    platform: "claude".to_string(),
+                    model: None,
+                    prompt_override: None,
+                    timeout_minutes: None,
+                    infra_retry_limit: None,
+                    infra_crash_max_seconds: None,
+                    infra_backoff_seconds: None,
+                }]),
+                blueprint: None,
+                from_node: entry.clone(),
+                condition: "always".to_string(),
+                min_pass: None,
+                straggler_timeout_minutes: Some(5),
+                quorum_grace_minutes: None,
+                timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
+                on_pass_to: arbiter.clone(),
+                on_fail_to: None,
+            }))
+            .await
+            .unwrap();
+        assert!(
+            is_err(&result),
+            "cascade + straggler_timeout_minutes must be rejected"
+        );
+        assert!(
+            text(&result).contains("straggler_timeout_minutes")
+                && text(&result).contains("cascade"),
+            "error must name the field and the kind: {}",
+            text(&result)
+        );
+    }
+
+    #[tokio::test]
+    async fn graph_update_ensemble_rejects_quorum_grace_on_round_robin() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let lp = insert_test_graph(&db, dir.path());
+        let spec = insert_test_spec(&db, &lp.id, 1);
+        let entry = add_agent_node(&handler, &spec.id, "Entry").await;
+        let arbiter = add_agent_node(&handler, &spec.id, "Arbiter").await;
+
+        let created = handler
+            .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                commit_rights: None,
+                spec_id: Some(spec.id.clone()),
+                graph_id: None,
+                name: "Ensemble".to_string(),
+                kind: Some("round_robin".to_string()),
+                prompt_template: Some("do it".to_string()),
+                members: Some(vec![
+                    EnsembleMemberParams {
+                        platform: "claude".to_string(),
+                        model: None,
+                        prompt_override: None,
+                        timeout_minutes: None,
+                        infra_retry_limit: None,
+                        infra_crash_max_seconds: None,
+                        infra_backoff_seconds: None,
+                    },
+                    EnsembleMemberParams {
+                        platform: "openrouter".to_string(),
+                        model: None,
+                        prompt_override: None,
+                        timeout_minutes: None,
+                        infra_retry_limit: None,
+                        infra_crash_max_seconds: None,
+                        infra_backoff_seconds: None,
+                    },
+                ]),
+                blueprint: None,
+                from_node: entry.clone(),
+                condition: "always".to_string(),
+                min_pass: None,
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
+                timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
+                on_pass_to: arbiter.clone(),
+                on_fail_to: None,
+            }))
+            .await
+            .unwrap();
+        let ensemble_id = extract_id(&created, "ensemble_id");
+
+        let result = handler
+            .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+                commit_rights: None,
+                ensemble_id: ensemble_id.clone(),
+                kind: None,
+                prompt_template: None,
+                members: None,
+                min_pass: None,
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: Some(Some(3)),
+                timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
+                on_pass_to: None,
+                on_fail_to: None,
+                from_node: None,
+                condition: None,
+                add_entry_from: None,
+                add_entry_condition: None,
+                remove_entry_from: None,
+            }))
+            .await
+            .unwrap();
+        assert!(
+            is_err(&result),
+            "round_robin + quorum_grace_minutes must be rejected"
+        );
+        assert!(
+            text(&result).contains("quorum_grace_minutes") && text(&result).contains("round_robin"),
+            "error must name the field and the kind: {}",
+            text(&result)
+        );
+    }
+
+    #[tokio::test]
+    async fn graph_update_ensemble_switching_to_cascade_clears_stale_straggler_and_grace_fields() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let lp = insert_test_graph(&db, dir.path());
+        let spec = insert_test_spec(&db, &lp.id, 1);
+        let entry = add_agent_node(&handler, &spec.id, "Entry").await;
+        let arbiter = add_agent_node(&handler, &spec.id, "Arbiter").await;
+
+        let created = handler
+            .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                commit_rights: None,
+                spec_id: Some(spec.id.clone()),
+                graph_id: None,
+                name: "Ensemble".to_string(),
+                kind: Some("parallel".to_string()),
+                prompt_template: Some("do it".to_string()),
+                members: Some(vec![
+                    EnsembleMemberParams {
+                        platform: "claude".to_string(),
+                        model: None,
+                        prompt_override: None,
+                        timeout_minutes: None,
+                        infra_retry_limit: None,
+                        infra_crash_max_seconds: None,
+                        infra_backoff_seconds: None,
+                    },
+                    EnsembleMemberParams {
+                        platform: "openrouter".to_string(),
+                        model: None,
+                        prompt_override: None,
+                        timeout_minutes: None,
+                        infra_retry_limit: None,
+                        infra_crash_max_seconds: None,
+                        infra_backoff_seconds: None,
+                    },
+                ]),
+                blueprint: None,
+                from_node: entry.clone(),
+                condition: "always".to_string(),
+                min_pass: None,
+                straggler_timeout_minutes: Some(7),
+                quorum_grace_minutes: Some(2),
+                timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
+                on_pass_to: arbiter.clone(),
+                on_fail_to: None,
+            }))
+            .await
+            .unwrap();
+        let ensemble_id = extract_id(&created, "ensemble_id");
+
+        let updated = handler
+            .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+                commit_rights: None,
+                ensemble_id: ensemble_id.clone(),
+                kind: Some("cascade".to_string()),
+                prompt_template: None,
+                members: None,
+                min_pass: None,
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
+                timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
+                on_pass_to: None,
+                on_fail_to: None,
+                from_node: None,
+                condition: None,
+                add_entry_from: None,
+                add_entry_condition: None,
+                remove_entry_from: None,
+            }))
+            .await
+            .unwrap();
+        assert!(
+            !is_err(&updated),
+            "switching to cascade must succeed: {:?}",
+            updated
+        );
+        assert!(
+            text(&updated).contains("Cleared")
+                && text(&updated).contains("straggler_timeout_minutes"),
+            "response must say the stale fields were cleared: {}",
+            text(&updated)
+        );
+
+        let details = db.get_ensemble_details(&ensemble_id).unwrap().unwrap();
+        assert_eq!(details.ensemble.kind, EnsembleKind::Cascade);
+        assert_eq!(details.ensemble.straggler_timeout_minutes, None);
+        assert_eq!(details.ensemble.quorum_grace_minutes, None);
     }
 
     #[tokio::test]

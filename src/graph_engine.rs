@@ -3787,14 +3787,20 @@ impl GraphEngine {
         Ok(execution)
     }
 
-    /// CM3: run a single ensemble member to a verdict, honouring its own
-    /// infra-retry budget (`begin_infra_retry`) and the ensemble straggler
-    /// timeout. Returns the member's `NodeExecution` plus a `had_no_verdict`
-    /// flag that is `true` only when the member produced no usable result — a
-    /// retry-exhausted infra crash, a hard error, or a straggler kill. Cascade
-    /// and round-robin share this so "advance to the next member only on no
-    /// verdict" has exactly one implementation; a real `fail` verdict returns
-    /// `had_no_verdict == false` and must stop the walk.
+    /// CM3/CB67: run a single ensemble member to a verdict, honouring its own
+    /// infra-retry budget (`begin_infra_retry`). Bounded only by ITS OWN
+    /// effective timeout — `member_timeout_minutes`, or else
+    /// `ensemble.timeout_minutes` (never `straggler_timeout_minutes`, which is
+    /// a parallel-quorum concept with no meaning for a sequential walk) — and
+    /// CB67: every attempt, the initial one AND every infra retry, gets that
+    /// full timeout FRESH, timed from that attempt's own start; no ensemble-
+    /// wide clock is ever armed here. Returns the member's `NodeExecution`
+    /// plus a `had_no_verdict` flag that is `true` only when the member
+    /// produced no usable result — a retry-exhausted infra crash, a hard
+    /// error, or a timeout kill. Cascade and round-robin share this so
+    /// "advance to the next member only on no verdict" has exactly one
+    /// implementation; a real `fail` verdict returns `had_no_verdict == false`
+    /// and must stop the walk.
     #[allow(clippy::too_many_arguments)]
     async fn run_ensemble_member(
         &self,
@@ -3805,7 +3811,7 @@ impl GraphEngine {
         iteration: usize,
         workdir: &str,
         member_timeout_minutes: Option<i64>,
-        straggler_minutes: u64,
+        ensemble_timeout_minutes: u64,
         node_outputs: &HashMap<String, Value>,
         all_node_names: &[String],
         initial_resume_candidate: Option<String>,
@@ -3813,7 +3819,7 @@ impl GraphEngine {
     ) -> Result<(NodeExecution, bool)> {
         let bound_minutes = member_timeout_minutes
             .map(|minutes| minutes.max(0) as u64)
-            .unwrap_or(straggler_minutes);
+            .unwrap_or(ensemble_timeout_minutes);
         let run_id = uuid::Uuid::new_v4().to_string();
         // CB43: member run — resolved from the node config at dispatch.
         let (executed_platform, executed_model) = executed_pair_for_node(node);
@@ -3845,157 +3851,146 @@ impl GraphEngine {
         let node_outputs = node_outputs.clone();
         let all_node_names = all_node_names.to_vec();
 
-        let outcome =
-            tokio::time::timeout(std::time::Duration::from_secs(bound_minutes * 60), async {
-                let (retry_limit, crash_max_secs, backoff_secs) = read_infra_config(&node);
-                let mut attempt: u32 = 0;
-                let mut member_run_id = run_id.clone();
-                let mut resume_candidate: Option<String> = initial_resume_candidate;
-                loop {
-                    let execution = execute_agent_node(
-                        &db,
-                        &lp,
-                        &spec,
-                        &node,
-                        previous_output.as_ref(),
-                        &member_run_id,
-                        &workdir,
-                        resume_candidate.as_deref(),
-                        false,
-                        dynamic_skills.as_ref(),
-                        &node_outputs,
-                        &all_node_names,
-                    )
-                    .await?;
-                    let run = db.get_graph_run(&member_run_id)?.ok_or_else(|| {
-                        anyhow!("Graph run '{}' not found after execution.", member_run_id)
-                    })?;
-                    if is_infra_crash(
-                        &node,
-                        &execution,
-                        &run,
-                        attempt,
-                        retry_limit,
-                        crash_max_secs,
-                    ) {
-                        resume_candidate = run.session_id.clone();
-                        member_run_id = begin_infra_retry(
-                            &db,
-                            &lp,
-                            &spec,
-                            &node,
-                            previous_output.as_ref(),
-                            iteration as i64,
-                            &member_run_id,
-                            &execution.output,
-                            attempt,
-                            backoff_secs,
-                        )
-                        .await?;
-                        attempt += 1;
-                        continue;
-                    }
-                    // The member is settled. It still counts as "no verdict"
-                    // when the settled shape is a retry-exhausted infra crash —
-                    // the same check cascade keys its fallthrough off.
-                    let mut execution = execution;
-                    let mut run = run;
-                    let member_had_no_verdict = finalize_infra_crash_shape(
-                        &db,
-                        &member_run_id,
-                        &node,
-                        &mut execution,
-                        &mut run,
-                        attempt,
-                        retry_limit,
-                        crash_max_secs,
-                    )
-                    .await?;
-                    break Ok::<_, anyhow::Error>((
-                        execution,
-                        run,
-                        member_run_id.clone(),
-                        member_had_no_verdict,
-                    ));
-                }
-            })
+        let (retry_limit, crash_max_secs, backoff_secs) = read_infra_config(&node);
+        let mut attempt: u32 = 0;
+        let mut member_run_id = run_id.clone();
+        let mut resume_candidate: Option<String> = initial_resume_candidate;
+        let mut settled_session_id: Option<String> = None;
+
+        // CB67: each iteration below re-arms `tokio::time::timeout` with the
+        // SAME `bound_minutes` but a FRESH deadline, timed from that
+        // iteration's own start — the initial attempt and every infra retry
+        // each get the member's full effective timeout, never a shared
+        // ensemble-wide (or even single-member-wide) clock.
+        let result: (NodeExecution, bool) = loop {
+            let attempt_outcome = tokio::time::timeout(
+                std::time::Duration::from_secs(bound_minutes * 60),
+                execute_agent_node(
+                    &db,
+                    &lp,
+                    &spec,
+                    &node,
+                    previous_output.as_ref(),
+                    &member_run_id,
+                    &workdir,
+                    resume_candidate.as_deref(),
+                    false,
+                    dynamic_skills.as_ref(),
+                    &node_outputs,
+                    &all_node_names,
+                ),
+            )
             .await;
 
-        let mut settled_session_id: Option<String> = None;
-        let result = match outcome {
-            Ok(Ok((execution, run, final_run_id, no_verdict))) => {
-                settled_session_id = run.session_id.clone();
-                let execution = if run.status == GraphRunStatus::Running {
-                    let _ = db.update_graph_run_result(
-                        &final_run_id,
-                        execution.status,
-                        Some(&execution.output),
-                        Some(chrono::Utc::now()),
+            let execution = match attempt_outcome {
+                Ok(Ok(execution)) => execution,
+                // A hard error inside this attempt — the member never
+                // produced a verdict, so the caller moves on to the next one.
+                Ok(Err(error)) => {
+                    break (
+                        NodeExecution {
+                            status: GraphRunStatus::Fail,
+                            output: serde_json::json!({ "error": error.to_string() }),
+                            summary: format!("Ensemble member '{}' failed: {error}", node.name),
+                        },
+                        true,
                     );
-                    execution
-                } else {
-                    NodeExecution {
-                        status: run.status,
-                        output: run.output.unwrap_or_else(|| serde_json::json!({})),
-                        summary: execution.summary,
-                    }
-                };
-                (execution, no_verdict)
-            }
-            // A hard error inside the retry graph — the member never produced a
-            // verdict, so the caller moves on to the next one.
-            Ok(Err(error)) => (
-                NodeExecution {
-                    status: GraphRunStatus::Fail,
-                    output: serde_json::json!({ "error": error.to_string() }),
-                    summary: format!("Ensemble member '{}' failed: {error}", node.name),
-                },
-                true,
-            ),
-            // Timeout — the member was killed before it produced a verdict
-            // (either its own `timeout_minutes` or, absent that, the
-            // ensemble's straggler timeout), so the caller moves on to the
-            // next one.
-            Err(_elapsed) => {
-                if let Ok(Some(run)) = db.get_active_graph_run_for_node(&node.id) {
-                    let reason = if member_timeout_minutes.is_some() {
-                        "member's own timeout"
-                    } else {
-                        "ensemble straggler timeout"
-                    };
-                    terminate_run_row(&db, &run, reason);
                 }
-                let (error_tag, summary) = if member_timeout_minutes.is_some() {
-                    (
-                        "member timeout",
-                        format!(
-                            "Ensemble member '{}' timed out: its own timeout_minutes ({bound_minutes}m) elapsed.",
-                            node.name
-                        ),
-                    )
-                } else {
-                    (
-                        "straggler timeout",
-                        format!(
-                            "Ensemble member '{}' killed: straggler timeout after {bound_minutes}m.",
-                            node.name
-                        ),
-                    )
-                };
-                (
-                    NodeExecution {
-                        status: GraphRunStatus::Fail,
-                        output: serde_json::json!({
-                            "kind": "agent",
-                            "node_id": node.id,
-                            "error": error_tag,
-                            "timeout_minutes": bound_minutes,
-                        }),
-                        summary,
-                    },
-                    true,
+                // This attempt's own full `bound_minutes` elapsed — kill
+                // whatever's live now (B12) and settle this member as failed.
+                // Never retried: a timeout is a hard kill, not a crash shape
+                // to feed back into `is_infra_crash`.
+                Err(_elapsed) => {
+                    if let Ok(Some(run)) = db.get_active_graph_run_for_node(&node.id) {
+                        let terminate_reason = if member_timeout_minutes.is_some() {
+                            "member's own timeout"
+                        } else {
+                            "ensemble's timeout_minutes"
+                        };
+                        terminate_run_row(&db, &run, terminate_reason);
+                    }
+                    let source = if member_timeout_minutes.is_some() {
+                        "its own timeout_minutes"
+                    } else {
+                        "the ensemble's timeout_minutes"
+                    };
+                    break (
+                        NodeExecution {
+                            status: GraphRunStatus::Fail,
+                            output: serde_json::json!({
+                                "kind": "agent",
+                                "node_id": node.id,
+                                "error": "member timeout",
+                                "timeout_minutes": bound_minutes,
+                            }),
+                            summary: format!(
+                                "Ensemble member '{}' timed out: {source} ({bound_minutes}m) elapsed.",
+                                node.name
+                            ),
+                        },
+                        true,
+                    );
+                }
+            };
+
+            let run = db.get_graph_run(&member_run_id)?.ok_or_else(|| {
+                anyhow!("Graph run '{}' not found after execution.", member_run_id)
+            })?;
+            if is_infra_crash(
+                &node,
+                &execution,
+                &run,
+                attempt,
+                retry_limit,
+                crash_max_secs,
+            ) {
+                resume_candidate = run.session_id.clone();
+                member_run_id = begin_infra_retry(
+                    &db,
+                    &lp,
+                    &spec,
+                    &node,
+                    previous_output.as_ref(),
+                    iteration as i64,
+                    &member_run_id,
+                    &execution.output,
+                    attempt,
+                    backoff_secs,
                 )
+                .await?;
+                attempt += 1;
+                continue;
             }
+            let mut execution = execution;
+            let mut run = run;
+            let member_had_no_verdict = finalize_infra_crash_shape(
+                &db,
+                &member_run_id,
+                &node,
+                &mut execution,
+                &mut run,
+                attempt,
+                retry_limit,
+                crash_max_secs,
+            )
+            .await?;
+            settled_session_id = run.session_id.clone();
+            let final_execution = if run.status == GraphRunStatus::Running {
+                let _ = db.update_graph_run_result(
+                    &member_run_id,
+                    execution.status,
+                    Some(&execution.output),
+                    Some(chrono::Utc::now()),
+                );
+                execution
+            } else {
+                NodeExecution {
+                    status: run.status,
+                    output: run.output.unwrap_or_else(|| serde_json::json!({})),
+                    summary: execution.summary,
+                }
+            };
+            break (final_execution, member_had_no_verdict);
         };
 
         if result.0.status == GraphRunStatus::Pass {
@@ -4039,7 +4034,11 @@ impl GraphEngine {
         resumable_sessions: &mut HashMap<String, String>,
     ) -> Result<NodeExecution> {
         let ensemble = &details.ensemble;
-        let straggler_minutes = ensemble.effective_straggler_timeout_minutes().max(0) as u64;
+        // CB67/FR1: cascade has no ensemble-wide deadline and never consults
+        // `straggler_timeout_minutes` (a parallel-quorum concept) — a
+        // member's fallback, absent its own override, is always the
+        // ensemble's plain `timeout_minutes`.
+        let ensemble_timeout_minutes = ensemble.timeout_minutes.max(0) as u64;
 
         // CM15: every member node's CONFIG (platform/model/prompt/timeout/…) is
         // read fresh here, once, before any member task is spawned — so a
@@ -4103,7 +4102,7 @@ impl GraphEngine {
                     iteration,
                     workdir,
                     member.timeout_minutes,
-                    straggler_minutes,
+                    ensemble_timeout_minutes,
                     node_outputs,
                     all_node_names,
                     candidate.clone(),
@@ -4392,7 +4391,11 @@ impl GraphEngine {
             }
         };
 
-        let straggler_minutes = ensemble.effective_straggler_timeout_minutes().max(0) as u64;
+        // CB67/FR1: round_robin has no ensemble-wide deadline and never
+        // consults `straggler_timeout_minutes` (a parallel-quorum concept) —
+        // a member's fallback, absent its own override, is always the
+        // ensemble's plain `timeout_minutes`.
+        let ensemble_timeout_minutes = ensemble.timeout_minutes.max(0) as u64;
 
         // CM15: every member node's CONFIG (platform/model/prompt/timeout/…) is
         // read fresh here, once, before any member task is spawned — so a
@@ -4445,7 +4448,7 @@ impl GraphEngine {
                     iteration,
                     workdir,
                     member.timeout_minutes,
-                    straggler_minutes,
+                    ensemble_timeout_minutes,
                     node_outputs,
                     all_node_names,
                     if offset == 0 {
@@ -22989,6 +22992,185 @@ echo done
         .unwrap();
     }
 
+    /// Like [`insert_kind_ensemble`], but the ensemble's `timeout_minutes`
+    /// and `infra_retry_limit` are caller-supplied instead of fixed at 5/None
+    /// — CB67 needs a short, non-zero `timeout_minutes` (so a member can
+    /// sleep past HALF of it while staying under the whole of it) and
+    /// `infra_retry_limit: 0` baked into each member NODE's config (so a
+    /// silent/no-verdict member falls through after exactly one attempt
+    /// instead of retrying in place — dispatch resolves the retry budget
+    /// from the member node's config, so the value has to land there, not
+    /// only on the ensemble row, which dispatch never reads for this).
+    ///
+    /// CB67 deviation from the original plan draft: `straggler_timeout_minutes`
+    /// is `Some(0)` (the pre-CB67 legacy shape — `graph_add_ensemble` used to
+    /// accept it on any kind), not `None`. FR1 requires sequential dispatch
+    /// to never consult that field: with `None` the pre-fix fallback
+    /// (`effective_straggler_timeout_minutes()`) equals `timeout_minutes`,
+    /// so a test built on it passes with or without the fix. With `Some(0)`
+    /// the pre-fix code bounds every member to a zero-second window and
+    /// cuts them all instantly — the test then fails before the fix and
+    /// passes after, exactly as the spec's failing-test-first guideline
+    /// requires.
+    fn insert_kind_ensemble_with_timeout(
+        db: &Database,
+        spec_id: &str,
+        kind: crate::domain::graphs::EnsembleKind,
+        timeout_minutes: i64,
+        infra_retry_limit: Option<i64>,
+        members: &[(&str, &str)],
+    ) {
+        let now = chrono::Utc::now();
+        db.insert_graph_node(&GraphNode {
+            id: "kickoff".to_string(),
+            spec_id: Some(spec_id.to_string()),
+            graph_id: None,
+            name: "kickoff".to_string(),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({ "command": "printf ok", "success_condition": "exit_code_0" }),
+            position: 1,
+            created_at: now,
+        })
+        .unwrap();
+
+        let member_nodes: Vec<GraphNode> = members
+            .iter()
+            .enumerate()
+            .map(|(i, (node_id, platform))| {
+                let mut config = serde_json::json!({
+                    "platform": platform,
+                    "prompt_template": "ignored by the member's test script",
+                    "timeout_minutes": timeout_minutes,
+                    "infra_backoff_seconds": 0,
+                });
+                if let Some(limit) = infra_retry_limit {
+                    config["infra_retry_limit"] = serde_json::json!(limit);
+                }
+                GraphNode {
+                    id: node_id.to_string(),
+                    spec_id: Some(spec_id.to_string()),
+                    graph_id: None,
+                    name: format!("member-{}", i + 1),
+                    kind: GraphNodeKind::Agent,
+                    config,
+                    position: 2 + i as i64,
+                    created_at: now,
+                }
+            })
+            .collect();
+
+        let join_node = GraphNode {
+            id: "join1".to_string(),
+            spec_id: Some(spec_id.to_string()),
+            graph_id: None,
+            name: "join".to_string(),
+            kind: GraphNodeKind::Join,
+            config: serde_json::json!({ "ensemble_id": "ens1" }),
+            position: 50,
+            created_at: now,
+        };
+
+        let mut edges = Vec::new();
+        for (node_id, _) in members {
+            edges.push(GraphEdge {
+                id: format!("kickoff->{node_id}"),
+                spec_id: Some(spec_id.to_string()),
+                graph_id: None,
+                from_node: "kickoff".to_string(),
+                to_node: node_id.to_string(),
+                condition: GraphEdgeCondition::Always,
+            });
+            edges.push(GraphEdge {
+                id: format!("{node_id}->join1"),
+                spec_id: Some(spec_id.to_string()),
+                graph_id: None,
+                from_node: node_id.to_string(),
+                to_node: "join1".to_string(),
+                condition: GraphEdgeCondition::Always,
+            });
+        }
+        for (i, (term, cond)) in [
+            ("done-pass", GraphEdgeCondition::Pass),
+            ("done-fail", GraphEdgeCondition::Fail),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            db.insert_graph_node(&GraphNode {
+                id: term.to_string(),
+                spec_id: Some(spec_id.to_string()),
+                graph_id: None,
+                name: term.to_string(),
+                kind: GraphNodeKind::Check,
+                config: serde_json::json!({ "command": "printf ok", "success_condition": "exit_code_0" }),
+                position: 100 + i as i64,
+                created_at: now,
+            })
+            .unwrap();
+            edges.push(GraphEdge {
+                id: format!("join1->{term}"),
+                spec_id: Some(spec_id.to_string()),
+                graph_id: None,
+                from_node: "join1".to_string(),
+                to_node: term.to_string(),
+                condition: cond,
+            });
+        }
+
+        let ensemble = crate::domain::graphs::Ensemble {
+            commit_rights: false,
+            id: "ens1".to_string(),
+            spec_id: Some(spec_id.to_string()),
+            graph_id: None,
+            name: "Switched Ensemble".to_string(),
+            prompt_template: "ignored by the member's test script".to_string(),
+            join_node_id: "join1".to_string(),
+            entry_from_node: "kickoff".to_string(),
+            entry_condition: GraphEdgeCondition::Always,
+            min_pass: 1,
+            straggler_timeout_minutes: Some(0),
+            quorum_grace_minutes: None,
+            timeout_minutes,
+            infra_retry_limit,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
+            on_pass_to: "done-pass".to_string(),
+            on_fail_to: Some("done-fail".to_string()),
+            kind,
+            round_robin_index: if kind == crate::domain::graphs::EnsembleKind::RoundRobin {
+                Some(0)
+            } else {
+                None
+            },
+            created_at: now,
+        };
+        let ensemble_members: Vec<EnsembleMember> = members
+            .iter()
+            .enumerate()
+            .map(|(i, (node_id, platform))| EnsembleMember {
+                ensemble_id: "ens1".to_string(),
+                node_id: node_id.to_string(),
+                position: i as i64,
+                platform: platform.to_string(),
+                model: None,
+                prompt_override: None,
+                timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
+            })
+            .collect();
+
+        db.insert_ensemble_unit(
+            &ensemble,
+            &ensemble_members,
+            &member_nodes,
+            &join_node,
+            &edges,
+        )
+        .unwrap();
+    }
+
     /// Like [`insert_kind_ensemble`] but each member may carry its own
     /// `timeout_minutes` override (CM23) — `None` uses the ensemble's shared
     /// `timeout_minutes` (5, same fixture value `insert_kind_ensemble` uses),
@@ -29529,6 +29711,172 @@ exit 0
             member_runs(&db, &spec_id, "c-saysno").len(),
             1,
             "a reported fail must not be retried as infra"
+        );
+    }
+
+    /// CB67: `timeout_minutes: 1` (60s) is "the timeout"; half of it is 30s.
+    /// The fixture carries the legacy `straggler_timeout_minutes: Some(0)`
+    /// shape (pre-CB67 `graph_add_ensemble` accepted it on any kind). Before
+    /// CB67 the no-override fallback was `effective_straggler_timeout_minutes()`
+    /// — i.e. that 0 — so every member was bounded to a zero-second window
+    /// and cut instantly; the join never sees m3 and this test fails. After
+    /// CB67, sequential dispatch never consults the field (FR1): each member
+    /// attempt is bounded only by its own effective timeout — the ensemble's
+    /// `timeout_minutes` here — timed fresh from that attempt's own start,
+    /// and every infra retry re-arms that same budget fresh. m1 crashes with
+    /// no verdict at once (falls through). m2 sleeps 40s (past half) then
+    /// exits 1, no verdict (falls through). m3 sleeps 45s (past half) and
+    /// crashes on attempt 0, then its infra retry gets a FRESH 60s — not
+    /// what's left of attempt 0's clock (the pre-CB67 single-timeout-wrapping-
+    /// -the-whole-retry-loop bug) and not the ensemble's — sleeps 40s (past
+    /// half) and files a real Pass. The join passes with m3 as winner.
+    #[tokio::test]
+    async fn round_robin_later_member_is_not_starved_by_earlier_members_elapsed_time() {
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+        let db_path = dir.path().join(TEST_DB_FILENAME);
+        let marker = dir.path().join("m3.first-attempt.marker");
+        let fake_home = setup_multi_cli_home(&[
+            ("m1", &write_member_script(dir.path(), "m1.sh", "exit 1")),
+            (
+                "m2",
+                &write_member_script(dir.path(), "m2.sh", "sleep 40; exit 1"),
+            ),
+            (
+                "m3",
+                &write_member_script(
+                    dir.path(),
+                    "m3.sh",
+                    &format!(
+                        "if [ -f '{marker}' ]; then\nsleep 40\n{invocation}else\nsleep 45\ntouch '{marker}'\nexit 1\nfi",
+                        marker = marker.display(),
+                        invocation = self_report_invocation(&db_path, "m3", "pass", None),
+                    ),
+                ),
+            ),
+        ]);
+        insert_kind_ensemble_with_timeout(
+            &db,
+            &spec_id,
+            crate::domain::graphs::EnsembleKind::RoundRobin,
+            1,
+            Some(0),
+            &[("m1", "m1"), ("m2", "m2"), ("m3", "m3")],
+        );
+        // m3 alone may retry (attempt 0 crashes without a verdict; attempt 1
+        // must get a fresh member timeout, not attempt 0's leftovers).
+        db.update_graph_node_details(
+            "m3",
+            None,
+            None,
+            Some(&serde_json::json!({
+                "platform": "m3",
+                "prompt_template": "ignored by the member's test script",
+                "timeout_minutes": 1,
+                "infra_backoff_seconds": 0,
+                "infra_retry_limit": 1,
+            })),
+            None,
+        )
+        .unwrap();
+
+        let _home = HomeGuard::set(fake_home.path());
+        engine
+            .run_graph(graph_id.clone(), None, None, None, None)
+            .await
+            .unwrap();
+        drop(_home);
+
+        let join = join_run(&db, &spec_id, "join1");
+        assert_eq!(
+            join.status,
+            GraphRunStatus::Pass,
+            "m3 must not be cut by the ensemble's (nonexistent) deadline, by m1+m2's elapsed time, or by its own attempt 0's elapsed time; it gets its own fresh timeout per attempt"
+        );
+        assert_eq!(join.output.as_ref().unwrap()["member"]["node_id"], "m3");
+        assert!(
+            member_runs(&db, &spec_id, "m3")
+                .iter()
+                .any(|r| r.status == GraphRunStatus::Pass),
+            "m3 must have actually passed, not been cut"
+        );
+    }
+
+    /// CB67 (cascade variant of the round-robin test above): same setup, same
+    /// requirements — the cascade fallthrough path must arm no ensemble-wide
+    /// deadline either (the legacy `straggler_timeout_minutes: Some(0)`
+    /// fixture would cut every member instantly pre-CB67), each member gets
+    /// its own fresh timeout from its own attempt's start, and m3's infra
+    /// retry re-arms that budget fresh instead of inheriting attempt 0's
+    /// leftovers. See the round-robin variant's doc comment for the full
+    /// pre/post-fix story.
+    #[tokio::test]
+    async fn cascade_later_member_is_not_starved_by_earlier_members_elapsed_time() {
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+        let db_path = dir.path().join(TEST_DB_FILENAME);
+        let marker = dir.path().join("m3.first-attempt.marker");
+        let fake_home = setup_multi_cli_home(&[
+            ("m1", &write_member_script(dir.path(), "m1.sh", "exit 1")),
+            (
+                "m2",
+                &write_member_script(dir.path(), "m2.sh", "sleep 40; exit 1"),
+            ),
+            (
+                "m3",
+                &write_member_script(
+                    dir.path(),
+                    "m3.sh",
+                    &format!(
+                        "if [ -f '{marker}' ]; then\nsleep 40\n{invocation}else\nsleep 45\ntouch '{marker}'\nexit 1\nfi",
+                        marker = marker.display(),
+                        invocation = self_report_invocation(&db_path, "m3", "pass", None),
+                    ),
+                ),
+            ),
+        ]);
+        insert_kind_ensemble_with_timeout(
+            &db,
+            &spec_id,
+            crate::domain::graphs::EnsembleKind::Cascade,
+            1,
+            Some(0),
+            &[("m1", "m1"), ("m2", "m2"), ("m3", "m3")],
+        );
+        // m3 alone may retry (attempt 0 crashes without a verdict; attempt 1
+        // must get a fresh member timeout, not attempt 0's leftovers).
+        db.update_graph_node_details(
+            "m3",
+            None,
+            None,
+            Some(&serde_json::json!({
+                "platform": "m3",
+                "prompt_template": "ignored by the member's test script",
+                "timeout_minutes": 1,
+                "infra_backoff_seconds": 0,
+                "infra_retry_limit": 1,
+            })),
+            None,
+        )
+        .unwrap();
+
+        let _home = HomeGuard::set(fake_home.path());
+        engine
+            .run_graph(graph_id.clone(), None, None, None, None)
+            .await
+            .unwrap();
+        drop(_home);
+
+        let join = join_run(&db, &spec_id, "join1");
+        assert_eq!(
+            join.status,
+            GraphRunStatus::Pass,
+            "m3 must not be cut by the ensemble's (nonexistent) deadline, by m1+m2's elapsed time, or by its own attempt 0's elapsed time; it gets its own fresh timeout per attempt"
+        );
+        assert_eq!(join.output.as_ref().unwrap()["winner"]["node_id"], "m3");
+        assert!(
+            member_runs(&db, &spec_id, "m3")
+                .iter()
+                .any(|r| r.status == GraphRunStatus::Pass),
+            "m3 must have actually passed, not been cut"
         );
     }
 
