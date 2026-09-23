@@ -9,6 +9,11 @@
 //! events — the export document has no field for either — see spec
 //! decision 1), so unlike [`Database::insert_graph`] this never needs to
 //! encode one.
+//!
+//! The `ensembles`/`ensemble_members` writes mirror the authoring path's full
+//! column set — including `kind`, `round_robin_index` and the infra budget
+//! columns — so nothing the import plan carries is silently dropped to a
+//! column default (CB62).
 
 use anyhow::{anyhow, Result};
 use rusqlite::{params, Transaction};
@@ -66,8 +71,8 @@ impl Database {
         for ensemble_plan in &plan.ensembles {
             let ensemble = &ensemble_plan.ensemble;
             tx.execute(
-                "INSERT INTO ensembles (id, spec_id, graph_id, name, prompt_template, join_node_id, entry_from_node, entry_condition, min_pass, straggler_timeout_minutes, quorum_grace_minutes, timeout_minutes, on_pass_to, on_fail_to, commit_rights, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                "INSERT INTO ensembles (id, spec_id, graph_id, name, prompt_template, join_node_id, entry_from_node, entry_condition, min_pass, straggler_timeout_minutes, quorum_grace_minutes, timeout_minutes, infra_retry_limit, infra_crash_max_seconds, infra_backoff_seconds, on_pass_to, on_fail_to, kind, round_robin_index, commit_rights, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
                 params![
                     &ensemble.id,
                     &ensemble.spec_id,
@@ -81,16 +86,21 @@ impl Database {
                     ensemble.straggler_timeout_minutes,
                     ensemble.quorum_grace_minutes,
                     ensemble.timeout_minutes,
+                    ensemble.infra_retry_limit,
+                    ensemble.infra_crash_max_seconds,
+                    ensemble.infra_backoff_seconds,
                     &ensemble.on_pass_to,
                     &ensemble.on_fail_to,
+                    ensemble.kind.as_str(),
+                    ensemble.round_robin_index,
                     ensemble.commit_rights,
                     ensemble.created_at.timestamp(),
                 ],
             )?;
             for member in &ensemble_plan.members {
                 tx.execute(
-                    "INSERT INTO ensemble_members (ensemble_id, node_id, position, platform, model, prompt_override, timeout_minutes)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    "INSERT INTO ensemble_members (ensemble_id, node_id, position, platform, model, prompt_override, timeout_minutes, infra_retry_limit, infra_crash_max_seconds, infra_backoff_seconds)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                     params![
                         &member.ensemble_id,
                         &member.node_id,
@@ -99,6 +109,9 @@ impl Database {
                         &member.model,
                         &member.prompt_override,
                         &member.timeout_minutes,
+                        &member.infra_retry_limit,
+                        &member.infra_crash_max_seconds,
+                        &member.infra_backoff_seconds,
                     ],
                 )?;
             }
@@ -384,5 +397,220 @@ mod tests {
             Some(expected_infra_id),
             "imported graph must persist infra_node_id"
         );
+    }
+
+    /// CB62: the exact measured defect — a `cascade` ensemble must come back
+    /// as `cascade` from the DB, not as the column default `parallel`. Also
+    /// pins `round_robin_index` persistence.
+    #[test]
+    fn import_graph_persists_ensemble_kind() {
+        use crate::domain::graph_transfer::{
+            GraphExportEnsemble, GraphExportEnsembleMember, GraphExportEnsembleTarget,
+            GraphExportNode,
+        };
+        use crate::domain::graphs::EnsembleKind;
+        let db = test_db();
+        let member = || GraphExportEnsembleMember {
+            platform: Some("claude".to_string()),
+            model: None,
+            prompt_override: None,
+            timeout_minutes: None,
+        };
+        let document = GraphExportDocument {
+            format_version: 2,
+            name: "kinds-graph".to_string(),
+            description: None,
+            nodes: vec![
+                GraphExportNode {
+                    name: "kickoff".to_string(),
+                    kind: GraphNodeKind::Check,
+                    position: 1,
+                    config: serde_json::json!({"command": "true"}),
+                },
+                GraphExportNode {
+                    name: "final".to_string(),
+                    kind: GraphNodeKind::Check,
+                    position: 2,
+                    config: serde_json::json!({"command": "true"}),
+                },
+            ],
+            edges: vec![],
+            ensembles: vec![
+                GraphExportEnsemble {
+                    commit_rights: false,
+                    name: "Cascade Team".to_string(),
+                    kind: Some("cascade".to_string()),
+                    prompt_template: "go".to_string(),
+                    entry_from_node: GraphExportEnsembleTarget::Node("kickoff".to_string()),
+                    entry_condition: GraphEdgeCondition::Always,
+                    on_pass_to: GraphExportEnsembleTarget::Node("final".to_string()),
+                    on_fail_to: None,
+                    min_pass: 1,
+                    timeout_minutes: 30,
+                    straggler_timeout_minutes: None,
+                    quorum_grace_minutes: None,
+                    members: vec![member(), member()],
+                },
+                GraphExportEnsemble {
+                    commit_rights: false,
+                    name: "RR Team".to_string(),
+                    kind: Some("round_robin".to_string()),
+                    prompt_template: "go".to_string(),
+                    entry_from_node: GraphExportEnsembleTarget::Node("kickoff".to_string()),
+                    entry_condition: GraphEdgeCondition::Always,
+                    on_pass_to: GraphExportEnsembleTarget::Node("final".to_string()),
+                    on_fail_to: None,
+                    min_pass: 1,
+                    timeout_minutes: 30,
+                    straggler_timeout_minutes: None,
+                    quorum_grace_minutes: None,
+                    members: vec![member(), member()],
+                },
+            ],
+            infra_node: None,
+        };
+        let lp = draft_graph("graph-1", "kinds-graph", "/tmp/project");
+        let plan = build_import_plan(&document, &lp.id).unwrap();
+        db.import_graph(&lp, &plan).unwrap();
+
+        let stored = db.list_ensembles_for_graph("graph-1").unwrap();
+        assert_eq!(stored.len(), 2);
+        let cascade = stored
+            .iter()
+            .find(|d| d.ensemble.name == "Cascade Team")
+            .expect("cascade ensemble present");
+        let rr = stored
+            .iter()
+            .find(|d| d.ensemble.name == "RR Team")
+            .expect("round_robin ensemble present");
+        assert_eq!(cascade.ensemble.kind, EnsembleKind::Cascade);
+        assert_eq!(rr.ensemble.kind, EnsembleKind::RoundRobin);
+        assert_eq!(rr.ensemble.round_robin_index, Some(0));
+    }
+
+    /// CB62 FR4 (DB half): the persisted round trip compared as whole
+    /// serialized documents — this is the test that fails on the current
+    /// code and passes once the INSERT carries `kind`. Every optional
+    /// ensemble/member field is non-default so a silently-dropped column
+    /// shows up as a document diff (shape-derived, per the NFR).
+    #[test]
+    fn import_graph_round_trips_the_whole_document() {
+        use crate::domain::graph_transfer::{
+            GraphExportEdge, GraphExportEnsemble, GraphExportEnsembleMember,
+            GraphExportEnsembleTarget, GraphExportNode,
+        };
+        let db = test_db();
+        let doc = GraphExportDocument {
+            format_version: 2,
+            name: "cb62-full".to_string(),
+            description: Some("all fields".to_string()),
+            nodes: vec![
+                GraphExportNode {
+                    name: "kickoff".to_string(),
+                    kind: GraphNodeKind::Check,
+                    position: 1,
+                    config: serde_json::json!({"command": "true"}),
+                },
+                GraphExportNode {
+                    name: "final".to_string(),
+                    kind: GraphNodeKind::Check,
+                    position: 2,
+                    config: serde_json::json!({"command": "true"}),
+                },
+            ],
+            edges: vec![GraphExportEdge {
+                from_node: "kickoff".to_string(),
+                to_node: "final".to_string(),
+                condition: GraphEdgeCondition::Always,
+            }],
+            ensembles: vec![
+                GraphExportEnsemble {
+                    commit_rights: true,
+                    name: "Alpha".to_string(),
+                    kind: Some("cascade".to_string()),
+                    prompt_template: "go".to_string(),
+                    entry_from_node: GraphExportEnsembleTarget::Node("kickoff".to_string()),
+                    entry_condition: GraphEdgeCondition::Always,
+                    on_pass_to: GraphExportEnsembleTarget::Ensemble {
+                        ensemble: "Beta".to_string(),
+                    },
+                    on_fail_to: Some(GraphExportEnsembleTarget::Node("final".to_string())),
+                    min_pass: 1,
+                    timeout_minutes: 15,
+                    straggler_timeout_minutes: Some(7),
+                    quorum_grace_minutes: None,
+                    members: vec![
+                        GraphExportEnsembleMember {
+                            platform: Some("copilot".to_string()),
+                            model: Some("model-a".to_string()),
+                            prompt_override: Some("angle a".to_string()),
+                            timeout_minutes: Some(15),
+                        },
+                        GraphExportEnsembleMember {
+                            platform: Some("opencode".to_string()),
+                            model: None,
+                            prompt_override: None,
+                            timeout_minutes: None,
+                        },
+                    ],
+                },
+                GraphExportEnsemble {
+                    commit_rights: false,
+                    name: "Beta".to_string(),
+                    kind: Some("round_robin".to_string()),
+                    prompt_template: "review".to_string(),
+                    entry_from_node: GraphExportEnsembleTarget::Node("kickoff".to_string()),
+                    entry_condition: GraphEdgeCondition::Always,
+                    on_pass_to: GraphExportEnsembleTarget::Node("final".to_string()),
+                    on_fail_to: None,
+                    min_pass: 1,
+                    timeout_minutes: 30,
+                    straggler_timeout_minutes: Some(5),
+                    quorum_grace_minutes: None,
+                    members: vec![
+                        GraphExportEnsembleMember {
+                            platform: Some("claude".to_string()),
+                            model: Some("sonnet".to_string()),
+                            prompt_override: None,
+                            timeout_minutes: None,
+                        },
+                        GraphExportEnsembleMember {
+                            platform: Some("claude".to_string()),
+                            model: None,
+                            prompt_override: Some("angle b".to_string()),
+                            timeout_minutes: Some(9),
+                        },
+                    ],
+                },
+            ],
+            infra_node: Some("final".to_string()),
+        };
+        let lp = draft_graph("graph-1", "cb62-full", "/tmp/project");
+        let plan = build_import_plan(&doc, &lp.id).unwrap();
+        let mut lp = lp;
+        lp.description = doc.description.clone();
+        lp.infra_node_id = plan.infra_node_id.clone();
+        db.import_graph(&lp, &plan).unwrap();
+
+        // Read back the imported graph exactly as graph_export does...
+        let graph_nodes = db.list_graph_nodes_for_graph("graph-1").unwrap();
+        let graph_edges = db.list_graph_edges_for_graph("graph-1").unwrap();
+        let ensembles = db.list_ensembles_for_graph("graph-1").unwrap();
+        let stored_graph = db.get_graph("graph-1").unwrap().unwrap();
+        let redone =
+            build_export_document(&stored_graph, &graph_nodes, &graph_edges, &ensembles).unwrap();
+
+        // ...and compare the whole serialized documents section by section.
+        let first_value = serde_json::to_value(&doc).unwrap();
+        let second_value = serde_json::to_value(&redone).unwrap();
+        assert_eq!(
+            first_value["ensembles"], second_value["ensembles"],
+            "CB62: every ensemble field must survive the DB round trip"
+        );
+        assert_eq!(first_value["nodes"], second_value["nodes"]);
+        assert_eq!(first_value["edges"], second_value["edges"]);
+        assert_eq!(first_value["infra_node"], second_value["infra_node"]);
+        assert_eq!(first_value["name"], second_value["name"]);
+        assert_eq!(first_value["description"], second_value["description"]);
     }
 }

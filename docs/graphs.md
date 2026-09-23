@@ -547,6 +547,15 @@ thing to check before running an imported graph:
 `nodes_missing_platform` in the MCP response, or the same list
 printed by the CLI.
 
+An ensemble's `kind` is carried in the document for `cascade` and
+`round_robin`; export omits it for `parallel`, which is what an
+absent `kind` means on import. Import refuses a `kind` value it does
+not know — naming the ensemble and the value — and refuses a document
+that carries any field it does not know how to restore, as part of
+its all-or-nothing contract. `format_version` 3 remains the newest
+accepted version; 1 and 2 documents import unchanged (they carry
+fewer fields, never more).
+
 An [ensemble](#ensembles) round-trips as one ensemble — not as its
 expanded member/quorum nodes — via its own `ensembles` array entry.
 The `entry_from_node`, `on_pass_to`, and `on_fail_to` fields use a bare
@@ -560,7 +569,7 @@ ensemble of reviewers, and a committer the quorum routes to on pass.
 
 ```json
 {
-  "format_version": 2,
+  "format_version": 3,
   "name": "implement-and-review",
   "description": "Implement a spec, get two model opinions, then commit.",
   "nodes": [
@@ -592,11 +601,12 @@ ensemble of reviewers, and a committer the quorum routes to on pass.
   "ensembles": [
     {
       "name": "reviewers",
+      "kind": "cascade",
       "prompt_template": "Review this diff for correctness: {{previous_feedback}}",
       "entry_from_node": "implementer",
       "entry_condition": "always",
       "on_pass_to": "committer",
-      "min_pass": 2,
+      "min_pass": 1,
       "timeout_minutes": 20,
       "members": [
         {"platform": "copilot", "model": null, "prompt_override": null},
@@ -613,7 +623,8 @@ member/quorum nodes never appear in `nodes` — only its
 `members` array do. `implementer` uses its platform's default model,
 hence the explicit `"model": null`; a `format_version: 1` document
 with `{}` members still imports, with every unbound node reported as
-`nodes_missing_platform`.
+`nodes_missing_platform`. `reviewers` runs as a cascade: one member at
+a time, first usable verdict wins.
 
 ## Archive and restore
 

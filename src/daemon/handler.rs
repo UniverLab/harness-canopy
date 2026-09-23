@@ -7922,7 +7922,7 @@ impl TaskTriggerHandler {
 
     #[tool(
         name = "graph_export",
-        description = "Export a graph's design — name, description, nodes, edges, and ensembles — as a portable JSON document, so it can be shared as a file and recreated elsewhere with graph_import. Never includes ids, workdir, specs, or run/status state. Includes platform/model for every agent node and ensemble member; format_version 2."
+        description = "Export a graph's design — name, description, nodes, edges, and ensembles — as a portable JSON document, so it can be shared as a file and recreated elsewhere with graph_import. Never includes ids, workdir, specs, or run/status state. Includes platform/model for every agent node and ensemble member, and each ensemble's kind ('cascade'/'round_robin'; omitted for the 'parallel' default); format_version 3."
     )]
     async fn graph_export(
         &self,
@@ -7970,7 +7970,7 @@ impl TaskTriggerHandler {
 
     #[tool(
         name = "graph_import",
-        description = "Create a new graph from an exported document (the object graph_export returns). Always creates a new graph — never updates or overwrites an existing one; if the name is already taken in workdir, a numeric suffix is applied and the response says which name was used. Validates the document exactly as graph_add_node/graph_add_edge/graph_add_ensemble would, all-or-nothing: nothing is written if any part is rejected. Accepts format_version 1 (members with no binding, reported as missing a platform) and 2 (bindings restored). The response lists every agent node left without a platform so the caller knows what to fill in before running the graph."
+        description = "Create a new graph from an exported document (the object graph_export returns). Always creates a new graph — never updates or overwrites an existing one; if the name is already taken in workdir, a numeric suffix is applied and the response says which name was used. Validates the document exactly as graph_add_node/graph_add_edge/graph_add_ensemble would, all-or-nothing: nothing is written if any part is rejected. Accepts format_version 1 (members with no binding, reported as missing a platform), 2 (bindings restored), and 3 (graph/error vocabulary). Restores each ensemble's kind, commit_rights, timeouts, member overrides, and entry/exit wiring exactly; a document field this build does not know how to restore — including an unknown 'kind' value — is a refusal naming the field, never a silent default. The response lists every agent node left without a platform so the caller knows what to fill in before running the graph."
     )]
     async fn graph_import(
         &self,
@@ -22543,6 +22543,243 @@ mod endpoint_tests {
         // Identical except the name (decision 4 renamed it on collision).
         second_doc["name"] = first_doc["name"].clone();
         assert_eq!(first_doc, second_doc);
+    }
+
+    #[tokio::test]
+    async fn graph_export_import_round_trip_preserves_all_ensemble_kinds() {
+        // CB62 end-to-end: cascade + round_robin ensembles survive export ->
+        // import -> export identical (modulo the collision-rename), so
+        // `graph_get` on the imported graph shows cascade/round_robin, not
+        // parallel. Authoring also gives the cascade a second entry source
+        // and infra budgets, neither of which the export document carries
+        // (out of scope for CB62); the round trip stays identical because
+        // both exports consistently omit them.
+        let (dir, _db, handler) = endpoint_test_handler();
+        let workdir = dir.path().to_string_lossy().to_string();
+
+        let created = handler
+            .graph_create(Parameters(GraphCreateParams {
+                name: "Kind Graph".to_string(),
+                description: None,
+                workdir: workdir.clone(),
+                trigger: None,
+                infra_node_id: None,
+                allow_dirty_start: false,
+            }))
+            .await
+            .unwrap();
+        let graph_id = extract_id(&created, "graph_id");
+
+        let kickoff = handler
+            .graph_add_node(Parameters(GraphAddNodeParams {
+                spec_id: None,
+                graph_id: Some(graph_id.clone()),
+                name: "kickoff".to_string(),
+                kind: Some("check".to_string()),
+                config: Some(check_node_config("true")),
+                blueprint: None,
+                config_overrides: None,
+            }))
+            .await
+            .unwrap();
+        let kickoff_id = extract_id(&kickoff, "node_id");
+
+        let alt = handler
+            .graph_add_node(Parameters(GraphAddNodeParams {
+                spec_id: None,
+                graph_id: Some(graph_id.clone()),
+                name: "alt".to_string(),
+                kind: Some("check".to_string()),
+                config: Some(check_node_config("true")),
+                blueprint: None,
+                config_overrides: None,
+            }))
+            .await
+            .unwrap();
+        let alt_id = extract_id(&alt, "node_id");
+
+        let downstream = handler
+            .graph_add_node(Parameters(GraphAddNodeParams {
+                spec_id: None,
+                graph_id: Some(graph_id.clone()),
+                name: "downstream".to_string(),
+                kind: Some("agent".to_string()),
+                config: Some(agent_node_config("claude")),
+                blueprint: None,
+                config_overrides: None,
+            }))
+            .await
+            .unwrap();
+        let downstream_id = extract_id(&downstream, "node_id");
+
+        let wired = handler
+            .graph_add_edge(Parameters(GraphAddEdgeParams {
+                spec_id: None,
+                graph_id: Some(graph_id.clone()),
+                from_node: kickoff_id.clone(),
+                to_node: alt_id.clone(),
+                condition: "always".to_string(),
+                route: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&wired), "{}", text(&wired));
+
+        let cascade = handler
+            .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                commit_rights: None,
+                spec_id: None,
+                graph_id: Some(graph_id.clone()),
+                kind: Some("cascade".to_string()),
+                name: "CascadeTeam".to_string(),
+                prompt_template: Some("draft it".to_string()),
+                blueprint: None,
+                members: Some(vec![
+                    EnsembleMemberParams {
+                        platform: "openrouter".to_string(),
+                        model: Some("model-a".to_string()),
+                        prompt_override: None,
+                        timeout_minutes: None,
+                        infra_retry_limit: Some(5),
+                        infra_crash_max_seconds: None,
+                        infra_backoff_seconds: None,
+                    },
+                    EnsembleMemberParams {
+                        platform: "openrouter".to_string(),
+                        model: Some("model-b".to_string()),
+                        prompt_override: None,
+                        timeout_minutes: None,
+                        infra_retry_limit: None,
+                        infra_crash_max_seconds: None,
+                        infra_backoff_seconds: None,
+                    },
+                ]),
+                condition: "always".to_string(),
+                from_node: kickoff_id.clone(),
+                on_pass_to: downstream_id.clone(),
+                on_fail_to: None,
+                min_pass: None,
+                timeout_minutes: None,
+                infra_retry_limit: Some(2),
+                infra_crash_max_seconds: Some(60),
+                infra_backoff_seconds: Some(30),
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&cascade), "{}", text(&cascade));
+        let cascade_id = extract_id(&cascade, "ensemble_id");
+
+        let round_robin = handler
+            .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                commit_rights: None,
+                spec_id: None,
+                graph_id: Some(graph_id.clone()),
+                kind: Some("round_robin".to_string()),
+                name: "RrTeam".to_string(),
+                prompt_template: Some("draft it".to_string()),
+                blueprint: None,
+                members: Some(vec![
+                    EnsembleMemberParams {
+                        platform: "openrouter".to_string(),
+                        model: Some("model-a".to_string()),
+                        prompt_override: None,
+                        timeout_minutes: None,
+                        infra_retry_limit: None,
+                        infra_crash_max_seconds: None,
+                        infra_backoff_seconds: None,
+                    },
+                    EnsembleMemberParams {
+                        platform: "openrouter".to_string(),
+                        model: Some("model-b".to_string()),
+                        prompt_override: None,
+                        timeout_minutes: None,
+                        infra_retry_limit: None,
+                        infra_crash_max_seconds: None,
+                        infra_backoff_seconds: None,
+                    },
+                ]),
+                condition: "always".to_string(),
+                from_node: kickoff_id.clone(),
+                on_pass_to: downstream_id.clone(),
+                on_fail_to: None,
+                min_pass: None,
+                timeout_minutes: None,
+                infra_retry_limit: Some(3),
+                infra_crash_max_seconds: Some(61),
+                infra_backoff_seconds: Some(31),
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&round_robin), "{}", text(&round_robin));
+
+        let second_source = handler
+            .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+                ensemble_id: cascade_id.clone(),
+                kind: None,
+                prompt_template: None,
+                members: None,
+                min_pass: None,
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
+                timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
+                on_pass_to: None,
+                on_fail_to: None,
+                from_node: None,
+                condition: None,
+                add_entry_from: Some(alt_id.clone()),
+                add_entry_condition: None,
+                remove_entry_from: None,
+                commit_rights: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&second_source), "{}", text(&second_source));
+
+        let first_export = handler
+            .graph_export(Parameters(GraphExportParams { graph_id }))
+            .await
+            .unwrap();
+        let first_doc: serde_json::Value = serde_json::from_str(&raw_text(&first_export)).unwrap();
+        assert_eq!(first_doc["ensembles"].as_array().unwrap().len(), 2);
+
+        let imported = handler
+            .graph_import(Parameters(GraphImportParams {
+                document: first_doc.clone(),
+                workdir: workdir.clone(),
+                name: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&imported), "{}", text(&imported));
+        let imported_body: serde_json::Value = serde_json::from_str(&raw_text(&imported)).unwrap();
+        let new_graph_id = imported_body["graph_id"].as_str().unwrap().to_string();
+
+        let second_export = handler
+            .graph_export(Parameters(GraphExportParams {
+                graph_id: new_graph_id,
+            }))
+            .await
+            .unwrap();
+        let mut second_doc: serde_json::Value =
+            serde_json::from_str(&raw_text(&second_export)).unwrap();
+        second_doc["name"] = first_doc["name"].clone();
+        assert_eq!(first_doc, second_doc);
+
+        let kinds: Vec<&str> = second_doc["ensembles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["kind"].as_str().unwrap_or("parallel"))
+            .collect();
+        assert!(kinds.contains(&"cascade"), "kinds: {kinds:?}");
+        assert!(kinds.contains(&"round_robin"), "kinds: {kinds:?}");
     }
 
     #[tokio::test]

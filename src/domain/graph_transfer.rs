@@ -15,6 +15,11 @@
 //! import is built on the same node/edge/ensemble shapes `graph_add_node`/
 //! `graph_add_edge`/`graph_add_ensemble` produce rather than a second,
 //! divergent write path.
+//!
+//! Import restores each ensemble's `kind` and every other field the document
+//! carries; a document field it does not know how to restore — including an
+//! unknown `kind` value — is a refusal naming the field, never a silent
+//! default (CB62).
 
 use std::collections::HashMap;
 
@@ -49,6 +54,7 @@ const ENSEMBLE_MAX_MEMBERS: usize = 8;
 /// deliberate (struct field order) — see `docs/graphs.md` for the documented,
 /// hand-writable contract this type is the source of truth for.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GraphExportDocument {
     pub format_version: i64,
     pub name: String,
@@ -65,6 +71,7 @@ pub struct GraphExportDocument {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GraphExportNode {
     pub name: String,
     pub kind: GraphNodeKind,
@@ -75,6 +82,7 @@ pub struct GraphExportNode {
 /// References nodes by `name`, never by id (decision 2) — what makes the
 /// file reviewable, hand-editable, and diffable.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GraphExportEdge {
     pub from_node: String,
     pub to_node: String,
@@ -82,6 +90,7 @@ pub struct GraphExportEdge {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GraphExportEnsembleMember {
     #[serde(default)]
     pub platform: Option<String>,
@@ -110,8 +119,12 @@ impl GraphExportEnsembleTarget {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GraphExportEnsemble {
     pub name: String,
+    /// Ensemble kind (`"parallel"` | `"cascade"` | `"round_robin"`); export
+    /// omits it for `parallel` (the default). Import restores it exactly and
+    /// refuses an unrecognized string (CB62).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     /// CM28: whether this ensemble holds commit rights (B37). Always
@@ -644,11 +657,15 @@ pub fn build_import_plan(
     for (doc_ensemble, (ensemble_id, join_node_id, member_node_ids)) in
         document.ensembles.iter().zip(&allocations)
     {
-        let import_kind = doc_ensemble
-            .kind
-            .as_deref()
-            .and_then(EnsembleKind::from_str)
-            .unwrap_or(EnsembleKind::Parallel);
+        let import_kind = match doc_ensemble.kind.as_deref() {
+            None => EnsembleKind::Parallel,
+            Some(value) => EnsembleKind::from_str(value).ok_or_else(|| {
+                format!(
+                    "Ensemble '{}' has unknown kind '{value}'. Expected one of: parallel, cascade, round_robin.",
+                    doc_ensemble.name
+                )
+            })?,
+        };
         let min_members = match import_kind {
             EnsembleKind::Parallel => ENSEMBLE_MIN_MEMBERS,
             EnsembleKind::Cascade | EnsembleKind::RoundRobin => 1,
@@ -815,12 +832,7 @@ pub fn build_import_plan(
             }
         }
 
-        let import_kind = doc_ensemble
-            .kind
-            .as_deref()
-            .and_then(EnsembleKind::from_str)
-            .unwrap_or(EnsembleKind::Parallel);
-
+        // `import_kind` was parsed once at the top of the loop body; reuse it.
         ensembles.push(GraphImportEnsemblePlan {
             ensemble: Ensemble {
                 id: ensemble_id.clone(),
@@ -1284,6 +1296,42 @@ mod tests {
                 .unwrap_or_else(|e| panic!("version {version} must parse: {e}"));
             assert_eq!(doc.format_version, version);
         }
+        // An old document with no kind/infra/sources imports as a parallel
+        // with empty optionals.
+        let value = serde_json::json!({
+            "format_version": 1,
+            "name": "legacy",
+            "nodes": [
+                {"name": "kickoff", "kind": "check", "position": 1, "config": {"command": "true"}},
+                {"name": "next", "kind": "check", "position": 2, "config": {"command": "true"}}
+            ],
+            "edges": [],
+            "ensembles": [
+                {
+                    "name": "team",
+                    "prompt_template": "go",
+                    "entry_from_node": "kickoff",
+                    "entry_condition": "always",
+                    "on_pass_to": "next",
+                    "min_pass": 2,
+                    "timeout_minutes": 30,
+                    "members": [
+                        {"platform": "claude"},
+                        {"platform": "claude"}
+                    ]
+                }
+            ]
+        });
+        let document = parse_export_document_value(&value).unwrap();
+        let plan = build_import_plan(&document, "new-graph").unwrap();
+        assert_eq!(
+            plan.ensembles[0].ensemble.kind,
+            crate::domain::graphs::EnsembleKind::Parallel
+        );
+        assert_eq!(plan.ensembles[0].ensemble.infra_retry_limit, None);
+        assert_eq!(plan.ensembles[0].ensemble.infra_crash_max_seconds, None);
+        assert_eq!(plan.ensembles[0].ensemble.infra_backoff_seconds, None);
+        assert_eq!(plan.ensembles[0].members[0].infra_retry_limit, None);
     }
 
     #[test]
@@ -1937,45 +1985,66 @@ mod tests {
         assert_eq!(odd.config["model"], "some-model-abc");
     }
 
-    /// A `format_version: 2` document must stay readable after later fields
-    /// are added: unknown fields are ignored rather than rejected, at the
-    /// document, node, and member levels.
+    /// CB62 FR3: a field the document carries that the import does not know how
+    /// to restore is a hard error naming the field, not a silent default —
+    /// at the document, node, edge, ensemble, and member levels. An unknown
+    /// field inside a node's free-form `config` map is NOT covered here
+    /// (config keys have their own validator, validate_known_config_keys).
     #[test]
-    fn unknown_fields_are_ignored() {
-        let value = serde_json::json!({
-            "format_version": 2,
-            "name": "future-graph",
-            "future_field": 123,
-            "nodes": [
-                {"name": "a", "kind": "check", "position": 1, "config": {"command": "true"}, "future_node_field": "x"},
-                {"name": "b", "kind": "check", "position": 2, "config": {"command": "true"}},
-            ],
-            "edges": [
-                {"from_node": "a", "to_node": "b", "condition": "always"}
-            ],
-            "ensembles": [
-                {
-                    "name": "team",
-                    "prompt_template": "go",
-                    "entry_from_node": "a",
-                    "entry_condition": "always",
-                    "on_pass_to": "b",
-                    "min_pass": 2,
-                    "timeout_minutes": 30,
-                    "members": [
-                        {"platform": "claude", "model": null, "prompt_override": null, "future_member_field": [1, 2]},
-                        {"platform": "claude", "model": "opus", "prompt_override": null}
-                    ]
-                }
-            ]
-        });
-        let document = parse_export_document_value(&value)
-            .expect("unknown future fields must not break parsing");
-        let plan = build_import_plan(&document, "new-graph")
-            .expect("unknown future fields must not break import");
-        assert_eq!(plan.nodes.len(), 2);
-        assert_eq!(plan.ensembles.len(), 1);
-        assert_eq!(plan.ensembles[0].members[1].model.as_deref(), Some("opus"));
+    fn unknown_fields_are_rejected_naming_the_field() {
+        for value in [
+            serde_json::json!({
+                "format_version": 2,
+                "name": "future-graph",
+                "future_field": 123,
+                "nodes": [],
+                "edges": [],
+                "ensembles": []
+            }),
+            serde_json::json!({
+                "format_version": 2,
+                "name": "future-graph",
+                "nodes": [
+                    {"name": "a", "kind": "check", "position": 1, "config": {"command": "true"}, "future_node_field": "x"},
+                    {"name": "b", "kind": "check", "position": 2, "config": {"command": "true"}},
+                ],
+                "edges": [
+                    {"from_node": "a", "to_node": "b", "condition": "always", "future_edge_field": 1}
+                ],
+                "ensembles": []
+            }),
+            serde_json::json!({
+                "format_version": 2,
+                "name": "future-graph",
+                "nodes": [
+                    {"name": "a", "kind": "check", "position": 1, "config": {"command": "true"}},
+                    {"name": "b", "kind": "check", "position": 2, "config": {"command": "true"}},
+                ],
+                "edges": [],
+                "ensembles": [
+                    {
+                        "name": "team",
+                        "future_ensemble_field": true,
+                        "prompt_template": "go",
+                        "entry_from_node": "a",
+                        "entry_condition": "always",
+                        "on_pass_to": "b",
+                        "min_pass": 2,
+                        "timeout_minutes": 30,
+                        "members": [
+                            {"platform": "claude", "model": null, "prompt_override": null, "future_member_field": [1, 2]},
+                            {"platform": "claude", "model": "opus", "prompt_override": null}
+                        ]
+                    }
+                ]
+            }),
+        ] {
+            let err = parse_export_document_value(&value).unwrap_err();
+            assert!(
+                err.contains("future"),
+                "unknown field must be a hard error naming the field: {err}"
+            );
+        }
     }
 
     /// Pins `docs/graphs.md`'s worked example to the actual format: if this
@@ -2492,6 +2561,345 @@ mod tests {
             result.is_ok(),
             "valid {{output:NodeName}} reference must be accepted: {:?}",
             result.err()
+        );
+    }
+
+    /// CB62 requirement 4 (domain half): export → import → export of one
+    /// ensemble of every kind, each carrying every optional field, compared
+    /// as whole serialized documents. Derived from the serialized shape: a
+    /// field added to the export structs later that import does not restore
+    /// shows up as a Value diff — this test fails until it is handled.
+    #[test]
+    fn every_document_field_round_trips_through_the_plan() {
+        let lp = make_graph("cb62-domain");
+        let nodes = vec![
+            make_node(
+                "kickoff",
+                "kickoff",
+                GraphNodeKind::Check,
+                serde_json::json!({"command": "true"}),
+                1,
+            ),
+            make_node(
+                "final",
+                "final",
+                GraphNodeKind::Check,
+                serde_json::json!({"command": "true"}),
+                2,
+            ),
+            make_node(
+                "am1",
+                "Alpha [1]",
+                GraphNodeKind::Agent,
+                serde_json::json!({"platform": "copilot", "model": "model-a", "prompt_template": "angle a", "timeout_minutes": 15}),
+                3,
+            ),
+            make_node(
+                "am2",
+                "Alpha [2]",
+                GraphNodeKind::Agent,
+                serde_json::json!({"platform": "opencode", "prompt_template": "draft", "timeout_minutes": 15}),
+                4,
+            ),
+            make_node(
+                "aj",
+                "Alpha (quorum)",
+                GraphNodeKind::Join,
+                serde_json::json!({"ensemble_id": "ens1"}),
+                5,
+            ),
+            make_node(
+                "bm1",
+                "Beta [1]",
+                GraphNodeKind::Agent,
+                serde_json::json!({"platform": "claude", "model": "sonnet", "prompt_template": "review", "timeout_minutes": 30}),
+                6,
+            ),
+            make_node(
+                "bj",
+                "Beta (quorum)",
+                GraphNodeKind::Join,
+                serde_json::json!({"ensemble_id": "ens2"}),
+                7,
+            ),
+            make_node(
+                "cm",
+                "Gamma [1]",
+                GraphNodeKind::Agent,
+                serde_json::json!({"platform": "claude", "prompt_template": "check", "timeout_minutes": 20}),
+                8,
+            ),
+            make_node(
+                "cn",
+                "Gamma [2]",
+                GraphNodeKind::Agent,
+                serde_json::json!({"platform": "copilot", "prompt_template": "check", "timeout_minutes": 20}),
+                9,
+            ),
+            make_node(
+                "cj",
+                "Gamma (quorum)",
+                GraphNodeKind::Join,
+                serde_json::json!({"ensemble_id": "ens3"}),
+                10,
+            ),
+        ];
+        let edges = vec![
+            make_edge("e1", "kickoff", "am1", GraphEdgeCondition::Always),
+            make_edge("e2", "kickoff", "am2", GraphEdgeCondition::Always),
+            make_edge("e3", "am1", "aj", GraphEdgeCondition::Always),
+            make_edge("e4", "am2", "aj", GraphEdgeCondition::Always),
+            // Alpha passes into Beta (chained: fan-out to every Beta member)
+            // and fails to final.
+            make_edge("e5", "aj", "bm1", GraphEdgeCondition::Pass),
+            make_edge("e6", "aj", "final", GraphEdgeCondition::Fail),
+            // Beta's own primary entry from kickoff — so Beta's members each
+            // have TWO entry sources (kickoff's always + Alpha's pass), the
+            // "multiple entry sources" shape.
+            make_edge("e7", "kickoff", "bm1", GraphEdgeCondition::Always),
+            make_edge("e8", "bm1", "bj", GraphEdgeCondition::Always),
+            // Beta passes into Gamma (chained fan-out to both Gamma members).
+            make_edge("e9", "bj", "cm", GraphEdgeCondition::Pass),
+            make_edge("e10", "bj", "cn", GraphEdgeCondition::Pass),
+            // Gamma's own entry + quorum exit.
+            make_edge("e11", "kickoff", "cm", GraphEdgeCondition::Always),
+            make_edge("e12", "kickoff", "cn", GraphEdgeCondition::Always),
+            make_edge("e13", "cm", "cj", GraphEdgeCondition::Always),
+            make_edge("e14", "cn", "cj", GraphEdgeCondition::Always),
+            make_edge("e15", "cj", "final", GraphEdgeCondition::Pass),
+        ];
+        // Alpha: cascade, commit rights, member overrides, on_fail_to, straggler.
+        let mut alpha = make_ensemble_details("ens1", "aj", "kickoff", "bj", &["am1", "am2"]);
+        alpha.ensemble.name = "Alpha".to_string();
+        alpha.ensemble.prompt_template = "draft".to_string();
+        alpha.ensemble.kind = EnsembleKind::Cascade;
+        alpha.ensemble.commit_rights = true;
+        alpha.ensemble.min_pass = 1;
+        alpha.ensemble.timeout_minutes = 15;
+        alpha.ensemble.straggler_timeout_minutes = Some(7);
+        alpha.ensemble.on_fail_to = Some("final".to_string());
+        alpha.members[0].platform = "copilot".to_string();
+        alpha.members[0].model = Some("model-a".to_string());
+        alpha.members[0].prompt_override = Some("angle a".to_string());
+        alpha.members[0].timeout_minutes = Some(15);
+        alpha.members[1].platform = "opencode".to_string();
+        alpha.members[1].model = None;
+        // Beta: round_robin, 1 member (import allows 1-8 for RR/cascade).
+        let mut beta = make_ensemble_details("ens2", "bj", "kickoff", "cj", &["bm1"]);
+        beta.ensemble.name = "Beta".to_string();
+        beta.ensemble.prompt_template = "review".to_string();
+        beta.ensemble.kind = EnsembleKind::RoundRobin;
+        beta.ensemble.min_pass = 1;
+        beta.ensemble.timeout_minutes = 30;
+        beta.ensemble.straggler_timeout_minutes = Some(5);
+        beta.members[0].platform = "claude".to_string();
+        beta.members[0].model = Some("sonnet".to_string());
+        // Gamma: parallel, grace field (parallel-only) exercised.
+        let mut gamma = make_ensemble_details("ens3", "cj", "kickoff", "final", &["cm", "cn"]);
+        gamma.ensemble.name = "Gamma".to_string();
+        gamma.ensemble.prompt_template = "check".to_string();
+        gamma.ensemble.kind = EnsembleKind::Parallel;
+        gamma.ensemble.min_pass = 1;
+        gamma.ensemble.timeout_minutes = 20;
+        gamma.ensemble.quorum_grace_minutes = Some(2);
+        gamma.members[0].platform = "claude".to_string();
+        gamma.members[0].model = None;
+        gamma.members[1].platform = "copilot".to_string();
+        gamma.members[1].model = None;
+        let first = build_export_document(&lp, &nodes, &edges, &[alpha, beta, gamma]).unwrap();
+
+        let plan = build_import_plan(&first, "graph-2").unwrap();
+
+        let mut imported_all_nodes = plan.nodes.clone();
+        let mut imported_details = Vec::new();
+        for ens in &plan.ensembles {
+            imported_all_nodes.push(ens.join_node.clone());
+            imported_all_nodes.extend(ens.member_nodes.iter().cloned());
+            imported_details.push(EnsembleDetails {
+                ensemble: ens.ensemble.clone(),
+                members: ens.members.clone(),
+            });
+        }
+        let mut lp2 = make_graph("cb62-domain");
+        lp2.id = "graph-2".to_string();
+        let second =
+            build_export_document(&lp2, &imported_all_nodes, &plan.edges, &imported_details)
+                .unwrap();
+
+        assert_eq!(
+            serde_json::to_value(&first).unwrap(),
+            serde_json::to_value(&second).unwrap(),
+            "CB62: document must be identical after an export/import round trip"
+        );
+    }
+
+    fn import_kind_fixture(kind: Option<&str>) -> GraphImportPlan {
+        let doc = GraphExportDocument {
+            format_version: 2,
+            name: "x".to_string(),
+            description: None,
+            nodes: vec![
+                GraphExportNode {
+                    name: "kickoff".to_string(),
+                    kind: GraphNodeKind::Check,
+                    position: 1,
+                    config: serde_json::json!({"command": "true"}),
+                },
+                GraphExportNode {
+                    name: "next".to_string(),
+                    kind: GraphNodeKind::Check,
+                    position: 2,
+                    config: serde_json::json!({"command": "true"}),
+                },
+            ],
+            edges: vec![],
+            ensembles: vec![GraphExportEnsemble {
+                commit_rights: false,
+                name: "team".to_string(),
+                kind: kind.map(str::to_string),
+                prompt_template: "go".to_string(),
+                entry_from_node: GraphExportEnsembleTarget::Node("kickoff".to_string()),
+                entry_condition: GraphEdgeCondition::Always,
+                on_pass_to: GraphExportEnsembleTarget::Node("next".to_string()),
+                on_fail_to: None,
+                min_pass: 1,
+                timeout_minutes: 30,
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
+                members: vec![
+                    GraphExportEnsembleMember {
+                        platform: Some("claude".to_string()),
+                        model: None,
+                        prompt_override: None,
+                        timeout_minutes: None,
+                    },
+                    GraphExportEnsembleMember {
+                        platform: Some("claude".to_string()),
+                        model: None,
+                        prompt_override: None,
+                        timeout_minutes: None,
+                    },
+                ],
+            }],
+            infra_node: None,
+        };
+        build_import_plan(&doc, "new-graph").unwrap()
+    }
+
+    #[test]
+    fn import_restores_each_ensemble_kind() {
+        let plan = import_kind_fixture(None);
+        assert_eq!(plan.ensembles[0].ensemble.kind, EnsembleKind::Parallel);
+        assert_eq!(plan.ensembles[0].ensemble.round_robin_index, None);
+        let plan = import_kind_fixture(Some("cascade"));
+        assert_eq!(plan.ensembles[0].ensemble.kind, EnsembleKind::Cascade);
+        assert_eq!(plan.ensembles[0].ensemble.round_robin_index, None);
+        let plan = import_kind_fixture(Some("round_robin"));
+        assert_eq!(plan.ensembles[0].ensemble.kind, EnsembleKind::RoundRobin);
+        assert_eq!(plan.ensembles[0].ensemble.round_robin_index, Some(0));
+    }
+
+    #[test]
+    fn import_rejects_unknown_ensemble_kind() {
+        let doc = GraphExportDocument {
+            format_version: 2,
+            name: "x".to_string(),
+            description: None,
+            nodes: vec![
+                GraphExportNode {
+                    name: "kickoff".to_string(),
+                    kind: GraphNodeKind::Check,
+                    position: 1,
+                    config: serde_json::json!({"command": "true"}),
+                },
+                GraphExportNode {
+                    name: "next".to_string(),
+                    kind: GraphNodeKind::Check,
+                    position: 2,
+                    config: serde_json::json!({"command": "true"}),
+                },
+            ],
+            edges: vec![],
+            ensembles: vec![GraphExportEnsemble {
+                commit_rights: false,
+                name: "Reviewers".to_string(),
+                kind: Some("hyper".to_string()),
+                prompt_template: "go".to_string(),
+                entry_from_node: GraphExportEnsembleTarget::Node("kickoff".to_string()),
+                entry_condition: GraphEdgeCondition::Always,
+                on_pass_to: GraphExportEnsembleTarget::Node("next".to_string()),
+                on_fail_to: None,
+                min_pass: 1,
+                timeout_minutes: 30,
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
+                members: vec![
+                    GraphExportEnsembleMember {
+                        platform: Some("claude".to_string()),
+                        model: None,
+                        prompt_override: None,
+                        timeout_minutes: None,
+                    },
+                    GraphExportEnsembleMember {
+                        platform: Some("claude".to_string()),
+                        model: None,
+                        prompt_override: None,
+                        timeout_minutes: None,
+                    },
+                ],
+            }],
+            infra_node: None,
+        };
+        let err = build_import_plan(&doc, "new-graph").unwrap_err();
+        assert!(err.contains("kind"), "err must name the field: {err}");
+        assert!(err.contains("hyper"), "err must name the value: {err}");
+        assert!(
+            err.contains("Reviewers"),
+            "err must name the ensemble: {err}"
+        );
+    }
+
+    #[test]
+    fn import_rejects_unknown_document_field() {
+        let value = serde_json::json!({
+            "format_version": 2,
+            "name": "x",
+            "nodes": [],
+            "edges": [],
+            "ensembles": [],
+            "bogus_field": 1
+        });
+        let err = parse_export_document_value(&value).unwrap_err();
+        assert!(
+            err.contains("bogus_field"),
+            "err must name the field: {err}"
+        );
+        let value = serde_json::json!({
+            "format_version": 2,
+            "name": "x",
+            "nodes": [],
+            "edges": [],
+            "ensembles": [
+                {
+                    "name": "team",
+                    "prompt_template": "go",
+                    "entry_from_node": "a",
+                    "entry_condition": "always",
+                    "on_pass_to": "b",
+                    "min_pass": 2,
+                    "timeout_minutes": 30,
+                    "bogus_field": 1,
+                    "members": [
+                        {"platform": "claude"},
+                        {"platform": "claude"}
+                    ]
+                }
+            ]
+        });
+        let err = parse_export_document_value(&value).unwrap_err();
+        assert!(
+            err.contains("bogus_field"),
+            "err must name the field: {err}"
         );
     }
 }
