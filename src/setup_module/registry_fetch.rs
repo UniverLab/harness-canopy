@@ -548,7 +548,7 @@ fn platforms_differ(old: &Platform, new: &Platform) -> bool {
 /// than naming them, so a newly added `CliConfig` field participates
 /// automatically without this function changing -- the merge knows fields,
 /// never which harness it's looking at.
-fn merge_cli_fields(
+pub(crate) fn merge_cli_fields(
     local: &CliConfig,
     baseline: Option<&CliConfig>,
     registry: &CliConfig,

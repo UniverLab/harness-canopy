@@ -390,7 +390,13 @@ pub fn run_setup(force_skills: bool) -> Result<()> {
     // ── Save unified config ──────────────────────────────────────
     let mut config = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir);
     config.mark_configured();
-    config.clis = cli_registry.available_clis;
+    let baseline = crate::domain::registry_baseline::RegistryBaseline::load(&canopy_dir);
+    let changed_fields = merge_cli_registry_into_config(
+        &mut config,
+        &cli_registry,
+        &platforms_with_cli,
+        baseline.as_ref(),
+    );
     config.temperature_unit = temperature_unit;
     config.theme = theme;
     config.embeddings_model = embeddings_model;
@@ -406,6 +412,12 @@ pub fn run_setup(force_skills: bool) -> Result<()> {
         Err(e) => format!("\x1b[33m⚠\x1b[0m Config: {e}"),
     };
     wiz.add(config_step);
+    if !changed_fields.is_empty() {
+        wiz.add(format!(
+            "\x1b[90m  Updated from registry: {}\x1b[0m",
+            changed_fields.join(", ")
+        ));
+    }
 
     // ── Final summary ───────────────────────────────────────────
     wiz.render()?;
@@ -415,6 +427,99 @@ pub fn run_setup(force_skills: bool) -> Result<()> {
 
     Ok(())
 }
+
+/// Merge the registry's detected CLIs into `config.clis` through the same
+/// per-field three-way merge `apply_registry_refresh` uses (CB58), instead
+/// of replacing the whole list outright. A key present locally and absent
+/// from the registry survives.
+///
+/// `infra_retry_limit`, `infra_crash_max_seconds` and `infra_backoff_seconds`
+/// are canopy-side settings the registry never publishes. The generic
+/// per-field merge cannot tell "the registry doesn't own this field" apart
+/// from "the registry wants it unset" when there is no baseline yet for a
+/// CLI (first-ever refresh: `merge_cli_fields` treats every field as
+/// user-untouched and adopts the registry's `null` outright) -- getting that
+/// wrong here is the exact CB58 incident (`infra_retry_limit = 0` silently
+/// dropped). So these three fields are restored to their pre-merge local
+/// value unconditionally, after the generic merge runs, regardless of
+/// baseline state.
+///
+/// Returns the registry-owned fields that actually changed
+/// (`"{cli_name}.{field}"`), with any `infra_*` entries stripped back out
+/// since those never really changed -- for the wizard's own-run summary.
+/// Silence is the failure mode this fixes.
+fn merge_cli_registry_into_config(
+    config: &mut crate::domain::canopy_config::CanopyConfig,
+    cli_registry: &crate::domain::cli_config::CliRegistry,
+    platforms_with_cli: &[PlatformWithCli],
+    baseline: Option<&crate::domain::registry_baseline::RegistryBaseline>,
+) -> Vec<String> {
+    let registry_by_name: std::collections::HashMap<String, crate::domain::cli_config::CliConfig> =
+        cli_registry
+            .available_clis
+            .iter()
+            .map(|c| (c.name.clone(), c.clone()))
+            .collect();
+
+    let mut changed_fields: Vec<String> = Vec::new();
+
+    for existing in config.clis.iter_mut() {
+        if let Some(registry_cli) = registry_by_name.get(&existing.name) {
+            let baseline_cli = baseline.and_then(|b| b.get(&existing.name));
+            let name = existing.name.clone();
+            let pre_merge_infra_retry_limit = existing.infra_retry_limit;
+            let pre_merge_infra_crash_max_seconds = existing.infra_crash_max_seconds;
+            let pre_merge_infra_backoff_seconds = existing.infra_backoff_seconds;
+
+            let mut merged = crate::setup_module::registry_fetch::merge_cli_fields(
+                existing,
+                baseline_cli,
+                registry_cli,
+                &name,
+                &mut changed_fields,
+            );
+
+            // CM30 settings: canopy-side only, never registry-owned. Restore
+            // regardless of what the generic merge just did.
+            merged.infra_retry_limit = pre_merge_infra_retry_limit;
+            merged.infra_crash_max_seconds = pre_merge_infra_crash_max_seconds;
+            merged.infra_backoff_seconds = pre_merge_infra_backoff_seconds;
+            changed_fields.retain(|f| {
+                f != &format!("{name}.infra_retry_limit")
+                    && f != &format!("{name}.infra_crash_max_seconds")
+                    && f != &format!("{name}.infra_backoff_seconds")
+            });
+
+            *existing = merged;
+        }
+    }
+
+    // Remove CLIs only when the registry explicitly knows the platform AND
+    // the binary is confirmed missing -- same rule `apply_registry_refresh`
+    // uses, so a manually-added CLI the registry has never heard of is kept.
+    let known_names: std::collections::HashSet<String> = platforms_with_cli
+        .iter()
+        .filter_map(|p| p.cli.as_ref().map(|c| c.name.clone()))
+        .collect();
+    config.clis.retain(|c| {
+        if !known_names.contains(&c.name) {
+            return true;
+        }
+        c.is_available()
+    });
+
+    // Add newly detected CLIs that aren't already in config.
+    let existing_names: std::collections::HashSet<String> =
+        config.clis.iter().map(|c| c.name.clone()).collect();
+    for cli in cli_registry.available_clis.iter().cloned() {
+        if !existing_names.contains(&cli.name) {
+            config.clis.push(cli);
+        }
+    }
+
+    changed_fields
+}
+
 /// Tracks completed wizard steps so we can re-render a clean summary
 /// after clearing the screen between interactive phases.
 pub(crate) struct WizardState {
@@ -1152,6 +1257,242 @@ mod tests {
         assert!(
             production.contains("GEMINI_API_KEY is not set"),
             "missing Gemini key must bail with an actionable message"
+        );
+    }
+
+    // ── CB58: wizard save merges the registry into config.clis ─────
+
+    fn cb58_cli(name: &str, binary: &str) -> crate::domain::cli_config::CliConfig {
+        crate::domain::cli_config::CliConfig {
+            name: name.to_string(),
+            binary: binary.to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn cb58_platform_with_cli(
+        name: &str,
+        cli: crate::domain::cli_config::CliConfig,
+    ) -> PlatformWithCli {
+        PlatformWithCli {
+            name: name.to_string(),
+            config_path: format!("{name}.marker"),
+            cli: Some(cli),
+        }
+    }
+
+    /// The literal line CB58 is about must never come back: the wizard's
+    /// save path must not assign the registry's CLI list wholesale.
+    #[test]
+    fn wizard_save_path_has_no_whole_list_assignment_from_the_registry() {
+        let source = include_str!("wizard.rs");
+        let production = source
+            .split("mod tests {")
+            .next()
+            .expect("wizard.rs always has a tests module");
+        assert!(
+            !production.contains("config.clis = cli_registry.available_clis"),
+            "the wizard must merge the registry's CLI list, not replace config.clis wholesale"
+        );
+    }
+
+    #[test]
+    fn merge_preserves_hand_set_infra_retry_limit_and_drifted_model_flag_while_updating_stale_headless_mode(
+    ) {
+        use crate::domain::canopy_config::CanopyConfig;
+        use crate::domain::cli_config::CliConfig;
+        use crate::domain::registry_baseline::RegistryBaseline;
+
+        // Platform A: registry corrects a stale headless_mode the user never
+        // touched, but the user's hand-set infra_retry_limit = 0 must survive
+        // regardless of what the baseline says about it (registry never
+        // publishes infra_* fields, so baseline.infra_retry_limit is always
+        // None here -- this is the exact CB58 incident shape).
+        let local_a = CliConfig {
+            headless_mode: "--old-headless".to_string(),
+            infra_retry_limit: Some(0),
+            ..cb58_cli("opencode", "ls")
+        };
+        let baseline_a = CliConfig {
+            headless_mode: "--old-headless".to_string(),
+            ..cb58_cli("opencode", "ls")
+        };
+        let registry_a = CliConfig {
+            headless_mode: "--new-headless".to_string(),
+            ..cb58_cli("opencode", "ls")
+        };
+
+        // Platform B: user drifted model_flag away from the baseline
+        // (deliberate edit) -- must survive even though the registry offers
+        // a newer value.
+        let baseline_b = CliConfig {
+            model_flag: Some("--model-old".to_string()),
+            ..cb58_cli("cursor", "ls")
+        };
+        let local_b = CliConfig {
+            model_flag: Some("--model-custom".to_string()),
+            ..baseline_b.clone()
+        };
+        let registry_b = CliConfig {
+            model_flag: Some("--model-new".to_string()),
+            ..cb58_cli("cursor", "ls")
+        };
+
+        let mut config = CanopyConfig {
+            clis: vec![local_a, local_b],
+            ..Default::default()
+        };
+
+        let cli_registry = crate::domain::cli_config::CliRegistry {
+            version: 2,
+            available_clis: vec![registry_a.clone(), registry_b.clone()],
+        };
+        let platforms_with_cli = vec![
+            cb58_platform_with_cli("opencode", registry_a),
+            cb58_platform_with_cli("cursor", registry_b),
+        ];
+        let baseline = RegistryBaseline {
+            clis: vec![baseline_a, baseline_b],
+            platforms: vec![],
+        };
+
+        let changed = merge_cli_registry_into_config(
+            &mut config,
+            &cli_registry,
+            &platforms_with_cli,
+            Some(&baseline),
+        );
+
+        let opencode = config.get_cli("opencode").unwrap();
+        assert_eq!(
+            opencode.infra_retry_limit,
+            Some(0),
+            "hand-set infra_retry_limit must survive"
+        );
+        assert_eq!(
+            opencode.headless_mode, "--new-headless",
+            "untouched field must still update"
+        );
+
+        let cursor = config.get_cli("cursor").unwrap();
+        assert_eq!(
+            cursor.model_flag.as_deref(),
+            Some("--model-custom"),
+            "drifted field must survive"
+        );
+
+        assert!(changed.contains(&"opencode.headless_mode".to_string()));
+        assert!(
+            !changed.iter().any(|f| f.contains("infra_retry_limit")),
+            "infra_retry_limit must never be reported as registry-changed: {changed:?}"
+        );
+    }
+
+    /// The exact CB58 regression: no baseline exists at all (e.g. first-ever
+    /// setup run). Without the explicit infra_* restore, `merge_cli_fields`
+    /// treats every field as user-untouched and would silently null out a
+    /// hand-set infra_retry_limit.
+    #[test]
+    fn merge_preserves_infra_retry_limit_with_no_baseline_at_all() {
+        use crate::domain::canopy_config::CanopyConfig;
+        use crate::domain::cli_config::CliConfig;
+
+        let local = CliConfig {
+            headless_mode: "--old-headless".to_string(),
+            infra_retry_limit: Some(0),
+            infra_crash_max_seconds: Some(120),
+            infra_backoff_seconds: Some(15),
+            ..cb58_cli("opencode", "ls")
+        };
+        let registry = CliConfig {
+            headless_mode: "--new-headless".to_string(),
+            ..cb58_cli("opencode", "ls")
+        };
+
+        let mut config = CanopyConfig {
+            clis: vec![local],
+            ..Default::default()
+        };
+
+        let cli_registry = crate::domain::cli_config::CliRegistry {
+            version: 2,
+            available_clis: vec![registry.clone()],
+        };
+        let platforms_with_cli = vec![cb58_platform_with_cli("opencode", registry)];
+
+        merge_cli_registry_into_config(&mut config, &cli_registry, &platforms_with_cli, None);
+
+        let opencode = config.get_cli("opencode").unwrap();
+        assert_eq!(opencode.infra_retry_limit, Some(0));
+        assert_eq!(opencode.infra_crash_max_seconds, Some(120));
+        assert_eq!(opencode.infra_backoff_seconds, Some(15));
+        assert_eq!(opencode.headless_mode, "--new-headless");
+    }
+
+    #[test]
+    fn merge_adds_newly_detected_platform() {
+        use crate::domain::canopy_config::CanopyConfig;
+
+        let mut config = CanopyConfig::default();
+        let registry_cli = cb58_cli("brandnew", "ls");
+        let cli_registry = crate::domain::cli_config::CliRegistry {
+            version: 2,
+            available_clis: vec![registry_cli.clone()],
+        };
+        let platforms_with_cli = vec![cb58_platform_with_cli("brandnew", registry_cli)];
+
+        merge_cli_registry_into_config(&mut config, &cli_registry, &platforms_with_cli, None);
+
+        assert!(config.get_cli("brandnew").is_some());
+    }
+
+    #[test]
+    fn merge_removes_platform_whose_binary_vanished() {
+        use crate::domain::canopy_config::CanopyConfig;
+
+        let ghost_local = cb58_cli("ghost", "canopy-test-fixture-cli-missing-xyz");
+        let mut config = CanopyConfig {
+            clis: vec![ghost_local],
+            ..Default::default()
+        };
+
+        // Registry still knows about "ghost" (it's in platforms_with_cli),
+        // but its binary can never resolve, so `cli_registry.available_clis`
+        // does not include it (CliRegistry::detect_available filters on
+        // is_available()).
+        let ghost_registry_entry = cb58_cli("ghost", "canopy-test-fixture-cli-missing-xyz");
+        let cli_registry = crate::domain::cli_config::CliRegistry {
+            version: 2,
+            available_clis: vec![],
+        };
+        let platforms_with_cli = vec![cb58_platform_with_cli("ghost", ghost_registry_entry)];
+
+        merge_cli_registry_into_config(&mut config, &cli_registry, &platforms_with_cli, None);
+
+        assert!(config.get_cli("ghost").is_none());
+    }
+
+    #[test]
+    fn merge_keeps_manually_added_cli_the_registry_has_never_heard_of() {
+        use crate::domain::canopy_config::CanopyConfig;
+
+        let manual = cb58_cli("manual-only", "ls");
+        let mut config = CanopyConfig {
+            clis: vec![manual],
+            ..Default::default()
+        };
+
+        let cli_registry = crate::domain::cli_config::CliRegistry {
+            version: 2,
+            available_clis: vec![],
+        };
+        let platforms_with_cli: Vec<PlatformWithCli> = vec![];
+
+        merge_cli_registry_into_config(&mut config, &cli_registry, &platforms_with_cli, None);
+
+        assert!(
+            config.get_cli("manual-only").is_some(),
+            "a CLI the registry doesn't know about at all must never be removed"
         );
     }
 }
