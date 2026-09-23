@@ -126,7 +126,11 @@ pub struct CanopyConfig {
     #[serde(default = "default_rag_vector_cache_entries")]
     pub rag_vector_cache_entries: u32,
 
-    #[serde(default)]
+    /// Defaults to enabled for both a fresh install (no config file yet)
+    /// and an installation whose config.toml predates this field —
+    /// announcements are on by default and not something setup asks
+    /// about (CB60).
+    #[serde(default = "default_announcements_enabled")]
     pub announcements_enabled: bool,
 
     /// Pinned right-panel face (`"activity"`, `"knowledge"` or `"graph"`).
@@ -154,6 +158,10 @@ fn default_rag_max_file_mb() -> u32 {
 /// module wrapping it — `crate::rag::vector_store` doesn't resolve there.
 fn default_rag_vector_cache_entries() -> u32 {
     64
+}
+
+fn default_announcements_enabled() -> bool {
+    true
 }
 
 /// Validates a configured (or user-entered) per-file indexing size cap.
@@ -427,7 +435,7 @@ impl Default for CanopyConfig {
             theme: default_theme(),
             rag_max_file_mb: default_rag_max_file_mb(),
             rag_vector_cache_entries: default_rag_vector_cache_entries(),
-            announcements_enabled: false,
+            announcements_enabled: default_announcements_enabled(),
             pinned_panel_face: None,
         }
     }
@@ -814,9 +822,9 @@ mod tests {
     }
 
     #[test]
-    fn announcements_enabled_defaults_to_false() {
+    fn announcements_enabled_defaults_to_true() {
         let config = CanopyConfig::default();
-        assert!(!config.announcements_enabled);
+        assert!(config.announcements_enabled);
     }
 
     #[test]
@@ -836,7 +844,23 @@ mod tests {
     }
 
     #[test]
-    fn config_without_announcements_field_defaults_to_false() {
+    fn announcements_enabled_false_round_trips_via_config_toml() {
+        let dir = TempDir::new().unwrap();
+        let canopy_dir = dir.path().join(".canopy");
+        std::fs::create_dir_all(&canopy_dir).unwrap();
+
+        let config = CanopyConfig {
+            announcements_enabled: false,
+            ..CanopyConfig::default()
+        };
+        config.save(&canopy_dir).unwrap();
+
+        let loaded = CanopyConfig::load(&canopy_dir);
+        assert!(!loaded.announcements_enabled);
+    }
+
+    #[test]
+    fn config_without_announcements_field_defaults_to_true() {
         let dir = TempDir::new().unwrap();
         let canopy_dir = dir.path().join(".canopy");
         std::fs::create_dir_all(&canopy_dir).unwrap();
@@ -844,7 +868,7 @@ mod tests {
         std::fs::write(canopy_dir.join("config.toml"), toml).unwrap();
 
         let loaded = CanopyConfig::load(&canopy_dir);
-        assert!(!loaded.announcements_enabled);
+        assert!(loaded.announcements_enabled);
     }
 
     #[test]
