@@ -829,7 +829,11 @@ pub struct App {
     /// Whether the live graph view's graph highlight auto-follows the
     /// engine's current node (`true`, the default) or sits on a node the
     /// user manually navigated to (`false`, see `graph_live_selected_node`).
-    /// Reset to `true` whenever the selected graph changes.
+    /// Reset to `true` whenever the selected graph changes. CT23: this is
+    /// also the graph's entered/not-entered state — it only becomes `false`
+    /// via `App::graph_live_enter` (`Enter`), and plain arrow keys drive the
+    /// graph's internal navigation only while it is `false`; while `true`,
+    /// plain arrows fall through to ordinary sidebar navigation instead.
     pub(crate) graph_live_follow: bool,
     /// The node id manually highlighted in the live graph view's graph.
     /// Only meaningful while `graph_live_follow` is `false`.

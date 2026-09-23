@@ -205,6 +205,18 @@ pub fn handle_preview_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers)
         && app.automation_kind == crate::tui::app::AutomationKind::Graph;
 
     match code {
+        // CT23: Shift+↑/↓ are reserved frame navigation (RESERVED_FOCUS_KEYS
+        // in src/tui/event/agent_focus.rs) — they move the sidebar selection
+        // between graphs from anywhere in the graph view, including while a
+        // graph is entered (manual mode). Matched first, before any of the
+        // graph's own Up/Down arms below, or they get swallowed as internal
+        // sibling navigation instead (the CT23 bug).
+        KeyCode::Down if modifiers.contains(KeyModifiers::SHIFT) => {
+            app.select_next();
+        }
+        KeyCode::Up if modifiers.contains(KeyModifiers::SHIFT) => {
+            app.select_prev();
+        }
         // CT3: an open tail dialog intercepts Esc first — dismissing a
         // diagnostic viewer never touches the run or the graph state below.
         KeyCode::Esc if on_graph && app.node_tail_dialog_active() => {
@@ -223,6 +235,14 @@ pub fn handle_preview_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers)
         }
         KeyCode::Esc | KeyCode::Char('h') => {
             app.focus = Focus::Home;
+        }
+        // CT23: Enter on a selected graph enters its manual navigation — the
+        // only way to reach manual mode (functional requirement 4, no
+        // separate toggle). 'l' is untouched below: it keeps opening the
+        // node editor.
+        KeyCode::Enter if on_graph => {
+            app.graph_live_enter();
+            return Ok(());
         }
         KeyCode::Enter | KeyCode::Char('l') => {
             if app.agents_rag_focused {
@@ -252,13 +272,25 @@ pub fn handle_preview_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers)
             app.log_scroll = 0;
             app.focus = Focus::Agent;
         }
+        // CT23: the `!graph_live_follow` clause alone would let this arm
+        // steal plain Down/Up from the tail dialog whenever it's opened in
+        // auto mode (dialog open doesn't require entering the graph first),
+        // reaching this arm before the dedicated tail-scroll arms below —
+        // the explicit `node_tail_dialog_active()` exclusion keeps the
+        // dialog's scroll working regardless of entered/not-entered state.
         KeyCode::Down | KeyCode::Char('j')
-            if !(on_graph && app.graph_live_focus == GraphLiveFocus::Graph) =>
+            if !(on_graph
+                && app.graph_live_focus == GraphLiveFocus::Graph
+                && !app.graph_live_follow)
+                && !(on_graph && app.node_tail_dialog_active()) =>
         {
             app.select_next();
         }
         KeyCode::Up | KeyCode::Char('k')
-            if !(on_graph && app.graph_live_focus == GraphLiveFocus::Graph) =>
+            if !(on_graph
+                && app.graph_live_focus == GraphLiveFocus::Graph
+                && !app.graph_live_follow)
+                && !(on_graph && app.node_tail_dialog_active()) =>
         {
             app.select_prev();
         }
@@ -283,16 +315,32 @@ pub fn handle_preview_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers)
         // Graph navigation: Right = child (forward along edges, pass first),
         // Left = parent (back along incoming), Up/Down = sibling in DFS order.
         // Documented: "next" at a branch = pass > fail > always > route(alpha) > error.
-        KeyCode::Right if on_graph && app.graph_live_focus == GraphLiveFocus::Graph => {
+        KeyCode::Right
+            if on_graph
+                && app.graph_live_focus == GraphLiveFocus::Graph
+                && !app.graph_live_follow =>
+        {
             app.graph_live_navigate_child();
         }
-        KeyCode::Left if on_graph && app.graph_live_focus == GraphLiveFocus::Graph => {
+        KeyCode::Left
+            if on_graph
+                && app.graph_live_focus == GraphLiveFocus::Graph
+                && !app.graph_live_follow =>
+        {
             app.graph_live_navigate_parent();
         }
-        KeyCode::Down if on_graph && app.graph_live_focus == GraphLiveFocus::Graph => {
+        KeyCode::Down
+            if on_graph
+                && app.graph_live_focus == GraphLiveFocus::Graph
+                && !app.graph_live_follow =>
+        {
             app.graph_live_navigate_sibling(true);
         }
-        KeyCode::Up if on_graph && app.graph_live_focus == GraphLiveFocus::Graph => {
+        KeyCode::Up
+            if on_graph
+                && app.graph_live_focus == GraphLiveFocus::Graph
+                && !app.graph_live_follow =>
+        {
             app.graph_live_navigate_sibling(false);
         }
         // Plain Tab/BackTab hand arrow-key ownership between the graph and
@@ -1610,9 +1658,9 @@ mod preview_key_tests {
     }
 
     #[test]
-    fn existing_navigation_keys_are_unaffected_by_the_new_bindings() {
-        // Arrows/Tab must keep meaning exactly what they meant before —
-        // decision 8 of the graph controls spec.
+    fn entering_a_graph_lets_plain_arrows_navigate_it() {
+        // CT23 FR2/FR3: before Enter, plain arrows must not touch the
+        // graph's internal navigation; after Enter, they must.
         let mut app = app_on_graph(crate::domain::graphs::GraphStatus::Running);
         app.graph_live_state = Some(crate::tui::app::graph_live_state::GraphLiveState {
             graph_id: "lp1".to_string(),
@@ -1627,34 +1675,124 @@ mod preview_key_tests {
             done_count: 0,
             total_count: 0,
             current_spec_id: None,
-            effective_nodes: vec![crate::domain::graphs::GraphNode {
-                id: "n1".to_string(),
+            effective_nodes: vec![
+                crate::domain::graphs::GraphNode {
+                    id: "n1".to_string(),
+                    spec_id: None,
+                    graph_id: Some("lp1".to_string()),
+                    name: "Implement".to_string(),
+                    kind: crate::domain::graphs::GraphNodeKind::Agent,
+                    config: serde_json::json!({}),
+                    position: 0,
+                    created_at: Utc::now(),
+                },
+                crate::domain::graphs::GraphNode {
+                    id: "n2".to_string(),
+                    spec_id: None,
+                    graph_id: Some("lp1".to_string()),
+                    name: "Review".to_string(),
+                    kind: crate::domain::graphs::GraphNodeKind::Check,
+                    config: serde_json::json!({}),
+                    position: 1,
+                    created_at: Utc::now(),
+                },
+            ],
+            effective_edges: vec![crate::domain::graphs::GraphEdge {
+                id: "e1".to_string(),
                 spec_id: None,
                 graph_id: Some("lp1".to_string()),
-                name: "Implement".to_string(),
-                kind: crate::domain::graphs::GraphNodeKind::Agent,
-                config: serde_json::json!({}),
-                position: 0,
-                created_at: Utc::now(),
+                from_node: "n1".to_string(),
+                to_node: "n2".to_string(),
+                condition: crate::domain::graphs::GraphEdgeCondition::Pass,
             }],
-            effective_edges: Vec::new(),
             ensembles: Vec::new(),
             router_taken_routes: std::collections::HashMap::new(),
-            current_node_id: None,
+            current_node_id: Some("n1".to_string()),
             current_node_status: None,
             current_node_started_at: None,
             current_node_iteration: None,
             current_node_output_tail: None,
         });
 
-        let before_follow = app.graph_live_follow;
+        assert!(app.graph_live_follow);
         handle_preview_key(&mut app, KeyCode::Right, KeyModifiers::NONE).unwrap();
-        // Moving the graph highlight right drops auto-follow, same as always.
-        assert_ne!(before_follow, app.graph_live_follow);
+        assert!(
+            app.graph_live_follow,
+            "plain Right before Enter must not move the graph or leave auto-follow"
+        );
 
-        let before_focus = app.graph_live_focus;
-        handle_preview_key(&mut app, KeyCode::Tab, KeyModifiers::NONE).unwrap();
-        assert_ne!(before_focus, app.graph_live_focus);
+        handle_preview_key(&mut app, KeyCode::Enter, KeyModifiers::NONE).unwrap();
+        assert!(!app.graph_live_follow, "Enter must switch to manual mode");
+
+        handle_preview_key(&mut app, KeyCode::Right, KeyModifiers::NONE).unwrap();
+        assert_eq!(
+            app.graph_live_selected_node.as_deref(),
+            Some("n2"),
+            "plain Right after entering must move to the child node"
+        );
+    }
+
+    #[test]
+    fn esc_leaves_manual_navigation_back_to_auto() {
+        // CT23 FR3/FR5: Esc must leave manual navigation, returning to auto.
+        let mut app = app_on_graph(crate::domain::graphs::GraphStatus::Running);
+        handle_preview_key(&mut app, KeyCode::Enter, KeyModifiers::NONE).unwrap();
+        assert!(!app.graph_live_follow, "Enter must switch to manual mode");
+
+        handle_preview_key(&mut app, KeyCode::Esc, KeyModifiers::NONE).unwrap();
+        assert!(
+            app.graph_live_follow,
+            "Esc must return the graph view to auto mode"
+        );
+    }
+
+    fn app_on_two_graphs() -> App {
+        let mut app = app_with_agents();
+        app.focus = Focus::Preview;
+        app.sidebar_layer = SidebarLayer::Automation;
+        app.automation_kind = crate::tui::app::AutomationKind::Graph;
+        app.agents = Vec::new();
+        let now = Utc::now();
+        let mut g1 = graph_with_status(crate::domain::graphs::GraphStatus::Running);
+        g1.id = "g1".to_string();
+        g1.created_at = now;
+        let mut g2 = graph_with_status(crate::domain::graphs::GraphStatus::Running);
+        g2.id = "g2".to_string();
+        g2.created_at = now - chrono::Duration::seconds(10);
+        app.graphs = vec![g1, g2];
+        app.selected_graph_id = Some("g1".to_string());
+        app
+    }
+
+    #[test]
+    fn shift_down_moves_between_graphs_without_entering_either() {
+        // CT23 FR1/FR5: Shift+Down must move the sidebar selection to the
+        // next graph, not navigate inside the first one, and the
+        // destination must land in auto mode (not entered).
+        let mut app = app_on_two_graphs();
+
+        handle_preview_key(&mut app, KeyCode::Down, KeyModifiers::SHIFT).unwrap();
+
+        assert_eq!(app.selected_graph_id.as_deref(), Some("g2"));
+        assert!(
+            app.graph_live_follow,
+            "landing on the next graph must not be in manual/entered mode"
+        );
+    }
+
+    #[test]
+    fn shift_down_reaches_next_graph_even_while_entered() {
+        // CT23 FR1: once a graph is entered (manual navigation active),
+        // Shift+Down must still move to the next graph — the previous bug
+        // captured it as internal sibling navigation instead.
+        let mut app = app_on_two_graphs();
+
+        handle_preview_key(&mut app, KeyCode::Enter, KeyModifiers::NONE).unwrap();
+        assert!(!app.graph_live_follow, "Enter must switch to manual mode");
+
+        handle_preview_key(&mut app, KeyCode::Down, KeyModifiers::SHIFT).unwrap();
+
+        assert_eq!(app.selected_graph_id.as_deref(), Some("g2"));
     }
 
     fn spawn_cat_agent(name: &str) -> crate::tui::agent::InteractiveAgent {

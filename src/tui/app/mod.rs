@@ -1689,6 +1689,21 @@ impl App {
         self.graph_live_follow = false;
     }
 
+    /// Enter the live graph view's manual navigation (CT23): the only way to
+    /// reach manual mode — functional requirement 4 forbids a separate
+    /// toggle. Seeds the manual selection at whatever auto-follow was
+    /// currently highlighting, so entering never jumps the highlight. A
+    /// no-op if already in manual mode: `Enter` always means "be in manual
+    /// mode", never something else depending on hidden state.
+    pub fn graph_live_enter(&mut self) {
+        if !self.graph_live_follow {
+            return;
+        }
+        let current = self.graph_live_highlighted_node_id().map(str::to_string);
+        self.graph_live_selected_node = current;
+        self.graph_live_follow = false;
+    }
+
     /// Return the live graph view to auto-follow, discarding any manual
     /// node-inspection selection.
     pub fn graph_live_reset_follow(&mut self) {
