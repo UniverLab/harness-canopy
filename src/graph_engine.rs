@@ -8401,9 +8401,30 @@ mod tests {
         );
     }
 
+    /// CB57: shared by `graph_fixture`/`bare_graph_fixture` and every call site
+    /// that needs to hand a fake member script its own DB path for
+    /// self-reporting, so the filename can't drift between the two.
+    const TEST_DB_FILENAME: &str = "test.db";
+
+    /// CB57 (FR5): the test binary itself — the executable fake member
+    /// scripts re-execute to run `self_report_verdict_writer` and file
+    /// their own verdicts. `std::env::current_exe()` is that binary under
+    /// both `cargo test` and `cargo nextest run` (nextest invokes the same
+    /// compiled test executables), and it always contains the tests
+    /// module. This replaces the separate `cm_verdict_writer` binary: a
+    /// second `[[bin]]` would ship with `cargo install harness-canopy`
+    /// and put a program that writes verdicts straight into a canopy
+    /// database on every user's PATH (spec: no new binary target).
+    fn self_report_exe() -> String {
+        std::env::current_exe()
+            .expect("path of the running test binary")
+            .to_string_lossy()
+            .into_owned()
+    }
+
     fn graph_fixture() -> Result<(TempDir, Arc<Database>, GraphEngine, String, String)> {
         let dir = tempdir()?;
-        let db = Arc::new(Database::new(&dir.path().join("test.db"))?);
+        let db = Arc::new(Database::new(&dir.path().join(TEST_DB_FILENAME))?);
         let lp = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
@@ -12174,11 +12195,22 @@ if [ "$is_resume" = "1" ] && [ -n "$FAIL_RESUME" ]; then
   echo "resume rejected" >&2
   exit 1
 fi
-# CM13 test support: linger so a test-side verdict filer can file a
-# `graph_complete_node` verdict on this run's row before the process exits.
-# Unset (the default) keeps the instant behavior every other test relies on.
+# CM13 test support: linger, historically so a background verdict filer
+# had time to land its write. Unset (the default) keeps the instant
+# behavior every other test relies on.
 if [ -n "$LINGER_SECONDS" ]; then
   sleep "$LINGER_SECONDS"
+fi
+# CB57 test support: when SELF_REPORT_NODE_ID is set, file this run's own
+# self-report verdict before exiting (replaces the old background-poller
+# verdict filer). Unset (the default) keeps every other test's "never
+# reports" behavior unchanged.
+if [ -n "$SELF_REPORT_NODE_ID" ]; then
+  CANOPY_TEST_SELF_REPORT_DB="$SELF_REPORT_DB" \
+  CANOPY_TEST_SELF_REPORT_NODE_ID="$SELF_REPORT_NODE_ID" \
+  CANOPY_TEST_SELF_REPORT_STATUS="${SELF_REPORT_STATUS:-pass}" \
+  CANOPY_TEST_SELF_REPORT_STDOUT="$SELF_REPORT_STDOUT" \
+    "$SELF_REPORT_EXE" --exact graph_engine::tests::self_report_verdict_writer --nocapture >/dev/null
 fi
 echo done
 "#,
@@ -12570,76 +12602,15 @@ echo done
     /// into `queue-1`, run the queue, and hand back the argv log path plus the db.
     /// Each grouped member shares the one top-level node id `node-impl`, which
     /// is exactly what a warm-context queue looks like: several small specs
-    /// draining one graph.
-    /// CM13 test support: simulates a well-behaved harness for tests whose
-    /// fake CLI scripts can print and exit but can never call
-    /// `graph_complete_node`. A background thread watches the given nodes'
-    /// active (`Running`) run rows and files a `Pass` verdict on each —
-    /// exactly what the real harness's report call would write — so the run
-    /// reads as self-reported instead of unreported infra. Pair with a
-    /// lingering fake CLI (`LINGER_SECONDS`) so the verdict lands before the
-    /// process exits. Drop the filer when the run finishes; it joins its
-    /// thread. Scoped to one test's `Database` handle plus an explicit node
-    /// list, so parallel tests cannot file verdicts for each other.
-    struct VerdictFiler {
-        stop: Arc<std::sync::atomic::AtomicBool>,
-        handle: Option<std::thread::JoinHandle<()>>,
-    }
-
-    impl VerdictFiler {
-        /// `members`: `(node_id, stdout)` — `stdout` is recorded on the filed
-        /// verdict so downstream `{{output:Name}}` substitution keeps working.
-        fn spawn(db: &Arc<Database>, members: Vec<(String, Option<String>)>) -> Self {
-            Self::spawn_with_status(db, members, GraphRunStatus::Pass)
-        }
-
-        fn spawn_with_status(
-            db: &Arc<Database>,
-            members: Vec<(String, Option<String>)>,
-            status: GraphRunStatus,
-        ) -> Self {
-            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let stop_child = Arc::clone(&stop);
-            let db_child = Arc::clone(db);
-            let handle = std::thread::spawn(move || {
-                while !stop_child.load(std::sync::atomic::Ordering::Relaxed) {
-                    for (node_id, stdout) in &members {
-                        if let Ok(Some(run)) = db_child.get_active_graph_run_for_node(node_id) {
-                            let mut output = serde_json::json!({ "test_self_report": true });
-                            if let Some(text) = stdout {
-                                output["stdout"] = serde_json::Value::String(text.clone());
-                            }
-                            let _ = db_child.update_graph_run_result(
-                                &run.id,
-                                status,
-                                Some(&output),
-                                Some(chrono::Utc::now()),
-                            );
-                        }
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(5));
-                }
-            });
-            Self {
-                stop,
-                handle: Some(handle),
-            }
-        }
-    }
-
-    impl Drop for VerdictFiler {
-        fn drop(&mut self) {
-            self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
-            if let Some(handle) = self.handle.take() {
-                let _ = handle.join();
-            }
-        }
-    }
-
+    /// draining one graph. The fake CLI script self-reports its own Pass
+    /// verdict as the last thing it does before exiting (see
+    /// `self_report_invocation`), so `graph_complete_node` never needs to be
+    /// called for the run to read as reported instead of unreported infra.
     async fn run_grouped_queue(
         member_specs: &[(&str, Option<&str>)],
     ) -> (Arc<Database>, std::path::PathBuf) {
         let (dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
+        let db_path = dir.path().join(TEST_DB_FILENAME);
         let argv_file = dir.path().join("argv.log");
         let script = write_argv_echo_cli(dir.path());
         let mut env = HashMap::new();
@@ -12649,10 +12620,17 @@ echo done
         );
         env.insert("RESUME_FLAG".to_string(), "--resume".to_string());
         // CM13: the echo script never calls graph_complete_node, so without a
-        // filer every run would be unreported infra and the queue would halt
-        // at the first spec. The filer simulates the well-behaved harness;
-        // the linger keeps each run alive until its verdict lands.
+        // self-report every run would be unreported infra and the queue
+        // would halt at the first spec. The self-report lands at script
+        // exit (CB57); the linger below only spaces runs and is not
+        // load-bearing for the verdict write.
         env.insert("LINGER_SECONDS".to_string(), "1".to_string());
+        env.insert("SELF_REPORT_NODE_ID".to_string(), "node-impl".to_string());
+        env.insert("SELF_REPORT_EXE".to_string(), self_report_exe());
+        env.insert(
+            "SELF_REPORT_DB".to_string(),
+            db_path.to_string_lossy().into_owned(),
+        );
         // set-at-spawn capture on a cold run; resume-by-id for the handoff.
         let cli = argv_cli_config(&script, env, Some("--resume"), Some("--set"), None);
         let home = write_resume_cli_home(cli);
@@ -12678,10 +12656,9 @@ echo done
         .unwrap();
 
         let guard = HomeGuard::set(home.path());
-        // CM13: file Pass verdicts so the grouped session mechanics run
-        // against completed specs, as they did before unreported runs became
-        // infra. Dropped (joined) before returning.
-        let _filer = VerdictFiler::spawn(&db, vec![("node-impl".to_string(), None)]);
+        // CB57: the script self-reports its Pass verdict so the grouped
+        // session mechanics run against completed specs, as they did before
+        // unreported runs became infra.
         engine
             .run_graph(
                 graph_id.clone(),
@@ -12770,6 +12747,7 @@ echo done
         // session its OWN (spec 2's) content, plus a notice that spec 1 is
         // done, so it neither regurgitates spec 1 nor works blind.
         let (dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
+        let db_path = dir.path().join(TEST_DB_FILENAME);
         let argv_file = dir.path().join("argv.log");
         let script = write_argv_echo_cli(dir.path());
         let mut env = HashMap::new();
@@ -12778,9 +12756,15 @@ echo done
             argv_file.to_string_lossy().into_owned(),
         );
         env.insert("RESUME_FLAG".to_string(), "--resume".to_string());
-        // CM13: linger so the VerdictFiler below can file the Pass verdict
-        // before the process exits.
+        // CM13: linger so the script's own self-report (below) has time to
+        // land before the process exits.
         env.insert("LINGER_SECONDS".to_string(), "1".to_string());
+        env.insert("SELF_REPORT_NODE_ID".to_string(), "node-impl".to_string());
+        env.insert("SELF_REPORT_EXE".to_string(), self_report_exe());
+        env.insert(
+            "SELF_REPORT_DB".to_string(),
+            db_path.to_string_lossy().into_owned(),
+        );
         let cli = argv_cli_config(&script, env, Some("--resume"), Some("--set"), None);
         let home = write_resume_cli_home(cli);
 
@@ -12811,9 +12795,8 @@ echo done
         .unwrap();
 
         let guard = HomeGuard::set(home.path());
-        // CM13: file Pass verdicts (see VerdictFiler) so both specs complete
-        // and the cross-boundary resume below is exercised.
-        let _filer = VerdictFiler::spawn(&db, vec![("node-impl".to_string(), None)]);
+        // CB57: the script self-reports its Pass verdict so both specs
+        // complete and the cross-boundary resume below is exercised.
         engine
             .run_graph(
                 graph_id.clone(),
@@ -12869,6 +12852,7 @@ echo done
         // do next." Same fix, different node role — a `review` node instead
         // of `impl`, proving the fix is node-role-agnostic.
         let (dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
+        let db_path = dir.path().join(TEST_DB_FILENAME);
         let argv_file = dir.path().join("argv.log");
         let script = write_argv_echo_cli(dir.path());
         let mut env = HashMap::new();
@@ -12877,9 +12861,15 @@ echo done
             argv_file.to_string_lossy().into_owned(),
         );
         env.insert("RESUME_FLAG".to_string(), "--resume".to_string());
-        // CM13: linger so the VerdictFiler below can file the Pass verdict
-        // before the process exits.
+        // CM13: linger so the script's own self-report (below) has time to
+        // land before the process exits.
         env.insert("LINGER_SECONDS".to_string(), "1".to_string());
+        env.insert("SELF_REPORT_NODE_ID".to_string(), "node-review".to_string());
+        env.insert("SELF_REPORT_EXE".to_string(), self_report_exe());
+        env.insert(
+            "SELF_REPORT_DB".to_string(),
+            db_path.to_string_lossy().into_owned(),
+        );
         let cli = argv_cli_config(&script, env, Some("--resume"), Some("--set"), None);
         let home = write_resume_cli_home(cli);
 
@@ -12908,9 +12898,8 @@ echo done
         .unwrap();
 
         let guard = HomeGuard::set(home.path());
-        // CM13: file Pass verdicts (see VerdictFiler) so both specs complete
-        // and the cross-boundary resume below is exercised.
-        let _filer = VerdictFiler::spawn(&db, vec![("node-review".to_string(), None)]);
+        // CB57: the script self-reports its Pass verdict so both specs
+        // complete and the cross-boundary resume below is exercised.
         engine
             .run_graph(
                 graph_id.clone(),
@@ -14521,7 +14510,7 @@ echo done
     /// one bound spec.
     fn bare_graph_fixture() -> Result<(TempDir, Arc<Database>, GraphEngine, String)> {
         let dir = tempdir()?;
-        let db = Arc::new(Database::new(&dir.path().join("test.db"))?);
+        let db = Arc::new(Database::new(&dir.path().join(TEST_DB_FILENAME))?);
         let lp = crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
@@ -17948,6 +17937,7 @@ echo done
     #[tokio::test]
     async fn explicit_idea_run_executes_graph_and_rerun_picks_up_new_idea() {
         let (dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
+        let db_path = dir.path().join(TEST_DB_FILENAME);
         let argv_file = dir.path().join("argv.log");
         let script = write_argv_echo_cli(dir.path());
         let mut env = HashMap::new();
@@ -17956,9 +17946,15 @@ echo done
             argv_file.to_string_lossy().into_owned(),
         );
         env.insert("RESUME_FLAG".to_string(), "--resume".to_string());
-        // CM13: linger so the VerdictFiler below can file the Pass verdict
-        // before the process exits.
+        // CM13: linger so the script's own self-report (below) has time to
+        // land before the process exits.
         env.insert("LINGER_SECONDS".to_string(), "1".to_string());
+        env.insert("SELF_REPORT_NODE_ID".to_string(), "node-impl".to_string());
+        env.insert("SELF_REPORT_EXE".to_string(), self_report_exe());
+        env.insert(
+            "SELF_REPORT_DB".to_string(),
+            db_path.to_string_lossy().into_owned(),
+        );
         let cli = argv_cli_config(&script, env, None, None, None);
         let home = write_resume_cli_home(cli);
 
@@ -17998,9 +17994,8 @@ echo done
         .unwrap();
 
         let guard = HomeGuard::set(home.path());
-        // CM13: file Pass verdicts (see VerdictFiler) so the idea dispatches
-        // complete; the filer lives across both dispatches below.
-        let _filer = VerdictFiler::spawn(&db, vec![("node-impl".to_string(), None)]);
+        // CB57: the script self-reports its Pass verdict so the idea
+        // dispatches complete, across both dispatches below.
         engine
             .run_graph(
                 graph_id.clone(),
@@ -20102,6 +20097,146 @@ echo done
         path.to_string_lossy().to_string()
     }
 
+    /// CB57: a shell fragment that re-executes the test binary itself
+    /// (`self_report_exe`, filtered to `graph_engine::tests::
+    /// self_report_verdict_writer`) so a fake member script files its own
+    /// self-report verdict as the last thing it does before exiting — see
+    /// that test's doc comment for why the process-exit ordering can never
+    /// race the engine. Values are passed to the child as `CANOPY_TEST_*`
+    /// command-prefix env assignments (the child is the writer; in-suite
+    /// the variable is never set, so the no-op early-return holds under
+    /// any harness). `status` is `"pass"` or `"fail"`. The stdout string
+    /// is only passed when `Some`: with `None` the writer files no
+    /// `stdout` key, exactly like the old positional-4 invocation. None of
+    /// this file's fixed stdout strings ("A", "B", "OK",
+    /// "NODE_OUTPUT_DATA_1", ...) contain a single quote, so naive
+    /// single-quoting is safe here; this is not a general-purpose shell
+    /// escaper. The child's stdout (libtest chatter) goes to /dev/null so
+    /// the member's own stdout stays byte-identical; panics print to
+    /// stderr and the 101 exit still fails the member script loudly.
+    fn self_report_invocation(
+        db_path: &std::path::Path,
+        node_id: &str,
+        status: &str,
+        stdout: Option<&str>,
+    ) -> String {
+        let exe = self_report_exe();
+        let mut vars = format!(
+            "CANOPY_TEST_SELF_REPORT_DB='{}' CANOPY_TEST_SELF_REPORT_NODE_ID='{node_id}' CANOPY_TEST_SELF_REPORT_STATUS='{status}'",
+            db_path.display()
+        );
+        if let Some(text) = stdout {
+            vars += &format!(" CANOPY_TEST_SELF_REPORT_STDOUT='{text}'");
+        }
+        format!(
+            "{vars} '{exe}' --exact graph_engine::tests::self_report_verdict_writer --nocapture >/dev/null\n"
+        )
+    }
+
+    /// CB57: like [`write_member_script`], but appends a
+    /// [`self_report_invocation`] after `body` so the script files its own
+    /// verdict before exiting — replacing the old background-poller pattern
+    /// for members whose script never calls back into the engine.
+    fn write_self_reporting_member_script(
+        dir: &std::path::Path,
+        name: &str,
+        body: &str,
+        db_path: &std::path::Path,
+        node_id: &str,
+        status: &str,
+        stdout: Option<&str>,
+    ) -> String {
+        let full_body = format!(
+            "{body}\n{}",
+            self_report_invocation(db_path, node_id, status, stdout)
+        );
+        write_member_script(dir, name, &full_body)
+    }
+
+    /// CB57 (FR5): the re-executed verdict writer. A fake member script
+    /// re-runs the test binary itself (`self_report_exe`, filtered with
+    /// `--exact graph_engine::tests::self_report_verdict_writer
+    /// --nocapture` — see `self_report_invocation`) and this test files
+    /// that member's own self-report straight into the run's database
+    /// using the real `get_active_graph_run_for_node` +
+    /// `update_graph_run_result` — the same calls `graph_complete_node`
+    /// makes; no SQL is hand-mirrored. Node id, status and stdout come
+    /// from `CANOPY_TEST_SELF_REPORT_NODE_ID`, `_STATUS` and `_STDOUT`
+    /// (when `_STDOUT` is set — even to the empty string — its value is
+    /// filed as the row's `stdout`, matching the old binary's shape). With
+    /// `CANOPY_TEST_SELF_REPORT_DB` unset — every ordinary suite run —
+    /// this test returns immediately.
+    ///
+    /// The ordering guarantee it inherits from the deleted binary: the
+    /// engine always inserts the run row with status `running` before it
+    /// spawns the member process, and never reads that row back until the
+    /// process has exited — so a write done here, inside the grandchild
+    /// the member's script waits on, is ordered before the engine's read
+    /// by process-exit semantics, not by winning a race against a timer.
+    /// Panics if no running row exists: that would mean the ordering
+    /// above broke — a real defect to see in test output, not something
+    /// to retry past.
+    #[test]
+    fn self_report_verdict_writer() {
+        let Some(db_path) = std::env::var_os("CANOPY_TEST_SELF_REPORT_DB") else {
+            return;
+        };
+        let node_id = std::env::var("CANOPY_TEST_SELF_REPORT_NODE_ID")
+            .expect("a script that sets CANOPY_TEST_SELF_REPORT_DB also sets the node id");
+        let status = match std::env::var("CANOPY_TEST_SELF_REPORT_STATUS")
+            .expect("a script that sets CANOPY_TEST_SELF_REPORT_DB also sets the status")
+            .as_str()
+        {
+            "pass" => GraphRunStatus::Pass,
+            "fail" => GraphRunStatus::Fail,
+            other => panic!("self_report_verdict_writer: bad status {other:?}"),
+        };
+        let stdout_text = std::env::var("CANOPY_TEST_SELF_REPORT_STDOUT").ok();
+
+        let file_verdict = || -> Result<()> {
+            let db = Database::new(&std::path::PathBuf::from(&db_path))?;
+            let run = db
+                .get_active_graph_run_for_node(&node_id)?
+                .ok_or_else(|| anyhow!("no running graph_run row for node {node_id:?}"))?;
+            let mut output = serde_json::json!({ "test_self_report": true });
+            if let Some(text) = &stdout_text {
+                output["stdout"] = Value::String(text.clone());
+            }
+            let updated = db.update_graph_run_result(
+                run.id.as_str(),
+                status,
+                Some(&output),
+                Some(chrono::Utc::now()),
+            )?;
+            if !updated {
+                bail!(
+                    "graph_run row {} vanished between lookup and update",
+                    run.id
+                );
+            }
+            Ok(())
+        };
+
+        // Deviation D1: the deleted binary opened its own connection with
+        // a 5 s SQLite busy timeout; `Database::new` sets none, and its
+        // open-time seeding performs short write transactions that can
+        // collide with the engine's writes under a loaded suite. Retry
+        // ONLY on "database is locked" (SQLITE_BUSY), waiting — this is
+        // the busy handler, not a verdict retry: the filing still happens
+        // before the member process exits (what orders it against the
+        // engine's read), a missing running row fails on the first
+        // attempt, and any other error panics immediately. Budget ~5 s.
+        for attempt in 0..50u32 {
+            match file_verdict() {
+                Ok(()) => return,
+                Err(e) if attempt < 49 && e.to_string().contains("database is locked") => {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                Err(e) => panic!("self_report_verdict_writer: {e}"),
+            }
+        }
+    }
+
     /// A fake `.canopy/config.toml` registering one CLI entry per
     /// `(name, binary)` pair — lets each ensemble member run its own script
     /// under its own `platform` name, so a single ensemble can exercise
@@ -20572,8 +20707,8 @@ echo done
 
     /// CM26 FR1: a parallel bounce resumes the member whose last run in this
     /// spec passed, and cold-starts a member whose last run was a straggler
-    /// kill. `member-pass` (VerdictFiler-Passed, lingers just long enough for
-    /// the filer to land the verdict before it exits) and `member-straggler`
+    /// kill. `member-pass` (self-reports Pass as the last thing its script
+    /// does before exiting) and `member-straggler`
     /// (never filed; its own node-level `timeout_minutes: 0` — NOT the
     /// ensemble's shared `straggler_timeout_minutes`, which the parallel path
     /// applies to every member alike and would kill `member-pass` too —
@@ -20583,6 +20718,7 @@ echo done
     #[tokio::test]
     async fn parallel_bounce_resumes_passer_and_cold_starts_straggler() {
         let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+        let db_path = dir.path().join(TEST_DB_FILENAME);
         let script = write_argv_echo_cli(dir.path());
 
         let argv_pass = dir.path().join("argv-pass.log");
@@ -20593,6 +20729,12 @@ echo done
         );
         env_pass.insert("RESUME_FLAG".to_string(), "--resume".to_string());
         env_pass.insert("LINGER_SECONDS".to_string(), "1".to_string());
+        env_pass.insert("SELF_REPORT_NODE_ID".to_string(), "member-pass".to_string());
+        env_pass.insert("SELF_REPORT_EXE".to_string(), self_report_exe());
+        env_pass.insert(
+            "SELF_REPORT_DB".to_string(),
+            db_path.to_string_lossy().into_owned(),
+        );
         let mut cli_pass =
             argv_cli_config(&script, env_pass, Some("--resume"), Some("--set"), None);
         cli_pass.name = "cli-pass".to_string();
@@ -20668,14 +20810,12 @@ echo done
             db.insert_graph_edge(&edge).unwrap();
         }
 
-        let _filer = VerdictFiler::spawn(&db, vec![("member-pass".to_string(), None)]);
         let _home = HomeGuard::set(home.path());
         engine
             .run_graph(graph_id, None, None, None, None)
             .await
             .unwrap();
         drop(_home);
-        drop(_filer);
 
         assert!(
             done_marker.exists(),
@@ -20740,6 +20880,7 @@ echo done
     #[tokio::test]
     async fn round_robin_bounce_after_fail_advances_then_resumes_and_stays() {
         let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+        let db_path = dir.path().join(TEST_DB_FILENAME);
         let script = write_argv_echo_cli(dir.path());
 
         let argv_a = dir.path().join("argv-a.log");
@@ -20750,6 +20891,13 @@ echo done
         );
         env_a.insert("RESUME_FLAG".to_string(), "--resume".to_string());
         env_a.insert("LINGER_SECONDS".to_string(), "1".to_string());
+        env_a.insert("SELF_REPORT_NODE_ID".to_string(), "rr-a".to_string());
+        env_a.insert("SELF_REPORT_EXE".to_string(), self_report_exe());
+        env_a.insert(
+            "SELF_REPORT_DB".to_string(),
+            db_path.to_string_lossy().into_owned(),
+        );
+        env_a.insert("SELF_REPORT_STATUS".to_string(), "fail".to_string());
         let mut cli_a = argv_cli_config(&script, env_a, Some("--resume"), Some("--set"), None);
         cli_a.name = "cli-a".to_string();
 
@@ -20761,6 +20909,12 @@ echo done
         );
         env_b.insert("RESUME_FLAG".to_string(), "--resume".to_string());
         env_b.insert("LINGER_SECONDS".to_string(), "1".to_string());
+        env_b.insert("SELF_REPORT_NODE_ID".to_string(), "rr-b".to_string());
+        env_b.insert("SELF_REPORT_EXE".to_string(), self_report_exe());
+        env_b.insert(
+            "SELF_REPORT_DB".to_string(),
+            db_path.to_string_lossy().into_owned(),
+        );
         let mut cli_b = argv_cli_config(&script, env_b, Some("--resume"), Some("--set"), None);
         cli_b.name = "cli-b".to_string();
 
@@ -20835,24 +20989,12 @@ echo done
             db.insert_graph_edge(&edge).unwrap();
         }
 
-        let _filer_b = VerdictFiler::spawn_with_status(
-            &db,
-            vec![("rr-b".to_string(), None)],
-            GraphRunStatus::Pass,
-        );
-        let _filer_a = VerdictFiler::spawn_with_status(
-            &db,
-            vec![("rr-a".to_string(), None)],
-            GraphRunStatus::Fail,
-        );
         let _home = HomeGuard::set(home.path());
         engine
             .run_graph(graph_id, None, None, None, None)
             .await
             .unwrap();
         drop(_home);
-        drop(_filer_a);
-        drop(_filer_b);
 
         assert!(
             done_via_pass_gate.exists(),
@@ -20913,6 +21055,7 @@ echo done
     #[tokio::test]
     async fn cascade_bounce_resumes_previous_passer() {
         let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+        let db_path = dir.path().join(TEST_DB_FILENAME);
 
         let crash_script = write_member_script(dir.path(), "crash.sh", "exit 1");
         let cli_crash = crate::domain::cli_config::CliConfig {
@@ -20932,6 +21075,12 @@ echo done
         );
         env_b.insert("RESUME_FLAG".to_string(), "--resume".to_string());
         env_b.insert("LINGER_SECONDS".to_string(), "1".to_string());
+        env_b.insert("SELF_REPORT_NODE_ID".to_string(), "casc-b".to_string());
+        env_b.insert("SELF_REPORT_EXE".to_string(), self_report_exe());
+        env_b.insert(
+            "SELF_REPORT_DB".to_string(),
+            db_path.to_string_lossy().into_owned(),
+        );
         let mut cli_b = argv_cli_config(&script_b, env_b, Some("--resume"), Some("--set"), None);
         cli_b.name = "cli-b".to_string();
 
@@ -20968,14 +21117,12 @@ echo done
             db.insert_graph_edge(&edge).unwrap();
         }
 
-        let _filer = VerdictFiler::spawn(&db, vec![("casc-b".to_string(), None)]);
         let _home = HomeGuard::set(home.path());
         engine
             .run_graph(graph_id, None, None, None, None)
             .await
             .unwrap();
         drop(_home);
-        drop(_filer);
 
         assert!(
             done_marker.exists(),
@@ -21028,6 +21175,7 @@ echo done
     #[tokio::test]
     async fn ensemble_member_resume_false_forces_cold_start_on_bounce() {
         let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+        let db_path = dir.path().join(TEST_DB_FILENAME);
         let script = write_argv_echo_cli(dir.path());
 
         let argv_noresume = dir.path().join("argv-noresume.log");
@@ -21038,6 +21186,15 @@ echo done
         );
         env_noresume.insert("RESUME_FLAG".to_string(), "--resume".to_string());
         env_noresume.insert("LINGER_SECONDS".to_string(), "1".to_string());
+        env_noresume.insert(
+            "SELF_REPORT_NODE_ID".to_string(),
+            "member-noresume".to_string(),
+        );
+        env_noresume.insert("SELF_REPORT_EXE".to_string(), self_report_exe());
+        env_noresume.insert(
+            "SELF_REPORT_DB".to_string(),
+            db_path.to_string_lossy().into_owned(),
+        );
         let mut cli_noresume =
             argv_cli_config(&script, env_noresume, Some("--resume"), Some("--set"), None);
         cli_noresume.name = "cli-noresume".to_string();
@@ -21050,6 +21207,15 @@ echo done
         );
         env_sibling.insert("RESUME_FLAG".to_string(), "--resume".to_string());
         env_sibling.insert("LINGER_SECONDS".to_string(), "1".to_string());
+        env_sibling.insert(
+            "SELF_REPORT_NODE_ID".to_string(),
+            "member-sibling".to_string(),
+        );
+        env_sibling.insert("SELF_REPORT_EXE".to_string(), self_report_exe());
+        env_sibling.insert(
+            "SELF_REPORT_DB".to_string(),
+            db_path.to_string_lossy().into_owned(),
+        );
         let mut cli_sibling =
             argv_cli_config(&script, env_sibling, Some("--resume"), Some("--set"), None);
         cli_sibling.name = "cli-sibling".to_string();
@@ -21237,20 +21403,12 @@ echo done
         )
         .unwrap();
 
-        let _filer = VerdictFiler::spawn(
-            &db,
-            vec![
-                ("member-noresume".to_string(), None),
-                ("member-sibling".to_string(), None),
-            ],
-        );
         let _home = HomeGuard::set(home.path());
         engine
             .run_graph(graph_id, None, None, None, None)
             .await
             .unwrap();
         drop(_home);
-        drop(_filer);
 
         assert!(
             done_marker.exists(),
@@ -21903,8 +22061,8 @@ echo done
 
     /// CM24: with `quorum_grace_minutes: Some(0)`, the join resolves the
     /// instant the quorum is met instead of waiting for every member.
-    /// `m-ok` passes (its lingering script gives the `VerdictFiler` time to
-    /// file the self-report, then exits); the two hanging members are
+    /// `m-ok` passes (its script self-reports as the last thing it does
+    /// before exiting); the two hanging members are
     /// terminated with reason `quorum met` — recorded as fail, distinct
     /// from `ensemble straggler timeout` — and the join passes 1/3 with
     /// `quorum_met_at`/`grace_minutes` in its output. The generous
@@ -21913,10 +22071,19 @@ echo done
     #[tokio::test]
     async fn ensemble_quorum_grace_zero_terminates_stragglers_on_quorum_met() {
         let (dir, db, engine, _graph_id, spec_id) = graph_fixture().unwrap();
+        let db_path = dir.path().join(TEST_DB_FILENAME);
         let fake_home = setup_multi_cli_home(&[
             (
                 "member-ok",
-                &write_member_script(dir.path(), "ok.sh", "sleep 2; printf OK"),
+                &write_self_reporting_member_script(
+                    dir.path(),
+                    "ok.sh",
+                    "sleep 2; printf OK",
+                    &db_path,
+                    "m-ok",
+                    "pass",
+                    Some("OK"),
+                ),
             ),
             (
                 "member-hang-a",
@@ -21948,8 +22115,6 @@ echo done
             None,
         );
 
-        let _filer = VerdictFiler::spawn(&db, vec![("m-ok".to_string(), Some("OK".to_string()))]);
-
         let _home = HomeGuard::set(fake_home.path());
         let started = std::time::Instant::now();
         engine
@@ -21958,7 +22123,6 @@ echo done
             .unwrap();
         let elapsed = started.elapsed();
         drop(_home);
-        drop(_filer);
 
         assert!(
             pass_marker.exists(),
@@ -22004,25 +22168,50 @@ echo done
 
     /// CM24: a member that finishes after the quorum was met but inside the
     /// grace window is consolidated normally — not terminated. `m-a` passes
-    /// fast; a chained thread files `m-b`/`m-c` passes a few seconds later
-    /// (both strictly after `m-a`'s verdict); all three land inside the
-    /// 1-minute grace, so the join passes 3/3 and resolves in seconds
+    /// fast; `m-b`/`m-c` self-report their own passes a few seconds later,
+    /// each as the last thing its own script does; all three land inside
+    /// the 1-minute grace, so the join passes 3/3 and resolves in seconds
     /// rather than waiting out the window.
     #[tokio::test]
     async fn ensemble_quorum_grace_allows_member_finishing_inside_grace_to_be_consolidated() {
         let (dir, db, engine, _graph_id, spec_id) = graph_fixture().unwrap();
+        let db_path = dir.path().join(TEST_DB_FILENAME);
         let fake_home = setup_multi_cli_home(&[
             (
                 "member-a",
-                &write_member_script(dir.path(), "a.sh", "sleep 2; printf A"),
+                &write_self_reporting_member_script(
+                    dir.path(),
+                    "a.sh",
+                    "sleep 2; printf A",
+                    &db_path,
+                    "m-a",
+                    "pass",
+                    Some("A"),
+                ),
             ),
             (
                 "member-b",
-                &write_member_script(dir.path(), "b.sh", "sleep 5; printf B"),
+                &write_self_reporting_member_script(
+                    dir.path(),
+                    "b.sh",
+                    "sleep 5; printf B",
+                    &db_path,
+                    "m-b",
+                    "pass",
+                    Some("B"),
+                ),
             ),
             (
                 "member-c",
-                &write_member_script(dir.path(), "c.sh", "sleep 8; printf C"),
+                &write_self_reporting_member_script(
+                    dir.path(),
+                    "c.sh",
+                    "sleep 8; printf C",
+                    &db_path,
+                    "m-c",
+                    "pass",
+                    Some("C"),
+                ),
             ),
         ]);
         let pass_marker = dir.path().join("pass.marker");
@@ -22046,43 +22235,6 @@ echo done
             None,
         );
 
-        let _filer_a = VerdictFiler::spawn(&db, vec![("m-a".to_string(), Some("A".to_string()))]);
-        // File m-b/m-c passes only after m-a has passed, so both finish
-        // strictly after the quorum was met but inside the grace window.
-        let db_child = Arc::clone(&db);
-        let spec_child = spec_id.clone();
-        let delayed = std::thread::spawn(move || {
-            for _ in 0..600 {
-                let a_passed = db_child
-                    .list_graph_runs_for_spec(&spec_child)
-                    .unwrap()
-                    .into_iter()
-                    .any(|r| r.node_id == "m-a" && r.status == GraphRunStatus::Pass);
-                if a_passed {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-            for (node_id, stdout) in [("m-b", "B"), ("m-c", "C")] {
-                std::thread::sleep(std::time::Duration::from_secs(2));
-                for _ in 0..200 {
-                    if let Ok(Some(run)) = db_child.get_active_graph_run_for_node(node_id) {
-                        let _ = db_child.update_graph_run_result(
-                            &run.id,
-                            GraphRunStatus::Pass,
-                            Some(&serde_json::json!({
-                                "test_self_report": true,
-                                "stdout": stdout,
-                            })),
-                            Some(chrono::Utc::now()),
-                        );
-                        break;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                }
-            }
-        });
-
         let _home = HomeGuard::set(fake_home.path());
         let started = std::time::Instant::now();
         engine
@@ -22091,8 +22243,6 @@ echo done
             .unwrap();
         let elapsed = started.elapsed();
         drop(_home);
-        drop(_filer_a);
-        let _ = delayed.join();
 
         assert!(
             pass_marker.exists(),
@@ -22126,12 +22276,24 @@ echo done
     #[tokio::test]
     async fn ensemble_quorum_grace_ignored_for_cascade() {
         let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+        let db_path = dir.path().join(TEST_DB_FILENAME);
         let fake_home = setup_multi_cli_home(&[
             (
                 "m-crash",
                 &write_member_script(dir.path(), "crash.sh", "exit 1"),
             ),
-            ("m-ok", &write_member_script(dir.path(), "ok.sh", "sleep 1")),
+            (
+                "m-ok",
+                &write_self_reporting_member_script(
+                    dir.path(),
+                    "ok.sh",
+                    "sleep 1",
+                    &db_path,
+                    "m-ok",
+                    "pass",
+                    None,
+                ),
+            ),
         ]);
         insert_kind_ensemble(
             &db,
@@ -22142,15 +22304,12 @@ echo done
         db.update_ensemble_join_config("ens1", None, None, Some(Some(0)), None, None, None, None)
             .unwrap();
 
-        let _filer = VerdictFiler::spawn(&db, vec![("m-ok".to_string(), None)]);
-
         let _home = HomeGuard::set(fake_home.path());
         engine
             .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
         drop(_home);
-        drop(_filer);
 
         let join = join_run(&db, &spec_id, "join1");
         assert_eq!(
@@ -22530,7 +22689,19 @@ echo done
                 config: serde_json::json!({
                     "platform": platform,
                     "prompt_template": "ignored by the member's test script",
-                    "timeout_minutes": member_timeout.unwrap_or(5),
+                    // CB57: the node-level `timeout_minutes` feeds
+                    // `spawn_and_wait_cli_process`'s own kill-and-record-a-Fail-verdict
+                    // path, which cascade/round-robin treat as fail-fast — a
+                    // different outcome from the member-leash cut below
+                    // (`run_ensemble_member`'s no-verdict fallthrough). Arming
+                    // both with 0 races the two enforcers: under load the inner
+                    // one sometimes wins (captured: `members_tried: 1`, no m-ok
+                    // row at all, join Fail in 0.7 s — m-ok was never
+                    // dispatched, so no verdict-filer window was missed). The
+                    // member record below keeps the real `Some(0)` leash this
+                    // test is about; the node-level default is clamped to >= 1
+                    // minute so it can never fire inside the test.
+                    "timeout_minutes": member_timeout.map(|m| m.max(1)).unwrap_or(5),
                     "infra_backoff_seconds": 0,
                 }),
                 position: 2 + i as i64,
@@ -22658,20 +22829,34 @@ echo done
     /// `timeout_minutes`. `m-hang` being cut counts as "no verdict" exactly
     /// like an infra crash does, so round-robin falls through to `m-ok` per
     /// FR5. `m-ok`'s script only sleeps (it never calls back into
-    /// `graph_complete_node`), so a background `VerdictFiler` — the same
-    /// self-report simulation this file's other CM13 tests use — files its
-    /// Pass while it's still running; the join then passes on `m-ok`'s real
+    /// `graph_complete_node`), so it self-reports its own Pass as the last
+    /// thing it does before exiting; the join then passes on `m-ok`'s real
     /// result, proving the short leash didn't cost the ensemble the whole
-    /// rotation.
+    /// rotation. (CB57: the `Some(0)` lives on the ensemble member record —
+    /// the member leash. The member node's own process timeout is clamped to
+    /// >= 1 minute in `insert_kind_ensemble_with_member_timeouts` so the
+    /// inner kill-and-verdict path can't win the race and fail the walk fast.)
     #[tokio::test]
     async fn round_robin_member_with_short_timeout_is_cut_while_sibling_with_no_override_is_not() {
         let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+        let db_path = dir.path().join(TEST_DB_FILENAME);
         let fake_home = setup_multi_cli_home(&[
             (
                 "m-hang",
                 &write_member_script(dir.path(), "hang.sh", "sleep 5; exit 0"),
             ),
-            ("m-ok", &write_member_script(dir.path(), "ok.sh", "sleep 1")),
+            (
+                "m-ok",
+                &write_self_reporting_member_script(
+                    dir.path(),
+                    "ok.sh",
+                    "sleep 1",
+                    &db_path,
+                    "m-ok",
+                    "pass",
+                    None,
+                ),
+            ),
         ]);
         insert_kind_ensemble_with_member_timeouts(
             &db,
@@ -22680,15 +22865,12 @@ echo done
             &[("m-hang", "m-hang", Some(0)), ("m-ok", "m-ok", None)],
         );
 
-        let _filer = VerdictFiler::spawn(&db, vec![("m-ok".to_string(), None)]);
-
         let _home = HomeGuard::set(fake_home.path());
         engine
             .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
         drop(_home);
-        drop(_filer);
 
         let join = join_run(&db, &spec_id, "join1");
         assert_eq!(
@@ -22734,15 +22916,35 @@ echo done
     /// override and therefore uses the ensemble's shared timeout — still
     /// runs and its pass becomes the ensemble's verdict. Proves the cascade
     /// fallthrough path respects per-member leashes, not just round-robin.
+    /// Before CB57, a loaded-suite run captured `left: Fail, right: Pass`
+    /// for the join assertion below. The failing run's member rows showed
+    /// `members_tried: 1` with winner m-hang (`"error": "timed out"`) and no
+    /// m-ok row at all: m-hang's node-level `timeout_minutes: 0` (inner
+    /// kill-and-verdict, fail-fast) had beaten the member-leash cut (outer
+    /// no-verdict fallthrough) — m-ok was never dispatched, so no
+    /// verdict-filer window was missed. See the `timeout_minutes` clamp in
+    /// `insert_kind_ensemble_with_member_timeouts`.
     #[tokio::test]
     async fn cascade_member_with_short_timeout_is_cut_while_sibling_with_no_override_is_not() {
         let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+        let db_path = dir.path().join(TEST_DB_FILENAME);
         let fake_home = setup_multi_cli_home(&[
             (
                 "m-hang",
                 &write_member_script(dir.path(), "hang.sh", "sleep 5; exit 0"),
             ),
-            ("m-ok", &write_member_script(dir.path(), "ok.sh", "sleep 1")),
+            (
+                "m-ok",
+                &write_self_reporting_member_script(
+                    dir.path(),
+                    "ok.sh",
+                    "sleep 1",
+                    &db_path,
+                    "m-ok",
+                    "pass",
+                    None,
+                ),
+            ),
         ]);
         insert_kind_ensemble_with_member_timeouts(
             &db,
@@ -22751,15 +22953,12 @@ echo done
             &[("m-hang", "m-hang", Some(0)), ("m-ok", "m-ok", None)],
         );
 
-        let _filer = VerdictFiler::spawn(&db, vec![("m-ok".to_string(), None)]);
-
         let _home = HomeGuard::set(fake_home.path());
         engine
             .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
         drop(_home);
-        drop(_filer);
 
         let join = join_run(&db, &spec_id, "join1");
         assert_eq!(
@@ -23250,13 +23449,32 @@ echo done
         // prove this: each call rebuilds its snapshot from the current rows.
         let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
         // Two members + two "replacement" platforms, all backed by a lingering
-        // script so the VerdictFiler can file a Pass before the process exits.
-        let s = write_member_script(dir.path(), "m.sh", "sleep 1");
+        // script that self-reports a Pass as the last thing it does before
+        // exiting.
+        let db_path = dir.path().join(TEST_DB_FILENAME);
+        let s_m0 = write_self_reporting_member_script(
+            dir.path(),
+            "m0.sh",
+            "sleep 1",
+            &db_path,
+            "m0",
+            "pass",
+            None,
+        );
+        let s_m1 = write_self_reporting_member_script(
+            dir.path(),
+            "m1.sh",
+            "sleep 1",
+            &db_path,
+            "m1",
+            "pass",
+            None,
+        );
         let fake_home = setup_multi_cli_home(&[
-            ("cli-m0a", s.as_str()),
-            ("cli-m1a", s.as_str()),
-            ("cli-m0b", s.as_str()),
-            ("cli-m1b", s.as_str()),
+            ("cli-m0a", s_m0.as_str()),
+            ("cli-m1a", s_m1.as_str()),
+            ("cli-m0b", s_m0.as_str()),
+            ("cli-m1b", s_m1.as_str()),
         ]);
         insert_kind_ensemble(
             &db,
@@ -23293,11 +23511,6 @@ echo done
         })
         .unwrap();
 
-        // members are node ids "m0"/"m1" (2nd tuple field is the platform name).
-        let _filer = VerdictFiler::spawn(
-            &db,
-            vec![("m0".to_string(), None), ("m1".to_string(), None)],
-        );
         let _home = HomeGuard::set(fake_home.path());
 
         let engine = std::sync::Arc::new(engine);
@@ -23341,7 +23554,6 @@ echo done
 
         handle.await.unwrap().unwrap();
         drop(_home);
-        drop(_filer);
 
         assert_eq!(
             db.get_graph_spec(&spec_id).unwrap().unwrap().status,
@@ -23690,6 +23902,7 @@ echo done
     #[tokio::test]
     async fn ensemble_node_config_retry_limit_zero_overrides_platform() {
         let (dir, db, engine, _graph_id, spec_id) = graph_fixture().unwrap();
+        let db_path = dir.path().join(TEST_DB_FILENAME);
         let fake_home = setup_multi_cli_home_with_infra(&[
             (
                 "plat-five",
@@ -23700,7 +23913,15 @@ echo done
             ),
             (
                 "plat-ok",
-                &write_member_script(dir.path(), "ok.sh", "sleep 1"),
+                &write_self_reporting_member_script(
+                    dir.path(),
+                    "ok.sh",
+                    "sleep 1",
+                    &db_path,
+                    "m-ok",
+                    "pass",
+                    None,
+                ),
                 None,
                 None,
                 None,
@@ -23721,15 +23942,12 @@ echo done
         db.update_graph_node_details(&node.id, None, None, Some(&node.config), None)
             .unwrap();
 
-        let _filer = VerdictFiler::spawn(&db, vec![("m-ok".to_string(), None)]);
-
         let _home = HomeGuard::set(fake_home.path());
         engine
             .run_graph("wf-test".to_string(), None, None, None, None)
             .await
             .unwrap();
         drop(_home);
-        drop(_filer);
 
         let runs = member_runs(&db, &spec_id, "m-overridden");
         assert_eq!(
@@ -27139,10 +27357,25 @@ COUNTER=$((COUNTER + 1))
 echo $COUNTER > "$COUNTER_FILE"
 cat > "${CAPTURE_DIR}/prompt_${COUNTER}"
 echo "NODE_OUTPUT_DATA_${COUNTER}"
-# CM13 test support: linger so the test-side verdict filer can file a Pass
-# verdict on this run's row before the process exits (see VerdictFiler).
+# CM13 test support: linger, historically so a background verdict filer had
+# time to land its write.
 if [ -n "$LINGER_SECONDS" ]; then
   sleep "$LINGER_SECONDS"
+fi
+# CB57 test support: look up which node this invocation belongs to by
+# its counter (1st/2nd/3rd call), since one script backs all three
+# nodes here — then self-report using this invocation's own output.
+case "$COUNTER" in
+  1) SELF_REPORT_NODE_ID="$SELF_REPORT_NODE_1" ;;
+  2) SELF_REPORT_NODE_ID="$SELF_REPORT_NODE_2" ;;
+  3) SELF_REPORT_NODE_ID="$SELF_REPORT_NODE_3" ;;
+esac
+if [ -n "$SELF_REPORT_NODE_ID" ]; then
+  CANOPY_TEST_SELF_REPORT_DB="$SELF_REPORT_DB" \
+  CANOPY_TEST_SELF_REPORT_NODE_ID="$SELF_REPORT_NODE_ID" \
+  CANOPY_TEST_SELF_REPORT_STATUS="${SELF_REPORT_STATUS:-pass}" \
+  CANOPY_TEST_SELF_REPORT_STDOUT="NODE_OUTPUT_DATA_${COUNTER}" \
+    "$SELF_REPORT_EXE" --exact graph_engine::tests::self_report_verdict_writer --nocapture >/dev/null
 fi
 exit 0
 "#,
@@ -27253,29 +27486,19 @@ exit 0
         .unwrap();
 
         let _home = HomeGuard::set(fake_home.path());
+        let db_path = dir.path().join(TEST_DB_FILENAME);
         std::env::set_var("CAPTURE_DIR", capture_dir.to_str().unwrap());
         std::env::set_var("LINGER_SECONDS", "1");
-
-        // CM13: the capture script never calls graph_complete_node, so file
-        // Pass verdicts carrying each node's canned stdout (see VerdictFiler)
-        // — the “happy path” the multi-hop retention below is about.
-        let _filer = VerdictFiler::spawn(
-            &db,
-            vec![
-                (
-                    "node-architect".to_string(),
-                    Some("NODE_OUTPUT_DATA_1".to_string()),
-                ),
-                (
-                    "node-tester".to_string(),
-                    Some("NODE_OUTPUT_DATA_2".to_string()),
-                ),
-                (
-                    "node-implementer".to_string(),
-                    Some("NODE_OUTPUT_DATA_3".to_string()),
-                ),
-            ],
-        );
+        // CB57: the capture script never calls graph_complete_node, so it
+        // self-reports its own Pass verdict (carrying each node's canned
+        // stdout) as the last thing it does before exiting — see
+        // `self_report_invocation`'s doc comment for why that can't race the
+        // engine the way the old background-poller could.
+        std::env::set_var("SELF_REPORT_NODE_1", "node-architect");
+        std::env::set_var("SELF_REPORT_NODE_2", "node-tester");
+        std::env::set_var("SELF_REPORT_NODE_3", "node-implementer");
+        std::env::set_var("SELF_REPORT_EXE", self_report_exe());
+        std::env::set_var("SELF_REPORT_DB", db_path.to_string_lossy().into_owned());
 
         let result = engine
             .run_graph(graph_id.clone(), None, None, None, None)
@@ -27283,6 +27506,11 @@ exit 0
         drop(_home);
         std::env::remove_var("CAPTURE_DIR");
         std::env::remove_var("LINGER_SECONDS");
+        std::env::remove_var("SELF_REPORT_NODE_1");
+        std::env::remove_var("SELF_REPORT_NODE_2");
+        std::env::remove_var("SELF_REPORT_NODE_3");
+        std::env::remove_var("SELF_REPORT_EXE");
+        std::env::remove_var("SELF_REPORT_DB");
 
         result.unwrap();
 
@@ -27311,6 +27539,7 @@ exit 0
     #[tokio::test]
     async fn idea_text_populates_spec_content_in_placeholder() {
         let (dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
+        let db_path = dir.path().join(TEST_DB_FILENAME);
         let argv_file = dir.path().join("argv.log");
         let script = write_argv_echo_cli(dir.path());
         let mut env = HashMap::new();
@@ -27319,9 +27548,15 @@ exit 0
             argv_file.to_string_lossy().into_owned(),
         );
         env.insert("RESUME_FLAG".to_string(), "--resume".to_string());
-        // CM13: linger so the VerdictFiler below can file the Pass verdict
-        // before the process exits.
+        // CM13 legacy: holds the run briefly before it exits; the
+        // self-report below lands at exit and does not depend on it.
         env.insert("LINGER_SECONDS".to_string(), "1".to_string());
+        env.insert("SELF_REPORT_NODE_ID".to_string(), "node-impl".to_string());
+        env.insert("SELF_REPORT_EXE".to_string(), self_report_exe());
+        env.insert(
+            "SELF_REPORT_DB".to_string(),
+            db_path.to_string_lossy().into_owned(),
+        );
         let cli = argv_cli_config(&script, env, None, None, None);
         let home = write_resume_cli_home(cli);
 
@@ -27361,10 +27596,9 @@ exit 0
         .unwrap();
 
         let guard = HomeGuard::set(home.path());
-        // CM13: the echo script never calls graph_complete_node, so the filer
-        // files the Pass verdict instead (see VerdictFiler). The filer is
-        // dropped (joined) before returning.
-        let _filer = VerdictFiler::spawn(&db, vec![("node-impl".to_string(), None)]);
+        // CB57: the echo script never calls graph_complete_node, so it
+        // self-reports its own Pass verdict instead, as the last thing it
+        // does before exiting.
         engine
             .run_graph(
                 graph_id.clone(),
@@ -28726,9 +28960,18 @@ exit 0
     #[tokio::test]
     async fn cm13_round_robin_falls_through_unreported_member_then_passes_on_next() {
         let (dir, db, engine, _graph_id, spec_id) = graph_fixture().unwrap();
+        let db_path = dir.path().join(TEST_DB_FILENAME);
 
         let silent_path = write_member_script(dir.path(), "silent.sh", "exit 0");
-        let ok_path = write_member_script(dir.path(), "ok.sh", "sleep 1");
+        let ok_path = write_self_reporting_member_script(
+            dir.path(),
+            "ok.sh",
+            "sleep 1",
+            &db_path,
+            "rr-ok",
+            "pass",
+            None,
+        );
 
         let fake_home = setup_multi_cli_home(&[
             ("rr-silent", silent_path.as_str()),
@@ -28741,14 +28984,11 @@ exit 0
             &[("rr-silent", "rr-silent"), ("rr-ok", "rr-ok")],
         );
 
-        let _filer = VerdictFiler::spawn(&db, vec![("rr-ok".to_string(), None)]);
-
         let _home = HomeGuard::set(fake_home.path());
         let result = engine
             .run_graph(_graph_id.clone(), None, None, None, None)
             .await;
         drop(_home);
-        drop(_filer);
 
         result.unwrap();
 
@@ -28792,8 +29032,17 @@ exit 0
     #[tokio::test]
     async fn cm13_round_robin_self_reported_fail_stops_walk_no_fallthrough() {
         let (dir, db, engine, _graph_id, spec_id) = graph_fixture().unwrap();
+        let db_path = dir.path().join(TEST_DB_FILENAME);
 
-        let saysno_path = write_member_script(dir.path(), "saysno.sh", "sleep 1");
+        let saysno_path = write_self_reporting_member_script(
+            dir.path(),
+            "saysno.sh",
+            "sleep 1",
+            &db_path,
+            "rr-saysno",
+            "fail",
+            None,
+        );
         let second_path = write_member_script(dir.path(), "second.sh", "printf ok");
 
         let fake_home = setup_multi_cli_home(&[
@@ -28807,18 +29056,11 @@ exit 0
             &[("rr-saysno", "rr-saysno"), ("rr-second", "rr-second")],
         );
 
-        let _filer = VerdictFiler::spawn_with_status(
-            &db,
-            vec![("rr-saysno".into(), None)],
-            GraphRunStatus::Fail,
-        );
-
         let _home = HomeGuard::set(fake_home.path());
         let _result = engine
             .run_graph(_graph_id.clone(), None, None, None, None)
             .await;
         drop(_home);
-        drop(_filer);
 
         let join = join_run(&db, &spec_id, "join1");
         assert_eq!(
@@ -28852,8 +29094,17 @@ exit 0
     #[tokio::test]
     async fn cm13_cascade_self_reported_fail_stops_walk_no_fallthrough() {
         let (dir, db, engine, _graph_id, spec_id) = graph_fixture().unwrap();
+        let db_path = dir.path().join(TEST_DB_FILENAME);
 
-        let saysno_path = write_member_script(dir.path(), "saysno.sh", "sleep 1");
+        let saysno_path = write_self_reporting_member_script(
+            dir.path(),
+            "saysno.sh",
+            "sleep 1",
+            &db_path,
+            "c-saysno",
+            "fail",
+            None,
+        );
         let second_path = write_member_script(dir.path(), "second.sh", "printf ok");
 
         let fake_home = setup_multi_cli_home(&[
@@ -28867,18 +29118,11 @@ exit 0
             &[("c-saysno", "c-saysno"), ("c-second", "c-second")],
         );
 
-        let _filer = VerdictFiler::spawn_with_status(
-            &db,
-            vec![("c-saysno".into(), None)],
-            GraphRunStatus::Fail,
-        );
-
         let _home = HomeGuard::set(fake_home.path());
         let _result = engine
             .run_graph(_graph_id.clone(), None, None, None, None)
             .await;
         drop(_home);
-        drop(_filer);
 
         let join = join_run(&db, &spec_id, "join1");
         assert_eq!(
