@@ -65,6 +65,18 @@ pub(crate) enum ProbeOutcome {
     /// contained the probe token — the defect class this module exists to
     /// catch, including "exit 0 with an error and nothing else."
     Broken,
+    /// The process ran to completion and its response carries the CLI's own
+    /// argument-parser usage/error text — canopy called the platform wrong
+    /// (flag order, a renamed/removed flag, an argument shape the parser
+    /// rejects), not a credentials/network/quota problem the platform
+    /// itself has (CB61's devin case: `-p` before `--model` made the
+    /// prompt land as a positional `PATH`, and devin's own clap parser
+    /// refused with "the argument '--print [<PROMPT>]' cannot be used with
+    /// '[PATH]...'"). Distinct from `Broken` so the fix is understood to be
+    /// the registry's `invocation_template`/`headless_mode`, never a retry
+    /// or a permuted command line (see `error` for the exact parser line,
+    /// `argv` for the exact command canopy ran).
+    Misconfigured,
     /// The resolved binary does not identify as this platform (CB44): the
     /// registry's `identity_check` ran and its output lacked the expected
     /// substring. Distinct from `Broken`/`SpawnFailed` so the caller knows
@@ -108,6 +120,7 @@ impl ProbeOutcome {
         match self {
             Self::Reachable => "reachable",
             Self::Broken => "broken",
+            Self::Misconfigured => "misconfigured",
             Self::WrongBinary => "wrong_binary",
             Self::TimedOut => "timed_out",
             Self::NotConfigured => "not_configured",
@@ -134,6 +147,15 @@ pub(crate) struct ProbeReport {
     /// tell a caller nothing about whether the fix is an API key, a model
     /// name, or a missing binary.
     pub error: Option<String>,
+    /// The exact argv canopy invoked for this probe (program + args,
+    /// space-joined, secrets redacted) — CB61. `Some` on every outcome from
+    /// `SpawnFailed` onward where a `Command` was actually built (spawn
+    /// failure, timeout, a wait() error, `Substituted`, `Broken`,
+    /// `Misconfigured`); `None` when no command was ever built
+    /// (`NotConfigured`, `Unknown`, `WrongBinary`, a `build_command` error,
+    /// and `Reachable` — paired with `error` being `None` there too, since
+    /// nothing needs reproducing on success).
+    pub argv: Option<String>,
 }
 
 impl ProbeReport {
@@ -145,6 +167,7 @@ impl ProbeReport {
             "outcome": self.outcome.as_str(),
             "duration_ms": self.duration_ms,
             "error": self.error,
+            "argv": self.argv,
         })
     }
 }
@@ -223,6 +246,57 @@ fn detect_model_rejection(stdout: &str, stderr: &str) -> Option<String> {
     None
 }
 
+/// Render a built command's argv as one space-joined, secret-redacted,
+/// shell-quoted string — CB61. Quoted (via `shell_words::quote`, the same
+/// crate the registry side already uses to split `headless_mode`) because
+/// the probe prompt itself is a single argv element containing spaces
+/// ("Reply with exactly this text and nothing else: <token>") — an
+/// unquoted join would let a shell re-split it into several words and
+/// change what gets reproduced, defeating FR1's "paste it into a shell
+/// without reconstructing it." Reuses `redact_secrets` (the same
+/// redaction node-run output already goes through) rather than a second
+/// implementation. Built from `Command::as_std()`
+/// (`get_program`/`get_args`), the same argv the OS will actually exec —
+/// not a re-derivation from the registry template, so it can never drift
+/// from what was really run.
+fn command_argv(command: &tokio::process::Command) -> String {
+    let std_cmd = command.as_std();
+    let mut parts = vec![std_cmd.get_program().to_string_lossy().into_owned()];
+    parts.extend(std_cmd.get_args().map(|a| a.to_string_lossy().into_owned()));
+    let quoted = parts
+        .iter()
+        .map(|p| shell_words::quote(p).into_owned())
+        .collect::<Vec<_>>()
+        .join(" ");
+    redact_secrets(&quoted)
+}
+
+/// Substrings of a CLI argument-parser's own usage/error output that mean
+/// canopy's invocation was malformed, not that the platform is down —
+/// CB61. Matched case-insensitively and per-line, like
+/// `detect_model_rejection` above, but unconditionally (not gated on
+/// `target.model` — CB61's devin case has no model requested at all).
+/// This is a fixed, closed list (functional requirement #2's four shapes);
+/// it is not a general clap/argparse-error detector.
+const MISCONFIGURED_MARKERS: &[&str] = &[
+    "cannot be used with",
+    "unrecognized flag",
+    "unexpected argument",
+    "unknown option",
+];
+
+fn detect_misconfigured_invocation(stdout: &str, stderr: &str) -> Option<String> {
+    for text in [stderr, stdout] {
+        for line in text.lines() {
+            let lower = line.to_lowercase();
+            if MISCONFIGURED_MARKERS.iter().any(|m| lower.contains(m)) {
+                return Some(line.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// Probe one platform+model pair by actually invoking it: build the
 /// platform's real headless command from its registry config
 /// (`headless_mode`/`model_flag`/etc, via [`CliStrategy::from_cli_config`] —
@@ -246,6 +320,7 @@ pub(crate) async fn probe_target(
             model: target.model.clone(),
             outcome: ProbeOutcome::NotConfigured,
             duration_ms: start.elapsed().as_millis(),
+            argv: None,
             error: Some(format!(
                 "Platform '{}' is not configured in canopy (~/.canopy/config.toml).",
                 target.platform
@@ -269,6 +344,7 @@ pub(crate) async fn probe_target(
                 model: target.model.clone(),
                 outcome: ProbeOutcome::Unknown,
                 duration_ms: start.elapsed().as_millis(),
+                argv: None,
                 error: Some(format!(
                     "Platform '{}' has no configured way to select a model explicitly \
                      (no usable model_flag) — cannot validate model '{}' end-to-end. Omit \
@@ -294,6 +370,7 @@ pub(crate) async fn probe_target(
                     model: target.model.clone(),
                     outcome: ProbeOutcome::SpawnFailed,
                     duration_ms: start.elapsed().as_millis(),
+                    argv: None,
                     error: Some(redact_secrets(&error.to_string())),
                 };
             }
@@ -311,6 +388,7 @@ pub(crate) async fn probe_target(
                 model: target.model.clone(),
                 outcome: ProbeOutcome::WrongBinary,
                 duration_ms: start.elapsed().as_millis(),
+                argv: None,
                 error: Some(redact_secrets(&wb.report(&cli_config.binary, check_cmd))),
             };
         }
@@ -327,10 +405,12 @@ pub(crate) async fn probe_target(
                 model: target.model.clone(),
                 outcome: ProbeOutcome::SpawnFailed,
                 duration_ms: start.elapsed().as_millis(),
+                argv: None,
                 error: Some(redact_secrets(&error.to_string())),
             }
         }
     };
+    let argv = command_argv(&command);
     command.stdout(std::process::Stdio::piped());
     command.stderr(std::process::Stdio::piped());
 
@@ -342,6 +422,7 @@ pub(crate) async fn probe_target(
                 model: target.model.clone(),
                 outcome: ProbeOutcome::SpawnFailed,
                 duration_ms: start.elapsed().as_millis(),
+                argv: Some(argv.clone()),
                 error: Some(redact_secrets(&error.to_string())),
             }
         }
@@ -362,6 +443,7 @@ pub(crate) async fn probe_target(
                 model: target.model.clone(),
                 outcome: ProbeOutcome::TimedOut,
                 duration_ms: start.elapsed().as_millis(),
+                argv: Some(argv.clone()),
                 error: None,
             }
         }
@@ -370,6 +452,7 @@ pub(crate) async fn probe_target(
             model: target.model.clone(),
             outcome: ProbeOutcome::SpawnFailed,
             duration_ms: start.elapsed().as_millis(),
+            argv: Some(argv.clone()),
             error: Some(redact_secrets(&error.to_string())),
         },
         Ok(Ok(output)) => {
@@ -389,6 +472,7 @@ pub(crate) async fn probe_target(
                         model: target.model.clone(),
                         outcome: ProbeOutcome::Substituted,
                         duration_ms,
+                        argv: Some(argv.clone()),
                         error: Some(redact_secrets(&warning)),
                     };
                 }
@@ -398,6 +482,7 @@ pub(crate) async fn probe_target(
                         model: target.model.clone(),
                         outcome: ProbeOutcome::Broken,
                         duration_ms,
+                        argv: Some(argv.clone()),
                         error: Some(redact_secrets(&rejection)),
                     };
                 }
@@ -409,9 +494,19 @@ pub(crate) async fn probe_target(
                     model: target.model.clone(),
                     outcome: ProbeOutcome::Reachable,
                     duration_ms,
+                    argv: None,
                     error: None,
                 }
             } else {
+                // CB61: the platform answered with its own argument-parser
+                // usage/error text — canopy called it wrong, not a
+                // credentials/network/quota failure on the platform's side.
+                // Checked before `raw_error` below moves stdout/stderr.
+                let outcome = if detect_misconfigured_invocation(&stdout, &stderr).is_some() {
+                    ProbeOutcome::Misconfigured
+                } else {
+                    ProbeOutcome::Broken
+                };
                 // Prefer stderr (where an error is conventionally printed)
                 // but fall back to stdout — the mimocode incident printed
                 // its error to stdout with an empty stderr, exit code 0.
@@ -428,8 +523,9 @@ pub(crate) async fn probe_target(
                 ProbeReport {
                     platform: target.platform.clone(),
                     model: target.model.clone(),
-                    outcome: ProbeOutcome::Broken,
+                    outcome,
                     duration_ms,
+                    argv: Some(argv.clone()),
                     error: Some(redact_secrets(&raw_error)),
                 }
             }
@@ -1163,6 +1259,179 @@ mod tests {
         assert!(error.contains("[REDACTED]"));
     }
 
+    /// CB61 checked-by #1: a fake CLI that exits non-zero printing
+    /// `error: unexpected argument` is reported `misconfigured`, and the
+    /// argv canopy ran is present in the report.
+    #[tokio::test]
+    async fn probe_target_reports_misconfigured_for_unexpected_argument() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = write_script(
+            &dir,
+            "misconfigured-cli",
+            "echo \"error: unexpected argument '--foo' found\" 1>&2\nexit 1\n",
+        );
+        let config = config_with_cli("misconfigured", &script);
+        let target = ProbeTarget {
+            platform: "misconfigured".to_string(),
+            model: None,
+            effort: None,
+        };
+        let report = probe_target(&config, &target, None, Duration::from_secs(5)).await;
+        assert_eq!(report.outcome, ProbeOutcome::Misconfigured);
+        assert!(!report.outcome.reachable());
+        assert_eq!(report.outcome.as_str(), "misconfigured");
+        let argv = report.argv.expect("misconfigured report must carry argv");
+        assert!(argv.contains(&script.to_string_lossy().to_string()));
+    }
+
+    /// FR1: "a person can paste it into a shell without reconstructing it."
+    /// The probe prompt is one argv element containing spaces ("Reply with
+    /// exactly this text and nothing else: <token>") — a naive space-join
+    /// would let a shell re-split it into several words, changing what
+    /// gets reproduced. Assert the rendered argv round-trips through
+    /// `shell_words::split` back into the exact argv canopy ran, with the
+    /// prompt intact as a single word.
+    #[tokio::test]
+    async fn probe_target_argv_is_shell_pasteable_despite_multi_word_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = write_script(
+            &dir,
+            "misconfigured-argv-cli",
+            "echo \"error: unexpected argument '--foo' found\" 1>&2\nexit 1\n",
+        );
+        let config = config_with_cli("misconfigured-argv", &script);
+        let target = ProbeTarget {
+            platform: "misconfigured-argv".to_string(),
+            model: None,
+            effort: None,
+        };
+        let report = probe_target(&config, &target, None, Duration::from_secs(5)).await;
+        let argv = report.argv.expect("misconfigured report must carry argv");
+        let words = shell_words::split(&argv).expect("argv must be valid shell syntax");
+        assert!(
+            words
+                .iter()
+                .any(|w| w.starts_with("Reply with exactly this text and nothing else:")),
+            "prompt must survive as a single shell word, got: {words:?}"
+        );
+    }
+
+    /// CB61 checked-by #2: a fake CLI that exits non-zero printing a network
+    /// error (no usage-string marker) stays `broken`, not `misconfigured`.
+    #[tokio::test]
+    async fn probe_target_stays_broken_for_non_usage_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = write_script(
+            &dir,
+            "network-broken-cli",
+            "echo 'Error: connection reset by peer' 1>&2\nexit 1\n",
+        );
+        let config = config_with_cli("network-broken", &script);
+        let target = ProbeTarget {
+            platform: "network-broken".to_string(),
+            model: None,
+            effort: None,
+        };
+        let report = probe_target(&config, &target, None, Duration::from_secs(5)).await;
+        assert_eq!(report.outcome, ProbeOutcome::Broken);
+        assert!(report.argv.is_some());
+    }
+
+    /// CB61 checked-by #3: a fake CLI that answers normally stays
+    /// `reachable`, with no argv attached (nothing to reproduce on success,
+    /// matching `error`'s existing convention).
+    #[tokio::test]
+    async fn probe_target_reachable_has_no_argv() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = write_script(&dir, "reachable-cli", "echo \"ok: $1\"\n");
+        let config = config_with_cli("reachable-argv", &script);
+        let target = ProbeTarget {
+            platform: "reachable-argv".to_string(),
+            model: None,
+            effort: None,
+        };
+        let report = probe_target(&config, &target, None, Duration::from_secs(5)).await;
+        assert_eq!(report.outcome, ProbeOutcome::Reachable);
+        assert!(report.argv.is_none());
+    }
+
+    /// CB61 checked-by #4: the argv in the output contains no API key or
+    /// token. `headless_mode` is the one field the legacy (non-template)
+    /// build path always splits into argv verbatim (see
+    /// `build_headless_command`), so it is the simplest way to put a fixed
+    /// secret string on the command line for this test.
+    #[tokio::test]
+    async fn probe_target_redacts_secrets_in_argv() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = write_script(
+            &dir,
+            "leaky-argv-cli",
+            "echo \"error: unrecognized flag: --foo\" 1>&2\nexit 1\n",
+        );
+        let config = CanopyConfig {
+            clis: vec![CliConfig {
+                name: "leaky-argv".to_string(),
+                binary: script.to_string_lossy().to_string(),
+                headless_mode: "--api-key sk-ant-1234567890123456".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let target = ProbeTarget {
+            platform: "leaky-argv".to_string(),
+            model: None,
+            effort: None,
+        };
+        let report = probe_target(&config, &target, None, Duration::from_secs(5)).await;
+        assert_eq!(report.outcome, ProbeOutcome::Misconfigured);
+        let argv = report.argv.unwrap();
+        assert!(!argv.contains("sk-ant-1234567890123456"));
+        assert!(argv.contains("[REDACTED]"));
+    }
+
+    /// CB61 corpus check: devin's real registry error text (the argument-
+    /// order defect this spec exists to catch) classifies as
+    /// `misconfigured`. Literal string copied from
+    /// `canopy-registry/platforms/devin.toml`'s comment.
+    #[tokio::test]
+    async fn probe_target_classifies_devin_real_error_as_misconfigured() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = write_script(
+            &dir,
+            "devin-like-cli",
+            "echo \"error: the argument '--print [<PROMPT>]' cannot be used with '[PATH]...'\" 1>&2\nexit 2\n",
+        );
+        let config = config_with_cli("devin-like", &script);
+        let target = ProbeTarget {
+            platform: "devin-like".to_string(),
+            model: None,
+            effort: None,
+        };
+        let report = probe_target(&config, &target, None, Duration::from_secs(5)).await;
+        assert_eq!(report.outcome, ProbeOutcome::Misconfigured);
+    }
+
+    /// CB61 corpus check: opencode's real registry error text (a v2-removed
+    /// flag) classifies as `misconfigured`. Literal string copied from
+    /// `canopy-registry/platforms/opencode.toml`'s comment.
+    #[tokio::test]
+    async fn probe_target_classifies_opencode_real_error_as_misconfigured() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = write_script(
+            &dir,
+            "opencode-like-cli",
+            "echo \"Unrecognized flag: --dir in command opencode run\" 1>&2\nexit 1\n",
+        );
+        let config = config_with_cli("opencode-like", &script);
+        let target = ProbeTarget {
+            platform: "opencode-like".to_string(),
+            model: None,
+            effort: None,
+        };
+        let report = probe_target(&config, &target, None, Duration::from_secs(5)).await;
+        assert_eq!(report.outcome, ProbeOutcome::Misconfigured);
+    }
+
     #[tokio::test]
     async fn probe_targets_runs_concurrently_not_serially() {
         // Two hanging probes with a timeout well under 2x itself: if they
@@ -1428,6 +1697,7 @@ mod tests {
             model: None,
             outcome,
             duration_ms: 0,
+            argv: None,
             error: None,
         }
     }
@@ -1453,8 +1723,9 @@ mod tests {
             report(ProbeOutcome::NotConfigured),
             report(ProbeOutcome::SpawnFailed),
             report(ProbeOutcome::Substituted),
+            report(ProbeOutcome::Misconfigured),
         ];
-        assert_eq!(would_fail_count(&reports), 5);
+        assert_eq!(would_fail_count(&reports), 6);
     }
 
     /// The core honesty requirement: a pair whose validity is `Unknown`
@@ -1477,6 +1748,7 @@ mod tests {
             report(ProbeOutcome::NotConfigured),
             report(ProbeOutcome::SpawnFailed),
             report(ProbeOutcome::Substituted),
+            report(ProbeOutcome::Misconfigured),
         ];
         assert_eq!(unknown_count(&reports), 0);
     }
@@ -1497,6 +1769,7 @@ mod tests {
             ProbeOutcome::SpawnFailed,
             ProbeOutcome::Unknown,
             ProbeOutcome::Substituted,
+            ProbeOutcome::Misconfigured,
         ];
         let words: Vec<&str> = all.iter().map(ProbeOutcome::as_str).collect();
         assert_eq!(
@@ -1509,6 +1782,7 @@ mod tests {
                 "spawn_failed",
                 "unknown",
                 "substituted",
+                "misconfigured",
             ]
         );
         // Only `Reachable` is ever a pass.
