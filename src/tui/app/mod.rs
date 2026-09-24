@@ -1691,17 +1691,61 @@ impl App {
 
     /// Enter the live graph view's manual navigation (CT23): the only way to
     /// reach manual mode — functional requirement 4 forbids a separate
-    /// toggle. Seeds the manual selection at whatever auto-follow was
-    /// currently highlighting, so entering never jumps the highlight. A
-    /// no-op if already in manual mode: `Enter` always means "be in manual
-    /// mode", never something else depending on hidden state.
+    /// toggle. Seeds the manual selection, in order (CT24): (a) the engine's
+    /// current node while the graph is running; (b) on a finished graph, the
+    /// most recent run's node of the strip-selected spec (else the last spec
+    /// in the queue), when that node still exists in the effective graph;
+    /// (c) otherwise the graph's entry node (first in DFS order). Entering
+    /// never jumps the highlight on a running graph; on a finished graph it
+    /// lands somewhere navigable instead of pointing at `None`. A no-op if
+    /// already in manual mode (`Enter` always means "be in manual mode"), and
+    /// a no-op on a graph with no effective nodes (nothing to navigate — stay
+    /// in auto-follow rather than entering manual pointing at nothing).
     pub fn graph_live_enter(&mut self) {
         if !self.graph_live_follow {
             return;
         }
-        let current = self.graph_live_highlighted_node_id().map(str::to_string);
-        self.graph_live_selected_node = current;
-        self.graph_live_follow = false;
+        // (a) running graph: current node.
+        if let Some(id) = self
+            .graph_live_state
+            .as_ref()
+            .and_then(|s| s.current_node_id.clone())
+        {
+            self.graph_live_selected_node = Some(id);
+            self.graph_live_follow = false;
+            return;
+        }
+        // (b) finished graph: most recent run of strip-selected spec, else
+        // last spec in queue.
+        if let Some(state) = self.graph_live_state.as_ref() {
+            let strip_or_last: Option<String> = self
+                .graph_spec_strip_selected
+                .clone()
+                .or_else(|| state.spec_queue.last().map(|e| e.spec_id.clone()));
+            if let Some(spec_id) = strip_or_last {
+                if let Some(node_id) = self
+                    .db
+                    .list_graph_runs_for_spec(&spec_id)
+                    .unwrap_or_default()
+                    .last()
+                    .map(|r| r.node_id.clone())
+                {
+                    if state.effective_nodes.iter().any(|n| n.id == node_id) {
+                        self.graph_live_selected_node = Some(node_id);
+                        self.graph_live_follow = false;
+                        return;
+                    }
+                }
+            }
+        }
+        // (c) entry node: first of dfs_order, else lowest-position effective
+        // node (dfs_order already falls back to lowest position).
+        if let Some(first) = self.dfs_order().first().cloned() {
+            self.graph_live_selected_node = Some(first);
+            self.graph_live_follow = false;
+        }
+        // No effective nodes: stay in follow (nothing to navigate). Do NOT
+        // set follow=false with a None selection.
     }
 
     /// Return the live graph view to auto-follow, discarding any manual
@@ -7657,6 +7701,128 @@ mod tests {
         // wrap? sibling move_index wraps, so next should go to a again
         app.graph_live_navigate_sibling(true);
         assert_eq!(app.graph_live_highlighted_node_id(), Some("a"));
+    }
+
+    #[test]
+    fn graph_live_enter_seeds_from_most_recent_run_on_finished_graph() {
+        // CT24 FR1 (b): on a finished graph with recorded runs, Enter seeds
+        // the manual selection at the most recent run's node of the
+        // last-queued (or strip-selected) spec — not the entry node.
+        use crate::domain::graphs::{
+            Graph, GraphEdge, GraphEdgeCondition, GraphNode, GraphNodeKind, GraphNodeRun,
+            GraphRunStatus, GraphSpec, GraphSpecStatus, GraphStatus,
+        };
+        let db = test_db();
+        db.insert_graph(&Graph {
+            archived: false,
+            paused_by_reconciliation: false,
+            allow_dirty_start: false,
+            infra_node_id: None,
+            id: "lp1".to_string(),
+            name: "Nightly review".to_string(),
+            description: None,
+            workdir: "/tmp".to_string(),
+            status: GraphStatus::Completed,
+            trigger: None,
+            created_at: chrono::Utc::now(),
+            started_at: None,
+            completed_at: None,
+            autorun_at: None,
+            auto_continue_at: None,
+            auto_continue_action: None,
+            active_run_queue_id: None,
+            hooks: std::collections::BTreeMap::new(),
+        })
+        .unwrap();
+        db.insert_graph_spec(&GraphSpec {
+            id: "s1".to_string(),
+            graph_id: Some("lp1".to_string()),
+            name: "Spec".to_string(),
+            description: None,
+            position: 0,
+            parallelizable: false,
+            status: GraphSpecStatus::Completed,
+            started_at: None,
+            completed_at: None,
+            spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
+            spec_committed_head: None,
+            workdir: None,
+            completed_via: None,
+            completed_via_reason: None,
+            completed_via_at: None,
+        })
+        .unwrap();
+        for (position, id) in ["n1", "n2"].iter().enumerate() {
+            db.insert_graph_node(&GraphNode {
+                id: id.to_string(),
+                spec_id: None,
+                graph_id: Some("lp1".to_string()),
+                name: id.to_string(),
+                kind: GraphNodeKind::Agent,
+                config: serde_json::json!({}),
+                position: position as i64,
+                created_at: chrono::Utc::now(),
+            })
+            .unwrap();
+        }
+        db.insert_graph_edge(&GraphEdge {
+            id: "e1".to_string(),
+            spec_id: None,
+            graph_id: Some("lp1".to_string()),
+            from_node: "n1".to_string(),
+            to_node: "n2".to_string(),
+            condition: GraphEdgeCondition::Pass,
+        })
+        .unwrap();
+        // One completed run on n2 for s1: the "most recent run" the seed
+        // must prefer over the entry node.
+        db.insert_graph_run(&GraphNodeRun {
+            id: uuid::Uuid::new_v4().to_string(),
+            graph_id: "lp1".to_string(),
+            spec_id: "s1".to_string(),
+            node_id: "n2".to_string(),
+            status: GraphRunStatus::Pass,
+            input: None,
+            output: None,
+            started_at: chrono::Utc::now(),
+            completed_at: None,
+            iteration: 0,
+            pid: None,
+            boot_id: None,
+            session_id: None,
+            executed_platform: None,
+            executed_model: None,
+        })
+        .unwrap();
+
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        let details = db
+            .get_graph_details("lp1")
+            .ok()
+            .flatten()
+            .expect("seeded graph resolves");
+        app.graph_live_state =
+            crate::tui::app::graph_live_state::assemble_graph_live_state(&db, &details);
+        app.graph_live_follow = true;
+        app.graph_live_selected_node = None;
+        app.graph_spec_strip_selected = None;
+
+        app.graph_live_enter();
+        assert!(!app.graph_live_follow, "Enter must switch to manual mode");
+        assert_eq!(
+            app.graph_live_selected_node.as_deref(),
+            Some("n2"),
+            "seed must be the most recent run's node, not the entry node"
+        );
     }
 }
 

@@ -1444,6 +1444,64 @@ mod preview_key_tests {
         app
     }
 
+    /// The Running-graph live snapshot the CT23/CT24 graph-view key tests
+    /// navigate: engine on `n1`, effective nodes `n1 -> n2` (pass). Since the
+    /// temp DB has no graph rows, tests that drive Enter/Esc must install it
+    /// themselves (a None live state makes Enter a no-op by design — CT24).
+    fn running_live_state() -> crate::tui::app::graph_live_state::GraphLiveState {
+        crate::tui::app::graph_live_state::GraphLiveState {
+            graph_id: "lp1".to_string(),
+            graph_name: "Nightly review".to_string(),
+            graph_status: crate::domain::graphs::GraphStatus::Running,
+            workdir: "/tmp".to_string(),
+            trigger_type: "manual".to_string(),
+            schedule_expr: None,
+            watch_path: None,
+            autorun_at: None,
+            spec_queue: Vec::new(),
+            done_count: 0,
+            total_count: 0,
+            current_spec_id: None,
+            effective_nodes: vec![
+                crate::domain::graphs::GraphNode {
+                    id: "n1".to_string(),
+                    spec_id: None,
+                    graph_id: Some("lp1".to_string()),
+                    name: "Implement".to_string(),
+                    kind: crate::domain::graphs::GraphNodeKind::Agent,
+                    config: serde_json::json!({}),
+                    position: 0,
+                    created_at: Utc::now(),
+                },
+                crate::domain::graphs::GraphNode {
+                    id: "n2".to_string(),
+                    spec_id: None,
+                    graph_id: Some("lp1".to_string()),
+                    name: "Review".to_string(),
+                    kind: crate::domain::graphs::GraphNodeKind::Check,
+                    config: serde_json::json!({}),
+                    position: 1,
+                    created_at: Utc::now(),
+                },
+            ],
+            effective_edges: vec![crate::domain::graphs::GraphEdge {
+                id: "e1".to_string(),
+                spec_id: None,
+                graph_id: Some("lp1".to_string()),
+                from_node: "n1".to_string(),
+                to_node: "n2".to_string(),
+                condition: crate::domain::graphs::GraphEdgeCondition::Pass,
+            }],
+            ensembles: Vec::new(),
+            router_taken_routes: std::collections::HashMap::new(),
+            current_node_id: Some("n1".to_string()),
+            current_node_status: None,
+            current_node_started_at: None,
+            current_node_iteration: None,
+            current_node_output_tail: None,
+        }
+    }
+
     #[test]
     fn preview_r_on_a_completed_graph_dispatches_run() {
         let mut app = app_on_graph(crate::domain::graphs::GraphStatus::Completed);
@@ -1736,6 +1794,7 @@ mod preview_key_tests {
     fn esc_leaves_manual_navigation_back_to_auto() {
         // CT23 FR3/FR5: Esc must leave manual navigation, returning to auto.
         let mut app = app_on_graph(crate::domain::graphs::GraphStatus::Running);
+        app.graph_live_state = Some(running_live_state());
         handle_preview_key(&mut app, KeyCode::Enter, KeyModifiers::NONE).unwrap();
         assert!(!app.graph_live_follow, "Enter must switch to manual mode");
 
@@ -1743,6 +1802,248 @@ mod preview_key_tests {
         assert!(
             app.graph_live_follow,
             "Esc must return the graph view to auto mode"
+        );
+    }
+
+    /// Seeds a Completed graph `lp1` with a bound Completed spec `s1` and two
+    /// graph-level nodes `n1 -> n2` (pass). No runs recorded. Used by the
+    /// CT24 tests so the refresh path (`refresh_graphs_selection`) can
+    /// reassemble a live state whose effective nodes still contain the graph.
+    fn seed_completed_graph_with_nodes(db: &Database) {
+        db.insert_graph(&crate::domain::graphs::Graph {
+            archived: false,
+            paused_by_reconciliation: false,
+            allow_dirty_start: false,
+            infra_node_id: None,
+            id: "lp1".to_string(),
+            name: "Nightly review".to_string(),
+            description: None,
+            workdir: "/tmp".to_string(),
+            status: crate::domain::graphs::GraphStatus::Completed,
+            trigger: None,
+            created_at: Utc::now(),
+            started_at: None,
+            completed_at: None,
+            autorun_at: None,
+            auto_continue_at: None,
+            auto_continue_action: None,
+            active_run_queue_id: None,
+            hooks: std::collections::BTreeMap::new(),
+        })
+        .unwrap();
+        db.insert_graph_spec(&crate::domain::graphs::GraphSpec {
+            id: "s1".to_string(),
+            graph_id: Some("lp1".to_string()),
+            name: "Spec".to_string(),
+            description: None,
+            position: 0,
+            parallelizable: false,
+            status: crate::domain::graphs::GraphSpecStatus::Completed,
+            started_at: None,
+            completed_at: None,
+            spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
+            spec_committed_head: None,
+            workdir: None,
+            completed_via: None,
+            completed_via_reason: None,
+            completed_via_at: None,
+        })
+        .unwrap();
+        for (position, id) in ["n1", "n2"].iter().enumerate() {
+            db.insert_graph_node(&crate::domain::graphs::GraphNode {
+                id: id.to_string(),
+                spec_id: None,
+                graph_id: Some("lp1".to_string()),
+                name: id.to_string(),
+                kind: crate::domain::graphs::GraphNodeKind::Agent,
+                config: serde_json::json!({}),
+                position: position as i64,
+                created_at: Utc::now(),
+            })
+            .unwrap();
+        }
+        db.insert_graph_edge(&crate::domain::graphs::GraphEdge {
+            id: "e1".to_string(),
+            spec_id: None,
+            graph_id: Some("lp1".to_string()),
+            from_node: "n1".to_string(),
+            to_node: "n2".to_string(),
+            condition: crate::domain::graphs::GraphEdgeCondition::Pass,
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn enter_on_completed_graph_seeds_manual_and_stays_manual() {
+        // CT24 FR1/FR2: a finished graph has no engine current node, so Enter
+        // must seed a manual selection (entry node) and the next refresh tick
+        // must keep manual mode as long as that node still exists — never
+        // flip back just because the graph is not running.
+        let db = test_db();
+        seed_completed_graph_with_nodes(&db);
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        app.focus = Focus::Preview;
+        app.sidebar_layer = SidebarLayer::Automation;
+        app.automation_kind = crate::tui::app::AutomationKind::Graph;
+        app.graphs = vec![graph_with_status(
+            crate::domain::graphs::GraphStatus::Completed,
+        )];
+        app.selected_graph_id = Some("lp1".to_string());
+        app.graph_live_state = Some(crate::tui::app::graph_live_state::GraphLiveState {
+            graph_id: "lp1".to_string(),
+            graph_name: "Nightly review".to_string(),
+            graph_status: crate::domain::graphs::GraphStatus::Completed,
+            workdir: "/tmp".to_string(),
+            trigger_type: "manual".to_string(),
+            schedule_expr: None,
+            watch_path: None,
+            autorun_at: None,
+            spec_queue: Vec::new(),
+            done_count: 0,
+            total_count: 0,
+            current_spec_id: None,
+            effective_nodes: vec![
+                crate::domain::graphs::GraphNode {
+                    id: "n1".to_string(),
+                    spec_id: None,
+                    graph_id: Some("lp1".to_string()),
+                    name: "Implement".to_string(),
+                    kind: crate::domain::graphs::GraphNodeKind::Agent,
+                    config: serde_json::json!({}),
+                    position: 0,
+                    created_at: Utc::now(),
+                },
+                crate::domain::graphs::GraphNode {
+                    id: "n2".to_string(),
+                    spec_id: None,
+                    graph_id: Some("lp1".to_string()),
+                    name: "Review".to_string(),
+                    kind: crate::domain::graphs::GraphNodeKind::Check,
+                    config: serde_json::json!({}),
+                    position: 1,
+                    created_at: Utc::now(),
+                },
+            ],
+            effective_edges: vec![crate::domain::graphs::GraphEdge {
+                id: "e1".to_string(),
+                spec_id: None,
+                graph_id: Some("lp1".to_string()),
+                from_node: "n1".to_string(),
+                to_node: "n2".to_string(),
+                condition: crate::domain::graphs::GraphEdgeCondition::Pass,
+            }],
+            ensembles: Vec::new(),
+            router_taken_routes: std::collections::HashMap::new(),
+            current_node_id: None,
+            current_node_status: None,
+            current_node_started_at: None,
+            current_node_iteration: None,
+            current_node_output_tail: None,
+        });
+        app.graph_live_follow = true;
+        app.graph_live_selected_node = None;
+
+        handle_preview_key(&mut app, KeyCode::Enter, KeyModifiers::NONE).unwrap();
+        assert!(!app.graph_live_follow, "Enter must switch to manual mode");
+        assert!(
+            app.graph_live_selected_node.is_some(),
+            "a seed must exist on a finished graph"
+        );
+
+        app.refresh_graphs_selection();
+        assert!(
+            !app.graph_live_follow,
+            "refresh must keep manual mode when the seed still exists"
+        );
+
+        let before = app.graph_live_selected_node.clone();
+        handle_preview_key(&mut app, KeyCode::Down, KeyModifiers::NONE).unwrap();
+        assert_ne!(
+            app.graph_live_selected_node, before,
+            "plain Down must move inside the graph"
+        );
+        assert_eq!(
+            app.selected_graph_id.as_deref(),
+            Some("lp1"),
+            "plain Down must not move the sidebar to the next graph"
+        );
+    }
+
+    #[test]
+    fn enter_on_a_paused_graph_seeds_the_entry_node() {
+        // CT24 FR1 (c): with no runs to consult, Enter must seed the graph's
+        // entry node (first effective node) — not stay in follow with a None
+        // selection.
+        let mut app = app_on_graph(crate::domain::graphs::GraphStatus::Paused);
+        app.graph_live_state = Some(crate::tui::app::graph_live_state::GraphLiveState {
+            graph_id: "lp1".to_string(),
+            graph_name: "Nightly review".to_string(),
+            graph_status: crate::domain::graphs::GraphStatus::Paused,
+            workdir: "/tmp".to_string(),
+            trigger_type: "manual".to_string(),
+            schedule_expr: None,
+            watch_path: None,
+            autorun_at: None,
+            spec_queue: Vec::new(),
+            done_count: 0,
+            total_count: 0,
+            current_spec_id: None,
+            effective_nodes: vec![
+                crate::domain::graphs::GraphNode {
+                    id: "n1".to_string(),
+                    spec_id: None,
+                    graph_id: Some("lp1".to_string()),
+                    name: "Implement".to_string(),
+                    kind: crate::domain::graphs::GraphNodeKind::Agent,
+                    config: serde_json::json!({}),
+                    position: 0,
+                    created_at: Utc::now(),
+                },
+                crate::domain::graphs::GraphNode {
+                    id: "n2".to_string(),
+                    spec_id: None,
+                    graph_id: Some("lp1".to_string()),
+                    name: "Review".to_string(),
+                    kind: crate::domain::graphs::GraphNodeKind::Check,
+                    config: serde_json::json!({}),
+                    position: 1,
+                    created_at: Utc::now(),
+                },
+            ],
+            effective_edges: vec![crate::domain::graphs::GraphEdge {
+                id: "e1".to_string(),
+                spec_id: None,
+                graph_id: Some("lp1".to_string()),
+                from_node: "n1".to_string(),
+                to_node: "n2".to_string(),
+                condition: crate::domain::graphs::GraphEdgeCondition::Pass,
+            }],
+            ensembles: Vec::new(),
+            router_taken_routes: std::collections::HashMap::new(),
+            current_node_id: None,
+            current_node_status: None,
+            current_node_started_at: None,
+            current_node_iteration: None,
+            current_node_output_tail: None,
+        });
+        app.graph_live_follow = true;
+        app.graph_live_selected_node = None;
+
+        handle_preview_key(&mut app, KeyCode::Enter, KeyModifiers::NONE).unwrap();
+        assert!(!app.graph_live_follow, "Enter must switch to manual mode");
+        assert_eq!(
+            app.graph_live_selected_node.as_deref(),
+            Some("n1"),
+            "the entry node must be selected when there is no run to seed from"
         );
     }
 
@@ -1786,6 +2087,7 @@ mod preview_key_tests {
         // Shift+Down must still move to the next graph — the previous bug
         // captured it as internal sibling navigation instead.
         let mut app = app_on_two_graphs();
+        app.graph_live_state = Some(running_live_state());
 
         handle_preview_key(&mut app, KeyCode::Enter, KeyModifiers::NONE).unwrap();
         assert!(!app.graph_live_follow, "Enter must switch to manual mode");

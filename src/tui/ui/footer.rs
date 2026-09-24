@@ -46,7 +46,20 @@ pub(super) fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Them
                 let on_graph = app.sidebar_layer == SidebarLayer::Automation
                     && app.automation_kind == AutomationKind::Graph;
                 let is_bg = matches!(app.selected_agent(), Some(AgentEntry::Agent(_)));
-                let mut h = vec![("↑↓", "nav"), ("Enter", "focus"), ("Shift+←→", "tab")];
+                // CT24: on the graph face, Enter/Esc are how manual mode is
+                // reached/left, so advertise them; the spec strip keeps plain
+                // `Enter focus` (it is driven by Tab/←→, not Enter/Esc).
+                let mut h: Vec<(&str, &str)> = if on_graph
+                    && app.graph_live_focus == crate::tui::app::types::GraphLiveFocus::Graph
+                {
+                    if app.graph_live_follow {
+                        vec![("↑↓", "nav"), ("Enter", "manual"), ("Shift+←→", "tab")]
+                    } else {
+                        vec![("↑↓", "nav"), ("Esc", "auto"), ("Shift+←→", "tab")]
+                    }
+                } else {
+                    vec![("↑↓", "nav"), ("Enter", "focus"), ("Shift+←→", "tab")]
+                };
                 if on_graph && app.graph_live_focus == crate::tui::app::types::GraphLiveFocus::Graph
                 {
                     h.push(("←→", "graph ↑↓"));
@@ -984,5 +997,34 @@ mod tests {
         });
         assert!(!text.contains("autorun"), "{text}");
         assert!(!text.contains("reset"), "{text}");
+    }
+
+    #[test]
+    fn footer_on_graph_view_shows_enter_manual_in_auto_and_esc_auto_in_manual() {
+        // CT24 FR3: on the graph view the footer must advertise manual mode's
+        // real entry point — "Enter manual" in auto-follow, "Esc auto" in
+        // manual — never the old "Enter focus".
+        let mut app = app_on_graph(crate::domain::graphs::GraphStatus::Completed);
+        let theme = Theme::classic();
+
+        app.graph_live_follow = true;
+        app.graph_live_selected_node = None;
+        let text = render_footer_to_text(200, 1, |frame, area| {
+            draw_footer(frame, area, &app, &theme);
+        });
+        // Match the full key+label pair: loose `contains("auto")` or
+        // `contains("Esc")` would false-positive on the always-present
+        // "a autorun" / "Esc home" hints (same trap as the "r run" note in
+        // `footer_on_a_running_graph_offers_only_pause`).
+        assert!(text.contains("Enter manual"), "{text}");
+        assert!(!text.contains("focus"), "{text}");
+
+        app.graph_live_follow = false;
+        app.graph_live_selected_node = Some("n1".to_string());
+        let text = render_footer_to_text(200, 1, |frame, area| {
+            draw_footer(frame, area, &app, &theme);
+        });
+        assert!(text.contains("Esc auto"), "{text}");
+        assert!(!text.contains("Enter focus"), "{text}");
     }
 }
