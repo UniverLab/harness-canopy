@@ -1,6 +1,6 @@
 //! Daily database health routine: full `integrity_check` and
 //! `foreign_key_check`, plus a verified single-backup replacement via
-//! `VACUUM INTO`, run inside the daemon only while it's idle (no loop
+//! `VACUUM INTO`, run inside the daemon only while it's idle (no graph
 //! running, no TUI attached).
 //!
 //! Reuses the same `tokio::spawn` + interval-poll pattern the internal cron
@@ -15,10 +15,10 @@
 //!   function over a `Database` and two paths. No idle/cadence decision, no
 //!   tokio — directly callable from tests and from the on-demand trigger
 //!   (`canopy daemon health-check`, see `daemon::cli`) without spinning up
-//!   the daemon's background loop.
+//!   the daemon's background graph.
 //! - [`HealthRoutine`] is the daemon-side wrapper: decides *when* to call
 //!   it (idle + due), runs it off the async runtime via `spawn_blocking` (a
-//!   long `integrity_check` on a large database must not stall loop
+//!   long `integrity_check` on a large database must not stall graph
 //!   execution or MCP requests), and persists the result.
 
 use std::path::{Path, PathBuf};
@@ -76,20 +76,56 @@ impl HealthRoutine {
         let routine = Arc::clone(&self);
         tokio::spawn(async move {
             tracing::info!("Database health routine started");
-            routine.run_loop(cancel_run).await;
+            routine.run_graph(cancel_run).await;
             tracing::info!("Database health routine stopped");
         });
         cancel
     }
 
-    async fn run_loop(&self, cancel: CancellationToken) {
+    async fn run_graph(&self, cancel: CancellationToken) {
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => break,
                 _ = tokio::time::sleep(POLL_INTERVAL) => {
                     self.maybe_run().await;
+                    self.expire_subagent_runs().await;
+                    self.prune_operational_sessions().await;
                 }
             }
+        }
+    }
+
+    async fn prune_operational_sessions(&self) {
+        let db = Arc::clone(&self.db);
+        match tokio::task::spawn_blocking(move || db.prune_operational_sessions(30)).await {
+            Ok(Ok(count)) if count > 0 => {
+                tracing::info!(
+                    "operational sessions cleanup: pruned {count} session(s) older than 30 days"
+                );
+            }
+            Ok(Err(e)) => {
+                tracing::warn!("operational sessions cleanup: {e}");
+            }
+            Err(e) => {
+                tracing::warn!("operational sessions cleanup: task panicked: {e}");
+            }
+            _ => {}
+        }
+    }
+
+    async fn expire_subagent_runs(&self) {
+        let db = Arc::clone(&self.db);
+        match tokio::task::spawn_blocking(move || db.expire_subagent_runs()).await {
+            Ok(Ok(count)) if count > 0 => {
+                tracing::info!("subagent TTL cleanup: expired {count} run(s)");
+            }
+            Ok(Err(e)) => {
+                tracing::warn!("subagent TTL cleanup: {e}");
+            }
+            Err(e) => {
+                tracing::warn!("subagent TTL cleanup: task panicked: {e}");
+            }
+            _ => {}
         }
     }
 
@@ -348,18 +384,20 @@ fn available_space(path: &Path) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::loops::{Loop, LoopStatus};
+    use crate::domain::graphs::{Graph, GraphStatus};
     use tempfile::tempdir;
 
-    fn make_running_loop(id: &str) -> Loop {
-        Loop {
+    fn make_running_graph(id: &str) -> Graph {
+        Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
+            infra_node_id: None,
             id: id.to_string(),
-            name: format!("loop-{id}"),
+            name: format!("graph-{id}"),
             description: None,
             workdir: "/tmp/proj".to_string(),
-            status: LoopStatus::Running,
+            status: GraphStatus::Running,
             trigger: None,
             created_at: Utc::now(),
             started_at: None,
@@ -368,7 +406,7 @@ mod tests {
             auto_continue_at: None,
             auto_continue_action: None,
             active_run_queue_id: None,
-            on_completed: None,
+            hooks: std::collections::BTreeMap::new(),
         }
     }
 
@@ -414,8 +452,11 @@ mod tests {
         // tests: a valid header first, then bit-flipped page data, so this
         // is in-page corruption rather than a "not a database" error.
         let mut bytes = std::fs::read(&db_path).unwrap();
-        let start = bytes.len() / 2;
-        let end = start + 200.min(bytes.len() - start);
+        // CM5: a fixed offset in page 3 rather than bytes.len()/2 — the
+        // subagent_runs table shifted the file so the midpoint no longer
+        // lands in a page quick_check validates.
+        let start = 8192;
+        let end = (start + 100).min(bytes.len());
         for b in &mut bytes[start..end] {
             *b ^= 0xFF;
         }
@@ -454,8 +495,11 @@ mod tests {
         let temp_path = temp_backup_path(&backup_path);
         db.backup_into(&temp_path).unwrap();
         let mut bytes = std::fs::read(&temp_path).unwrap();
-        let start = bytes.len() / 2;
-        let end = start + 200.min(bytes.len() - start);
+        // CM5: a fixed offset in page 3 rather than bytes.len()/2 — the
+        // subagent_runs table shifted the file so the midpoint no longer
+        // lands in a page quick_check validates.
+        let start = 8192;
+        let end = (start + 100).min(bytes.len());
         for b in &mut bytes[start..end] {
             *b ^= 0xFF;
         }
@@ -530,7 +574,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let db_path = database_path(dir.path());
         let db = Arc::new(Database::new(&db_path).unwrap());
-        db.insert_loop(&make_running_loop("loop-1")).unwrap();
+        db.insert_graph(&make_running_graph("graph-1")).unwrap();
 
         let routine = HealthRoutine::new(Arc::clone(&db), dir.path().to_path_buf());
         routine.maybe_run().await;

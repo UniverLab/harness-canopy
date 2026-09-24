@@ -15,7 +15,7 @@ pub enum SeedOption {
     None,
     /// Bind to an existing seed identity.
     Seed { id: String, name: String },
-    /// Create a new seed via the Nursery loop.
+    /// Create a new seed via the Nursery graph.
     PlantNewSeed,
 }
 
@@ -106,6 +106,8 @@ pub struct NewAgentDialog {
     pub resume_sessions_empty: bool,
     /// Whether to launch the agent in yolo (autonomous) mode.
     pub yolo_mode: bool,
+    /// Whether to launch in a sandbox (git worktree with instruction file).
+    pub sandbox_mode: bool,
     /// Index into `seed_options` for the selected seed identity.
     pub seed_index: usize,
     /// Available seed identity options.
@@ -177,6 +179,7 @@ impl NewAgentDialog {
             selected_resume_session: None,
             resume_sessions_empty: false,
             yolo_mode: false,
+            sandbox_mode: false,
             seed_index: 0,
             seed_options,
         };
@@ -260,6 +263,29 @@ impl NewAgentDialog {
 
     pub fn selected_cli(&self) -> Cli {
         self.available_clis[self.cli_index].clone()
+    }
+
+    /// Human label for the harness at `idx`: the product display string
+    /// with the slug in parentheses when it differs, so the user still
+    /// knows what gets stored. Storage and matching always use the slug
+    /// from [`selected_cli`](Self::selected_cli).
+    pub fn cli_display_label(&self, idx: usize) -> String {
+        let slug = self
+            .available_clis
+            .get(idx)
+            .map(|c| c.as_str())
+            .unwrap_or("");
+        let display = self
+            .cli_configs
+            .get(idx)
+            .and_then(|c| c.as_ref())
+            .map(|c| c.display_name())
+            .unwrap_or_else(|| slug.to_string());
+        if display == slug {
+            display
+        } else {
+            format!("{display} ({slug})")
+        }
     }
 
     pub fn selected_args(&self) -> Option<String> {
@@ -491,7 +517,11 @@ impl NewAgentDialog {
         self.available_clis
             .iter()
             .enumerate()
-            .filter(|(_, cli)| query.is_empty() || cli.as_str().to_lowercase().contains(&query))
+            .filter(|(idx, cli)| {
+                query.is_empty()
+                    || cli.as_str().to_lowercase().contains(&query)
+                    || self.cli_display_label(*idx).to_lowercase().contains(&query)
+            })
             .map(|(idx, _)| idx)
             .collect()
     }
@@ -509,7 +539,8 @@ impl NewAgentDialog {
         if filtered.is_empty() {
             return;
         }
-        self.cli_picker_idx = (self.cli_picker_idx + 1) % filtered.len();
+        self.cli_picker_idx =
+            crate::tui::selection::move_index(self.cli_picker_idx, filtered.len(), true);
         self.set_cli_index(filtered[self.cli_picker_idx]);
     }
 
@@ -518,10 +549,8 @@ impl NewAgentDialog {
         if filtered.is_empty() {
             return;
         }
-        self.cli_picker_idx = self
-            .cli_picker_idx
-            .checked_sub(1)
-            .unwrap_or(filtered.len() - 1);
+        self.cli_picker_idx =
+            crate::tui::selection::move_index(self.cli_picker_idx, filtered.len(), false);
         self.set_cli_index(filtered[self.cli_picker_idx]);
     }
 
@@ -560,9 +589,9 @@ impl NewAgentDialog {
             && self.background_trigger == BackgroundTrigger::Watch;
 
         let all: Vec<_> = entries.filter_map(|e| e.ok()).collect();
-        let mut dirs = collect_dir_names(&all, "📁 ");
+        let mut dirs = collect_dir_names(&all);
         let mut files = if include_files {
-            collect_file_names(&all, "  ")
+            collect_file_names(&all)
         } else {
             Vec::new()
         };
@@ -624,7 +653,7 @@ impl NewAgentDialog {
         self.refresh_dir_entries();
         // Position cursor on the directory we came from
         if let Some(name) = leaving_name {
-            let target = format!("📁 {name}");
+            let target = format!("{name}/");
             if let Some(idx) = self.dir_entries.iter().position(|e| e == &target) {
                 self.dir_selected = idx;
             }
@@ -642,7 +671,7 @@ impl NewAgentDialog {
         }
 
         let selected = filtered[self.dir_selected].clone();
-        let name = selected.trim_start_matches("📁 ").trim_start_matches("  ");
+        let name = selected.strip_suffix('/').unwrap_or(selected.as_str());
         let full_path = format!("{}/{}", self.current_path.trim_end_matches('/'), name);
         self.working_dir = full_path;
     }
@@ -655,7 +684,7 @@ impl NewAgentDialog {
         }
 
         let selected = filtered[self.dir_selected].clone();
-        let name = selected.trim_start_matches("📁 ").trim_start_matches("  ");
+        let name = selected.strip_suffix('/').unwrap_or(selected.as_str());
         let full_path = format!("{}/{}", self.current_path.trim_end_matches('/'), name);
         let is_dir = std::fs::metadata(&full_path)
             .map(|m| m.is_dir())
@@ -760,7 +789,7 @@ pub fn detect_available_shells() -> Vec<String> {
     found
 }
 
-fn collect_dir_names(entries: &[std::fs::DirEntry], prefix: &str) -> Vec<String> {
+fn collect_dir_names(entries: &[std::fs::DirEntry]) -> Vec<String> {
     entries
         .iter()
         .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
@@ -769,13 +798,13 @@ fn collect_dir_names(entries: &[std::fs::DirEntry], prefix: &str) -> Vec<String>
             if name.starts_with('.') {
                 None
             } else {
-                Some(format!("{prefix}{name}"))
+                Some(format!("{name}/"))
             }
         })
         .collect()
 }
 
-fn collect_file_names(entries: &[std::fs::DirEntry], prefix: &str) -> Vec<String> {
+fn collect_file_names(entries: &[std::fs::DirEntry]) -> Vec<String> {
     entries
         .iter()
         .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
@@ -784,7 +813,7 @@ fn collect_file_names(entries: &[std::fs::DirEntry], prefix: &str) -> Vec<String
             if name.starts_with('.') {
                 None
             } else {
-                Some(format!("{prefix}{name}"))
+                Some(name)
             }
         })
         .collect()
@@ -1005,6 +1034,7 @@ mod tests {
             session_list_format_args: None,
             session_id_pattern: None,
             models_list_cmd: None,
+            identity_check: None,
             accent_color: None,
             yolo_flag: None,
             trust_flag: None,
@@ -1013,6 +1043,14 @@ mod tests {
             paste_submit_delay_ms: None,
             paste_submit_key: None,
             paste_submit_presses: 1,
+            invocation_template: None,
+            effort_declaration: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
+
+            provider: None,
+            tool_name: None,
         }
     }
 
@@ -1097,6 +1135,42 @@ mod tests {
         assert_eq!(dialog.selected_cli().as_str(), "claude");
     }
 
+    #[test]
+    fn new_agent_selection_stores_slug_not_display() {
+        fn config_for(
+            slug: &str,
+            provider: Option<&str>,
+            tool: Option<&str>,
+        ) -> crate::domain::cli_config::CliConfig {
+            crate::domain::cli_config::CliConfig {
+                name: slug.into(),
+                provider: provider.map(str::to_string),
+                tool_name: tool.map(str::to_string),
+                ..Default::default()
+            }
+        }
+        let mut dialog = NewAgentDialog::new(None);
+        dialog.available_clis = vec![Cli::new("claude"), Cli::new("mistral")];
+        dialog.cli_configs = vec![
+            Some(config_for("claude", Some("Anthropic"), Some("Claude Code"))),
+            Some(config_for("mistral", Some("Mistral AI"), Some("Vibe"))),
+        ];
+        assert_eq!(
+            dialog.cli_display_label(0),
+            "Anthropic · Claude Code (claude)"
+        );
+        assert_eq!(dialog.cli_display_label(1), "Mistral AI · Vibe (mistral)");
+        dialog.cli_index = 0;
+        assert_eq!(dialog.selected_cli().as_str(), "claude");
+        dialog.cli_index = 1;
+        assert_eq!(dialog.selected_cli().as_str(), "mistral");
+        // Filtering by product name finds the slug, and vice versa.
+        dialog.cli_picker_filter = "vibe".to_string();
+        assert_eq!(dialog.filtered_cli_indices(), vec![1]);
+        dialog.cli_picker_filter = "mist".to_string();
+        assert_eq!(dialog.filtered_cli_indices(), vec![1]);
+    }
+
     // ── selected_args ────────────────────────────────────────────
 
     #[test]
@@ -1127,6 +1201,7 @@ mod tests {
             session_list_format_args: None,
             session_id_pattern: None,
             models_list_cmd: None,
+            identity_check: None,
             accent_color: None,
             yolo_flag: None,
             trust_flag: None,
@@ -1135,6 +1210,14 @@ mod tests {
             paste_submit_delay_ms: None,
             paste_submit_key: None,
             paste_submit_presses: 1,
+            invocation_template: None,
+            effort_declaration: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
+
+            provider: None,
+            tool_name: None,
         })];
         dialog.cli_index = 0;
         dialog.task_mode = NewTaskMode::Interactive;
@@ -1172,6 +1255,7 @@ mod tests {
             session_list_format_args: None,
             session_id_pattern: None,
             models_list_cmd: None,
+            identity_check: None,
             accent_color: None,
             yolo_flag: None,
             trust_flag: None,
@@ -1180,6 +1264,14 @@ mod tests {
             paste_submit_delay_ms: None,
             paste_submit_key: None,
             paste_submit_presses: 1,
+            invocation_template: None,
+            effort_declaration: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
+
+            provider: None,
+            tool_name: None,
         })];
         dialog.cli_index = 0;
         assert_eq!(
@@ -1218,6 +1310,7 @@ mod tests {
             session_list_format_args: None,
             session_id_pattern: None,
             models_list_cmd: None,
+            identity_check: None,
             accent_color: None,
             yolo_flag: Some("--yolo".to_string()),
             trust_flag: None,
@@ -1226,6 +1319,14 @@ mod tests {
             paste_submit_delay_ms: None,
             paste_submit_key: None,
             paste_submit_presses: 1,
+            invocation_template: None,
+            effort_declaration: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
+
+            provider: None,
+            tool_name: None,
         })];
         dialog.cli_index = 0;
         assert_eq!(dialog.selected_yolo_flag().as_deref(), Some("--yolo"));
@@ -1283,6 +1384,7 @@ mod tests {
             session_list_format_args: None,
             session_id_pattern: None,
             models_list_cmd: None,
+            identity_check: None,
             accent_color: None,
             yolo_flag: None,
             trust_flag: None,
@@ -1291,6 +1393,14 @@ mod tests {
             paste_submit_delay_ms: None,
             paste_submit_key: None,
             paste_submit_presses: 1,
+            invocation_template: None,
+            effort_declaration: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
+
+            provider: None,
+            tool_name: None,
         })];
         dialog.cli_index = 0;
         assert!(!dialog.resume_unconfigured());
@@ -1489,6 +1599,7 @@ mod tests {
             session_list_format_args: None,
             session_id_pattern: None,
             models_list_cmd: None,
+            identity_check: None,
             accent_color: None,
             yolo_flag: None,
             trust_flag: None,
@@ -1497,6 +1608,14 @@ mod tests {
             paste_submit_delay_ms: None,
             paste_submit_key: None,
             paste_submit_presses: 1,
+            invocation_template: None,
+            effort_declaration: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
+
+            provider: None,
+            tool_name: None,
         };
         let result = dialog.build_resume_args(&config, Some("--tui".to_string()));
         assert_eq!(result.as_deref(), Some("--tui"));
@@ -1523,6 +1642,7 @@ mod tests {
             session_list_format_args: None,
             session_id_pattern: None,
             models_list_cmd: None,
+            identity_check: None,
             accent_color: None,
             yolo_flag: None,
             trust_flag: None,
@@ -1531,6 +1651,14 @@ mod tests {
             paste_submit_delay_ms: None,
             paste_submit_key: None,
             paste_submit_presses: 1,
+            invocation_template: None,
+            effort_declaration: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
+
+            provider: None,
+            tool_name: None,
         };
         let result = dialog.build_resume_args(&config, Some("--tui".to_string()));
         assert_eq!(result.as_deref(), Some("--tui --resume"));
@@ -1557,6 +1685,7 @@ mod tests {
             session_list_format_args: None,
             session_id_pattern: None,
             models_list_cmd: None,
+            identity_check: None,
             accent_color: None,
             yolo_flag: None,
             trust_flag: None,
@@ -1565,6 +1694,14 @@ mod tests {
             paste_submit_delay_ms: None,
             paste_submit_key: None,
             paste_submit_presses: 1,
+            invocation_template: None,
+            effort_declaration: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
+
+            provider: None,
+            tool_name: None,
         };
         let result = dialog.build_resume_args(&config, Some("--tui".to_string()));
         assert_eq!(result.as_deref(), Some("--tui"));
@@ -1591,6 +1728,7 @@ mod tests {
             session_list_format_args: None,
             session_id_pattern: None,
             models_list_cmd: None,
+            identity_check: None,
             accent_color: None,
             yolo_flag: None,
             trust_flag: None,
@@ -1599,6 +1737,14 @@ mod tests {
             paste_submit_delay_ms: None,
             paste_submit_key: None,
             paste_submit_presses: 1,
+            invocation_template: None,
+            effort_declaration: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
+
+            provider: None,
+            tool_name: None,
         };
         let result = dialog.build_resume_args(&config, None);
         assert_eq!(result.as_deref(), Some("--resume"));
@@ -1625,6 +1771,7 @@ mod tests {
             session_list_format_args: None,
             session_id_pattern: None,
             models_list_cmd: None,
+            identity_check: None,
             accent_color: None,
             yolo_flag: None,
             trust_flag: None,
@@ -1633,6 +1780,14 @@ mod tests {
             paste_submit_delay_ms: None,
             paste_submit_key: None,
             paste_submit_presses: 1,
+            invocation_template: None,
+            effort_declaration: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
+
+            provider: None,
+            tool_name: None,
         };
         let result = dialog.build_resume_args(&config, None);
         assert!(result.is_none());
@@ -1660,6 +1815,7 @@ mod tests {
             session_list_format_args: None,
             session_id_pattern: None,
             models_list_cmd: None,
+            identity_check: None,
             accent_color: None,
             yolo_flag: None,
             trust_flag: None,
@@ -1668,6 +1824,14 @@ mod tests {
             paste_submit_delay_ms: None,
             paste_submit_key: None,
             paste_submit_presses: 1,
+            invocation_template: None,
+            effort_declaration: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
+
+            provider: None,
+            tool_name: None,
         };
         let result = dialog.build_resume_args(&config, Some("--tui".to_string()));
         assert_eq!(result.as_deref(), Some("--tui --conversation ses_abc123"));
@@ -1728,6 +1892,7 @@ mod tests {
             session_list_format_args: None,
             session_id_pattern: None,
             models_list_cmd: None,
+            identity_check: None,
             accent_color: Some([255, 0, 0]),
             yolo_flag: None,
             trust_flag: None,
@@ -1736,6 +1901,14 @@ mod tests {
             paste_submit_delay_ms: None,
             paste_submit_key: None,
             paste_submit_presses: 1,
+            invocation_template: None,
+            effort_declaration: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
+
+            provider: None,
+            tool_name: None,
         })];
         dialog.cli_index = 0;
         let theme = Theme::classic();
@@ -1766,6 +1939,7 @@ mod tests {
             session_list_format_args: None,
             session_id_pattern: None,
             models_list_cmd: None,
+            identity_check: None,
             accent_color: None,
             yolo_flag: None,
             trust_flag: None,
@@ -1774,6 +1948,14 @@ mod tests {
             paste_submit_delay_ms: None,
             paste_submit_key: None,
             paste_submit_presses: 1,
+            invocation_template: None,
+            effort_declaration: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
+
+            provider: None,
+            tool_name: None,
         };
         // With session but no resume_cmd, falls back to generic resume
         let result = dialog.build_resume_args(&config, Some("--tui".to_string()));
@@ -1831,6 +2013,7 @@ mod tests {
             session_list_format_args: None,
             session_id_pattern: None,
             models_list_cmd: None,
+            identity_check: None,
             accent_color: None,
             yolo_flag: Some("--yolo".to_string()),
             trust_flag: None,
@@ -1839,6 +2022,14 @@ mod tests {
             paste_submit_delay_ms: None,
             paste_submit_key: None,
             paste_submit_presses: 1,
+            invocation_template: None,
+            effort_declaration: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
+
+            provider: None,
+            tool_name: None,
         })];
         dialog.cli_index = 0;
         dialog.apply_resume_choice(resumable_session("opencode", "/proj", Some("--tui --yolo")));
@@ -1873,6 +2064,7 @@ mod tests {
             session_list_format_args: None,
             session_id_pattern: None,
             models_list_cmd: None,
+            identity_check: None,
             accent_color: None,
             yolo_flag: None,
             trust_flag: None,
@@ -1881,6 +2073,14 @@ mod tests {
             paste_submit_delay_ms: None,
             paste_submit_key: None,
             paste_submit_presses: 1,
+            invocation_template: None,
+            effort_declaration: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
+
+            provider: None,
+            tool_name: None,
         })];
         dialog.cli_index = 0;
         // The recorded session's own args already carry the resume flag.
@@ -1957,7 +2157,7 @@ mod tests {
     fn update_dir_preview_valid_selection() {
         let mut dialog = NewAgentDialog::new(None);
         dialog.current_path = "/tmp".to_string();
-        dialog.dir_entries = vec!["📁 sub".to_string(), "  file.txt".to_string()];
+        dialog.dir_entries = vec!["sub/".to_string(), "file.txt".to_string()];
         dialog.dir_selected = 0;
         dialog.update_dir_preview();
         assert_eq!(dialog.working_dir, "/tmp/sub");

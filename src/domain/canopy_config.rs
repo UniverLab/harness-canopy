@@ -18,6 +18,13 @@ pub struct CanopyConfig {
     pub mcp_filesystem_root: String,
 
     /// Available CLIs detected during setup.
+    ///
+    /// CB44: a platform's `binary` may be an absolute path instead of the
+    /// registry's bare name — e.g. `binary = "/opt/blackbox/bin/bb"` when
+    /// the real CLI lives under another name or outside `PATH`. The edit
+    /// lives in this local file only (never in `canopy-registry`) and is
+    /// preserved across registry refreshes by `merge_cli_fields`; the
+    /// resolver uses an absolute path as-is with no `PATH` search.
     #[serde(default)]
     pub clis: Vec<CliConfig>,
 
@@ -56,17 +63,17 @@ pub struct CanopyConfig {
     pub embeddings_idle_unload_secs: u64,
 
     /// Global cap (F1) on how many ensemble members run concurrently across
-    /// every loop run, shared by the whole daemon so one ensemble can't
+    /// every graph run, shared by the whole daemon so one ensemble can't
     /// starve another's. An 8-member ensemble queues past this rather than
     /// fork-bombing the host.
     #[serde(default = "default_ensemble_concurrency_cap")]
     pub ensemble_concurrency_cap: usize,
 
-    /// Cross-run attempt budget (C19): how many separate loop executions a
-    /// single spec may fail with a genuine verdict before the loop is marked
+    /// Cross-run attempt budget (C19): how many separate graph executions a
+    /// single spec may fail with a genuine verdict before the graph is marked
     /// blocked instead of being left to burn another quota window on a
-    /// relaunch. Persisted per spec (`loop_specs.cross_run_attempts`) so it
-    /// survives `loop_reset`, a relaunch, and a daemon restart — unlike the
+    /// relaunch. Persisted per spec (`graph_specs.cross_run_attempts`) so it
+    /// survives `graph_reset`, a relaunch, and a daemon restart — unlike the
     /// per-node in-run iteration budget, which resets with every execution.
     /// Lower than that per-node budget by design: these are whole attempts,
     /// not node cycles.
@@ -118,6 +125,20 @@ pub struct CanopyConfig {
     /// different ceilings.
     #[serde(default = "default_rag_vector_cache_entries")]
     pub rag_vector_cache_entries: u32,
+
+    /// Defaults to enabled for both a fresh install (no config file yet)
+    /// and an installation whose config.toml predates this field —
+    /// announcements are on by default and not something setup asks
+    /// about (CB60).
+    #[serde(default = "default_announcements_enabled")]
+    pub announcements_enabled: bool,
+
+    /// Pinned right-panel face (`"activity"`, `"knowledge"` or `"graph"`).
+    /// `None` means automatic mode (the default; a fresh install is
+    /// unpinned). Stored as a plain string — rather than the TUI's
+    /// `PanelFace` enum — so this domain crate never depends on the TUI.
+    #[serde(default)]
+    pub pinned_panel_face: Option<String>,
 }
 
 /// Highest per-file indexing cap a user may configure, in MB. Text/PDF
@@ -137,6 +158,10 @@ fn default_rag_max_file_mb() -> u32 {
 /// module wrapping it — `crate::rag::vector_store` doesn't resolve there.
 fn default_rag_vector_cache_entries() -> u32 {
     64
+}
+
+fn default_announcements_enabled() -> bool {
+    true
 }
 
 /// Validates a configured (or user-entered) per-file indexing size cap.
@@ -410,6 +435,8 @@ impl Default for CanopyConfig {
             theme: default_theme(),
             rag_max_file_mb: default_rag_max_file_mb(),
             rag_vector_cache_entries: default_rag_vector_cache_entries(),
+            announcements_enabled: default_announcements_enabled(),
+            pinned_panel_face: None,
         }
     }
 }
@@ -792,6 +819,90 @@ mod tests {
 
         assert!(config.get_cli("opencode").is_some());
         assert!(config.get_cli("nonexistent").is_none());
+    }
+
+    #[test]
+    fn announcements_enabled_defaults_to_true() {
+        let config = CanopyConfig::default();
+        assert!(config.announcements_enabled);
+    }
+
+    #[test]
+    fn announcements_enabled_round_trips_via_config_toml() {
+        let dir = TempDir::new().unwrap();
+        let canopy_dir = dir.path().join(".canopy");
+        std::fs::create_dir_all(&canopy_dir).unwrap();
+
+        let config = CanopyConfig {
+            announcements_enabled: true,
+            ..CanopyConfig::default()
+        };
+        config.save(&canopy_dir).unwrap();
+
+        let loaded = CanopyConfig::load(&canopy_dir);
+        assert!(loaded.announcements_enabled);
+    }
+
+    #[test]
+    fn announcements_enabled_false_round_trips_via_config_toml() {
+        let dir = TempDir::new().unwrap();
+        let canopy_dir = dir.path().join(".canopy");
+        std::fs::create_dir_all(&canopy_dir).unwrap();
+
+        let config = CanopyConfig {
+            announcements_enabled: false,
+            ..CanopyConfig::default()
+        };
+        config.save(&canopy_dir).unwrap();
+
+        let loaded = CanopyConfig::load(&canopy_dir);
+        assert!(!loaded.announcements_enabled);
+    }
+
+    #[test]
+    fn config_without_announcements_field_defaults_to_true() {
+        let dir = TempDir::new().unwrap();
+        let canopy_dir = dir.path().join(".canopy");
+        std::fs::create_dir_all(&canopy_dir).unwrap();
+        let toml = r#"embeddings_model = "intfloat/multilingual-e5-base""#;
+        std::fs::write(canopy_dir.join("config.toml"), toml).unwrap();
+
+        let loaded = CanopyConfig::load(&canopy_dir);
+        assert!(loaded.announcements_enabled);
+    }
+
+    #[test]
+    fn pinned_panel_face_defaults_to_none_for_automatic_mode() {
+        let config = CanopyConfig::default();
+        assert_eq!(config.pinned_panel_face, None);
+    }
+
+    #[test]
+    fn pinned_panel_face_round_trips_via_config_toml() {
+        let dir = TempDir::new().unwrap();
+        let canopy_dir = dir.path().join(".canopy");
+        std::fs::create_dir_all(&canopy_dir).unwrap();
+
+        let config = CanopyConfig {
+            pinned_panel_face: Some("knowledge".to_string()),
+            ..CanopyConfig::default()
+        };
+        config.save(&canopy_dir).unwrap();
+
+        let loaded = CanopyConfig::load(&canopy_dir);
+        assert_eq!(loaded.pinned_panel_face.as_deref(), Some("knowledge"));
+    }
+
+    #[test]
+    fn config_without_pinned_panel_face_field_stays_unpinned() {
+        let dir = TempDir::new().unwrap();
+        let canopy_dir = dir.path().join(".canopy");
+        std::fs::create_dir_all(&canopy_dir).unwrap();
+        let toml = r#"embeddings_model = "intfloat/multilingual-e5-base""#;
+        std::fs::write(canopy_dir.join("config.toml"), toml).unwrap();
+
+        let loaded = CanopyConfig::load(&canopy_dir);
+        assert_eq!(loaded.pinned_panel_face, None);
     }
 
     #[test]

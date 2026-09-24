@@ -3,16 +3,19 @@
 //! Uses the `rmcp` SDK's `#[tool_router]` and `#[tool_handler]` macros
 //! with `Parameters<T>` for proper MCP protocol compliance.
 
+pub(crate) mod agent_cli;
+pub(crate) mod announcements;
 pub(crate) mod bridge;
 pub(crate) mod clean_cli;
 pub(crate) mod cli;
 pub(crate) mod cli_daemon;
+pub(crate) mod daemon_start;
 pub(crate) mod doctor;
+pub(crate) mod graph_cli;
 pub(crate) mod handler_formatting;
 pub(crate) mod handler_helpers;
 pub(crate) mod health_routine;
 pub(crate) mod helpers;
-pub(crate) mod loop_cli;
 pub(crate) mod models_cli;
 pub(crate) mod params;
 pub(crate) mod params_extract;
@@ -21,9 +24,13 @@ pub(crate) mod process;
 pub(crate) mod project_cli;
 pub(crate) mod prompts_cli;
 pub(crate) mod rag_cli;
+
+pub(crate) mod sandbox_cli;
 pub(crate) mod server;
 pub(crate) mod service_install;
 pub(crate) mod spec_cli;
+pub(crate) mod subagent;
+pub(crate) mod subagent_cli;
 
 pub mod handler;
 

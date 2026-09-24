@@ -1,5 +1,5 @@
-//! Renderer for [`LoopFormDialog`] — create/edit a loop's metadata and
-//! trigger (T9). Mirrors the loop node editor's visual style.
+//! Renderer for [`GraphFormDialog`] — create/edit a graph's metadata and
+//! trigger (T9). Mirrors the graph node editor's visual style.
 
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -8,15 +8,15 @@ use ratatui::widgets::{Block, Clear, Paragraph};
 use ratatui::Frame;
 
 use super::centered_rect;
-use crate::tui::app::dialog::loop_form::{
-    LoopFormDialog, LoopTriggerChoice, FIELD_DESCRIPTION, FIELD_NAME, FIELD_TRIGGER_KIND,
+use crate::tui::app::dialog::graph_form::{
+    GraphFormDialog, GraphTriggerChoice, FIELD_DESCRIPTION, FIELD_NAME, FIELD_TRIGGER_KIND,
     FIELD_TRIGGER_VALUE, FIELD_WORKDIR,
 };
 use crate::tui::app::types::App;
 use crate::tui::ui::theme::Theme;
 
-pub fn draw_loop_form_dialog(frame: &mut Frame, app: &App, theme: &Theme) {
-    let Some(dialog) = &app.loop_form_dialog else {
+pub fn draw_graph_form_dialog(frame: &mut Frame, app: &App, theme: &Theme) {
+    let Some(dialog) = &app.graph_form_dialog else {
         return;
     };
 
@@ -26,9 +26,9 @@ pub fn draw_loop_form_dialog(frame: &mut Frame, app: &App, theme: &Theme) {
     frame.render_widget(Clear, area);
 
     let title = if dialog.is_edit_mode() {
-        " Edit Loop "
+        " Edit Graph "
     } else {
-        " New Loop "
+        " New Graph "
     };
     let border_color = if has_error {
         Color::Red
@@ -37,7 +37,7 @@ pub fn draw_loop_form_dialog(frame: &mut Frame, app: &App, theme: &Theme) {
     };
     let block = Block::default()
         .title(title)
-        .borders(crate::tui::ui::borders_for(theme))
+        .borders(crate::tui::ui::dialog_borders_for(theme))
         .border_style(Style::default().fg(border_color))
         .style(Style::default().bg(theme.dialog_bg));
     let inner = block.inner(area);
@@ -56,8 +56,8 @@ pub fn draw_loop_form_dialog(frame: &mut Frame, app: &App, theme: &Theme) {
         trigger_kind_line(dialog, theme),
     ];
     match dialog.trigger_choice {
-        LoopTriggerChoice::Manual => {}
-        LoopTriggerChoice::Cron => {
+        GraphTriggerChoice::Manual => {}
+        GraphTriggerChoice::Cron => {
             lines.push(text_field_line(
                 dialog,
                 FIELD_TRIGGER_VALUE,
@@ -66,7 +66,7 @@ pub fn draw_loop_form_dialog(frame: &mut Frame, app: &App, theme: &Theme) {
                 theme,
             ));
         }
-        LoopTriggerChoice::Watch => {
+        GraphTriggerChoice::Watch => {
             lines.push(text_field_line(
                 dialog,
                 FIELD_TRIGGER_VALUE,
@@ -103,7 +103,7 @@ pub fn draw_loop_form_dialog(frame: &mut Frame, app: &App, theme: &Theme) {
 }
 
 fn text_field_line<'a>(
-    dialog: &LoopFormDialog,
+    dialog: &GraphFormDialog,
     field: usize,
     label: &'a str,
     value: &'a str,
@@ -131,7 +131,7 @@ fn text_field_line<'a>(
     ])
 }
 
-fn trigger_kind_line<'a>(dialog: &'a LoopFormDialog, theme: &Theme) -> Line<'a> {
+fn trigger_kind_line<'a>(dialog: &'a GraphFormDialog, theme: &Theme) -> Line<'a> {
     let focused = dialog.field == FIELD_TRIGGER_KIND;
     let marker = if focused { "▸ " } else { "  " };
     let label_style = if focused {

@@ -108,7 +108,7 @@ fn implementer_preset() -> String {
 }
 
 fn reviewer_preset() -> String {
-    let mut out = wrapped_section(&ROLE, "You are the reviewer and committer for this loop.");
+    let mut out = wrapped_section(&ROLE, "You are the reviewer and committer for this graph.");
     out.push_str(&itemized_section(&PROCEDURE, &[
         "Review the current diff strictly against this spec — nothing else:\n\n{{spec_content}}",
         "If the diff correctly and completely implements the spec, make EXACTLY ONE commit covering ONLY this spec's work. Use a concise, descriptive commit message with NO trailers of any kind (no Co-Authored-By, no issue references, no generated-by footers).",
@@ -131,11 +131,11 @@ fn reviewer_preset() -> String {
 fn resilience_preset() -> String {
     let mut out = wrapped_section(
         &ROLE,
-        "You are the on-call medic for this loop. A node just failed or reported a blocker. Your only job is to diagnose why and route to the right next step — you do not fix the underlying work yourself.",
+        "You are the on-call medic for this graph. A node just failed or reported a blocker. Your only job is to diagnose why and route to the right next step — you do not fix the underlying work yourself.",
     );
     out.push_str(&itemized_section(&PROCEDURE, &[
         "Read the failure/blocker context below (`{{previous_feedback}}`) and pick exactly ONE diagnosis: QUOTA, GLITCH, or OTHER.",
-        "QUOTA — the failure is a rate limit, quota exhaustion, or \"try again later\" from the platform/API itself. Action: no code changes are needed; report QUOTA and that the node should be retried once quota resets.",
+        "QUOTA — the failure is a rate limit, quota exhaustion, or \"try again later\" from the platform/API itself. Action: call `graph_schedule_autorun` with `graph_id` set to this graph's ID and `quota_reset_message` set to the ENTIRE failure text below, copied verbatim — do NOT extract, truncate, reformat, or translate any part of it; the engine parses the raw text itself. Then report FAIL.",
         "GLITCH — the failure is a transient infrastructure hiccup (network blip, spurious timeout, a flaky check unrelated to the spec) with no sign of a real defect. Action: report GLITCH and recommend a plain retry of the same node.",
         "OTHER — the failure reflects a genuine problem with the work itself (wrong code, an unmet spec, a missing dependency, a decision only a human can make). Action: report OTHER with a precise, actionable explanation of what's wrong so a human or the next agent can address it.",
         "State your diagnosis and its one action clearly in your report; do not hedge between diagnoses.",
@@ -143,7 +143,7 @@ fn resilience_preset() -> String {
     out.push_str(&itemized_section(&ALLOWED, &[
         "Reading files, logs, git history, and process/job status.",
         "Checking scheduling/queue state (e.g. `git status`, `git log`, `ps`, reading CI/log output).",
-        "Reporting your diagnosis and recommended action via loop_complete_node / loop_report_blocker.",
+        "Reporting your diagnosis and recommended action via graph_complete_node / graph_report_blocker.",
     ]));
     out.push_str(&itemized_section(
         &PROHIBITED,
@@ -259,22 +259,157 @@ impl std::fmt::Display for MissingPresetBinding {
 
 impl std::error::Error for MissingPresetBinding {}
 
-/// Every `{{name}}` placeholder in `content`, first-seen order, deduplicated.
+/// One lexical piece of a template, as recognised by [`scan_template`] — the
+/// single definition of what a `{{...}}` marker and its `\{{...}}` escape
+/// look like.
+enum TemplatePiece<'a> {
+    /// Copy verbatim: ordinary characters, and any backslash that is not
+    /// immediately followed by a complete `{{...}}` pair.
+    Literal(&'a str),
+    /// `\{{inner}}` — renders as the literal `{{inner}}`, never a binding
+    /// site, whatever `inner` names.
+    Escaped { inner: &'a str },
+    /// An unescaped `{{inner}}` binding site; `inner` is the exact inner
+    /// bytes, surrounding whitespace and all.
+    Marker { inner: &'a str },
+}
+
+/// Walk `template` left to right, handing each piece to `visit`.
+///
+/// This is the single owner of escape handling: it alone decides where a
+/// marker begins, that a `\` immediately before `{{...}}` escapes it, and
+/// that any other `\` is ordinary text. [`render_template`],
+/// [`placeholder_names`] and [`unbindable_placeholders`] are all written
+/// against it, so the escape rule can never drift between them.
+fn scan_template(template: &str, mut visit: impl FnMut(TemplatePiece<'_>)) {
+    let mut i = 0;
+    while i < template.len() {
+        let rest = &template[i..];
+        if let Some(after) = rest.strip_prefix("\\{{") {
+            if let Some(end) = after.find("}}") {
+                visit(TemplatePiece::Escaped {
+                    inner: &after[..end],
+                });
+                i += "\\{{".len() + end + "}}".len();
+                continue;
+            }
+            // No closing `}}`: the backslash is ordinary text — fall through.
+        } else if let Some(after) = rest.strip_prefix("{{") {
+            match after.find("}}") {
+                Some(end) => {
+                    visit(TemplatePiece::Marker {
+                        inner: &after[..end],
+                    });
+                    i += "{{".len() + end + "}}".len();
+                }
+                None => {
+                    // Unterminated marker: the remainder is all literal text.
+                    visit(TemplatePiece::Literal(rest));
+                    return;
+                }
+            }
+            continue;
+        }
+        let ch = rest.chars().next().expect("non-empty str has a first char");
+        visit(TemplatePiece::Literal(&rest[..ch.len_utf8()]));
+        i += ch.len_utf8();
+    }
+}
+
+/// Render `template` in a single left-to-right pass, resolving each
+/// unescaped `{{name}}` marker through `resolve` and emitting escaped
+/// `\{{name}}` markers as literal text.
+///
+/// Contract (CP4):
+/// - `\{{name}}` (a backslash immediately before the opening braces, with a
+///   closing `}}` ahead) emits `{{name}}` — the backslash removed, exactly
+///   once — and never invokes `resolve`, even when `name` is a real binding.
+/// - An unescaped `{{raw}}` invokes `resolve(raw)` once with the exact inner
+///   bytes; a `Some` replacement is emitted, a `None` leaves the original
+///   marker untouched so validation can report it.
+/// - A backslash not immediately followed by `{{` is ordinary text and is
+///   copied unchanged — prompts full of paths (`C:\temp`) and regexes
+///   (`\d+`) must survive byte-for-byte.
+/// - The output is never rescanned: a replacement containing `{{...}}` is
+///   data, not a new marker.
+///
+/// Escape recognition is delegated entirely to [`scan_template`], the one
+/// place that defines it.
+pub fn render_template(template: &str, resolve: impl Fn(&str) -> Option<String>) -> String {
+    let mut out = String::with_capacity(template.len());
+    scan_template(template, |piece| match piece {
+        TemplatePiece::Literal(text) => out.push_str(text),
+        TemplatePiece::Escaped { inner } => {
+            out.push_str("{{");
+            out.push_str(inner);
+            out.push_str("}}");
+        }
+        TemplatePiece::Marker { inner } => match resolve(inner) {
+            Some(replacement) => out.push_str(&replacement),
+            None => {
+                out.push_str("{{");
+                out.push_str(inner);
+                out.push_str("}}");
+            }
+        },
+    });
+    out
+}
+
+/// Every unescaped `{{name}}` placeholder in `content`, first-seen order,
+/// deduplicated. Escaped `\{{name}}` pairs are literal prose, not binding
+/// sites, and are skipped. Names are trimmed for the dedup key, matching the
+/// historical behaviour of this helper.
 fn placeholder_names(content: &str) -> Vec<String> {
     let mut names = Vec::new();
-    let mut rest = content;
-    while let Some(start) = rest.find("{{") {
-        let after_open = &rest[start + 2..];
-        let Some(end) = after_open.find("}}") else {
-            break;
-        };
-        let name = after_open[..end].trim().to_string();
-        if !name.is_empty() && !names.contains(&name) {
-            names.push(name);
+    scan_template(content, |piece| {
+        if let TemplatePiece::Marker { inner } = piece {
+            let name = inner.trim().to_string();
+            if !name.is_empty() && !names.contains(&name) {
+                names.push(name);
+            }
         }
-        rest = &after_open[end + 2..];
-    }
+    });
     names
+}
+
+/// The `{{name}}` placeholders in `template` that `supported` cannot bind.
+///
+/// A non-empty result means rendering `template` would leave a literal
+/// `{{...}}` in the output: the caller must refuse to emit it — exactly as
+/// [`render_preset`] refuses — rather than pass an unfilled template on to
+/// whatever composes it into a final prompt, where the marker would be read
+/// as an instruction.
+///
+/// Checked against the *template*, never the rendered output: a bound value
+/// (a spec body, prior feedback) may legitimately contain `{{...}}` text of
+/// its own, and that is data, not an unfilled placeholder.
+///
+/// A marker counts as unbindable when its inner text either names nothing in
+/// `supported` **or** carries surrounding whitespace (`{{ spec_content }}`):
+/// [`render_template`] resolves the *exact* inner bytes, so a padded marker
+/// finds no binding and reaches the agent as a literal `{{…}}` just as surely
+/// as one naming a binding that does not exist.
+///
+/// Escaped `\{{...}}` pairs are skipped via [`scan_template`] — the shared
+/// definition of the escape — whatever their inner text, even a real binding
+/// name.
+pub fn unbindable_placeholders(template: &str, supported: &[&str]) -> Vec<String> {
+    let mut leftovers: Vec<String> = Vec::new();
+    scan_template(template, |piece| {
+        let TemplatePiece::Marker { inner } = piece else {
+            return;
+        };
+        let name = inner.trim();
+        if name.is_empty() {
+            return;
+        }
+        let bindable = inner == name && supported.contains(&name);
+        if !bindable && !leftovers.iter().any(|seen| seen == name) {
+            leftovers.push(name.to_string());
+        }
+    });
+    leftovers
 }
 
 /// Render a preset's raw content (as returned by [`resolve_prompt_preset`]
@@ -302,11 +437,7 @@ pub fn render_preset(
         }
     }
 
-    let mut rendered = content.to_string();
-    for (name, value) in bindings {
-        rendered = rendered.replace(&format!("{{{{{name}}}}}"), value);
-    }
-    Ok(rendered)
+    Ok(render_template(content, |raw| bindings.get(raw).cloned()))
 }
 
 #[cfg(test)]
@@ -502,7 +633,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let prompts = prompts_dir(dir.path());
         std::fs::create_dir_all(&prompts).unwrap();
-        let old_style = "You are the reviewer and committer for this loop.\n\n\
+        let old_style = "You are the reviewer and committer for this graph.\n\n\
              Review the current diff strictly against this spec — nothing else:\n\n{{spec_content}}\n";
         std::fs::write(prompts.join("reviewer.md"), old_style).unwrap();
 
@@ -523,7 +654,7 @@ mod tests {
         std::fs::create_dir_all(&prompts).unwrap();
         // Simulate an existing installation: an operator-edited reviewer.md
         // in the pre-tagged format, predating this change.
-        let old_style = "You are the reviewer and committer for this loop.\n{{spec_content}}\n";
+        let old_style = "You are the reviewer and committer for this graph.\n{{spec_content}}\n";
         std::fs::write(prompts.join("reviewer.md"), old_style).unwrap();
 
         // A daemon startup on the new binary reseeds missing files only.
@@ -620,5 +751,135 @@ mod tests {
         assert!(!rendered_b.contains("ONLY-IN-A"));
         assert!(!rendered_a.contains(&rendered_b));
         assert!(!rendered_b.contains(&rendered_a));
+    }
+
+    #[test]
+    fn unbindable_placeholders_empty_when_every_marker_is_supported() {
+        let template = "Do {{spec_content}} then read {{previous_feedback}}";
+        assert!(
+            unbindable_placeholders(template, &["spec_content", "previous_feedback"]).is_empty()
+        );
+    }
+
+    #[test]
+    fn unbindable_placeholders_names_the_markers_no_binding_covers() {
+        let template = "Do {{spec_content}} and also {{custom_thing}}";
+        assert_eq!(
+            unbindable_placeholders(template, &["spec_content", "previous_feedback"]),
+            vec!["custom_thing"]
+        );
+    }
+
+    #[test]
+    fn unbindable_placeholders_ignores_braces_in_a_bound_value_not_the_template() {
+        // The template is clean; only the eventual *value* of {{spec_content}}
+        // would contain "{{x}}" — that is data, and must not count as unbindable.
+        let template = "Implement this: {{spec_content}}";
+        assert!(unbindable_placeholders(template, &["spec_content"]).is_empty());
+    }
+
+    #[test]
+    fn unbindable_placeholders_flags_a_supported_name_padded_with_inner_whitespace() {
+        // The renderers substitute the exact `{{spec_content}}` sequence, so
+        // `{{ spec_content }}` would survive into the output as a literal
+        // marker even though `spec_content` is a supported binding — it must
+        // be refused, not emitted.
+        let template = "Do {{ spec_content }} now";
+        assert_eq!(
+            unbindable_placeholders(template, &["spec_content"]),
+            vec!["spec_content"]
+        );
+    }
+
+    #[test]
+    fn unbindable_placeholders_ignores_an_escaped_unknown_marker() {
+        let template = "Fail when \\{{something}} appears in a touched file.";
+        assert!(
+            unbindable_placeholders(template, &["spec_content"]).is_empty(),
+            "escaped marker must not be reported"
+        );
+    }
+
+    #[test]
+    fn unbindable_placeholders_ignores_an_escaped_valid_binding() {
+        // An escaped marker naming a real binding is still literal text.
+        assert!(
+            unbindable_placeholders("The literal \\{{spec_content}} marker.", &["spec_content"])
+                .is_empty(),
+            "escaped valid binding must not be reported"
+        );
+        // Padded so it discriminates: without the escape, `{{ spec_content }}`
+        // is reported (the renderer binds only the exact name form), so an
+        // empty result here can only mean the `\` was honoured.
+        assert!(
+            unbindable_placeholders(
+                "The literal \\{{ spec_content }} marker.",
+                &["spec_content"]
+            )
+            .is_empty(),
+            "escaped padded binding must not be reported"
+        );
+        assert_eq!(
+            unbindable_placeholders("The literal {{ spec_content }} marker.", &["spec_content"]),
+            vec!["spec_content"],
+            "the same marker unescaped is still unbindable"
+        );
+    }
+
+    #[test]
+    fn render_preset_emits_an_escaped_unknown_marker_as_literal() {
+        let template = "Fail when \\{{something}} appears in a touched file.";
+        let rendered = render_preset("reviewer", template, &HashMap::new()).unwrap();
+        assert_eq!(
+            rendered,
+            "Fail when {{something}} appears in a touched file."
+        );
+    }
+
+    #[test]
+    fn render_preset_escape_wins_over_a_real_binding_without_rescan() {
+        let mut bindings = HashMap::new();
+        bindings.insert("spec_content".to_string(), "SPEC-BODY".to_string());
+        let rendered = render_preset("p", "Literal \\{{spec_content}} here.", &bindings).unwrap();
+        assert_eq!(rendered, "Literal {{spec_content}} here.");
+    }
+
+    #[test]
+    fn render_preset_leaves_ordinary_backslashes_untouched() {
+        let template = "Path C:\\temp and regex \\d+ stay.";
+        let rendered = render_preset("p", template, &HashMap::new()).unwrap();
+        assert_eq!(rendered, template);
+    }
+
+    #[test]
+    fn render_template_does_not_rescan_replacement_values() {
+        let mut bindings = HashMap::new();
+        bindings.insert(
+            "spec_content".to_string(),
+            "value holding {{inner}} text".to_string(),
+        );
+        let rendered = render_preset("p", "Body: {{spec_content}}.", &bindings).unwrap();
+        assert!(
+            rendered.contains("{{inner}}"),
+            "replacement text must be emitted as data, not rescanned: {rendered}"
+        );
+    }
+
+    #[test]
+    fn resilience_preset_includes_graph_schedule_autorun_instruction() {
+        let specs = builtin_prompt_preset_specs();
+        let (_, content) = specs.iter().find(|(n, _)| *n == "resilience").unwrap();
+        assert!(
+            content.contains("graph_schedule_autorun"),
+            "resilience preset must instruct calling graph_schedule_autorun for quota failures"
+        );
+        assert!(
+            content.contains("quota_reset_message"),
+            "resilience preset must name the quota_reset_message parameter"
+        );
+        assert!(
+            content.contains("verbatim"),
+            "resilience preset must instruct passing the text verbatim, not extracted"
+        );
     }
 }

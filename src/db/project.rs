@@ -53,9 +53,9 @@ pub struct RagQueueItem {
     pub queued_at: i64,
 }
 
-/// One row in a project's persisted History tab: a finished loop or a past
+/// One row in a project's persisted History tab: a finished graph or a past
 /// (no longer live) interactive/terminal session, scoped to the project's
-/// workdir and ordered newest-first. Unlike the live agent/loop providers
+/// workdir and ordered newest-first. Unlike the live agent/graph providers
 /// (which only know about what's running in *this* TUI process), this reads
 /// straight from SQLite so history survives a restart.
 #[derive(Debug, Clone)]
@@ -69,7 +69,7 @@ pub struct ProjectHistoryEntry {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProjectHistoryKind {
-    Loop,
+    Graph,
     InteractiveSession,
     TerminalSession,
 }
@@ -122,6 +122,11 @@ impl Database {
         // must exist as a kind='project' node or link_projects and the TUI
         // relation picker have nothing to operate on.
         self.ensure_project_node(p)?;
+        // Recompute derived containment (best-effort: never fail a register
+        // on a graph nicety).
+        if let Err(e) = self.rebuild_containment_edges() {
+            tracing::debug!("rebuild_containment_edges after upsert failed: {e}");
+        }
         Ok(())
     }
 
@@ -140,15 +145,31 @@ impl Database {
         Ok(project)
     }
 
+    /// Explicit registration entry point (the spec's "explicit call"):
+    /// canonicalizes `path` and registers it, marker file or not.
+    pub fn register_project_explicit(&self, path: &Path) -> Result<Project> {
+        self.register_project_path(path)
+    }
+
     pub fn delete_project(&self, hash: &str) -> Result<()> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
-        conn.execute(
-            "DELETE FROM projects WHERE hash=?1",
-            rusqlite::params![hash],
-        )?;
+        {
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
+            conn.execute(
+                "DELETE FROM projects WHERE hash=?1",
+                rusqlite::params![hash],
+            )?;
+            // Remove the graph root node; incident edges CASCADE via FKs.
+            conn.execute(
+                "DELETE FROM intelligence_nodes WHERE id=?1",
+                rusqlite::params![format!("project:{hash}")],
+            )?;
+        }
+        if let Err(e) = self.rebuild_containment_edges() {
+            tracing::debug!("rebuild_containment_edges after delete failed: {e}");
+        }
         Ok(())
     }
 
@@ -325,7 +346,7 @@ impl Database {
     }
 
     /// Remap a project registered at `old_hash` onto `new_canonical_path`:
-    /// re-key every dependent row (interactive/terminal sessions, loops,
+    /// re-key every dependent row (interactive/terminal sessions, graphs,
     /// standalone specs, sync state, prompts, scheduled sends, agents,
     /// intelligence nodes) from the old path/hash to the new one, in a
     /// single transaction. If no project is registered at the new path
@@ -338,101 +359,179 @@ impl Database {
     /// one project: either the whole re-key applied (and committed) or none
     /// of it did.
     pub fn remap_project(&self, old_hash: &str, new_canonical_path: &str) -> Result<RemapOutcome> {
-        let mut conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
-        let tx = conn.transaction()?;
+        // Scope the connection guard: the post-commit containment rebuild
+        // re-locks the connection, so the guard must be dropped first
+        // (a held std Mutex guard here would deadlock).
+        let outcome = {
+            let mut conn = self
+                .conn
+                .lock()
+                .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
+            let tx = conn.transaction()?;
 
-        let old_path: String = tx
-            .query_row(
-                "SELECT path FROM projects WHERE hash = ?1",
-                params![old_hash],
-                |row| row.get(0),
-            )
-            .map_err(|_| anyhow::anyhow!("No project registered with hash '{old_hash}'"))?;
+            let old_path: String = tx
+                .query_row(
+                    "SELECT path FROM projects WHERE hash = ?1",
+                    params![old_hash],
+                    |row| row.get(0),
+                )
+                .map_err(|_| anyhow::anyhow!("No project registered with hash '{old_hash}'"))?;
 
-        let new_hash = workdir_hash(new_canonical_path);
-        if new_hash == old_hash {
-            anyhow::bail!(
-                "New path resolves to the same project (hash unchanged) — nothing to remap"
-            );
+            let new_hash = workdir_hash(new_canonical_path);
+            if new_hash == old_hash {
+                anyhow::bail!(
+                    "New path resolves to the same project (hash unchanged) — nothing to remap"
+                );
+            }
+
+            let target_exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM projects WHERE hash = ?1)",
+                params![new_hash],
+                |row| row.get::<_, i64>(0),
+            )? != 0;
+            let kind = RemapKind::decide(target_exists);
+            let counts = count_remap_targets(&tx, &old_path, old_hash)?;
+
+            tx.execute(
+                "UPDATE interactive_sessions SET working_dir = ?2 WHERE working_dir = ?1",
+                params![old_path, new_canonical_path],
+            )?;
+            tx.execute(
+                "UPDATE terminal_sessions SET working_dir = ?2 WHERE working_dir = ?1",
+                params![old_path, new_canonical_path],
+            )?;
+            tx.execute(
+                "UPDATE graphs SET workdir = ?2 WHERE workdir = ?1",
+                params![old_path, new_canonical_path],
+            )?;
+            tx.execute(
+                "UPDATE graph_specs SET workdir = ?2, updated_at = ?3 WHERE workdir = ?1",
+                params![
+                    old_path,
+                    new_canonical_path,
+                    chrono::Utc::now().timestamp_millis()
+                ],
+            )?;
+            tx.execute(
+                "UPDATE sync_messages SET workdir = ?2 WHERE workdir = ?1",
+                params![old_path, new_canonical_path],
+            )?;
+            tx.execute(
+                "UPDATE sync_locks SET workdir = ?2 WHERE workdir = ?1",
+                params![old_path, new_canonical_path],
+            )?;
+            tx.execute(
+                "UPDATE last_prompts SET workdir = ?2 WHERE workdir = ?1",
+                params![old_path, new_canonical_path],
+            )?;
+            tx.execute(
+                "UPDATE scheduled_sends SET workdir = ?2 WHERE workdir = ?1",
+                params![old_path, new_canonical_path],
+            )?;
+            tx.execute(
+                "UPDATE failed_scheduled_sends SET workdir = ?2 WHERE workdir = ?1",
+                params![old_path, new_canonical_path],
+            )?;
+            tx.execute(
+                "UPDATE agents SET working_dir = ?2 WHERE working_dir = ?1",
+                params![old_path, new_canonical_path],
+            )?;
+            tx.execute(
+                "UPDATE intelligence_nodes SET project_hash = ?2 WHERE project_hash = ?1",
+                params![old_hash, new_hash],
+            )?;
+
+            // Keep the `project:{hash}` graph root in sync with the hash re-key:
+            // CASCADE won't fire here (no row delete in MOVE), so rename
+            // explicitly. MERGE drops the stale root (edges CASCADE).
+            let old_node_id = format!("project:{old_hash}");
+            let new_node_id = format!("project:{new_hash}");
+            let old_node: Option<(String, String, Option<String>)> = match tx.query_row(
+                "SELECT title, body, metadata FROM intelligence_nodes WHERE id = ?1",
+                params![old_node_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            ) {
+                Ok(v) => Some(v),
+                Err(rusqlite::Error::QueryReturnedNoRows) => None,
+                Err(e) => return Err(e.into()),
+            };
+            match kind {
+                RemapKind::Move => {
+                    if let Some((title, body, metadata)) = old_node {
+                        let new_metadata = match metadata
+                            .as_deref()
+                            .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
+                        {
+                            Some(mut value) => {
+                                if let Some(obj) = value.as_object_mut() {
+                                    obj.insert(
+                                        "path".to_string(),
+                                        serde_json::Value::String(new_canonical_path.to_string()),
+                                    );
+                                }
+                                value.to_string()
+                            }
+                            None => serde_json::json!({
+                                "source": "registry",
+                                "path": new_canonical_path,
+                            })
+                            .to_string(),
+                        };
+                        tx.execute(
+                            "DELETE FROM intelligence_nodes WHERE id = ?1",
+                            params![old_node_id],
+                        )?;
+                        tx.execute(
+                        "INSERT INTO intelligence_nodes (id, kind, title, body, metadata, project_hash, session_id, created_at, updated_at)
+                         VALUES (?1, 'project', ?2, ?3, ?4, ?5, NULL, strftime('%s','now'), strftime('%s','now'))",
+                        params![new_node_id, title, body, new_metadata, new_hash],
+                    )?;
+                        tx.execute(
+                        "UPDATE intelligence_edges SET from_node_id = ?2 WHERE from_node_id = ?1",
+                        params![old_node_id, new_node_id],
+                    )?;
+                        tx.execute(
+                            "UPDATE intelligence_edges SET to_node_id = ?2 WHERE to_node_id = ?1",
+                            params![old_node_id, new_node_id],
+                        )?;
+                    }
+                }
+                RemapKind::Merge => {
+                    tx.execute(
+                        "DELETE FROM intelligence_nodes WHERE id = ?1",
+                        params![old_node_id],
+                    )?;
+                }
+            }
+
+            match kind {
+                RemapKind::Move => {
+                    tx.execute(
+                        "UPDATE projects SET hash = ?2, path = ?3 WHERE hash = ?1",
+                        params![old_hash, new_hash, new_canonical_path],
+                    )?;
+                }
+                RemapKind::Merge => {
+                    tx.execute("DELETE FROM projects WHERE hash = ?1", params![old_hash])?;
+                }
+            }
+
+            tx.commit()?;
+
+            Ok::<RemapOutcome, anyhow::Error>(RemapOutcome {
+                kind,
+                old_hash: old_hash.to_string(),
+                new_hash,
+                new_path: new_canonical_path.to_string(),
+                counts,
+            })
+        }?;
+
+        if let Err(e) = self.rebuild_containment_edges() {
+            tracing::debug!("rebuild_containment_edges after remap failed: {e}");
         }
 
-        let target_exists: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM projects WHERE hash = ?1)",
-            params![new_hash],
-            |row| row.get::<_, i64>(0),
-        )? != 0;
-        let kind = RemapKind::decide(target_exists);
-        let counts = count_remap_targets(&tx, &old_path, old_hash)?;
-
-        tx.execute(
-            "UPDATE interactive_sessions SET working_dir = ?2 WHERE working_dir = ?1",
-            params![old_path, new_canonical_path],
-        )?;
-        tx.execute(
-            "UPDATE terminal_sessions SET working_dir = ?2 WHERE working_dir = ?1",
-            params![old_path, new_canonical_path],
-        )?;
-        tx.execute(
-            "UPDATE loops SET workdir = ?2 WHERE workdir = ?1",
-            params![old_path, new_canonical_path],
-        )?;
-        tx.execute(
-            "UPDATE loop_specs SET workdir = ?2 WHERE workdir = ?1",
-            params![old_path, new_canonical_path],
-        )?;
-        tx.execute(
-            "UPDATE sync_messages SET workdir = ?2 WHERE workdir = ?1",
-            params![old_path, new_canonical_path],
-        )?;
-        tx.execute(
-            "UPDATE sync_locks SET workdir = ?2 WHERE workdir = ?1",
-            params![old_path, new_canonical_path],
-        )?;
-        tx.execute(
-            "UPDATE last_prompts SET workdir = ?2 WHERE workdir = ?1",
-            params![old_path, new_canonical_path],
-        )?;
-        tx.execute(
-            "UPDATE scheduled_sends SET workdir = ?2 WHERE workdir = ?1",
-            params![old_path, new_canonical_path],
-        )?;
-        tx.execute(
-            "UPDATE failed_scheduled_sends SET workdir = ?2 WHERE workdir = ?1",
-            params![old_path, new_canonical_path],
-        )?;
-        tx.execute(
-            "UPDATE agents SET working_dir = ?2 WHERE working_dir = ?1",
-            params![old_path, new_canonical_path],
-        )?;
-        tx.execute(
-            "UPDATE intelligence_nodes SET project_hash = ?2 WHERE project_hash = ?1",
-            params![old_hash, new_hash],
-        )?;
-
-        match kind {
-            RemapKind::Move => {
-                tx.execute(
-                    "UPDATE projects SET hash = ?2, path = ?3 WHERE hash = ?1",
-                    params![old_hash, new_hash, new_canonical_path],
-                )?;
-            }
-            RemapKind::Merge => {
-                tx.execute("DELETE FROM projects WHERE hash = ?1", params![old_hash])?;
-            }
-        }
-
-        tx.commit()?;
-
-        Ok(RemapOutcome {
-            kind,
-            old_hash: old_hash.to_string(),
-            new_hash,
-            new_path: new_canonical_path.to_string(),
-            counts,
-        })
+        Ok(outcome)
     }
 
     // ── RAG queue (SQLite) ──────────────────────────────────────────────
@@ -551,13 +650,13 @@ fn count_remap_targets(
         params![old_path],
         |row| row.get(0),
     )?;
-    let loops: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM loops WHERE workdir = ?1",
+    let graphs: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM graphs WHERE workdir = ?1",
         params![old_path],
         |row| row.get(0),
     )?;
-    let loop_specs: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM loop_specs WHERE workdir = ?1",
+    let graph_specs: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM graph_specs WHERE workdir = ?1",
         params![old_path],
         |row| row.get(0),
     )?;
@@ -600,8 +699,8 @@ fn count_remap_targets(
     Ok(RemapCounts {
         interactive_sessions,
         terminal_sessions,
-        loops,
-        loop_specs,
+        graphs,
+        graph_specs,
         sync_messages,
         sync_locks,
         last_prompts,
@@ -734,7 +833,7 @@ impl Database {
             .lock()
             .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
         // Keep the last successful index timestamp per file unless a later delete
-        // exists. This avoids full startup re-index loops after transient errors.
+        // exists. This avoids full startup re-index graphs after transient errors.
         let mut stmt = conn.prepare(
             "SELECT s.file_path, s.last_indexed_at
                FROM (
@@ -882,11 +981,11 @@ fn parse_rfc3339_timestamp(value: &str) -> i64 {
 
 impl Database {
     /// Persisted history for a project's `Focus → History` tab: finished
-    /// loops plus past (exited/finished) interactive and terminal sessions,
+    /// graphs plus past (exited/finished) interactive and terminal sessions,
     /// all scoped to `workdir` and merged newest-first. Reads straight from
-    /// SQLite (via the `idx_loops_workdir_created`,
+    /// SQLite (via the `idx_graphs_workdir_created`,
     /// `idx_interactive_sessions_workdir`, and `idx_terminal_sessions_workdir`
-    /// indices) rather than the live agent/loop providers, which only know
+    /// indices) rather than the live agent/graph providers, which only know
     /// about state observed since this TUI process started.
     pub fn list_project_history(
         &self,
@@ -900,22 +999,22 @@ impl Database {
 
         let mut entries = Vec::new();
 
-        let mut loop_stmt = conn.prepare(
+        let mut graph_stmt = conn.prepare(
             "SELECT name, status, COALESCE(completed_at, created_at)
-             FROM loops
+             FROM graphs
              WHERE workdir = ?1 AND status IN ('completed', 'failed')
              ORDER BY COALESCE(completed_at, created_at) DESC
              LIMIT ?2",
         )?;
-        let loop_rows = loop_stmt.query_map(rusqlite::params![workdir, limit as i64], |row| {
+        let graph_rows = graph_stmt.query_map(rusqlite::params![workdir, limit as i64], |row| {
             Ok(ProjectHistoryEntry {
-                kind: ProjectHistoryKind::Loop,
+                kind: ProjectHistoryKind::Graph,
                 name: row.get(0)?,
                 status: row.get(1)?,
                 at: row.get(2)?,
             })
         })?;
-        for row in loop_rows {
+        for row in graph_rows {
             entries.push(row?);
         }
 
@@ -1156,14 +1255,16 @@ mod tests {
         .unwrap();
         db.insert_terminal_session("term-1", "term-1", "bash", workdir)
             .unwrap();
-        db.insert_loop(&crate::domain::loops::Loop {
+        db.insert_graph(&crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
-            id: "loop-1".to_string(),
-            name: "loop-1".to_string(),
+            allow_dirty_start: false,
+            infra_node_id: None,
+            id: "graph-1".to_string(),
+            name: "graph-1".to_string(),
             description: None,
             workdir: workdir.to_string(),
-            status: crate::domain::loops::LoopStatus::Completed,
+            status: crate::domain::graphs::GraphStatus::Completed,
             trigger: None,
             created_at: chrono::Utc::now(),
             started_at: None,
@@ -1172,20 +1273,23 @@ mod tests {
             auto_continue_at: None,
             auto_continue_action: None,
             active_run_queue_id: None,
-            on_completed: None,
+            hooks: std::collections::BTreeMap::new(),
         })
         .unwrap();
-        db.insert_loop_spec(&crate::domain::loops::LoopSpec {
+        db.insert_graph_spec(&crate::domain::graphs::GraphSpec {
             id: "spec-standalone-1".to_string(),
-            loop_id: None,
+            graph_id: None,
             name: "standalone".to_string(),
             description: None,
             position: 0,
             parallelizable: false,
-            status: crate::domain::loops::LoopSpecStatus::Pending,
+            status: crate::domain::graphs::GraphSpecStatus::Pending,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: Some(workdir.to_string()),
             completed_via: None,
@@ -1217,6 +1321,8 @@ mod tests {
             "sess-1",
             Some(workdir),
             chrono::Utc::now(),
+            None,
+            None,
         )
         .unwrap();
         db.insert_failed_scheduled_send(
@@ -1225,6 +1331,7 @@ mod tests {
             "sess-1",
             Some(workdir),
             chrono::Utc::now(),
+            None,
         )
         .unwrap();
         db.upsert_agent(&crate::domain::models::Agent {
@@ -1233,6 +1340,7 @@ mod tests {
             trigger: None,
             cli: crate::domain::models::Cli::new("opencode"),
             model: None,
+            effort: None,
             working_dir: Some(workdir.to_string()),
             enabled: true,
             enable_at: None,
@@ -1248,11 +1356,13 @@ mod tests {
         .unwrap();
         db.upsert_intelligence_node(crate::db::intelligence::IntelligenceNodeInput {
             id: None,
-            kind: "fact".to_string(),
-            title: "a fact".to_string(),
-            body: "body".to_string(),
+            kind: Some("fact".to_string()),
+            status: None,
+            title: Some("a fact".to_string()),
+            body: Some("body".to_string()),
+            body_replace: None,
             metadata: None,
-            project_hash: Some(hash.to_string()),
+            project_hash: Some(Some(hash.to_string())),
             session_id: None,
             relations: None,
         })
@@ -1279,8 +1389,8 @@ mod tests {
         // Every seeded table contributed exactly one dependent row.
         assert_eq!(outcome.counts.interactive_sessions, 1);
         assert_eq!(outcome.counts.terminal_sessions, 1);
-        assert_eq!(outcome.counts.loops, 1);
-        assert_eq!(outcome.counts.loop_specs, 1);
+        assert_eq!(outcome.counts.graphs, 1);
+        assert_eq!(outcome.counts.graph_specs, 1);
         assert_eq!(outcome.counts.sync_messages, 1);
         assert_eq!(outcome.counts.sync_locks, 1);
         assert_eq!(outcome.counts.last_prompts, 1);
@@ -1299,8 +1409,8 @@ mod tests {
 
         // Every dependent now points at the new path/hash, and nothing is
         // left behind at the old one.
-        assert_eq!(db.project_dependent_counts(old_path).unwrap().loops, 0);
-        assert_eq!(db.project_dependent_counts(new_path).unwrap().loops, 1);
+        assert_eq!(db.project_dependent_counts(old_path).unwrap().graphs, 0);
+        assert_eq!(db.project_dependent_counts(new_path).unwrap().graphs, 1);
         assert_eq!(
             db.project_dependent_counts(new_path)
                 .unwrap()
@@ -1353,8 +1463,8 @@ mod tests {
         );
 
         // Dependents were reassigned to the new path/hash.
-        assert_eq!(db.project_dependent_counts(new_path).unwrap().loops, 1);
-        assert_eq!(db.project_dependent_counts(old_path).unwrap().loops, 0);
+        assert_eq!(db.project_dependent_counts(new_path).unwrap().graphs, 1);
+        assert_eq!(db.project_dependent_counts(old_path).unwrap().graphs, 0);
     }
 
     #[test]
@@ -1364,14 +1474,16 @@ mod tests {
             .unwrap();
         db.upsert_project(&sample_project_at("hash-b", "/proj-b"))
             .unwrap();
-        db.insert_loop(&crate::domain::loops::Loop {
+        db.insert_graph(&crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
-            id: "loop-b".to_string(),
-            name: "loop-b".to_string(),
+            allow_dirty_start: false,
+            infra_node_id: None,
+            id: "graph-b".to_string(),
+            name: "graph-b".to_string(),
             description: None,
             workdir: "/proj-b".to_string(),
-            status: crate::domain::loops::LoopStatus::Completed,
+            status: crate::domain::graphs::GraphStatus::Completed,
             trigger: None,
             created_at: chrono::Utc::now(),
             started_at: None,
@@ -1380,14 +1492,14 @@ mod tests {
             auto_continue_at: None,
             auto_continue_action: None,
             active_run_queue_id: None,
-            on_completed: None,
+            hooks: std::collections::BTreeMap::new(),
         })
         .unwrap();
 
         db.remap_project("hash-a", "/proj-a-moved").unwrap();
 
         assert!(db.get_project("hash-b").unwrap().is_some());
-        assert_eq!(db.project_dependent_counts("/proj-b").unwrap().loops, 1);
+        assert_eq!(db.project_dependent_counts("/proj-b").unwrap().graphs, 1);
     }
 
     #[test]
@@ -1426,8 +1538,8 @@ mod tests {
         // Nothing actually moved.
         assert!(db.get_project(old_hash).unwrap().is_some());
         assert!(db.get_project(&workdir_hash(new_path)).unwrap().is_none());
-        assert_eq!(db.project_dependent_counts(old_path).unwrap().loops, 1);
-        assert_eq!(db.project_dependent_counts(new_path).unwrap().loops, 0);
+        assert_eq!(db.project_dependent_counts(old_path).unwrap().graphs, 1);
+        assert_eq!(db.project_dependent_counts(new_path).unwrap().graphs, 0);
 
         // A real remap right after reports the same counts.
         let applied = db.remap_project(old_hash, new_path).unwrap();

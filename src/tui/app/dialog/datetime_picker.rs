@@ -1,8 +1,8 @@
 //! Shared inline date-time picker (year/month/day/hour/minute), extracted
 //! from the prompt builder's scheduled-send control (U11, `prompt.rs`'s
-//! former `SendAtEdit`) so the loop autorun dialog (C18) can reuse the exact
-//! same widget instead of building a second one — see `loop_control.rs`'s
-//! `LoopAutorunDialog`.
+//! former `SendAtEdit`) so the graph autorun dialog (C18) can reuse the exact
+//! same widget instead of building a second one — see `graph_control.rs`'s
+//! `GraphAutorunDialog`.
 
 use chrono::Timelike;
 

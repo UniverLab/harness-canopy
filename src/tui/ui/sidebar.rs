@@ -9,18 +9,20 @@ use ratatui::widgets::{Block, Paragraph};
 use ratatui::Frame;
 
 use super::theme::Theme;
-use super::{borders_for, last_two_segments, truncate_str, BG_HOVER, INTERACTIVE_COLOR};
+use super::{
+    borders_for, dialog_borders_for, last_two_segments, truncate_str, BG_HOVER, INTERACTIVE_COLOR,
+};
 use super::{STATUS_DISABLED, STATUS_FAIL, STATUS_OK, STATUS_RUNNING};
-use crate::domain::loops::{Loop, LoopStatus};
+use crate::domain::graphs::{Graph, GraphStatus};
 use crate::tui::agent::AgentStatus;
 use crate::tui::app::types::{
-    AgentEntry, AgentSectionFocus, App, AutomationKind, Focus, LoopSidebarMeta, SidebarLayer,
+    AgentEntry, AgentSectionFocus, App, AutomationKind, Focus, GraphSidebarMeta, SidebarLayer,
 };
 use ratatui::style::Color;
 
 pub(super) fn draw_sidebar(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     app.sidebar_click_map.clear();
-    app.automation_loop_click_map.clear();
+    app.automation_graph_click_map.clear();
     app.project_click_map.clear();
     app.sidebar_tab_click_map.clear();
     app.sidebar_visible_capacity = 0;
@@ -175,12 +177,8 @@ fn scroll_state_with_offset(
     max_visible: usize,
     manual_offset: usize,
 ) -> ScrollState {
-    let auto_start = selected.map_or(0, |selected| {
-        if selected >= max_visible {
-            selected.saturating_sub(max_visible - 1)
-        } else {
-            0
-        }
+    let auto_start = selected.map_or(0, |sel| {
+        crate::tui::selection::clamp_scroll(sel, 0, total_items, max_visible)
     });
     let max_start = total_items.saturating_sub(max_visible);
     let start = (auto_start + manual_offset).min(max_start);
@@ -279,7 +277,7 @@ fn render_graph_panel(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         Style::default().fg(theme.dim_text),
         Style::default().fg(theme.dim_text),
         theme,
-        |frame, inner| draw_project_graph(frame, inner, app, theme),
+        |frame, inner| draw_project_graph(frame, inner, app, theme, 0),
     );
 }
 
@@ -288,7 +286,10 @@ fn render_graph_panel(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 /// (C26 decision 1 — projects aren't the subject on Live/Automation), and
 /// only when there's an edge to draw (C26 decision 2 — a workspace of
 /// unrelated projects still fills `project_graph_trees` with one singleton
-/// per project, which is not "content").
+/// per project, which is not "content"). CT1 moves the graph into the
+/// right panel's Knowledge face, so while that face is showing the sidebar
+/// stops rendering it there — one home for the graph, never two.
+#[cfg(test)]
 fn graph_has_content(edge_count: usize, is_knowledge_tab: bool) -> bool {
     is_knowledge_tab && edge_count > 0
 }
@@ -298,10 +299,11 @@ fn render_brain_or_graph(
     area: Rect,
     app: &App,
     theme: &Theme,
-    is_knowledge_tab: bool,
+    _is_knowledge_tab: bool,
 ) {
-    let graph_has_content = graph_has_content(app.project_graph_edges.len(), is_knowledge_tab);
-    match split_brain_or_graph(area, graph_has_content) {
+    // CT1: the project-relations graph belongs exclusively to the right
+    // panel's Knowledge face. Keep this sidebar region for Brian's Brain.
+    match split_brain_or_graph(area, false) {
         BrainOrGraphLayout::Neither => {}
         BrainOrGraphLayout::GraphOnly(graph_area) => {
             render_graph_panel(frame, graph_area, app, theme);
@@ -422,11 +424,34 @@ fn agent_indices_by_kind(app: &App) -> (Vec<usize>, Vec<usize>, Vec<usize>) {
 /// up below their demand scroll internally. Callers use this only when the
 /// sections can't all be shown at full height (`sum(demands) > budget`), but the
 /// function is correct for any input and always allocates at most `budget` rows.
-fn fair_section_heights(demands: &[u16], budget: u16) -> Vec<u16> {
+fn fair_section_heights(
+    demands: &[u16],
+    budget: u16,
+    focused: Option<usize>,
+    floor: u16,
+) -> Vec<u16> {
     let n = demands.len();
     let mut alloc = vec![0u16; n];
     let mut capped = vec![false; n];
     let mut remaining_budget = budget;
+
+    // Guarantee the focused section a floor before fair distribution, if it
+    // has any demand at all. This is the fix for "I can navigate them but
+    // I can't see them" on short screens: the section with the cursor must
+    // always have rows to draw into.
+    if let Some(idx) = focused {
+        if idx < n && demands[idx] > 0 && floor > 0 && budget > 0 {
+            let guaranteed = floor.min(demands[idx]).min(budget);
+            alloc[idx] = guaranteed;
+            remaining_budget = budget - guaranteed;
+            // If the focused section's demand was fully satisfied by the floor,
+            // it is done; otherwise the fair pass will allocate any additional
+            // share on top of the floor.
+            if alloc[idx] >= demands[idx] {
+                capped[idx] = true;
+            }
+        }
+    }
 
     loop {
         let active: Vec<usize> = (0..n).filter(|&i| !capped[i]).collect();
@@ -484,7 +509,7 @@ fn fair_section_heights(demands: &[u16], budget: u16) -> Vec<u16> {
     alloc
 }
 
-/// Rows needed for a card-style sub-list (agent cards, loop cards): 0 when
+/// Rows needed for a card-style sub-list (agent cards, graph cards): 0 when
 /// empty, else `count*4+2` (3-row cards + 1-row gap + 2-row border).
 fn card_list_demand(count: usize) -> u16 {
     if count == 0 {
@@ -520,6 +545,7 @@ fn draw_sidebar_tabs(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme
     if let Some(bar) = take_top(&mut remaining, 1) {
         draw_sidebar_tab_bar(frame, bar, app, theme);
     }
+    draw_sidebar_gap(frame, &mut remaining, theme);
 
     match app.sidebar_layer {
         SidebarLayer::Live => draw_live_body(
@@ -537,6 +563,57 @@ fn draw_sidebar_tabs(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme
     }
 }
 
+/// CT14 (C32 follow-on): the guaranteed floor must track the section holding
+/// the cursor, derived from where `selected` actually lives — not from the
+/// stored `agent_section_focus` alone, which can drift after a data refresh
+/// that clamps `selected` without updating focus.
+pub(crate) fn live_section_floor_index(
+    app: &App,
+    interactive_indices: &[usize],
+    terminal_indices: &[usize],
+) -> Option<usize> {
+    let cursor_idx = if interactive_indices.contains(&app.selected) {
+        Some(0)
+    } else if terminal_indices.contains(&app.selected) {
+        Some(1)
+    } else if matches!(app.agents.get(app.selected), Some(AgentEntry::Group(_))) {
+        Some(2)
+    } else {
+        None
+    };
+    cursor_idx.or(match app.agent_section_focus {
+        AgentSectionFocus::Interactive => Some(0),
+        AgentSectionFocus::Terminal => Some(1),
+        AgentSectionFocus::Groups => Some(2),
+        AgentSectionFocus::Brain => None,
+    })
+}
+
+/// CT14: like [`live_section_floor_index`], the Automation floor tracks the
+/// entry holding the cursor — a valid graph selection means the Graphs section,
+/// a background-agent `selected` means Agents — falling back to the stored
+/// `automation_kind` only when neither resolves (both sub-lists empty).
+pub(crate) fn automation_section_floor_index(
+    app: &App,
+    background_indices: &[usize],
+) -> Option<usize> {
+    let graph_active = app
+        .selected_graph_id
+        .as_deref()
+        .is_some_and(|id| app.sidebar_graphs().iter().any(|lp| lp.id == id));
+    let agent_active = background_indices.contains(&app.selected);
+    if graph_active {
+        Some(1)
+    } else if agent_active {
+        Some(0)
+    } else {
+        match app.automation_kind {
+            AutomationKind::Agent => Some(0),
+            AutomationKind::Graph => Some(1),
+        }
+    }
+}
+
 fn draw_live_body(
     frame: &mut Frame,
     area: Rect,
@@ -550,7 +627,10 @@ fn draw_live_body(
         card_list_demand(terminal_indices.len()),
         groups_list_demand(app.split_groups.len()),
     ];
-    let alloc = fair_section_heights(&demands, area.height);
+    // CT14: the guaranteed floor tracks the section holding the cursor
+    // (C32 follow-on) — see `live_section_floor_index`.
+    let focused_idx = live_section_floor_index(app, interactive_indices, terminal_indices);
+    let alloc = fair_section_heights(&demands, area.height, focused_idx, 6);
     let mut remaining = area;
 
     if let Some(sub) = take_top(&mut remaining, alloc[0]) {
@@ -566,6 +646,7 @@ fn draw_live_body(
             theme,
         );
     }
+    draw_sidebar_gap(frame, &mut remaining, theme);
     if let Some(sub) = take_top(&mut remaining, alloc[1]) {
         let border_style = agent_section_border_style(app, AgentSectionFocus::Terminal, theme);
         render_agent_list_panel(
@@ -579,6 +660,7 @@ fn draw_live_body(
             theme,
         );
     }
+    draw_sidebar_gap(frame, &mut remaining, theme);
     if let Some(sub) = take_top(&mut remaining, alloc[2]) {
         render_groups_panel(frame, Some(sub), app, AgentSectionFocus::Groups, theme);
     }
@@ -593,12 +675,17 @@ fn draw_automation_body(
     background_indices: &[usize],
     theme: &Theme,
 ) -> Rect {
-    let loop_count = app.sidebar_loops().len();
+    let graph_count = app.sidebar_graphs().len();
     let demands = [
         card_list_demand(background_indices.len()),
-        card_list_demand(loop_count),
+        card_list_demand(graph_count),
     ];
-    let alloc = fair_section_heights(&demands, area.height);
+    // CT14: like `draw_live_body` above, the floor tracks the entry holding
+    // the cursor — see `automation_section_floor_index`.
+    // Row counts are recomputed per frame from current lengths (FR5); nothing
+    // is cached across frames.
+    let focused_idx = automation_section_floor_index(app, background_indices);
+    let alloc = fair_section_heights(&demands, area.height, focused_idx, 6);
     let mut remaining = area;
 
     if let Some(sub) = take_top(&mut remaining, alloc[0]) {
@@ -614,25 +701,26 @@ fn draw_automation_body(
             theme,
         );
     }
+    draw_sidebar_gap(frame, &mut remaining, theme);
     if let Some(sub) = take_top(&mut remaining, alloc[1]) {
         // The archived count is always shown here — even while browsing the
         // main list — so the archive is never an invisible state; see the
         // F4-archive spec's "always-visible count" requirement.
-        let title = if app.loop_view_archived {
-            format!(" archived loops ({}) ", app.archived_loop_count)
-        } else if app.archived_loop_count > 0 {
-            format!(" loops · {} archived ", app.archived_loop_count)
+        let title = if app.graph_view_archived {
+            format!(" archived graphs ({}) ", app.archived_graph_count)
+        } else if app.archived_graph_count > 0 {
+            format!(" graphs · {} archived ", app.archived_graph_count)
         } else {
-            " loops ".to_string()
+            " graphs ".to_string()
         };
         render_titled_panel(
             frame,
             sub,
             &title,
             Style::default().fg(theme.dim_text),
-            automation_border_style(app, AutomationKind::Loop, theme),
+            automation_border_style(app, AutomationKind::Graph, theme),
             theme,
-            |frame, inner| draw_automation_loops_list(frame, inner, app, theme),
+            |frame, inner| draw_automation_graphs_list(frame, inner, app, theme),
         );
     }
 
@@ -668,8 +756,20 @@ fn draw_knowledge_body(frame: &mut Frame, area: Rect, app: &mut App, theme: &The
             |frame, inner| draw_projects_list(frame, inner, app, theme),
         );
     }
+    draw_sidebar_gap(frame, &mut remaining, theme);
 
     remaining
+}
+
+fn draw_sidebar_gap(frame: &mut Frame, remaining: &mut Rect, theme: &Theme) {
+    if remaining.height > 0 {
+        if let Some(gap) = take_top(remaining, 1) {
+            frame.render_widget(
+                Paragraph::new("").style(Style::default().bg(theme.sidebar_bg)),
+                gap,
+            );
+        }
+    }
 }
 
 // ── Focus/border styling ────────────────────────────────────────────
@@ -814,8 +914,8 @@ fn draw_projects_list(frame: &mut Frame, area: Rect, app: &mut App, theme: &Them
     let row_h = 4u16;
 
     // Collected up front (rather than iterating `app.projects` directly) so
-    // the loop body can also push into `app.project_click_map` — mirrors
-    // `draw_automation_loops_list`'s `loop_ids_and_meta` pattern, since both
+    // the graph body can also push into `app.project_click_map` — mirrors
+    // `draw_automation_graphs_list`'s `graph_ids_and_meta` pattern, since both
     // borrow `app` mutably for the click map alongside the data being drawn.
     let visible: Vec<(usize, String, String, String)> = app
         .projects
@@ -837,7 +937,7 @@ fn draw_projects_list(frame: &mut Frame, area: Rect, app: &mut App, theme: &Them
         if y + 3 > area.y + area.height {
             break;
         }
-        draw_project_loop_card(
+        draw_project_graph_card(
             frame,
             Rect::new(area.x, y, area.width, 3),
             *idx == app.selected_project,
@@ -859,7 +959,7 @@ fn knowledge_border_style_is_focused(app: &App) -> bool {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn draw_project_loop_card(
+fn draw_project_graph_card(
     frame: &mut Frame,
     area: Rect,
     selected: bool,
@@ -902,32 +1002,33 @@ fn draw_project_loop_card(
     );
 }
 
-// ── Automation layer: loops sub-list ────────────────────────────────
+// ── Automation layer: graphs sub-list ────────────────────────────────
 
-/// Status icon shown on a loop's card. Every one of the five statuses gets
-/// its own icon/color pair so a listed loop is identifiable at a glance
+/// Status icon shown on a graph's card. Every one of the five statuses gets
+/// its own icon/color pair so a listed graph is identifiable at a glance
 /// without hiding any of them (running/paused/draft/failed/completed are
 /// listed side by side now that the sidebar no longer filters by status);
 /// `blocked` is a `Paused` sub-state (its latest run recorded a
-/// `loop_report_blocker` description) that borrows `Failed`'s color to flag
+/// `graph_report_blocker` description) that borrows `Failed`'s color to flag
 /// it needs the same attention, distinguished from `Failed` by icon.
-fn loop_status_icon(lp: &Loop, meta: &LoopSidebarMeta, theme: &Theme) -> (&'static str, Color) {
+fn graph_status_icon(lp: &Graph, meta: &GraphSidebarMeta, theme: &Theme) -> (&'static str, Color) {
     match lp.status {
-        LoopStatus::Running => ("▶", STATUS_RUNNING),
-        LoopStatus::Paused if meta.blocked => ("⛔", STATUS_FAIL),
-        LoopStatus::Paused => ("⏸", theme.warning),
-        LoopStatus::Draft => ("○", theme.dim_text),
-        LoopStatus::Completed => ("✓", STATUS_OK),
-        LoopStatus::Failed => ("✗", STATUS_FAIL),
+        GraphStatus::Running => ("▶", STATUS_RUNNING),
+        GraphStatus::Pausing => ("⏸", theme.warning),
+        GraphStatus::Paused if meta.blocked => ("⛔", STATUS_FAIL),
+        GraphStatus::Paused => ("⏸", theme.warning),
+        GraphStatus::Draft => ("○", theme.dim_text),
+        GraphStatus::Completed => ("✓", STATUS_OK),
+        GraphStatus::Failed => ("✗", STATUS_FAIL),
     }
 }
 
-fn draw_active_loop_card(
+fn draw_active_graph_card(
     frame: &mut Frame,
     area: Rect,
     selected: bool,
-    lp: &Loop,
-    meta: &LoopSidebarMeta,
+    lp: &Graph,
+    meta: &GraphSidebarMeta,
     panel_focused: bool,
     theme: &Theme,
 ) {
@@ -938,7 +1039,7 @@ fn draw_active_loop_card(
     };
     let title_style = project_title_style(selected, panel_focused, theme);
     let meta_style = project_meta_style(selected, theme);
-    let (icon, icon_color) = loop_status_icon(lp, meta, theme);
+    let (icon, icon_color) = graph_status_icon(lp, meta, theme);
 
     frame.render_widget(
         Paragraph::new(Line::from(vec![
@@ -953,7 +1054,7 @@ fn draw_active_loop_card(
         Rect::new(area.x, area.y, area.width, 1),
     );
 
-    let last_run_style = if lp.status == LoopStatus::Running {
+    let last_run_style = if lp.status == GraphStatus::Running {
         Style::default().fg(STATUS_RUNNING)
     } else {
         meta_style
@@ -980,12 +1081,12 @@ fn draw_active_loop_card(
     );
 }
 
-fn draw_automation_loops_list(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
-    let loops = app.sidebar_loops();
-    if loops.is_empty() {
+fn draw_automation_graphs_list(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
+    let graphs = app.sidebar_graphs();
+    if graphs.is_empty() {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                "No loops",
+                "No graphs",
                 Style::default().fg(theme.muted_text),
             ))),
             area,
@@ -994,27 +1095,29 @@ fn draw_automation_loops_list(frame: &mut Frame, area: Rect, app: &mut App, them
     }
 
     let selected_index = app
-        .selected_loop_id
+        .selected_graph_id
         .as_deref()
-        .and_then(|id| loops.iter().position(|lp| lp.id == id));
+        .and_then(|id| graphs.iter().position(|lp| lp.id == id));
     let scroll = scroll_state(
-        loops.len(),
+        graphs.len(),
         selected_index,
+        // CT14 (FR5): visible-row count recomputed from the current height
+        // every frame — never remembered from when the list was last drawn.
         ((area.height + 1) / 4).max(1) as usize,
     );
-    let panel_focused =
-        layer_focused(app, SidebarLayer::Automation) && app.automation_kind == AutomationKind::Loop;
+    let panel_focused = layer_focused(app, SidebarLayer::Automation)
+        && app.automation_kind == AutomationKind::Graph;
     let mut y = area.y;
     let row_h = 4u16;
 
-    let loop_ids_and_meta: Vec<(String, Loop, LoopSidebarMeta)> = loops
+    let graph_ids_and_meta: Vec<(String, Graph, GraphSidebarMeta)> = graphs
         .iter()
         .copied()
         .skip(scroll.start)
         .take(scroll.max_visible)
         .map(|lp| {
             let meta = app
-                .loop_sidebar_meta
+                .graph_sidebar_meta
                 .get(&lp.id)
                 .cloned()
                 .unwrap_or_default();
@@ -1022,14 +1125,14 @@ fn draw_automation_loops_list(frame: &mut Frame, area: Rect, app: &mut App, them
         })
         .collect();
 
-    for (id, lp, meta) in &loop_ids_and_meta {
+    for (id, lp, meta) in &graph_ids_and_meta {
         if y + 3 > area.y + area.height {
             break;
         }
         let card_area = Rect::new(area.x, y, area.width, 3);
-        let selected = app.selected_loop_id.as_deref() == Some(id.as_str());
-        draw_active_loop_card(frame, card_area, selected, lp, meta, panel_focused, theme);
-        app.automation_loop_click_map.push((id.clone(), y, y + 3));
+        let selected = app.selected_graph_id.as_deref() == Some(id.as_str());
+        draw_active_graph_card(frame, card_area, selected, lp, meta, panel_focused, theme);
+        app.automation_graph_click_map.push((id.clone(), y, y + 3));
         y += row_h;
     }
 
@@ -1271,7 +1374,7 @@ fn draw_agent_list(
     draw_scroll_indicators(frame, area, scroll.has_up, scroll.has_down, theme);
 }
 
-fn draw_scroll_indicators(
+pub(crate) fn draw_scroll_indicators(
     frame: &mut Frame,
     area: Rect,
     has_up: bool,
@@ -1681,7 +1784,13 @@ fn graph_edge_row_budget(inner_height: u16, edge_count: usize) -> usize {
     edge_count.min(inner_height as usize)
 }
 
-fn draw_project_graph(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+pub(crate) fn draw_project_graph(
+    frame: &mut Frame,
+    area: Rect,
+    app: &App,
+    theme: &Theme,
+    offset: u16,
+) {
     if app.project_graph_trees.is_empty() || app.project_graph_edges.is_empty() {
         let msg = if app.projects.len() <= 1 {
             "No relationships yet. Press Enter on a project to link."
@@ -1698,9 +1807,19 @@ fn draw_project_graph(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         return;
     }
 
-    let edge_count = graph_edge_row_budget(area.height, app.project_graph_edges.len());
+    let total = app.project_graph_edges.len();
+    let visible = area.height as usize;
+    let max_offset = total.saturating_sub(visible.max(1));
+    let clamped_offset = (offset as usize).min(max_offset);
+    let edge_count = graph_edge_row_budget(area.height, total.saturating_sub(clamped_offset));
 
-    for (i, edge) in app.project_graph_edges.iter().take(edge_count).enumerate() {
+    for (i, edge) in app
+        .project_graph_edges
+        .iter()
+        .skip(clamped_offset)
+        .take(edge_count)
+        .enumerate()
+    {
         let y = area.y + i as u16;
         if y + 1 > area.y + area.height {
             break;
@@ -1708,6 +1827,10 @@ fn draw_project_graph(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         let relation = match edge.relation.as_str() {
             "depends_on" => "(depends)",
             "complements" => "(complements)",
+            "extends" => "(extends)",
+            "publishes" => "(publishes)",
+            "contains" => "(contains)",
+            "relates_to" => "(related)",
             _ => "",
         };
         let label = format!(
@@ -1745,7 +1868,7 @@ fn draw_project_relation_dialog(
 
     let block = Block::default()
         .title(format!(" Link: {} ", dialog.from_name))
-        .borders(borders_for(theme))
+        .borders(dialog_borders_for(theme))
         .border_style(Style::default().fg(theme.header_color));
     frame.render_widget(block, area);
 
@@ -1858,7 +1981,7 @@ mod tests {
     }
 
     /// Builds an App backed by a fresh temp DB with `project_count` registered
-    /// projects and one loop named "Probe Loop", then renders the sidebar into
+    /// projects and one graph named "Probe Graph", then renders the sidebar into
     /// a `width`x`height` TestBackend and returns the screen contents as a
     /// flat string for substring assertions. The `Live` tab is active by
     /// default (matching `App::new`) — use `render_sidebar_text_on_tab` to
@@ -1899,7 +2022,7 @@ mod tests {
         prepare: impl FnOnce(&mut App),
     ) -> String {
         use crate::db::Database;
-        use crate::domain::loops::{Loop, LoopStatus};
+        use crate::domain::graphs::{Graph, GraphStatus};
         use crate::domain::project::Project;
         use crate::tui::app::App;
         use ratatui::backend::TestBackend;
@@ -1922,14 +2045,16 @@ mod tests {
             })
             .unwrap();
         }
-        db.insert_loop(&Loop {
+        db.insert_graph(&Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
+            infra_node_id: None,
             id: "wf-probe".to_string(),
-            name: "Probe Loop".to_string(),
+            name: "Probe Graph".to_string(),
             description: None,
             workdir: "/tmp/probe".to_string(),
-            status: LoopStatus::Running,
+            status: GraphStatus::Running,
             trigger: None,
             created_at: chrono::Utc::now(),
             started_at: None,
@@ -1938,16 +2063,21 @@ mod tests {
             auto_continue_at: None,
             auto_continue_action: None,
             active_run_queue_id: None,
-            on_completed: None,
+            hooks: std::collections::BTreeMap::new(),
         })
         .unwrap();
 
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).unwrap();
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         app.sidebar_layer = active_layer;
         assert!(
-            !app.sidebar_loops().is_empty(),
-            "loop should be loaded from db"
+            !app.sidebar_graphs().is_empty(),
+            "graph should be loaded from db"
         );
         prepare(&mut app);
 
@@ -1995,7 +2125,7 @@ mod tests {
     }
 
     /// The active tab's sub-sections are each capped at their own demand, so a
-    /// tall sidebar holding one loop and no sessions leaves rows unclaimed.
+    /// tall sidebar holding one graph and no sessions leaves rows unclaimed.
     /// Those rows belong to the brain. `draw_sidebar_tabs` used to hand back a
     /// hardcoded zero-height rect instead, which made the brain unreachable no
     /// matter how `split_brain_or_graph` later divided it.
@@ -2031,6 +2161,116 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_has_tab_to_list_gap() {
+        use crate::db::Database;
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        std::mem::forget(tmp);
+        let db = Arc::new(Database::new(&path).unwrap());
+        let data_dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
+        let theme = Theme::modern();
+        let backend = TestBackend::new(45, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                draw_sidebar_tabs(frame, area, &mut app, &theme);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        assert!((0..buffer.area.width)
+            .all(|x| { buffer[(x, 1)].symbol() == " " && buffer[(x, 1)].bg == theme.sidebar_bg }));
+    }
+
+    #[test]
+    fn sidebar_has_gaps_between_all_sections() {
+        use crate::db::Database;
+        use crate::tui::agent::InteractiveAgent;
+        use crate::tui::app::App;
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        std::mem::forget(tmp);
+        let db = Arc::new(Database::new(&path).unwrap());
+        let data_dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
+        // Seed Live with one interactive and one terminal so both sub-panels allocate.
+        let mut interactive = InteractiveAgent::spawn_terminal(
+            "cat",
+            "/tmp",
+            80,
+            24,
+            Some("interactive-1"),
+            &[],
+            Color::White,
+        )
+        .expect("spawn interactive");
+        interactive.status = crate::tui::agent::AgentStatus::Running;
+        app.interactive_agents.push(interactive);
+        let mut terminal = InteractiveAgent::spawn_terminal(
+            "cat",
+            "/tmp",
+            80,
+            24,
+            Some("terminal-1"),
+            &[],
+            Color::White,
+        )
+        .expect("spawn terminal");
+        terminal.status = crate::tui::agent::AgentStatus::Running;
+        app.terminal_agents.push(terminal);
+        app.agents.push(AgentEntry::Interactive(0));
+        app.agents.push(AgentEntry::Terminal(0));
+        app.sidebar_layer = SidebarLayer::Live;
+
+        let theme = Theme::modern();
+        let backend = TestBackend::new(45, 40);
+        let mut terminal_backend = Terminal::new(backend).unwrap();
+        terminal_backend
+            .draw(|frame| {
+                let area = frame.area();
+                draw_sidebar_tabs(frame, area, &mut app, &theme);
+            })
+            .unwrap();
+        let buffer = terminal_backend.backend().buffer();
+        // Tab bar is y=0, gap at y=1 must be blank sidebar_bg.
+        assert!((0..buffer.area.width)
+            .all(|x| { buffer[(x, 1)].symbol() == " " && buffer[(x, 1)].bg == theme.sidebar_bg }));
+        // After the first titled panel (interactive) there must be another blank gap
+        // before the terminal panel, and likewise between terminal and groups.
+        // Count blank rows inside the Live body to ensure the rule is applied between
+        // every section, not just tabs->list.
+        let blank_gap_rows = (0..buffer.area.height)
+            .filter(|&y| {
+                (0..buffer.area.width).all(|x| {
+                    buffer[(x, y)].symbol() == " " && buffer[(x, y)].bg == theme.sidebar_bg
+                })
+            })
+            .count();
+        assert!(
+            blank_gap_rows >= 3,
+            "expected at least 3 breathing gaps (tab->interactive, interactive->terminal, terminal->groups), found {blank_gap_rows}"
+        );
+    }
+
+    #[test]
     fn every_tab_label_fits_uncut_at_the_real_sidebar_width() {
         // The reason the count is gone: 33 columns / 3 tabs leaves 11 per
         // cell, which fits "Automation" and "Knowledge" but not either of
@@ -2046,22 +2286,22 @@ mod tests {
     }
 
     #[test]
-    fn automation_layer_shows_running_loop() {
+    fn automation_layer_shows_running_graph() {
         let text =
             render_sidebar_text_on_tab(1, 45, 40, &Theme::classic(), SidebarLayer::Automation);
-        assert!(text.contains("Probe Loop"), "expected loop name visible");
+        assert!(text.contains("Probe Graph"), "expected graph name visible");
     }
 
     // ── Last-run sidebar meta (replaces the old done/total spec count) ──
 
-    /// Builds an App around a caller-supplied `Loop` plus whatever the `seed`
+    /// Builds an App around a caller-supplied `Graph` plus whatever the `seed`
     /// closure inserts into the same DB, renders the Automation tab into a
     /// TestBackend, and returns the screen text. Unlike
     /// `render_sidebar_text_on_tab` (a fixed `Running`, spec-less "Probe
-    /// Loop"), this lets each last-run test control the loop's status and
-    /// `loop_runs` history directly.
+    /// Graph"), this lets each last-run test control the graph's status and
+    /// `graph_runs` history directly.
     fn render_automation_text_for(
-        lp: &crate::domain::loops::Loop,
+        lp: &crate::domain::graphs::Graph,
         seed: impl FnOnce(&crate::db::Database),
     ) -> String {
         use crate::db::Database;
@@ -2073,11 +2313,16 @@ mod tests {
         let path = tmp.path().to_path_buf();
         std::mem::forget(tmp);
         let db = Arc::new(Database::new(&path).unwrap());
-        db.insert_loop(lp).unwrap();
+        db.insert_graph(lp).unwrap();
         seed(&db);
 
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).unwrap();
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         app.sidebar_layer = SidebarLayer::Automation;
 
         let backend = TestBackend::new(50, 40);
@@ -2092,12 +2337,14 @@ mod tests {
         buffer_to_text(terminal.backend().buffer())
     }
 
-    fn bare_loop(id: &str, status: LoopStatus) -> Loop {
-        Loop {
+    fn bare_graph(id: &str, status: GraphStatus) -> Graph {
+        Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
+            infra_node_id: None,
             id: id.to_string(),
-            name: format!("Loop {id}"),
+            name: format!("Graph {id}"),
             description: None,
             workdir: "/tmp/probe".to_string(),
             status,
@@ -2109,38 +2356,41 @@ mod tests {
             auto_continue_at: None,
             auto_continue_action: None,
             active_run_queue_id: None,
-            on_completed: None,
+            hooks: std::collections::BTreeMap::new(),
         }
     }
 
-    /// Records one node run against `loop_id` via a queue-driven spec — the
-    /// spec's own `loop_id` is `None` (never bound to this loop, so
-    /// `list_loop_specs(loop_id)` stays empty, exactly like a queue-driven
-    /// run), but `loop_runs.loop_id` is set, which is what the sidebar's
+    /// Records one node run against `graph_id` via a queue-driven spec — the
+    /// spec's own `graph_id` is `None` (never bound to this graph, so
+    /// `list_graph_specs(graph_id)` stays empty, exactly like a queue-driven
+    /// run), but `graph_runs.graph_id` is set, which is what the sidebar's
     /// last-run query reads.
     fn seed_queue_driven_run(
         db: &crate::db::Database,
-        loop_id: &str,
+        graph_id: &str,
         started_at: chrono::DateTime<chrono::Utc>,
         output: Option<serde_json::Value>,
     ) {
-        use crate::domain::loops::{
-            LoopNode, LoopNodeKind, LoopNodeRun, LoopRunStatus, LoopSpec, LoopSpecStatus,
+        use crate::domain::graphs::{
+            GraphNode, GraphNodeKind, GraphNodeRun, GraphRunStatus, GraphSpec, GraphSpecStatus,
         };
 
-        let spec_id = format!("{loop_id}-spec");
-        let node_id = format!("{loop_id}-node");
-        db.insert_loop_spec(&LoopSpec {
+        let spec_id = format!("{graph_id}-spec");
+        let node_id = format!("{graph_id}-node");
+        db.insert_graph_spec(&GraphSpec {
             id: spec_id.clone(),
-            loop_id: None,
+            graph_id: None,
             name: "queued spec".to_string(),
             description: None,
             position: 0,
             parallelizable: false,
-            status: LoopSpecStatus::Completed,
+            status: GraphSpecStatus::Completed,
             started_at: Some(started_at),
             completed_at: Some(started_at),
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -2148,23 +2398,23 @@ mod tests {
             completed_via_at: None,
         })
         .unwrap();
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: node_id.clone(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "node".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({}),
             position: 0,
             created_at: started_at,
         })
         .unwrap();
-        db.insert_loop_run(&LoopNodeRun {
-            id: format!("{loop_id}-run"),
-            loop_id: loop_id.to_string(),
+        db.insert_graph_run(&GraphNodeRun {
+            id: format!("{graph_id}-run"),
+            graph_id: graph_id.to_string(),
             spec_id,
             node_id,
-            status: LoopRunStatus::Pass,
+            status: GraphRunStatus::Pass,
             input: None,
             output,
             started_at,
@@ -2173,19 +2423,21 @@ mod tests {
             pid: None,
             boot_id: None,
             session_id: None,
+            executed_platform: None,
+            executed_model: None,
         })
         .unwrap();
     }
 
     #[test]
-    fn queue_driven_loop_shows_last_run_time_not_zero_zero() {
+    fn queue_driven_graph_shows_last_run_time_not_zero_zero() {
         let started_at = chrono::Utc::now() - chrono::Duration::minutes(2);
-        let text = render_automation_text_for(&bare_loop("q1", LoopStatus::Draft), |db| {
+        let text = render_automation_text_for(&bare_graph("q1", GraphStatus::Draft), |db| {
             seed_queue_driven_run(db, "q1", started_at, None);
         });
         assert!(
             !text.contains("0/0"),
-            "queue-driven loop must not fall back to the old done/total count: {text}"
+            "queue-driven graph must not fall back to the old done/total count: {text}"
         );
         assert!(
             text.contains("2m"),
@@ -2194,19 +2446,19 @@ mod tests {
     }
 
     #[test]
-    fn never_run_loop_shows_plainly_not_blank_or_zero() {
-        let text = render_automation_text_for(&bare_loop("never1", LoopStatus::Draft), |_db| {});
+    fn never_run_graph_shows_plainly_not_blank_or_zero() {
+        let text = render_automation_text_for(&bare_graph("never1", GraphStatus::Draft), |_db| {});
         assert!(
             !text.contains("0/0"),
-            "a never-run loop must not show a misleading zero: {text}"
+            "a never-run graph must not show a misleading zero: {text}"
         );
         assert!(
             text.contains("never"),
-            "a never-run loop must say so plainly: {text}"
+            "a never-run graph must say so plainly: {text}"
         );
     }
 
-    /// Scans row `y` for the first cell matching one of `loop_status_icon`'s
+    /// Scans row `y` for the first cell matching one of `graph_status_icon`'s
     /// glyphs, returning its `(symbol, fg color)` — used to check that every
     /// status renders a visually distinct card without depending on the
     /// inner panel's exact border offset.
@@ -2233,34 +2485,39 @@ mod tests {
         let db = Arc::new(Database::new(&path).unwrap());
 
         // Staggered `created_at`, oldest first, so recency ordering is
-        // unambiguous once sorted (none of these loops have run, so
+        // unambiguous once sorted (none of these graphs have run, so
         // `last_activity` falls back to `created_at`).
         let base = chrono::Utc::now() - chrono::Duration::hours(10);
-        let mut draft = bare_loop("s-draft", LoopStatus::Draft);
+        let mut draft = bare_graph("s-draft", GraphStatus::Draft);
         draft.created_at = base;
-        db.insert_loop(&draft).unwrap();
+        db.insert_graph(&draft).unwrap();
 
-        let mut failed = bare_loop("s-failed", LoopStatus::Failed);
+        let mut failed = bare_graph("s-failed", GraphStatus::Failed);
         failed.created_at = base + chrono::Duration::minutes(10);
         failed.autorun_at = Some(chrono::Utc::now() + chrono::Duration::minutes(20));
-        db.insert_loop(&failed).unwrap();
+        db.insert_graph(&failed).unwrap();
 
-        let mut completed = bare_loop("s-completed", LoopStatus::Completed);
+        let mut completed = bare_graph("s-completed", GraphStatus::Completed);
         completed.created_at = base + chrono::Duration::minutes(20);
-        db.insert_loop(&completed).unwrap();
+        db.insert_graph(&completed).unwrap();
 
-        let mut paused = bare_loop("s-paused", LoopStatus::Paused);
+        let mut paused = bare_graph("s-paused", GraphStatus::Paused);
         paused.created_at = base + chrono::Duration::minutes(30);
-        db.insert_loop(&paused).unwrap();
+        db.insert_graph(&paused).unwrap();
 
-        let mut running = bare_loop("s-running", LoopStatus::Running);
+        let mut running = bare_graph("s-running", GraphStatus::Running);
         running.created_at = base + chrono::Duration::minutes(40);
-        db.insert_loop(&running).unwrap();
+        db.insert_graph(&running).unwrap();
 
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).unwrap();
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         app.sidebar_layer = SidebarLayer::Automation;
-        app.automation_kind = AutomationKind::Loop;
+        app.automation_kind = AutomationKind::Graph;
 
         let theme = Theme::classic();
         let backend = TestBackend::new(50, 60);
@@ -2275,16 +2532,16 @@ mod tests {
         let text = buffer_to_text(&buffer);
 
         for name in [
-            "Loop s-draft",
-            "Loop s-failed",
-            "Loop s-completed",
-            "Loop s-paused",
-            "Loop s-running",
+            "Graph s-draft",
+            "Graph s-failed",
+            "Graph s-completed",
+            "Graph s-paused",
+            "Graph s-running",
         ] {
             assert!(text.contains(name), "expected {name} listed: {text}");
         }
 
-        let click_map = app.automation_loop_click_map.clone();
+        let click_map = app.automation_graph_click_map.clone();
         let ids: Vec<&str> = click_map.iter().map(|(id, _, _)| id.as_str()).collect();
         assert_eq!(
             ids,
@@ -2311,26 +2568,26 @@ mod tests {
 
         assert!(
             text.contains("resumes"),
-            "a pending autorun must be visible on its loop's sidebar entry: {text}"
+            "a pending autorun must be visible on its graph's sidebar entry: {text}"
         );
     }
 
     #[test]
-    fn running_loop_shows_running_not_a_relative_time() {
+    fn running_graph_shows_running_not_a_relative_time() {
         let started_at = chrono::Utc::now() - chrono::Duration::minutes(2);
-        let text = render_automation_text_for(&bare_loop("run1", LoopStatus::Running), |db| {
+        let text = render_automation_text_for(&bare_graph("run1", GraphStatus::Running), |db| {
             seed_queue_driven_run(db, "run1", started_at, None);
         });
         assert!(
             text.contains("running"),
-            "an actively-running loop must say 'running', not its stale last-run time: {text}"
+            "an actively-running graph must say 'running', not its stale last-run time: {text}"
         );
     }
 
     #[test]
-    fn blocked_indicator_still_renders_for_paused_loop_with_blocker() {
+    fn blocked_indicator_still_renders_for_paused_graph_with_blocker() {
         let started_at = chrono::Utc::now() - chrono::Duration::minutes(5);
-        let text = render_automation_text_for(&bare_loop("blocked1", LoopStatus::Paused), |db| {
+        let text = render_automation_text_for(&bare_graph("blocked1", GraphStatus::Paused), |db| {
             seed_queue_driven_run(
                 db,
                 "blocked1",
@@ -2340,7 +2597,7 @@ mod tests {
         });
         assert!(
             text.contains('⛔'),
-            "a paused loop with a reported blocker must still show the blocked icon: {text}"
+            "a paused graph with a reported blocker must still show the blocked icon: {text}"
         );
     }
 
@@ -2348,12 +2605,12 @@ mod tests {
     fn inactive_tabs_bodies_are_not_rendered() {
         // The whole point of tabs over stacked layers: exactly one body is
         // visible at a time. A project ("only-in-knowledge") and the
-        // always-present "Probe Loop" (Automation) must not leak into the
+        // always-present "Probe Graph" (Automation) must not leak into the
         // Live tab's render, and vice versa.
         let live_text =
             render_sidebar_text_on_tab(1, 45, 40, &Theme::classic(), SidebarLayer::Live);
         assert!(
-            !live_text.contains("Probe Loop"),
+            !live_text.contains("Probe Graph"),
             "Automation's body must not render while Live is active"
         );
         assert!(
@@ -2368,7 +2625,7 @@ mod tests {
             "Knowledge's body must render while Knowledge is active"
         );
         assert!(
-            !knowledge_text.contains("Probe Loop"),
+            !knowledge_text.contains("Probe Graph"),
             "Automation's body must not render while Knowledge is active"
         );
     }
@@ -2453,7 +2710,12 @@ mod tests {
         }
 
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).unwrap();
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         assert_eq!(app.projects.len(), 2, "projects should be loaded from db");
         // Only the active tab's body renders now — Knowledge must be active
         // for its project rows to draw at all.
@@ -2490,7 +2752,7 @@ mod tests {
         let total: u16 = demands.iter().sum();
         assert_eq!(total, 38);
 
-        let alloc = fair_section_heights(&demands, 30);
+        let alloc = fair_section_heights(&demands, 30, None, 0);
 
         // No section is ever allocated more than it needs.
         for (got, want) in alloc.iter().zip(demands.iter()) {
@@ -2512,7 +2774,7 @@ mod tests {
         let budget = 24;
         assert!(demands.iter().sum::<u16>() > budget);
 
-        let alloc = fair_section_heights(&demands, budget);
+        let alloc = fair_section_heights(&demands, budget, None, 0);
 
         for (got, want) in alloc.iter().zip(demands.iter()) {
             assert!(got <= want, "section {got} exceeded its demand {want}");
@@ -2523,7 +2785,7 @@ mod tests {
     #[test]
     fn fair_section_heights_fits_everyone_when_budget_is_ample() {
         let demands = [needed_agents(1), needed_agents(2)];
-        let alloc = fair_section_heights(&demands, 100);
+        let alloc = fair_section_heights(&demands, 100, None, 0);
         assert_eq!(alloc[0], demands[0]);
         assert_eq!(alloc[1], demands[1]);
     }
@@ -2601,7 +2863,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).unwrap();
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
 
         let mut ok_agent = InteractiveAgent::spawn_terminal(
             "cat",
@@ -2780,7 +3047,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).unwrap();
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
 
         let backend = TestBackend::new(33, 40);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -2827,7 +3099,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).unwrap();
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         app.sidebar_layer = SidebarLayer::Live;
 
         let theme = Theme::classic();
@@ -2871,33 +3148,33 @@ mod tests {
 
     #[test]
     fn fair_section_heights_empty() {
-        assert_eq!(fair_section_heights(&[], 20), Vec::<u16>::new());
+        assert_eq!(fair_section_heights(&[], 20, None, 0), Vec::<u16>::new());
     }
 
     #[test]
     fn fair_section_heights_single_section() {
-        assert_eq!(fair_section_heights(&[10], 20), vec![10]);
+        assert_eq!(fair_section_heights(&[10], 20, None, 0), vec![10]);
     }
 
     #[test]
     fn fair_section_heights_budget_exactly_matches_demand() {
-        assert_eq!(fair_section_heights(&[5, 5, 5], 15), vec![5, 5, 5]);
+        assert_eq!(fair_section_heights(&[5, 5, 5], 15, None, 0), vec![5, 5, 5]);
     }
 
     #[test]
     fn fair_section_heights_budget_exceeds_demand() {
-        assert_eq!(fair_section_heights(&[3, 3], 20), vec![3, 3]);
+        assert_eq!(fair_section_heights(&[3, 3], 20, None, 0), vec![3, 3]);
     }
 
     #[test]
     fn fair_section_heights_budget_falls_short() {
-        let result = fair_section_heights(&[10, 10], 10);
+        let result = fair_section_heights(&[10, 10], 10, None, 0);
         assert_eq!(result.iter().sum::<u16>(), 10);
     }
 
     #[test]
     fn fair_section_heights_one_small_one_large() {
-        let result = fair_section_heights(&[2, 20], 12);
+        let result = fair_section_heights(&[2, 20], 12, None, 0);
         assert_eq!(result[0], 2);
         assert_eq!(result[1], 10);
         assert_eq!(result.iter().sum::<u16>(), 12);
@@ -2905,16 +3182,93 @@ mod tests {
 
     #[test]
     fn fair_section_heights_budget_zero() {
-        assert_eq!(fair_section_heights(&[10, 10], 0), vec![0, 0]);
+        assert_eq!(fair_section_heights(&[10, 10], 0, None, 0), vec![0, 0]);
     }
 
     #[test]
     fn fair_section_heights_many_sections() {
-        let result = fair_section_heights(&[5, 5, 5, 5, 5], 10);
+        let result = fair_section_heights(&[5, 5, 5, 5, 5], 10, None, 0);
         assert_eq!(result.iter().sum::<u16>(), 10);
         for &v in &result {
             assert!(v <= 5);
         }
+    }
+
+    #[test]
+    fn fair_section_heights_focused_section_gets_floor_on_short_screen() {
+        // Short screen: three sections, each wanting far more than a fair
+        // share of the budget. Plain fair distribution splits it roughly
+        // evenly and leaves every section below the floor needed to show
+        // the cursor -- "I can navigate them but I can't see them".
+        let demands = [needed_agents(5), needed_agents(5), needed_agents(5)];
+        let budget = 15;
+
+        // Precondition: without a focused section the section the user is
+        // looking at is starved below the floor. If this ever stops being
+        // true the test below no longer proves the floor does anything.
+        let fair = fair_section_heights(&demands, budget, None, 0);
+        assert!(
+            fair[0] < 6,
+            "precondition: fair split should starve the section, got {}",
+            fair[0]
+        );
+
+        // Focusing that section guarantees it the floor before fair
+        // distribution runs for the rest.
+        let alloc = fair_section_heights(&demands, budget, Some(0), 6);
+        assert!(
+            alloc[0] >= 6,
+            "focused section got {} rows, expected >= 6",
+            alloc[0]
+        );
+
+        // Still within budget, still nobody over their demand.
+        assert!(alloc.iter().sum::<u16>() <= budget);
+        for (got, want) in alloc.iter().zip(demands.iter()) {
+            assert!(got <= want, "section got {got} exceeded demand {want}");
+        }
+    }
+
+    #[test]
+    fn fair_section_heights_floor_respects_demand() {
+        let demands = [4, 20, 20];
+        let alloc = fair_section_heights(&demands, 30, Some(0), 6);
+        assert_eq!(alloc[0], 4);
+        assert!(alloc.iter().sum::<u16>() <= 30);
+    }
+
+    #[test]
+    fn fair_section_heights_floor_respects_budget() {
+        let demands = [20, 20];
+        let alloc = fair_section_heights(&demands, 3, Some(0), 6);
+        assert!(alloc[0] <= 3);
+        assert!(alloc.iter().sum::<u16>() <= 3);
+    }
+
+    #[test]
+    fn fair_section_heights_no_focus_unchanged() {
+        // With no focused section and a zero floor the function must
+        // behave exactly as it did before the floor was added: the small
+        // sections cap at their demand, the large one takes the rest.
+        let demands = [needed_agents(6), needed_agents(1), groups_list_demand(1)];
+        assert_eq!(fair_section_heights(&demands, 20, None, 0), vec![10, 6, 4]);
+    }
+
+    #[test]
+    fn fair_section_heights_focus_no_effect_when_budget_is_ample() {
+        // Tall screen: everything fits. The focused-section floor must not
+        // change what any section gets -- no visible difference from the
+        // pre-floor behaviour on screens with sufficient height.
+        let demands = [needed_agents(3), needed_agents(2), groups_list_demand(2)];
+        let ample = demands.iter().sum::<u16>() + 10;
+        assert_eq!(
+            fair_section_heights(&demands, ample, Some(0), 6),
+            fair_section_heights(&demands, ample, None, 0),
+        );
+        assert_eq!(
+            fair_section_heights(&demands, ample, Some(0), 6),
+            demands.to_vec(),
+        );
     }
 
     #[test]
@@ -3136,7 +3490,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).unwrap();
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         app.rag_paused = true;
         assert_eq!(rag_info_title(&app), " ragInfo ⏸ ");
     }
@@ -3149,7 +3508,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).unwrap();
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         app.rag_paused = false;
         assert_eq!(rag_info_title(&app), " ragInfo ");
     }
@@ -3162,7 +3526,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).unwrap();
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         app.rag_info.queued_items = 5;
         assert_eq!(rag_queue_text(&app), "5 queued");
     }
@@ -3175,7 +3544,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).unwrap();
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         app.rag_info.queued_items = 0;
         assert_eq!(rag_queue_text(&app), "");
     }
@@ -3206,7 +3580,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).unwrap();
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         let backend = TestBackend::new(33, 20);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
@@ -3226,7 +3605,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).unwrap();
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         let backend = TestBackend::new(33, 20);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
@@ -3244,7 +3628,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).unwrap();
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         app.rag_embeddings_model = "text-embedding-3-small".to_string();
         app.rag_model_loaded = true;
         app.rag_acquisition_state =
@@ -3264,7 +3653,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).unwrap();
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         app.rag_embeddings_model = "text-embedding-3-small".to_string();
         app.rag_acquisition_state = Some(crate::rag::status::AcquisitionState::Failed {
             reason: "boom".to_string(),
@@ -3398,7 +3792,7 @@ mod tests {
     }
 
     #[test]
-    fn knowledge_tab_with_an_edge_draws_the_graph_panel() {
+    fn knowledge_tab_does_not_draw_graph_in_sidebar() {
         let text = render_sidebar_text_with(
             2,
             34,
@@ -3417,12 +3811,8 @@ mod tests {
             },
         );
         assert!(
-            text.contains("project graph"),
-            "graph panel title missing: {text}"
-        );
-        assert!(
-            text.contains("project0") && text.contains("project1"),
-            "edge label missing: {text}"
+            !text.contains("project graph"),
+            "project graph belongs to the right-panel Knowledge face: {text}"
         );
     }
 
@@ -3442,6 +3832,110 @@ mod tests {
         assert!(
             !text.contains("project graph"),
             "graph panel must not render on Live: {text}"
+        );
+    }
+
+    #[test]
+    fn registered_projects_with_zero_relations_do_not_claim_graph_height() {
+        // Spec CB17: registered projects with zero relations make
+        // `refresh_project_graph` fill `trees` with one singleton per project
+        // while leaving `edges` empty. The old `!trees.is_empty()` height-claim
+        // check fired on that, stealing GRAPH_MIN_HEIGHT rows to show only
+        // "No relationships yet". The fixed criterion is the same one the
+        // drawer uses — it requires an edge — so with none the panel claims
+        // nothing and the strip goes to Brian's Brain.
+        //
+        // Guard: `knowledge_tab_with_an_edge_draws_the_graph_panel` renders
+        // with this exact (project_count, width, height, tab) and asserts the
+        // panel *does* appear once an edge is present. The only difference
+        // here is the relation count, so a pass proves the criterion — not a
+        // lack of room — is what withholds the rows.
+        let text = render_sidebar_text_with(
+            2,
+            34,
+            40,
+            &Theme::classic(),
+            SidebarLayer::Knowledge,
+            |app| {
+                assert!(
+                    !app.project_graph_trees.is_empty(),
+                    "precondition: singleton trees should be present"
+                );
+                assert!(
+                    app.project_graph_edges.is_empty(),
+                    "precondition: no relations were registered"
+                );
+            },
+        );
+        assert!(
+            !text.contains("project graph"),
+            "graph panel must not claim height with zero relations: {text}"
+        );
+        assert!(
+            !text.contains("No relationships yet"),
+            "empty message must not be drawn when panel has no content: {text}"
+        );
+    }
+
+    #[test]
+    fn ct14_fair_section_floor_tracks_cursor_not_stored_focus() {
+        // CT14 render invariant (C32 follow-on): the guaranteed floor follows
+        // the section holding the cursor, not the stored focus alone — so a
+        // zero-row focused section cannot steal the floor on short screens.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        std::mem::forget(tmp);
+        let db = Arc::new(crate::db::Database::new(&path).unwrap());
+        let data_dir = tempfile::tempdir().unwrap();
+        let mut app = crate::tui::app::App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
+
+        // Cursor sits on a terminal row while stored focus claims Interactive.
+        app.agents = vec![
+            AgentEntry::Interactive(0),
+            AgentEntry::Interactive(1),
+            AgentEntry::Terminal(0),
+        ];
+        app.selected = 2;
+        app.agent_section_focus = AgentSectionFocus::Interactive;
+        assert_eq!(
+            super::live_section_floor_index(&app, &[0, 1], &[2]),
+            Some(1),
+            "floor must track the terminal cursor, not the stored Interactive focus"
+        );
+
+        // Automation mirror: cursor on a background agent while the stored
+        // kind claims Graphs (whose list is empty here).
+        app.agents = vec![AgentEntry::Agent(crate::domain::models::Agent {
+            id: "bg-1".to_string(),
+            prompt: String::new(),
+            trigger: None,
+            cli: crate::domain::models::Cli::new("claude"),
+            model: None,
+            effort: None,
+            working_dir: None,
+            enabled: true,
+            enable_at: None,
+            created_at: chrono::Utc::now(),
+            log_path: "/tmp/bg-1.log".to_string(),
+            timeout_minutes: 15,
+            expires_at: None,
+            last_run_at: None,
+            last_run_ok: None,
+            last_triggered_at: None,
+            trigger_count: 0,
+        })];
+        app.selected = 0;
+        app.selected_graph_id = None;
+        app.automation_kind = AutomationKind::Graph;
+        assert_eq!(
+            super::automation_section_floor_index(&app, &[0]),
+            Some(0),
+            "floor must track the agent cursor, not the stored Graph kind"
         );
     }
 }

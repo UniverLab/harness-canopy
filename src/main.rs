@@ -16,7 +16,7 @@ mod db;
 mod domain;
 mod dynamic_skills;
 mod executor;
-mod loop_engine;
+mod graph_engine;
 mod mcp_wizard_module;
 mod rag;
 mod scheduler;
@@ -30,17 +30,20 @@ mod watchers;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use daemon::agent_cli::{handle_agent_action, AgentAction};
 use daemon::bridge::run_bridge;
 use daemon::clean_cli::handle_clean_action;
 use daemon::cli::{handle_daemon_action, DaemonAction};
 use daemon::doctor::run_doctor;
-use daemon::loop_cli::{handle_loop_action, LoopAction};
+use daemon::graph_cli::{handle_graph_action, GraphAction};
 use daemon::models_cli::{handle_models_action, ModelsAction};
 use daemon::project_cli::{handle_project_action, ProjectAction};
 use daemon::prompts_cli::{handle_prompts_action, PromptsAction};
 use daemon::rag_cli::{handle_rag_action, RagAction};
+use daemon::sandbox_cli::{handle_sandbox_action, SandboxAction};
 use daemon::server::{run_http_server, run_stdio_server};
 use daemon::spec_cli::{handle_spec_action, SpecAction};
+use daemon::subagent_cli::{handle_subagent_action, SubagentAction};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -60,6 +63,15 @@ enum Commands {
         #[command(subcommand)]
         action: DaemonAction,
     },
+    /// Check for a newer stable release and install it (asks first; refuses cargo installs).
+    Update {
+        /// Only print whether an update exists; exit 1 when one does, 0 otherwise. Changes nothing.
+        #[arg(long)]
+        check: bool,
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Run a health check diagnosing common issues.
     Doctor,
     /// Run the MCP server over stdio transport.
@@ -76,18 +88,45 @@ enum Commands {
         #[arg(long = "force-skills")]
         force_skills: bool,
     },
+    /// Remove canopy and optionally delete all local data.
+    Uninstall {
+        /// Preview what would be removed without changing anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Also delete ~/.canopy (database, models, config). Without this flag,
+        /// only the tool footprint is removed; data is preserved.
+        #[arg(long)]
+        purge: bool,
+        /// Skip the interactive confirmation prompt for --purge.
+        #[arg(long)]
+        yes: bool,
+        /// Only remove canopy's own `canopy` server entry from each platform config;
+        /// leave shared registry servers (`fetch`, `filesystem`) in place.
+        #[arg(long = "keep-shared-servers")]
+        keep_shared_servers: bool,
+    },
     /// Interactive wizard to configure MCP in your AI client.
-    Mcp,
+    Mcp {
+        /// Use a local registry directory instead of fetching from GitHub.
+        /// Useful for development and testing registry changes before publishing.
+        #[arg(long = "local-registry", value_name = "PATH")]
+        local_registry: Option<PathBuf>,
+    },
     /// RAG indexing management.
     Rag {
         #[command(subcommand)]
         action: RagAction,
     },
-    /// Inspect and control loop state (list/info are read-only;
+    /// Inspect and control graph state (list/info are read-only;
     /// run/pause/continue/reset/autorun delegate to the daemon).
-    Loop {
+    Graph {
         #[command(subcommand)]
-        action: LoopAction,
+        action: GraphAction,
+    },
+    /// Inspect registered agents (read-only, served from the local database).
+    Agent {
+        #[command(subcommand)]
+        action: AgentAction,
     },
     /// Manage standalone specs.
     Spec {
@@ -142,6 +181,16 @@ enum Commands {
         #[command(subcommand)]
         action: PromptsAction,
     },
+    /// Launch and collect ephemeral subagents.
+    Subagent {
+        #[command(subcommand)]
+        action: SubagentAction,
+    },
+    /// List, land, or discard canopy sandbox worktrees left by sandboxed graph runs.
+    Sandbox {
+        #[command(subcommand)]
+        action: SandboxAction,
+    },
     /// Run a stdio sidecar proxy that injects canopy identity headers.
     Bridge {
         /// Agent session ID to bind this bridge process.
@@ -168,6 +217,10 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Some(Commands::Daemon { action }) => handle_daemon_action(action, cli.port).await,
+        Some(Commands::Update { check, yes }) => {
+            let code = autoupdate::run_update(check, yes)?;
+            std::process::exit(code);
+        }
         Some(Commands::Doctor) => run_doctor().await,
         Some(Commands::Stdio) => run_stdio_server().await,
         Some(Commands::Serve) => run_http_server(cli.port).await,
@@ -181,12 +234,27 @@ async fn main() -> Result<()> {
             tokio::task::block_in_place(|| setup_module::run_setup(force_skills))?;
             Ok(())
         }
-        Some(Commands::Mcp) => {
+        Some(Commands::Mcp { local_registry }) => {
+            if let Some(path) = local_registry {
+                setup_module::registry_fetch::set_local_registry(path);
+            }
             tokio::task::block_in_place(mcp_wizard_module::run_mcp_wizard)?;
             Ok(())
         }
+        Some(Commands::Uninstall {
+            dry_run,
+            purge,
+            yes,
+            keep_shared_servers,
+        }) => {
+            tokio::task::block_in_place(|| {
+                handle_uninstall(dry_run, purge, yes, keep_shared_servers)
+            })?;
+            Ok(())
+        }
         Some(Commands::Rag { action }) => handle_rag_action(action).await,
-        Some(Commands::Loop { action }) => handle_loop_action(action, cli.port).await,
+        Some(Commands::Graph { action }) => handle_graph_action(action, cli.port).await,
+        Some(Commands::Agent { action }) => handle_agent_action(action).await,
         Some(Commands::Spec { action }) => handle_spec_action(action, cli.port).await,
         Some(Commands::Models { action }) => handle_models_action(action).await,
         Some(Commands::Project { action }) => handle_project_action(action).await,
@@ -199,6 +267,8 @@ async fn main() -> Result<()> {
             stop_daemon,
         }) => handle_clean_action(dry_run, older_than, hard, yes, no_reclaim, stop_daemon).await,
         Some(Commands::Prompts { action }) => handle_prompts_action(action).await,
+        Some(Commands::Subagent { action }) => handle_subagent_action(action, cli.port).await,
+        Some(Commands::Sandbox { action }) => handle_sandbox_action(action).await,
         Some(Commands::Bridge {
             agent_id,
             port,
@@ -213,12 +283,42 @@ async fn main() -> Result<()> {
                     setup_module::run_setup(false)?;
                 }
                 setup_module::maybe_refresh_registry();
-                let _ = autoupdate::check_and_update_if_needed();
+                autoupdate::maybe_spawn_update_notice();
                 tui::run_tui()
             })?;
             Ok(())
         }
     }
+}
+
+fn handle_uninstall(
+    dry_run: bool,
+    purge: bool,
+    yes: bool,
+    keep_shared_servers: bool,
+) -> Result<()> {
+    let plan = setup_module::uninstall::build_uninstall_plan(keep_shared_servers)?;
+
+    if dry_run {
+        setup_module::uninstall::print_dry_run(&plan);
+        return Ok(());
+    }
+
+    if purge && !yes {
+        println!("  This will DELETE ~/.canopy (database, models, config, logs).");
+        println!("  Type 'yes' to confirm:");
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        if input.trim() != "yes" {
+            println!("  Aborted.");
+            return Ok(());
+        }
+    }
+
+    setup_module::uninstall::execute_uninstall(&plan, purge)?;
+    println!();
+    println!("  canopy has been uninstalled.");
+    Ok(())
 }
 
 pub(crate) fn resolve_port(port_override: Option<u16>) -> u16 {
@@ -256,7 +356,7 @@ pub(crate) fn ensure_data_dir() -> Result<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::CommandFactory;
+    use clap::{CommandFactory, Parser};
 
     fn assert_all_subcommands_have_about(cmd: &clap::Command, prefix: &str) {
         for sub in cmd.get_subcommands() {
@@ -279,5 +379,41 @@ mod tests {
     fn all_subcommands_have_help_text() {
         let cmd = <Cli as CommandFactory>::command();
         assert_all_subcommands_have_about(&cmd, "");
+    }
+
+    #[test]
+    fn mcp_subcommand_accepts_local_registry_flag() {
+        // CB65: `canopy mcp` must accept the same --local-registry flag as setup.
+        let cli = Cli::try_parse_from(["canopy", "mcp", "--local-registry", "/tmp/r"])
+            .expect("`canopy mcp --local-registry /tmp/r` must parse");
+        match cli.command {
+            Some(Commands::Mcp { local_registry }) => {
+                assert_eq!(local_registry, Some(PathBuf::from("/tmp/r")));
+            }
+            _ => panic!("expected Commands::Mcp with local_registry"),
+        }
+    }
+
+    #[test]
+    fn uninstall_accepts_keep_shared_servers_flag() {
+        let cli = Cli::try_parse_from(["canopy", "uninstall", "--keep-shared-servers"])
+            .expect("`canopy uninstall --keep-shared-servers` must parse");
+        match cli.command {
+            Some(Commands::Uninstall {
+                keep_shared_servers,
+                ..
+            }) => assert!(keep_shared_servers),
+            _ => panic!("expected Commands::Uninstall with keep_shared_servers"),
+        }
+
+        let cli = Cli::try_parse_from(["canopy", "uninstall"])
+            .expect("`canopy uninstall` must parse without the shared-server flag");
+        match cli.command {
+            Some(Commands::Uninstall {
+                keep_shared_servers,
+                ..
+            }) => assert!(!keep_shared_servers),
+            _ => panic!("expected Commands::Uninstall with keep_shared_servers"),
+        }
     }
 }

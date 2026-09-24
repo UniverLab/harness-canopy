@@ -2,6 +2,7 @@ use anyhow::Result;
 use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 use std::time::Duration;
 
+use super::agent_focus::is_reserved_focus_key;
 use super::search_picker::resolve_cd_path;
 use crate::tui::agent::{key_to_bytes, InteractiveAgent};
 use crate::tui::app::terminal_search::TerminalSearch;
@@ -69,6 +70,12 @@ pub fn handle_terminal_direct_pty_key(
     code: KeyCode,
     modifiers: KeyModifiers,
 ) -> Result<()> {
+    // CT16: while the child holds the alternate screen, canopy's reserved
+    // keys stay with canopy (single source of truth: `is_reserved_focus_key`,
+    // shared with the interactive path). Never forward them to the PTY.
+    if app.terminal_agents[idx].in_alternate_screen() && is_reserved_focus_key(code, modifiers) {
+        return Ok(());
+    }
     let bytes = key_to_bytes(code, modifiers);
     let sensitive_input = {
         let agent = &app.terminal_agents[idx];
@@ -880,6 +887,75 @@ mod should_skip_warp_sync_tests {
     fn agent_not_in_alternate_screen_does_not_skip() {
         let agent = make_agent();
         assert!(!should_skip_warp_sync(&agent));
+    }
+}
+
+#[cfg(test)]
+mod alternate_screen_key_routing_tests {
+    use super::*;
+    use crate::db::Database;
+    use crate::tui::app::types::AgentEntry;
+    use crate::tui::app::types::{App, Focus};
+    use ratatui::style::Color;
+    use std::io::{self, Write};
+    use std::sync::{Arc, Mutex};
+    use tempfile::{tempdir, NamedTempFile};
+
+    struct RecordingWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for RecordingWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().expect("lock recording writer").extend(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn test_app(agent: InteractiveAgent) -> App {
+        let tmp = NamedTempFile::new().expect("create temp database");
+        let db = Arc::new(Database::new(&tmp.path().to_path_buf()).expect("create database"));
+        let data_dir = tempdir().expect("create data directory");
+        let mut app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        app.terminal_agents.push(agent);
+        app.agents = vec![AgentEntry::Terminal(0)];
+        app.selected = 0;
+        app.focus = Focus::Agent;
+        app
+    }
+
+    #[test]
+    fn alternate_screen_forwards_content_keys_but_keeps_reserved_keys_in_canopy() {
+        let mut agent = InteractiveAgent::spawn_terminal(
+            "cat",
+            "/tmp",
+            80,
+            24,
+            Some("routing"),
+            &[],
+            Color::White,
+        )
+        .expect("spawn terminal");
+        agent.vt.lock().expect("lock vt").process(b"\x1b[?1049h");
+        let written = Arc::new(Mutex::new(Vec::new()));
+        agent.writer = Arc::new(Mutex::new(Box::new(RecordingWriter(Arc::clone(&written)))));
+        let mut app = test_app(agent);
+
+        handle_terminal_direct_pty_key(&mut app, 0, KeyCode::F(10), KeyModifiers::NONE)
+            .expect("reserved key handling");
+        assert!(written.lock().expect("lock written bytes").is_empty());
+
+        handle_terminal_direct_pty_key(&mut app, 0, KeyCode::Char('a'), KeyModifiers::NONE)
+            .expect("content key handling");
+        assert_eq!(&*written.lock().expect("lock written bytes"), b"a");
+        app.terminal_agents[0].kill();
     }
 }
 

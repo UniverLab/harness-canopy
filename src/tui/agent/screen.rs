@@ -808,4 +808,140 @@ mod tests {
             "replaying no lines must not print a marker or anything else: {out:?}"
         );
     }
+
+    #[test]
+    fn ct15_scrolled_past_visible_is_in_scrollback() {
+        let agent = InteractiveAgent::spawn_terminal(
+            "cat",
+            "/tmp",
+            80,
+            10,
+            Some("ct15-scrollback"),
+            &[],
+            ratatui::style::Color::White,
+        )
+        .expect("spawn terminal");
+
+        let mut vt = agent.vt.lock().unwrap();
+        for i in 0..40 {
+            vt.process(format!("ordinary line {i}\r\n").as_bytes());
+        }
+        vt.process(b"\r\x1b[Kprogress\r\nexit status 0\r\n");
+        drop(vt);
+
+        let output = agent.last_lines(50);
+        for i in 0..40 {
+            assert!(
+                output.contains(&format!("ordinary line {i}")),
+                "ordinary line {i} missing from last_lines: {output:?}"
+            );
+        }
+        assert!(output.contains("exit status 0"));
+
+        let total_abs = {
+            let mut vt = agent.vt.lock().unwrap();
+            vt.screen_mut().set_scrollback(usize::MAX);
+            let max_sb = vt.screen().scrollback();
+            vt.screen_mut().set_scrollback(0);
+            max_sb + 10
+        };
+        let full_scrollback = agent.lines_at_scrollback_range(0, total_abs);
+        for i in 0..40 {
+            assert!(
+                full_scrollback.contains(&format!("ordinary line {i}")),
+                "ordinary line {i} missing from scrollback history: {full_scrollback:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ct15_nonzero_exit_keeps_output_like_zero() {
+        let mut success = spawn_test_terminal("ct15-exit-zero");
+        let mut failure = spawn_test_terminal("ct15-exit-one");
+        let stream = b"ordinary line\r\nerror: boom\r\n";
+        success.vt.lock().unwrap().process(stream);
+        failure.vt.lock().unwrap().process(stream);
+        success.status = crate::tui::agent::AgentStatus::Exited(0);
+        failure.status = crate::tui::agent::AgentStatus::Exited(1);
+
+        assert_eq!(success.last_lines(50), failure.last_lines(50));
+        assert!(failure.last_lines(50).contains("error: boom"));
+    }
+
+    #[test]
+    fn ct15_preview_and_focus_identical() {
+        let mut agent = spawn_test_terminal("ct15-preview-focus");
+        agent
+            .vt
+            .lock()
+            .unwrap()
+            .process(b"ordinary line 1\r\nordinary line 2\r\n\r\x1b[Kprogress\r\nerror: boom\r\n");
+
+        let focused = agent.last_lines(50);
+        let snapshot = agent.screen_snapshot().unwrap();
+        let rendered = snapshot
+            .cells
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .filter_map(|cell| cell.as_ref().map(|cell| cell.ch.as_str()))
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("ordinary line 1"));
+        assert!(rendered.contains("error: boom"));
+        assert!(focused.contains("ordinary line 1"));
+
+        agent.scroll_offset = 1;
+        assert_eq!(focused, agent.last_lines(50));
+    }
+
+    #[test]
+    #[ignore = "portal sanity test driving real PTY/shell; run explicitly"]
+    fn ct15_portal_repro_sanity() {
+        let mut agent = InteractiveAgent::spawn_terminal(
+            "sh",
+            "/tmp",
+            80,
+            24,
+            Some("ct15-portal-sanity"),
+            &[],
+            ratatui::style::Color::White,
+        )
+        .expect("spawn terminal");
+
+        std::thread::sleep(std::time::Duration::from_millis(800));
+
+        let script = br#"bash -c 'for i in 1 2 3 4 5; do echo "ordinary line $i"; done; for pct in 10 40 70 100; do printf "\r\033[K  progress %s%%" "$pct"; sleep 0.05; done; printf "\n"; echo "error: boom"; echo "exit status 1"'
+"#;
+        agent.write_to_pty(script).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        agent.poll();
+        let last = agent.last_lines(50);
+
+        let snap = agent.screen_snapshot().expect("snapshot");
+        let mut screen_text = String::new();
+        for row in &snap.cells {
+            let mut line = String::new();
+            for cell in row {
+                if let Some(c) = cell {
+                    line.push_str(&c.ch);
+                } else {
+                    line.push(' ');
+                }
+            }
+            screen_text.push_str(line.trim_end());
+            screen_text.push('\n');
+        }
+
+        assert!(last.contains("ordinary line 1"), "lost via last_lines");
+        assert!(
+            screen_text.contains("ordinary line 1"),
+            "lost via screen_snapshot"
+        );
+    }
 }

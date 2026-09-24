@@ -34,7 +34,7 @@ The dialog includes a CLI picker, model picker, seed identity selector
 - **System dashboard** — CPU, memory, disk, GPU (NVIDIA/Linux/macOS) and
   temperatures with amber/red alert thresholds. Under WSL, metrics come
   from the Windows host via PowerShell.
-- **Live loop view** — real-time graph rendering of the running loop's
+- **Live graph view** — real-time graph rendering of the running graph's
   current spec, auto-following the active node. Manual node inspection
   shows per-node run info (status, elapsed time, output tail, iteration).
   `Esc` toggles between auto-follow and manual mode.
@@ -50,7 +50,7 @@ Canopy tracks 28 achievement-style missions across six categories:
 | **Environment** | 4 | Firefly Catcher, Harness Master, Canopy Explorer, Multitasker |
 | **Intelligence** | 6 | World Connector, Data Architect, Deep Searcher, Digital Archeologist |
 | **Projects** | 3 | Project Polyglot, The Gardener, Data Hoarder |
-| **Loop** | 4 | Automation Engineer, Pipeline Pilot, Parallel Vision, Loop Survivor |
+| **Graph** | 4 | Automation Engineer, Pipeline Pilot, Parallel Vision, Graph Survivor |
 | **Seeds** | 4 | First Bloom, Identity Evolved, The Orchard, Deep Roots |
 | **SysInfo** | 7 | Full Throttle, Nuclear Winter, VRAM Squeezer, YOLO Pilot |
 
@@ -62,11 +62,11 @@ visible in the TUI's gamification panel.
 
 The sidebar shows sections for the selected project:
 
-- **Loops** — active loops with spec progress (done/total) and current
-  spec indicator. Selecting a loop opens the live loop view.
+- **Graphs** — active graphs with spec progress (done/total) and current
+  spec indicator. Selecting a graph opens the live graph view.
 - **Backlog** — standalone specs tagged to the project's workdir, not
-  yet assigned to any loop.
-- **History** — completed and failed loops for the project.
+  yet assigned to any graph.
+- **History** — completed and failed graphs for the project.
 
 Sections are automatically filtered by the selected project's workdir.
 
@@ -89,15 +89,15 @@ Sections are automatically filtered by the selected project's workdir.
 - **Launchpad** — start new sessions with previous-mission recovery and
   auto-injected context.
 
-## Loops in the TUI
+## Graphs in the TUI
 
-The loop editor allows inline editing of node config JSON with
-validation. See [Loops](loops.md) for the engine itself.
+The graph editor allows inline editing of node config JSON with
+validation. See [Graphs](graphs.md) for the engine itself.
 
 ## Notifications
 
 Native desktop notifications for task completions, failures, watcher
-triggers, and loop lifecycle events (loop started, spec completed with
-progress, loop finished with outcome, blocker reported, completion hook
+triggers, and graph lifecycle events (graph started, spec completed with
+progress, graph finished with outcome, blocker reported, completion hook
 failure). Platform auto-detected: WSL (PowerShell toasts), macOS
 (`osascript`), Linux (`notify-send`).

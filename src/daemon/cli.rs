@@ -3,9 +3,11 @@ use anyhow::Result;
 use clap::Subcommand;
 
 use crate::application::ports::{AgentRepository, StateRepository};
+use crate::daemon::daemon_start::{start_daemon_live, StartIntent};
 use crate::daemon::process::{
-    diagnose_daemon, is_process_running, kill_port_occupant, print_last_n_lines, read_pid,
-    remove_pid_file, resolve_port_pid, send_signal, service_manager_facts, DaemonState,
+    diagnose_daemon, is_process_running, kill_port_occupant, orphan_needs_kill, print_last_n_lines,
+    read_pid, remove_pid_file, resolve_port_pid, send_signal, service_manager_facts,
+    service_manager_stop, service_unit_installed, should_stop_via_manager, DaemonState,
 };
 
 #[cfg(target_os = "linux")]
@@ -69,7 +71,7 @@ pub(crate) fn configured_port(data_dir: &std::path::Path) -> u16 {
     let db_path = database_path(data_dir);
     db_path
         .exists()
-        .then(|| Database::new(&db_path).ok())
+        .then(|| Database::new_safe(&db_path, data_dir).ok())
         .flatten()
         .and_then(|db| db.get_state("port").ok().flatten())
         .and_then(|s| s.parse().ok())
@@ -109,55 +111,31 @@ async fn handle_start(data_dir: &std::path::Path, port_override: Option<u16>) ->
         }
     }
 
-    kill_port_occupant(port);
-
     install_service_if_needed(&exe, port);
 
-    let mut cmd = std::process::Command::new(&exe);
-    cmd.arg("serve");
-    if let Some(p) = port_override {
-        cmd.arg("--port").arg(p.to_string());
+    // CB72 orphan rule (FR2): with a unit installed, clear the port only
+    // when the live occupant is provably NOT that unit's MainPID — a
+    // proven orphan blocking the unit from ever binding. Never fires
+    // without an installed unit, and never against the managed daemon;
+    // when nothing is listening there is nothing to kill.
+    if orphan_needs_kill(
+        service_unit_installed(),
+        service_manager_facts().and_then(|m| m.pid),
+        resolve_port_pid(port),
+    ) {
+        kill_port_occupant(port);
     }
 
-    kill_port_occupant(port);
+    // CB72: one shared start for every path — asks systemd/launchd to start
+    // the installed unit (and waits for the port) when one exists; only
+    // falls back to a direct detached spawn when no unit/manager is there
+    // to own the daemon.
+    start_daemon_live(port, StartIntent::Explicit, &exe, port_override, data_dir)?;
 
-    let log_path = data_dir.join("daemon.log");
-    let log_file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)?;
-    let log_file_err = log_file.try_clone()?;
-
-    cmd.stdout(log_file)
-        .stderr(log_file_err)
-        .stdin(std::process::Stdio::null());
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        unsafe {
-            cmd.pre_exec(|| {
-                libc::setsid();
-                Ok(())
-            });
-        }
-    }
-
-    let child = cmd.spawn()?;
-    let child_pid = child.id();
-
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-    if !is_process_running(child_pid) {
-        eprintln!(
-            "Daemon failed to start — check logs at {}",
-            log_path.display()
-        );
-        return Err(anyhow::anyhow!("Daemon process exited immediately"));
-    }
-
-    println!("Daemon started (PID: {child_pid})");
-    println!("Logs: {}", log_path.display());
+    println!(
+        "Daemon started on port {port} (managed by systemd/launchd when a unit is installed, detached otherwise)"
+    );
+    println!("Logs: {}", data_dir.join("daemon.log").display());
     Ok(())
 }
 
@@ -202,6 +180,26 @@ fn install_service_if_needed(_exe: &std::path::Path, _port: u16) {
 
 async fn handle_stop(data_dir: &std::path::Path) -> Result<()> {
     let port = configured_port(data_dir);
+
+    // FR3: when the live daemon IS the unit's MainPID, stop through the
+    // manager (`systemctl --user stop` / `launchctl unload`) — signalling
+    // that PID directly reads as an unclean exit under `Restart=on-failure`
+    // and systemd would respawn it behind the user's back. An orphan
+    // (occupant ≠ MainPID) or an unmanaged daemon keeps the signal path
+    // below untouched.
+    let manager = service_manager_facts();
+    let occupant = resolve_port_pid(port);
+    if should_stop_via_manager(manager.as_ref(), occupant) {
+        let name = manager.map(|m| m.name).unwrap_or("the service manager");
+        let stopped = service_manager_stop();
+        remove_pid_file(data_dir);
+        if stopped {
+            println!("Daemon stopped via {name}");
+        } else {
+            eprintln!("Warning: {name} did not confirm the stop — the daemon may still be running");
+        }
+        return Ok(());
+    }
 
     // Signal whichever PIDs are actually alive among the PID file and the
     // port's real occupant — not just the PID file. An orphaned `canopy
@@ -291,7 +289,7 @@ fn handle_status(data_dir: &std::path::Path) -> Result<()> {
         DaemonState::Running { pid } => pid,
     };
 
-    let Ok(db) = Database::new(&database_path(data_dir)) else {
+    let Ok(db) = Database::new_safe(&database_path(data_dir), data_dir) else {
         println!("Daemon: RUNNING (PID: {pid})");
         return Ok(());
     };
@@ -372,7 +370,7 @@ fn handle_health_check(data_dir: &std::path::Path) -> Result<()> {
         return Ok(());
     }
     let backup_path = health_routine::backup_path(data_dir);
-    let db = Database::new(&db_path)?;
+    let db = Database::new_safe(&db_path, data_dir)?;
 
     println!("Running database health check...");
     let status = health_routine::run_health_check(&db, &db_path, &backup_path);
@@ -437,5 +435,33 @@ fn handle_uninstall_service() -> Result<()> {
             eprintln!("\x1b[31m✗\x1b[0m  Failed: {e}");
             Err(e)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// (c) FR2's `handle_start` kill rule, as the pure predicate the
+    /// sequence hinges on: unit installed + something holds the port +
+    /// that something is NOT the unit's MainPID → kill the orphan first,
+    /// then the shared start runs `systemctl --user start` (that second
+    /// half is asserted by the `Explicit` call in `daemon_start`'s
+    /// unit-start test). Every other combination must keep its hands off
+    /// the port — especially the no-unit case, which is the TUI/setup
+    /// (Auto) callers' guarantee that they can never kill.
+    #[test]
+    fn explicit_start_kills_orphan_then_starts_unit() {
+        // Proven orphan: unit installed, no live MainPID, orphan listens → kill.
+        assert!(orphan_needs_kill(true, None, Some(9)));
+        // Managed daemon holds its own port → never kill.
+        assert!(!orphan_needs_kill(true, Some(9), Some(9)));
+        // No unit installed → never kill (Auto callers can't reach a kill).
+        assert!(!orphan_needs_kill(false, None, Some(9)));
+        // Nothing holds the port → nothing to kill.
+        assert!(!orphan_needs_kill(true, None, None));
+        // Unit's MainPID alive but a *different* process holds the port →
+        // the listener is an orphan, kill it.
+        assert!(orphan_needs_kill(true, Some(7), Some(9)));
     }
 }

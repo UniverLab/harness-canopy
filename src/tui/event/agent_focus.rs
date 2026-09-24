@@ -20,6 +20,12 @@ enum FocusedAgent {
 }
 
 pub fn handle_agent_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> Result<()> {
+    // CT14: `project_focus` is only meaningful on the Knowledge layer — the
+    // `cycle/step/switch` clears in `App` uphold this; flag any drift early.
+    debug_assert!(
+        app.project_focus.is_none() || app.sidebar_layer == SidebarLayer::Knowledge,
+        "project_focus survived leaving Knowledge"
+    );
     if app.sidebar_layer == SidebarLayer::Knowledge && app.project_focus.is_some() {
         handle_project_focus_key(app, code, modifiers);
         return Ok(());
@@ -140,11 +146,7 @@ fn cycle_split_picker(app: &mut App, forward: bool) {
         return;
     }
 
-    app.split_picker_idx = if forward {
-        (app.split_picker_idx + 1) % len
-    } else {
-        app.split_picker_idx.checked_sub(1).unwrap_or(len - 1)
-    };
+    app.split_picker_idx = crate::tui::selection::move_index(app.split_picker_idx, len, forward);
 }
 
 fn toggle_split_orientation(app: &mut App) {
@@ -235,9 +237,17 @@ const RESERVED_FOCUS_KEYS: &[(KeyCode, KeyModifiers)] = &[
     // to make the transfer reachable again from inside a claimed session. The
     // owner doesn't use Codex's binding and will rebind it on Codex's side.
     (KeyCode::Char('t'), KeyModifiers::CONTROL),
+    // Shift+F4 ends the focused session (`handle_termination_shortcut`).
+    // Deliberately not frame navigation — a second eyes-open exception in the
+    // style of Ctrl+T above: bare F4 is a common child binding and stays the
+    // child's, but shifted-F4 is already canopy's "end the session" chord in
+    // split mode (see footer.rs), so reserving it makes one binding mean one
+    // thing everywhere and gives a claimed child a visible way out. Plain F4
+    // is intentionally NOT reserved.
+    (KeyCode::F(4), KeyModifiers::SHIFT),
 ];
 
-fn is_reserved_focus_key(code: KeyCode, modifiers: KeyModifiers) -> bool {
+pub(crate) fn is_reserved_focus_key(code: KeyCode, modifiers: KeyModifiers) -> bool {
     RESERVED_FOCUS_KEYS
         .iter()
         .any(|(reserved, required)| *reserved == code && modifiers.contains(*required))
@@ -270,6 +280,16 @@ fn currently_focused_target(app: &App) -> Option<FocusedAgent> {
 /// Codex (spec C23) negotiates Kitty without ever using the alternate
 /// screen, so either signal alone must be sufficient — neither is dropped.
 pub(crate) fn focused_child_claimed_keyboard(app: &App) -> bool {
+    // Ownership boundary (CT6): only the child in actual `Focus::Agent`
+    // owns the keyboard. A session merely selected/previewed in
+    // `Focus::Preview` never claims arrows — preview navigation owns them.
+    // This is why preview arrows were sometimes swallowed: without the
+    // focus gate, a previewed child in the alternate screen (or with Kitty
+    // keyboard flags negotiated) counted as "focused" and its claim reached
+    // preview-level dispatch.
+    if app.focus != Focus::Agent {
+        return false;
+    }
     let Some(target) = currently_focused_target(app) else {
         return false;
     };
@@ -400,20 +420,17 @@ fn handle_termination_shortcut(app: &mut App, code: KeyCode, modifiers: KeyModif
     }
 
     if modifiers.contains(KeyModifiers::SHIFT) {
-        return terminate_split_session_if_present(app);
+        // End the focused session whether or not a split is active. In a split
+        // this kills the focused pane's session (via terminate_focused_session,
+        // which also clears the now-dead group); without a split it kills the
+        // single focused session. Never dissolve-only: dissolving (keep both
+        // sessions) stays on plain F4.
+        app.terminate_focused_session();
+        return true;
     }
 
     if app.active_split_id.is_some() {
         app.dissolve_split();
-        return true;
-    }
-
-    app.terminate_focused_session();
-    true
-}
-
-fn terminate_split_session_if_present(app: &mut App) -> bool {
-    if app.active_split_id.is_none() {
         return true;
     }
 
@@ -476,22 +493,7 @@ fn try_cycle_from_playground(app: &mut App, forward: bool) -> bool {
 }
 
 fn try_cycle_through_focusable(app: &mut App, forward: bool) -> bool {
-    let focusable: Vec<usize> = app
-        .agents
-        .iter()
-        .enumerate()
-        .filter(|(_, entry)| {
-            matches!(
-                entry,
-                AgentEntry::Interactive(_)
-                    | AgentEntry::Terminal(_)
-                    | AgentEntry::Group(_)
-                    | AgentEntry::Agent(_)
-                    | AgentEntry::Orphaned(_)
-            )
-        })
-        .map(|(idx, _)| idx)
-        .collect();
+    let focusable = app.cycle_focus_indices();
 
     if focusable.is_empty() {
         app.activate_playground();
@@ -558,11 +560,7 @@ fn advance_focusable_selection(app: &mut App, forward: bool, focusable: &[usize]
         .iter()
         .position(|&idx| idx == app.selected)
         .unwrap_or(0);
-    let next_pos = if forward {
-        (current_pos + 1) % focusable.len()
-    } else {
-        current_pos.checked_sub(1).unwrap_or(focusable.len() - 1)
-    };
+    let next_pos = crate::tui::selection::move_index(current_pos, focusable.len(), forward);
     app.selected = focusable[next_pos];
     app.focus = Focus::Agent;
     app.update_agent_section_focus_on_change(0);
@@ -909,6 +907,7 @@ mod tests {
             }),
             cli: Cli::new("claude"),
             model: Some("original-model".to_string()),
+            effort: None,
             working_dir: Some("/original/dir".to_string()),
             enabled: true,
             enable_at: None,
@@ -929,7 +928,12 @@ mod tests {
         db.upsert_agent(&agent).expect("seed agent");
 
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.agents = vec![AgentEntry::Agent(agent)];
         app.selected = 0;
         app.focus = Focus::Agent;
@@ -939,7 +943,12 @@ mod tests {
     fn app_with_project_focus(tab: ProjectTab) -> App {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.projects = vec![crate::domain::project::Project::new("/tmp/proj")];
         app.sidebar_layer = SidebarLayer::Knowledge;
         app.selected_project = 0;
@@ -1305,6 +1314,89 @@ mod tests {
         // f10, split, not exited
         assert!(!dismisses_exited_session(KeyCode::F(10), true, false));
     }
+
+    #[test]
+    fn shift_cycle_on_live_wraps_within_live_and_skips_background_agent() {
+        // CT20 regression: on Live, Shift+Up/Down must walk exactly
+        // live_indices() (Interactive/Terminal/Orphaned/Group) — never the
+        // background Agent row, even though it sits earlier in app.agents.
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        app.agents = vec![
+            AgentEntry::Agent(cron_agent("bg-1")),
+            AgentEntry::Interactive(0),
+            AgentEntry::Interactive(1),
+        ];
+        app.sidebar_layer = SidebarLayer::Live;
+        app.selected = 1; // Interactive(0)
+        app.focus = Focus::Agent;
+
+        assert!(handle_agent_cycle_shortcut(
+            &mut app,
+            KeyCode::Up,
+            KeyModifiers::SHIFT
+        ));
+        assert_eq!(
+            app.selected, 2,
+            "Shift+Up from the first Live item wraps to the last Live item (Interactive(1)), not the background agent"
+        );
+
+        assert!(handle_agent_cycle_shortcut(
+            &mut app,
+            KeyCode::Down,
+            KeyModifiers::SHIFT
+        ));
+        assert_eq!(
+            app.selected, 1,
+            "Shift+Down from Interactive(1) returns to Interactive(0)"
+        );
+    }
+
+    #[test]
+    fn shift_cycle_on_automation_stays_within_automation_entries() {
+        // CT20: on Automation, the cycle must stay inside that tab's own
+        // agent entries and never step onto a Live-tab entry that happens to
+        // share the app.agents list.
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        app.agents = vec![
+            AgentEntry::Group(0), // a Live entry that must never be visited here
+            AgentEntry::Agent(cron_agent("bg-1")),
+            AgentEntry::Agent(cron_agent("bg-2")),
+        ];
+        app.sidebar_layer = SidebarLayer::Automation;
+        app.selected = 1; // first background agent
+        app.focus = Focus::Agent;
+
+        assert!(handle_agent_cycle_shortcut(
+            &mut app,
+            KeyCode::Down,
+            KeyModifiers::SHIFT
+        ));
+        assert_eq!(app.selected, 2, "steps to the second background agent");
+
+        assert!(handle_agent_cycle_shortcut(
+            &mut app,
+            KeyCode::Down,
+            KeyModifiers::SHIFT
+        ));
+        assert_eq!(
+            app.selected, 1,
+            "wraps back to the first background agent, never to the Group at index 0"
+        );
+    }
 }
 
 // C23: `handle_focus_shortcuts` must yield every key but F10 once a focused
@@ -1351,7 +1443,12 @@ mod focus_shortcuts_keyboard_claim_tests {
     fn app_with_interactive_agent(agent: InteractiveAgent) -> App {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.interactive_agents = vec![agent];
         app.agents = vec![AgentEntry::Interactive(0)];
         app.selected = 0;
@@ -1374,6 +1471,7 @@ mod focus_shortcuts_keyboard_claim_tests {
                 (KeyCode::Left, KeyModifiers::SHIFT),
                 (KeyCode::Right, KeyModifiers::SHIFT),
                 (KeyCode::Char('t'), KeyModifiers::CONTROL),
+                (KeyCode::F(4), KeyModifiers::SHIFT),
             ]
         );
         assert!(is_reserved_focus_key(KeyCode::F(10), KeyModifiers::NONE));
@@ -1383,6 +1481,20 @@ mod focus_shortcuts_keyboard_claim_tests {
         assert!(is_reserved_focus_key(
             KeyCode::Char('t'),
             KeyModifiers::CONTROL
+        ));
+    }
+
+    #[test]
+    fn shift_f4_is_reserved_but_plain_f4_is_not() {
+        // CT10: Shift+F4 must survive a claimed keyboard; bare F4 stays the
+        // child's so plain function keys keep working inside sessions.
+        assert!(is_reserved_focus_key(KeyCode::F(4), KeyModifiers::SHIFT));
+        assert!(!is_reserved_focus_key(KeyCode::F(4), KeyModifiers::NONE));
+        // Matching is `contains`, not equality: a terminal reporting extra
+        // modifiers alongside Shift still resolves.
+        assert!(is_reserved_focus_key(
+            KeyCode::F(4),
+            KeyModifiers::SHIFT | KeyModifiers::CONTROL
         ));
     }
 
@@ -1466,6 +1578,12 @@ mod focus_shortcuts_keyboard_claim_tests {
             "Ctrl+T is reserved for context transfer regardless of which \
              signal claimed the keyboard"
         );
+        // Opening the modal moved focus to ContextTransfer; re-establish
+        // Agent focus so the F4/F10 probes below still exercise the claimed
+        // focused child (in production the dispatcher re-routes by the new
+        // focus after a handled key, so a single call never evaluates later
+        // shortcuts under a mutated focus).
+        app.focus = Focus::Agent;
         assert!(!handle_focus_shortcuts(
             &mut app,
             KeyCode::F(4),
@@ -1501,7 +1619,12 @@ mod focus_shortcuts_keyboard_claim_tests {
     fn no_focused_agent_is_unaffected() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.focus = Focus::Agent;
 
         assert!(!focused_child_claimed_keyboard(&app));
@@ -1519,7 +1642,12 @@ mod focus_shortcuts_keyboard_claim_tests {
 
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.interactive_agents = vec![left, right];
         app.split_groups.push(SplitGroup {
             id: "split-1".to_string(),
@@ -1552,5 +1680,403 @@ mod focus_shortcuts_keyboard_claim_tests {
 
         app.interactive_agents[0].kill();
         app.interactive_agents[1].kill();
+    }
+
+    // CT6 ownership matrix: only a *focused* child may claim the keyboard.
+    // A session merely selected in Preview never does — otherwise its
+    // alternate-screen/Kitty state swallows preview-level Up/Down and the
+    // arrows stop navigating between sessions.
+
+    #[test]
+    fn previewed_kitty_claimed_child_does_not_claim_keyboard() {
+        let agent = spawn_cat_agent("previewed-codex-like");
+        *agent.kitty_keyboard_flags.lock().expect("lock") = Some(7);
+        assert!(agent.kitty_keyboard_negotiated());
+        let mut app = app_with_interactive_agent(agent);
+        app.focus = Focus::Preview;
+
+        assert!(
+            !focused_child_claimed_keyboard(&app),
+            "a Kitty-negotiated child that is only previewed must not claim arrows"
+        );
+        app.interactive_agents[0].kill();
+    }
+
+    #[test]
+    fn previewed_alternate_screen_child_does_not_claim_keyboard() {
+        let agent = spawn_cat_agent("previewed-vim-like");
+        agent.vt.lock().expect("vt lock").process(b"\x1b[?1049h");
+        assert!(agent.in_alternate_screen());
+        let mut app = app_with_interactive_agent(agent);
+        app.focus = Focus::Preview;
+
+        assert!(
+            !focused_child_claimed_keyboard(&app),
+            "an alternate-screen child that is only previewed must not claim arrows"
+        );
+        app.interactive_agents[0].kill();
+    }
+
+    #[test]
+    fn focused_claimed_child_still_claims_keyboard() {
+        // The focus gate narrows the claim; it must not remove it. A claimed
+        // child in actual Agent focus still owns ordinary keys.
+        let agent = spawn_cat_agent("focused-codex-like");
+        *agent.kitty_keyboard_flags.lock().expect("lock") = Some(7);
+        let mut app = app_with_interactive_agent(agent);
+        assert!(matches!(app.focus, Focus::Agent));
+
+        assert!(focused_child_claimed_keyboard(&app));
+        app.interactive_agents[0].kill();
+    }
+
+    #[test]
+    fn previewed_claimed_child_does_not_block_unreserved_shortcuts() {
+        // Same ownership rule through `handle_focus_shortcuts`: with Preview
+        // focus, an unreserved key (Ctrl+S) reaches canopy even though the
+        // selected child negotiated Kitty — the claim cannot reach
+        // preview-level dispatch. Two sessions so the split picker can open.
+        let agent = spawn_cat_agent("previewed-ctrl-s");
+        *agent.kitty_keyboard_flags.lock().expect("lock") = Some(7);
+        let second = spawn_cat_agent("previewed-ctrl-s-2");
+        let mut app = app_with_interactive_agent(agent);
+        app.interactive_agents.push(second);
+        app.focus = Focus::Preview;
+
+        assert!(handle_focus_shortcuts(
+            &mut app,
+            KeyCode::Char('s'),
+            KeyModifiers::CONTROL
+        ));
+        assert!(app.split_picker_open);
+        app.interactive_agents[0].kill();
+        app.interactive_agents[1].kill();
+    }
+
+    #[test]
+    fn shift_f4_terminates_claimed_session_while_plain_f4_yields() {
+        // CT10 (T2): with a Kitty-claimed focused child (Codex shape),
+        // Shift+F4 terminates the session instead of reaching the PTY, while
+        // plain F4 is still forwarded (not consumed).
+        let agent = spawn_cat_agent("claimed-end-me");
+        *agent.kitty_keyboard_flags.lock().expect("lock") = Some(7);
+        let mut app = app_with_interactive_agent(agent);
+        assert!(focused_child_claimed_keyboard(&app));
+
+        let handled = handle_focus_shortcuts(&mut app, KeyCode::F(4), KeyModifiers::SHIFT);
+        assert!(
+            handled,
+            "Shift+F4 must be consumed, not forwarded to the PTY"
+        );
+        assert!(
+            app.interactive_agents.is_empty(),
+            "Shift+F4 must terminate the focused session"
+        );
+
+        // Fresh app, same claimed setup: plain F4 must NOT be consumed, so
+        // `handle_agent_key` forwards it to the PTY one layer up.
+        let agent = spawn_cat_agent("claimed-keeps-f4");
+        *agent.kitty_keyboard_flags.lock().expect("lock") = Some(7);
+        let mut app = app_with_interactive_agent(agent);
+        assert!(focused_child_claimed_keyboard(&app));
+        assert!(
+            !handle_focus_shortcuts(&mut app, KeyCode::F(4), KeyModifiers::NONE),
+            "plain F4 must reach the claimed child"
+        );
+        assert_eq!(
+            app.interactive_agents.len(),
+            1,
+            "plain F4 must not terminate anything while claimed"
+        );
+
+        app.interactive_agents[0].kill();
+    }
+
+    #[test]
+    fn shift_f4_terminates_alternate_screen_session_while_plain_f4_yields() {
+        // CT10 (T2): same contract through the other claim signal — a child
+        // in the alternate screen without Kitty flags.
+        let agent = spawn_cat_agent("altscreen-end-me");
+        agent.vt.lock().expect("vt lock").process(b"\x1b[?1049h");
+        assert!(agent.in_alternate_screen());
+        assert!(!agent.kitty_keyboard_negotiated());
+        let mut app = app_with_interactive_agent(agent);
+        assert!(focused_child_claimed_keyboard(&app));
+
+        let handled = handle_focus_shortcuts(&mut app, KeyCode::F(4), KeyModifiers::SHIFT);
+        assert!(
+            handled,
+            "Shift+F4 must be consumed, not forwarded to the PTY"
+        );
+        assert!(
+            app.interactive_agents.is_empty(),
+            "Shift+F4 must terminate the focused session"
+        );
+
+        let agent = spawn_cat_agent("altscreen-keeps-f4");
+        agent.vt.lock().expect("vt lock").process(b"\x1b[?1049h");
+        let mut app = app_with_interactive_agent(agent);
+        assert!(focused_child_claimed_keyboard(&app));
+        assert!(
+            !handle_focus_shortcuts(&mut app, KeyCode::F(4), KeyModifiers::NONE),
+            "plain F4 must reach the alternate-screen child"
+        );
+
+        app.interactive_agents[0].kill();
+    }
+
+    #[test]
+    fn plain_f4_keeps_current_meaning_without_a_claim() {
+        // CT10 (T3): unclaimed child, no split — plain F4 ends the session.
+        let agent = spawn_cat_agent("plain-f4-end");
+        let mut app = app_with_interactive_agent(agent);
+        assert!(!focused_child_claimed_keyboard(&app));
+
+        assert!(handle_focus_shortcuts(
+            &mut app,
+            KeyCode::F(4),
+            KeyModifiers::NONE
+        ));
+        assert!(
+            app.interactive_agents.is_empty(),
+            "plain F4 with no split must terminate the session"
+        );
+    }
+
+    fn app_with_split(left: InteractiveAgent, right: InteractiveAgent) -> App {
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        app.interactive_agents = vec![left, right];
+        app.split_groups.push(SplitGroup {
+            id: "split-1".to_string(),
+            orientation: SplitOrientation::Horizontal,
+            session_a: "split-left".to_string(),
+            session_b: "split-right".to_string(),
+            created_at: Utc::now(),
+        });
+        app.active_split_id = Some("split-1".to_string());
+        app.split_right_focused = false;
+        app.focus = Focus::Agent;
+        app
+    }
+
+    #[test]
+    fn plain_f4_dissolves_a_split_and_keeps_both_sessions() {
+        // CT10 (T3/FR4): unclaimed children in a split — plain F4 dissolves
+        // (both sessions survive, grouping drops).
+        let mut app = app_with_split(
+            spawn_cat_agent("split-left"),
+            spawn_cat_agent("split-right"),
+        );
+        assert!(!focused_child_claimed_keyboard(&app));
+
+        assert!(handle_focus_shortcuts(
+            &mut app,
+            KeyCode::F(4),
+            KeyModifiers::NONE
+        ));
+        assert!(
+            app.active_split_id.is_none(),
+            "plain F4 in a split must dissolve the grouping"
+        );
+        assert_eq!(
+            app.interactive_agents.len(),
+            2,
+            "dissolving keeps both sessions alive"
+        );
+
+        for agent in &mut app.interactive_agents {
+            agent.kill();
+        }
+    }
+
+    #[test]
+    fn shift_f4_in_a_split_ends_the_focused_pane_session() {
+        // CT10 (FR2): Shift+F4 in a split kills the focused pane's session
+        // (left here) and clears the now-dead grouping — it does NOT
+        // dissolve-only.
+        let mut app = app_with_split(
+            spawn_cat_agent("split-left"),
+            spawn_cat_agent("split-right"),
+        );
+        app.split_right_focused = false;
+        assert!(!focused_child_claimed_keyboard(&app));
+
+        assert!(handle_focus_shortcuts(
+            &mut app,
+            KeyCode::F(4),
+            KeyModifiers::SHIFT
+        ));
+        assert!(
+            app.active_split_id.is_none(),
+            "the dead pane's grouping must be cleared"
+        );
+        assert!(
+            app.interactive_agents
+                .iter()
+                .all(|agent| agent.name != "split-left"),
+            "Shift+F4 must kill the focused pane's session"
+        );
+        assert!(
+            app.interactive_agents
+                .iter()
+                .any(|agent| agent.name == "split-right"),
+            "the unfocused pane's session must survive"
+        );
+
+        for agent in &mut app.interactive_agents {
+            agent.kill();
+        }
+    }
+
+    #[test]
+    fn shift_f4_without_a_split_ends_the_single_session() {
+        // CT10 (T3/FR2): regression for the old `terminate_split_session_if_present`
+        // helper, which swallowed Shift+F4 when no split was active.
+        let agent = spawn_cat_agent("lone-session");
+        let mut app = app_with_interactive_agent(agent);
+        assert!(app.active_split_id.is_none());
+        assert!(!focused_child_claimed_keyboard(&app));
+
+        assert!(handle_focus_shortcuts(
+            &mut app,
+            KeyCode::F(4),
+            KeyModifiers::SHIFT
+        ));
+        assert!(
+            app.interactive_agents.is_empty(),
+            "Shift+F4 with no split must terminate the focused session"
+        );
+    }
+
+    #[test]
+    fn terminating_from_inside_focus_leaves_consistent_focus() {
+        // CT10 (T5): ending a session from inside focus must not leave the
+        // TUI focused on the session that just died.
+        let agent = spawn_cat_agent("claimed-focus-check");
+        *agent.kitty_keyboard_flags.lock().expect("lock") = Some(7);
+        let mut app = app_with_interactive_agent(agent);
+        assert!(matches!(app.focus, Focus::Agent));
+
+        assert!(handle_focus_shortcuts(
+            &mut app,
+            KeyCode::F(4),
+            KeyModifiers::SHIFT
+        ));
+        assert!(
+            matches!(app.focus, Focus::Preview),
+            "focus must leave the dead pane"
+        );
+        assert!(
+            app.agents.is_empty() || app.selected < app.agents.len(),
+            "selection must point at a live session"
+        );
+    }
+
+    // CT16 (T2): a warp terminal whose child entered the alternate screen
+    // routes keys like an interactive session — ordinary keystrokes yield to
+    // the child, reserved keys stay with canopy, and the direct-PTY path
+    // never forwards a reserved key.
+    fn spawn_cat_terminal(name: &str) -> InteractiveAgent {
+        InteractiveAgent::spawn_terminal("cat", "/tmp", 80, 24, Some(name), &[], Color::Reset)
+            .expect("spawn cat as a stand-in terminal child")
+    }
+
+    fn app_with_terminal_agent(agent: InteractiveAgent) -> App {
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        app.terminal_agents = vec![agent];
+        app.agents = vec![AgentEntry::Terminal(0)];
+        app.selected = 0;
+        app.focus = Focus::Agent;
+        app
+    }
+
+    #[test]
+    fn ct16_terminal_alt_screen_keys_go_to_child_but_reserved_stay_canopy() {
+        let agent = spawn_cat_terminal("ct16-term");
+        agent.vt.lock().expect("vt lock").process(b"\x1b[?1049h");
+        assert!(agent.in_alternate_screen());
+        let mut app = app_with_terminal_agent(agent);
+        assert!(focused_child_claimed_keyboard(&app));
+
+        assert!(
+            handle_focus_shortcuts(&mut app, KeyCode::F(10), KeyModifiers::NONE),
+            "F10 leaves focus even while a terminal child holds the alt screen"
+        );
+        app.focus = Focus::Agent;
+        assert!(
+            handle_focus_shortcuts(&mut app, KeyCode::Char('t'), KeyModifiers::CONTROL),
+            "Ctrl+T stays with canopy while a terminal child holds the alt screen"
+        );
+        app.focus = Focus::Agent;
+        assert!(
+            !handle_focus_shortcuts(&mut app, KeyCode::Char('a'), KeyModifiers::NONE),
+            "an ordinary key yields to the alt-screen terminal child"
+        );
+        app.terminal_agents[0].kill();
+    }
+
+    #[test]
+    fn ct16_terminal_direct_pty_key_never_forwards_reserved_keys() {
+        // `handle_terminal_direct_pty_key` is only reached for non-reserved
+        // keys in production (`handle_focus_shortcuts` consumes reserved
+        // first); this is the defensive second gate. `history_index` is the
+        // observable: the normal path clears it, the guard must not.
+        let agent = spawn_cat_terminal("ct16-term-guard");
+        agent.vt.lock().expect("vt lock").process(b"\x1b[?1049h");
+        let mut app = app_with_terminal_agent(agent);
+
+        app.terminal_agents[0].history_index = Some(0);
+        handle_terminal_direct_pty_key(&mut app, 0, KeyCode::Char('t'), KeyModifiers::CONTROL)
+            .expect("reserved direct key");
+        assert_eq!(
+            app.terminal_agents[0].history_index,
+            Some(0),
+            "a reserved key in alt screen must not reach the PTY path"
+        );
+
+        app.terminal_agents[0].history_index = Some(0);
+        handle_terminal_direct_pty_key(&mut app, 0, KeyCode::Char('a'), KeyModifiers::NONE)
+            .expect("ordinary direct key");
+        assert_eq!(
+            app.terminal_agents[0].history_index, None,
+            "an ordinary key in alt screen still reaches the child"
+        );
+        app.terminal_agents[0].kill();
+    }
+
+    #[test]
+    fn focused_claimed_child_still_yields_reserved_shift_arrows() {
+        // Shift+Up/Down stays canopy-owned inside a claimed focused session;
+        // the focus gate changes who may claim, not the reserved set.
+        let agent = spawn_cat_agent("focused-shift-arrows");
+        *agent.kitty_keyboard_flags.lock().expect("lock") = Some(7);
+        let mut app = app_with_interactive_agent(agent);
+        assert!(matches!(app.focus, Focus::Agent));
+
+        assert!(handle_focus_shortcuts(
+            &mut app,
+            KeyCode::Up,
+            KeyModifiers::SHIFT
+        ));
+        assert!(handle_focus_shortcuts(
+            &mut app,
+            KeyCode::Down,
+            KeyModifiers::SHIFT
+        ));
+        app.interactive_agents[0].kill();
     }
 }

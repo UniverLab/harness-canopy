@@ -28,6 +28,7 @@ struct CliRunParams<'a> {
     cli: &'a Cli,
     prompt: String,
     model: Option<&'a str>,
+    effort: Option<&'a str>,
     working_dir: Option<&'a str>,
     log_path: String,
     trigger: TriggerType,
@@ -103,6 +104,8 @@ impl Executor {
         let run_id = uuid::Uuid::new_v4().to_string();
         let now = Utc::now();
         let timeout_at = now + chrono::Duration::minutes(i64::from(agent.timeout_minutes));
+        // CB43: record the pair resolved at dispatch, on the row itself.
+        let (executed_platform, executed_model) = executed_pair_for_agent(agent);
         let run = RunLog {
             id: run_id.clone(),
             background_agent_id: agent.id.clone(),
@@ -113,6 +116,8 @@ impl Executor {
             finished_at: None,
             exit_code: None,
             timeout_at: Some(timeout_at),
+            executed_platform,
+            executed_model,
         };
 
         match self.db.try_start_run(&run)? {
@@ -133,6 +138,9 @@ impl Executor {
                     finished_at: Some(now),
                     exit_code: None,
                     timeout_at: None,
+                    // CB43: nothing executed on a skipped run — no pair.
+                    executed_platform: None,
+                    executed_model: None,
                 };
                 let _ = self.db.insert_run(&missed);
                 Ok(None)
@@ -241,6 +249,7 @@ impl Executor {
             cli: &agent.cli,
             prompt: wrapped,
             model: agent.model.as_deref(),
+            effort: agent.effort.as_deref(),
             working_dir: agent.working_dir.as_deref(),
             log_path: agent.log_path.clone(),
             trigger: ctx.trigger_type,
@@ -347,6 +356,7 @@ impl Executor {
             params.cli,
             &params.prompt,
             params.model,
+            params.effort,
             params.working_dir,
         ) {
             Ok(cmd) => cmd,
@@ -375,6 +385,47 @@ impl Executor {
             params.trigger,
         );
 
+        // CM7: a configured `effort` the platform can't honour is recorded in
+        // the agent's own run log (not just the daemon's tracing) — an option
+        // that looks applied and isn't is the failure mode this exists to
+        // prevent.
+        let effort_reason = params.effort.and_then(|e| {
+            crate::domain::cli_config::effort_rejection_reason(
+                params.cli.strategy().effort_declaration.as_ref(),
+                params.cli.as_str(),
+                e,
+            )
+        });
+        if let Some(reason) = &effort_reason {
+            tracing::warn!("agent '{}': effort not applied — {}", params.id, reason);
+        }
+
+        // CB34: same for a `model` a model-flagless platform can't honour —
+        // recorded in the agent's own run log, not silently dropped.
+        let model_reason = params.model.and_then(|m| {
+            crate::domain::cli_config::model_rejection_reason(
+                params.cli.strategy().model_flag.as_deref(),
+                params.cli.as_str(),
+                m,
+            )
+        });
+        if let Some(reason) = &model_reason {
+            tracing::warn!("agent '{}': model not applied — {}", params.id, reason);
+        }
+
+        let with_notices = |stderr: &[u8]| -> Vec<u8> {
+            let mut prefix = String::new();
+            if let Some(reason) = &effort_reason {
+                prefix.push_str(&format!("[canopy] effort not applied: {reason}\n"));
+            }
+            if let Some(reason) = &model_reason {
+                prefix.push_str(&format!("[canopy] model not applied: {reason}\n"));
+            }
+            let mut out = prefix.into_bytes();
+            out.extend_from_slice(stderr);
+            out
+        };
+
         let started_at = Utc::now();
         let output = cmd.output().await;
 
@@ -389,7 +440,7 @@ impl Executor {
                     &started_at,
                     code,
                     &out.stdout,
-                    &out.stderr,
+                    &with_notices(&out.stderr),
                 )?;
                 (code, success)
             }
@@ -402,7 +453,7 @@ impl Executor {
                     &started_at,
                     -1,
                     &[],
-                    e.to_string().as_bytes(),
+                    &with_notices(e.to_string().as_bytes()),
                 )?;
                 (-1, false)
             }
@@ -421,16 +472,41 @@ fn resolve_cli_binary(cli: &Cli) -> Result<PathBuf> {
     crate::domain::cli_strategy::resolve_binary(&cmd_name)
 }
 
+/// CB43: the platform+model pair resolved at dispatch for a background agent
+/// run. The model gate reads the registry without panicking (unlike
+/// `Cli::strategy`): an unknown platform stores the requested model as-is
+/// rather than dropping it.
+fn executed_pair_for_agent(agent: &Agent) -> (Option<String>, Option<String>) {
+    let platform = agent.cli.as_str().to_string();
+    let model = agent
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(str::to_string);
+    let selectable = dirs::home_dir()
+        .map(|home| crate::domain::canopy_config::CanopyConfig::load(&home.join(".canopy")))
+        .and_then(|config| config.get_cli(&platform).map(|cli| cli.model_flag.clone()))
+        .map(|flag| crate::domain::cli_config::model_flag_selects_model(flag.as_deref()))
+        .unwrap_or(true);
+    (Some(platform), if selectable { model } else { None })
+}
+
 /// Build the CLI command with appropriate flags.
 fn build_cli_command(
     _cli_path: &Path,
     cli: &Cli,
     prompt: &str,
     model: Option<&str>,
+    effort: Option<&str>,
     working_dir: Option<&str>,
 ) -> Result<Command> {
     let strategy = cli.strategy();
-    let mut cmd = strategy.build_command(prompt, model, working_dir)?;
+    let mut cmd = if let Some(e) = effort {
+        strategy.build_command_with_session(prompt, model, working_dir, None, Some(e))?
+    } else {
+        strategy.build_command(prompt, model, working_dir)?
+    };
 
     // Stdin is already set by `build_command` (null for argv-mode CLIs, or
     // an open temp-file handle carrying the prompt for stdin-mode CLIs) —

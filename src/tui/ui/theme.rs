@@ -38,6 +38,14 @@ pub struct Theme {
     /// Input-field background, focused — the theme-driven pair for
     /// `field_bg` (C4 audit: `Color::Rgb(40, 40, 40)`).
     pub field_bg_focused: Color,
+    /// Graph status palette — routed through Theme so the drawing never
+    /// ships with fixed colors (CT2).
+    pub status_running: Color,
+    pub status_ok: Color,
+    pub status_fail: Color,
+    pub status_disabled: Color,
+    pub status_interrupted: Color,
+    pub kind_router: Color,
 }
 
 impl Theme {
@@ -62,30 +70,42 @@ impl Theme {
             success: Color::Green,
             field_bg: Color::Rgb(30, 30, 30),
             field_bg_focused: Color::Rgb(40, 40, 40),
+            status_running: Color::Rgb(76, 175, 80),
+            status_ok: Color::Rgb(66, 165, 245),
+            status_fail: Color::Rgb(229, 57, 53),
+            status_disabled: Color::Rgb(120, 120, 120),
+            status_interrupted: Color::Rgb(255, 179, 0),
+            kind_router: Color::Rgb(171, 71, 188),
         }
     }
 
     /// Borderless, background-contrast look (T5): panels are separated by
     /// differing background colors instead of box-drawing borders.
     pub fn modern() -> Self {
-        let panel_bg = Color::Rgb(25, 25, 35);
+        let panel_bg = Color::Rgb(30, 30, 42);
         Self {
-            border_color: panel_bg,
+            border_color: Color::Rgb(42, 42, 60),
             panel_bg,
-            sidebar_bg: Color::Rgb(18, 18, 25),
-            selected_bg: Color::Rgb(40, 40, 55),
-            header_color: Color::Rgb(160, 160, 170),
-            dim_text: Color::Rgb(90, 90, 100),
+            sidebar_bg: Color::Rgb(14, 14, 22),
+            selected_bg: Color::Rgb(44, 44, 62),
+            header_color: Color::Rgb(168, 168, 180),
+            dim_text: Color::Rgb(140, 140, 155),
             show_borders: false,
-            dialog_bg: panel_bg,
+            dialog_bg: Color::Rgb(34, 34, 50),
             text_primary: Color::Rgb(225, 225, 230),
-            accent_fg: Color::Rgb(20, 20, 25),
-            muted_text: Color::Rgb(75, 75, 85),
+            accent_fg: Color::Rgb(18, 18, 24),
+            muted_text: Color::Rgb(130, 130, 145),
             warning: Color::Rgb(215, 180, 90),
             error: Color::Rgb(195, 95, 95),
             success: Color::Rgb(120, 190, 145),
-            field_bg: Color::Rgb(35, 35, 45),
-            field_bg_focused: Color::Rgb(45, 45, 60),
+            field_bg: Color::Rgb(38, 38, 50),
+            field_bg_focused: Color::Rgb(48, 48, 64),
+            status_running: Color::Rgb(76, 175, 80),
+            status_ok: Color::Rgb(66, 165, 245),
+            status_fail: Color::Rgb(229, 57, 53),
+            status_disabled: Color::Rgb(120, 120, 120),
+            status_interrupted: Color::Rgb(255, 179, 0),
+            kind_router: Color::Rgb(171, 71, 188),
         }
     }
 
@@ -137,6 +157,12 @@ mod tests {
         assert_eq!(theme.warning, Color::Yellow);
         assert_eq!(theme.error, Color::Red);
         assert_eq!(theme.success, Color::Green);
+        assert_eq!(theme.status_running, Color::Rgb(76, 175, 80));
+        assert_eq!(theme.status_ok, Color::Rgb(66, 165, 245));
+        assert_eq!(theme.status_fail, Color::Rgb(229, 57, 53));
+        assert_eq!(theme.status_disabled, Color::Rgb(120, 120, 120));
+        assert_eq!(theme.status_interrupted, Color::Rgb(255, 179, 0));
+        assert_eq!(theme.kind_router, Color::Rgb(171, 71, 188));
     }
 
     #[test]
@@ -147,18 +173,82 @@ mod tests {
     #[test]
     fn modern_reproduces_spec_values() {
         let theme = Theme::modern();
-        assert_eq!(theme.panel_bg, Color::Rgb(25, 25, 35));
-        assert_eq!(theme.border_color, theme.panel_bg);
-        assert_eq!(theme.sidebar_bg, Color::Rgb(18, 18, 25));
-        assert_eq!(theme.selected_bg, Color::Rgb(40, 40, 55));
-        assert_eq!(theme.header_color, Color::Rgb(160, 160, 170));
-        assert_eq!(theme.dim_text, Color::Rgb(90, 90, 100));
+        assert_eq!(theme.panel_bg, Color::Rgb(30, 30, 42));
+        assert_eq!(theme.border_color, Color::Rgb(42, 42, 60));
+        assert_eq!(theme.sidebar_bg, Color::Rgb(14, 14, 22));
+        assert_eq!(theme.selected_bg, Color::Rgb(44, 44, 62));
+        assert_eq!(theme.header_color, Color::Rgb(168, 168, 180));
+        assert_eq!(theme.dim_text, Color::Rgb(140, 140, 155));
+        assert_eq!(theme.dialog_bg, Color::Rgb(34, 34, 50));
+        assert_eq!(theme.muted_text, Color::Rgb(130, 130, 145));
+        assert_eq!(theme.field_bg, Color::Rgb(38, 38, 50));
+        assert_eq!(theme.field_bg_focused, Color::Rgb(48, 48, 64));
+    }
+
+    fn linear(channel: u8) -> f64 {
+        let value = channel as f64 / 255.0;
+        if value <= 0.04045 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
+    fn rel_luminance(color: Color) -> f64 {
+        match color {
+            Color::Rgb(red, green, blue) => {
+                0.2126 * linear(red) + 0.7152 * linear(green) + 0.0722 * linear(blue)
+            }
+            Color::White => rel_luminance(Color::Rgb(255, 255, 255)),
+            Color::Black => 0.0,
+            other => panic!("unsupported test color: {other:?}"),
+        }
+    }
+
+    fn contrast_ratio(foreground: Color, background: Color) -> f64 {
+        let foreground_luminance = rel_luminance(foreground);
+        let background_luminance = rel_luminance(background);
+        (foreground_luminance.max(background_luminance) + 0.05)
+            / (foreground_luminance.min(background_luminance) + 0.05)
+    }
+
+    #[test]
+    fn modern_sidebar_text_contrast() {
+        let theme = Theme::modern();
+        for (foreground, threshold) in [
+            (theme.text_primary, 4.5),
+            (theme.dim_text, 4.5),
+            (theme.muted_text, 4.5),
+            (theme.header_color, 3.0),
+        ] {
+            assert!(
+                contrast_ratio(foreground, theme.sidebar_bg) >= threshold,
+                "{foreground:?} fails {threshold}:1 contrast against sidebar"
+            );
+        }
+        assert!(contrast_ratio(theme.text_primary, theme.panel_bg) >= 4.5);
+        assert!(contrast_ratio(theme.text_primary, theme.field_bg) >= 4.5);
+    }
+
+    #[test]
+    fn modern_sidebar_panel_step_is_perceptible() {
+        let theme = Theme::modern();
+        let sidebar_luminance = rel_luminance(theme.sidebar_bg);
+        let panel_luminance = rel_luminance(theme.panel_bg);
+        assert_ne!(sidebar_luminance, panel_luminance);
+        assert!(
+            contrast_ratio(theme.sidebar_bg, theme.panel_bg) >= 1.12
+                || (panel_luminance - sidebar_luminance).abs() >= 0.007
+        );
     }
 
     /// Every colour role `Theme` declares must have a distinct value between
     /// `classic` and `modern` — otherwise a role was added and never given
     /// its own modern treatment, silently falling back to the classic look
     /// (the exact defect this spec fixes, reintroduced one field at a time).
+    /// Semantic status colors (and router tag) are intentionally identical
+    /// across themes — they encode pass/fail/running, not chrome — so they
+    /// are excluded from this distinctness check (see CT2).
     #[test]
     fn classic_and_modern_differ_in_every_color_field() {
         let classic = Theme::classic();
@@ -178,6 +268,25 @@ mod tests {
         assert_ne!(classic.success, modern.success);
         assert_ne!(classic.field_bg, modern.field_bg);
         assert_ne!(classic.field_bg_focused, modern.field_bg_focused);
+    }
+
+    #[test]
+    fn classic_has_status_colors() {
+        let theme = Theme::classic();
+        assert_eq!(theme.status_running, Color::Rgb(76, 175, 80));
+        assert_eq!(theme.status_ok, Color::Rgb(66, 165, 245));
+        assert_eq!(theme.status_fail, Color::Rgb(229, 57, 53));
+        assert_eq!(theme.status_disabled, Color::Rgb(120, 120, 120));
+        assert_eq!(theme.status_interrupted, Color::Rgb(255, 179, 0));
+        assert_eq!(theme.kind_router, Color::Rgb(171, 71, 188));
+        // Modern intentionally preserves the same semantic values.
+        let modern = Theme::modern();
+        assert_eq!(modern.status_running, Color::Rgb(76, 175, 80));
+        assert_eq!(modern.status_ok, Color::Rgb(66, 165, 245));
+        assert_eq!(modern.status_fail, Color::Rgb(229, 57, 53));
+        assert_eq!(modern.status_disabled, Color::Rgb(120, 120, 120));
+        assert_eq!(modern.status_interrupted, Color::Rgb(255, 179, 0));
+        assert_eq!(modern.kind_router, Color::Rgb(171, 71, 188));
     }
 
     #[test]

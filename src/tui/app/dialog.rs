@@ -3,17 +3,19 @@
 mod app_methods;
 pub mod at_picker;
 pub mod datetime_picker;
+pub mod graph_control;
+pub mod graph_form;
 pub mod knowledge;
 pub mod launchpad;
-pub mod loop_control;
-pub mod loop_form;
 pub mod new_agent;
+pub mod node_tail;
 pub mod prompt;
 
 pub use at_picker::*;
+pub(crate) use graph_control::*;
+pub use graph_form::*;
 pub use knowledge::*;
 pub use launchpad::*;
-pub(crate) use loop_control::*;
-pub use loop_form::*;
 pub use new_agent::*;
+pub(crate) use node_tail::*;
 pub use prompt::*;

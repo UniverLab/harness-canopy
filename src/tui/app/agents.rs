@@ -181,30 +181,8 @@ impl App {
         }
     }
 
-    /// Indices of all agent entries the user can navigate to from focus mode:
-    /// interactive + terminal sessions, groups, and background agents. The
-    /// RAG-info panel is reached by walking past either end of this list, not
-    /// by a dedicated index. Order matches `app.agents`, which itself is
-    /// `[background..., interactive..., terminal..., groups...]`.
-    fn focusable_agent_indices(&self) -> Vec<usize> {
-        self.agents
-            .iter()
-            .enumerate()
-            .filter(|(_, entry)| {
-                matches!(
-                    entry,
-                    AgentEntry::Interactive(_)
-                        | AgentEntry::Terminal(_)
-                        | AgentEntry::Group(_)
-                        | AgentEntry::Agent(_)
-                )
-            })
-            .map(|(idx, _)| idx)
-            .collect()
-    }
-
     fn move_interactive_selection(&mut self, forward: bool) {
-        let focusable = self.focusable_agent_indices();
+        let focusable = self.cycle_focus_indices();
         if focusable.is_empty() {
             return;
         }
@@ -214,11 +192,7 @@ impl App {
             .position(|&idx| idx == self.selected)
             .unwrap_or(0);
 
-        let next_pos = if forward {
-            (current_pos + 1) % focusable.len()
-        } else {
-            current_pos.checked_sub(1).unwrap_or(focusable.len() - 1)
-        };
+        let next_pos = crate::tui::selection::move_index(current_pos, focusable.len(), forward);
 
         self.selected = focusable[next_pos];
         self.focus = Focus::Agent;
@@ -477,6 +451,35 @@ impl App {
         } else {
             let _ = self.db.finish_interactive_session(&agent_id, code);
         }
+
+        if let Some(ref sb) = self.active_sandbox {
+            let sandbox = sb.clone();
+            let merge_result = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current()
+                    .block_on(async { crate::domain::sandbox::merge_sandbox(&sandbox).await })
+            });
+            match merge_result {
+                Ok(outcome) => {
+                    let status = match &outcome {
+                        crate::domain::sandbox::MergeOutcome::CleanMerge => "merged",
+                        crate::domain::sandbox::MergeOutcome::ConflictResolution => "merged",
+                        crate::domain::sandbox::MergeOutcome::MergeFailed(_) => "failed",
+                    };
+                    let _ = self.db.update_sandbox_run_status(&sandbox.id, status);
+                    if let crate::domain::sandbox::MergeOutcome::MergeFailed(ref reason) = outcome {
+                        tracing::error!("Sandbox merge failed: {reason}");
+                        self.notification_service
+                            .notify_nursery_failed(&format!("Sandbox merge failed: {reason}"));
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Sandbox merge error: {e}");
+                    let _ = self.db.update_sandbox_run_status(&sandbox.id, "failed");
+                }
+            }
+            self.active_sandbox = None;
+        }
+
         let _ = self
             .db
             .close_agent_missions(&agent_id, &agent_name, &working_dir);
@@ -626,12 +629,21 @@ impl App {
             if dominated {
                 continue;
             }
-            // Warp-mode terminals lose 3 rows for the input box
-            let effective_rows = if agent.warp_mode {
+            // Warp-mode terminals lose 3 rows for the input box. This must
+            // stay equal to `pty_area.height.saturating_sub(3)` where
+            // `pty_area` is what `draw_terminal_warp_mode` stores in
+            // `last_panel_inner` (panel inner minus input_height + gap);
+            // a future warp-height change that drifts from it would silently
+            // reintroduce completion-timed shrinks (CT15).
+            // CT16: when the child holds the alternate screen it owns the
+            // full pane, so do not reserve the input-box rows. Keep the
+            // constant in sync with `panel/mod.rs::split_warp_areas`.
+            let effective_rows = if agent.warp_mode && !agent.in_alternate_screen() {
                 rows.saturating_sub(3)
             } else {
                 rows
             };
+            debug_assert!(effective_rows <= rows);
             if agent.last_pty_cols != cols || agent.last_pty_rows != effective_rows {
                 agent.resize(cols, effective_rows);
             }
@@ -1285,7 +1297,12 @@ mod close_terminal_session_tests {
     fn app_with_history(name: &str) -> (App, TempDir) {
         let db = test_db();
         let data_dir = tempdir().expect("tempdir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         let hist = load_history(data_dir.path(), name);
         app.terminal_histories.insert(name.to_string(), hist);
         (app, data_dir)
@@ -1373,5 +1390,239 @@ mod close_terminal_session_tests {
              scrollback: {:?}",
             after.scrollback
         );
+    }
+
+    #[test]
+    fn alternate_screen_terminal_gets_the_full_panel_height() {
+        let (mut app, _data_dir) = app_with_history("full-pane");
+        let agent = spawn_test_terminal("full-pane");
+        agent.vt.lock().expect("lock vt").process(b"\x1b[?1049h");
+        assert!(agent.in_alternate_screen());
+        app.terminal_agents.push(agent);
+        app.last_panel_inner = (80, 24);
+
+        app.resize_interactive_agents();
+
+        assert_eq!(app.terminal_agents[0].last_pty_cols, 80);
+        assert_eq!(app.terminal_agents[0].last_pty_rows, 24);
+        assert!(app.terminal_agents[0].should_bypass_warp_input());
+        app.terminal_agents[0].kill();
+    }
+
+    #[test]
+    fn leaving_alternate_screen_restores_warp_height_without_losing_output() {
+        let (mut app, _data_dir) = app_with_history("restore-warp");
+        let agent = spawn_test_terminal("restore-warp");
+        agent
+            .vt
+            .lock()
+            .expect("lock vt")
+            .process(b"line0\r\nline1\r\nline2\r\n");
+        agent.vt.lock().expect("lock vt").process(b"\x1b[?1049h");
+        app.terminal_agents.push(agent);
+        app.last_panel_inner = (80, 24);
+
+        app.resize_interactive_agents();
+        assert_eq!(app.terminal_agents[0].last_pty_rows, 24);
+
+        app.terminal_agents[0]
+            .vt
+            .lock()
+            .expect("lock vt")
+            .process(b"\x1b[?1049l");
+        app.resize_interactive_agents();
+
+        let agent = &app.terminal_agents[0];
+        assert!(!agent.in_alternate_screen());
+        assert_eq!(agent.last_pty_rows, 21);
+        assert!(agent.last_lines(50).contains("line0"));
+        assert!(agent.last_lines(50).contains("line1"));
+        assert!(agent.last_lines(50).contains("line2"));
+        app.terminal_agents[0].kill();
+    }
+
+    #[test]
+    fn terminal_without_alternate_screen_keeps_warp_height() {
+        let (mut app, _data_dir) = app_with_history("normal-warp");
+        app.terminal_agents.push(spawn_test_terminal("normal-warp"));
+        app.last_panel_inner = (80, 24);
+
+        app.resize_interactive_agents();
+
+        assert!(!app.terminal_agents[0].in_alternate_screen());
+        assert_eq!(app.terminal_agents[0].last_pty_rows, 21);
+        assert!(!app.terminal_agents[0].should_bypass_warp_input());
+        app.terminal_agents[0].kill();
+    }
+}
+
+// CT16: warp terminal hands the full pane to a child in the alternate screen.
+// Each test drives the `vt` parser directly with `CSI ?1049h/l` so no real
+// full-screen program or PTY timing is involved.
+#[cfg(test)]
+mod ct16_warp_fullscreen_handover_tests {
+    use super::*;
+    use crate::db::Database;
+    use std::sync::Arc;
+    use tempfile::{tempdir, NamedTempFile};
+
+    fn test_db() -> Arc<Database> {
+        let tmp = NamedTempFile::new().expect("create temp file");
+        let path = tmp.path().to_path_buf();
+        std::mem::forget(tmp);
+        Arc::new(Database::new(&path).expect("create test db"))
+    }
+
+    fn spawn_test_terminal(name: &str) -> InteractiveAgent {
+        InteractiveAgent::spawn_terminal(
+            "cat",
+            "/tmp",
+            80,
+            24,
+            Some(name),
+            &[],
+            ratatui::style::Color::White,
+        )
+        .expect("spawn terminal")
+    }
+
+    fn feed(agent: &InteractiveAgent, bytes: &[u8]) {
+        agent.vt.lock().expect("lock vt").process(bytes);
+    }
+
+    fn app_with_terminal(agent: InteractiveAgent) -> App {
+        let db = test_db();
+        // `App` only borrows the data dir during construction (history paths
+        // are resolved eagerly), so the temp dir need not outlive this call
+        // for these resize-only tests. Keep construction local.
+        let data_dir = tempdir().expect("tempdir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        app.terminal_agents.push(agent);
+        app
+    }
+
+    #[test]
+    fn terminal_alt_screen_withdraws_input_box_and_reports_full_area() {
+        // T1: entering the alternate screen withdraws the warp input box
+        // (bypass) and the pane reports the full area to the child.
+        let agent = spawn_test_terminal("ct16-t1");
+        assert!(agent.warp_mode);
+        let mut app = app_with_terminal(agent);
+        app.last_panel_inner = (80, 24);
+        app.resize_interactive_agents();
+        assert_eq!(
+            app.terminal_agents[0].last_pty_rows, 21,
+            "warp mode reserves 3 rows for the input box before alt screen"
+        );
+
+        feed(&app.terminal_agents[0], b"\x1b[?1049h");
+        assert!(app.terminal_agents[0].in_alternate_screen());
+        assert!(
+            app.terminal_agents[0].should_bypass_warp_input(),
+            "alt screen must bypass the warp input box"
+        );
+        let warp_active =
+            app.terminal_agents[0].warp_mode && !app.terminal_agents[0].should_bypass_warp_input();
+        assert!(!warp_active, "input box is withdrawn while in alt screen");
+
+        app.resize_interactive_agents();
+        assert_eq!(
+            app.terminal_agents[0].last_pty_rows, 24,
+            "child in alt screen is told the full pane height, not warp height"
+        );
+        assert_eq!(app.terminal_agents[0].last_pty_cols, 80);
+        app.terminal_agents[0].kill();
+    }
+
+    #[test]
+    fn resize_reports_full_pane_dimensions_to_child() {
+        // T5/FR4: the dimensions reported to the child equal the pane's own
+        // dimensions while the child holds the alternate screen.
+        let agent = spawn_test_terminal("ct16-t5");
+        let mut app = app_with_terminal(agent);
+        app.last_panel_inner = (100, 30);
+        app.resize_interactive_agents();
+        assert_eq!(
+            (
+                app.terminal_agents[0].last_pty_cols,
+                app.terminal_agents[0].last_pty_rows
+            ),
+            (100, 27)
+        );
+
+        feed(&app.terminal_agents[0], b"\x1b[?1049h");
+        app.resize_interactive_agents();
+        assert_eq!(
+            (
+                app.terminal_agents[0].last_pty_cols,
+                app.terminal_agents[0].last_pty_rows
+            ),
+            (100, 30),
+            "alt-screen child must see the full pane dimensions"
+        );
+        app.terminal_agents[0].kill();
+    }
+
+    #[test]
+    fn leaving_alt_screen_restores_warp_with_scrollback_intact() {
+        // T3/FR3: leaving the alternate screen restores warp sizing and the
+        // output produced before the child started is still there.
+        let agent = spawn_test_terminal("ct16-t3");
+        for i in 0..10 {
+            feed(&agent, format!("line{i}\r\n").as_bytes());
+        }
+        let mut app = app_with_terminal(agent);
+        app.last_panel_inner = (80, 24);
+        app.resize_interactive_agents();
+        assert_eq!(app.terminal_agents[0].last_pty_rows, 21);
+
+        feed(&app.terminal_agents[0], b"\x1b[?1049h");
+        app.resize_interactive_agents();
+        assert_eq!(app.terminal_agents[0].last_pty_rows, 24);
+
+        feed(&app.terminal_agents[0], b"\x1b[?1049l");
+        assert!(!app.terminal_agents[0].in_alternate_screen());
+        app.resize_interactive_agents();
+        assert_eq!(
+            app.terminal_agents[0].last_pty_rows, 21,
+            "warp sizing returns once the child leaves the alt screen"
+        );
+        let warp_active =
+            app.terminal_agents[0].warp_mode && !app.terminal_agents[0].should_bypass_warp_input();
+        assert!(warp_active, "input box comes back after alt screen");
+
+        let text = app.terminal_agents[0].last_lines(50);
+        for i in 0..10 {
+            assert!(
+                text.contains(&format!("line{i}")),
+                "earlier output survives the full-pane round trip: {text:?}"
+            );
+        }
+        app.terminal_agents[0].kill();
+    }
+
+    #[test]
+    fn never_enters_alt_screen_unaffected() {
+        // T4/FR5: a child that never enters the alternate screen keeps warp
+        // sizing and never bypasses the input box.
+        let agent = spawn_test_terminal("ct16-t4");
+        let mut app = app_with_terminal(agent);
+        app.last_panel_inner = (80, 24);
+        for _ in 0..3 {
+            feed(&app.terminal_agents[0], b"normal output\r\n");
+            app.resize_interactive_agents();
+            assert!(!app.terminal_agents[0].in_alternate_screen());
+            assert!(!app.terminal_agents[0].should_bypass_warp_input());
+            assert_eq!(app.terminal_agents[0].last_pty_rows, 21);
+            let warp_active = app.terminal_agents[0].warp_mode
+                && !app.terminal_agents[0].should_bypass_warp_input();
+            assert!(warp_active, "warp input box stays for normal children");
+        }
+        app.terminal_agents[0].kill();
     }
 }

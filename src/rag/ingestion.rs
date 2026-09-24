@@ -96,7 +96,7 @@ pub struct IngestionManager {
     _personal_watcher: std::sync::Mutex<Option<RecommendedWatcher>>,
     /// Cached embedding client keyed by model id so we load the ONNX model once.
     /// Dropped after `embeddings_idle_unload_secs` of inactivity (see
-    /// `idle_unload_loop`) and reloaded transparently on next use.
+    /// `idle_unload_graph`) and reloaded transparently on next use.
     cached_client: Mutex<Option<CachedClient>>,
 }
 
@@ -289,13 +289,13 @@ impl IngestionManager {
         let ct_idle = ct.child_token();
         let mgr_idle = Arc::clone(&self);
         tokio::spawn(async move {
-            mgr_idle.idle_unload_loop(ct_idle).await;
+            mgr_idle.idle_unload_graph(ct_idle).await;
         });
 
         let ct_acquire = ct.child_token();
         let mgr_acquire = Arc::clone(&self);
         tokio::spawn(async move {
-            mgr_acquire.model_acquisition_loop(ct_acquire).await;
+            mgr_acquire.model_acquisition_graph(ct_acquire).await;
         });
 
         ct
@@ -308,7 +308,7 @@ impl IngestionManager {
     /// once right away and then on a slow poll — the poll (rather than a
     /// one-shot at startup) is what picks up a model chosen by a `canopy
     /// setup` run against an already-running daemon.
-    async fn model_acquisition_loop(&self, ct: tokio_util::sync::CancellationToken) {
+    async fn model_acquisition_graph(&self, ct: tokio_util::sync::CancellationToken) {
         self.ensure_configured_model_acquired().await;
         loop {
             tokio::select! {
@@ -364,7 +364,7 @@ impl IngestionManager {
 
     /// Periodically checks whether the cached embedding client has been idle
     /// long enough to drop, freeing the model's RAM until it's needed again.
-    async fn idle_unload_loop(&self, ct: tokio_util::sync::CancellationToken) {
+    async fn idle_unload_graph(&self, ct: tokio_util::sync::CancellationToken) {
         loop {
             tokio::select! {
                 _ = ct.cancelled() => break,
@@ -580,12 +580,47 @@ impl IngestionManager {
         }
     }
 
+    /// Items enqueued directly into the DB (e.g. by `canopy rag backfill`
+    /// while the daemon is already running) bypass the in-memory queue, so
+    /// poll the DB periodically and reload anything pending. Idempotent:
+    /// [`Queue::push`] skips paths already held in memory.
+    async fn reload_queue_from_db(&self) {
+        let failed = self.db.permanently_failed_rag_files().unwrap_or_default();
+        let pending = match self.db_pending_queue() {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!("rag_backfill: failed to read pending DB queue: {e:#}");
+                return;
+            }
+        };
+        let mut reloaded = 0usize;
+        for path in &pending {
+            if failed.contains(path) {
+                continue;
+            }
+            if self.enqueue(path).await {
+                reloaded += 1;
+            }
+        }
+        if reloaded > 0 {
+            tracing::info!("rag_backfill: reloaded {reloaded} pending queue item(s) from DB");
+            self.notify.notify_one();
+        }
+    }
+
     async fn run(&self, ct: tokio_util::sync::CancellationToken) {
+        let mut db_poll = tokio::time::interval(std::time::Duration::from_secs(60));
+        db_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
                 _ = ct.cancelled() => break,
                 _ = self.notify.notified() => {
                     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    self.drain_queue(&ct).await;
+                }
+                _ = db_poll.tick() => {
+                    // Pick up items added by `canopy rag backfill` or other CLI commands
+                    self.reload_queue_from_db().await;
                     self.drain_queue(&ct).await;
                 }
             }
@@ -816,7 +851,10 @@ impl IngestionManager {
         if meta.len() > max_bytes {
             let size_mb = meta.len() as f64 / (1024.0 * 1024.0);
             let cap_mb = max_bytes as f64 / (1024.0 * 1024.0);
-            tracing::info!(
+            // WARN, not DEBUG/INFO: a file dropped from the index is a fact the
+            // operator must be able to see — the same visibility `canopy doctor`
+            // and `canopy rag report` now give the aggregate count (CB20).
+            tracing::warn!(
                 "Personal RAG: skipping '{source_path}' — {size_mb:.1} MB exceeds the \
                  {cap_mb:.0} MB indexing limit (config.toml: rag_max_file_mb)"
             );
@@ -1604,7 +1642,7 @@ mod tests {
 
     /// (1b) A local model being *configured* isn't enough to load it: the
     /// proactive acquisition path (`ensure_configured_model_acquired`, run
-    /// by `model_acquisition_loop` right after `start()`) must also see an
+    /// by `model_acquisition_graph` right after `start()`) must also see an
     /// empty queue and skip, or a daemon that never indexes anything would
     /// still eagerly load the model — reintroducing the exact startup load
     /// this spec removes, just from a different call site than
@@ -1976,6 +2014,32 @@ mod tests {
         let events = mgr.db().rag_events_for_file(&source_path).unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event_type, "skipped_oversize");
+    }
+
+    /// The size-based discard must announce itself at a visible level — a
+    /// DEBUG/INFO-only drop is the exact bug CB20 exists to kill (81 of ~270
+    /// PDFs vanished with nothing above DEBUG to show for it). The repo has no
+    /// tracing-capture harness, so this pins the log level at the source: a
+    /// future edit cannot quietly demote the call without failing here.
+    #[test]
+    fn oversize_skip_is_logged_at_warn() {
+        let source = include_str!("ingestion.rs");
+        let production_code = source
+            .split("mod tests {")
+            .next()
+            .expect("ingestion.rs always contains the literal \"mod tests {\"");
+        let marker = "MB exceeds the";
+        let idx = production_code
+            .find(marker)
+            .expect("the oversize-skip log message must still exist");
+        let call_start = production_code[..idx]
+            .rfind("tracing::")
+            .expect("the oversize-skip message must be emitted through a tracing macro");
+        assert!(
+            production_code[call_start..].starts_with("tracing::warn!"),
+            "the oversize-skip discard must be logged at WARN, not DEBUG/INFO — found: {:?}",
+            &production_code[call_start..call_start + 20.min(production_code.len() - call_start)]
+        );
     }
 }
 

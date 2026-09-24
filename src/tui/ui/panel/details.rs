@@ -1,8 +1,8 @@
-use super::{INTERACTIVE_COLOR, STATUS_DISABLED, STATUS_FAIL, STATUS_OK, STATUS_RUNNING};
 use crate::domain::models::{Agent, Trigger};
 use crate::tui::app::types::App;
 use crate::tui::app::utils::relative_time;
 use crate::tui::ui::theme::Theme;
+use crate::tui::ui::{INTERACTIVE_COLOR, STATUS_DISABLED, STATUS_FAIL, STATUS_OK, STATUS_RUNNING};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -203,6 +203,13 @@ pub fn draw_agent_details(frame: &mut Frame, area: Rect, agent: &Agent, app: &Ap
         lines.push(Line::from(vec![
             Span::styled("Model:   ", Style::default().fg(theme.dim_text)),
             Span::raw(model),
+        ]));
+    }
+
+    if let Some(ref effort) = agent.effort {
+        lines.push(Line::from(vec![
+            Span::styled("Effort:  ", Style::default().fg(theme.dim_text)),
+            Span::raw(effort),
         ]));
     }
 

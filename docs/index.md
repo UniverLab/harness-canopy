@@ -19,7 +19,7 @@ It turns a single machine into a small agent operations center:
 - **Remember** — a project-scoped knowledge graph that persists facts,
   patterns and session summaries across sessions.
 - **Search** your own documents with a local-first RAG pipeline.
-- **Automate** multi-step processes with a DAG loop engine.
+- **Automate** multi-step processes with a DAG graph engine.
 
 Everything persists in an embedded SQLite database under `~/.canopy/` —
 no external services, no cloud account.
@@ -29,8 +29,8 @@ no external services, no cloud account.
 | Piece | What it does |
 |---|---|
 | **Daemon** | MCP server (Streamable HTTP + stdio), scheduler, watcher engine, database |
-| **Canopy Hub (TUI)** | Full-screen terminal UI for agents, loops and system metrics |
-| **83 MCP tools** | Agent management, sync, intelligence, seeds, loops, specs, queues, blueprints, RAG, projects |
+| **Canopy Hub (TUI)** | Full-screen terminal UI for agents, graphs and system metrics |
+| **84 MCP tools** | Agent management, sync, intelligence, seeds, graphs, specs, queues, blueprints, RAG, projects |
 | **Seed identities** | Persistent, evolvable agent personalities stored as TOML |
 | **Gamification** | 28 missions across 6 categories tracking usage milestones |
 
@@ -41,11 +41,11 @@ no external services, no cloud account.
 - [The TUI — Canopy Hub](tui.md) — the interactive terminal interface.
 - [Agents](agents.md) — interactive, background and terminal agents; seed identities.
 - [Intelligence & Sync](intelligence-and-sync.md) — knowledge graph and multi-agent coordination.
-- [Loops](loops.md) — the DAG loop engine.
+- [Graphs](graphs.md) — the DAG graph engine.
 - [Usage Patterns](usage-patterns.md) — the shapes a graph can take, and where each breaks.
 - [Recipes](recipes.md) — those shapes built end to end, with real calls and prompts.
 - [RAG Pipeline](rag.md) — personal document search.
-- [MCP Tools](mcp-tools.md) — all 83 tools by category.
+- [MCP Tools](mcp-tools.md) — all 84 tools by category.
 - [CLI Reference](cli-reference.md) — every `canopy` command.
 
 ## Part of UniverLab

@@ -3,6 +3,7 @@
 //! This is the innermost layer of the architecture. It has no dependencies
 //! on infrastructure, frameworks, or external crates beyond basic utilities.
 
+pub mod activity;
 pub mod blueprints;
 pub mod canopy_config;
 pub mod clean;
@@ -11,8 +12,8 @@ pub mod cli_strategy;
 pub mod db_health;
 pub mod db_paths;
 pub mod gamification;
-pub mod loop_transfer;
-pub mod loops;
+pub mod graph_transfer;
+pub mod graphs;
 pub mod models;
 pub mod models_db;
 pub mod notification;
@@ -22,7 +23,10 @@ pub mod prompts;
 pub mod queues;
 pub mod quota_reset;
 pub mod registry_baseline;
+pub mod sandbox;
 pub mod seeds;
+pub mod specs;
+pub mod subagent_mcp;
 pub mod sync;
 pub mod usage_stats;
 pub mod validation;

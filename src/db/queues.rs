@@ -4,7 +4,7 @@ use rusqlite::{params, OptionalExtension};
 use std::io::{Error as IoError, ErrorKind};
 
 use crate::db::Database;
-use crate::domain::loops::LoopSpecStatus;
+use crate::domain::graphs::GraphSpecStatus;
 use crate::domain::queues::{Queue, QueueDetails};
 
 impl Database {
@@ -164,7 +164,7 @@ impl Database {
             .query_row(
                 "SELECT pm.spec_id, ls.status
                  FROM queue_members pm
-                 JOIN loop_specs ls ON ls.id = pm.spec_id
+                 JOIN graph_specs ls ON ls.id = pm.spec_id
                  WHERE pm.queue_id = ?1 AND pm.group_name = ?2
                    AND pm.position < (
                        SELECT position FROM queue_members
@@ -177,8 +177,8 @@ impl Database {
                     queue_id,
                     group_name,
                     spec_id,
-                    LoopSpecStatus::Completed.as_str(),
-                    LoopSpecStatus::Failed.as_str(),
+                    GraphSpecStatus::Completed.as_str(),
+                    GraphSpecStatus::Failed.as_str(),
                 ],
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             )
@@ -189,14 +189,14 @@ impl Database {
         let Some((predecessor_spec, status)) = predecessor else {
             return Ok(None);
         };
-        if status != LoopSpecStatus::Completed.as_str() {
+        if status != GraphSpecStatus::Completed.as_str() {
             return Ok(None);
         }
 
         // The session that most recently served `node_id` for that completed
         // sibling — the warm context to continue.
         conn.query_row(
-            "SELECT session_id FROM loop_runs
+            "SELECT session_id FROM graph_runs
              WHERE spec_id = ?1 AND node_id = ?2 AND session_id IS NOT NULL
              ORDER BY started_at DESC, rowid DESC
              LIMIT 1",
@@ -228,7 +228,7 @@ impl Database {
              WHERE pm.queue_id = ?1 AND pm.spec_id = ?2 AND pm.group_name IS NOT NULL
                AND EXISTS (
                    SELECT 1 FROM queue_members sib
-                   JOIN loop_runs lr ON lr.spec_id = sib.spec_id
+                   JOIN graph_runs lr ON lr.spec_id = sib.spec_id
                    WHERE sib.queue_id = ?1 AND sib.group_name = pm.group_name
                      AND sib.spec_id != ?2
                      AND lr.node_id = ?3 AND lr.session_id = ?4
@@ -315,13 +315,13 @@ impl Database {
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         conn.query_row(
             "SELECT pm.spec_id FROM queue_members pm
-             JOIN loop_specs ls ON ls.id = pm.spec_id
+             JOIN graph_specs ls ON ls.id = pm.spec_id
              WHERE pm.queue_id = ?1 AND ls.status IN (?2, ?3)
              ORDER BY pm.position ASC LIMIT 1",
             params![
                 queue_id,
-                LoopSpecStatus::Pending.as_str(),
-                LoopSpecStatus::Interrupted.as_str()
+                GraphSpecStatus::Pending.as_str(),
+                GraphSpecStatus::Interrupted.as_str()
             ],
             |row| row.get::<_, String>(0),
         )
@@ -339,10 +339,10 @@ impl Database {
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         conn.query_row(
             "SELECT pm.spec_id FROM queue_members pm
-             JOIN loop_specs ls ON ls.id = pm.spec_id
+             JOIN graph_specs ls ON ls.id = pm.spec_id
              WHERE pm.queue_id = ?1 AND ls.status = ?2
              ORDER BY pm.position ASC LIMIT 1",
-            params![queue_id, LoopSpecStatus::Running.as_str()],
+            params![queue_id, GraphSpecStatus::Running.as_str()],
             |row| row.get::<_, String>(0),
         )
         .optional()
@@ -350,8 +350,8 @@ impl Database {
     }
 
     /// Whether `queue_id` still has a member that isn't `completed`/`skipped`
-    /// (i.e. `pending` or stuck `running`). Used by the loop engine as a
-    /// guard against marking a queue run's loop `completed` when
+    /// (i.e. `pending` or stuck `running`). Used by the graph engine as a
+    /// guard against marking a queue run's graph `completed` when
     /// [`Self::queue_next_pending_spec_id`] finds no `pending` member to pick
     /// next but a member is nonetheless left non-terminal — e.g. `running`
     /// because a previous run crashed mid-spec and hasn't been reset yet.
@@ -362,12 +362,12 @@ impl Database {
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM queue_members pm
-             JOIN loop_specs ls ON ls.id = pm.spec_id
+             JOIN graph_specs ls ON ls.id = pm.spec_id
              WHERE pm.queue_id = ?1 AND ls.status NOT IN (?2, ?3)",
             params![
                 queue_id,
-                LoopSpecStatus::Completed.as_str(),
-                LoopSpecStatus::Skipped.as_str()
+                GraphSpecStatus::Completed.as_str(),
+                GraphSpecStatus::Skipped.as_str()
             ],
             |row| row.get(0),
         )?;
@@ -376,14 +376,14 @@ impl Database {
 
     /// Queue members left `running` with no live node run behind them in this
     /// daemon's lifetime — a safety net for status left stuck `running` by a
-    /// path other than G2 boot reconcile (which only ever reconciles a loop
+    /// path other than G2 boot reconcile (which only ever reconciles a graph
     /// that was itself `Running` at boot; a member corrupted to `running` by
-    /// some other route, or belonging to a loop reconcile didn't touch,
+    /// some other route, or belonging to a graph reconcile didn't touch,
     /// would otherwise stay silently invisible to
     /// [`Self::queue_next_pending_spec_id`] forever). "Live in this daemon's
-    /// lifetime" means a `loop_runs` row for the spec that is still
+    /// lifetime" means a `graph_runs` row for the spec that is still
     /// `running` *and* stamped with the current process's boot id — matching
-    /// [`Database::reconcile_orphaned_loops`]'s own liveness test. Returned
+    /// [`Database::reconcile_orphaned_graphs`]'s own liveness test. Returned
     /// in queue order; callers must log why before recovering one (R3: no
     /// spec status may silently exclude a member from selection).
     pub fn queue_stale_running_members(
@@ -397,16 +397,16 @@ impl Database {
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
             "SELECT pm.spec_id FROM queue_members pm
-             JOIN loop_specs ls ON ls.id = pm.spec_id
+             JOIN graph_specs ls ON ls.id = pm.spec_id
              WHERE pm.queue_id = ?1 AND ls.status = ?2
              AND NOT EXISTS (
-                 SELECT 1 FROM loop_runs lr
+                 SELECT 1 FROM graph_runs lr
                  WHERE lr.spec_id = pm.spec_id AND lr.status = 'running' AND lr.boot_id = ?3
              )
              ORDER BY pm.position ASC",
         )?;
         let rows = stmt.query_map(
-            params![queue_id, LoopSpecStatus::Running.as_str(), current_boot_id],
+            params![queue_id, GraphSpecStatus::Running.as_str(), current_boot_id],
             |row| row.get::<_, String>(0),
         )?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -424,7 +424,7 @@ impl Database {
             .collect::<std::collections::HashMap<_, _>>();
         let members = member_pairs
             .into_iter()
-            .filter_map(|(spec_id, _)| self.get_loop_spec(&spec_id).transpose())
+            .filter_map(|(spec_id, _)| self.get_graph_spec(&spec_id).transpose())
             .collect::<Result<Vec<_>>>()?;
 
         Ok(Some(QueueDetails {
@@ -432,6 +432,47 @@ impl Database {
             members,
             member_groups,
         }))
+    }
+
+    pub fn resolve_queue_id_by_prefix(&self, prefix: &str) -> Result<Option<String>> {
+        if prefix.is_empty() {
+            return Ok(None);
+        }
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let exists: bool = conn
+            .query_row(
+                "SELECT id FROM queues WHERE id = ?1",
+                params![prefix],
+                |_| Ok(true),
+            )
+            .optional()
+            .map_err(|e| anyhow!("{}", e))?
+            .unwrap_or(false);
+        if exists {
+            return Ok(Some(prefix.to_string()));
+        }
+        let escaped_prefix = prefix
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let mut stmt = conn.prepare("SELECT id FROM queues WHERE id LIKE ?1 || '%' ESCAPE '\\'")?;
+        let ids: Vec<String> = stmt
+            .query_map(rusqlite::params![escaped_prefix], |row| row.get(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        match ids.len() {
+            0 => Ok(None),
+            1 => Ok(Some(ids.into_iter().next().unwrap())),
+            _ => Err(anyhow!(
+                "Ambiguous queue id prefix '{}' matches {} ids: {}",
+                prefix,
+                ids.len(),
+                ids.join(", ")
+            )),
+        }
     }
 }
 

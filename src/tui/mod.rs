@@ -20,6 +20,12 @@ mod ui;
 mod whimsg;
 
 pub(crate) use ui::truncate_str_keep_tail;
+// CH3: the graph engine enqueues interactive hook messages with a canonical
+// promptbuilder-equivalent state — the builder types live here, so they are
+// re-exported for that one non-TUI consumer rather than making `app` public.
+pub(crate) use app::dialog::PersistedBuilderState;
+#[cfg(test)]
+pub(crate) use app::dialog::SimplePromptDialog;
 
 use anyhow::{Context, Result};
 use ratatui::crossterm::{
@@ -40,7 +46,7 @@ use crate::db::Database;
 use crate::domain::db_paths::database_path;
 
 use crate::tui::app::types::App;
-use event::run_event_loop;
+use event::run_event_graph;
 
 /// Entry point for `canopy tui`.
 pub fn run_tui() -> Result<()> {
@@ -67,8 +73,10 @@ pub fn run_tui() -> Result<()> {
         }
     }
 
-    let db = Arc::new(Database::new(&db_path).context("Failed to open database")?);
-    let mut app = App::new(Arc::clone(&db), &data_dir)?;
+    let db = Arc::new(Database::new_safe(&db_path, &data_dir).context("Failed to open database")?);
+    let home = dirs::home_dir().unwrap_or_default();
+    let canopy_config = crate::domain::canopy_config::CanopyConfig::load(&home.join(".canopy"));
+    let mut app = App::new(Arc::clone(&db), &data_dir, &canopy_config)?;
 
     // Reap bridge sidecars whose owning process died without cleaning up
     app.reconcile_bridge_sessions();
@@ -109,7 +117,7 @@ pub fn run_tui() -> Result<()> {
     let mut terminal = ratatui::Terminal::new(backend)?;
 
     // Run
-    let result = run_event_loop(&mut terminal, &mut app);
+    let result = run_event_graph(&mut terminal, &mut app);
 
     // Restore terminal — always, even on error
     disable_raw_mode()?;
@@ -128,32 +136,22 @@ pub fn run_tui() -> Result<()> {
 }
 
 /// Try to start the daemon process automatically.
+///
+/// CB72: never kills — if anything (managed daemon or orphan alike) already
+/// holds the port, there is nothing to start; otherwise the shared start
+/// prefers the installed unit and only detaches a raw `canopy serve` when
+/// no unit/manager exists to own it.
 fn auto_start_daemon(data_dir: &std::path::Path) -> Result<()> {
-    let exe = std::env::current_exe()?;
-    let log_path = data_dir.join("daemon.log");
-    let log_file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)?;
-    let log_err = log_file.try_clone()?;
-
-    let mut cmd = std::process::Command::new(&exe);
-    cmd.arg("serve")
-        .stdout(log_file)
-        .stderr(log_err)
-        .stdin(std::process::Stdio::null());
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        unsafe {
-            cmd.pre_exec(|| {
-                libc::setsid();
-                Ok(())
-            });
-        }
+    let port = crate::resolve_port(None);
+    if crate::daemon::process::resolve_port_pid(port).is_some() {
+        return Ok(());
     }
-
-    cmd.spawn().context("Failed to spawn daemon process")?;
-    Ok(())
+    let exe = std::env::current_exe()?;
+    crate::daemon::daemon_start::start_daemon_live(
+        port,
+        crate::daemon::daemon_start::StartIntent::Auto,
+        &exe,
+        None,
+        data_dir,
+    )
 }

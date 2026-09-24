@@ -6,14 +6,148 @@ mod setup_module {
     pub struct PlatformWithCli {
         pub cli: Option<crate::domain::cli_config::CliConfig>,
     }
+
+    pub fn strip_jsonc_comments(input: &str) -> String {
+        let mut out = String::with_capacity(input.len());
+        let mut chars = input.chars().peekable();
+        let mut in_string = false;
+
+        while let Some(c) = chars.next() {
+            if in_string {
+                out.push(c);
+                if c == '\\' {
+                    if let Some(&next) = chars.peek() {
+                        out.push(next);
+                        chars.next();
+                    }
+                    continue;
+                }
+                if c == '"' {
+                    in_string = false;
+                }
+            } else {
+                match c {
+                    '"' => {
+                        in_string = true;
+                        out.push(c);
+                    }
+                    '/' => match chars.peek() {
+                        Some('/') => {
+                            for ch in chars.by_ref() {
+                                if ch == '\n' {
+                                    out.push('\n');
+                                    break;
+                                }
+                            }
+                        }
+                        Some('*') => {
+                            chars.next();
+                            while let Some(ch) = chars.next() {
+                                if ch == '*' && chars.peek() == Some(&'/') {
+                                    chars.next();
+                                    break;
+                                }
+                            }
+                        }
+                        _ => out.push('/'),
+                    },
+                    _ => out.push(c),
+                }
+            }
+        }
+        out
+    }
+
+    pub mod models {
+        use serde::{Deserialize, Serialize};
+        use std::path::Path;
+
+        #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+        pub struct Platform {
+            pub name: String,
+            pub config_path: String,
+            #[serde(default)]
+            pub config_format: Option<String>,
+            #[serde(default)]
+            pub toml_array_format: bool,
+            #[serde(default = "default_command_format")]
+            pub command_format: String,
+            #[serde(alias = "servers_key")]
+            pub mcp_servers_key: Vec<String>,
+            #[serde(default)]
+            pub deprecated_keys: Vec<String>,
+            #[serde(default)]
+            pub unsupported_keys: Vec<String>,
+            #[serde(default)]
+            pub fields_mapping: std::collections::HashMap<String, String>,
+            #[serde(default)]
+            pub required_fields: std::collections::HashMap<String, Vec<String>>,
+            #[serde(default)]
+            pub server_extras: std::collections::HashMap<String, serde_json::Value>,
+            #[serde(default)]
+            pub skills_dir: Option<String>,
+            #[serde(default)]
+            pub instruction_file: Option<String>,
+            #[serde(default)]
+            pub cli: Option<serde_json::Value>,
+        }
+
+        fn default_command_format() -> String {
+            "separate".to_string()
+        }
+
+        pub fn resolve_config_path(home: &Path, config_path: &str) -> std::path::PathBuf {
+            let primary = home.join(config_path);
+            if primary.exists() {
+                return primary;
+            }
+            let ext = primary.extension().and_then(|e| e.to_str()).unwrap_or("");
+            let alternate = match ext {
+                "jsonc" => primary.with_extension("json"),
+                "json" => primary.with_extension("jsonc"),
+                _ => return primary,
+            };
+            if alternate.exists() {
+                return alternate;
+            }
+            primary
+        }
+    }
 }
 
+mod daemon {
+    pub mod process {
+        pub fn other_instance_may_be_running(_data_dir: &std::path::Path) -> bool {
+            false
+        }
+        pub fn read_pid(_data_dir: &std::path::Path) -> Option<u32> {
+            None
+        }
+        pub fn is_process_running(_pid: u32) -> bool {
+            false
+        }
+        pub fn ancestor_pids() -> Vec<u32> {
+            vec![]
+        }
+        pub fn terminate_process_group_async(_pid: i64, _grace: std::time::Duration) {}
+        pub const KILL_GRACE: std::time::Duration = std::time::Duration::from_secs(0);
+    }
+}
+
+mod system {
+    pub fn boot_id() -> Option<String> {
+        None
+    }
+}
+
+#[path = "../src/application/mod.rs"]
+mod application;
+#[path = "../src/db/mod.rs"]
+mod db;
 #[path = "../src/domain/mod.rs"]
 mod domain;
-#[path = "../src/rag/embedding_client.rs"]
-mod embedding_client;
-#[path = "../src/rag/vector_store.rs"]
-mod vector_store;
+#[path = "../src/rag/mod.rs"]
+mod rag;
 
 /// Example: Search the personal RAG for content about denoising metrics
 #[tokio::main]
@@ -29,12 +163,12 @@ async fn main() -> anyhow::Result<()> {
     println!("  Model: {}", model);
 
     // Get embedding dimensions
-    let dimensions = embedding_client::model_dimensions(model)
+    let dimensions = rag::embedding_client::model_dimensions(model)
         .map_err(|e| anyhow::anyhow!("Invalid model: {}", e))?;
     println!("  Dimensions: {}", dimensions);
 
     // Create embedding client
-    let client = embedding_client::client_from_config(&config)?;
+    let client = rag::embedding_client::client_from_config(&config)?;
 
     // Embed the query (run in blocking task to avoid blocking async executor)
     let query = "métricas validar denoising resultados conclusiones metrics";
@@ -49,9 +183,10 @@ async fn main() -> anyhow::Result<()> {
     println!("✅ Query embedded: {} dims\n", query_vec.len());
 
     // Open vector store and search
-    let store: vector_store::VectorStore =
-        vector_store::VectorStore::new(dimensions, Some(config.rag_vector_cache_entries)).await?;
-    let results: Vec<vector_store::SearchResult> = store.search_similar(&query_vec, 5).await?;
+    let store: rag::vector_store::VectorStore =
+        rag::vector_store::VectorStore::new(dimensions, Some(config.rag_vector_cache_entries))
+            .await?;
+    let results: Vec<rag::vector_store::SearchResult> = store.search_similar(&query_vec, 5).await?;
 
     println!("📊 Top 5 results:\n");
     if results.is_empty() {

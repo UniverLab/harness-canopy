@@ -3,8 +3,8 @@
 //! Provides a clean abstraction for sending notifications from both
 //! daemon (background tasks) and TUI (interactive agents).
 
-/// How a loop run reached a terminal state, for [`NotificationService::notify_loop_finished`].
-pub enum LoopFinishOutcome<'a> {
+/// How a graph run reached a terminal state, for [`NotificationService::notify_graph_finished`].
+pub enum GraphFinishOutcome<'a> {
     /// Every spec in the run reached `completed`.
     Completed {
         done: usize,
@@ -14,9 +14,9 @@ pub enum LoopFinishOutcome<'a> {
         /// human watching it knows a post-completion agent is now running.
         hook_launched: bool,
     },
-    /// A spec failed and the loop has no more retries/routes to take.
+    /// A spec failed and the graph has no more retries/routes to take.
     Failed { spec_name: &'a str },
-    /// A node reported a blocker needing human intervention; the loop paused.
+    /// A node reported a blocker needing human intervention; the graph paused.
     Blocked { summary: &'a str },
 }
 
@@ -38,42 +38,44 @@ pub trait NotificationService: Send + Sync {
     /// Send a notification about a nursery (seed creation) failure.
     fn notify_nursery_failed(&self, error_msg: &str);
 
-    /// Send a notification when a loop run actually begins executing.
+    /// Send a notification when a graph run actually begins executing.
     ///
     /// `resumed` distinguishes a fresh launch ("Started") from picking up
     /// where a prior run left off ("Resumed") — a reset+rerun or an autorun
-    /// resume shouldn't read as the loop starting from scratch again.
+    /// resume shouldn't read as the graph starting from scratch again.
     /// `first_pending` names the spec this dispatch will work first, when
     /// known.
-    fn notify_loop_started(
+    fn notify_graph_started(
         &self,
-        loop_name: &str,
+        graph_name: &str,
         spec_count: usize,
         resumed: bool,
         first_pending: Option<&str>,
     );
 
-    /// Send a notification each time a spec within a loop reaches `completed`.
+    /// Send a notification each time a spec within a graph reaches `completed`.
     /// `next_pending` names the spec that will run next (if any), so the toast
     /// says both what just finished and what's coming.
     fn notify_spec_completed(
         &self,
-        loop_name: &str,
+        graph_name: &str,
         spec_name: &str,
         done: usize,
         total: usize,
         next_pending: Option<&str>,
     );
 
-    /// Send a notification when a loop run reaches a terminal state
+    /// Send a notification when a graph run reaches a terminal state
     /// (completed, failed, or blocked).
-    fn notify_loop_finished(&self, loop_name: &str, outcome: LoopFinishOutcome<'_>);
+    fn notify_graph_finished(&self, graph_name: &str, outcome: GraphFinishOutcome<'_>);
 
-    /// Send a notification when a loop's `on_completed` hook (N2) fails —
+    /// Send a notification when a graph's `on_completed` hook (N2) fails —
     /// a bad platform/CLI config, a non-zero exit, or a timeout. Never sent
-    /// for the loop run itself (that already finished successfully by the
+    /// for the graph run itself (that already finished successfully by the
     /// time the hook runs); this is purely about the hook's own outcome.
-    fn notify_loop_completion_hook_failed(&self, loop_name: &str, error: &str);
+    fn notify_graph_completion_hook_failed(&self, graph_name: &str, error: &str);
+
+    fn notify_announcement(&self, title: &str, body: &str);
 }
 
 use crate::domain::notification::{send_notification, NotificationLevel};
@@ -131,9 +133,9 @@ impl NotificationService for DefaultNotificationService {
         send_notification("Seed creation failed", error_msg, NotificationLevel::Error);
     }
 
-    fn notify_loop_started(
+    fn notify_graph_started(
         &self,
-        loop_name: &str,
+        graph_name: &str,
         spec_count: usize,
         resumed: bool,
         first_pending: Option<&str>,
@@ -143,12 +145,12 @@ impl NotificationService for DefaultNotificationService {
             .map(|name| format!(" · next: {name}"))
             .unwrap_or_default();
         let body = format!("{verb} · {spec_count} specs{next}");
-        send_notification(loop_name, &body, NotificationLevel::Info);
+        send_notification(graph_name, &body, NotificationLevel::Info);
     }
 
     fn notify_spec_completed(
         &self,
-        loop_name: &str,
+        graph_name: &str,
         spec_name: &str,
         done: usize,
         total: usize,
@@ -158,12 +160,12 @@ impl NotificationService for DefaultNotificationService {
             .map(|name| format!(" · next: {name}"))
             .unwrap_or_default();
         let body = format!("{spec_name} ✓ · {done}/{total}{next}");
-        send_notification(loop_name, &body, NotificationLevel::Success);
+        send_notification(graph_name, &body, NotificationLevel::Success);
     }
 
-    fn notify_loop_finished(&self, loop_name: &str, outcome: LoopFinishOutcome<'_>) {
+    fn notify_graph_finished(&self, graph_name: &str, outcome: GraphFinishOutcome<'_>) {
         let (body, level) = match outcome {
-            LoopFinishOutcome::Completed {
+            GraphFinishOutcome::Completed {
                 done,
                 total,
                 hook_launched,
@@ -178,21 +180,25 @@ impl NotificationService for DefaultNotificationService {
                     NotificationLevel::Success,
                 )
             }
-            LoopFinishOutcome::Failed { spec_name } => {
+            GraphFinishOutcome::Failed { spec_name } => {
                 (format!("Failed · {spec_name}"), NotificationLevel::Error)
             }
-            LoopFinishOutcome::Blocked { summary } => {
+            GraphFinishOutcome::Blocked { summary } => {
                 (format!("Blocked · {summary}"), NotificationLevel::Warning)
             }
         };
-        send_notification(loop_name, &body, level);
+        send_notification(graph_name, &body, level);
     }
 
-    fn notify_loop_completion_hook_failed(&self, loop_name: &str, error: &str) {
+    fn notify_graph_completion_hook_failed(&self, graph_name: &str, error: &str) {
         send_notification(
-            loop_name,
+            graph_name,
             &format!("Post-completion hook failed · {error}"),
             NotificationLevel::Warning,
         );
+    }
+
+    fn notify_announcement(&self, title: &str, body: &str) {
+        send_notification(title, body, NotificationLevel::Info);
     }
 }

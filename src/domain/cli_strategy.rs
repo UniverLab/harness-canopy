@@ -57,18 +57,21 @@ pub struct CliStrategy {
     /// Flag that non-interactively trusts the run's working directory for
     /// this invocation, e.g. mistral's `--trust`. See
     /// [`CliConfig::trust_flag`]. Only applied by a caller that has opted in
-    /// (the loop engine, per `node.config["trust_workdir"]`) — never appended
+    /// (the graph engine, per `node.config["trust_workdir"]`) — never appended
     /// unconditionally by this struct's own command builders.
     ///
     /// [`CliConfig::trust_flag`]: super::cli_config::CliConfig::trust_flag
     pub trust_flag: Option<String>,
+    /// Declarative argv template. See [`CliConfig::invocation_template`].
+    pub invocation_template: Option<String>,
+    pub effort_declaration: Option<super::cli_config::EffortDeclaration>,
 }
 
 /// A CLI's configured `binary` could not be resolved to an executable.
 ///
 /// Typed (rather than a bare `anyhow!` string) so callers can tell this
 /// apart from every other command-build failure without matching on the
-/// rendered message: a missing binary is *permanent*, so the loop engine's
+/// rendered message: a missing binary is *permanent*, so the graph engine's
 /// infra-crash retry must not spend attempts and backoff waiting for it to
 /// appear (B39).
 #[derive(Debug, thiserror::Error)]
@@ -174,12 +177,244 @@ fn resolve_binary_with_path(binary: &str, path: &str) -> Result<PathBuf> {
         .map_err(Into::into)
 }
 
+/// How long an identity check may run before it is treated as a failure.
+/// Diagnosis-only (probe/doctor, CB44) — never on dispatch.
+pub const IDENTITY_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Maximum characters of captured output kept in a [`WrongBinaryError`].
+pub const IDENTITY_CHECK_OUTPUT_LIMIT: usize = 500;
+
+/// The resolved binary does not identify as the platform it was resolved
+/// for (CB44): the registry's `identity_check` ran against the resolved
+/// path and its output did not contain the expected substring.
+///
+/// The captured output is evidence for the report and nothing else — callers
+/// must not scrape it for quota/model meaning.
+#[derive(Debug, thiserror::Error)]
+#[error("Resolved '{resolved}' which does not identify as the {platform} CLI (expected '{expected}' in output; saw: {output}")]
+pub struct WrongBinaryError {
+    pub platform: String,
+    pub resolved: PathBuf,
+    pub expected: String,
+    pub output: String,
+}
+
+impl WrongBinaryError {
+    /// The full failure text: absolute path, platform, expected substring,
+    /// invoked command, and truncated evidence. This wording (not "platform
+    /// unreachable") is the whole value of CB44 — it ends the months-long
+    /// "blackbox is broken" misdiagnosis by naming what was actually found.
+    pub fn report(&self, binary: &str, cmd: &str) -> String {
+        format!(
+            "Resolved '{}', which does not identify as the {} CLI (expected '{}' in output of '{} {}'; saw: {})",
+            self.resolved.display(),
+            self.platform,
+            self.expected,
+            binary,
+            cmd,
+            self.output,
+        )
+    }
+}
+
+/// Truncate captured output to [`IDENTITY_CHECK_OUTPUT_LIMIT`] chars for
+/// the report, keeping the head (where `--version`-shaped output lives).
+pub fn truncate_identity_output(output: &str) -> String {
+    let trimmed = output.trim();
+    if trimmed.len() <= IDENTITY_CHECK_OUTPUT_LIMIT {
+        return trimmed.to_string();
+    }
+    format!("{}…", &trimmed[..IDENTITY_CHECK_OUTPUT_LIMIT])
+}
+
+/// Case-insensitive substring check of combined stdout+stderr against the
+/// registry's expected token. Pure so unit tests can pin the matching rule
+/// without spawning a process.
+fn identity_output_matches(combined: &str, expected: &str) -> bool {
+    combined.to_lowercase().contains(&expected.to_lowercase())
+}
+
+fn wrong_binary_error(
+    cli: &super::cli_config::CliConfig,
+    resolved: &Path,
+    expected: &str,
+    output: &str,
+) -> WrongBinaryError {
+    WrongBinaryError {
+        platform: cli.name.clone(),
+        resolved: resolved.to_path_buf(),
+        expected: expected.to_string(),
+        output: truncate_identity_output(output),
+    }
+}
+
+/// Synchronous identity check for sync contexts (doctor). Runs
+/// `<resolved> <check.cmd>` with stdin nulled, no network, no credentials,
+/// and judges combined stdout+stderr against `check.contains`.
+///
+/// - `Ok(())` when the platform declares no check (backward compatible) or
+///   the output contains the expected substring.
+/// - Never searches for another candidate binary: reports what was found
+///   and lets a human point at the right one via the absolute-path override.
+/// - Never called on dispatch (constraint 3) — probe/doctor only.
+pub fn verify_identity(
+    cli: &super::cli_config::CliConfig,
+    resolved: &Path,
+) -> std::result::Result<(), WrongBinaryError> {
+    let Some(check) = cli.identity_check.as_ref() else {
+        return Ok(());
+    };
+    let args = match shell_words::split(&check.cmd) {
+        Ok(args) => args,
+        Err(e) => {
+            return Err(wrong_binary_error(
+                cli,
+                resolved,
+                &check.contains,
+                &format!("failed to parse identity check command: {e}"),
+            ));
+        }
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    let resolved_owned = resolved.to_path_buf();
+    std::thread::spawn(move || {
+        let out = std::process::Command::new(&resolved_owned)
+            .args(&args)
+            .stdin(std::process::Stdio::null())
+            .output();
+        let _ = tx.send(out);
+    });
+    let output = match rx.recv_timeout(IDENTITY_CHECK_TIMEOUT) {
+        Ok(Ok(out)) => out,
+        Ok(Err(e)) => {
+            return Err(wrong_binary_error(
+                cli,
+                resolved,
+                &check.contains,
+                &format!("failed to run identity check: {e}"),
+            ));
+        }
+        Err(_) => {
+            return Err(wrong_binary_error(
+                cli,
+                resolved,
+                &check.contains,
+                "identity check timed out",
+            ));
+        }
+    };
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if identity_output_matches(&combined, &check.contains) {
+        Ok(())
+    } else {
+        Err(wrong_binary_error(
+            cli,
+            resolved,
+            &check.contains,
+            &combined,
+        ))
+    }
+}
+
+/// Async identity check for async contexts (probe). Same rule as
+/// [`verify_identity`]: `<resolved> <check.cmd>` judged against
+/// `check.contains`, case-insensitively, on combined stdout+stderr.
+pub async fn verify_identity_async(
+    cli: &super::cli_config::CliConfig,
+    resolved: &Path,
+) -> std::result::Result<(), WrongBinaryError> {
+    let Some(check) = cli.identity_check.as_ref() else {
+        return Ok(());
+    };
+    let args = match shell_words::split(&check.cmd) {
+        Ok(args) => args,
+        Err(e) => {
+            return Err(wrong_binary_error(
+                cli,
+                resolved,
+                &check.contains,
+                &format!("failed to parse identity check command: {e}"),
+            ));
+        }
+    };
+    let mut cmd = tokio::process::Command::new(resolved);
+    cmd.args(&args);
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    #[cfg(unix)]
+    cmd.process_group(0);
+    cmd.kill_on_drop(true);
+    let child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            return Err(wrong_binary_error(
+                cli,
+                resolved,
+                &check.contains,
+                &format!("failed to run identity check: {e}"),
+            ));
+        }
+    };
+    let output = match tokio::time::timeout(IDENTITY_CHECK_TIMEOUT, child.wait_with_output()).await
+    {
+        Ok(Ok(out)) => out,
+        Ok(Err(e)) => {
+            return Err(wrong_binary_error(
+                cli,
+                resolved,
+                &check.contains,
+                &format!("failed to run identity check: {e}"),
+            ));
+        }
+        Err(_) => {
+            return Err(wrong_binary_error(
+                cli,
+                resolved,
+                &check.contains,
+                "identity check timed out",
+            ));
+        }
+    };
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if identity_output_matches(&combined, &check.contains) {
+        Ok(())
+    } else {
+        Err(wrong_binary_error(
+            cli,
+            resolved,
+            &check.contains,
+            &combined,
+        ))
+    }
+}
+
+/// One parsed piece of a template token: either literal text, or a
+/// `{{marker}}` (required) / `{{marker?}}` (optional) reference.
+enum TokenPart<'a> {
+    Literal(&'a str),
+    Marker { name: &'a str, optional: bool },
+}
+
 impl CliStrategy {
     /// Build a strategy straight from a registry [`CliConfig`] entry — the
     /// one place that lists every field this struct mirrors from it, so
     /// [`super::models::Cli::strategy`] and anything else that needs a
     /// strategy from a resolved config (e.g. the platform probe) can never
     /// drift apart by hand-copying the field list twice.
+    ///
+    /// CB44: `identity_check` is deliberately NOT mirrored here. Dispatch
+    /// builds every command through this strategy, so leaving the check out
+    /// keeps verification diagnosis-only (probe/doctor) with zero per-call
+    /// tax — a user who never runs doctor or probe keeps today's behaviour.
     ///
     /// [`CliConfig`]: super::cli_config::CliConfig
     pub fn from_cli_config(cli_config: &super::cli_config::CliConfig) -> Self {
@@ -197,11 +432,22 @@ impl CliStrategy {
             session_id_pattern: cli_config.session_id_pattern.clone(),
             session_resume_cmd: cli_config.session_resume_cmd.clone(),
             trust_flag: cli_config.trust_flag.clone(),
+            invocation_template: cli_config.invocation_template.clone(),
+            effort_declaration: cli_config.effort_declaration.clone(),
         }
     }
 
+    /// The model-selection flag, but only when it names one. `None` when the
+    /// platform has no `model_flag` OR it is blank (`model_flag = ""`) — in
+    /// both cases a requested model must be omitted from argv entirely, never
+    /// rendered as an empty word or a bare value.
+    fn selectable_model_flag(&self) -> Option<&str> {
+        let f = self.model_flag.as_deref()?;
+        crate::domain::cli_config::model_flag_selects_model(Some(f)).then_some(f)
+    }
+
     /// Return a copy of this strategy with `prompt_via_stdin` forced to
-    /// `true`. Used by the loop engine when the composed prompt exceeds
+    /// `true`. Used by the graph engine when the composed prompt exceeds
     /// the OS argv size limit — delivering via stdin avoids E2BIG
     /// regardless of what the CLI's registered capability says.
     pub fn with_stdin_forced(&self) -> Self {
@@ -222,7 +468,7 @@ impl CliStrategy {
         model: Option<&str>,
         working_dir: Option<&str>,
     ) -> Result<Command> {
-        self.build_command_with_session(prompt, model, working_dir, None)
+        self.build_command_with_session(prompt, model, working_dir, None, None)
     }
 
     /// [`build_command`], additionally injecting a caller-chosen session id
@@ -237,6 +483,7 @@ impl CliStrategy {
         model: Option<&str>,
         working_dir: Option<&str>,
         session_id: Option<&str>,
+        effort: Option<&str>,
     ) -> Result<Command> {
         // Cold start: inject the set-at-spawn flag + id only when both the
         // registry flag and a caller-minted id exist.
@@ -244,7 +491,24 @@ impl CliStrategy {
             (Some(flag), Some(id)) => Some((flag, id)),
             _ => None,
         };
-        self.build_headless_command(prompt, model, working_dir, session_arg)
+        self.build_headless_command(prompt, model, working_dir, session_arg, None, effort)
+    }
+
+    /// CM5: build a headless command that points the CLI at a canopy-synthesized
+    /// MCP config file (via the `{{mcp_config}}` invocation-template marker)
+    /// instead of the platform's global config, so an ephemeral subagent only
+    /// sees the MCP surface it was granted. A platform with no
+    /// `invocation_template` has no marker to inject: `mcp_config_path` is then
+    /// inert and the CLI runs with its full global surface (the caller warns).
+    pub fn build_command_with_mcp_config(
+        &self,
+        prompt: &str,
+        model: Option<&str>,
+        working_dir: Option<&str>,
+        mcp_config_path: Option<&str>,
+        effort: Option<&str>,
+    ) -> Result<Command> {
+        self.build_headless_command(prompt, model, working_dir, None, mcp_config_path, effort)
     }
 
     /// Build a headless command that RESUMES an existing session by id (RS2).
@@ -267,13 +531,213 @@ impl CliStrategy {
                 self.binary
             )
         })?;
-        self.build_headless_command(prompt, model, working_dir, Some((flag, session_id)))
+        self.build_headless_command(
+            prompt,
+            model,
+            working_dir,
+            Some((flag, session_id)),
+            None,
+            None,
+        )
     }
 
     /// Whether this platform can resume a specific session by id in headless
     /// mode (RS2) — i.e. the registry gives it a `session_resume_cmd`.
     pub fn supports_resume_by_id(&self) -> bool {
         self.session_resume_cmd.is_some()
+    }
+
+    /// Build argv from the invocation template. Returns the substituted
+    /// argv words (without headless flags) for the given marker values.
+    /// Effort and mcp_config are declared but not yet wired (CB3/CB4).
+    #[allow(clippy::too_many_arguments)]
+    fn build_argv_from_template(
+        &self,
+        template: &str,
+        prompt: &str,
+        model: Option<&str>,
+        working_dir: Option<&str>,
+        session_arg: Option<(&str, &str)>,
+        effort: Option<&str>,
+        mcp_config: Option<&str>,
+    ) -> Vec<String> {
+        let mut markers: HashMap<&str, Option<&str>> = HashMap::new();
+        // When prompt is delivered via stdin, treat {{prompt}} as unavailable
+        // so it and any preceding flag are elided from argv.
+        if self.prompt_via_stdin {
+            markers.insert("prompt", None);
+        } else {
+            markers.insert("prompt", Some(prompt));
+        }
+        markers.insert("model", model);
+        markers.insert("workdir", working_dir);
+        markers.insert("effort", effort);
+        markers.insert("mcp_config", mcp_config);
+        let session_id_val = session_arg.map(|(_, id)| id);
+        markers.insert("session_id", session_id_val);
+        let session_flag_val = session_arg.map(|(flag, _)| flag);
+        markers.insert("session_flag", session_flag_val);
+
+        let tokens: Vec<&str> = template.split_whitespace().collect();
+        let mut argv: Vec<String> = Vec::new();
+        let mut i = 0;
+        while i < tokens.len() {
+            let token = tokens[i];
+            let has_marker = token.contains("{{");
+            if !has_marker {
+                let next_dropped = if i + 1 < tokens.len() {
+                    let next = tokens[i + 1];
+                    next.contains("{{") && Self::resolve_token(next, &markers).is_none()
+                } else {
+                    false
+                };
+                if token.starts_with('-') && next_dropped {
+                    i += 1;
+                    continue;
+                }
+                argv.push(token.to_string());
+                i += 1;
+            } else {
+                if let Some(rendered) = Self::resolve_token(token, &markers) {
+                    argv.push(rendered);
+                }
+                i += 1;
+            }
+        }
+        argv
+    }
+
+    /// FR4: a template's "model-bearing" token (the one carrying the `model`
+    /// marker) must never be able to render empty — that would silently drop
+    /// the whole model argument, the exact defect this spec exists to fix,
+    /// just hidden behind the `?` spelling instead of the old
+    /// drop-whole-token-on-any-missing-marker rule. A token where EVERY marker
+    /// in it (including `model` itself, i.e. spelled `{{model?}}`) is optional
+    /// can do exactly that when model is absent. `{{model}}` (required, the
+    /// only spelling a model-bearing token should ever use) is always safe and
+    /// never triggers this.
+    ///
+    /// `template` is the raw `invocation_template` string (no `None` case here
+    /// — callers only invoke this when a template exists). Returns `Some(msg)`
+    /// naming the platform and the offending token; `None` when the template
+    /// has no unsafe model-bearing token.
+    pub fn unsafe_optional_model_token(template: &str, platform: &str) -> Option<String> {
+        for token in template.split_whitespace() {
+            let parts = Self::parse_token_parts(token);
+            let has_model_marker = parts
+                .iter()
+                .any(|p| matches!(p, TokenPart::Marker { name, .. } if *name == "model"));
+            if !has_model_marker {
+                continue;
+            }
+            let all_optional = parts.iter().all(|p| match p {
+                TokenPart::Marker { optional, .. } => *optional,
+                TokenPart::Literal(_) => true,
+            });
+            if all_optional {
+                return Some(format!(
+                    "platform '{platform}' invocation_template token '{token}' has only \
+                     optional markers including {{{{model?}}}} — it would render empty \
+                     (silently dropping the model argument) whenever model is absent. \
+                     Spell the model marker as required: '{{{{model}}}}'."
+                ));
+            }
+        }
+        None
+    }
+
+    /// One parsed piece of a template token: either literal text, or a
+    /// `{{marker}}` (required) / `{{marker?}}` (optional) reference.
+    fn parse_token_parts(token: &str) -> Vec<TokenPart<'_>> {
+        let mut parts = Vec::new();
+        let mut rest = token;
+        loop {
+            let Some(start) = rest.find("{{") else {
+                if !rest.is_empty() {
+                    parts.push(TokenPart::Literal(rest));
+                }
+                break;
+            };
+            if start > 0 {
+                parts.push(TokenPart::Literal(&rest[..start]));
+            }
+            let after_open = &rest[start + 2..];
+            let Some(end) = after_open.find("}}") else {
+                parts.push(TokenPart::Literal(&rest[start..]));
+                break;
+            };
+            let raw_name = &after_open[..end];
+            let (name, optional) = match raw_name.strip_suffix('?') {
+                Some(n) => (n, true),
+                None => (raw_name, false),
+            };
+            parts.push(TokenPart::Marker { name, optional });
+            rest = &after_open[end + 2..];
+        }
+        parts
+    }
+
+    /// Resolve one template token against the marker values. `None` means the
+    /// token is dropped entirely — either because a REQUIRED marker in it is
+    /// unavailable (today's rule, unchanged: FR3), or because after removing
+    /// every unavailable OPTIONAL marker and its bound literal glue (FR1/FR2)
+    /// nothing is left to render (FR2: "a token that becomes empty is
+    /// dropped"). `Some(rendered)` is the fully substituted token.
+    fn resolve_token(token: &str, markers: &HashMap<&str, Option<&str>>) -> Option<String> {
+        let parts = Self::parse_token_parts(token);
+
+        // FR3: any unavailable REQUIRED marker drops the whole token, exactly
+        // as `all_markers_available` did before — optional markers never
+        // participate in this check.
+        for part in &parts {
+            if let TokenPart::Marker {
+                name,
+                optional: false,
+            } = part
+            {
+                markers.get(name).copied().flatten()?;
+            }
+        }
+
+        // FR1/FR2: render left to right. A literal immediately followed by an
+        // unavailable OPTIONAL marker is the "glue bound to" that marker (FR2)
+        // — both are dropped as a pair. Every other literal, and every
+        // available marker's value, is emitted normally.
+        let mut out = String::new();
+        let mut i = 0;
+        while i < parts.len() {
+            match &parts[i] {
+                TokenPart::Literal(s) => {
+                    let glue_drops = matches!(
+                        parts.get(i + 1),
+                        Some(TokenPart::Marker { name, optional: true })
+                            if markers.get(name).copied().flatten().is_none()
+                    );
+                    if glue_drops {
+                        i += 2;
+                    } else {
+                        out.push_str(s);
+                        i += 1;
+                    }
+                }
+                TokenPart::Marker { name, .. } => {
+                    if let Some(val) = markers.get(name).copied().flatten() {
+                        out.push_str(val);
+                    }
+                    // Unavailable here can only be an optional marker (a
+                    // required-unavailable one already returned above) — skip
+                    // it silently, its own glue (if any) was already consumed
+                    // in the Literal arm above, or there was none to consume.
+                    i += 1;
+                }
+            }
+        }
+
+        if out.is_empty() {
+            None
+        } else {
+            Some(out)
+        }
     }
 
     /// Shared core for every headless spawn (cold or resume). `session_arg`,
@@ -288,6 +752,8 @@ impl CliStrategy {
         model: Option<&str>,
         working_dir: Option<&str>,
         session_arg: Option<(&str, &str)>,
+        mcp_config: Option<&str>,
+        effort: Option<&str>,
     ) -> Result<Command> {
         let resolved = resolve_binary(&self.binary)?;
         let mut cmd = Command::new(resolved);
@@ -307,48 +773,95 @@ impl CliStrategy {
             cmd.env(key, value);
         }
 
-        // Add headless mode flags (before prompt)
-        for arg in shell_words::split(&self.headless_mode).unwrap_or_default() {
-            cmd.arg(arg);
-        }
+        if let Some(ref template) = self.invocation_template {
+            // Template-driven argv assembly (CB2).
+            let argv = self.build_argv_from_template(
+                template,
+                prompt,
+                model,
+                working_dir,
+                session_arg,
+                effort,
+                mcp_config,
+            );
 
-        // Inject the session flag + id (set-at-spawn for a cold start, or the
-        // resume-by-id flag for a resume) before the positional prompt.
-        if let Some((flag, id)) = session_arg {
-            cmd.arg(flag).arg(id);
-        }
-
-        // Deliver the prompt via stdin (backed by an anonymous temp file) or
-        // argv, per the CLI's registered capability. argv has an OS-level
-        // per-argument/argv size cliff (Linux MAX_ARG_STRLEN, ARG_MAX) that a
-        // large composed prompt (e.g. one embedding a prior node's full
-        // output) can cross, crashing the spawn with E2BIG. Node outputs are
-        // arbitrarily large, so any CLI that can read the prompt from stdin
-        // instead should.
-        if self.prompt_via_stdin {
-            let mut file = tempfile::tempfile().context("failed to create temp file for prompt")?;
-            file.write_all(prompt.as_bytes())
-                .context("failed to write prompt to temp file")?;
-            file.seek(SeekFrom::Start(0))
-                .context("failed to rewind prompt temp file")?;
-            cmd.stdin(std::process::Stdio::from(file));
-        } else {
-            cmd.arg(prompt);
-            cmd.stdin(std::process::Stdio::null());
-        }
-
-        // Add model if specified
-        if let Some(m) = model {
-            if let Some(ref flag) = self.model_flag {
-                cmd.arg(flag).arg(m);
+            // Headless flags are always prepended (not part of template).
+            for arg in shell_words::split(&self.headless_mode).unwrap_or_default() {
+                cmd.arg(arg);
             }
-        }
 
-        // Add working directory if supported
-        if self.supports_working_dir {
-            if let Some(dir) = working_dir {
-                if let Some(ref flag) = self.working_dir_flag {
-                    cmd.arg(flag).arg(dir);
+            // Deliver prompt via stdin vs argv. When prompt_via_stdin is true,
+            // {{prompt}} is already elided (markers inserted as None), but for
+            // safety filter any argv word that equals the prompt text.
+            for arg in &argv {
+                if self.prompt_via_stdin && arg == prompt {
+                    continue;
+                }
+                cmd.arg(arg);
+            }
+
+            if self.prompt_via_stdin {
+                let mut file =
+                    tempfile::tempfile().context("failed to create temp file for prompt")?;
+                file.write_all(prompt.as_bytes())
+                    .context("failed to write prompt to temp file")?;
+                file.seek(SeekFrom::Start(0))
+                    .context("failed to rewind prompt temp file")?;
+                cmd.stdin(std::process::Stdio::from(file));
+            } else {
+                cmd.stdin(std::process::Stdio::null());
+            }
+        } else {
+            // Legacy: fixed-order assembly (unchanged).
+            // Add headless mode flags (before prompt)
+            for arg in shell_words::split(&self.headless_mode).unwrap_or_default() {
+                cmd.arg(arg);
+            }
+
+            // Inject the session flag + id (set-at-spawn for a cold start, or the
+            // resume-by-id flag for a resume) before the positional prompt.
+            if let Some((flag, id)) = session_arg {
+                cmd.arg(flag).arg(id);
+            }
+
+            // Deliver the prompt via stdin (backed by an anonymous temp file) or
+            // argv, per the CLI's registered capability. argv has an OS-level
+            // per-argument/argv size cliff (Linux MAX_ARG_STRLEN, ARG_MAX) that a
+            // large composed prompt (e.g. one embedding a prior node's full
+            // output) can cross, crashing the spawn with E2BIG. Node outputs are
+            // arbitrarily large, so any CLI that can read the prompt from stdin
+            // instead should.
+            if self.prompt_via_stdin {
+                let mut file =
+                    tempfile::tempfile().context("failed to create temp file for prompt")?;
+                file.write_all(prompt.as_bytes())
+                    .context("failed to write prompt to temp file")?;
+                file.seek(SeekFrom::Start(0))
+                    .context("failed to rewind prompt temp file")?;
+                cmd.stdin(std::process::Stdio::from(file));
+            } else {
+                cmd.arg(prompt);
+                cmd.stdin(std::process::Stdio::null());
+            }
+
+            // Add model if specified — but only when the platform actually
+            // declares a way to select one. A blank `model_flag` (CB34,
+            // antigravity's `model_flag = ""`) is NOT a flag: emitting it puts
+            // a stray empty argv word on the command line that the CLI
+            // rejects before the run starts. Treat blank like `None` and omit
+            // the model entirely; the caller records a not-applied notice.
+            if let Some(m) = model {
+                if let Some(flag) = self.selectable_model_flag() {
+                    cmd.arg(flag).arg(m);
+                }
+            }
+
+            // Add working directory if supported
+            if self.supports_working_dir {
+                if let Some(dir) = working_dir {
+                    if let Some(ref flag) = self.working_dir_flag {
+                        cmd.arg(flag).arg(dir);
+                    }
                 }
             }
         }
@@ -446,6 +959,8 @@ mod tests {
             session_id_pattern: None,
             session_resume_cmd: None,
             trust_flag: None,
+            invocation_template: None,
+            effort_declaration: None,
         }
     }
 
@@ -506,6 +1021,55 @@ mod tests {
 
         let cmd_str = format!("{:?}", cmd);
         assert!(!cmd_str.contains("--model"));
+    }
+
+    /// CB34: a blank `model_flag` (antigravity's `model_flag = ""`) must not put
+    /// an empty argv word — or the bare model value — on the command line.
+    #[test]
+    fn build_command_blank_model_flag_omits_model_from_argv() {
+        let mut strategy = sample_strategy();
+        strategy.model_flag = Some(String::new());
+
+        let cmd = strategy
+            .build_command("test prompt", Some("gpt-4"), None)
+            .unwrap();
+
+        let args: Vec<String> = cmd
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+
+        assert!(
+            !args.iter().any(|a| a.is_empty()),
+            "blank model_flag must not render an empty argv word: {args:?}"
+        );
+        assert!(
+            !args.iter().any(|a| a == "gpt-4"),
+            "the model value must be omitted, not passed bare: {args:?}"
+        );
+    }
+
+    /// A real `model_flag` is unaffected: flag + value still land in argv, adjacent.
+    #[test]
+    fn build_command_real_model_flag_still_passes_model_in_argv() {
+        let strategy = sample_strategy(); // model_flag = Some("--model")
+
+        let cmd = strategy
+            .build_command("test prompt", Some("gpt-4"), None)
+            .unwrap();
+
+        let args: Vec<String> = cmd
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+
+        let i = args
+            .iter()
+            .position(|a| a == "--model")
+            .expect("--model must be present");
+        assert_eq!(args.get(i + 1).map(String::as_str), Some("gpt-4"));
     }
 
     #[test]
@@ -579,6 +1143,7 @@ mod tests {
                 None,
                 None,
                 Some("11111111-2222-3333-4444-555555555555"),
+                None,
             )
             .unwrap();
         let cmd_str = format!("{:?}", cmd);
@@ -592,7 +1157,7 @@ mod tests {
         // silently dropped, never passed as a stray argument.
         let strategy = sample_strategy();
         let cmd = strategy
-            .build_command_with_session("p", None, None, Some("sid-123"))
+            .build_command_with_session("p", None, None, Some("sid-123"), None)
             .unwrap();
         let cmd_str = format!("{:?}", cmd);
         assert!(!cmd_str.contains("sid-123"));
@@ -881,5 +1446,885 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("my-cli"));
         assert!(msg.contains("/usr/bin:/bin"));
+    }
+
+    #[test]
+    fn template_prompt_positional_at_end() {
+        // Case 1: prompt as positional at end (majority of current platforms).
+        let mut s = sample_strategy();
+        s.invocation_template =
+            Some("--session-id {{session_id}} {{prompt}} --model {{model}}".to_string());
+        s.session_id_set_flag = Some("--session-id".to_string());
+
+        let cmd = s
+            .build_command_with_session("the prompt", Some("gpt-4"), None, Some("ses_123"), None)
+            .unwrap();
+        let cmd_str = format!("{:?}", cmd);
+
+        // Assert order: headless flags, then session-id, then prompt, then model.
+        let headless_at = cmd_str.find("--headless").unwrap();
+        let session_at = cmd_str.find("--session-id").unwrap();
+        let prompt_at = cmd_str.find("the prompt").unwrap();
+        let model_at = cmd_str.find("--model").unwrap();
+        assert!(headless_at < session_at);
+        assert!(session_at < prompt_at);
+        assert!(prompt_at < model_at);
+    }
+
+    #[test]
+    fn template_prompt_as_flag_value() {
+        // Case 2: prompt as value of a flag (copilot -p). The flag that consumes
+        // the next argv word must be immediately followed by the prompt, not by
+        // --session-id (which would be misinterpreted as the prompt).
+        let mut s = sample_strategy();
+        s.invocation_template = Some("-p {{prompt}} --session-id {{session_id}}".to_string());
+        s.session_id_set_flag = Some("--session-id".to_string());
+
+        let cmd = s
+            .build_command_with_session("the prompt", None, None, Some("ses_456"), None)
+            .unwrap();
+        let cmd_str = format!("{:?}", cmd);
+
+        // Assert: -p immediately followed by prompt (no --session-id in between).
+        let p_flag_at = cmd_str.find("-p").unwrap();
+        let prompt_at = cmd_str.find("the prompt").unwrap();
+        let session_at = cmd_str.find("--session-id").unwrap();
+        assert!(p_flag_at < prompt_at);
+        assert!(prompt_at < session_at);
+        // Critical: --session-id must NOT appear between -p and the prompt.
+        let between = &cmd_str[p_flag_at..prompt_at];
+        assert!(!between.contains("--session-id"));
+    }
+
+    #[test]
+    fn template_flag_equals_value_form() {
+        // Case 3: --flag=value in a single word.
+        let mut s = sample_strategy();
+        s.invocation_template = Some("--model={{model}} {{prompt}}".to_string());
+
+        let cmd = s.build_command("the prompt", Some("gpt-4"), None).unwrap();
+        let cmd_str = format!("{:?}", cmd);
+
+        // Assert: --model=gpt-4 is a single argv word (no space between flag and value).
+        assert!(cmd_str.contains("--model=gpt-4"));
+        // And it's distinct from --model gpt-4 (two words).
+        assert!(!cmd_str.contains("--model \"gpt-4\""));
+    }
+
+    #[test]
+    fn template_composite_marker_in_value() {
+        // Case 4: marker composed within another marker's value (cursor effort).
+        let s = sample_strategy();
+        let argv = s.build_argv_from_template(
+            "{{model}}[context=1m,effort={{effort}},fast=false] {{prompt}}",
+            "the prompt",
+            Some("claude-opus-4-8"),
+            None,
+            None,
+            Some("high"),
+            None,
+        );
+
+        assert_eq!(argv.len(), 2);
+        assert_eq!(
+            argv[0],
+            "claude-opus-4-8[context=1m,effort=high,fast=false]"
+        );
+        assert_eq!(argv[1], "the prompt");
+    }
+
+    #[test]
+    fn template_elides_unavailable_marker_and_companion_flag() {
+        // If {{model}} is unavailable, --model is also elided (no orphan flag).
+        let mut s = sample_strategy();
+        s.invocation_template = Some("--model {{model}} {{prompt}}".to_string());
+
+        let cmd = s.build_command("the prompt", None, None).unwrap();
+        let cmd_str = format!("{:?}", cmd);
+
+        assert!(cmd_str.contains("the prompt"));
+        assert!(!cmd_str.contains("--model"));
+    }
+
+    #[test]
+    fn template_elides_flag_equals_value_when_marker_unavailable() {
+        // If {{model}} is unavailable, --model={{model}} is elided as a unit.
+        let mut s = sample_strategy();
+        s.invocation_template = Some("--model={{model}} {{prompt}}".to_string());
+
+        let cmd = s.build_command("the prompt", None, None).unwrap();
+        let cmd_str = format!("{:?}", cmd);
+
+        assert!(cmd_str.contains("the prompt"));
+        assert!(!cmd_str.contains("--model"));
+    }
+
+    #[test]
+    fn template_elides_composite_when_any_marker_unavailable() {
+        // If {{effort}} is unavailable, the whole composite token is elided.
+        let s = sample_strategy();
+        let argv = s.build_argv_from_template(
+            "{{model}}[context=1m,effort={{effort}},fast=false] {{prompt}}",
+            "the prompt",
+            Some("claude-opus-4-8"),
+            None,
+            None,
+            None, // effort unavailable
+            None,
+        );
+
+        assert_eq!(argv.len(), 1);
+        assert_eq!(argv[0], "the prompt");
+    }
+
+    #[test]
+    fn template_none_falls_back_to_legacy_assembly() {
+        // Backward compat: no template → legacy fixed-order behavior.
+        let s = sample_strategy(); // invocation_template is None
+        let cmd = s
+            .build_command("the prompt", Some("gpt-4"), Some("/tmp"))
+            .unwrap();
+        let cmd_str = format!("{:?}", cmd);
+
+        // Legacy order: headless, prompt, model, workdir.
+        assert!(cmd_str.contains("--headless"));
+        assert!(cmd_str.contains("the prompt"));
+        assert!(cmd_str.contains("--model"));
+        assert!(cmd_str.contains("gpt-4"));
+        assert!(cmd_str.contains("--workdir"));
+        assert!(cmd_str.contains("/tmp"));
+    }
+
+    #[test]
+    fn template_resume_uses_correct_flag() {
+        let mut s = sample_strategy();
+        s.invocation_template = Some("{{session_flag}} {{session_id}} {{prompt}}".to_string());
+        s.session_resume_cmd = Some("--resume".to_string());
+        s.session_id_set_flag = Some("--session-id".to_string());
+
+        let cmd = s
+            .build_resume_command("ses_123", "the prompt", None, None)
+            .unwrap();
+        let cmd_str = format!("{:?}", cmd);
+
+        assert!(cmd_str.contains("--resume"));
+        assert!(cmd_str.contains("ses_123"));
+        assert!(cmd_str.contains("the prompt"));
+        // Critical: --session-id must NOT appear (resume uses --resume, not --session-id)
+        let resume_at = cmd_str.find("--resume").unwrap();
+        let ses_at = cmd_str.find("ses_123").unwrap();
+        let between = &cmd_str[resume_at..ses_at];
+        assert!(!between.contains("--session-id"));
+    }
+
+    #[test]
+    fn template_stdin_forced_elides_prompt_marker() {
+        let mut s = sample_strategy();
+        s.invocation_template = Some("--model {{model}} {{prompt}}".to_string());
+        s.prompt_via_stdin = true;
+
+        let cmd = s.build_command("the prompt", Some("gpt-4"), None).unwrap();
+        let cmd_str = format!("{:?}", cmd);
+
+        assert!(cmd_str.contains("--model"));
+        assert!(cmd_str.contains("gpt-4"));
+        // Prompt is delivered via stdin, not argv
+        assert!(!cmd_str.contains("the prompt"));
+    }
+
+    #[test]
+    fn template_workdir_marker() {
+        let mut s = sample_strategy();
+        s.invocation_template = Some("--workdir {{workdir}} {{prompt}}".to_string());
+
+        let cmd = s
+            .build_command("the prompt", None, Some("/tmp/project"))
+            .unwrap();
+        let cmd_str = format!("{:?}", cmd);
+        assert!(cmd_str.contains("--workdir"));
+        assert!(cmd_str.contains("/tmp/project"));
+        assert!(cmd_str.contains("the prompt"));
+
+        // Without workdir, --workdir is elided
+        let cmd2 = s.build_command("the prompt", None, None).unwrap();
+        let cmd_str2 = format!("{:?}", cmd2);
+        assert!(!cmd_str2.contains("--workdir"));
+        assert!(cmd_str2.contains("the prompt"));
+    }
+
+    #[test]
+    fn template_optional_marker_glue_renders_when_available() {
+        let s = sample_strategy();
+        let argv = s.build_argv_from_template(
+            "-m {{model}}#{{effort?}} {{prompt}}",
+            "implement",
+            Some("opencode/big-pickle"),
+            None,
+            None,
+            Some("high"),
+            None,
+        );
+        assert_eq!(argv, vec!["-m", "opencode/big-pickle#high", "implement"]);
+    }
+
+    #[test]
+    fn template_optional_marker_glue_elided_when_absent() {
+        let s = sample_strategy();
+        let argv = s.build_argv_from_template(
+            "-m {{model}}#{{effort?}} {{prompt}}",
+            "implement",
+            Some("opencode/big-pickle"),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(argv, vec!["-m", "opencode/big-pickle", "implement"]);
+        assert!(argv.contains(&"opencode/big-pickle".to_string()));
+        assert!(!argv.iter().any(|w| w.contains('#')));
+    }
+
+    #[test]
+    fn template_optional_marker_hyphen_glue() {
+        let s = sample_strategy();
+        let template = "--model {{model}}-{{effort?}} {{prompt}}";
+        let with_effort = s.build_argv_from_template(
+            template,
+            "go",
+            Some("claude-sonnet-5"),
+            None,
+            None,
+            Some("high"),
+            None,
+        );
+        assert_eq!(with_effort, vec!["--model", "claude-sonnet-5-high", "go"]);
+        let without_effort = s.build_argv_from_template(
+            template,
+            "go",
+            Some("claude-sonnet-5"),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(without_effort, vec!["--model", "claude-sonnet-5", "go"]);
+    }
+
+    #[test]
+    fn template_required_marker_still_drops_token_and_flag() {
+        let s = sample_strategy();
+        let template = "--variant {{effort}} {{prompt}}";
+        let argv = s.build_argv_from_template(template, "go", None, None, None, None, None);
+        assert_eq!(argv, vec!["go"]);
+        assert!(!argv.contains(&"--variant".to_string()));
+    }
+
+    #[test]
+    fn template_optional_marker_alone_in_token_drops_with_flag() {
+        let s = sample_strategy();
+        let template = "--variant {{effort?}} {{prompt}}";
+        let argv = s.build_argv_from_template(template, "go", None, None, None, None, None);
+        assert_eq!(argv, vec!["go"]);
+        let argv2 =
+            s.build_argv_from_template(template, "go", None, None, None, Some("high"), None);
+        assert_eq!(argv2, vec!["--variant", "high", "go"]);
+    }
+
+    #[test]
+    fn unsafe_optional_model_token_rejects_all_optional_model_bearing_token() {
+        let msg = CliStrategy::unsafe_optional_model_token(
+            "-m {{model?}}#{{effort?}} {{prompt}}",
+            "opencode",
+        );
+        assert!(msg.is_some());
+        let msg = msg.unwrap();
+        assert!(msg.contains("opencode"));
+        assert!(msg.contains("{{model?}}#{{effort?}}"));
+    }
+
+    #[test]
+    fn unsafe_optional_model_token_allows_required_model_with_optional_effort() {
+        assert!(CliStrategy::unsafe_optional_model_token(
+            "-m {{model}}#{{effort?}} {{prompt}}",
+            "opencode",
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn unsafe_optional_model_token_none_when_no_model_marker() {
+        assert!(CliStrategy::unsafe_optional_model_token(
+            "-p {{prompt}} --add-dir {{workdir}}",
+            "antigravity",
+        )
+        .is_none());
+    }
+
+    // ── CB3: real registry templates as fixtures ─────────────────
+    // All `invocation_template` strings below are copied verbatim from
+    // `canopy-registry` commit `0f90d39` (branch `feat/invocation-template`),
+    // one fixture per platform. Tests call `build_argv_from_template` directly
+    // and assert the exact argv word list — no CLI is spawned, no network.
+    fn strategy_with_template(template: &str) -> CliStrategy {
+        let mut s = sample_strategy();
+        s.headless_mode = String::new();
+        s.invocation_template = Some(template.to_string());
+        s
+    }
+
+    #[test]
+    fn real_template_copilot_prompt_immediately_after_p_flag() {
+        // Source: canopy-registry/platforms/copilot.toml @ 0f90d39
+        // Template: "-p {{prompt}} {{session_flag}} {{session_id}} --model {{model}}"
+        let template = "-p {{prompt}} {{session_flag}} {{session_id}} --model {{model}}";
+        let s = strategy_with_template(template);
+
+        // Without session: session markers elided, no orphan flags.
+        let argv = s.build_argv_from_template(
+            template,
+            "fix the bug",
+            Some("gpt-4"),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(argv, vec!["-p", "fix the bug", "--model", "gpt-4"]);
+        assert_eq!(argv[0], "-p");
+        assert_eq!(argv[1], "fix the bug");
+
+        // With session: -p still immediately followed by prompt, not by session flag.
+        let argv2 = s.build_argv_from_template(
+            template,
+            "fix the bug",
+            Some("gpt-4"),
+            None,
+            Some(("--session-id", "uuid-123")),
+            None,
+            None,
+        );
+        assert_eq!(
+            argv2,
+            vec![
+                "-p",
+                "fix the bug",
+                "--session-id",
+                "uuid-123",
+                "--model",
+                "gpt-4"
+            ]
+        );
+        assert_eq!(argv2[0], "-p");
+        assert_eq!(argv2[1], "fix the bug");
+        // Guard against the RS1 regression: `copilot -p --session-id <uuid> <PROMPT>`
+        assert_ne!(argv2[1], "--session-id");
+    }
+
+    #[test]
+    fn real_template_claude_argv_with_effort() {
+        // Source: canopy-registry/platforms/claude.toml @ 0f90d39
+        // Template: "--effort {{effort}} --model {{model}} {{session_flag}} {{session_id}} {{prompt}}"
+        let template =
+            "--effort {{effort}} --model {{model}} {{session_flag}} {{session_id}} {{prompt}}";
+        let s = strategy_with_template(template);
+        let argv = s.build_argv_from_template(
+            template,
+            "do the thing",
+            Some("claude-opus-4-8"),
+            None,
+            Some(("--session-id", "ses_abc")),
+            Some("high"),
+            None,
+        );
+        assert_eq!(
+            argv,
+            vec![
+                "--effort",
+                "high",
+                "--model",
+                "claude-opus-4-8",
+                "--session-id",
+                "ses_abc",
+                "do the thing"
+            ]
+        );
+    }
+
+    #[test]
+    fn real_template_claude_argv_without_effort_elides_flag() {
+        // Source: canopy-registry/platforms/claude.toml @ 0f90d39
+        let template =
+            "--effort {{effort}} --model {{model}} {{session_flag}} {{session_id}} {{prompt}}";
+        let s = strategy_with_template(template);
+        let argv = s.build_argv_from_template(
+            template,
+            "do the thing",
+            Some("claude-opus-4-8"),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(argv, vec!["--model", "claude-opus-4-8", "do the thing"]);
+        assert!(!argv.contains(&"--effort".to_string()));
+        assert!(!argv.contains(&"--session-id".to_string()));
+    }
+
+    #[test]
+    fn real_template_gemini_session_flag_before_prompt() {
+        // Source: canopy-registry/platforms/gemini.toml @ 0f90d39
+        // Template: "{{session_flag}} {{session_id}} -p {{prompt}} --model {{model}}"
+        let template = "{{session_flag}} {{session_id}} -p {{prompt}} --model {{model}}";
+        let s = strategy_with_template(template);
+        let argv = s.build_argv_from_template(
+            template,
+            "analyze this",
+            Some("gemini-2.5-pro"),
+            None,
+            Some(("--session-id", "ses_gem")),
+            None,
+            None,
+        );
+        assert_eq!(
+            argv,
+            vec![
+                "--session-id",
+                "ses_gem",
+                "-p",
+                "analyze this",
+                "--model",
+                "gemini-2.5-pro"
+            ]
+        );
+        // Without session: session markers elided, no orphan flags.
+        let argv2 = s.build_argv_from_template(
+            template,
+            "analyze this",
+            Some("gemini-2.5-pro"),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            argv2,
+            vec!["-p", "analyze this", "--model", "gemini-2.5-pro"]
+        );
+    }
+
+    #[test]
+    fn real_template_codex_effort_as_single_argv_word() {
+        // Source: canopy-registry/platforms/codex.toml @ 0f90d39
+        // Template: "-m {{model}} -C {{workdir}} -c 'model_reasoning_effort=\"{{effort}}\"' {{prompt}}"
+        let template =
+            "-m {{model}} -C {{workdir}} -c 'model_reasoning_effort=\"{{effort}}\"' {{prompt}}";
+        let s = strategy_with_template(template);
+        let argv = s.build_argv_from_template(
+            template,
+            "refactor",
+            Some("o3"),
+            Some("/proj"),
+            None,
+            Some("high"),
+            None,
+        );
+        assert_eq!(
+            argv,
+            vec![
+                "-m",
+                "o3",
+                "-C",
+                "/proj",
+                "-c",
+                "'model_reasoning_effort=\"high\"'",
+                "refactor"
+            ]
+        );
+        // Verify -c value is one single argv word containing the quotes.
+        assert_eq!(argv[4], "-c");
+        assert_eq!(argv[5], "'model_reasoning_effort=\"high\"'");
+        // Without effort: flag and quoted token elided together.
+        let argv2 = s.build_argv_from_template(
+            template,
+            "refactor",
+            Some("o3"),
+            Some("/proj"),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(argv2, vec!["-m", "o3", "-C", "/proj", "refactor"]);
+        assert!(!argv2.contains(&"-c".to_string()));
+    }
+
+    #[test]
+    fn real_template_cursor_effort_embedded_in_model() {
+        // Source: canopy-registry/platforms/cursor.toml @ 0f90d39
+        // Template: "{{model}}[context=1m,effort={{effort}},fast=false] --workspace {{workdir}} {{prompt}}"
+        let template =
+            "{{model}}[context=1m,effort={{effort}},fast=false] --workspace {{workdir}} {{prompt}}";
+        let s = strategy_with_template(template);
+        let argv = s.build_argv_from_template(
+            template,
+            "build ui",
+            Some("claude-opus-4-8"),
+            Some("/proj"),
+            None,
+            Some("high"),
+            None,
+        );
+        assert_eq!(
+            argv,
+            vec![
+                "claude-opus-4-8[context=1m,effort=high,fast=false]",
+                "--workspace",
+                "/proj",
+                "build ui"
+            ]
+        );
+        assert_eq!(
+            argv[0],
+            "claude-opus-4-8[context=1m,effort=high,fast=false]"
+        );
+    }
+
+    #[test]
+    fn real_template_cursor_effort_elided_when_unavailable() {
+        // Source: canopy-registry/platforms/cursor.toml @ 0f90d39
+        let template =
+            "{{model}}[context=1m,effort={{effort}},fast=false] --workspace {{workdir}} {{prompt}}";
+        let s = strategy_with_template(template);
+        // Without effort, the whole composite token must be elided (both markers required).
+        let argv = s.build_argv_from_template(
+            template,
+            "build ui",
+            Some("claude-opus-4-8"),
+            Some("/proj"),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(argv, vec!["--workspace", "/proj", "build ui"]);
+        assert!(!argv.iter().any(|w| w.contains("effort=")));
+    }
+
+    #[test]
+    fn real_template_cline_thinking_flag() {
+        // Source: canopy-registry/platforms/cline.toml @ 0f90d39
+        // Template: "--thinking {{effort}} -m {{model}} -c {{workdir}} {{prompt}}"
+        let template = "--thinking {{effort}} -m {{model}} -c {{workdir}} {{prompt}}";
+        let s = strategy_with_template(template);
+        let argv = s.build_argv_from_template(
+            template,
+            "explain",
+            Some("gpt-4"),
+            Some("/proj"),
+            None,
+            Some("medium"),
+            None,
+        );
+        assert_eq!(
+            argv,
+            vec![
+                "--thinking",
+                "medium",
+                "-m",
+                "gpt-4",
+                "-c",
+                "/proj",
+                "explain"
+            ]
+        );
+        // Without effort: no orphan --thinking flag.
+        let argv2 = s.build_argv_from_template(
+            template,
+            "explain",
+            Some("gpt-4"),
+            Some("/proj"),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(argv2, vec!["-m", "gpt-4", "-c", "/proj", "explain"]);
+        assert!(!argv2.contains(&"--thinking".to_string()));
+    }
+
+    #[test]
+    fn real_template_opencode_v2_effort_in_model() {
+        // Source: CM31 — opencode v2 removed `--variant`; reasoning level now
+        // rides inside `-m provider/model#variant`. `{{effort?}}` optional so a
+        // dispatch with no effort still gets `-m <model>` (not a dropped flag).
+        let template = "-m {{model}}#{{effort?}} --dir {{workdir}} {{prompt}}";
+        let s = strategy_with_template(template);
+        let argv = s.build_argv_from_template(
+            template,
+            "implement",
+            Some("opencode/big-pickle"),
+            Some("/proj"),
+            None,
+            Some("max"),
+            None,
+        );
+        assert_eq!(
+            argv,
+            vec![
+                "-m",
+                "opencode/big-pickle#max",
+                "--dir",
+                "/proj",
+                "implement"
+            ]
+        );
+        // Without effort: `-m opencode/big-pickle` survives whole — this is
+        // the CM31 fix; the old template lost `-m` and the model entirely here.
+        let argv2 = s.build_argv_from_template(
+            template,
+            "implement",
+            Some("opencode/big-pickle"),
+            Some("/proj"),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            argv2,
+            vec!["-m", "opencode/big-pickle", "--dir", "/proj", "implement"]
+        );
+        assert!(!argv2.iter().any(|w| w.contains('#')));
+    }
+
+    #[test]
+    fn real_template_antigravity_no_effort_elides_cleanly() {
+        // Source: canopy-registry/platforms/antigravity.toml @ 0f90d39
+        // Template: "-p {{prompt}} --add-dir {{workdir}}"
+        // effort_declaration = { form = "", values = [] } — declared as not supporting effort.
+        let template = "-p {{prompt}} --add-dir {{workdir}}";
+        let s = strategy_with_template(template);
+        let argv =
+            s.build_argv_from_template(template, "hello", None, Some("/proj"), None, None, None);
+        assert_eq!(argv, vec!["-p", "hello", "--add-dir", "/proj"]);
+        // Even if effort is passed, template has no {{effort}} marker so argv is unchanged.
+        let argv2 = s.build_argv_from_template(
+            template,
+            "hello",
+            None,
+            Some("/proj"),
+            None,
+            Some("high"),
+            None,
+        );
+        assert_eq!(argv2, vec!["-p", "hello", "--add-dir", "/proj"]);
+        assert!(!argv2.iter().any(|w| w.contains("high")));
+    }
+
+    #[test]
+    fn build_command_with_mcp_config_injects_path() {
+        let template = "-p {{prompt}} --mcp-config {{mcp_config}}";
+        let s = strategy_with_template(template);
+        let argv = s.build_argv_from_template(
+            template,
+            "hello",
+            None,
+            None,
+            None,
+            None,
+            Some("/tmp/mcp.json"),
+        );
+        assert!(argv.contains(&"/tmp/mcp.json".to_string()));
+        assert!(argv.contains(&"--mcp-config".to_string()));
+    }
+
+    #[test]
+    fn build_command_with_mcp_config_none_omits_marker() {
+        let template = "-p {{prompt}} --mcp-config {{mcp_config}}";
+        let s = strategy_with_template(template);
+        let argv = s.build_argv_from_template(template, "hello", None, None, None, None, None);
+        assert!(!argv.iter().any(|w| w.contains("mcp")));
+        assert_eq!(argv, vec!["-p", "hello"]);
+    }
+
+    #[test]
+    fn build_command_with_mcp_config_with_effort_reaches_argv() {
+        let template = "-p {{prompt}} --mcp-config {{mcp_config}} --effort {{effort}}";
+        let s = strategy_with_template(template);
+        let cmd = s
+            .build_command_with_mcp_config("hello", None, None, Some("/tmp/mcp.json"), Some("high"))
+            .unwrap();
+        let cmd_str = format!("{:?}", cmd);
+        assert!(cmd_str.contains("--effort"));
+        assert!(cmd_str.contains("high"));
+    }
+
+    #[test]
+    fn build_command_with_mcp_config_without_effort_elides_flag() {
+        let template = "-p {{prompt}} --mcp-config {{mcp_config}} --effort {{effort}}";
+        let s = strategy_with_template(template);
+        let cmd = s
+            .build_command_with_mcp_config("hello", None, None, Some("/tmp/mcp.json"), None)
+            .unwrap();
+        let cmd_str = format!("{:?}", cmd);
+        assert!(!cmd_str.contains("--effort"));
+    }
+
+    // ── CB44 identity check ──────────────────────────────────────
+
+    fn identity_cli(
+        binary: &str,
+        cmd: Option<&str>,
+        contains: Option<&str>,
+    ) -> super::super::cli_config::CliConfig {
+        super::super::cli_config::CliConfig {
+            name: "blackbox".to_string(),
+            binary: binary.to_string(),
+            identity_check: match (cmd, contains) {
+                (Some(c), Some(s)) => Some(super::super::cli_config::IdentityCheck {
+                    cmd: c.to_string(),
+                    contains: s.to_string(),
+                }),
+                _ => None,
+            },
+            ..Default::default()
+        }
+    }
+
+    fn write_identity_script(dir: &tempfile::TempDir, name: &str, body: &str) -> PathBuf {
+        let path = dir.path().join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        path
+    }
+
+    #[test]
+    fn verify_identity_passes_when_output_contains_expected_substring() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = write_identity_script(&dir, "bb", "echo 'Blackbox CLI v1.2.3'\n");
+        let cli = identity_cli(
+            &script.to_string_lossy(),
+            Some("--version"),
+            Some("Blackbox"),
+        );
+        assert!(verify_identity(&cli, &script).is_ok());
+    }
+
+    #[test]
+    fn verify_identity_fails_when_output_missing_substring_reports_wrong_binary_with_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = write_identity_script(
+            &dir,
+            "blackbox",
+            "echo \"blackbox: another window manager is already running on display ':0'\"\n",
+        );
+        let cli = identity_cli(
+            &script.to_string_lossy(),
+            Some("--version"),
+            Some("Blackbox CLI"),
+        );
+        let err = verify_identity(&cli, &script).unwrap_err();
+        assert_eq!(err.resolved, script);
+        assert_eq!(err.expected, "Blackbox CLI");
+        assert!(
+            err.output.contains("another window manager"),
+            "error must carry the wrong program's output as evidence: {}",
+            err.output
+        );
+        let report = err.report(&cli.binary, "--version");
+        assert!(
+            report.contains(&script.to_string_lossy().to_string()),
+            "report must name the resolved absolute path: {report}"
+        );
+        assert!(report.contains("does not identify as the blackbox CLI"));
+    }
+
+    #[test]
+    fn verify_identity_skipped_when_check_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = write_identity_script(
+            &dir,
+            "whatever",
+            "echo 'another window manager is already running'\n",
+        );
+        let cli = identity_cli(&script.to_string_lossy(), None, None);
+        assert!(verify_identity(&cli, &script).is_ok());
+    }
+
+    #[test]
+    fn verify_identity_uses_absolute_path_directly_without_path_search() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = write_identity_script(&dir, "real-bb", "echo 'Blackbox CLI'\n");
+        let cli = identity_cli(
+            &script.to_string_lossy(),
+            Some("--version"),
+            Some("blackbox"),
+        );
+        // Absolute binary is used as-is; no PATH lookup happens.
+        assert!(verify_identity(&cli, &script).is_ok());
+    }
+
+    #[test]
+    fn verify_identity_matches_case_insensitively() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = write_identity_script(&dir, "bb", "echo 'BLACKBOX cli'\n");
+        let cli = identity_cli(
+            &script.to_string_lossy(),
+            Some("--version"),
+            Some("blackbox"),
+        );
+        assert!(verify_identity(&cli, &script).is_ok());
+    }
+
+    #[test]
+    fn verify_identity_truncates_long_output_but_keeps_evidence() {
+        let long = "x".repeat(IDENTITY_CHECK_OUTPUT_LIMIT + 1000);
+        let truncated = truncate_identity_output(&long);
+        assert!(truncated.len() <= IDENTITY_CHECK_OUTPUT_LIMIT + 3);
+        assert!(truncated.starts_with("xxx"));
+    }
+
+    /// CB44 constraint 3: the identity check is diagnosis-only
+    /// (probe/doctor), never a per-dispatch tax. Dispatch builds every
+    /// command through `CliStrategy::from_cli_config`, which deliberately
+    /// drops `identity_check` — and neither the executor nor the graph
+    /// engine may reference the check or its helper directly. Greps their
+    /// production code the way doctor's glyph test greps its own.
+    #[test]
+    fn agent_dispatch_never_runs_identity_check() {
+        for (name, source) in [
+            ("executor", include_str!("../executor/mod.rs")),
+            ("graph_engine", include_str!("../graph_engine.rs")),
+        ] {
+            let production_code = source.split("mod tests {").next().unwrap_or(source);
+            for marker in ["verify_identity", "identity_check"] {
+                assert!(
+                    !production_code.contains(marker),
+                    "CB44: `{marker}` must not appear in {name} production code — \
+                     identity verification is diagnosis-only (probe/doctor)"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn verify_identity_async_passes_and_fails_like_sync() {
+        let dir = tempfile::tempdir().unwrap();
+        let good = write_identity_script(&dir, "good", "echo 'Blackbox CLI'\n");
+        let bad = write_identity_script(
+            &dir,
+            "bad",
+            "echo 'another window manager is already running'\n",
+        );
+        let good_cli = identity_cli(&good.to_string_lossy(), Some("--version"), Some("Blackbox"));
+        let bad_cli = identity_cli(
+            &bad.to_string_lossy(),
+            Some("--version"),
+            Some("Blackbox CLI"),
+        );
+        assert!(verify_identity_async(&good_cli, &good).await.is_ok());
+        let err = verify_identity_async(&bad_cli, &bad).await.unwrap_err();
+        assert_eq!(err.resolved, bad);
+        assert!(err.output.contains("another window manager"));
     }
 }

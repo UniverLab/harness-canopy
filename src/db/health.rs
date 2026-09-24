@@ -121,8 +121,11 @@ mod tests {
             drop(db);
         }
         let mut bytes = std::fs::read(&path).unwrap();
-        let start = bytes.len() / 2;
-        let end = start + 200.min(bytes.len() - start);
+        // CM5: a fixed offset in page 3 rather than bytes.len()/2 — the
+        // subagent_runs table shifted the file so the midpoint no longer
+        // lands in a page quick_check validates.
+        let start = 8192;
+        let end = (start + 100).min(bytes.len());
         for b in &mut bytes[start..end] {
             *b ^= 0xFF;
         }
@@ -153,7 +156,7 @@ mod tests {
             let conn = db.conn.lock().unwrap();
             conn.execute_batch(
                 "PRAGMA foreign_keys=OFF;
-                 INSERT INTO loop_specs (id, loop_id, name, position, status)
+                 INSERT INTO graph_specs (id, graph_id, name, position, status)
                      VALUES ('orphan-spec', 'does-not-exist', 'orphan', 0, 'pending');
                  PRAGMA foreign_keys=ON;",
             )
@@ -161,7 +164,7 @@ mod tests {
         }
         let violations = db.foreign_key_check().unwrap();
         assert_eq!(violations.len(), 1);
-        assert!(violations[0].contains("loop_specs"));
+        assert!(violations[0].contains("graph_specs"));
     }
 
     // ── backup_into / integrity_check_file ─────────────────────────────
@@ -201,8 +204,11 @@ mod tests {
             drop(db);
         }
         let mut bytes = std::fs::read(&path).unwrap();
-        let start = bytes.len() / 2;
-        let end = start + 200.min(bytes.len() - start);
+        // CM5: a fixed offset in page 3 rather than bytes.len()/2 — the
+        // subagent_runs table shifted the file so the midpoint no longer
+        // lands in a page quick_check validates.
+        let start = 8192;
+        let end = (start + 100).min(bytes.len());
         for b in &mut bytes[start..end] {
             *b ^= 0xFF;
         }

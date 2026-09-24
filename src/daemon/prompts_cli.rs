@@ -1,6 +1,6 @@
 //! CLI handlers for `canopy prompts` subcommands (P1) — discovery for the
 //! file-backed prompt presets under `~/.canopy/prompts/`. Read-only, mirrors
-//! `canopy loop list/info` in spirit and structure (see `loop_cli.rs`).
+//! `canopy graph list/info` in spirit and structure (see `graph_cli.rs`).
 
 use std::path::Path;
 

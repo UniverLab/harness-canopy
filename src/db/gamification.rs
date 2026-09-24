@@ -28,30 +28,30 @@ impl Database {
         Ok(count)
     }
 
-    pub fn count_loop_node_runs(&self) -> Result<i64> {
+    pub fn count_graph_node_runs(&self) -> Result<i64> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
-        let count: i64 = conn.query_row("SELECT COUNT(*) FROM loop_runs", [], |r| r.get(0))?;
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM graph_runs", [], |r| r.get(0))?;
         Ok(count)
     }
 
-    pub fn count_completed_loops(&self) -> Result<i64> {
+    pub fn count_completed_graphs(&self) -> Result<i64> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
         let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM loops WHERE status = 'completed'",
+            "SELECT COUNT(*) FROM graphs WHERE status = 'completed'",
             [],
             |r| r.get(0),
         )?;
         Ok(count)
     }
 
-    pub fn max_loop_nodes_in_any_loop(&self) -> Result<usize> {
+    pub fn max_graph_nodes_in_any_graph(&self) -> Result<usize> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
         let max: i64 = conn.query_row(
             "SELECT COALESCE(MAX(node_count), 0) FROM (
-                SELECT ws.loop_id, COUNT(wn.id) AS node_count
-                FROM loop_specs ws
-                JOIN loop_nodes wn ON wn.spec_id = ws.id
-                GROUP BY ws.loop_id
+                SELECT ws.graph_id, COUNT(wn.id) AS node_count
+                FROM graph_specs ws
+                JOIN graph_nodes wn ON wn.spec_id = ws.id
+                GROUP BY ws.graph_id
              )",
             [],
             |r| r.get(0),
@@ -59,12 +59,12 @@ impl Database {
         Ok(max.max(0) as usize)
     }
 
-    pub fn has_parallel_loop_run(&self) -> Result<bool> {
+    pub fn has_parallel_graph_run(&self) -> Result<bool> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
         let count: i64 = conn.query_row(
             "SELECT COUNT(*)
-             FROM loop_runs wr
-             JOIN loop_specs ws ON ws.id = wr.spec_id
+             FROM graph_runs wr
+             JOIN graph_specs ws ON ws.id = wr.spec_id
              WHERE ws.parallelizable = 1",
             [],
             |r| r.get(0),
@@ -110,23 +110,23 @@ mod tests {
     }
 
     #[test]
-    fn count_loop_node_runs_empty() {
+    fn count_graph_node_runs_empty() {
         let db = test_db();
-        let count = db.count_loop_node_runs().unwrap();
+        let count = db.count_graph_node_runs().unwrap();
         assert_eq!(count, 0);
     }
 
     #[test]
-    fn count_completed_loops_empty() {
+    fn count_completed_graphs_empty() {
         let db = test_db();
-        let count = db.count_completed_loops().unwrap();
+        let count = db.count_completed_graphs().unwrap();
         assert_eq!(count, 0);
     }
 
     #[test]
-    fn max_loop_nodes_in_any_loop_empty() {
+    fn max_graph_nodes_in_any_graph_empty() {
         let db = test_db();
-        let max = db.max_loop_nodes_in_any_loop().unwrap();
+        let max = db.max_graph_nodes_in_any_graph().unwrap();
         assert_eq!(max, 0);
     }
 
@@ -214,43 +214,43 @@ mod tests {
     }
 
     #[test]
-    fn count_loop_node_runs_with_data() {
+    fn count_graph_node_runs_with_data() {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs() as i64;
-        // Insert a loop
+        // Insert a graph
         conn.execute(
-            "INSERT INTO loops (id, name, workdir, status, created_at) VALUES (?1, 'test', '/tmp', 'draft', ?2)",
+            "INSERT INTO graphs (id, name, workdir, status, created_at) VALUES (?1, 'test', '/tmp', 'draft', ?2)",
             rusqlite::params!["loop1", now],
         )
         .unwrap();
         // Insert a spec
         conn.execute(
-            "INSERT INTO loop_specs (id, loop_id, name, position, parallelizable, status) VALUES (?1, ?2, 'spec1', 0, 0, 'pending')",
+            "INSERT INTO graph_specs (id, graph_id, name, position, parallelizable, status) VALUES (?1, ?2, 'spec1', 0, 0, 'pending')",
             rusqlite::params!["spec1", "loop1"],
         )
         .unwrap();
-        // Insert a node (spec_id non-null, loop_id null)
+        // Insert a node (spec_id non-null, graph_id null)
         conn.execute(
-            "INSERT INTO loop_nodes (id, spec_id, loop_id, name, kind, config, position, created_at) VALUES (?1, ?2, NULL, 'node1', 'agent', '{}', 0, ?3)",
+            "INSERT INTO graph_nodes (id, spec_id, graph_id, name, kind, config, position, created_at) VALUES (?1, ?2, NULL, 'node1', 'agent', '{}', 0, ?3)",
             rusqlite::params!["n1", "spec1", now],
         )
         .unwrap();
-        // Insert a loop_run
+        // Insert a graph_run
         conn.execute(
-            "INSERT INTO loop_runs (id, loop_id, spec_id, node_id, status, started_at, iteration) VALUES (?1, ?2, ?3, ?4, 'success', ?5, 1)",
+            "INSERT INTO graph_runs (id, graph_id, spec_id, node_id, status, started_at, iteration) VALUES (?1, ?2, ?3, ?4, 'success', ?5, 1)",
             rusqlite::params!["run1", "loop1", "spec1", "n1", now],
         )
         .unwrap();
         drop(conn);
-        assert_eq!(db.count_loop_node_runs().unwrap(), 1);
+        assert_eq!(db.count_graph_node_runs().unwrap(), 1);
     }
 
     #[test]
-    fn count_completed_loops_with_data() {
+    fn count_completed_graphs_with_data() {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
         let now = std::time::SystemTime::now()
@@ -258,54 +258,54 @@ mod tests {
             .unwrap()
             .as_secs() as i64;
         conn.execute(
-            "INSERT INTO loops (id, name, workdir, status, created_at) VALUES (?1, 'completed', '/tmp', 'completed', ?2)",
+            "INSERT INTO graphs (id, name, workdir, status, created_at) VALUES (?1, 'completed', '/tmp', 'completed', ?2)",
             rusqlite::params!["loop1", now],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO loops (id, name, workdir, status, created_at) VALUES (?1, 'running', '/tmp', 'running', ?2)",
+            "INSERT INTO graphs (id, name, workdir, status, created_at) VALUES (?1, 'running', '/tmp', 'running', ?2)",
             rusqlite::params!["loop2", now],
         )
         .unwrap();
         drop(conn);
-        assert_eq!(db.count_completed_loops().unwrap(), 1);
+        assert_eq!(db.count_completed_graphs().unwrap(), 1);
     }
 
     #[test]
-    fn max_loop_nodes_in_any_loop_with_data() {
+    fn max_graph_nodes_in_any_graph_with_data() {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs() as i64;
-        // Loop with 1 spec, 2 nodes
+        // Graph with 1 spec, 2 nodes
         conn.execute(
-            "INSERT INTO loops (id, name, workdir, status, created_at) VALUES (?1, 'loop1', '/tmp', 'draft', ?2)",
+            "INSERT INTO graphs (id, name, workdir, status, created_at) VALUES (?1, 'loop1', '/tmp', 'draft', ?2)",
             rusqlite::params!["loop1", now],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO loop_specs (id, loop_id, name, position, parallelizable, status) VALUES (?1, ?2, 'spec1', 0, 0, 'pending')",
+            "INSERT INTO graph_specs (id, graph_id, name, position, parallelizable, status) VALUES (?1, ?2, 'spec1', 0, 0, 'pending')",
             rusqlite::params!["spec1", "loop1"],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO loop_nodes (id, spec_id, loop_id, name, kind, config, position, created_at) VALUES (?1, ?2, NULL, 'n1', 'agent', '{}', 0, ?3)",
+            "INSERT INTO graph_nodes (id, spec_id, graph_id, name, kind, config, position, created_at) VALUES (?1, ?2, NULL, 'n1', 'agent', '{}', 0, ?3)",
             rusqlite::params!["n1", "spec1", now],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO loop_nodes (id, spec_id, loop_id, name, kind, config, position, created_at) VALUES (?1, ?2, NULL, 'n2', 'check', '{}', 1, ?3)",
+            "INSERT INTO graph_nodes (id, spec_id, graph_id, name, kind, config, position, created_at) VALUES (?1, ?2, NULL, 'n2', 'check', '{}', 1, ?3)",
             rusqlite::params!["n2", "spec1", now],
         )
         .unwrap();
         drop(conn);
-        assert_eq!(db.max_loop_nodes_in_any_loop().unwrap(), 2);
+        assert_eq!(db.max_graph_nodes_in_any_graph().unwrap(), 2);
     }
 
     #[test]
-    fn has_parallel_loop_run_false_when_non_parallel() {
+    fn has_parallel_graph_run_false_when_non_parallel() {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
         let now = std::time::SystemTime::now()
@@ -313,31 +313,31 @@ mod tests {
             .unwrap()
             .as_secs() as i64;
         conn.execute(
-            "INSERT INTO loops (id, name, workdir, status, created_at) VALUES (?1, 'loop1', '/tmp', 'draft', ?2)",
+            "INSERT INTO graphs (id, name, workdir, status, created_at) VALUES (?1, 'loop1', '/tmp', 'draft', ?2)",
             rusqlite::params!["loop1", now],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO loop_specs (id, loop_id, name, position, parallelizable, status) VALUES (?1, ?2, 'spec1', 0, 0, 'pending')",
+            "INSERT INTO graph_specs (id, graph_id, name, position, parallelizable, status) VALUES (?1, ?2, 'spec1', 0, 0, 'pending')",
             rusqlite::params!["spec1", "loop1"],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO loop_nodes (id, spec_id, loop_id, name, kind, config, position, created_at) VALUES (?1, ?2, NULL, 'n1', 'agent', '{}', 0, ?3)",
+            "INSERT INTO graph_nodes (id, spec_id, graph_id, name, kind, config, position, created_at) VALUES (?1, ?2, NULL, 'n1', 'agent', '{}', 0, ?3)",
             rusqlite::params!["n1", "spec1", now],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO loop_runs (id, loop_id, spec_id, node_id, status, started_at, iteration) VALUES (?1, ?2, ?3, ?4, 'success', ?5, 1)",
+            "INSERT INTO graph_runs (id, graph_id, spec_id, node_id, status, started_at, iteration) VALUES (?1, ?2, ?3, ?4, 'success', ?5, 1)",
             rusqlite::params!["run1", "loop1", "spec1", "n1", now],
         )
         .unwrap();
         drop(conn);
-        assert!(!db.has_parallel_loop_run().unwrap());
+        assert!(!db.has_parallel_graph_run().unwrap());
     }
 
     #[test]
-    fn has_parallel_loop_run_true_when_parallel() {
+    fn has_parallel_graph_run_true_when_parallel() {
         let db = test_db();
         let conn = db.conn.lock().unwrap();
         let now = std::time::SystemTime::now()
@@ -345,27 +345,27 @@ mod tests {
             .unwrap()
             .as_secs() as i64;
         conn.execute(
-            "INSERT INTO loops (id, name, workdir, status, created_at) VALUES (?1, 'loop1', '/tmp', 'draft', ?2)",
+            "INSERT INTO graphs (id, name, workdir, status, created_at) VALUES (?1, 'loop1', '/tmp', 'draft', ?2)",
             rusqlite::params!["loop1", now],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO loop_specs (id, loop_id, name, position, parallelizable, status) VALUES (?1, ?2, 'spec1', 0, 1, 'pending')",
+            "INSERT INTO graph_specs (id, graph_id, name, position, parallelizable, status) VALUES (?1, ?2, 'spec1', 0, 1, 'pending')",
             rusqlite::params!["spec1", "loop1"],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO loop_nodes (id, spec_id, loop_id, name, kind, config, position, created_at) VALUES (?1, ?2, NULL, 'n1', 'agent', '{}', 0, ?3)",
+            "INSERT INTO graph_nodes (id, spec_id, graph_id, name, kind, config, position, created_at) VALUES (?1, ?2, NULL, 'n1', 'agent', '{}', 0, ?3)",
             rusqlite::params!["n1", "spec1", now],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO loop_runs (id, loop_id, spec_id, node_id, status, started_at, iteration) VALUES (?1, ?2, ?3, ?4, 'success', ?5, 1)",
+            "INSERT INTO graph_runs (id, graph_id, spec_id, node_id, status, started_at, iteration) VALUES (?1, ?2, ?3, ?4, 'success', ?5, 1)",
             rusqlite::params!["run1", "loop1", "spec1", "n1", now],
         )
         .unwrap();
         drop(conn);
-        assert!(db.has_parallel_loop_run().unwrap());
+        assert!(db.has_parallel_graph_run().unwrap());
     }
 
     #[test]
