@@ -377,7 +377,34 @@ pub(crate) async fn run_doctor() -> Result<()> {
     // systemd/launchd retry-graph the daemon forever with nothing on the
     // port — from here that's indistinguishable from "never started" unless
     // doctor reads the unit itself and says so.
-    report_service_unit(&home, &mut issues);
+    //
+    // CB73: the BROWSER check judges the *effective* environment (merged
+    // drop-ins via `systemctl show`), plus the environ of an orphaned port
+    // holder when that process isn't the unit's MainPID (CB72) — the
+    // running daemon's environment is the one harnesses actually inherit.
+    let port_pid_for_unit = port_pid;
+    let manager_pid_for_unit = manager.as_ref().and_then(|m| m.pid);
+    let show_out = if manager.is_some_and(|m| m.name == "systemd") {
+        read_systemctl_show_environment()
+    } else {
+        None
+    };
+    let is_orphan = port_pid_for_unit.is_some()
+        && manager_pid_for_unit != port_pid_for_unit
+        && manager.is_some();
+    let orphan_env: Option<Vec<u8>> = if is_orphan {
+        port_pid_for_unit.and_then(read_proc_environ)
+    } else {
+        None
+    };
+    report_service_unit(
+        &home,
+        port_pid_for_unit,
+        manager_pid_for_unit,
+        show_out.as_deref(),
+        orphan_env.as_deref(),
+        &mut issues,
+    );
 
     // ── Orphaned joins (CB52) ─────────────────────────────────────
     // Databases damaged before the entry/exit FKs became RESTRICT hold join
@@ -945,9 +972,39 @@ fn parse_unit_binary(manager: &str, unit_content: &str) -> Option<PathBuf> {
 /// Pure over &str so tests drive it without real unit files.
 fn unit_defines_browser(unit_content: &str) -> bool {
     unit_content.lines().any(|line| {
-        line.strip_prefix("Environment=BROWSER=").is_some_and(|v| {
-            // Mirror parse_existing_browser_env: one layer of surrounding
-            // quotes is not a value — `Environment=BROWSER=""` is empty.
+        // CB73: drop-in files are often hand-written with indented lines —
+        // accept ` Environment=BROWSER=...` the same as a flush-left one.
+        line.trim_start()
+            .strip_prefix("Environment=BROWSER=")
+            .is_some_and(|v| {
+                // Mirror parse_existing_browser_env: one layer of surrounding
+                // quotes is not a value — `Environment=BROWSER=""` is empty.
+                let unquoted = if v.len() >= 2 && v.starts_with('"') && v.ends_with('"') {
+                    &v[1..v.len() - 1]
+                } else {
+                    v
+                };
+                !unquoted.is_empty()
+            })
+    })
+}
+
+/// CB73 FR1: is BROWSER set in the *effective* environment systemd would
+/// launch the unit with? Parses the stdout of
+/// `systemctl --user show canopy.service -p Environment` — one
+/// `Environment=...` line that already merges every drop-in. Pure over
+/// &str so tests inject canned output instead of shelling out.
+fn browser_set_in_systemctl_show(output: &str) -> bool {
+    let Some(rest) = output
+        .lines()
+        .find_map(|line| line.strip_prefix("Environment="))
+    else {
+        return false;
+    };
+    split_env_tokens(rest).into_iter().any(|token| {
+        token.strip_prefix("BROWSER=").is_some_and(|v| {
+            // Same one-layer quote rule as `unit_defines_browser`: the
+            // quotes wrap a value, they aren't one.
             let unquoted = if v.len() >= 2 && v.starts_with('"') && v.ends_with('"') {
                 &v[1..v.len() - 1]
             } else {
@@ -956,6 +1013,97 @@ fn unit_defines_browser(unit_content: &str) -> bool {
             !unquoted.is_empty()
         })
     })
+}
+
+/// Split an `Environment=` remainder into whitespace-separated tokens,
+/// keeping one layer of double quotes so `BROWSER="/x/my browser"` stays a
+/// single token. Tiny on purpose — no shell-word crate for one check.
+fn split_env_tokens(rest: &str) -> Vec<&str> {
+    let mut tokens = Vec::new();
+    let mut start: Option<usize> = None;
+    let mut in_quotes = false;
+    for (i, c) in rest.char_indices() {
+        if c == '"' {
+            in_quotes = !in_quotes;
+            if start.is_none() {
+                start = Some(i);
+            }
+        } else if c.is_whitespace() && !in_quotes {
+            if let Some(from) = start.take() {
+                tokens.push(&rest[from..i]);
+            }
+        } else if start.is_none() {
+            start = Some(i);
+        }
+    }
+    if let Some(from) = start {
+        tokens.push(&rest[from..]);
+    }
+    tokens
+}
+
+/// CB73 FR2: is BROWSER set in a process's raw `/proc/<pid>/environ`
+/// bytes? NUL-separated `KEY=value` entries; values are literal
+/// environment values, so no quote stripping applies here. Pure over
+/// `&[u8]` so tests inject bytes rather than reading `/proc`.
+fn browser_set_in_proc_environ(data: &[u8]) -> bool {
+    data.split(|&b| b == 0).any(|entry| {
+        entry.strip_prefix(b"BROWSER=").is_some_and(|v| {
+            // Environ values are literal (no quote rule); a stray trailing
+            // newline isn't part of the value.
+            !v.strip_suffix(b"\n").unwrap_or(v).is_empty()
+        })
+    })
+}
+
+/// CB73 FR2+FR3: the verdict doctor prints for the BROWSER check. An enum
+/// (not threaded booleans) so every combination of "unit effective
+/// environment" × "running daemon's environ" is an exhaustive, testable
+/// arm and the fix hint can only be attached to the arms where the
+/// effective unit value is missing.
+// The shared `Unit` prefix is deliberate: every variant is a verdict about
+// the unit's effective environment, so the prefix is meaning, not noise.
+#[allow(clippy::enum_variant_names)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BrowserEnvStatus {
+    /// No orphan to judge, and the effective environment has BROWSER —
+    /// success, no hint.
+    UnitSet,
+    /// No orphan to judge, and the effective environment lacks BROWSER —
+    /// warning + fix hint.
+    UnitMissing,
+    /// The orphan serving the port has BROWSER and so does the unit's
+    /// effective environment — success with both labels; no hint (FR3:
+    /// nothing is missing from the effective environment).
+    UnitSetOrphanSet,
+    /// Unit is fine but the orphan actually serving the port lacks
+    /// BROWSER — the daemon must be restarted through the unit. No
+    /// drop-in hint: the unit already defines it.
+    UnitSetOrphanMissing,
+    /// The orphan has BROWSER today but the unit's effective environment
+    /// lacks it — a restart through the unit would drop it. FR3 allows
+    /// the hint here (the effective unit environment IS missing).
+    UnitMissingOrphanSet,
+    /// Neither the effective unit environment nor the orphan's environ
+    /// has BROWSER — warning + fix hint + both labels.
+    UnitMissingOrphanMissing,
+}
+
+/// Combine the two observed facts into the verdict. `orphan_environ_set`
+/// is `None` when there is no orphan to judge (port holder is the unit's
+/// MainPID, nothing holds the port, or no manager), `Some(..)` otherwise.
+/// FR2: an orphan present means BOTH labels get reported whatever their
+/// values — every combination is its own arm, none collapsed, so a
+/// running daemon that HAS BROWSER is never printed as "missing".
+fn diagnose_browser_env(unit_set: bool, orphan_environ_set: Option<bool>) -> BrowserEnvStatus {
+    match (unit_set, orphan_environ_set) {
+        (true, None) => BrowserEnvStatus::UnitSet,
+        (false, None) => BrowserEnvStatus::UnitMissing,
+        (true, Some(true)) => BrowserEnvStatus::UnitSetOrphanSet,
+        (true, Some(false)) => BrowserEnvStatus::UnitSetOrphanMissing,
+        (false, Some(true)) => BrowserEnvStatus::UnitMissingOrphanSet,
+        (false, Some(false)) => BrowserEnvStatus::UnitMissingOrphanMissing,
+    }
 }
 
 /// What doctor should report about a service unit's binary, given facts a
@@ -1104,11 +1252,81 @@ fn report_layout_split(canopy_dir: &Path, state_pid: Option<u32>, issues: &mut V
     }
 }
 
+/// CB73 FR1 (I/O): the unit's *effective* environment as systemd reports
+/// it (`systemctl --user show canopy.service -p Environment` merges the
+/// unit file with every drop-in). `None` when `systemctl` is missing or
+/// fails — the check then falls back to parsing the files. Tests never
+/// call this; they inject a canned string into
+/// `read_effective_unit_browser` instead.
+fn read_systemctl_show_environment() -> Option<String> {
+    let output = std::process::Command::new("systemctl")
+        .args(["--user", "show", "canopy.service", "-p", "Environment"])
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// CB73 FR2 (I/O): raw `/proc/<pid>/environ` bytes for the process
+/// holding the daemon port, or `None` if it is gone/unreadable. Tests
+/// never call this; they inject bytes into `report_service_unit`.
+fn read_proc_environ(pid: u32) -> Option<Vec<u8>> {
+    std::fs::read(format!("/proc/{pid}/environ")).ok()
+}
+
+/// CB73 FR1: BROWSER in the effective environment. The injected
+/// `systemctl show` output (systemd's own merged view) is authoritative;
+/// only when it is `None` (systemctl unavailable) does this fall back to
+/// the unit file plus every `*.conf` drop-in under the sibling
+/// `canopy.service.d/`, sorted by file name.
+fn read_effective_unit_browser(unit_path: &Path, systemctl_output: Option<&str>) -> bool {
+    if let Some(output) = systemctl_output {
+        return browser_set_in_systemctl_show(output);
+    }
+    let mut combined = std::fs::read_to_string(unit_path).unwrap_or_default();
+    if let Some(dir) = unit_path.parent() {
+        let dropin_dir = dir.join("canopy.service.d");
+        let mut dropins: Vec<PathBuf> = std::fs::read_dir(&dropin_dir)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .map(|entry| entry.path())
+                    .filter(|p| p.extension() == Some(std::ffi::OsStr::new("conf")))
+                    .collect()
+            })
+            .unwrap_or_default();
+        dropins.sort();
+        for dropin in dropins {
+            if let Ok(content) = std::fs::read_to_string(&dropin) {
+                combined.push('\n');
+                combined.push_str(&content);
+            }
+        }
+    }
+    unit_defines_browser(&combined)
+}
+
 /// Report on the systemd/launchd service unit, if any: its path, the binary
 /// it names, and whether that binary is the problem. Running the daemon by
 /// hand instead of via a unit is legitimate, so no unit at all is a neutral
 /// informational line, not a warning.
-fn report_service_unit(home: &Path, issues: &mut Vec<String>) {
+///
+/// CB73: `port_pid`/`manager_pid` are the facts `run_doctor` already
+/// computed (no second /proc scan), `systemctl_output` is the injected
+/// `systemctl --user show -p Environment` stdout, and `orphan_environ` is
+/// the injected raw `/proc/<port_pid>/environ` bytes — present only when
+/// that port holder is an orphan (not the unit's MainPID). Tests inject
+/// these directly; production fills them via the thin readers below.
+fn report_service_unit(
+    home: &Path,
+    port_pid: Option<u32>,
+    manager_pid: Option<u32>,
+    systemctl_output: Option<&str>,
+    orphan_environ: Option<&[u8]>,
+    issues: &mut Vec<String>,
+) {
     let Some((manager, unit_path)) = service_unit_location(home) else {
         return;
     };
@@ -1166,14 +1384,59 @@ fn report_service_unit(home: &Path, issues: &mut Vec<String>) {
     }
 
     if manager == "systemd" {
-        if unit_defines_browser(&unit_content) {
-            success_nested(
-                "Browser env: BROWSER is set (login/connection pages can open)".to_string(),
-            );
-        } else {
-            println!("     \x1b[33m⚠\x1b[0m Unit defines no Environment=BROWSER= — harnesses and MCP servers started by the daemon cannot open login or connection pages");
-            println!("     Fix: mkdir -p ~/.config/systemd/user/canopy.service.d && printf '[Service]\\nEnvironment=BROWSER=<your-browser-cmd>\\n' > ~/.config/systemd/user/canopy.service.d/browser.conf && systemctl --user daemon-reload && systemctl --user restart canopy.service");
-            issues.push("Daemon unit has no BROWSER — harnesses/MCP servers cannot open login or connection pages. Re-run `canopy daemon install` with BROWSER set, or add the drop-in shown above.".to_string());
+        let unit_set = read_effective_unit_browser(&unit_path, systemctl_output);
+        // CB73 FR2: the environ bytes only count when they came from a
+        // real orphan — the port holder exists and is not the unit's
+        // MainPID. Otherwise there is no second opinion to report.
+        let orphan_set = match orphan_environ {
+            Some(environ) if port_pid.is_some() && manager_pid != port_pid => {
+                Some(browser_set_in_proc_environ(environ))
+            }
+            _ => None,
+        };
+        match diagnose_browser_env(unit_set, orphan_set) {
+            BrowserEnvStatus::UnitSet => {
+                success_nested(
+                    "Browser env: BROWSER is set (login/connection pages can open)".to_string(),
+                );
+            }
+            // FR2: an orphan means both labels are reported even when
+            // nothing is missing — the user must see WHOSE environment
+            // is actually carrying the daemon.
+            BrowserEnvStatus::UnitSetOrphanSet => {
+                success_nested(
+                    "Browser env: unit: set, running daemon: set (orphan) — BROWSER is set (login/connection pages can open)".to_string(),
+                );
+            }
+            BrowserEnvStatus::UnitMissing => {
+                println!("     \x1b[33m⚠\x1b[0m Unit defines no Environment=BROWSER= — harnesses and MCP servers started by the daemon cannot open login or connection pages");
+                println!("     Fix: mkdir -p ~/.config/systemd/user/canopy.service.d && printf '[Service]\\nEnvironment=BROWSER=<your-browser-cmd>\\n' > ~/.config/systemd/user/canopy.service.d/browser.conf && systemctl --user daemon-reload && systemctl --user restart canopy.service");
+                issues.push("Daemon unit has no BROWSER — harnesses/MCP servers cannot open login or connection pages. Re-run `canopy daemon install` with BROWSER set, or add the drop-in shown above.".to_string());
+            }
+            // The unit already defines BROWSER (the drop-in the fix hint
+            // would create exists) — so no hint; the defect is the orphan.
+            BrowserEnvStatus::UnitSetOrphanMissing => {
+                println!("     \x1b[33m⚠\x1b[0m unit: set, running daemon: missing (orphan) — restart the daemon through the unit so it inherits the drop-in");
+                issues.push("Running daemon is an orphan without BROWSER (unit: set, running daemon: missing (orphan)) — run 'canopy daemon stop' then start through systemd.".to_string());
+            }
+            // The orphan's environ HAS BROWSER today, but the unit's
+            // effective environment lacks it — FR2 requires reporting
+            // `running daemon: set`, never "missing"; FR3 allows the
+            // hint because the effective unit value IS missing.
+            BrowserEnvStatus::UnitMissingOrphanSet => {
+                println!("     \x1b[33m⚠\x1b[0m Unit defines no Environment=BROWSER= — harnesses and MCP servers started by the daemon cannot open login or connection pages");
+                println!("     \x1b[33m⚠\x1b[0m unit: missing, running daemon: set (orphan) — the running daemon has BROWSER but the unit does not; apply the fix and restart through the unit so a plain restart does not drop it");
+                println!("     Fix: mkdir -p ~/.config/systemd/user/canopy.service.d && printf '[Service]\\nEnvironment=BROWSER=<your-browser-cmd>\\n' > ~/.config/systemd/user/canopy.service.d/browser.conf && systemctl --user daemon-reload && systemctl --user restart canopy.service");
+                issues.push("Daemon unit has no BROWSER — harnesses/MCP servers cannot open login or connection pages. Re-run `canopy daemon install` with BROWSER set, or add the drop-in shown above.".to_string());
+            }
+            // Effective unit missing ⇒ the fix hint is allowed (FR3), and
+            // FR2 requires both labels on orphan reports.
+            BrowserEnvStatus::UnitMissingOrphanMissing => {
+                println!("     \x1b[33m⚠\x1b[0m Unit defines no Environment=BROWSER= — harnesses and MCP servers started by the daemon cannot open login or connection pages");
+                println!("     \x1b[33m⚠\x1b[0m unit: missing, running daemon: missing (orphan) — restart the daemon through the unit so it inherits the drop-in");
+                println!("     Fix: mkdir -p ~/.config/systemd/user/canopy.service.d && printf '[Service]\\nEnvironment=BROWSER=<your-browser-cmd>\\n' > ~/.config/systemd/user/canopy.service.d/browser.conf && systemctl --user daemon-reload && systemctl --user restart canopy.service");
+                issues.push("Daemon unit has no BROWSER — harnesses/MCP servers cannot open login or connection pages. Re-run `canopy daemon install` with BROWSER set, or add the drop-in shown above.".to_string());
+            }
         }
     }
 }
@@ -1554,6 +1817,269 @@ mod tests {
     fn unit_defines_browser_false_when_quoted_empty_value() {
         let content = "[Service]\nEnvironment=BROWSER=\"\"\n";
         assert!(!unit_defines_browser(content));
+    }
+
+    // ── CB73: BROWSER check reads the effective environment ───────
+
+    #[test]
+    fn effective_browser_true_when_dropin_sets_it_despite_bare_unit() {
+        // The CB73 bug verbatim: unit file has no BROWSER, the drop-in
+        // does — with systemctl unavailable the file fallback must still
+        // see the drop-in, or doctor proposes creating the file that
+        // already exists.
+        let dir = tempfile::tempdir().unwrap();
+        let unit_path = dir.path().join("canopy.service");
+        std::fs::write(&unit_path, "[Service]\nExecStart=/usr/bin/canopy serve\n").unwrap();
+        let dropin_dir = dir.path().join("canopy.service.d");
+        std::fs::create_dir_all(&dropin_dir).unwrap();
+        std::fs::write(
+            dropin_dir.join("browser.conf"),
+            "[Service]\nEnvironment=BROWSER=/home/u/bin/wsl-browser\n",
+        )
+        .unwrap();
+        assert!(read_effective_unit_browser(&unit_path, None));
+    }
+
+    #[test]
+    fn effective_browser_false_when_neither_sets_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let unit_path = dir.path().join("canopy.service");
+        std::fs::write(&unit_path, "[Service]\nExecStart=/usr/bin/canopy serve\n").unwrap();
+        // No canopy.service.d/ at all, and no BROWSER in the unit: the
+        // caller must reach the warning + fix-hint arm.
+        assert!(!read_effective_unit_browser(&unit_path, None));
+        // A missing unit file counts as empty, never as set.
+        assert!(!read_effective_unit_browser(
+            &dir.path().join("absent.service"),
+            None
+        ));
+        assert_eq!(
+            diagnose_browser_env(false, None),
+            BrowserEnvStatus::UnitMissing
+        );
+    }
+
+    #[test]
+    fn orphan_environ_missing_reported_when_unit_set() {
+        // Unit is fine, orphan isn't: both facts reported, no fix hint.
+        assert_eq!(
+            diagnose_browser_env(true, Some(false)),
+            BrowserEnvStatus::UnitSetOrphanMissing
+        );
+        assert!(!browser_set_in_proc_environ(b"PATH=/usr/bin\0FOO=1\0"));
+        assert!(browser_set_in_proc_environ(b"BROWSER=/x\0"));
+        // Entries are matched per NUL-separated entry, on their own
+        // prefix: BROWSER after another var is found, and a key that
+        // merely ends in "BROWSER" is not BROWSER.
+        assert!(browser_set_in_proc_environ(b"PATH=/usr/bin\0BROWSER=/x"));
+        assert!(!browser_set_in_proc_environ(b"NOBROWSER=x\0"));
+        assert!(!browser_set_in_proc_environ(b"BROWSER=\0PATH=/x"));
+    }
+
+    #[test]
+    fn orphan_environ_set_reported_when_unit_missing() {
+        // CB73 FR2: a running daemon that HAS BROWSER is a distinct
+        // verdict — `running daemon: set` — and must never be printed as
+        // "missing" just because the unit lacks it. Collapsing this
+        // combination is the regression this test pins.
+        assert_eq!(
+            diagnose_browser_env(false, Some(true)),
+            BrowserEnvStatus::UnitMissingOrphanSet
+        );
+        assert!(browser_set_in_proc_environ(
+            b"BROWSER=/home/u/bin/wsl-browser\0"
+        ));
+    }
+
+    #[test]
+    fn systemctl_show_parser_finds_browser_among_merged_vars() {
+        // `show` collapses all Environment= lines into one, so BROWSER
+        // may sit anywhere among merged variables.
+        assert!(browser_set_in_systemctl_show(
+            "Environment=PATH=/usr/bin BROWSER=/x/wsl-browser FOO=1\n"
+        ));
+        assert!(!browser_set_in_systemctl_show(
+            "Environment=PATH=/usr/bin\n"
+        ));
+        assert!(!browser_set_in_systemctl_show("Environment=BROWSER=\n"));
+        assert!(!browser_set_in_systemctl_show("Environment=\n"));
+        assert!(!browser_set_in_systemctl_show(""));
+        // Quoted value with a space stays one token and counts as set.
+        assert!(browser_set_in_systemctl_show(
+            "Environment=BROWSER=\"/x/my browser\"\n"
+        ));
+        // Quoted-but-empty is not a value, mirroring unit_defines_browser.
+        assert!(!browser_set_in_systemctl_show("Environment=BROWSER=\"\"\n"));
+    }
+
+    #[test]
+    fn systemctl_show_takes_precedence_over_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let unit_path = dir.path().join("canopy.service");
+        std::fs::write(&unit_path, "[Service]\nExecStart=/usr/bin/canopy serve\n").unwrap();
+
+        // show says set while the files don't → set (systemd's merged
+        // view wins over parsing files).
+        assert!(read_effective_unit_browser(
+            &unit_path,
+            Some("Environment=BROWSER=/from-show\n")
+        ));
+
+        // show says unset while a drop-in on disk has it → not set
+        // (show is authoritative; files must not override it).
+        let dropin_dir = dir.path().join("canopy.service.d");
+        std::fs::create_dir_all(&dropin_dir).unwrap();
+        std::fs::write(
+            dropin_dir.join("browser.conf"),
+            "Environment=BROWSER=/x/wsl-browser\n",
+        )
+        .unwrap();
+        assert!(!read_effective_unit_browser(
+            &unit_path,
+            Some("Environment=\n")
+        ));
+    }
+
+    #[test]
+    fn diagnose_browser_env_truth_table() {
+        // Exhaustive over unit_set × orphan_environ_set (None = no
+        // orphan): any branch swap or collapsed combination misreports
+        // CB73.
+        assert_eq!(diagnose_browser_env(true, None), BrowserEnvStatus::UnitSet);
+        assert_eq!(
+            diagnose_browser_env(false, None),
+            BrowserEnvStatus::UnitMissing
+        );
+        assert_eq!(
+            diagnose_browser_env(true, Some(true)),
+            BrowserEnvStatus::UnitSetOrphanSet
+        );
+        assert_eq!(
+            diagnose_browser_env(true, Some(false)),
+            BrowserEnvStatus::UnitSetOrphanMissing
+        );
+        assert_eq!(
+            diagnose_browser_env(false, Some(true)),
+            BrowserEnvStatus::UnitMissingOrphanSet
+        );
+        assert_eq!(
+            diagnose_browser_env(false, Some(false)),
+            BrowserEnvStatus::UnitMissingOrphanMissing
+        );
+    }
+
+    #[test]
+    fn unit_defines_browser_accepts_indented_dropin_line() {
+        assert!(unit_defines_browser(
+            " [Service]\n Environment=BROWSER=/x\n"
+        ));
+        // The quote rule is unchanged: indented but empty is still empty.
+        assert!(!unit_defines_browser(" Environment=BROWSER=\"\"\n"));
+    }
+
+    /// Writes a minimal `~/.config/systemd/user/canopy.service` under
+    /// `home` so `report_service_unit` reaches its browser block. The
+    /// ExecStart names a path that cannot exist: the binary check then
+    /// takes its Missing branch — which never spawns anything — and its
+    /// issue text carries no "BROWSER", so the browser assertions stay
+    /// clean. Linux-only because the block is gated on
+    /// `manager == "systemd"`.
+    #[cfg(target_os = "linux")]
+    fn write_minimal_unit(home: &Path) {
+        let unit_dir = home.join(".config/systemd/user");
+        std::fs::create_dir_all(&unit_dir).unwrap();
+        std::fs::write(
+            unit_dir.join("canopy.service"),
+            "[Service]\nExecStart=/nonexistent/canopy serve\n",
+        )
+        .unwrap();
+    }
+
+    /// The browser-related entries of a doctor run's issues — the
+    /// missing ExecStart binary also contributes its own unrelated line.
+    #[cfg(target_os = "linux")]
+    fn browser_issues(issues: &[String]) -> Vec<&String> {
+        issues.iter().filter(|i| i.contains("BROWSER")).collect()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn report_service_unit_no_browser_issue_when_effective_env_set() {
+        // The CB73 bug verbatim, wired end-to-end: systemctl reports
+        // BROWSER in the merged environment → success arm → the fix
+        // hint and its issue must not appear even though the unit file
+        // on disk names no BROWSER at all.
+        let dir = tempfile::tempdir().unwrap();
+        write_minimal_unit(dir.path());
+        let mut issues = Vec::new();
+        report_service_unit(
+            dir.path(),
+            None,
+            None,
+            Some("Environment=BROWSER=/x/wsl-browser\n"),
+            None,
+            &mut issues,
+        );
+        assert!(browser_issues(&issues).is_empty(), "{issues:?}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn report_service_unit_orphan_missing_blames_the_orphan_not_the_unit() {
+        // Unit effective env is set, orphan's environ isn't: FR3 — no
+        // drop-in hint (the file it creates already exists); the issue
+        // pushed must be the orphan-labeled one.
+        let dir = tempfile::tempdir().unwrap();
+        write_minimal_unit(dir.path());
+        let mut issues = Vec::new();
+        report_service_unit(
+            dir.path(),
+            Some(4242),
+            None,
+            Some("Environment=BROWSER=/x/wsl-browser\n"),
+            Some(b"PATH=/usr/bin\0"),
+            &mut issues,
+        );
+        let browser = browser_issues(&issues);
+        assert_eq!(browser.len(), 1, "{browser:?}");
+        assert!(browser[0].contains("orphan"), "{}", browser[0]);
+        assert!(
+            !browser[0].contains("Daemon unit has no BROWSER"),
+            "fix hint must not fire when the effective env is set: {}",
+            browser[0]
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn report_service_unit_unit_missing_orphan_set_pushes_unit_issue() {
+        // FR2's fourth combination: the running orphan HAS BROWSER but
+        // the unit's effective environment lacks it. The unit-missing
+        // arm must fire (hint allowed per FR3) — and the arm must not
+        // falsely claim the daemon is missing BROWSER.
+        let dir = tempfile::tempdir().unwrap();
+        write_minimal_unit(dir.path());
+        let mut issues = Vec::new();
+        report_service_unit(
+            dir.path(),
+            Some(4242),
+            Some(99),
+            Some("Environment=PATH=/usr/bin\n"),
+            Some(b"BROWSER=/x/wsl-browser\0"),
+            &mut issues,
+        );
+        let browser = browser_issues(&issues);
+        assert_eq!(browser.len(), 1, "{browser:?}");
+        assert!(
+            browser[0].contains("Daemon unit has no BROWSER"),
+            "{}",
+            browser[0]
+        );
+        assert!(
+            !browser[0].contains("without BROWSER (unit"),
+            "the orphan has BROWSER and must not be reported missing: {}",
+            browser[0]
+        );
     }
 
     #[test]
