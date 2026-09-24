@@ -72,6 +72,7 @@ pub struct Agent {
     pub trigger: Option<Trigger>,
     pub cli: Cli,
     pub model: Option<String>,
+    pub effort: Option<String>,
     pub working_dir: Option<String>,
     pub enabled: bool,
     /// One-shot scheduled enable time. When set and `enabled` is `false`,
@@ -400,6 +401,12 @@ pub struct RunLog {
     pub finished_at: Option<DateTime<Utc>>,
     pub exit_code: Option<i32>,
     pub timeout_at: Option<DateTime<Utc>>,
+    /// CB43: platform/model resolved at dispatch (`None` for pre-migration rows).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executed_platform: Option<String>,
+    /// CB43: see `executed_platform`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executed_model: Option<String>,
 }
 
 /// How an agent was triggered.

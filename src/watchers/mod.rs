@@ -16,21 +16,21 @@ use tokio::sync::Mutex;
 
 use crate::application::ports::AgentRepository;
 use crate::db::Database;
-use crate::domain::loops::Loop;
+use crate::domain::graphs::Graph;
 use crate::domain::models::{Agent, Trigger, WatchEvent};
 use crate::executor::Executor;
-use crate::loop_engine::LoopEngine;
+use crate::graph_engine::GraphEngine;
 
 /// Manages all active file system watchers.
 pub struct WatcherEngine {
     db: Arc<Database>,
     executor: Arc<Executor>,
-    /// Loop engine used to launch watch-triggered loops.
-    loop_engine: Arc<LoopEngine>,
+    /// Graph engine used to launch watch-triggered graphs.
+    graph_engine: Arc<GraphEngine>,
     /// Active notify watchers keyed by agent ID.
     active: Arc<Mutex<HashMap<String, ActiveWatcher>>>,
-    /// Active notify watchers for loops, keyed by loop ID.
-    active_loops: Arc<Mutex<HashMap<String, RecommendedWatcher>>>,
+    /// Active notify watchers for graphs, keyed by graph ID.
+    active_graphs: Arc<Mutex<HashMap<String, RecommendedWatcher>>>,
 }
 
 struct ActiveWatcher {
@@ -44,15 +44,15 @@ struct ActiveWatcher {
 #[derive(Clone)]
 enum FireTarget {
     Agent {
-        // Boxed: `Agent` is large relative to the loop variant, so keep the
+        // Boxed: `Agent` is large relative to the graph variant, so keep the
         // enum small (clippy::large_enum_variant).
         agent: Box<Agent>,
         executor: Arc<Executor>,
     },
-    Loop {
-        loop_id: String,
+    Graph {
+        graph_id: String,
         db: Arc<Database>,
-        loop_engine: Arc<LoopEngine>,
+        graph_engine: Arc<GraphEngine>,
     },
 }
 
@@ -60,12 +60,12 @@ impl FireTarget {
     fn id(&self) -> &str {
         match self {
             FireTarget::Agent { agent, .. } => &agent.id,
-            FireTarget::Loop { loop_id, .. } => loop_id,
+            FireTarget::Graph { graph_id, .. } => graph_id,
         }
     }
 
     /// Run the target. For agents this executes the CLI with event context;
-    /// for loops it launches the loop graph fire-and-forget (skipping loops
+    /// for graphs it launches the graph fire-and-forget (skipping graphs
     /// that are already running/paused so an event does not double-launch).
     async fn fire(self, file_path: String, evt_str: String) {
         match self {
@@ -83,26 +83,26 @@ impl FireTarget {
                     tracing::error!("Watcher '{}' execution failed: {}", agent.id, e);
                 }
             }
-            FireTarget::Loop {
-                loop_id,
+            FireTarget::Graph {
+                graph_id,
                 db,
-                loop_engine,
-            } => match db.get_loop(&loop_id) {
+                graph_engine,
+            } => match db.get_graph(&graph_id) {
                 Ok(Some(lp)) if lp.is_fireable() => {
                     tracing::info!(
-                        "Watch loop '{}' triggered: {} on {}",
-                        loop_id,
+                        "Watch graph '{}' triggered: {} on {}",
+                        graph_id,
                         evt_str,
                         file_path
                     );
-                    loop_engine.start_background(loop_id);
+                    graph_engine.start_background(graph_id);
                 }
                 Ok(Some(_)) => tracing::debug!(
-                    "Watch loop '{}' event ignored (loop already running/paused)",
-                    loop_id
+                    "Watch graph '{}' event ignored (graph already running/paused)",
+                    graph_id
                 ),
-                Ok(None) => tracing::warn!("Watch loop '{}' no longer exists", loop_id),
-                Err(e) => tracing::error!("Watch loop '{}' lookup failed: {}", loop_id, e),
+                Ok(None) => tracing::warn!("Watch graph '{}' no longer exists", graph_id),
+                Err(e) => tracing::error!("Watch graph '{}' lookup failed: {}", graph_id, e),
             },
         }
     }
@@ -116,17 +116,17 @@ struct WatchTarget {
 }
 
 impl WatcherEngine {
-    pub fn new(db: Arc<Database>, executor: Arc<Executor>, loop_engine: Arc<LoopEngine>) -> Self {
+    pub fn new(db: Arc<Database>, executor: Arc<Executor>, graph_engine: Arc<GraphEngine>) -> Self {
         Self {
             db,
             executor,
-            loop_engine,
+            graph_engine,
             active: Arc::new(Mutex::new(HashMap::new())),
-            active_loops: Arc::new(Mutex::new(HashMap::new())),
+            active_graphs: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    /// Load and start all enabled watch agents and watch-triggered loops from
+    /// Load and start all enabled watch agents and watch-triggered graphs from
     /// the database.
     pub async fn reload_from_db(&self) -> Result<()> {
         let agents = self.db.list_watch_agents()?;
@@ -140,14 +140,14 @@ impl WatcherEngine {
             }
         }
 
-        let loops = self.db.list_watch_loops()?;
+        let graphs = self.db.list_watch_graphs()?;
         tracing::info!(
-            "Reloading {} watch-triggered loops from database",
-            loops.len()
+            "Reloading {} watch-triggered graphs from database",
+            graphs.len()
         );
-        for lp in loops {
-            if let Err(e) = self.start_loop_watcher(&lp).await {
-                tracing::error!("Failed to start watcher for loop '{}': {}", lp.id, e);
+        for lp in graphs {
+            if let Err(e) = self.start_graph_watcher(&lp).await {
+                tracing::error!("Failed to start watcher for graph '{}': {}", lp.id, e);
             }
         }
         Ok(())
@@ -199,9 +199,9 @@ impl WatcherEngine {
         Ok(())
     }
 
-    /// Start watching for a watch-triggered loop. On a matching event the loop
-    /// engine launches the loop graph (unless it is already running).
-    pub async fn start_loop_watcher(&self, lp: &Loop) -> Result<()> {
+    /// Start watching for a watch-triggered graph. On a matching event the graph
+    /// engine launches the graph (unless it is already running).
+    pub async fn start_graph_watcher(&self, lp: &Graph) -> Result<()> {
         let Some(Trigger::Watch {
             path,
             events,
@@ -209,17 +209,17 @@ impl WatcherEngine {
             recursive,
         }) = lp.trigger.as_ref()
         else {
-            return Err(anyhow::anyhow!("Loop '{}' has no Watch trigger", lp.id));
+            return Err(anyhow::anyhow!("Graph '{}' has no Watch trigger", lp.id));
         };
 
         let target = resolve_watch_target(path);
         let mode = watch_mode(*recursive, target.file_filter.is_some());
 
         let mut watcher = build_notify_watcher(
-            FireTarget::Loop {
-                loop_id: lp.id.clone(),
+            FireTarget::Graph {
+                graph_id: lp.id.clone(),
                 db: Arc::clone(&self.db),
-                loop_engine: Arc::clone(&self.loop_engine),
+                graph_engine: Arc::clone(&self.graph_engine),
             },
             events.clone(),
             *debounce_seconds,
@@ -234,7 +234,7 @@ impl WatcherEngine {
 
         watcher.watch(&target.path, mode)?;
 
-        self.active_loops
+        self.active_graphs
             .lock()
             .await
             .insert(lp.id.clone(), watcher);
@@ -249,26 +249,26 @@ impl WatcherEngine {
         Ok(())
     }
 
-    /// Stop a loop watcher by loop ID.
-    pub async fn stop_loop_watcher(&self, id: &str) -> Result<()> {
-        if self.active_loops.lock().await.remove(id).is_some() {
-            tracing::info!("Stopped loop watcher '{}'", id);
+    /// Stop a graph watcher by graph ID.
+    pub async fn stop_graph_watcher(&self, id: &str) -> Result<()> {
+        if self.active_graphs.lock().await.remove(id).is_some() {
+            tracing::info!("Stopped graph watcher '{}'", id);
         }
         Ok(())
     }
 
-    /// Stop all active watchers (agents and loops).
+    /// Stop all active watchers (agents and graphs).
     pub async fn stop_all(&self) {
         let mut active = self.active.lock().await;
         let count = active.len();
         active.clear();
-        let mut active_loops = self.active_loops.lock().await;
-        let loop_count = active_loops.len();
-        active_loops.clear();
+        let mut active_graphs = self.active_graphs.lock().await;
+        let graph_count = active_graphs.len();
+        active_graphs.clear();
         tracing::info!(
-            "Stopped {} agent watchers and {} loop watchers",
+            "Stopped {} agent watchers and {} graph watchers",
             count,
-            loop_count
+            graph_count
         );
     }
 

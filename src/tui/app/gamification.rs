@@ -240,10 +240,10 @@ impl App {
             project_count: self.projects.len() as i64,
             distinct_project_languages: languages.len(),
             gardener_edits,
-            loop_node_count_max: self.db.max_loop_nodes_in_any_loop().unwrap_or(0),
-            completed_loop_runs: self.db.count_completed_loops().unwrap_or(0),
-            total_loop_node_runs: self.db.count_loop_node_runs().unwrap_or(0),
-            has_parallel_loop: self.db.has_parallel_loop_run().unwrap_or(false),
+            graph_node_count_max: self.db.max_graph_nodes_in_any_graph().unwrap_or(0),
+            completed_graph_runs: self.db.count_completed_graphs().unwrap_or(0),
+            total_graph_node_runs: self.db.count_graph_node_runs().unwrap_or(0),
+            has_parallel_graph: self.db.has_parallel_graph_run().unwrap_or(false),
             seed_count: crate::domain::seeds::list_seeds()
                 .map(|s| s.len())
                 .unwrap_or(0),

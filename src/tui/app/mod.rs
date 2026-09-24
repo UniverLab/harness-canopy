@@ -2,7 +2,8 @@ mod agents;
 mod data;
 pub mod dialog;
 mod gamification;
-pub(crate) mod loop_live_state;
+pub(crate) mod graph_live_state;
+pub(crate) mod panel_face;
 mod project_graph;
 mod sync;
 
@@ -23,7 +24,7 @@ use super::context_transfer::{
     interactive_line_page_count, interactive_prompt_count, ContextCaptureKind, ContextSourceKind,
     ContextTransferConfig, ContextTransferModal, ContextTransferStep,
 };
-use crate::domain::loops::{LoopNodeKind, LoopSpecStatus, LoopStatus};
+use crate::domain::graphs::{GraphNodeKind, GraphSpecStatus, GraphStatus};
 use crate::tui::prompt_templates::PromptTemplates;
 
 pub(crate) use crate::tui::mcp_client::send_mcp_task_run;
@@ -38,18 +39,18 @@ pub mod utils;
 pub(crate) use session_resume::build_resumed_session_args;
 pub use terminal_search::TerminalSearch;
 pub(crate) use types::ContextTransferSource;
-pub(crate) use types::LoopLiveFocus;
+pub(crate) use types::GraphLiveFocus;
 pub use types::{
-    AgentEntry, AgentSectionFocus, App, AutomationKind, Focus, ProjectTab, SidebarLayer,
+    AgentEntry, AgentSectionFocus, App, AutomationKind, Focus, PanelFace, ProjectTab, SidebarLayer,
 };
-use types::{LoopSidebarMeta, RagTransferModal, SidebarStepMemory};
+use types::{GraphSidebarMeta, RagTransferModal, SidebarStepMemory};
 
 impl App {
-    pub fn new(db: Arc<Database>, data_dir: &Path) -> Result<Self> {
-        let home = dirs::home_dir().unwrap_or_default();
-        let canopy_dir = home.join(".canopy");
-        let canopy_config = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir);
-
+    pub fn new(
+        db: Arc<Database>,
+        data_dir: &Path,
+        canopy_config: &crate::domain::canopy_config::CanopyConfig,
+    ) -> Result<Self> {
         let system_monitor_active = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let system_info_rx = spawn_system_monitor(&system_monitor_active);
         let mission_manager = Self::init_mission_manager(Arc::clone(&db))?;
@@ -74,6 +75,7 @@ impl App {
             daemon_running: false,
             daemon_pid: None,
             daemon_version: String::new(),
+            update_available: crate::autoupdate::update_available_tag(),
             selected: 0,
             focus: Focus::Home,
             sidebar_layer: SidebarLayer::Live,
@@ -92,9 +94,9 @@ impl App {
             pending_launch_dialog: None,
             quit_confirm: false,
             delete_project_confirm: false,
-            archive_loop_confirm: false,
-            permanent_delete_loop_confirm: false,
-            loop_reset_confirm: false,
+            archive_graph_confirm: false,
+            permanent_delete_graph_confirm: false,
+            graph_reset_confirm: false,
             sidebar_brain: None,
             home_brain: None,
             sidebar_click_map: Vec::new(),
@@ -104,36 +106,41 @@ impl App {
             projects: Vec::new(),
             selected_project: 0,
             agent_section_focus: AgentSectionFocus::Interactive,
-            automation_loop_click_map: Vec::new(),
+            automation_graph_click_map: Vec::new(),
             project_click_map: Vec::new(),
             project_tab_click_map: Vec::new(),
             project_tab_row_click_map: Vec::new(),
             sidebar_tab_click_map: Vec::new(),
-            loops: Vec::new(),
-            archived_loops: Vec::new(),
-            archived_loop_count: 0,
-            loop_view_archived: false,
-            selected_loop_id: None,
-            loop_details: None,
-            loop_runs: Vec::new(),
-            loop_selected_spec: 0,
-            loop_selected_node: 0,
-            loop_editor_dialog: None,
-            loop_form_dialog: None,
-            loop_sidebar_meta: HashMap::new(),
-            loop_live_state: None,
-            loop_graph_follow: true,
-            loop_graph_selected_node: None,
-            loop_live_focus: LoopLiveFocus::Graph,
-            loop_spec_strip_selected: None,
-            loop_spec_strip_scroll: 0,
-            loop_spec_strip_capacity: 0,
-            loop_spec_strip_click_map: Vec::new(),
-            loop_autorun_dialog: None,
-            loop_action_pending: false,
-            loop_action_rx: None,
-            loop_action_message: None,
-            loop_action_message_at: std::time::Instant::now() - std::time::Duration::from_secs(999),
+            graphs: Vec::new(),
+            archived_graphs: Vec::new(),
+            archived_graph_count: 0,
+            graph_view_archived: false,
+            selected_graph_id: None,
+            graph_details: None,
+            graph_runs: Vec::new(),
+            graph_selected_spec: 0,
+            graph_selected_node: 0,
+            graph_editor_dialog: None,
+            graph_form_dialog: None,
+            graph_sidebar_meta: HashMap::new(),
+            graph_live_state: None,
+            graph_live_follow: true,
+            graph_live_selected_node: None,
+            graph_live_follow_anchor: None,
+            graph_live_focus: GraphLiveFocus::Graph,
+            graph_spec_strip_selected: None,
+            graph_spec_strip_scroll: 0,
+            graph_spec_strip_capacity: 0,
+            graph_spec_strip_click_map: Vec::new(),
+            graph_live_view_scroll: 0,
+            graph_live_view_total_lines: 0,
+            graph_autorun_dialog: None,
+            node_tail_dialog: None,
+            graph_action_pending: false,
+            graph_action_rx: None,
+            graph_action_message: None,
+            graph_action_message_at: std::time::Instant::now()
+                - std::time::Duration::from_secs(999),
             backlog_specs: Vec::new(),
             selected_backlog: 0,
             global_rag_queue: Vec::new(),
@@ -199,12 +206,35 @@ impl App {
             agents_rag_focused: false,
             sync_scroll_offset: 0,
             last_sync_area: None,
+            last_activity_rect: None,
+            last_knowledge_graph_rect: None,
+            last_knowledge_list_rect: None,
+            last_graph_face_rect: None,
+            graph_face_scroll: 0,
+            graph_face_total_lines: 0,
+            panel_face: PanelFace::Activity,
+            panel_pinned: App::load_panel_pinned_face(&canopy_config.pinned_panel_face),
+            panel_dwell_face: None,
+            panel_dwell_until: None,
+            panel_dwell_reason: None,
+            panel_last_reason: None,
+            panel_picker_open: false,
+            panel_picker_idx: 0,
+            panel_focused: false,
+            panel_interacting: false,
+            panel_last_knowledge_updated: None,
+            panel_last_backlog_updated: None,
+            panel_last_graph_running: false,
+            panel_baselines_init: false,
             session_protocol_state: HashMap::new(),
+            active_sandbox: None,
             project_relation_dialog: None,
             project_graph_edges: Vec::new(),
             project_graph_trees: Vec::new(),
             project_knowledge: Vec::new(),
             selected_knowledge: 0,
+            knowledge_list_scroll: 0,
+            knowledge_graph_scroll: 0,
             knowledge_filter: String::new(),
             knowledge_filter_mode: false,
             nursery_path: None,
@@ -225,10 +255,19 @@ impl App {
     /// Reload all data from the database and filesystem.
     pub fn refresh(&mut self) -> Result<()> {
         self.animation_tick = self.animation_tick.wrapping_add(1);
+        if self.update_available.is_none() {
+            self.update_available = crate::autoupdate::update_available_tag();
+        }
         self.refresh_daemon_status();
         self.refresh_agents()?;
         self.refresh_projects()?;
-        self.refresh_loops()?;
+        self.refresh_graphs()?;
+        // CT14: correct stale sidebar indices on the existing refresh tick
+        // (pure state, no extra redraw) so navigation works after data
+        // shrinks between ticks.
+        self.normalize_automation_kind();
+        self.normalize_agent_section_focus();
+        self.clamp_sidebar_selection();
         self.refresh_project_graph().ok();
         self.refresh_rag_state()?;
         self.refresh_active_runs()?;
@@ -248,8 +287,12 @@ impl App {
         self.resize_interactive_agents();
         self.poll_playground_search();
         self.refresh_playground_search()?;
-        self.poll_loop_action();
-        self.dismiss_loop_action_message();
+        self.poll_graph_action();
+        self.poll_node_tail_dialog();
+        self.dismiss_graph_action_message();
+        // CT1 multi-face panel: recompute the visible face from the
+        // switching rule after every data refresh above has run.
+        self.tick_panel_face();
         if let Some(dialog) = self.simple_prompt_dialog.as_mut() {
             dialog.tick_at_picker();
         }
@@ -327,7 +370,7 @@ impl App {
     }
 
     /// Apply a finished background playground search, if any (B23). Called
-    /// from the tick loop; never blocks.
+    /// from the tick graph; never blocks.
     fn poll_playground_search(&mut self) {
         let Some(rx) = &self.playground_search_rx else {
             return;
@@ -452,12 +495,29 @@ impl App {
             .collect()
     }
 
+    /// Ordered index set that the in-focus `Shift+Up`/`Shift+Down` cycle
+    /// (`agent_focus::handle_agent_cycle_shortcut`) walks — the same set the
+    /// active tab's own arrow navigation shows, so cycling can never land on an
+    /// entry rendered under a different tab (CT20). Knowledge has no live
+    /// sessions to focus into, so it contributes nothing.
+    pub(crate) fn cycle_focus_indices(&self) -> Vec<usize> {
+        match self.sidebar_layer {
+            SidebarLayer::Live => self.live_indices(),
+            SidebarLayer::Automation => self.automation_agent_indices(),
+            SidebarLayer::Knowledge => Vec::new(),
+        }
+    }
+
     /// Arrows never change the active tab (decisions 1–2): running off
     /// either end of `Live`'s own list wraps within it. The one exception is
     /// backing off the first item, which instead focuses the pinned RAG
     /// summary above the tab bar when it has anything to show (decision 3);
     /// with nothing to show there, that end wraps to the last item too.
     fn navigate_live(&mut self, forward: bool) {
+        // CT14 (FR5): row count is recomputed from current data at the moment
+        // of use; a stale cursor outside the current indices is corrected
+        // before moving, not left to fail silently.
+        self.normalize_agent_section_focus();
         let indices = self.live_indices();
         if indices.is_empty() {
             return;
@@ -489,29 +549,32 @@ impl App {
     }
 
     /// Automation is one flat ring for arrow-key purposes, agents rendered
-    /// above loops: `[agent, agent, …, loop, loop, …]`. Running off either
+    /// above graphs: `[agent, agent, …, graph, graph, …]`. Running off either
     /// end wraps within that same flat list (decisions 1–2), except backing
     /// off the very first item, which focuses the pinned RAG summary when it
     /// has anything to show (decision 3) and otherwise wraps to the last
     /// entry like any other tab.
     fn navigate_automation(&mut self, forward: bool) {
+        // CT14 (FR5): recompute the row count from current data at the moment
+        // of use, and correct a stale kind pointing at an emptied sub-list.
+        self.normalize_automation_kind();
         let agent_indices = self.automation_agent_indices();
-        let loop_ids: Vec<String> = self
-            .sidebar_loops()
+        let graph_ids: Vec<String> = self
+            .sidebar_graphs()
             .into_iter()
             .map(|lp| lp.id.clone())
             .collect();
-        let total = agent_indices.len() + loop_ids.len();
+        let total = agent_indices.len() + graph_ids.len();
         if total == 0 {
             return;
         }
 
         let current = match self.automation_kind {
             AutomationKind::Agent => agent_indices.iter().position(|&i| i == self.selected),
-            AutomationKind::Loop => self
-                .selected_loop_id
+            AutomationKind::Graph => self
+                .selected_graph_id
                 .as_ref()
-                .and_then(|id| loop_ids.iter().position(|v| v == id))
+                .and_then(|id| graph_ids.iter().position(|v| v == id))
                 .map(|pos| agent_indices.len() + pos),
         };
         let target_pos = match current {
@@ -538,9 +601,9 @@ impl App {
             self.selected = agent_indices[pos];
             self.update_agent_section_focus_on_change(prev);
         } else {
-            self.automation_kind = AutomationKind::Loop;
-            self.selected_loop_id = Some(loop_ids[pos - agent_indices.len()].clone());
-            self.refresh_loops_selection();
+            self.automation_kind = AutomationKind::Graph;
+            self.selected_graph_id = Some(graph_ids[pos - agent_indices.len()].clone());
+            self.refresh_graphs_selection();
         }
     }
 
@@ -550,7 +613,7 @@ impl App {
         }
         let next = self.selected_project + 1;
         self.selected_project = if next < self.projects.len() { next } else { 0 };
-        self.refresh_loops_selection();
+        self.refresh_graphs_selection();
     }
 
     fn navigate_projects_prev(&mut self) {
@@ -559,7 +622,7 @@ impl App {
         }
         if self.selected_project > 0 {
             self.selected_project -= 1;
-            self.refresh_loops_selection();
+            self.refresh_graphs_selection();
             return;
         }
         if self.rag_info.has_rag_activity() {
@@ -567,7 +630,7 @@ impl App {
             return;
         }
         self.selected_project = self.projects.len() - 1;
-        self.refresh_loops_selection();
+        self.refresh_graphs_selection();
     }
 
     /// Try focusing the first/last navigable item of `layer`. Returns
@@ -575,8 +638,19 @@ impl App {
     /// callers that walk multiple layers (`focus_sidebar_from_edge`,
     /// `cycle_sidebar_layer`) can keep looking.
     fn enter_layer(&mut self, layer: SidebarLayer, forward: bool) -> bool {
+        // CT14 (focus bug): leaving Knowledge abandons the deep project view;
+        // a surviving `project_focus` would trap Shift+arrows in the
+        // project-tab keymap on return.
+        if self.sidebar_layer == SidebarLayer::Knowledge
+            && layer != SidebarLayer::Knowledge
+            && self.project_focus.is_some()
+        {
+            self.exit_project_focus();
+        }
         match layer {
             SidebarLayer::Live => {
+                self.normalize_agent_section_focus();
+                self.clamp_sidebar_selection();
                 let indices = self.live_indices();
                 if indices.is_empty() {
                     return false;
@@ -592,19 +666,21 @@ impl App {
                 true
             }
             SidebarLayer::Automation => {
+                self.normalize_automation_kind();
+                self.clamp_sidebar_selection();
                 let agent_indices = self.automation_agent_indices();
-                let loop_ids: Vec<String> = self
-                    .sidebar_loops()
+                let graph_ids: Vec<String> = self
+                    .sidebar_graphs()
                     .into_iter()
                     .map(|lp| lp.id.clone())
                     .collect();
-                if agent_indices.is_empty() && loop_ids.is_empty() {
+                if agent_indices.is_empty() && graph_ids.is_empty() {
                     return false;
                 }
                 self.sidebar_layer = SidebarLayer::Automation;
-                // Agents render above loops, so entering forward (from
+                // Agents render above graphs, so entering forward (from
                 // above) lands on agents first; entering backward (from
-                // below) lands on loops first — whichever list is empty is
+                // below) lands on graphs first — whichever list is empty is
                 // skipped.
                 if forward {
                     if !agent_indices.is_empty() {
@@ -613,14 +689,14 @@ impl App {
                         self.selected = agent_indices[0];
                         self.update_agent_section_focus_on_change(prev);
                     } else {
-                        self.automation_kind = AutomationKind::Loop;
-                        self.selected_loop_id = Some(loop_ids[0].clone());
-                        self.refresh_loops_selection();
+                        self.automation_kind = AutomationKind::Graph;
+                        self.selected_graph_id = Some(graph_ids[0].clone());
+                        self.refresh_graphs_selection();
                     }
-                } else if !loop_ids.is_empty() {
-                    self.automation_kind = AutomationKind::Loop;
-                    self.selected_loop_id = Some(loop_ids.last().unwrap().clone());
-                    self.refresh_loops_selection();
+                } else if !graph_ids.is_empty() {
+                    self.automation_kind = AutomationKind::Graph;
+                    self.selected_graph_id = Some(graph_ids.last().unwrap().clone());
+                    self.refresh_graphs_selection();
                 } else {
                     self.automation_kind = AutomationKind::Agent;
                     let prev = self.selected;
@@ -635,7 +711,7 @@ impl App {
                 }
                 self.sidebar_layer = SidebarLayer::Knowledge;
                 self.selected_project = if forward { 0 } else { self.projects.len() - 1 };
-                self.refresh_loops_selection();
+                self.refresh_graphs_selection();
                 true
             }
         }
@@ -664,13 +740,11 @@ impl App {
                 if self.backlog_specs.is_empty() {
                     return;
                 }
-                self.selected_backlog = if forward {
-                    (self.selected_backlog + 1) % self.backlog_specs.len()
-                } else {
-                    self.selected_backlog
-                        .checked_sub(1)
-                        .unwrap_or(self.backlog_specs.len() - 1)
-                };
+                self.selected_backlog = crate::tui::selection::move_index(
+                    self.selected_backlog,
+                    self.backlog_specs.len(),
+                    forward,
+                );
             }
             Some(ProjectTab::Knowledge) => {
                 if forward {
@@ -684,13 +758,8 @@ impl App {
                 if len == 0 {
                     return;
                 }
-                self.selected_project_history = if forward {
-                    (self.selected_project_history + 1) % len
-                } else {
-                    self.selected_project_history
-                        .checked_sub(1)
-                        .unwrap_or(len - 1)
-                };
+                self.selected_project_history =
+                    crate::tui::selection::move_index(self.selected_project_history, len, forward);
             }
         }
     }
@@ -704,7 +773,8 @@ impl App {
             .iter()
             .position(|&idx| idx == self.selected_knowledge)
             .unwrap_or(0);
-        self.selected_knowledge = filtered[(current + 1) % filtered.len()];
+        let next = crate::tui::selection::move_index(current, filtered.len(), true);
+        self.selected_knowledge = filtered[next];
     }
 
     fn navigate_knowledge_prev(&mut self) {
@@ -716,7 +786,7 @@ impl App {
             .iter()
             .position(|&idx| idx == self.selected_knowledge)
             .unwrap_or(0);
-        let next = current.checked_sub(1).unwrap_or(filtered.len() - 1);
+        let next = crate::tui::selection::move_index(current, filtered.len(), false);
         self.selected_knowledge = filtered[next];
     }
 
@@ -740,6 +810,107 @@ impl App {
                     self.agent_section_focus = AgentSectionFocus::Groups;
                 }
             };
+        }
+    }
+
+    /// CT14: correct (never discard) stored sidebar state at the moment of
+    /// use. Each normalizer below prefers the remembered value and only moves
+    /// it when it no longer points at something that exists — this preserves
+    /// the user's place per the spec constraint (no reset-to-default).
+    pub(crate) fn clamp_sidebar_selection(&mut self) {
+        if !self.agents.is_empty() && self.selected >= self.agents.len() {
+            self.selected = self.agents.len() - 1;
+        }
+        if !self.projects.is_empty() && self.selected_project >= self.projects.len() {
+            self.selected_project = self.projects.len() - 1;
+        }
+        if self.projects.is_empty() {
+            self.selected_project = 0;
+        }
+        // Clamp the Knowledge History-tab cursor to the currently selected
+        // project's entries (moment of use, FR5).
+        if self.project_focus == Some(ProjectTab::History) {
+            let len = self.selected_project_history_entries().len();
+            if len == 0 {
+                self.selected_project_history = 0;
+            } else if self.selected_project_history >= len {
+                self.selected_project_history = len - 1;
+            }
+        }
+        // Clamp the scroll offset against the current layer's row count so a
+        // capacity change across tab switches can't strand it past the end.
+        let total = match self.sidebar_layer {
+            SidebarLayer::Live => self.live_indices().len(),
+            SidebarLayer::Automation => {
+                self.automation_agent_indices().len() + self.sidebar_graphs().len()
+            }
+            SidebarLayer::Knowledge => self.projects.len(),
+        };
+        let max_offset = total.saturating_sub(self.sidebar_visible_capacity);
+        if self.sidebar_scroll_offset > max_offset {
+            self.sidebar_scroll_offset = max_offset;
+        }
+    }
+
+    /// CT14 (selection bug): if `automation_kind` points at an empty sub-list
+    /// while the other one has rows, flip it to the non-empty side. Pure
+    /// state, no redraw.
+    pub(crate) fn normalize_automation_kind(&mut self) {
+        let has_agents = !self.automation_agent_indices().is_empty();
+        let has_graphs = !self.sidebar_graphs().is_empty();
+        match self.automation_kind {
+            AutomationKind::Agent if !has_agents && has_graphs => {
+                self.automation_kind = AutomationKind::Graph;
+                // Keep the graph cursor valid without recursing into
+                // `refresh_graphs_selection` (which itself calls this
+                // normalizer — see its tail).
+                let valid = self
+                    .selected_graph_id
+                    .as_deref()
+                    .is_some_and(|id| self.sidebar_graphs().iter().any(|lp| lp.id == id));
+                if !valid {
+                    self.selected_graph_id = self.sidebar_graphs().first().map(|lp| lp.id.clone());
+                }
+            }
+            AutomationKind::Graph if !has_graphs && has_agents => {
+                self.automation_kind = AutomationKind::Agent;
+                if !self.automation_agent_indices().contains(&self.selected) {
+                    let prev = self.selected;
+                    self.selected = self.automation_agent_indices()[0];
+                    self.update_agent_section_focus_on_change(prev);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// CT14 (selection bug): if `agent_section_focus` points at an empty Live
+    /// sub-list, move it to the first non-empty one. Pure state, no redraw.
+    pub(crate) fn normalize_agent_section_focus(&mut self) {
+        let has_interactive = self
+            .agents
+            .iter()
+            .any(|a| matches!(a, AgentEntry::Interactive(_) | AgentEntry::Orphaned(_)));
+        let has_terminal = self
+            .agents
+            .iter()
+            .any(|a| matches!(a, AgentEntry::Terminal(_)));
+        let has_groups = !self.split_groups.is_empty();
+        let empty = match self.agent_section_focus {
+            AgentSectionFocus::Interactive => !has_interactive,
+            AgentSectionFocus::Terminal => !has_terminal,
+            AgentSectionFocus::Groups => !has_groups,
+            AgentSectionFocus::Brain => false,
+        };
+        if !empty {
+            return;
+        }
+        if has_interactive {
+            self.agent_section_focus = AgentSectionFocus::Interactive;
+        } else if has_terminal {
+            self.agent_section_focus = AgentSectionFocus::Terminal;
+        } else if has_groups {
+            self.agent_section_focus = AgentSectionFocus::Groups;
         }
     }
 
@@ -792,15 +963,15 @@ impl App {
     }
 
     /// Recompute the Knowledge layer's per-project Preview summary cache
-    /// (pending backlog count, knowledge entry count, last activity, loop
+    /// (pending backlog count, knowledge entry count, last activity, graph
     /// badge). Cheap aggregate queries over the small `projects` list, run
     /// once per refresh tick — never per keystroke/highlight move
     /// (functional requirement 3).
     fn refresh_project_preview_cache(&mut self) {
         let running_workdirs: HashSet<String> = self
-            .sidebar_loops()
+            .sidebar_graphs()
             .iter()
-            .filter(|lp| lp.status == LoopStatus::Running)
+            .filter(|lp| lp.status == GraphStatus::Running)
             .map(|lp| lp.workdir.clone())
             .collect();
 
@@ -818,16 +989,16 @@ impl App {
                 .unwrap_or(0);
             let last_activity = self
                 .db
-                .list_loops(Some(project.path.as_str()), true)
+                .list_graphs(Some(project.path.as_str()), true)
                 .ok()
-                .and_then(|loops| loops.iter().map(|lp| lp.created_at.timestamp()).max());
+                .and_then(|graphs| graphs.iter().map(|lp| lp.created_at.timestamp()).max());
             cache.insert(
                 project.hash.clone(),
                 types::ProjectPreviewSummary {
                     pending_backlog,
                     knowledge_entries,
                     last_activity,
-                    loop_running: running_workdirs.contains(&project.path),
+                    graph_running: running_workdirs.contains(&project.path),
                 },
             );
         }
@@ -876,7 +1047,7 @@ impl App {
     /// Reload the standalone/backlog specs shown in the sidebar's `Backlog`
     /// section, tag-filtered to the selected project's workdir (or
     /// unfiltered when no project is registered/selected). Runs on the same
-    /// cadence as `refresh_projects` — no dedicated polling loop.
+    /// cadence as `refresh_projects` — no dedicated polling graph.
     fn refresh_backlog_specs(&mut self) -> Result<()> {
         let workdir_filter = self.selected_project().map(|p| p.path.clone());
         self.backlog_specs = self.db.list_specs(workdir_filter.as_deref(), None, true)?;
@@ -899,37 +1070,37 @@ impl App {
         Ok(())
     }
 
-    fn refresh_loops(&mut self) -> Result<()> {
-        self.loops = self.db.list_loops(None, false)?;
-        self.archived_loop_count = self.db.count_archived_loops().unwrap_or(0) as usize;
-        if self.loop_view_archived {
-            self.archived_loops = self.db.list_loops(None, true)?;
-            self.archived_loops.retain(|lp| lp.archived);
+    fn refresh_graphs(&mut self) -> Result<()> {
+        self.graphs = self.db.list_graphs(None, false)?;
+        self.archived_graph_count = self.db.count_archived_graphs().unwrap_or(0) as usize;
+        if self.graph_view_archived {
+            self.archived_graphs = self.db.list_graphs(None, true)?;
+            self.archived_graphs.retain(|lp| lp.archived);
         } else {
-            self.archived_loops.clear();
+            self.archived_graphs.clear();
         }
-        self.refresh_loop_sidebar_meta();
-        self.refresh_loops_selection();
+        self.refresh_graph_sidebar_meta();
+        self.refresh_graphs_selection();
         Ok(())
     }
 
-    /// Recompute the sidebar's per-loop "last activity" (see
-    /// [`LoopSidebarMeta`]) and blocked status (a `Paused` loop whose latest
-    /// run recorded a `loop_report_blocker` description). One
-    /// `list_loop_last_run_times` query for every loop's last-run time, plus,
-    /// for paused loops only, one `list_loop_runs_for_loop` query — bounded
-    /// by the (typically small) number of loops, run on the existing refresh
+    /// Recompute the sidebar's per-graph "last activity" (see
+    /// [`GraphSidebarMeta`]) and blocked status (a `Paused` graph whose latest
+    /// run recorded a `graph_report_blocker` description). One
+    /// `list_graph_last_run_times` query for every graph's last-run time, plus,
+    /// for paused graphs only, one `list_graph_runs_for_graph` query — bounded
+    /// by the (typically small) number of graphs, run on the existing refresh
     /// cadence rather than a dedicated poller.
     ///
-    /// Deliberately reads `loop_runs` rather than `list_loop_specs`: a
-    /// queue-driven loop's specs live on the queue, not on the loop's own
-    /// `loop_specs` rows, so that query is always empty for it. `loop_runs`
+    /// Deliberately reads `graph_runs` rather than `list_graph_specs`: a
+    /// queue-driven graph's specs live on the queue, not on the graph's own
+    /// `graph_specs` rows, so that query is always empty for it. `graph_runs`
     /// is populated regardless of how the spec was bound.
-    fn refresh_loop_sidebar_meta(&mut self) {
-        let last_run_times = self.db.list_loop_last_run_times().unwrap_or_default();
+    fn refresh_graph_sidebar_meta(&mut self) {
+        let last_run_times = self.db.list_graph_last_run_times().unwrap_or_default();
         let mut meta = HashMap::new();
-        for lp in &self.loops {
-            let running = lp.status == LoopStatus::Running;
+        for lp in &self.graphs {
+            let running = lp.status == GraphStatus::Running;
             let last_run_at = last_run_times.get(&lp.id).copied();
             let last_activity = last_run_at.unwrap_or(lp.created_at);
             let last_run_label = if running {
@@ -940,10 +1111,10 @@ impl App {
                     None => "never".to_string(),
                 }
             };
-            let blocked = lp.status == LoopStatus::Paused
+            let blocked = lp.status == GraphStatus::Paused
                 && self
                     .db
-                    .list_loop_runs_for_loop(&lp.id)
+                    .list_graph_runs_for_graph(&lp.id)
                     .ok()
                     .and_then(|runs| runs.last().and_then(|run| run.output.clone()))
                     .is_some_and(|output| output.get("blocker").is_some());
@@ -952,7 +1123,7 @@ impl App {
                 .map(|at| format!("resumes {}", utils::relative_time_until_compact(&at)));
             meta.insert(
                 lp.id.clone(),
-                LoopSidebarMeta {
+                GraphSidebarMeta {
                     last_activity,
                     last_run_label,
                     blocked,
@@ -960,184 +1131,711 @@ impl App {
                 },
             );
         }
-        self.loop_sidebar_meta = meta;
+        self.graph_sidebar_meta = meta;
     }
 
-    /// Every loop for the sidebar's `Loops` section, ordered by last
+    /// Every graph for the sidebar's `Graphs` section, ordered by last
     /// activity (most recent first) with **no filtering by status** — a
-    /// loop that reaches a terminal state stays listed so the operator can
+    /// graph that reaches a terminal state stays listed so the operator can
     /// see it failed/completed and act on it (selection and F4's
-    /// confirmation flow reach every loop regardless of status). Ties
-    /// broken by the existing `created_at DESC` order from `list_loops`,
+    /// confirmation flow reach every graph regardless of status). Ties
+    /// broken by the existing `created_at DESC` order from `list_graphs`,
     /// since the sort is stable.
     ///
-    /// `last_activity` is precomputed by [`Self::refresh_loop_sidebar_meta`]
-    /// on the refresh cadence, not queried here, so listing every loop adds
+    /// `last_activity` is precomputed by [`Self::refresh_graph_sidebar_meta`]
+    /// on the refresh cadence, not queried here, so listing every graph adds
     /// no per-tick database work.
-    pub fn sidebar_loops(&self) -> Vec<&crate::domain::loops::Loop> {
-        if self.loop_view_archived {
-            let mut loops: Vec<&crate::domain::loops::Loop> = self.archived_loops.iter().collect();
-            loops.sort_by_key(|lp| std::cmp::Reverse(lp.created_at));
-            return loops;
+    pub fn sidebar_graphs(&self) -> Vec<&crate::domain::graphs::Graph> {
+        if self.graph_view_archived {
+            let mut graphs: Vec<&crate::domain::graphs::Graph> =
+                self.archived_graphs.iter().collect();
+            graphs.sort_by_key(|lp| std::cmp::Reverse(lp.created_at));
+            return graphs;
         }
-        let mut loops: Vec<&crate::domain::loops::Loop> = self.loops.iter().collect();
-        loops.sort_by_key(|lp| {
+        let mut graphs: Vec<&crate::domain::graphs::Graph> = self.graphs.iter().collect();
+        graphs.sort_by_key(|lp| {
             std::cmp::Reverse(
-                self.loop_sidebar_meta
+                self.graph_sidebar_meta
                     .get(&lp.id)
                     .map(|meta| meta.last_activity)
                     .unwrap_or(lp.created_at),
             )
         });
-        loops
+        graphs
     }
 
-    pub(crate) fn refresh_loops_selection(&mut self) {
-        let visible = self.visible_loops();
+    pub(crate) fn refresh_graphs_selection(&mut self) {
+        let visible = self.visible_graphs();
         if visible.is_empty() {
-            self.selected_loop_id = None;
-            self.loop_details = None;
-            self.loop_runs.clear();
-            self.loop_selected_spec = 0;
-            self.loop_selected_node = 0;
-            self.loop_live_state = None;
-            self.loop_graph_follow = true;
-            self.loop_graph_selected_node = None;
-            self.loop_live_focus = LoopLiveFocus::Graph;
-            self.loop_spec_strip_selected = None;
-            self.loop_spec_strip_scroll = 0;
+            self.selected_graph_id = None;
+            self.graph_details = None;
+            self.graph_runs.clear();
+            self.graph_selected_spec = 0;
+            self.graph_selected_node = 0;
+            self.graph_live_state = None;
+            self.graph_live_follow = true;
+            self.graph_live_selected_node = None;
+            self.graph_live_follow_anchor = None;
+            self.graph_live_focus = GraphLiveFocus::Graph;
+            self.graph_spec_strip_selected = None;
+            self.graph_spec_strip_scroll = 0;
+            self.graph_live_view_scroll = 0;
             return;
         }
 
-        let previous_selected = self.selected_loop_id.clone();
+        let previous_selected = self.selected_graph_id.clone();
         if self
-            .selected_loop_id
+            .selected_graph_id
             .as_ref()
             .is_none_or(|selected| !visible.iter().any(|lp| lp.id == *selected))
         {
-            self.selected_loop_id = Some(visible[0].id.clone());
+            self.selected_graph_id = Some(visible[0].id.clone());
         }
 
-        let selected_changed = previous_selected != self.selected_loop_id;
-        let Some(selected_id) = self.selected_loop_id.clone() else {
+        let selected_changed = previous_selected != self.selected_graph_id;
+        let Some(selected_id) = self.selected_graph_id.clone() else {
             return;
         };
-        self.loop_details = self.db.get_loop_details(&selected_id).ok().flatten();
+        self.graph_details = self.db.get_graph_details(&selected_id).ok().flatten();
         if selected_changed {
-            self.loop_selected_spec = self.default_loop_spec_index();
-            self.loop_selected_node = 0;
-            self.loop_graph_follow = true;
-            self.loop_graph_selected_node = None;
-            self.loop_live_focus = LoopLiveFocus::Graph;
-            self.loop_spec_strip_selected = None;
-            self.loop_spec_strip_scroll = 0;
+            self.graph_selected_spec = self.default_graph_spec_index();
+            self.graph_selected_node = 0;
+            self.graph_live_follow = true;
+            self.graph_live_selected_node = None;
+            self.graph_live_follow_anchor = None;
+            self.graph_live_focus = GraphLiveFocus::Graph;
+            self.graph_spec_strip_selected = None;
+            self.graph_spec_strip_scroll = 0;
+            self.graph_live_view_scroll = 0;
         } else {
-            self.clamp_loop_selection();
+            self.clamp_graph_selection();
         }
-        self.refresh_loop_runs_for_selected_spec();
-        self.select_default_loop_node_if_needed(selected_changed);
-        self.refresh_loop_live_state();
+        self.refresh_graph_runs_for_selected_spec();
+        self.select_default_graph_node_if_needed(selected_changed);
+        self.refresh_graph_live_state();
+        // CT14: a graphs-list shrink between ticks can leave `automation_kind`
+        // pointing at the now-empty side; correct it here (no redraw).
+        self.normalize_automation_kind();
     }
 
-    /// Assemble a fresh [`LoopLiveState`] snapshot for the currently selected
-    /// loop. Zero cost when no loop is selected (no queries).
-    fn refresh_loop_live_state(&mut self) {
-        self.loop_live_state = self
-            .loop_details
+    /// Assemble a fresh [`GraphLiveState`] snapshot for the currently selected
+    /// graph. Zero cost when no graph is selected (no queries).
+    fn refresh_graph_live_state(&mut self) {
+        self.graph_live_state = self
+            .graph_details
             .as_ref()
-            .and_then(|details| loop_live_state::assemble_loop_live_state(&self.db, details));
+            .and_then(|details| graph_live_state::assemble_graph_live_state(&self.db, details));
 
         // A manually-highlighted node that no longer exists in the
         // (possibly just-advanced) effective graph falls back to
         // auto-follow rather than pointing at a stale/missing node.
-        if !self.loop_graph_follow {
-            let still_present = self.loop_live_state.as_ref().is_some_and(|state| {
-                self.loop_graph_selected_node
+        if !self.graph_live_follow {
+            let still_present = self.graph_live_state.as_ref().is_some_and(|state| {
+                self.graph_live_selected_node
                     .as_deref()
                     .is_some_and(|id| state.effective_nodes.iter().any(|n| n.id == id))
             });
             if !still_present {
-                self.loop_graph_follow = true;
-                self.loop_graph_selected_node = None;
+                self.graph_live_follow = true;
+                self.graph_live_selected_node = None;
+                self.graph_live_follow_anchor = None;
             }
         }
 
         // Same rule for the spec marker strip's manual selection: a spec
         // that's dropped out of the (possibly just-advanced) queue can't
         // stay highlighted.
-        if let Some(selected) = self.loop_spec_strip_selected.as_deref() {
+        if let Some(selected) = self.graph_spec_strip_selected.as_deref() {
             let still_present = self
-                .loop_live_state
+                .graph_live_state
                 .as_ref()
                 .is_some_and(|state| state.spec_queue.iter().any(|e| e.spec_id == selected));
             if !still_present {
-                self.loop_spec_strip_selected = None;
+                self.graph_spec_strip_selected = None;
             }
         }
     }
 
-    /// Move the live loop view's graph highlight to the next/previous node
-    /// (by `position` order) in the current spec's effective graph, entering
-    /// manual-inspection mode. No-op when there's no live state or graph.
-    pub fn loop_graph_move_highlight(&mut self, forward: bool) {
-        let ids: Vec<String> = match self.loop_live_state.as_ref() {
-            Some(state) if !state.effective_nodes.is_empty() => {
-                state.effective_nodes.iter().map(|n| n.id.clone()).collect()
-            }
-            _ => return,
-        };
+    fn edge_priority(
+        condition: &crate::domain::graphs::GraphEdgeCondition,
+    ) -> (u8, Option<String>) {
+        match condition {
+            crate::domain::graphs::GraphEdgeCondition::Pass => (0, None),
+            crate::domain::graphs::GraphEdgeCondition::Fail => (1, None),
+            crate::domain::graphs::GraphEdgeCondition::Always => (2, None),
+            crate::domain::graphs::GraphEdgeCondition::Route(label) => (3, Some(label.clone())),
+            crate::domain::graphs::GraphEdgeCondition::Error => (4, None),
+        }
+    }
 
-        let current = self.loop_graph_highlighted_node_id().map(str::to_string);
+    /// DFS traversal order of the effective graph (collapsed ensembles as one
+    /// node, cycles via visited set, `pass > fail > always > route(alpha) > error`).
+    /// This is the visual order the renderer draws, and what Up/Down navigate.
+    pub fn dfs_order(&self) -> Vec<String> {
+        let Some(state) = self.graph_live_state.as_ref() else {
+            return Vec::new();
+        };
+        if state.effective_nodes.is_empty() {
+            return Vec::new();
+        }
+        // Build collapsed graph identical to graph_live::graph_lines
+        use std::collections::{HashMap, HashSet};
+        let join_ids: HashSet<&str> = state
+            .ensembles
+            .iter()
+            .map(|e| e.join_node_id.as_str())
+            .collect();
+        let ensemble_by_member: HashMap<
+            &str,
+            &crate::tui::app::graph_live_state::EnsembleLiveInfo,
+        > = state
+            .ensembles
+            .iter()
+            .flat_map(|e| e.members.iter().map(move |m| (m.node_id.as_str(), e)))
+            .collect();
+        let ensemble_by_join: HashMap<&str, &crate::tui::app::graph_live_state::EnsembleLiveInfo> =
+            state
+                .ensembles
+                .iter()
+                .map(|e| (e.join_node_id.as_str(), e))
+                .collect();
+
+        // collapsed key -> (kind, pos)
+        let mut collapsed: HashMap<String, (bool, i64)> = HashMap::new(); // true=ensemble
+        let mut member_to_ensemble: HashMap<String, String> = HashMap::new();
+        let mut seen_ens: HashSet<String> = HashSet::new();
+        let mut collapsed_pos: HashMap<String, i64> = HashMap::new();
+        for node in &state.effective_nodes {
+            if join_ids.contains(node.id.as_str()) {
+                continue;
+            }
+            if let Some(ens) = ensemble_by_member.get(node.id.as_str()) {
+                if seen_ens.insert(ens.ensemble_id.clone()) {
+                    collapsed.insert(ens.ensemble_id.clone(), (true, node.position));
+                    collapsed_pos.insert(ens.ensemble_id.clone(), node.position);
+                    for m in &ens.members {
+                        member_to_ensemble.insert(m.node_id.clone(), ens.ensemble_id.clone());
+                    }
+                }
+            } else {
+                collapsed.insert(node.id.clone(), (false, node.position));
+                collapsed_pos.insert(node.id.clone(), node.position);
+            }
+        }
+        if collapsed.is_empty() {
+            return Vec::new();
+        }
+        let mut collapsed_edges: HashMap<
+            String,
+            Vec<(String, crate::domain::graphs::GraphEdgeCondition)>,
+        > = HashMap::new();
+        for edge in &state.effective_edges {
+            let from_raw = edge.from_node.as_str();
+            let to_raw = edge.to_node.as_str();
+            if let Some(ens) = ensemble_by_member.get(from_raw) {
+                if ens.join_node_id.as_str() == to_raw {
+                    continue;
+                }
+            }
+            let from_key = if let Some(ens) = ensemble_by_join.get(from_raw) {
+                Some(ens.ensemble_id.clone())
+            } else if let Some(ek) = member_to_ensemble.get(from_raw) {
+                Some(ek.clone())
+            } else if collapsed.contains_key(from_raw) {
+                Some(from_raw.to_string())
+            } else {
+                None
+            };
+            let to_key = if let Some(ens) = ensemble_by_join.get(to_raw) {
+                Some(ens.ensemble_id.clone())
+            } else if let Some(ek) = member_to_ensemble.get(to_raw) {
+                Some(ek.clone())
+            } else if collapsed.contains_key(to_raw) {
+                Some(to_raw.to_string())
+            } else {
+                None
+            };
+            if let (Some(fk), Some(tk)) = (from_key, to_key) {
+                let entry = collapsed_edges.entry(fk).or_default();
+                if !entry
+                    .iter()
+                    .any(|(ek, ec)| ek == &tk && ec == &edge.condition)
+                {
+                    entry.push((tk, edge.condition.clone()));
+                }
+            }
+        }
+        for edges in collapsed_edges.values_mut() {
+            edges.sort_by(|a, b| {
+                let (pa, la) = Self::edge_priority(&a.1);
+                let (pb, lb) = Self::edge_priority(&b.1);
+                pa.cmp(&pb).then_with(|| la.cmp(&lb))
+            });
+        }
+        let mut incoming: HashSet<String> = HashSet::new();
+        for tos in collapsed_edges.values() {
+            for (tk, _) in tos {
+                incoming.insert(tk.clone());
+            }
+        }
+        let entry_key = collapsed
+            .keys()
+            .find(|k| !incoming.contains(*k))
+            .cloned()
+            .or_else(|| {
+                collapsed
+                    .keys()
+                    .min_by_key(|k| collapsed_pos.get(*k).copied().unwrap_or(i64::MAX))
+                    .cloned()
+            })
+            .unwrap();
+        let mut visited: HashSet<String> = HashSet::new();
+        let mut order: Vec<String> = Vec::new();
+        fn dfs_rec(
+            key: &str,
+            collapsed_edges: &HashMap<
+                String,
+                Vec<(String, crate::domain::graphs::GraphEdgeCondition)>,
+            >,
+            visited: &mut HashSet<String>,
+            order: &mut Vec<String>,
+        ) {
+            if visited.contains(key) {
+                return;
+            }
+            visited.insert(key.to_string());
+            order.push(key.to_string());
+            if let Some(edges) = collapsed_edges.get(key) {
+                for (tk, _) in edges {
+                    if !visited.contains(tk.as_str()) {
+                        dfs_rec(tk, collapsed_edges, visited, order);
+                    }
+                }
+            }
+        }
+        dfs_rec(&entry_key, &collapsed_edges, &mut visited, &mut order);
+        let mut remaining: Vec<String> = collapsed
+            .keys()
+            .filter(|k| !visited.contains(k.as_str()))
+            .cloned()
+            .collect();
+        remaining.sort_by_key(|k| collapsed_pos.get(k.as_str()).copied().unwrap_or(i64::MAX));
+        for rk in remaining {
+            dfs_rec(&rk, &collapsed_edges, &mut visited, &mut order);
+        }
+        // Map collapsed keys back to concrete node ids for selection.
+        // For ensembles, use the first member's node id (renderer highlights on any member).
+        let mut ensemble_first_member: HashMap<String, String> = HashMap::new();
+        for ens in &state.ensembles {
+            if let Some(first) = ens.members.first() {
+                ensemble_first_member.insert(ens.ensemble_id.clone(), first.node_id.clone());
+            }
+        }
+        order
+            .into_iter()
+            .map(|ck| {
+                if let Some(mid) = ensemble_first_member.get(&ck) {
+                    mid.clone()
+                } else {
+                    ck
+                }
+            })
+            .collect()
+    }
+
+    /// Move to the next/previous node in DFS visual order (Up/Down).
+    pub fn graph_live_navigate_sibling(&mut self, forward: bool) {
+        let ids = self.dfs_order();
+        if ids.is_empty() {
+            return;
+        }
+        let current = self.graph_live_highlighted_node_id().map(str::to_string);
+        // Map current concrete id to its collapsed representation for index lookup
+        // dfs_order already returns concrete ids (ensemble first member), so direct lookup works
         let idx = current
             .as_deref()
             .and_then(|id| ids.iter().position(|n| n == id))
             .unwrap_or(0);
-        let next_idx = if forward {
-            (idx + 1) % ids.len()
-        } else {
-            idx.checked_sub(1).unwrap_or(ids.len() - 1)
-        };
-        self.loop_graph_selected_node = Some(ids[next_idx].clone());
-        self.loop_graph_follow = false;
+        let next_idx = crate::tui::selection::move_index(idx, ids.len(), forward);
+        self.graph_live_selected_node = Some(ids[next_idx].clone());
+        self.graph_live_follow = false;
     }
 
-    /// Return the live loop view to auto-follow, discarding any manual
+    /// Keep the old name as an alias for backward compatibility (tests, older key handlers).
+    #[allow(dead_code)]
+    pub fn graph_live_move_highlight(&mut self, forward: bool) {
+        self.graph_live_navigate_sibling(forward);
+    }
+
+    /// Move to the first outgoing edge's target (Right): pass > fail > always > route(alpha) > error.
+    pub fn graph_live_navigate_child(&mut self) {
+        let Some(state) = self.graph_live_state.as_ref() else {
+            return;
+        };
+        let Some(current_id) = self.graph_live_highlighted_node_id().map(str::to_string) else {
+            let order = self.dfs_order();
+            if let Some(first) = order.first() {
+                self.graph_live_selected_node = Some(first.clone());
+                self.graph_live_follow = false;
+            } else {
+                self.graph_live_follow = false;
+            }
+            return;
+        };
+        // Resolve current to its collapsed key if it's an ensemble member
+        let ensemble_by_member: std::collections::HashMap<
+            &str,
+            &crate::tui::app::graph_live_state::EnsembleLiveInfo,
+        > = state
+            .ensembles
+            .iter()
+            .flat_map(|e| e.members.iter().map(move |m| (m.node_id.as_str(), e)))
+            .collect();
+        let ensemble_by_join: std::collections::HashMap<
+            &str,
+            &crate::tui::app::graph_live_state::EnsembleLiveInfo,
+        > = state
+            .ensembles
+            .iter()
+            .map(|e| (e.join_node_id.as_str(), e))
+            .collect();
+        let mut member_to_ensemble: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        for ens in &state.ensembles {
+            for m in &ens.members {
+                member_to_ensemble.insert(m.node_id.clone(), ens.ensemble_id.clone());
+            }
+        }
+        let current_key = if let Some(ens) = ensemble_by_join.get(current_id.as_str()) {
+            ens.ensemble_id.clone()
+        } else if let Some(ek) = member_to_ensemble.get(&current_id) {
+            ek.clone()
+        } else {
+            current_id.clone()
+        };
+        // Build collapsed edges to find sorted outgoing
+        let join_ids: std::collections::HashSet<&str> = state
+            .ensembles
+            .iter()
+            .map(|e| e.join_node_id.as_str())
+            .collect();
+        let mut collapsed_edges: std::collections::HashMap<
+            String,
+            Vec<(String, crate::domain::graphs::GraphEdgeCondition)>,
+        > = std::collections::HashMap::new();
+        for edge in &state.effective_edges {
+            let from_raw = edge.from_node.as_str();
+            let to_raw = edge.to_node.as_str();
+            if let Some(ens) = ensemble_by_member.get(from_raw) {
+                if ens.join_node_id.as_str() == to_raw {
+                    continue;
+                }
+            }
+            let from_key = if let Some(ens) = ensemble_by_join.get(from_raw) {
+                Some(ens.ensemble_id.clone())
+            } else if let Some(ek) = member_to_ensemble.get(from_raw) {
+                Some(ek.clone())
+            } else if state.effective_nodes.iter().any(|n| n.id == from_raw)
+                && !join_ids.contains(from_raw)
+            {
+                Some(from_raw.to_string())
+            } else {
+                None
+            };
+            let to_key = if let Some(ens) = ensemble_by_join.get(to_raw) {
+                Some(ens.ensemble_id.clone())
+            } else if let Some(ek) = member_to_ensemble.get(to_raw) {
+                Some(ek.clone())
+            } else if state.effective_nodes.iter().any(|n| n.id == to_raw)
+                && !join_ids.contains(to_raw)
+            {
+                Some(to_raw.to_string())
+            } else {
+                None
+            };
+            if let (Some(fk), Some(tk)) = (from_key, to_key) {
+                let e = collapsed_edges.entry(fk).or_default();
+                if !e.iter().any(|(ek, ec)| ek == &tk && ec == &edge.condition) {
+                    e.push((tk, edge.condition.clone()));
+                }
+            }
+        }
+        for edges in collapsed_edges.values_mut() {
+            edges.sort_by(|a, b| {
+                let (pa, la) = Self::edge_priority(&a.1);
+                let (pb, lb) = Self::edge_priority(&b.1);
+                pa.cmp(&pb).then_with(|| la.cmp(&lb))
+            });
+        }
+        let Some(targets) = collapsed_edges.get(&current_key) else {
+            return;
+        };
+        if targets.is_empty() {
+            return;
+        }
+        let target_key = &targets[0].0;
+        // Map collapsed target back to concrete node id
+        let target_id = state
+            .ensembles
+            .iter()
+            .find(|e| &e.ensemble_id == target_key)
+            .and_then(|e| e.members.first().map(|m| m.node_id.clone()))
+            .unwrap_or_else(|| target_key.clone());
+        self.graph_live_selected_node = Some(target_id);
+        self.graph_live_follow = false;
+    }
+
+    /// Move to the incoming edge's source (Left).
+    pub fn graph_live_navigate_parent(&mut self) {
+        let Some(state) = self.graph_live_state.as_ref() else {
+            return;
+        };
+        let Some(current_id) = self.graph_live_highlighted_node_id().map(str::to_string) else {
+            return;
+        };
+        let ensemble_by_member: std::collections::HashMap<
+            &str,
+            &crate::tui::app::graph_live_state::EnsembleLiveInfo,
+        > = state
+            .ensembles
+            .iter()
+            .flat_map(|e| e.members.iter().map(move |m| (m.node_id.as_str(), e)))
+            .collect();
+        let ensemble_by_join: std::collections::HashMap<
+            &str,
+            &crate::tui::app::graph_live_state::EnsembleLiveInfo,
+        > = state
+            .ensembles
+            .iter()
+            .map(|e| (e.join_node_id.as_str(), e))
+            .collect();
+        let mut member_to_ensemble: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        for ens in &state.ensembles {
+            for m in &ens.members {
+                member_to_ensemble.insert(m.node_id.clone(), ens.ensemble_id.clone());
+            }
+        }
+        let current_key = if let Some(ens) = ensemble_by_join.get(current_id.as_str()) {
+            ens.ensemble_id.clone()
+        } else if let Some(ek) = member_to_ensemble.get(&current_id) {
+            ek.clone()
+        } else {
+            current_id.clone()
+        };
+        let join_ids: std::collections::HashSet<&str> = state
+            .ensembles
+            .iter()
+            .map(|e| e.join_node_id.as_str())
+            .collect();
+        let mut collapsed_edges: std::collections::HashMap<
+            String,
+            Vec<(String, crate::domain::graphs::GraphEdgeCondition)>,
+        > = std::collections::HashMap::new();
+        for edge in &state.effective_edges {
+            let from_raw = edge.from_node.as_str();
+            let to_raw = edge.to_node.as_str();
+            if let Some(ens) = ensemble_by_member.get(from_raw) {
+                if ens.join_node_id.as_str() == to_raw {
+                    continue;
+                }
+            }
+            let from_key = if let Some(ens) = ensemble_by_join.get(from_raw) {
+                Some(ens.ensemble_id.clone())
+            } else if let Some(ek) = member_to_ensemble.get(from_raw) {
+                Some(ek.clone())
+            } else if state.effective_nodes.iter().any(|n| n.id == from_raw)
+                && !join_ids.contains(from_raw)
+            {
+                Some(from_raw.to_string())
+            } else {
+                None
+            };
+            let to_key = if let Some(ens) = ensemble_by_join.get(to_raw) {
+                Some(ens.ensemble_id.clone())
+            } else if let Some(ek) = member_to_ensemble.get(to_raw) {
+                Some(ek.clone())
+            } else if state.effective_nodes.iter().any(|n| n.id == to_raw)
+                && !join_ids.contains(to_raw)
+            {
+                Some(to_raw.to_string())
+            } else {
+                None
+            };
+            if let (Some(fk), Some(tk)) = (from_key, to_key) {
+                let e = collapsed_edges.entry(fk).or_default();
+                if !e.iter().any(|(ek, ec)| ek == &tk && ec == &edge.condition) {
+                    e.push((tk, edge.condition.clone()));
+                }
+            }
+        }
+        // Find incoming: any collapsed edge where to == current_key
+        let mut incoming: Vec<String> = Vec::new();
+        for (fk, tos) in &collapsed_edges {
+            for (tk, _) in tos {
+                if tk == &current_key {
+                    incoming.push(fk.clone());
+                    break;
+                }
+            }
+        }
+        if incoming.is_empty() {
+            return;
+        }
+        let parent_key = &incoming[0];
+        let parent_id = state
+            .ensembles
+            .iter()
+            .find(|e| &e.ensemble_id == parent_key)
+            .and_then(|e| e.members.first().map(|m| m.node_id.clone()))
+            .unwrap_or_else(|| parent_key.clone());
+        self.graph_live_selected_node = Some(parent_id);
+        self.graph_live_follow = false;
+    }
+
+    /// Enter the live graph view's manual navigation (CT23): the only way to
+    /// reach manual mode — functional requirement 4 forbids a separate
+    /// toggle. Seeds the manual selection, in order (CT24): (a) the engine's
+    /// current node while the graph is running; (b) on a finished graph, the
+    /// most recent run's node of the strip-selected spec (else the last spec
+    /// in the queue), when that node still exists in the effective graph;
+    /// (c) otherwise the graph's entry node (first in DFS order). Entering
+    /// never jumps the highlight on a running graph; on a finished graph it
+    /// lands somewhere navigable instead of pointing at `None`. A no-op if
+    /// already in manual mode (`Enter` always means "be in manual mode"), and
+    /// a no-op on a graph with no effective nodes (nothing to navigate — stay
+    /// in auto-follow rather than entering manual pointing at nothing).
+    pub fn graph_live_enter(&mut self) {
+        if !self.graph_live_follow {
+            return;
+        }
+        // (a) running graph: current node.
+        if let Some(id) = self
+            .graph_live_state
+            .as_ref()
+            .and_then(|s| s.current_node_id.clone())
+        {
+            self.graph_live_selected_node = Some(id);
+            self.graph_live_follow = false;
+            return;
+        }
+        // (b) finished graph: most recent run of strip-selected spec, else
+        // last spec in queue.
+        if let Some(state) = self.graph_live_state.as_ref() {
+            let strip_or_last: Option<String> = self
+                .graph_spec_strip_selected
+                .clone()
+                .or_else(|| state.spec_queue.last().map(|e| e.spec_id.clone()));
+            if let Some(spec_id) = strip_or_last {
+                if let Some(node_id) = self
+                    .db
+                    .list_graph_runs_for_spec(&spec_id)
+                    .unwrap_or_default()
+                    .last()
+                    .map(|r| r.node_id.clone())
+                {
+                    if state.effective_nodes.iter().any(|n| n.id == node_id) {
+                        self.graph_live_selected_node = Some(node_id);
+                        self.graph_live_follow = false;
+                        return;
+                    }
+                }
+            }
+        }
+        // (c) entry node: first of dfs_order, else lowest-position effective
+        // node (dfs_order already falls back to lowest position).
+        if let Some(first) = self.dfs_order().first().cloned() {
+            self.graph_live_selected_node = Some(first);
+            self.graph_live_follow = false;
+        }
+        // No effective nodes: stay in follow (nothing to navigate). Do NOT
+        // set follow=false with a None selection.
+    }
+
+    /// Return the live graph view to auto-follow, discarding any manual
     /// node-inspection selection.
-    pub fn loop_graph_reset_follow(&mut self) {
-        self.loop_graph_follow = true;
-        self.loop_graph_selected_node = None;
+    pub fn graph_live_reset_follow(&mut self) {
+        self.graph_live_follow = true;
+        self.graph_live_selected_node = None;
+        self.graph_live_follow_anchor = None;
+    }
+
+    /// Step the live view's vertical scroll by `dir` lines (positive = down
+    /// into content, negative = back toward top). Clamps to the valid range
+    /// using the last-rendered total line count. No-op when no graph is
+    /// selected.
+    pub fn graph_live_view_scroll_step(&mut self, dir: i32) {
+        let new = if dir > 0 {
+            self.graph_live_view_scroll
+                .saturating_add(dir.unsigned_abs() as u16)
+        } else {
+            self.graph_live_view_scroll
+                .saturating_sub(dir.unsigned_abs() as u16)
+        };
+        self.graph_live_view_scroll = new.min(self.graph_live_view_max_scroll());
+    }
+
+    /// Maximum valid scroll value given the last-rendered total line count
+    /// and panel height. Returns 0 when the content fits entirely.
+    pub fn graph_live_view_max_scroll(&self) -> u16 {
+        self.graph_live_view_total_lines
+            .saturating_sub(self.last_panel_inner.1)
+    }
+
+    /// Step-and-clamp the right panel's Graph face scroll. Mirrors
+    /// `graph_live_view_scroll_step`'s pattern but uses this face's own
+    /// bookkeeping (`graph_face_total_lines`, `last_graph_face_rect`) —
+    /// deliberately not shared with the main pane's live graph view, which
+    /// can be showing something else entirely while this face is visible.
+    pub fn graph_face_scroll_step(&mut self, dir: i32) {
+        let new = if dir > 0 {
+            self.graph_face_scroll
+                .saturating_add(dir.unsigned_abs() as u16)
+        } else {
+            self.graph_face_scroll
+                .saturating_sub(dir.unsigned_abs() as u16)
+        };
+        self.graph_face_scroll = new.min(self.graph_face_scroll_max());
+    }
+
+    /// Maximum valid scroll value given the last-rendered total line count
+    /// and the Graph face's own rect height. Returns 0 when the content
+    /// fits entirely or the face hasn't drawn this frame.
+    pub fn graph_face_scroll_max(&self) -> u16 {
+        let visible = self.last_graph_face_rect.map_or(0, |r| r.height);
+        self.graph_face_total_lines.saturating_sub(visible)
     }
 
     /// Toggle plain-arrow-key ownership between the graph and the spec
     /// marker strip. The two are otherwise independent: switching focus
-    /// never touches `loop_graph_follow` or the strip's own selection.
-    pub fn loop_live_toggle_focus(&mut self) {
-        self.loop_live_focus = match self.loop_live_focus {
-            LoopLiveFocus::Graph => LoopLiveFocus::SpecStrip,
-            LoopLiveFocus::SpecStrip => LoopLiveFocus::Graph,
+    /// never touches `graph_live_follow` or the strip's own selection.
+    pub fn graph_live_toggle_focus(&mut self) {
+        self.graph_live_focus = match self.graph_live_focus {
+            GraphLiveFocus::Graph => GraphLiveFocus::SpecStrip,
+            GraphLiveFocus::SpecStrip => GraphLiveFocus::Graph,
         };
     }
 
     /// Move the marker strip's selection to the next/previous spec in queue
-    /// order, entering manual selection. Never touches `loop_graph_follow` —
+    /// order, entering manual selection. Never touches `graph_live_follow` —
     /// selecting a spec by hand in the strip is independent of the graph's
     /// own follow/manual state. No-op when there's no live state or queue.
-    pub fn loop_spec_strip_move_selection(&mut self, forward: bool) {
-        let ids: Vec<String> = match self.loop_live_state.as_ref() {
+    pub fn graph_spec_strip_move_selection(&mut self, forward: bool) {
+        let ids: Vec<String> = match self.graph_live_state.as_ref() {
             Some(state) if !state.spec_queue.is_empty() => {
                 state.spec_queue.iter().map(|e| e.spec_id.clone()).collect()
             }
             _ => return,
         };
 
-        let current = self.loop_spec_strip_selected.clone();
+        let current = self.graph_spec_strip_selected.clone();
         let idx = current
             .as_deref()
             .and_then(|id| ids.iter().position(|n| n == id));
         let next_idx = match idx {
             // Nothing selected yet: land on the strip's first/last item
             // rather than skipping past it as if index 0 were already
-            // selected (the graph's `loop_graph_move_highlight` can assume
+            // selected (the graph's `graph_live_move_highlight` can assume
             // that, since auto-follow always has *some* node highlighted;
             // the strip starts with no selection at all).
             None => {
@@ -1147,53 +1845,53 @@ impl App {
                     ids.len() - 1
                 }
             }
-            Some(idx) if forward => (idx + 1) % ids.len(),
-            Some(idx) => idx.checked_sub(1).unwrap_or(ids.len() - 1),
+            Some(idx) => crate::tui::selection::move_index(idx, ids.len(), forward),
         };
-        self.loop_spec_strip_selected = Some(ids[next_idx].clone());
-        self.loop_spec_strip_scroll = scroll_into_view(
-            self.loop_spec_strip_scroll,
+        self.graph_spec_strip_selected = Some(ids[next_idx].clone());
+        self.graph_spec_strip_scroll = crate::tui::selection::clamp_scroll(
             next_idx,
-            self.loop_spec_strip_capacity,
+            self.graph_spec_strip_scroll,
+            ids.len(),
+            self.graph_spec_strip_capacity,
         );
     }
 
     /// Select a spec directly by id in the marker strip (mouse click path).
     /// Ignored if the id isn't in the current queue.
-    pub fn loop_spec_strip_select(&mut self, spec_id: String) {
+    pub fn graph_spec_strip_select(&mut self, spec_id: String) {
         let exists = self
-            .loop_live_state
+            .graph_live_state
             .as_ref()
             .is_some_and(|state| state.spec_queue.iter().any(|e| e.spec_id == spec_id));
         if !exists {
             return;
         }
-        self.loop_spec_strip_selected = Some(spec_id);
-        self.loop_live_focus = LoopLiveFocus::SpecStrip;
+        self.graph_spec_strip_selected = Some(spec_id);
+        self.graph_live_focus = GraphLiveFocus::SpecStrip;
     }
 
-    /// The node id currently highlighted in the live loop view: the
+    /// The node id currently highlighted in the live graph view: the
     /// engine's current node while auto-following, else the manually
     /// selected node.
-    pub fn loop_graph_highlighted_node_id(&self) -> Option<&str> {
-        if self.loop_graph_follow {
-            self.loop_live_state.as_ref()?.current_node_id.as_deref()
+    pub fn graph_live_highlighted_node_id(&self) -> Option<&str> {
+        if self.graph_live_follow {
+            self.graph_live_state.as_ref()?.current_node_id.as_deref()
         } else {
-            self.loop_graph_selected_node.as_deref()
+            self.graph_live_selected_node.as_deref()
         }
     }
 
-    /// Run info (status/started_at/iteration/output tail) for the live loop
+    /// Run info (status/started_at/iteration/output tail) for the live graph
     /// view's currently highlighted node — reuses the snapshot's own
     /// current-node fields when the highlight matches it (no query), else
     /// looks up the manually-highlighted node directly.
-    pub fn loop_graph_highlighted_node_run_info(&self) -> loop_live_state::NodeRunInfo {
-        let Some(state) = self.loop_live_state.as_ref() else {
-            return loop_live_state::NodeRunInfo::default();
+    pub fn graph_live_highlighted_node_run_info(&self) -> graph_live_state::NodeRunInfo {
+        let Some(state) = self.graph_live_state.as_ref() else {
+            return graph_live_state::NodeRunInfo::default();
         };
-        let highlighted = self.loop_graph_highlighted_node_id();
+        let highlighted = self.graph_live_highlighted_node_id();
         if highlighted == state.current_node_id.as_deref() {
-            return loop_live_state::NodeRunInfo {
+            return graph_live_state::NodeRunInfo {
                 status: state.current_node_status,
                 started_at: state.current_node_started_at,
                 iteration: state.current_node_iteration,
@@ -1202,9 +1900,9 @@ impl App {
             };
         }
         let (Some(spec_id), Some(node_id)) = (state.current_spec_id.as_deref(), highlighted) else {
-            return loop_live_state::NodeRunInfo::default();
+            return graph_live_state::NodeRunInfo::default();
         };
-        self.loop_node_run_info(spec_id, node_id)
+        self.graph_node_run_info(spec_id, node_id)
     }
 
     fn refresh_rag_state(&mut self) -> Result<()> {
@@ -1264,44 +1962,44 @@ impl App {
         self.projects.get(self.selected_project)
     }
 
-    pub fn visible_loops(&self) -> Vec<&crate::domain::loops::Loop> {
-        if self.loop_view_archived {
-            self.archived_loops.iter().collect()
+    pub fn visible_graphs(&self) -> Vec<&crate::domain::graphs::Graph> {
+        if self.graph_view_archived {
+            self.archived_graphs.iter().collect()
         } else {
-            self.loops.iter().collect()
+            self.graphs.iter().collect()
         }
     }
 
-    pub fn selected_loop(&self) -> Option<&crate::domain::loops::Loop> {
-        let selected_id = self.selected_loop_id.as_ref()?;
-        if self.loop_view_archived {
-            self.archived_loops.iter().find(|lp| lp.id == *selected_id)
+    pub fn selected_graph(&self) -> Option<&crate::domain::graphs::Graph> {
+        let selected_id = self.selected_graph_id.as_ref()?;
+        if self.graph_view_archived {
+            self.archived_graphs.iter().find(|lp| lp.id == *selected_id)
         } else {
-            self.loops.iter().find(|lp| lp.id == *selected_id)
+            self.graphs.iter().find(|lp| lp.id == *selected_id)
         }
     }
 
-    pub fn selected_loop_spec(&self) -> Option<&crate::domain::loops::LoopSpecDetails> {
-        self.loop_details
+    pub fn selected_graph_spec(&self) -> Option<&crate::domain::graphs::GraphSpecDetails> {
+        self.graph_details
             .as_ref()
-            .and_then(|details| details.specs.get(self.loop_selected_spec))
+            .and_then(|details| details.specs.get(self.graph_selected_spec))
     }
 
-    pub fn selected_loop_node(&self) -> Option<&crate::domain::loops::LoopNode> {
-        self.selected_loop_spec()
-            .and_then(|spec| spec.nodes.get(self.loop_selected_node))
+    pub fn selected_graph_node(&self) -> Option<&crate::domain::graphs::GraphNode> {
+        self.selected_graph_spec()
+            .and_then(|spec| spec.nodes.get(self.graph_selected_node))
     }
 
     /// Latest run info (status/started_at/iteration/output tail) for
     /// `node_id` within `spec_id` — for a node the user has navigated to in
-    /// the graph, which may differ from `loop_live_state`'s auto-detected
+    /// the graph, which may differ from `graph_live_state`'s auto-detected
     /// current node.
-    pub(crate) fn loop_node_run_info(
+    pub(crate) fn graph_node_run_info(
         &self,
         spec_id: &str,
         node_id: &str,
-    ) -> loop_live_state::NodeRunInfo {
-        loop_live_state::resolve_node_run_info(&self.db, spec_id, node_id)
+    ) -> graph_live_state::NodeRunInfo {
+        graph_live_state::resolve_node_run_info(&self.db, spec_id, node_id)
     }
 
     pub fn delete_selected_project(&mut self) -> Result<()> {
@@ -1310,62 +2008,62 @@ impl App {
         };
         self.db.delete_project(&hash)?;
         self.refresh_projects()?;
-        self.refresh_loops()?;
+        self.refresh_graphs()?;
         self.refresh_project_graph().ok();
         self.refresh_rag_state()?;
         Ok(())
     }
 
-    /// Archive the loop currently selected in the main (non-archived) view.
-    /// A no-op (not an error) when nothing is selected, the loop is already
+    /// Archive the graph currently selected in the main (non-archived) view.
+    /// A no-op (not an error) when nothing is selected, the graph is already
     /// archived, or it's still `running` (archiving is for work that's
     /// finished with — pause it first).
-    pub fn archive_selected_loop(&mut self) -> Result<()> {
-        let Some(lp) = self.selected_loop() else {
+    pub fn archive_selected_graph(&mut self) -> Result<()> {
+        let Some(lp) = self.selected_graph() else {
             return Ok(());
         };
-        self.db.archive_loop(&lp.id)?;
-        self.refresh_loops()?;
+        self.db.archive_graph(&lp.id)?;
+        self.refresh_graphs()?;
         self.refresh_projects()?;
         self.refresh_rag_state()?;
         Ok(())
     }
 
-    /// Restore the loop currently selected in the archived view back to the
+    /// Restore the graph currently selected in the archived view back to the
     /// main list. A no-op when nothing is selected.
-    pub fn restore_selected_archived_loop(&mut self) -> Result<()> {
-        let Some(lp) = self.selected_loop() else {
+    pub fn restore_selected_archived_graph(&mut self) -> Result<()> {
+        let Some(lp) = self.selected_graph() else {
             return Ok(());
         };
-        self.db.restore_loop(&lp.id)?;
-        self.refresh_loops()?;
+        self.db.restore_graph(&lp.id)?;
+        self.refresh_graphs()?;
         self.refresh_projects()?;
         self.refresh_rag_state()?;
         Ok(())
     }
 
-    /// Permanently delete the loop currently selected in the archived view —
+    /// Permanently delete the graph currently selected in the archived view —
     /// the deliberate, separate act this spec keeps behind the archive: it
-    /// destroys the loop's row and, via `ON DELETE CASCADE`, its specs and
+    /// destroys the graph's row and, via `ON DELETE CASCADE`, its specs and
     /// full run history. A no-op when nothing is selected.
-    pub fn permanent_delete_selected_archived_loop(&mut self) -> Result<()> {
-        let Some(lp) = self.selected_loop() else {
+    pub fn permanent_delete_selected_archived_graph(&mut self) -> Result<()> {
+        let Some(lp) = self.selected_graph() else {
             return Ok(());
         };
-        self.db.delete_loop(&lp.id)?;
-        self.refresh_loops()?;
+        self.db.delete_graph(&lp.id)?;
+        self.refresh_graphs()?;
         self.refresh_projects()?;
         self.refresh_rag_state()?;
         Ok(())
     }
 
-    /// Toggle the Loops sidebar section between the main list and the
+    /// Toggle the Graphs sidebar section between the main list and the
     /// archive. Refreshes immediately so the archived list is populated the
-    /// moment it becomes visible (`refresh_loops` only loads
-    /// `archived_loops` while this flag is set).
-    pub fn toggle_loop_archive_view(&mut self) {
-        self.loop_view_archived = !self.loop_view_archived;
-        let _ = self.refresh_loops();
+    /// moment it becomes visible (`refresh_graphs` only loads
+    /// `archived_graphs` while this flag is set).
+    pub fn toggle_graph_archive_view(&mut self) {
+        self.graph_view_archived = !self.graph_view_archived;
+        let _ = self.refresh_graphs();
     }
 
     pub fn delete_selected_knowledge(&mut self) -> Result<()> {
@@ -1472,6 +2170,13 @@ impl App {
     /// tabs with nothing to select — a keyboard-only shortcut alongside
     /// arrow-key ring navigation.
     pub(crate) fn cycle_sidebar_layer(&mut self) {
+        // CT14 (focus bug): departing Knowledge must not leave a dangling
+        // `project_focus` behind — it traps Shift+arrows in the project-tab
+        // keymap after returning to another layer.
+        if self.sidebar_layer == SidebarLayer::Knowledge && self.project_focus.is_some() {
+            self.exit_project_focus();
+        }
+        self.normalize_automation_kind();
         self.agents_rag_focused = false;
         let ring = Self::SIDEBAR_TAB_RING;
         let start_idx = Self::sidebar_tab_index(self.sidebar_layer);
@@ -1509,11 +2214,21 @@ impl App {
     /// that layer's selection and a step back restores it instead of
     /// re-landing on its edge item the way a fresh jump (click/F2) does.
     pub(crate) fn step_sidebar_tab(&mut self, forward: bool) {
+        // CT14: correct stale indices at the moment of use (FR4/FR5) before
+        // stepping, so tab cycling works from any reachable state.
+        self.clamp_sidebar_selection();
         let ring = Self::SIDEBAR_TAB_RING;
         let idx = Self::sidebar_tab_index(self.sidebar_layer);
-        let next = step_ring_index(idx, ring.len(), forward);
+        let next = crate::tui::selection::move_index(idx, ring.len(), forward);
         self.remember_current_sidebar_selection();
         let target = ring[next];
+        // CT14 (focus bug): leaving Knowledge clears the deep project view.
+        if self.sidebar_layer == SidebarLayer::Knowledge
+            && target != SidebarLayer::Knowledge
+            && self.project_focus.is_some()
+        {
+            self.exit_project_focus();
+        }
         self.agents_rag_focused = false;
         if !self.restore_remembered_sidebar_selection(target) {
             self.switch_sidebar_tab(target);
@@ -1532,12 +2247,16 @@ impl App {
             }
             SidebarLayer::Automation => {
                 self.sidebar_step_memory.automation_kind = Some(self.automation_kind);
+                // Only the active branch's cursor is refreshed; the other
+                // branch's slot is left alone so a step back restores the
+                // kind that was actually last used.
                 match self.automation_kind {
                     AutomationKind::Agent => {
                         self.sidebar_step_memory.automation_selected = Some(self.selected);
                     }
-                    AutomationKind::Loop => {
-                        self.sidebar_step_memory.automation_loop_id = self.selected_loop_id.clone();
+                    AutomationKind::Graph => {
+                        self.sidebar_step_memory.automation_graph_id =
+                            self.selected_graph_id.clone();
                     }
                 }
             }
@@ -1558,6 +2277,10 @@ impl App {
                     return false;
                 };
                 if !self.live_indices().contains(&idx) {
+                    // CT14: stale memory must not be re-probed forever —
+                    // clear the dead slot so the next revisit goes straight
+                    // to the edge item.
+                    self.sidebar_step_memory.live_selected = None;
                     return false;
                 }
                 self.sidebar_layer = SidebarLayer::Live;
@@ -1570,6 +2293,8 @@ impl App {
                         return false;
                     };
                     if !self.automation_agent_indices().contains(&idx) {
+                        // CT14: clear the dead slot (see Live branch above).
+                        self.sidebar_step_memory.automation_selected = None;
                         return false;
                     }
                     self.sidebar_layer = SidebarLayer::Automation;
@@ -1577,17 +2302,19 @@ impl App {
                     self.selected = idx;
                     true
                 }
-                Some(AutomationKind::Loop) => {
-                    let Some(id) = self.sidebar_step_memory.automation_loop_id.clone() else {
+                Some(AutomationKind::Graph) => {
+                    let Some(id) = self.sidebar_step_memory.automation_graph_id.clone() else {
                         return false;
                     };
-                    if !self.sidebar_loops().iter().any(|lp| lp.id == id) {
+                    if !self.sidebar_graphs().iter().any(|lp| lp.id == id) {
+                        // CT14: clear the dead slot (see Live branch above).
+                        self.sidebar_step_memory.automation_graph_id = None;
                         return false;
                     }
                     self.sidebar_layer = SidebarLayer::Automation;
-                    self.automation_kind = AutomationKind::Loop;
-                    self.selected_loop_id = Some(id);
-                    self.refresh_loops_selection();
+                    self.automation_kind = AutomationKind::Graph;
+                    self.selected_graph_id = Some(id);
+                    self.refresh_graphs_selection();
                     true
                 }
                 None => false,
@@ -1597,6 +2324,8 @@ impl App {
                     return false;
                 };
                 if idx >= self.projects.len() {
+                    // CT14: clear the dead slot (see Live branch above).
+                    self.sidebar_step_memory.knowledge_selected = None;
                     return false;
                 }
                 self.sidebar_layer = SidebarLayer::Knowledge;
@@ -1629,7 +2358,7 @@ impl App {
             .iter()
             .position(|&t| t == current)
             .unwrap_or(0);
-        let next = step_ring_index(idx, ProjectTab::ALL.len(), forward);
+        let next = crate::tui::selection::move_index(idx, ProjectTab::ALL.len(), forward);
         self.enter_project_focus(ProjectTab::ALL[next]);
     }
 
@@ -1668,6 +2397,14 @@ impl App {
     /// deliberate click on a visible tab must always land there — a click on
     /// an empty Automation should show its empty state, not silently no-op.
     pub(crate) fn switch_sidebar_tab(&mut self, layer: SidebarLayer) {
+        // CT14 (focus bug): direct jumps off Knowledge also leave the deep
+        // project view.
+        if self.sidebar_layer == SidebarLayer::Knowledge
+            && layer != SidebarLayer::Knowledge
+            && self.project_focus.is_some()
+        {
+            self.exit_project_focus();
+        }
         self.agents_rag_focused = false;
         if !self.enter_layer(layer, true) {
             self.sidebar_layer = layer;
@@ -1704,34 +2441,32 @@ impl App {
         self.rag_paused = new_val;
     }
 
-    pub fn cycle_loop_spec(&mut self, forward: bool) {
-        let Some(details) = self.loop_details.as_ref() else {
+    pub fn cycle_graph_spec(&mut self, forward: bool) {
+        let Some(details) = self.graph_details.as_ref() else {
             return;
         };
         if details.specs.is_empty() {
             return;
         }
 
-        self.loop_selected_spec = if forward {
-            (self.loop_selected_spec + 1) % details.specs.len()
-        } else {
-            self.loop_selected_spec
-                .checked_sub(1)
-                .unwrap_or(details.specs.len() - 1)
-        };
-        self.loop_selected_node = 0;
-        self.refresh_loop_runs_for_selected_spec();
-        self.select_default_loop_node_if_needed(true);
+        self.graph_selected_spec = crate::tui::selection::move_index(
+            self.graph_selected_spec,
+            details.specs.len(),
+            forward,
+        );
+        self.graph_selected_node = 0;
+        self.refresh_graph_runs_for_selected_spec();
+        self.select_default_graph_node_if_needed(true);
         self.reset_log_scroll();
     }
 
-    pub fn open_loop_editor_dialog(&mut self) -> Result<()> {
-        let Some(node) = self.selected_loop_node() else {
+    pub fn open_graph_editor_dialog(&mut self) -> Result<()> {
+        let Some(node) = self.selected_graph_node() else {
             return Ok(());
         };
         let dialog = self.build_editor_dialog_content(node);
-        self.loop_editor_dialog = Some(dialog);
-        self.focus = Focus::LoopEditorDialog;
+        self.graph_editor_dialog = Some(dialog);
+        self.focus = Focus::GraphEditorDialog;
         Ok(())
     }
 
@@ -1739,27 +2474,27 @@ impl App {
     /// `pass`/`fail`/`always` edges, retargetable/deletable in place. A
     /// router's `route` edges stay under its `RouterRoutes` dialog instead
     /// (see [`Self::build_edges_dialog`]'s filter).
-    pub fn open_loop_edges_dialog(&mut self) -> Result<()> {
-        let Some(node) = self.selected_loop_node() else {
+    pub fn open_graph_edges_dialog(&mut self) -> Result<()> {
+        let Some(node) = self.selected_graph_node() else {
             return Ok(());
         };
         let dialog = self.build_edges_dialog(node);
-        self.loop_editor_dialog = Some(dialog);
-        self.focus = Focus::LoopEditorDialog;
+        self.graph_editor_dialog = Some(dialog);
+        self.focus = Focus::GraphEditorDialog;
         Ok(())
     }
 
     fn build_edges_dialog(
         &self,
-        node: &crate::domain::loops::LoopNode,
-    ) -> crate::tui::app::types::LoopEditorDialog {
-        let edges: Vec<crate::domain::loops::LoopEdge> = self
+        node: &crate::domain::graphs::GraphNode,
+    ) -> crate::tui::app::types::GraphEditorDialog {
+        let edges: Vec<crate::domain::graphs::GraphEdge> = self
             .router_existing_edges(node)
             .into_iter()
             .filter(|edge| edge.condition.route_label().is_none())
             .collect();
         let targets = self.router_candidate_targets(node);
-        crate::tui::app::types::LoopEditorDialog::new_edges(
+        crate::tui::app::types::GraphEditorDialog::new_edges(
             node.id.clone(),
             node.name.clone(),
             format!(" Edges · {} ", node.name),
@@ -1771,12 +2506,12 @@ impl App {
 
     /// Retarget the `Edges` dialog's focused edge to the next/previous
     /// candidate node — applied immediately through the same validated path
-    /// as the `loop_update_edge` MCP tool
-    /// ([`crate::daemon::handler::retarget_loop_edge`]), so a running loop
+    /// as the `graph_update_edge` MCP tool
+    /// ([`crate::daemon::handler::retarget_graph_edge`]), so a running graph
     /// or a cross-graph target is rejected the same way it would be over
     /// MCP, with the rejection shown as the dialog's error line.
-    pub fn retarget_focused_loop_edge(&mut self, forward: bool) -> Result<()> {
-        let Some(dialog) = self.loop_editor_dialog.as_ref() else {
+    pub fn retarget_focused_graph_edge(&mut self, forward: bool) -> Result<()> {
+        let Some(dialog) = self.graph_editor_dialog.as_ref() else {
             return Ok(());
         };
         let Some(edge) = dialog.focused_edge() else {
@@ -1790,18 +2525,18 @@ impl App {
         if next_target == current_target {
             return Ok(());
         }
-        match crate::daemon::handler::retarget_loop_edge(&self.db, &edge_id, &next_target) {
+        match crate::daemon::handler::retarget_graph_edge(&self.db, &edge_id, &next_target) {
             Ok(updated) => {
-                if let Some(dialog) = self.loop_editor_dialog.as_mut() {
+                if let Some(dialog) = self.graph_editor_dialog.as_mut() {
                     dialog.parse_error = None;
                     if let Some(row) = dialog.edge_rows.get_mut(dialog.edge_row_index) {
                         *row = updated;
                     }
                 }
-                self.refresh_loops()?;
+                self.refresh_graphs()?;
             }
             Err(message) => {
-                if let Some(dialog) = self.loop_editor_dialog.as_mut() {
+                if let Some(dialog) = self.graph_editor_dialog.as_mut() {
                     dialog.parse_error = Some(message);
                 }
             }
@@ -1810,29 +2545,29 @@ impl App {
     }
 
     /// Delete the `Edges` dialog's focused edge — through the same
-    /// validated path as the `loop_delete_edge` MCP tool
-    /// ([`crate::daemon::handler::delete_loop_edge_checked`]).
-    pub fn delete_focused_loop_edge(&mut self) -> Result<()> {
-        let Some(dialog) = self.loop_editor_dialog.as_ref() else {
+    /// validated path as the `graph_delete_edge` MCP tool
+    /// ([`crate::daemon::handler::delete_graph_edge_checked`]).
+    pub fn delete_focused_graph_edge(&mut self) -> Result<()> {
+        let Some(dialog) = self.graph_editor_dialog.as_ref() else {
             return Ok(());
         };
         let Some(edge) = dialog.focused_edge() else {
             return Ok(());
         };
         let edge_id = edge.id.clone();
-        match crate::daemon::handler::delete_loop_edge_checked(&self.db, &edge_id) {
+        match crate::daemon::handler::delete_graph_edge_checked(&self.db, &edge_id) {
             Ok(_) => {
-                if let Some(dialog) = self.loop_editor_dialog.as_mut() {
+                if let Some(dialog) = self.graph_editor_dialog.as_mut() {
                     dialog.parse_error = None;
                     dialog.edge_rows.retain(|edge| edge.id != edge_id);
                     if dialog.edge_row_index >= dialog.edge_rows.len() {
                         dialog.edge_row_index = dialog.edge_rows.len().saturating_sub(1);
                     }
                 }
-                self.refresh_loops()?;
+                self.refresh_graphs()?;
             }
             Err(message) => {
-                if let Some(dialog) = self.loop_editor_dialog.as_mut() {
+                if let Some(dialog) = self.graph_editor_dialog.as_mut() {
                     dialog.parse_error = Some(message);
                 }
             }
@@ -1840,96 +2575,96 @@ impl App {
         Ok(())
     }
 
-    /// U10: duplicate the highlighted loop node — a fresh, unwired copy of its
+    /// U10: duplicate the highlighted graph node — a fresh, unwired copy of its
     /// config into the same graph — then open the editor on the copy so its
     /// prompt/config can be tweaked (the closest thing the TUI has to a
     /// creation flow to pre-fill). Ensemble member/join nodes are
     /// engine-managed, so duplicating a whole ensemble is left to the
-    /// `loop_copy_ensemble` MCP tool and this is a no-op for those.
-    pub fn duplicate_selected_loop_node(&mut self) -> Result<()> {
-        let Some(node) = self.selected_loop_node() else {
+    /// `graph_copy_ensemble` MCP tool and this is a no-op for those.
+    pub fn duplicate_selected_graph_node(&mut self) -> Result<()> {
+        let Some(node) = self.selected_graph_node() else {
             return Ok(());
         };
         let node = node.clone();
 
         // Ensemble-owned (member or join) nodes can't be copied as plain
         // nodes — that would break the "no nested ensembles" invariant.
-        if node.kind == LoopNodeKind::Join
+        if node.kind == GraphNodeKind::Join
             || self.db.get_ensemble_by_member_node(&node.id)?.is_some()
             || self.db.get_ensemble_by_join_node(&node.id)?.is_some()
         {
             return Ok(());
         }
 
-        let siblings = match (&node.spec_id, &node.loop_id) {
-            (Some(spec_id), _) => self.db.list_loop_nodes(spec_id)?,
-            (None, Some(loop_id)) => self.db.list_loop_nodes_for_loop(loop_id)?,
+        let siblings = match (&node.spec_id, &node.graph_id) {
+            (Some(spec_id), _) => self.db.list_graph_nodes(spec_id)?,
+            (None, Some(graph_id)) => self.db.list_graph_nodes_for_graph(graph_id)?,
             (None, None) => return Ok(()),
         };
         let next_position = siblings.last().map(|n| n.position + 1).unwrap_or(1);
 
-        let copy = crate::domain::loops::LoopNode {
+        let copy = crate::domain::graphs::GraphNode {
             id: uuid::Uuid::new_v4().to_string(),
             spec_id: node.spec_id.clone(),
-            loop_id: node.loop_id.clone(),
+            graph_id: node.graph_id.clone(),
             name: format!("{} (copy)", node.name),
             kind: node.kind,
             config: node.config,
             position: next_position,
             created_at: chrono::Utc::now(),
         };
-        self.db.insert_loop_node(&copy)?;
-        self.refresh_loops()?;
+        self.db.insert_graph_node(&copy)?;
+        self.refresh_graphs()?;
 
         // Pre-fill the editor with the copy's config (identical to the
         // source's) so the user can immediately adjust it.
         let dialog = self.build_editor_dialog_content(&copy);
-        self.loop_editor_dialog = Some(dialog);
-        self.focus = Focus::LoopEditorDialog;
+        self.graph_editor_dialog = Some(dialog);
+        self.focus = Focus::GraphEditorDialog;
         Ok(())
     }
 
     fn build_editor_dialog_content(
         &self,
-        node: &crate::domain::loops::LoopNode,
-    ) -> crate::tui::app::types::LoopEditorDialog {
+        node: &crate::domain::graphs::GraphNode,
+    ) -> crate::tui::app::types::GraphEditorDialog {
         match node.kind {
-            LoopNodeKind::Agent => self.build_agent_prompt_dialog(node),
-            LoopNodeKind::Router => self.build_router_routes_dialog(node),
+            GraphNodeKind::Agent => self.build_agent_prompt_dialog(node),
+            GraphNodeKind::Router => self.build_router_routes_dialog(node),
             _ => self.build_node_config_dialog(node),
         }
     }
 
     fn build_agent_prompt_dialog(
         &self,
-        node: &crate::domain::loops::LoopNode,
-    ) -> crate::tui::app::types::LoopEditorDialog {
+        node: &crate::domain::graphs::GraphNode,
+    ) -> crate::tui::app::types::GraphEditorDialog {
         let prompt = node
             .config
             .get("prompt_template")
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default();
-        crate::tui::app::types::LoopEditorDialog::new(
+        crate::tui::app::types::GraphEditorDialog::new(
             node.id.clone(),
             node.name.clone(),
-            format!(" Loop Prompt · {} ", node.name),
+            format!(" Graph Prompt · {} ", node.name),
             "Ctrl+S save  ·  Enter newline  ·  Esc cancel".to_string(),
             prompt.to_string(),
-            crate::tui::app::types::LoopEditorMode::AgentPrompt,
+            crate::tui::app::types::GraphEditorMode::AgentPrompt,
         )
     }
 
     fn build_node_config_dialog(
         &self,
-        node: &crate::domain::loops::LoopNode,
-    ) -> crate::tui::app::types::LoopEditorDialog {
-        crate::tui::app::types::LoopEditorDialog::new(
+        node: &crate::domain::graphs::GraphNode,
+    ) -> crate::tui::app::types::GraphEditorDialog {
+        crate::tui::app::types::GraphEditorDialog::new(
             node.id.clone(),
             node.name.clone(),
-            format!(" Loop Config · {} ", node.name),
+            format!(" Graph Config · {} ", node.name),
             "Ctrl+S save JSON  ·  Enter newline  ·  Esc cancel".to_string(),
             serde_json::to_string_pretty(&node.config).unwrap_or_default(),
-            crate::tui::app::types::LoopEditorMode::NodeConfig,
+            crate::tui::app::types::GraphEditorMode::NodeConfig,
         )
     }
 
@@ -1937,13 +2672,13 @@ impl App {
     /// route can wire an edge to.
     fn router_candidate_targets(
         &self,
-        node: &crate::domain::loops::LoopNode,
+        node: &crate::domain::graphs::GraphNode,
     ) -> Vec<(String, String)> {
-        let siblings = match (&node.spec_id, &node.loop_id) {
-            (Some(spec_id), _) => self.db.list_loop_nodes(spec_id).unwrap_or_default(),
-            (None, Some(loop_id)) => self
+        let siblings = match (&node.spec_id, &node.graph_id) {
+            (Some(spec_id), _) => self.db.list_graph_nodes(spec_id).unwrap_or_default(),
+            (None, Some(graph_id)) => self
                 .db
-                .list_loop_nodes_for_loop(loop_id)
+                .list_graph_nodes_for_graph(graph_id)
                 .unwrap_or_default(),
             (None, None) => Vec::new(),
         };
@@ -1956,16 +2691,16 @@ impl App {
 
     /// This router node's currently-persisted `route`-conditioned outgoing
     /// edges, keyed by nothing in particular — callers match by route label
-    /// via [`crate::domain::loops::LoopEdgeCondition::route_label`].
+    /// via [`crate::domain::graphs::GraphEdgeCondition::route_label`].
     fn router_existing_edges(
         &self,
-        node: &crate::domain::loops::LoopNode,
-    ) -> Vec<crate::domain::loops::LoopEdge> {
-        let edges = match (&node.spec_id, &node.loop_id) {
-            (Some(spec_id), _) => self.db.list_loop_edges(spec_id).unwrap_or_default(),
-            (None, Some(loop_id)) => self
+        node: &crate::domain::graphs::GraphNode,
+    ) -> Vec<crate::domain::graphs::GraphEdge> {
+        let edges = match (&node.spec_id, &node.graph_id) {
+            (Some(spec_id), _) => self.db.list_graph_edges(spec_id).unwrap_or_default(),
+            (None, Some(graph_id)) => self
                 .db
-                .list_loop_edges_for_loop(loop_id)
+                .list_graph_edges_for_graph(graph_id)
                 .unwrap_or_default(),
             (None, None) => Vec::new(),
         };
@@ -1978,10 +2713,10 @@ impl App {
     /// Best-effort extraction of a router node's declared routes + fallback
     /// out of its raw `config` — used only to pre-fill the dialog. Shape
     /// correctness is enforced on save by
-    /// [`crate::domain::loops::validate_router_routes`], not here.
+    /// [`crate::domain::graphs::validate_router_routes`], not here.
     fn parse_router_config(
         config: &serde_json::Value,
-    ) -> (Vec<crate::domain::loops::RouterRoute>, String) {
+    ) -> (Vec<crate::domain::graphs::RouterRoute>, String) {
         let map = config.as_object();
         let routes = map
             .and_then(|m| m.get("routes"))
@@ -1990,7 +2725,7 @@ impl App {
                 routes
                     .iter()
                     .filter_map(serde_json::Value::as_object)
-                    .map(|obj| crate::domain::loops::RouterRoute {
+                    .map(|obj| crate::domain::graphs::RouterRoute {
                         label: obj
                             .get("label")
                             .and_then(serde_json::Value::as_str)
@@ -2015,8 +2750,8 @@ impl App {
 
     fn build_router_routes_dialog(
         &self,
-        node: &crate::domain::loops::LoopNode,
-    ) -> crate::tui::app::types::LoopEditorDialog {
+        node: &crate::domain::graphs::GraphNode,
+    ) -> crate::tui::app::types::GraphEditorDialog {
         let (parsed_routes, fallback) = Self::parse_router_config(&node.config);
         let existing_edges = self.router_existing_edges(node);
         let mut routes: Vec<crate::tui::app::types::RouterRouteDraft> = parsed_routes
@@ -2035,11 +2770,11 @@ impl App {
             .collect();
         // A brand new router (empty `routes`) starts with the domain's
         // minimum so the form is immediately shaped like a valid one.
-        while routes.len() < crate::domain::loops::ROUTER_MIN_ROUTES {
+        while routes.len() < crate::domain::graphs::ROUTER_MIN_ROUTES {
             routes.push(crate::tui::app::types::RouterRouteDraft::default());
         }
         let targets = self.router_candidate_targets(node);
-        crate::tui::app::types::LoopEditorDialog::new_router_routes(
+        crate::tui::app::types::GraphEditorDialog::new_router_routes(
             node.id.clone(),
             node.name.clone(),
             format!(" Router Routes · {} ", node.name),
@@ -2051,29 +2786,29 @@ impl App {
         )
     }
 
-    pub fn cancel_loop_editor_dialog(&mut self) {
-        self.loop_editor_dialog = None;
+    pub fn cancel_graph_editor_dialog(&mut self) {
+        self.graph_editor_dialog = None;
         self.focus = Focus::Preview;
     }
 
-    pub fn save_loop_editor_dialog(&mut self) -> Result<()> {
-        let Some(dialog) = self.loop_editor_dialog.take() else {
+    pub fn save_graph_editor_dialog(&mut self) -> Result<()> {
+        let Some(dialog) = self.graph_editor_dialog.take() else {
             return Ok(());
         };
-        let Some(node) = self.db.get_loop_node(&dialog.node_id)? else {
+        let Some(node) = self.db.get_graph_node(&dialog.node_id)? else {
             self.focus = Focus::Preview;
             return Ok(());
         };
 
         if matches!(
             dialog.mode,
-            crate::tui::app::types::LoopEditorMode::RouterRoutes
+            crate::tui::app::types::GraphEditorMode::RouterRoutes
         ) {
             return self.save_router_routes_dialog(dialog, &node);
         }
 
         let updated_config = self.compute_updated_node_config(&dialog, &node)?;
-        // Same allowlist `loop_add_node`/`loop_update_node` enforce (see
+        // Same allowlist `graph_add_node`/`graph_update_node` enforce (see
         // `daemon::handler::validate_node_config`) — a raw NodeConfig-mode
         // edit is the one TUI path that can hand-write a config the engine
         // will silently ignore (e.g. `prompt` instead of `prompt_template`),
@@ -2083,11 +2818,11 @@ impl App {
         {
             let mut d = dialog.clone();
             d.parse_error = Some(message);
-            self.loop_editor_dialog = Some(d);
-            self.focus = Focus::LoopEditorDialog;
+            self.graph_editor_dialog = Some(d);
+            self.focus = Focus::GraphEditorDialog;
             return Err(anyhow::anyhow!("Invalid node config"));
         }
-        self.db.update_loop_node_details(
+        self.db.update_graph_node_details(
             &dialog.node_id,
             None,
             None,
@@ -2095,54 +2830,56 @@ impl App {
             None,
         )?;
         self.focus = Focus::Preview;
-        self.refresh_loops()?;
+        self.refresh_graphs()?;
         Ok(())
     }
 
     /// Validate then persist a router's routes dialog: the declared
     /// routes/fallback shape (into `node.config`) and each route's edge
-    /// wiring (as separate `route`-conditioned [`crate::domain::loops::LoopEdge`]s).
+    /// wiring (as separate `route`-conditioned [`crate::domain::graphs::GraphEdge`]s).
     /// Both domain checks run against the *intended* state before anything
     /// is written, so a rejected save never leaves a half-wired router.
     fn save_router_routes_dialog(
         &mut self,
-        dialog: crate::tui::app::types::LoopEditorDialog,
-        node: &crate::domain::loops::LoopNode,
+        dialog: crate::tui::app::types::GraphEditorDialog,
+        node: &crate::domain::graphs::GraphNode,
     ) -> Result<()> {
-        let routes: Vec<crate::domain::loops::RouterRoute> = dialog
+        let routes: Vec<crate::domain::graphs::RouterRoute> = dialog
             .router_routes
             .iter()
-            .map(|draft| crate::domain::loops::RouterRoute {
+            .map(|draft| crate::domain::graphs::RouterRoute {
                 label: draft.label.trim().to_string(),
                 description: draft.description.trim().to_string(),
             })
             .collect();
         let fallback = dialog.router_fallback.trim().to_string();
 
-        if let Err(message) = crate::domain::loops::validate_router_routes(&routes, &fallback) {
+        if let Err(message) = crate::domain::graphs::validate_router_routes(&routes, &fallback) {
             return self.reopen_router_dialog_with_error(dialog, message);
         }
 
-        let intended_edges: Vec<crate::domain::loops::LoopEdge> = dialog
+        let intended_edges: Vec<crate::domain::graphs::GraphEdge> = dialog
             .router_routes
             .iter()
             .filter_map(|draft| {
                 let target = draft.target_node_id.clone()?;
-                Some(crate::domain::loops::LoopEdge {
+                Some(crate::domain::graphs::GraphEdge {
                     id: String::new(),
                     spec_id: node.spec_id.clone(),
-                    loop_id: node.loop_id.clone(),
+                    graph_id: node.graph_id.clone(),
                     from_node: node.id.clone(),
                     to_node: target,
-                    condition: crate::domain::loops::LoopEdgeCondition::Route(
+                    condition: crate::domain::graphs::GraphEdgeCondition::Route(
                         draft.label.trim().to_string(),
                     ),
                 })
             })
             .collect();
-        if let Err(message) =
-            crate::domain::loops::validate_router_route_coverage(&routes, &node.id, &intended_edges)
-        {
+        if let Err(message) = crate::domain::graphs::validate_router_route_coverage(
+            &routes,
+            &node.id,
+            &intended_edges,
+        ) {
             return self.reopen_router_dialog_with_error(dialog, message);
         }
 
@@ -2157,7 +2894,7 @@ impl App {
             "fallback": fallback,
         });
         self.db
-            .update_loop_node_details(&dialog.node_id, None, None, Some(&config), None)?;
+            .update_graph_node_details(&dialog.node_id, None, None, Some(&config), None)?;
 
         let existing_edges = self.router_existing_edges(node);
         for draft in &dialog.router_routes {
@@ -2167,20 +2904,21 @@ impl App {
                 .find(|edge| edge.condition.route_label() == Some(label));
             match (&draft.target_node_id, existing) {
                 (Some(target), Some(edge)) if &edge.to_node != target => {
-                    crate::daemon::handler::retarget_loop_edge(&self.db, &edge.id, target)
+                    crate::daemon::handler::retarget_graph_edge(&self.db, &edge.id, target)
                         .map_err(anyhow::Error::msg)?;
                 }
                 (Some(target), None) => {
-                    self.db.insert_loop_edge(&crate::domain::loops::LoopEdge {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        spec_id: node.spec_id.clone(),
-                        loop_id: node.loop_id.clone(),
-                        from_node: node.id.clone(),
-                        to_node: target.clone(),
-                        condition: crate::domain::loops::LoopEdgeCondition::Route(
-                            label.to_string(),
-                        ),
-                    })?;
+                    self.db
+                        .insert_graph_edge(&crate::domain::graphs::GraphEdge {
+                            id: uuid::Uuid::new_v4().to_string(),
+                            spec_id: node.spec_id.clone(),
+                            graph_id: node.graph_id.clone(),
+                            from_node: node.id.clone(),
+                            to_node: target.clone(),
+                            condition: crate::domain::graphs::GraphEdgeCondition::Route(
+                                label.to_string(),
+                            ),
+                        })?;
                 }
                 _ => {}
             }
@@ -2193,58 +2931,58 @@ impl App {
                 continue;
             };
             if !routes.iter().any(|route| route.label == label) {
-                crate::daemon::handler::delete_loop_edge_checked(&self.db, &edge.id)
+                crate::daemon::handler::delete_graph_edge_checked(&self.db, &edge.id)
                     .map_err(anyhow::Error::msg)?;
             }
         }
 
         self.focus = Focus::Preview;
-        self.refresh_loops()?;
+        self.refresh_graphs()?;
         Ok(())
     }
 
     fn reopen_router_dialog_with_error(
         &mut self,
-        mut dialog: crate::tui::app::types::LoopEditorDialog,
+        mut dialog: crate::tui::app::types::GraphEditorDialog,
         message: String,
     ) -> Result<()> {
         dialog.parse_error = Some(message);
-        self.loop_editor_dialog = Some(dialog);
-        self.focus = Focus::LoopEditorDialog;
+        self.graph_editor_dialog = Some(dialog);
+        self.focus = Focus::GraphEditorDialog;
         Err(anyhow::anyhow!("Invalid router routes"))
     }
 
     fn compute_updated_node_config(
         &mut self,
-        dialog: &crate::tui::app::types::LoopEditorDialog,
-        node: &crate::domain::loops::LoopNode,
+        dialog: &crate::tui::app::types::GraphEditorDialog,
+        node: &crate::domain::graphs::GraphNode,
     ) -> Result<serde_json::Value> {
         match dialog.mode {
-            crate::tui::app::types::LoopEditorMode::AgentPrompt => {
+            crate::tui::app::types::GraphEditorMode::AgentPrompt => {
                 Ok(Self::update_prompt_config(&node.config, &dialog.buffer))
             }
-            crate::tui::app::types::LoopEditorMode::NodeConfig => {
+            crate::tui::app::types::GraphEditorMode::NodeConfig => {
                 match serde_json::from_str::<serde_json::Value>(&dialog.buffer) {
                     Ok(v) => Ok(v),
                     Err(e) => {
                         let mut d = dialog.clone();
                         d.parse_error = Some(format!("JSON error: {e}"));
-                        self.loop_editor_dialog = Some(d);
-                        self.focus = Focus::LoopEditorDialog;
+                        self.graph_editor_dialog = Some(d);
+                        self.focus = Focus::GraphEditorDialog;
                         Err(anyhow::anyhow!("Invalid JSON"))
                     }
                 }
             }
             // Router routes are saved through `save_router_routes_dialog`
             // before this function is ever reached — see
-            // `save_loop_editor_dialog`'s mode check.
-            crate::tui::app::types::LoopEditorMode::RouterRoutes => unreachable!(
+            // `save_graph_editor_dialog`'s mode check.
+            crate::tui::app::types::GraphEditorMode::RouterRoutes => unreachable!(
                 "RouterRoutes is handled by save_router_routes_dialog before this call"
             ),
             // Edges mode has no Ctrl+S save step — every retarget/delete
             // applies immediately (see `handle_edges_key`), so this is
             // never reached.
-            crate::tui::app::types::LoopEditorMode::Edges => {
+            crate::tui::app::types::GraphEditorMode::Edges => {
                 unreachable!("Edges mode has no save step; mutations apply immediately")
             }
         }
@@ -2421,40 +3159,40 @@ impl App {
         }
     }
 
-    fn clamp_loop_selection(&mut self) {
-        let Some(details) = self.loop_details.as_ref() else {
-            self.loop_selected_spec = 0;
-            self.loop_selected_node = 0;
+    fn clamp_graph_selection(&mut self) {
+        let Some(details) = self.graph_details.as_ref() else {
+            self.graph_selected_spec = 0;
+            self.graph_selected_node = 0;
             return;
         };
         if details.specs.is_empty() {
-            self.loop_selected_spec = 0;
-            self.loop_selected_node = 0;
+            self.graph_selected_spec = 0;
+            self.graph_selected_node = 0;
             return;
         }
 
-        self.loop_selected_spec = self.loop_selected_spec.min(details.specs.len() - 1);
-        let node_count = details.specs[self.loop_selected_spec].nodes.len();
-        self.loop_selected_node = if node_count == 0 {
+        self.graph_selected_spec = self.graph_selected_spec.min(details.specs.len() - 1);
+        let node_count = details.specs[self.graph_selected_spec].nodes.len();
+        self.graph_selected_node = if node_count == 0 {
             0
         } else {
-            self.loop_selected_node.min(node_count - 1)
+            self.graph_selected_node.min(node_count - 1)
         };
     }
 
-    fn default_loop_spec_index(&self) -> usize {
-        self.loop_details
+    fn default_graph_spec_index(&self) -> usize {
+        self.graph_details
             .as_ref()
             .and_then(|details| {
                 details
                     .specs
                     .iter()
-                    .position(|spec| spec.spec.status == LoopSpecStatus::Running)
+                    .position(|spec| spec.spec.status == GraphSpecStatus::Running)
                     .or_else(|| {
                         details.specs.iter().position(|spec| {
                             matches!(
                                 spec.spec.status,
-                                LoopSpecStatus::Pending | LoopSpecStatus::Interrupted
+                                GraphSpecStatus::Pending | GraphSpecStatus::Interrupted
                             )
                         })
                     })
@@ -2462,40 +3200,40 @@ impl App {
             .unwrap_or(0)
     }
 
-    fn refresh_loop_runs_for_selected_spec(&mut self) {
-        self.loop_runs.clear();
-        let Some(spec) = self.selected_loop_spec() else {
+    fn refresh_graph_runs_for_selected_spec(&mut self) {
+        self.graph_runs.clear();
+        let Some(spec) = self.selected_graph_spec() else {
             return;
         };
-        self.loop_runs = self
+        self.graph_runs = self
             .db
-            .list_loop_runs_for_spec(&spec.spec.id)
+            .list_graph_runs_for_spec(&spec.spec.id)
             .unwrap_or_default();
     }
 
-    fn select_default_loop_node_if_needed(&mut self, reset: bool) {
-        let Some(spec) = self.selected_loop_spec() else {
-            self.loop_selected_node = 0;
+    fn select_default_graph_node_if_needed(&mut self, reset: bool) {
+        let Some(spec) = self.selected_graph_spec() else {
+            self.graph_selected_node = 0;
             return;
         };
         if spec.nodes.is_empty() {
-            self.loop_selected_node = 0;
+            self.graph_selected_node = 0;
             return;
         }
 
-        if !reset && self.loop_selected_node < spec.nodes.len() {
+        if !reset && self.graph_selected_node < spec.nodes.len() {
             return;
         }
 
         let current_node_id = self
-            .loop_runs
+            .graph_runs
             .iter()
             .rev()
-            .find(|run| run.status == crate::domain::loops::LoopRunStatus::Running)
-            .or_else(|| self.loop_runs.last())
+            .find(|run| run.status == crate::domain::graphs::GraphRunStatus::Running)
+            .or_else(|| self.graph_runs.last())
             .map(|run| run.node_id.as_str());
 
-        self.loop_selected_node = current_node_id
+        self.graph_selected_node = current_node_id
             .and_then(|node_id| spec.nodes.iter().position(|node| node.id == node_id))
             .unwrap_or(0);
     }
@@ -3655,33 +4393,6 @@ fn load_cli_usage() -> crate::domain::usage_stats::CliUsage {
     usage
 }
 
-/// Shared ring-stepping helper for both tab strips (sidebar layers and
-/// project tabs): move one position in `forward`'s direction, wrapping at
-/// either end.
-fn step_ring_index(idx: usize, len: usize, forward: bool) -> usize {
-    if forward {
-        (idx + 1) % len
-    } else {
-        idx.checked_sub(1).unwrap_or(len - 1)
-    }
-}
-
-/// Shift a scroll offset by the minimum amount needed to bring `idx` into
-/// `[offset, offset + capacity)` — used to keep the spec marker strip's
-/// keyboard-driven selection visible without jumping further than needed.
-fn scroll_into_view(offset: usize, idx: usize, capacity: usize) -> usize {
-    if capacity == 0 {
-        return 0;
-    }
-    if idx < offset {
-        idx
-    } else if idx >= offset + capacity {
-        idx + 1 - capacity
-    } else {
-        offset
-    }
-}
-
 fn calculate_log_hash(raw_log: &str) -> u64 {
     raw_log.bytes().enumerate().fold(0u64, |acc, (idx, byte)| {
         acc.wrapping_add((byte as u64).wrapping_mul(idx as u64 + 1))
@@ -3743,15 +4454,14 @@ mod tests {
         adaptive_change_score, adaptive_poll_interval_ms, blend_optional_f32, blend_optional_f64,
         build_resumed_session_args, calculate_log_hash, lerp_f32, lerp_u64, log_contains_error,
         log_contains_spawn, log_contains_success, process_is_alive, process_outlives_grace,
-        resume_decision, sample_from, scroll_into_view, should_resume_session, step_ring_index,
-        ResumeDecision, SystemSample,
+        resume_decision, sample_from, should_resume_session, ResumeDecision, SystemSample,
     };
     use crate::db::session::InteractiveSession;
     use crate::db::Database;
-    use crate::domain::loops::{LoopSpecStatus, LoopStatus};
-    use crate::tui::app::loop_live_state::{LoopLiveState, SpecQueueEntry};
+    use crate::domain::graphs::{GraphSpecStatus, GraphStatus};
+    use crate::tui::app::graph_live_state::{GraphLiveState, SpecQueueEntry};
     use crate::tui::app::types::{
-        AgentEntry, App, AutomationKind, Focus, LoopLiveFocus, ProjectTab, SidebarLayer,
+        AgentEntry, App, AutomationKind, Focus, GraphLiveFocus, ProjectTab, SidebarLayer,
     };
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -3791,7 +4501,12 @@ mod tests {
         .unwrap();
 
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.reconcile_bridge_sessions();
 
         let still_active = db.get_active_sessions_by_type("bridge").unwrap();
@@ -4056,7 +4771,7 @@ mod tests {
 
     #[test]
     fn test_process_outlives_grace_waits_out_a_dying_process() {
-        // A child that exits shortly after we check: the grace loop must
+        // A child that exits shortly after we check: the grace graph must
         // observe the death and report "no conflict" instead of orphaning.
         // The child is reaped on a side thread — an unreaped zombie would
         // still answer kill(pid, 0). (In production the contended PID never
@@ -4073,7 +4788,7 @@ mod tests {
         reaper.join().expect("join reaper");
     }
 
-    // ── Sidebar: loops/backlog/history sections ─────────────────────
+    // ── Sidebar: graphs/backlog/history sections ─────────────────────
 
     fn make_project(hash: &str, path: &str) -> crate::domain::project::Project {
         crate::domain::project::Project {
@@ -4087,14 +4802,16 @@ mod tests {
         }
     }
 
-    fn make_loop(
+    fn make_graph(
         id: &str,
         name: &str,
-        status: crate::domain::loops::LoopStatus,
-    ) -> crate::domain::loops::Loop {
-        crate::domain::loops::Loop {
+        status: crate::domain::graphs::GraphStatus,
+    ) -> crate::domain::graphs::Graph {
+        crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
+            infra_node_id: None,
             id: id.to_string(),
             name: name.to_string(),
             description: None,
@@ -4108,7 +4825,7 @@ mod tests {
             auto_continue_at: None,
             auto_continue_action: None,
             active_run_queue_id: None,
-            on_completed: None,
+            hooks: std::collections::BTreeMap::new(),
         }
     }
 
@@ -4116,18 +4833,21 @@ mod tests {
         id: &str,
         name: &str,
         workdir: Option<&str>,
-    ) -> crate::domain::loops::LoopSpec {
-        crate::domain::loops::LoopSpec {
+    ) -> crate::domain::graphs::GraphSpec {
+        crate::domain::graphs::GraphSpec {
             id: id.to_string(),
-            loop_id: None,
+            graph_id: None,
             name: name.to_string(),
             description: None,
             position: 0,
             parallelizable: false,
-            status: crate::domain::loops::LoopSpecStatus::Pending,
+            status: crate::domain::graphs::GraphSpecStatus::Pending,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: workdir.map(str::to_string),
             completed_via: None,
@@ -4137,44 +4857,49 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_loops_orders_by_recency_across_all_statuses() {
-        use crate::domain::loops::LoopStatus;
+    fn sidebar_graphs_orders_by_recency_across_all_statuses() {
+        use crate::domain::graphs::GraphStatus;
 
         let db = test_db();
         let base = chrono::Utc::now() - chrono::Duration::hours(10);
 
-        let mut draft = make_loop("l-draft", "Draft Loop", LoopStatus::Draft);
+        let mut draft = make_graph("l-draft", "Draft Graph", GraphStatus::Draft);
         draft.created_at = base;
-        db.insert_loop(&draft).unwrap();
+        db.insert_graph(&draft).unwrap();
 
-        let mut failed = make_loop("l-failed", "Failed Loop", LoopStatus::Failed);
+        let mut failed = make_graph("l-failed", "Failed Graph", GraphStatus::Failed);
         failed.created_at = base + chrono::Duration::minutes(10);
-        db.insert_loop(&failed).unwrap();
+        db.insert_graph(&failed).unwrap();
 
-        let mut done = make_loop("l-done", "Done Loop", LoopStatus::Completed);
+        let mut done = make_graph("l-done", "Done Graph", GraphStatus::Completed);
         done.created_at = base + chrono::Duration::minutes(20);
-        db.insert_loop(&done).unwrap();
+        db.insert_graph(&done).unwrap();
 
-        let mut paused = make_loop("l-paused", "Paused Loop", LoopStatus::Paused);
+        let mut paused = make_graph("l-paused", "Paused Graph", GraphStatus::Paused);
         paused.created_at = base + chrono::Duration::minutes(30);
-        db.insert_loop(&paused).unwrap();
+        db.insert_graph(&paused).unwrap();
 
-        let mut running = make_loop("l-running", "Running Loop", LoopStatus::Running);
+        let mut running = make_graph("l-running", "Running Graph", GraphStatus::Running);
         running.created_at = base + chrono::Duration::minutes(40);
-        db.insert_loop(&running).unwrap();
+        db.insert_graph(&running).unwrap();
 
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
 
         let ids: Vec<&str> = app
-            .sidebar_loops()
+            .sidebar_graphs()
             .iter()
             .map(|lp| lp.id.as_str())
             .collect();
         assert_eq!(
             ids,
             vec!["l-running", "l-paused", "l-done", "l-failed", "l-draft"],
-            "every loop must be listed regardless of status, ordered by last \
+            "every graph must be listed regardless of status, ordered by last \
              activity (created_at, since none of these have run) most recent first"
         );
     }
@@ -4186,15 +4911,20 @@ mod tests {
             .unwrap();
         db.upsert_project(&make_project("hash1", "/tmp/proj1"))
             .unwrap();
-        db.insert_loop_spec(&make_backlog_spec("spec-a", "Spec A", Some("/tmp/proj0")))
+        db.insert_graph_spec(&make_backlog_spec("spec-a", "Spec A", Some("/tmp/proj0")))
             .unwrap();
-        db.insert_loop_spec(&make_backlog_spec("spec-b", "Spec B", Some("/tmp/proj1")))
+        db.insert_graph_spec(&make_backlog_spec("spec-b", "Spec B", Some("/tmp/proj1")))
             .unwrap();
-        db.insert_loop_spec(&make_backlog_spec("spec-c", "Spec C", None))
+        db.insert_graph_spec(&make_backlog_spec("spec-c", "Spec C", None))
             .unwrap();
 
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         assert_eq!(app.selected_project, 0);
         assert_eq!(
             app.backlog_specs
@@ -4223,7 +4953,12 @@ mod tests {
             .unwrap();
 
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         assert!(app.project_focus.is_none(), "starts on Preview, not Focus");
 
         app.enter_project_focus(ProjectTab::Overview);
@@ -4244,7 +4979,12 @@ mod tests {
     fn cycle_project_tab_wraps_through_all_four_tabs() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.enter_project_focus(ProjectTab::Overview);
 
         app.cycle_project_tab(true);
@@ -4270,7 +5010,12 @@ mod tests {
         // must not land there.
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.agents = vec![
             AgentEntry::Group(0),
             AgentEntry::Group(1),
@@ -4293,7 +5038,12 @@ mod tests {
     fn navigate_live_wraps_at_both_ends() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.agents = vec![AgentEntry::Group(0), AgentEntry::Group(1)];
         app.sidebar_layer = SidebarLayer::Live;
         app.selected = 0;
@@ -4312,26 +5062,35 @@ mod tests {
 
     #[test]
     fn navigate_automation_wraps_at_both_ends() {
-        use crate::domain::loops::LoopStatus;
+        use crate::domain::graphs::GraphStatus;
 
         let db = test_db();
-        db.insert_loop(&make_loop("l-active", "Active Loop", LoopStatus::Running))
-            .unwrap();
+        db.insert_graph(&make_graph(
+            "l-active",
+            "Active Graph",
+            GraphStatus::Running,
+        ))
+        .unwrap();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.agents = vec![AgentEntry::Agent(bg_agent("bg-1"))];
         app.sidebar_layer = SidebarLayer::Automation;
         app.automation_kind = AutomationKind::Agent;
         app.selected = 0;
 
         // Backward off the first entry (the agent) wraps to the last (the
-        // loop) instead of leaving Automation.
+        // graph) instead of leaving Automation.
         app.select_prev();
         assert_eq!(app.sidebar_layer, SidebarLayer::Automation);
-        assert_eq!(app.automation_kind, AutomationKind::Loop);
-        assert_eq!(app.selected_loop_id.as_deref(), Some("l-active"));
+        assert_eq!(app.automation_kind, AutomationKind::Graph);
+        assert_eq!(app.selected_graph_id.as_deref(), Some("l-active"));
 
-        // Forward off the last entry (the loop) wraps back to the first
+        // Forward off the last entry (the graph) wraps back to the first
         // (the agent).
         app.select_next();
         assert_eq!(app.sidebar_layer, SidebarLayer::Automation);
@@ -4347,7 +5106,12 @@ mod tests {
         db.upsert_project(&make_project("hash1", "/tmp/proj1"))
             .unwrap();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.sidebar_layer = SidebarLayer::Knowledge;
         app.selected_project = 0;
 
@@ -4366,7 +5130,12 @@ mod tests {
     fn rag_reachable_upward_from_live_first_item_returns_to_live() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.agents = vec![AgentEntry::Group(0), AgentEntry::Group(1)];
         app.sidebar_layer = SidebarLayer::Live;
         app.selected = 0;
@@ -4396,7 +5165,12 @@ mod tests {
     fn rag_reachable_upward_from_automation_first_item_returns_to_automation() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.agents = vec![AgentEntry::Agent(bg_agent("bg-1"))];
         app.sidebar_layer = SidebarLayer::Automation;
         app.automation_kind = AutomationKind::Agent;
@@ -4423,7 +5197,12 @@ mod tests {
         db.upsert_project(&make_project("hash0", "/tmp/proj0"))
             .unwrap();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.sidebar_layer = SidebarLayer::Knowledge;
         app.selected_project = 0;
         app.rag_info = crate::db::project::RagInfoSummary {
@@ -4449,7 +5228,12 @@ mod tests {
         // Automation with nothing running, so its empty state is reachable.
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         assert_eq!(app.sidebar_layer, SidebarLayer::Live);
 
         app.switch_sidebar_tab(SidebarLayer::Automation);
@@ -4463,7 +5247,12 @@ mod tests {
         db.upsert_project(&make_project("hash0", "/tmp/proj0"))
             .unwrap();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
 
         app.switch_sidebar_tab(SidebarLayer::Knowledge);
 
@@ -4472,18 +5261,6 @@ mod tests {
     }
 
     // ── Pure helper tests ────────────────────────────────────────
-
-    #[test]
-    fn step_ring_index_forward_wraps() {
-        assert_eq!(step_ring_index(0, 3, true), 1);
-        assert_eq!(step_ring_index(2, 3, true), 0);
-    }
-
-    #[test]
-    fn step_ring_index_backward_wraps() {
-        assert_eq!(step_ring_index(1, 3, false), 0);
-        assert_eq!(step_ring_index(0, 3, false), 2);
-    }
 
     #[test]
     fn calculate_log_hash_empty_string() {
@@ -4809,30 +5586,30 @@ mod tests {
         assert_eq!(e, (2, 3));
     }
 
-    // ── LoopEditorDialog tests ──────────────────────────────────
+    // ── GraphEditorDialog tests ──────────────────────────────────
 
     #[test]
-    fn loop_editor_dialog_new_sets_cursor_at_end() {
-        let dialog = crate::tui::app::types::LoopEditorDialog::new(
+    fn graph_editor_dialog_new_sets_cursor_at_end() {
+        let dialog = crate::tui::app::types::GraphEditorDialog::new(
             "n1".into(),
             "node1".into(),
             "title".into(),
             "help".into(),
             "hello world".into(),
-            crate::tui::app::types::LoopEditorMode::AgentPrompt,
+            crate::tui::app::types::GraphEditorMode::AgentPrompt,
         );
         assert_eq!(dialog.cursor, 11); // "hello world" has 11 chars
     }
 
     #[test]
-    fn loop_editor_dialog_char_len() {
-        let mut dialog = crate::tui::app::types::LoopEditorDialog::new(
+    fn graph_editor_dialog_char_len() {
+        let mut dialog = crate::tui::app::types::GraphEditorDialog::new(
             "n1".into(),
             "node1".into(),
             "".into(),
             "".into(),
             "abc".into(),
-            crate::tui::app::types::LoopEditorMode::NodeConfig,
+            crate::tui::app::types::GraphEditorMode::NodeConfig,
         );
         assert_eq!(dialog.char_len(), 3);
         dialog.insert_str("de");
@@ -4840,14 +5617,14 @@ mod tests {
     }
 
     #[test]
-    fn loop_editor_dialog_insert_char() {
-        let mut dialog = crate::tui::app::types::LoopEditorDialog::new(
+    fn graph_editor_dialog_insert_char() {
+        let mut dialog = crate::tui::app::types::GraphEditorDialog::new(
             "n1".into(),
             "node1".into(),
             "".into(),
             "".into(),
             "ac".into(),
-            crate::tui::app::types::LoopEditorMode::AgentPrompt,
+            crate::tui::app::types::GraphEditorMode::AgentPrompt,
         );
         dialog.cursor = 1;
         dialog.insert_char('b');
@@ -4856,14 +5633,14 @@ mod tests {
     }
 
     #[test]
-    fn loop_editor_dialog_backspace() {
-        let mut dialog = crate::tui::app::types::LoopEditorDialog::new(
+    fn graph_editor_dialog_backspace() {
+        let mut dialog = crate::tui::app::types::GraphEditorDialog::new(
             "n1".into(),
             "node1".into(),
             "".into(),
             "".into(),
             "abc".into(),
-            crate::tui::app::types::LoopEditorMode::AgentPrompt,
+            crate::tui::app::types::GraphEditorMode::AgentPrompt,
         );
         dialog.backspace();
         assert_eq!(dialog.buffer, "ab");
@@ -4871,14 +5648,14 @@ mod tests {
     }
 
     #[test]
-    fn loop_editor_dialog_backspace_at_zero() {
-        let mut dialog = crate::tui::app::types::LoopEditorDialog::new(
+    fn graph_editor_dialog_backspace_at_zero() {
+        let mut dialog = crate::tui::app::types::GraphEditorDialog::new(
             "n1".into(),
             "node1".into(),
             "".into(),
             "".into(),
             "abc".into(),
-            crate::tui::app::types::LoopEditorMode::AgentPrompt,
+            crate::tui::app::types::GraphEditorMode::AgentPrompt,
         );
         dialog.cursor = 0;
         dialog.backspace();
@@ -4886,14 +5663,14 @@ mod tests {
     }
 
     #[test]
-    fn loop_editor_dialog_move_left_right() {
-        let mut dialog = crate::tui::app::types::LoopEditorDialog::new(
+    fn graph_editor_dialog_move_left_right() {
+        let mut dialog = crate::tui::app::types::GraphEditorDialog::new(
             "n1".into(),
             "node1".into(),
             "".into(),
             "".into(),
             "abc".into(),
-            crate::tui::app::types::LoopEditorMode::AgentPrompt,
+            crate::tui::app::types::GraphEditorMode::AgentPrompt,
         );
         dialog.move_left();
         assert_eq!(dialog.cursor, 2);
@@ -4904,14 +5681,14 @@ mod tests {
     }
 
     #[test]
-    fn loop_editor_dialog_move_home_end() {
-        let mut dialog = crate::tui::app::types::LoopEditorDialog::new(
+    fn graph_editor_dialog_move_home_end() {
+        let mut dialog = crate::tui::app::types::GraphEditorDialog::new(
             "n1".into(),
             "node1".into(),
             "".into(),
             "".into(),
             "hello".into(),
-            crate::tui::app::types::LoopEditorMode::AgentPrompt,
+            crate::tui::app::types::GraphEditorMode::AgentPrompt,
         );
         dialog.move_home();
         assert_eq!(dialog.cursor, 0);
@@ -4925,11 +5702,17 @@ mod tests {
     fn filtered_knowledge_indices_empty_filter_returns_all() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.project_knowledge = vec![
             crate::db::intelligence::IntelligenceNodeRecord {
                 id: "n1".into(),
                 kind: "fact".into(),
+                status: "noted".into(),
                 title: "Fact One".into(),
                 body: "body one".into(),
                 metadata: None,
@@ -4941,6 +5724,7 @@ mod tests {
             crate::db::intelligence::IntelligenceNodeRecord {
                 id: "n2".into(),
                 kind: "pattern".into(),
+                status: "noted".into(),
                 title: "Pattern Two".into(),
                 body: "body two".into(),
                 metadata: None,
@@ -4959,11 +5743,17 @@ mod tests {
     fn filtered_knowledge_indices_filter_matches_title() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.project_knowledge = vec![
             crate::db::intelligence::IntelligenceNodeRecord {
                 id: "n1".into(),
                 kind: "fact".into(),
+                status: "noted".into(),
                 title: "Rust Ownership".into(),
                 body: "body".into(),
                 metadata: None,
@@ -4975,6 +5765,7 @@ mod tests {
             crate::db::intelligence::IntelligenceNodeRecord {
                 id: "n2".into(),
                 kind: "fact".into(),
+                status: "noted".into(),
                 title: "Python GIL".into(),
                 body: "body".into(),
                 metadata: None,
@@ -4993,10 +5784,16 @@ mod tests {
     fn filtered_knowledge_indices_filter_matches_body() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.project_knowledge = vec![crate::db::intelligence::IntelligenceNodeRecord {
             id: "n1".into(),
             kind: "fact".into(),
+            status: "noted".into(),
             title: "Title".into(),
             body: "contains the word pattern".into(),
             metadata: None,
@@ -5014,11 +5811,17 @@ mod tests {
     fn filtered_knowledge_indices_filter_matches_kind() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.project_knowledge = vec![
             crate::db::intelligence::IntelligenceNodeRecord {
                 id: "n1".into(),
                 kind: "fact".into(),
+                status: "noted".into(),
                 title: "Title".into(),
                 body: "body".into(),
                 metadata: None,
@@ -5030,6 +5833,7 @@ mod tests {
             crate::db::intelligence::IntelligenceNodeRecord {
                 id: "n2".into(),
                 kind: "pattern".into(),
+                status: "noted".into(),
                 title: "Title".into(),
                 body: "body".into(),
                 metadata: None,
@@ -5048,10 +5852,16 @@ mod tests {
     fn filtered_knowledge_indices_no_match() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.project_knowledge = vec![crate::db::intelligence::IntelligenceNodeRecord {
             id: "n1".into(),
             kind: "fact".into(),
+            status: "noted".into(),
             title: "Title".into(),
             body: "body".into(),
             metadata: None,
@@ -5094,13 +5904,19 @@ mod tests {
     fn agent_entry_id_for_agent() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         let entry = AgentEntry::Agent(crate::domain::models::Agent {
             id: "bg-1".to_string(),
             prompt: String::new(),
             trigger: None,
             cli: crate::domain::models::Cli::new("claude"),
             model: None,
+            effort: None,
             working_dir: None,
             enabled: true,
             enable_at: None,
@@ -5120,7 +5936,12 @@ mod tests {
     fn agent_entry_id_for_corrupt() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         let entry = AgentEntry::Corrupt(crate::domain::models::CorruptAgent {
             id: "corrupt-1".to_string(),
             enabled: false,
@@ -5133,7 +5954,12 @@ mod tests {
     fn agent_entry_id_for_group_out_of_bounds() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         let entry = AgentEntry::Group(99);
         assert_eq!(entry.id(&app), "?");
     }
@@ -5142,7 +5968,12 @@ mod tests {
     fn agent_entry_id_for_interactive_out_of_bounds() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         let entry = AgentEntry::Interactive(99);
         assert_eq!(entry.id(&app), "?");
     }
@@ -5151,7 +5982,12 @@ mod tests {
     fn agent_entry_id_for_terminal_out_of_bounds() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         let entry = AgentEntry::Terminal(99);
         assert_eq!(entry.id(&app), "?");
     }
@@ -5160,7 +5996,12 @@ mod tests {
     fn agent_entry_id_for_orphaned_out_of_bounds() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         let entry = AgentEntry::Orphaned(99);
         assert_eq!(entry.id(&app), "?");
     }
@@ -5171,7 +6012,12 @@ mod tests {
     fn select_next_empty_agents_stays_put() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.agents.clear();
         app.selected = 0;
         app.sidebar_layer = SidebarLayer::Live;
@@ -5184,7 +6030,12 @@ mod tests {
     fn select_prev_empty_agents_stays_put() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.agents.clear();
         app.selected = 0;
         app.sidebar_layer = SidebarLayer::Live;
@@ -5196,7 +6047,12 @@ mod tests {
     fn select_agent_at_out_of_bounds_does_nothing() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.agents.clear();
         let prev = app.selected;
         app.select_agent_at(999);
@@ -5207,7 +6063,12 @@ mod tests {
     fn scroll_log_down_and_up() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.log_scroll = 10;
         app.scroll_log_down();
         assert_eq!(app.log_scroll, 13);
@@ -5219,48 +6080,58 @@ mod tests {
     fn scroll_log_up_at_zero_stays_zero() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.log_scroll = 0;
         app.scroll_log_up();
         assert_eq!(app.log_scroll, 0);
     }
 
-    // ── sidebar_loops: no status filtering ──────────────────────
+    // ── sidebar_graphs: no status filtering ──────────────────────
 
     #[test]
-    fn sidebar_loops_includes_every_status() {
-        use crate::domain::loops::LoopStatus;
+    fn sidebar_graphs_includes_every_status() {
+        use crate::domain::graphs::GraphStatus;
         let db = test_db();
-        db.insert_loop(&make_loop("l1", "Running", LoopStatus::Running))
+        db.insert_graph(&make_graph("l1", "Running", GraphStatus::Running))
             .unwrap();
-        db.insert_loop(&make_loop("l2", "Draft", LoopStatus::Draft))
+        db.insert_graph(&make_graph("l2", "Draft", GraphStatus::Draft))
             .unwrap();
-        db.insert_loop(&make_loop("l3", "Paused", LoopStatus::Paused))
+        db.insert_graph(&make_graph("l3", "Paused", GraphStatus::Paused))
             .unwrap();
-        db.insert_loop(&make_loop("l4", "Completed", LoopStatus::Completed))
+        db.insert_graph(&make_graph("l4", "Completed", GraphStatus::Completed))
             .unwrap();
-        db.insert_loop(&make_loop("l5", "Failed", LoopStatus::Failed))
+        db.insert_graph(&make_graph("l5", "Failed", GraphStatus::Failed))
             .unwrap();
 
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         let listed: Vec<&str> = app
-            .sidebar_loops()
+            .sidebar_graphs()
             .iter()
             .map(|lp| lp.id.as_str())
             .collect();
         assert!(
             listed.contains(&"l4"),
-            "a completed loop must stay in the sidebar list"
+            "a completed graph must stay in the sidebar list"
         );
         assert!(
             listed.contains(&"l5"),
-            "a failed loop must stay in the sidebar list"
+            "a failed graph must stay in the sidebar list"
         );
         assert!(listed.contains(&"l1"));
         assert!(listed.contains(&"l2"));
         assert!(listed.contains(&"l3"));
-        assert_eq!(listed.len(), 5, "no loop is dropped by status");
+        assert_eq!(listed.len(), 5, "no graph is dropped by status");
     }
 
     // ── Playground state tests ───────────────────────────────────
@@ -5269,7 +6140,12 @@ mod tests {
     fn activate_deactivate_playground() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         assert!(!app.playground_active);
 
         app.playground_query = "test query".to_string();
@@ -5291,7 +6167,12 @@ mod tests {
     fn poll_playground_search_no_rx_returns_early() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.playground_search_rx = None;
         // Should not panic
         app.poll_playground_search();
@@ -5301,7 +6182,12 @@ mod tests {
     fn poll_playground_search_disconnected_cleans_up() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         let (tx, rx) = std::sync::mpsc::channel();
         app.playground_search_rx = Some(rx);
         app.playground_search_pending = true;
@@ -5312,24 +6198,29 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_selected_loop_node_copies_config_and_opens_editor() {
-        use crate::domain::loops::{LoopNode, LoopNodeKind, LoopSpec, LoopSpecStatus, LoopStatus};
+    fn duplicate_selected_graph_node_copies_config_and_opens_editor() {
+        use crate::domain::graphs::{
+            GraphNode, GraphNodeKind, GraphSpec, GraphSpecStatus, GraphStatus,
+        };
         use crate::tui::app::types::Focus;
 
         let db = test_db();
-        db.insert_loop(&make_loop("loop-1", "Loop", LoopStatus::Draft))
+        db.insert_graph(&make_graph("graph-1", "Graph", GraphStatus::Draft))
             .unwrap();
-        db.insert_loop_spec(&LoopSpec {
+        db.insert_graph_spec(&GraphSpec {
             id: "spec-a".to_string(),
-            loop_id: Some("loop-1".to_string()),
+            graph_id: Some("graph-1".to_string()),
             name: "spec-a".to_string(),
             description: None,
             position: 0,
             parallelizable: false,
-            status: LoopSpecStatus::Pending,
+            status: GraphSpecStatus::Pending,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -5337,12 +6228,12 @@ mod tests {
             completed_via_at: None,
         })
         .unwrap();
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "impl".to_string(),
             spec_id: Some("spec-a".to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "implement".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({"platform": "claude", "prompt_template": "do it"}),
             position: 1,
             created_at: chrono::Utc::now(),
@@ -5350,18 +6241,23 @@ mod tests {
         .unwrap();
 
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
-        app.selected_loop_id = Some("loop-1".to_string());
-        app.loop_details = db.get_loop_details("loop-1").unwrap();
-        app.loop_selected_spec = 0;
-        app.loop_selected_node = 0;
-        assert_eq!(app.selected_loop_node().unwrap().id, "impl");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        app.selected_graph_id = Some("graph-1".to_string());
+        app.graph_details = db.get_graph_details("graph-1").unwrap();
+        app.graph_selected_spec = 0;
+        app.graph_selected_node = 0;
+        assert_eq!(app.selected_graph_node().unwrap().id, "impl");
 
-        app.duplicate_selected_loop_node().unwrap();
+        app.duplicate_selected_graph_node().unwrap();
 
         // The editor opens pre-filled on the new copy.
-        assert!(matches!(app.focus, Focus::LoopEditorDialog));
-        let dialog = app.loop_editor_dialog.as_ref().unwrap();
+        assert!(matches!(app.focus, Focus::GraphEditorDialog));
+        let dialog = app.graph_editor_dialog.as_ref().unwrap();
         assert!(
             dialog.node_name.ends_with("(copy)"),
             "expected a copy name, got '{}'",
@@ -5370,7 +6266,7 @@ mod tests {
         assert_ne!(dialog.node_id, "impl", "the copy must have a fresh id");
 
         // A second node now exists on the spec with the source's config.
-        let nodes = db.list_loop_nodes("spec-a").unwrap();
+        let nodes = db.list_graph_nodes("spec-a").unwrap();
         assert_eq!(nodes.len(), 2);
         let copy = nodes.iter().find(|n| n.id != "impl").unwrap();
         assert_eq!(copy.name, "implement (copy)");
@@ -5381,18 +6277,28 @@ mod tests {
     // ── Additional navigation and state tests ───────────────────
 
     #[test]
-    fn sidebar_loops_empty_when_no_loops() {
+    fn sidebar_graphs_empty_when_no_graphs() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
-        assert!(app.sidebar_loops().is_empty());
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        assert!(app.sidebar_graphs().is_empty());
     }
 
     #[test]
     fn live_indices_empty_when_no_agents() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         assert!(app.live_indices().is_empty());
     }
 
@@ -5400,7 +6306,12 @@ mod tests {
     fn automation_agent_indices_empty_when_no_agents() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         assert!(app.automation_agent_indices().is_empty());
     }
 
@@ -5408,7 +6319,12 @@ mod tests {
     fn step_sidebar_tab_forward_wraps() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.sidebar_layer = SidebarLayer::Knowledge;
         app.step_sidebar_tab(true);
         assert_eq!(app.sidebar_layer, SidebarLayer::Live);
@@ -5418,7 +6334,12 @@ mod tests {
     fn step_sidebar_tab_backward_wraps() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.sidebar_layer = SidebarLayer::Live;
         app.step_sidebar_tab(false);
         assert_eq!(app.sidebar_layer, SidebarLayer::Knowledge);
@@ -5431,6 +6352,7 @@ mod tests {
             trigger: None,
             cli: crate::domain::models::Cli::new("claude"),
             model: None,
+            effort: None,
             working_dir: None,
             enabled: true,
             enable_at: None,
@@ -5455,7 +6377,12 @@ mod tests {
         // leaving one for the other would otherwise clobber it.
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.agents = vec![
             AgentEntry::Group(0),
             AgentEntry::Group(1),
@@ -5486,7 +6413,12 @@ mod tests {
         // stale/invalid index — it should behave like a fresh jump instead.
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.agents = vec![
             AgentEntry::Group(0),
             AgentEntry::Group(1),
@@ -5513,7 +6445,12 @@ mod tests {
     fn reset_log_scroll_sets_to_zero() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.log_scroll = 50;
         app.sidebar_scroll_offset = 10;
         app.reset_log_scroll();
@@ -5525,9 +6462,14 @@ mod tests {
     fn cycle_sidebar_layer_skips_empty_tabs() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.sidebar_layer = SidebarLayer::Live;
-        // No agents, no projects, no loops → cycle may stay or move
+        // No agents, no projects, no graphs → cycle may stay or move
         app.cycle_sidebar_layer();
         // Should not panic
     }
@@ -5536,52 +6478,82 @@ mod tests {
     fn selected_project_out_of_bounds() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         assert!(app.selected_project().is_none());
     }
 
     #[test]
-    fn selected_loop_none_when_no_loops() {
+    fn selected_graph_none_when_no_graphs() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
-        assert!(app.selected_loop().is_none());
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        assert!(app.selected_graph().is_none());
     }
 
     #[test]
-    fn selected_loop_spec_none_when_no_details() {
+    fn selected_graph_spec_none_when_no_details() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
-        assert!(app.selected_loop_spec().is_none());
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        assert!(app.selected_graph_spec().is_none());
     }
 
     #[test]
-    fn selected_loop_node_none_when_no_details() {
+    fn selected_graph_node_none_when_no_details() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
-        assert!(app.selected_loop_node().is_none());
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        assert!(app.selected_graph_node().is_none());
     }
 
     #[test]
-    fn visible_loops_returns_all_loops() {
-        use crate::domain::loops::LoopStatus;
+    fn visible_graphs_returns_all_graphs() {
+        use crate::domain::graphs::GraphStatus;
         let db = test_db();
-        db.insert_loop(&make_loop("l1", "A", LoopStatus::Running))
+        db.insert_graph(&make_graph("l1", "A", GraphStatus::Running))
             .unwrap();
-        db.insert_loop(&make_loop("l2", "B", LoopStatus::Completed))
+        db.insert_graph(&make_graph("l2", "B", GraphStatus::Completed))
             .unwrap();
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
-        assert_eq!(app.visible_loops().len(), 2);
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        assert_eq!(app.visible_graphs().len(), 2);
     }
 
     #[test]
     fn selected_agent_none_when_empty() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         assert!(app.selected_agent().is_none());
     }
 
@@ -5589,7 +6561,12 @@ mod tests {
     fn selected_id_empty_when_no_agent() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         assert_eq!(app.selected_id(), "—");
     }
 
@@ -5597,41 +6574,61 @@ mod tests {
     fn focused_agent_name_empty_when_no_agent() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         assert!(app.focused_agent_name().is_empty());
     }
 
     #[test]
-    fn loop_graph_highlighted_node_id_none_when_no_live_state() {
+    fn graph_live_highlighted_node_id_none_when_no_live_state() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
-        assert!(app.loop_graph_highlighted_node_id().is_none());
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        assert!(app.graph_live_highlighted_node_id().is_none());
     }
 
     #[test]
-    fn loop_graph_reset_follow_clears_selection() {
+    fn graph_live_reset_follow_clears_selection() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
-        app.loop_graph_follow = false;
-        app.loop_graph_selected_node = Some("some-node".to_string());
-        app.loop_graph_reset_follow();
-        assert!(app.loop_graph_follow);
-        assert!(app.loop_graph_selected_node.is_none());
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        app.graph_live_follow = false;
+        app.graph_live_selected_node = Some("some-node".to_string());
+        app.graph_live_reset_follow();
+        assert!(app.graph_live_follow);
+        assert!(app.graph_live_selected_node.is_none());
     }
 
     #[test]
-    fn loop_graph_highlighted_node_run_info_default_when_no_live_state() {
+    fn graph_live_highlighted_node_run_info_default_when_no_live_state() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
-        let info = app.loop_graph_highlighted_node_run_info();
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        let info = app.graph_live_highlighted_node_run_info();
         assert!(info.status.is_none());
         assert!(info.output_tail.is_none());
     }
 
-    fn spec_queue_entry(id: &str, status: LoopSpecStatus) -> SpecQueueEntry {
+    fn spec_queue_entry(id: &str, status: GraphSpecStatus) -> SpecQueueEntry {
         SpecQueueEntry {
             spec_id: id.to_string(),
             spec_name: format!("Spec {id}"),
@@ -5643,11 +6640,16 @@ mod tests {
     fn app_with_spec_queue(ids: &[&str]) -> App {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
-        app.loop_live_state = Some(LoopLiveState {
-            loop_id: "lp1".to_string(),
-            loop_name: "loop".to_string(),
-            loop_status: LoopStatus::Running,
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        app.graph_live_state = Some(GraphLiveState {
+            graph_id: "lp1".to_string(),
+            graph_name: "graph".to_string(),
+            graph_status: GraphStatus::Running,
             workdir: "/tmp".to_string(),
             trigger_type: "manual".to_string(),
             schedule_expr: None,
@@ -5655,7 +6657,7 @@ mod tests {
             autorun_at: None,
             spec_queue: ids
                 .iter()
-                .map(|id| spec_queue_entry(id, LoopSpecStatus::Pending))
+                .map(|id| spec_queue_entry(id, GraphSpecStatus::Pending))
                 .collect(),
             done_count: 0,
             total_count: ids.len(),
@@ -5674,98 +6676,96 @@ mod tests {
     }
 
     #[test]
-    fn loop_spec_strip_move_selection_cycles_through_queue_and_wraps() {
+    fn graph_spec_strip_move_selection_cycles_through_queue_and_wraps() {
         let mut app = app_with_spec_queue(&["s1", "s2", "s3"]);
-        assert!(app.loop_spec_strip_selected.is_none());
+        assert!(app.graph_spec_strip_selected.is_none());
 
-        app.loop_spec_strip_move_selection(true);
-        assert_eq!(app.loop_spec_strip_selected.as_deref(), Some("s1"));
-        app.loop_spec_strip_move_selection(true);
-        assert_eq!(app.loop_spec_strip_selected.as_deref(), Some("s2"));
-        app.loop_spec_strip_move_selection(true);
-        assert_eq!(app.loop_spec_strip_selected.as_deref(), Some("s3"));
+        app.graph_spec_strip_move_selection(true);
+        assert_eq!(app.graph_spec_strip_selected.as_deref(), Some("s1"));
+        app.graph_spec_strip_move_selection(true);
+        assert_eq!(app.graph_spec_strip_selected.as_deref(), Some("s2"));
+        app.graph_spec_strip_move_selection(true);
+        assert_eq!(app.graph_spec_strip_selected.as_deref(), Some("s3"));
         // Wraps back to the first spec.
-        app.loop_spec_strip_move_selection(true);
-        assert_eq!(app.loop_spec_strip_selected.as_deref(), Some("s1"));
+        app.graph_spec_strip_move_selection(true);
+        assert_eq!(app.graph_spec_strip_selected.as_deref(), Some("s1"));
 
         // Backward wraps the other way.
-        app.loop_spec_strip_move_selection(false);
-        assert_eq!(app.loop_spec_strip_selected.as_deref(), Some("s3"));
+        app.graph_spec_strip_move_selection(false);
+        assert_eq!(app.graph_spec_strip_selected.as_deref(), Some("s3"));
 
         // Selecting a spec by hand (the mouse click path) and then moving by
         // keyboard from that point lands on the same spec a second keyboard
         // move would — click and keyboard share one selection.
-        app.loop_spec_strip_select("s2".to_string());
-        assert_eq!(app.loop_spec_strip_selected.as_deref(), Some("s2"));
-        app.loop_spec_strip_move_selection(true);
-        assert_eq!(app.loop_spec_strip_selected.as_deref(), Some("s3"));
+        app.graph_spec_strip_select("s2".to_string());
+        assert_eq!(app.graph_spec_strip_selected.as_deref(), Some("s2"));
+        app.graph_spec_strip_move_selection(true);
+        assert_eq!(app.graph_spec_strip_selected.as_deref(), Some("s3"));
     }
 
     #[test]
-    fn loop_spec_strip_move_selection_never_touches_graph_follow() {
+    fn graph_spec_strip_move_selection_never_touches_graph_follow() {
         let mut app = app_with_spec_queue(&["s1", "s2"]);
-        assert!(app.loop_graph_follow);
-        app.loop_spec_strip_move_selection(true);
+        assert!(app.graph_live_follow);
+        app.graph_spec_strip_move_selection(true);
         assert!(
-            app.loop_graph_follow,
+            app.graph_live_follow,
             "selecting a spec in the strip must not disturb the graph's own follow state"
         );
     }
 
     #[test]
-    fn loop_spec_strip_select_ignores_unknown_spec_id() {
+    fn graph_spec_strip_select_ignores_unknown_spec_id() {
         let mut app = app_with_spec_queue(&["s1", "s2"]);
-        app.loop_spec_strip_select("does-not-exist".to_string());
-        assert!(app.loop_spec_strip_selected.is_none());
+        app.graph_spec_strip_select("does-not-exist".to_string());
+        assert!(app.graph_spec_strip_selected.is_none());
     }
 
     #[test]
-    fn loop_spec_strip_select_focuses_the_strip() {
+    fn graph_spec_strip_select_focuses_the_strip() {
         let mut app = app_with_spec_queue(&["s1", "s2"]);
-        assert_eq!(app.loop_live_focus, LoopLiveFocus::Graph);
-        app.loop_spec_strip_select("s1".to_string());
-        assert_eq!(app.loop_live_focus, LoopLiveFocus::SpecStrip);
+        assert_eq!(app.graph_live_focus, GraphLiveFocus::Graph);
+        app.graph_spec_strip_select("s1".to_string());
+        assert_eq!(app.graph_live_focus, GraphLiveFocus::SpecStrip);
     }
 
     #[test]
-    fn loop_live_toggle_focus_toggles_between_graph_and_spec_strip() {
+    fn graph_live_toggle_focus_toggles_between_graph_and_spec_strip() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
-        assert_eq!(app.loop_live_focus, LoopLiveFocus::Graph);
-        app.loop_live_toggle_focus();
-        assert_eq!(app.loop_live_focus, LoopLiveFocus::SpecStrip);
-        app.loop_live_toggle_focus();
-        assert_eq!(app.loop_live_focus, LoopLiveFocus::Graph);
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        assert_eq!(app.graph_live_focus, GraphLiveFocus::Graph);
+        app.graph_live_toggle_focus();
+        assert_eq!(app.graph_live_focus, GraphLiveFocus::SpecStrip);
+        app.graph_live_toggle_focus();
+        assert_eq!(app.graph_live_focus, GraphLiveFocus::Graph);
     }
 
     #[test]
-    fn scroll_into_view_only_moves_when_index_leaves_the_window() {
-        // Already visible: offset unchanged.
-        assert_eq!(scroll_into_view(2, 3, 4), 2);
-        // Before the window: jump so idx becomes the first visible.
-        assert_eq!(scroll_into_view(5, 1, 4), 1);
-        // At/after the window's far edge: shift the minimum amount needed.
-        assert_eq!(scroll_into_view(0, 4, 4), 1);
-        // Zero capacity never scrolls.
-        assert_eq!(scroll_into_view(5, 9, 0), 0);
-    }
-
-    #[test]
-    fn cancel_loop_editor_dialog() {
+    fn cancel_graph_editor_dialog() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
-        app.loop_editor_dialog = Some(crate::tui::app::types::LoopEditorDialog::new(
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        app.graph_editor_dialog = Some(crate::tui::app::types::GraphEditorDialog::new(
             "n1".into(),
             "node1".into(),
             "title".into(),
             "help".into(),
             "buffer".into(),
-            crate::tui::app::types::LoopEditorMode::AgentPrompt,
+            crate::tui::app::types::GraphEditorMode::AgentPrompt,
         ));
-        app.cancel_loop_editor_dialog();
-        assert!(app.loop_editor_dialog.is_none());
+        app.cancel_graph_editor_dialog();
+        assert!(app.graph_editor_dialog.is_none());
         assert!(matches!(app.focus, Focus::Preview));
     }
 
@@ -5773,7 +6773,12 @@ mod tests {
     fn toggle_rag_pause_flips() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         assert!(!app.rag_paused);
         app.toggle_rag_pause();
         assert!(app.rag_paused);
@@ -5785,11 +6790,17 @@ mod tests {
     fn normalize_selected_knowledge_clamps_to_first_filtered() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.project_knowledge = vec![
             crate::db::intelligence::IntelligenceNodeRecord {
                 id: "n1".into(),
                 kind: "fact".into(),
+                status: "noted".into(),
                 title: "Alpha".into(),
                 body: "body".into(),
                 metadata: None,
@@ -5801,6 +6812,7 @@ mod tests {
             crate::db::intelligence::IntelligenceNodeRecord {
                 id: "n2".into(),
                 kind: "fact".into(),
+                status: "noted".into(),
                 title: "Beta".into(),
                 body: "body".into(),
                 metadata: None,
@@ -5820,7 +6832,12 @@ mod tests {
     fn enter_exit_knowledge_filter_mode() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         assert!(!app.knowledge_filter_mode);
         app.enter_knowledge_filter_mode();
         assert!(app.knowledge_filter_mode);
@@ -5832,7 +6849,12 @@ mod tests {
     fn dismiss_copied_recent_does_not_clear() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.show_copied = true;
         app.copied_at = std::time::Instant::now();
         app.dismiss_copied();
@@ -5843,7 +6865,12 @@ mod tests {
     fn dismiss_copied_old_enough_clears() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.show_copied = true;
         app.copied_at = std::time::Instant::now() - std::time::Duration::from_secs(5);
         app.dismiss_copied();
@@ -5852,24 +6879,26 @@ mod tests {
 
     // ── Edges dialog (retarget/delete an ordinary edge) ───────────────
 
-    /// Seeds a `Draft` loop with three plain agent nodes `A -> B -> C`
+    /// Seeds a `Draft` graph with three plain agent nodes `A -> B -> C`
     /// (`pass` edges) — the fixture the `Edges` dialog tests in this
     /// section start from. `A` has no incoming edge (the graph's entry
     /// point); only `A -> B` is wired, so there's a spare target (`C`) to
     /// retarget onto.
-    fn seed_plain_edge_loop(db: &Database) {
-        use crate::domain::loops::{
-            Loop, LoopEdge, LoopEdgeCondition, LoopNode, LoopNodeKind, LoopSpec,
+    fn seed_plain_edge_graph(db: &Database) {
+        use crate::domain::graphs::{
+            Graph, GraphEdge, GraphEdgeCondition, GraphNode, GraphNodeKind, GraphSpec,
         };
 
-        db.insert_loop(&Loop {
+        db.insert_graph(&Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
+            infra_node_id: None,
             id: "plp1".to_string(),
-            name: "plain loop".to_string(),
+            name: "plain graph".to_string(),
             description: None,
             workdir: "/tmp/plain-edge-test".to_string(),
-            status: LoopStatus::Draft,
+            status: GraphStatus::Draft,
             trigger: None,
             created_at: chrono::Utc::now(),
             started_at: None,
@@ -5878,20 +6907,23 @@ mod tests {
             auto_continue_at: None,
             auto_continue_action: None,
             active_run_queue_id: None,
-            on_completed: None,
+            hooks: std::collections::BTreeMap::new(),
         })
         .unwrap();
-        db.insert_loop_spec(&LoopSpec {
+        db.insert_graph_spec(&GraphSpec {
             id: "ps1".to_string(),
-            loop_id: Some("plp1".to_string()),
+            graph_id: Some("plp1".to_string()),
             name: "spec one".to_string(),
             description: None,
             position: 1,
             parallelizable: false,
-            status: LoopSpecStatus::Pending,
+            status: GraphSpecStatus::Pending,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -5900,50 +6932,55 @@ mod tests {
         })
         .unwrap();
         for (id, name, position) in [("node_a", "A", 0), ("node_b", "B", 1), ("node_c", "C", 2)] {
-            db.insert_loop_node(&LoopNode {
+            db.insert_graph_node(&GraphNode {
                 id: id.to_string(),
                 spec_id: Some("ps1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 name: name.to_string(),
-                kind: LoopNodeKind::Agent,
+                kind: GraphNodeKind::Agent,
                 config: serde_json::json!({}),
                 position,
                 created_at: chrono::Utc::now(),
             })
             .unwrap();
         }
-        db.insert_loop_edge(&LoopEdge {
+        db.insert_graph_edge(&GraphEdge {
             id: "e_ab".to_string(),
             spec_id: Some("ps1".to_string()),
-            loop_id: None,
+            graph_id: None,
             from_node: "node_a".to_string(),
             to_node: "node_b".to_string(),
-            condition: LoopEdgeCondition::Pass,
+            condition: GraphEdgeCondition::Pass,
         })
         .unwrap();
     }
 
     fn app_on_plain_node(db: &Arc<Database>, data_dir: &std::path::Path, node_index: usize) -> App {
-        let mut app = App::new(Arc::clone(db), data_dir).expect("create app");
-        app.refresh_loops().expect("refresh loops");
-        app.loop_selected_spec = 0;
-        app.loop_selected_node = node_index;
+        let mut app = App::new(
+            Arc::clone(db),
+            data_dir,
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        app.refresh_graphs().expect("refresh graphs");
+        app.graph_selected_spec = 0;
+        app.graph_selected_node = node_index;
         app
     }
 
     #[test]
-    fn open_loop_edges_dialog_lists_the_nodes_outgoing_plain_edges() {
+    fn open_graph_edges_dialog_lists_the_nodes_outgoing_plain_edges() {
         let db = test_db();
-        seed_plain_edge_loop(&db);
+        seed_plain_edge_graph(&db);
         let data_dir = tempdir().expect("create data dir");
         let mut app = app_on_plain_node(&db, data_dir.path(), 0);
 
-        app.open_loop_edges_dialog().expect("open edges dialog");
+        app.open_graph_edges_dialog().expect("open edges dialog");
 
-        let dialog = app.loop_editor_dialog.as_ref().expect("dialog opens");
+        let dialog = app.graph_editor_dialog.as_ref().expect("dialog opens");
         assert!(matches!(
             dialog.mode,
-            crate::tui::app::types::LoopEditorMode::Edges
+            crate::tui::app::types::GraphEditorMode::Edges
         ));
         assert_eq!(dialog.edge_rows.len(), 1);
         assert_eq!(dialog.edge_rows[0].to_node, "node_b");
@@ -5954,88 +6991,93 @@ mod tests {
     }
 
     #[test]
-    fn retarget_focused_loop_edge_changes_only_the_destination() {
+    fn retarget_focused_graph_edge_changes_only_the_destination() {
         let db = test_db();
-        seed_plain_edge_loop(&db);
+        seed_plain_edge_graph(&db);
         let data_dir = tempdir().expect("create data dir");
         let mut app = app_on_plain_node(&db, data_dir.path(), 0);
-        app.open_loop_edges_dialog().expect("open edges dialog");
+        app.open_graph_edges_dialog().expect("open edges dialog");
 
-        app.retarget_focused_loop_edge(true).expect("retarget");
+        app.retarget_focused_graph_edge(true).expect("retarget");
 
-        let dialog = app.loop_editor_dialog.as_ref().expect("dialog still open");
+        let dialog = app.graph_editor_dialog.as_ref().expect("dialog still open");
         assert!(dialog.parse_error.is_none(), "{:?}", dialog.parse_error);
         assert_eq!(dialog.edge_rows[0].to_node, "node_c");
         assert_eq!(
             dialog.edge_rows[0].condition,
-            crate::domain::loops::LoopEdgeCondition::Pass,
+            crate::domain::graphs::GraphEdgeCondition::Pass,
             "retargeting never touches the edge's condition"
         );
 
-        let edge = db.get_loop_edge("e_ab").unwrap().unwrap();
+        let edge = db.get_graph_edge("e_ab").unwrap().unwrap();
         assert_eq!(edge.to_node, "node_c");
         assert_eq!(edge.from_node, "node_a");
     }
 
     #[test]
-    fn delete_focused_loop_edge_removes_it_from_the_db_and_the_dialog() {
+    fn delete_focused_graph_edge_removes_it_from_the_db_and_the_dialog() {
         let db = test_db();
-        seed_plain_edge_loop(&db);
+        seed_plain_edge_graph(&db);
         let data_dir = tempdir().expect("create data dir");
         let mut app = app_on_plain_node(&db, data_dir.path(), 0);
-        app.open_loop_edges_dialog().expect("open edges dialog");
+        app.open_graph_edges_dialog().expect("open edges dialog");
 
-        app.delete_focused_loop_edge().expect("delete edge");
+        app.delete_focused_graph_edge().expect("delete edge");
 
-        let dialog = app.loop_editor_dialog.as_ref().expect("dialog still open");
+        let dialog = app.graph_editor_dialog.as_ref().expect("dialog still open");
         assert!(dialog.edge_rows.is_empty());
-        assert!(db.get_loop_edge("e_ab").unwrap().is_none());
+        assert!(db.get_graph_edge("e_ab").unwrap().is_none());
     }
 
     #[test]
-    fn retarget_focused_loop_edge_surfaces_the_running_loop_rejection() {
+    fn retarget_focused_graph_edge_surfaces_the_running_graph_rejection() {
         let db = test_db();
-        seed_plain_edge_loop(&db);
-        db.update_loop_status(
+        seed_plain_edge_graph(&db);
+        db.update_graph_status(
             "plp1",
-            crate::domain::loops::LoopStatus::Running,
+            crate::domain::graphs::GraphStatus::Running,
             None,
             None,
         )
         .unwrap();
         let data_dir = tempdir().expect("create data dir");
         let mut app = app_on_plain_node(&db, data_dir.path(), 0);
-        app.open_loop_edges_dialog().expect("open edges dialog");
+        app.open_graph_edges_dialog().expect("open edges dialog");
 
-        app.retarget_focused_loop_edge(true)
+        app.retarget_focused_graph_edge(true)
             .expect("call returns Ok");
 
-        let dialog = app.loop_editor_dialog.as_ref().expect("dialog still open");
+        let dialog = app.graph_editor_dialog.as_ref().expect("dialog still open");
         let error = dialog.parse_error.as_deref().unwrap_or_default();
         assert!(error.contains("running"), "{error}");
         // Target unchanged in the db.
-        assert_eq!(db.get_loop_edge("e_ab").unwrap().unwrap().to_node, "node_b");
+        assert_eq!(
+            db.get_graph_edge("e_ab").unwrap().unwrap().to_node,
+            "node_b"
+        );
     }
 
     // ── Router routes dialog (open/pre-fill/save) ────────────────────
 
-    /// Seeds a `Draft` loop with one spec containing a 4-route router node
+    /// Seeds a `Draft` graph with one spec containing a 4-route router node
     /// ("billing"/"technical"/"sales"/"escalation", fallback "escalation")
     /// already wired to `billing`, plus three plain agent target nodes —
     /// the fixture every router-dialog test in this section starts from.
-    fn seed_router_loop(db: &Database) {
-        use crate::domain::loops::{
-            Loop, LoopEdge, LoopEdgeCondition, LoopNode, LoopNodeKind, LoopSpec,
+    fn seed_router_graph(db: &Database) {
+        use crate::domain::graphs::{
+            Graph, GraphEdge, GraphEdgeCondition, GraphNode, GraphNodeKind, GraphSpec,
         };
 
-        db.insert_loop(&Loop {
+        db.insert_graph(&Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
+            infra_node_id: None,
             id: "rlp1".to_string(),
-            name: "router loop".to_string(),
+            name: "router graph".to_string(),
             description: None,
             workdir: "/tmp/router-test".to_string(),
-            status: LoopStatus::Draft,
+            status: GraphStatus::Draft,
             trigger: None,
             created_at: chrono::Utc::now(),
             started_at: None,
@@ -6044,20 +7086,23 @@ mod tests {
             auto_continue_at: None,
             auto_continue_action: None,
             active_run_queue_id: None,
-            on_completed: None,
+            hooks: std::collections::BTreeMap::new(),
         })
         .unwrap();
-        db.insert_loop_spec(&LoopSpec {
+        db.insert_graph_spec(&GraphSpec {
             id: "rs1".to_string(),
-            loop_id: Some("rlp1".to_string()),
+            graph_id: Some("rlp1".to_string()),
             name: "spec one".to_string(),
             description: None,
             position: 1,
             parallelizable: false,
-            status: LoopSpecStatus::Pending,
+            status: GraphSpecStatus::Pending,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -6066,12 +7111,12 @@ mod tests {
         })
         .unwrap();
 
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "router".to_string(),
             spec_id: Some("rs1".to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "Classify".to_string(),
-            kind: LoopNodeKind::Router,
+            kind: GraphNodeKind::Router,
             config: serde_json::json!({
                 "routes": [
                     {"label": "billing", "description": "billing desc"},
@@ -6090,36 +7135,41 @@ mod tests {
             ("technical_agent", "Technical specialist", 2),
             ("sales_agent", "Sales specialist", 3),
         ] {
-            db.insert_loop_node(&LoopNode {
+            db.insert_graph_node(&GraphNode {
                 id: id.to_string(),
                 spec_id: Some("rs1".to_string()),
-                loop_id: None,
+                graph_id: None,
                 name: name.to_string(),
-                kind: LoopNodeKind::Agent,
+                kind: GraphNodeKind::Agent,
                 config: serde_json::json!({}),
                 position,
                 created_at: chrono::Utc::now(),
             })
             .unwrap();
         }
-        db.insert_loop_edge(&LoopEdge {
+        db.insert_graph_edge(&GraphEdge {
             id: "e_billing".to_string(),
             spec_id: Some("rs1".to_string()),
-            loop_id: None,
+            graph_id: None,
             from_node: "router".to_string(),
             to_node: "billing_agent".to_string(),
-            condition: LoopEdgeCondition::Route("billing".to_string()),
+            condition: GraphEdgeCondition::Route("billing".to_string()),
         })
         .unwrap();
     }
 
     fn app_on_router_node(db: &Arc<Database>, data_dir: &std::path::Path) -> App {
-        let mut app = App::new(Arc::clone(db), data_dir).expect("create app");
-        app.refresh_loops().expect("refresh loops");
-        app.loop_selected_spec = 0;
-        app.loop_selected_node = 0; // "router" is position 0
+        let mut app = App::new(
+            Arc::clone(db),
+            data_dir,
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        app.refresh_graphs().expect("refresh graphs");
+        app.graph_selected_spec = 0;
+        app.graph_selected_node = 0; // "router" is position 0
         assert_eq!(
-            app.selected_loop_node().map(|n| n.id.as_str()),
+            app.selected_graph_node().map(|n| n.id.as_str()),
             Some("router"),
             "fixture invariant: router node must be selected"
         );
@@ -6127,18 +7177,18 @@ mod tests {
     }
 
     #[test]
-    fn open_loop_editor_dialog_prefills_router_routes_fallback_and_existing_wiring() {
+    fn open_graph_editor_dialog_prefills_router_routes_fallback_and_existing_wiring() {
         let db = test_db();
-        seed_router_loop(&db);
+        seed_router_graph(&db);
         let data_dir = tempdir().expect("create data dir");
         let mut app = app_on_router_node(&db, data_dir.path());
 
-        app.open_loop_editor_dialog().expect("open editor");
+        app.open_graph_editor_dialog().expect("open editor");
 
-        let dialog = app.loop_editor_dialog.as_ref().expect("dialog opens");
+        let dialog = app.graph_editor_dialog.as_ref().expect("dialog opens");
         assert!(matches!(
             dialog.mode,
-            crate::tui::app::types::LoopEditorMode::RouterRoutes
+            crate::tui::app::types::GraphEditorMode::RouterRoutes
         ));
         assert_eq!(dialog.router_routes.len(), 4);
         assert_eq!(dialog.router_fallback, "escalation");
@@ -6172,18 +7222,18 @@ mod tests {
     #[test]
     fn save_router_routes_dialog_rejects_an_invalid_fallback_with_a_readable_message() {
         let db = test_db();
-        seed_router_loop(&db);
+        seed_router_graph(&db);
         let data_dir = tempdir().expect("create data dir");
         let mut app = app_on_router_node(&db, data_dir.path());
-        app.open_loop_editor_dialog().expect("open editor");
+        app.open_graph_editor_dialog().expect("open editor");
 
-        app.loop_editor_dialog.as_mut().unwrap().router_fallback = "not-a-route".to_string();
+        app.graph_editor_dialog.as_mut().unwrap().router_fallback = "not-a-route".to_string();
 
-        let result = app.save_loop_editor_dialog();
+        let result = app.save_graph_editor_dialog();
         assert!(result.is_err(), "invalid fallback must not save");
 
         let dialog = app
-            .loop_editor_dialog
+            .graph_editor_dialog
             .as_ref()
             .expect("dialog stays open on validation failure");
         let message = dialog.parse_error.as_deref().unwrap_or_default();
@@ -6193,31 +7243,31 @@ mod tests {
         );
 
         // Nothing was written.
-        let node = db.get_loop_node("router").unwrap().unwrap();
+        let node = db.get_graph_node("router").unwrap().unwrap();
         assert_eq!(node.config["fallback"], "escalation");
     }
 
     #[test]
     fn save_router_routes_dialog_rejects_partial_wiring_before_writing_anything() {
         let db = test_db();
-        seed_router_loop(&db);
+        seed_router_graph(&db);
         let data_dir = tempdir().expect("create data dir");
         let mut app = app_on_router_node(&db, data_dir.path());
-        app.open_loop_editor_dialog().expect("open editor");
+        app.open_graph_editor_dialog().expect("open editor");
 
         // "billing" is already wired (from the fixture); leaving every other
         // route unwired is a rejected half-wired state, not a valid save.
-        let result = app.save_loop_editor_dialog();
+        let result = app.save_graph_editor_dialog();
         assert!(result.is_err());
         assert!(app
-            .loop_editor_dialog
+            .graph_editor_dialog
             .as_ref()
             .unwrap()
             .parse_error
             .is_some());
 
         // The pre-existing edge is untouched.
-        let edges = db.list_loop_edges("rs1").unwrap();
+        let edges = db.list_graph_edges("rs1").unwrap();
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].to_node, "billing_agent");
     }
@@ -6225,13 +7275,13 @@ mod tests {
     #[test]
     fn save_router_routes_dialog_persists_config_and_wires_every_route() {
         let db = test_db();
-        seed_router_loop(&db);
+        seed_router_graph(&db);
         let data_dir = tempdir().expect("create data dir");
         let mut app = app_on_router_node(&db, data_dir.path());
-        app.open_loop_editor_dialog().expect("open editor");
+        app.open_graph_editor_dialog().expect("open editor");
 
         {
-            let dialog = app.loop_editor_dialog.as_mut().unwrap();
+            let dialog = app.graph_editor_dialog.as_mut().unwrap();
             for route in dialog.router_routes.iter_mut() {
                 route.target_node_id = Some(match route.label.as_str() {
                     "billing" => "billing_agent".to_string(),
@@ -6243,15 +7293,15 @@ mod tests {
             }
         }
 
-        app.save_loop_editor_dialog().expect("save succeeds");
+        app.save_graph_editor_dialog().expect("save succeeds");
 
-        assert!(app.loop_editor_dialog.is_none(), "dialog closes on save");
+        assert!(app.graph_editor_dialog.is_none(), "dialog closes on save");
 
-        let node = db.get_loop_node("router").unwrap().unwrap();
+        let node = db.get_graph_node("router").unwrap().unwrap();
         assert_eq!(node.config["fallback"], "escalation");
         assert_eq!(node.config["routes"].as_array().unwrap().len(), 4);
 
-        let edges = db.list_loop_edges("rs1").unwrap();
+        let edges = db.list_graph_edges("rs1").unwrap();
         assert_eq!(edges.len(), 4, "every route now has exactly one edge");
         let by_route: HashMap<&str, &str> = edges
             .iter()
@@ -6271,13 +7321,13 @@ mod tests {
     #[test]
     fn save_router_routes_dialog_drops_the_edge_of_a_removed_route() {
         let db = test_db();
-        seed_router_loop(&db);
+        seed_router_graph(&db);
         let data_dir = tempdir().expect("create data dir");
         let mut app = app_on_router_node(&db, data_dir.path());
-        app.open_loop_editor_dialog().expect("open editor");
+        app.open_graph_editor_dialog().expect("open editor");
 
         {
-            let dialog = app.loop_editor_dialog.as_mut().unwrap();
+            let dialog = app.graph_editor_dialog.as_mut().unwrap();
             // Drop "billing" — the one route the fixture already wired.
             let idx = dialog
                 .router_routes
@@ -6294,9 +7344,9 @@ mod tests {
             dialog.router_fallback = "escalation".to_string();
         }
 
-        app.save_loop_editor_dialog().expect("save succeeds");
+        app.save_graph_editor_dialog().expect("save succeeds");
 
-        let edges = db.list_loop_edges("rs1").unwrap();
+        let edges = db.list_graph_edges("rs1").unwrap();
         assert_eq!(edges.len(), 3);
         assert!(
             !edges
@@ -6311,21 +7361,23 @@ mod tests {
     /// structured `AgentPrompt` mode instead), so it's the one that can
     /// reintroduce the exact incident shape (a config key the engine will
     /// never read) if left unvalidated. Saving must be rejected the same
-    /// way `loop_add_node`/`loop_update_node` reject it, and the bad config
+    /// way `graph_add_node`/`graph_update_node` reject it, and the bad config
     /// must never reach the DB.
     #[test]
-    fn save_loop_editor_dialog_rejects_unknown_config_key_in_node_config_mode() {
-        use crate::domain::loops::{Loop, LoopNode, LoopNodeKind, LoopSpec};
+    fn save_graph_editor_dialog_rejects_unknown_config_key_in_node_config_mode() {
+        use crate::domain::graphs::{Graph, GraphNode, GraphNodeKind, GraphSpec};
 
         let db = test_db();
-        db.insert_loop(&Loop {
+        db.insert_graph(&Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
+            infra_node_id: None,
             id: "clp1".to_string(),
-            name: "check loop".to_string(),
+            name: "check graph".to_string(),
             description: None,
             workdir: "/tmp/check-test".to_string(),
-            status: LoopStatus::Draft,
+            status: GraphStatus::Draft,
             trigger: None,
             created_at: chrono::Utc::now(),
             started_at: None,
@@ -6334,20 +7386,23 @@ mod tests {
             auto_continue_at: None,
             auto_continue_action: None,
             active_run_queue_id: None,
-            on_completed: None,
+            hooks: std::collections::BTreeMap::new(),
         })
         .unwrap();
-        db.insert_loop_spec(&LoopSpec {
+        db.insert_graph_spec(&GraphSpec {
             id: "cs1".to_string(),
-            loop_id: Some("clp1".to_string()),
+            graph_id: Some("clp1".to_string()),
             name: "spec one".to_string(),
             description: None,
             position: 1,
             parallelizable: false,
-            status: LoopSpecStatus::Pending,
+            status: GraphSpecStatus::Pending,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -6355,12 +7410,12 @@ mod tests {
             completed_via_at: None,
         })
         .unwrap();
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "check1".to_string(),
             spec_id: Some("cs1".to_string()),
-            loop_id: None,
+            graph_id: None,
             name: "Gate".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({"command": "true"}),
             position: 0,
             created_at: chrono::Utc::now(),
@@ -6368,29 +7423,34 @@ mod tests {
         .unwrap();
 
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
-        app.refresh_loops().expect("refresh loops");
-        app.loop_selected_spec = 0;
-        app.loop_selected_node = 0;
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        app.refresh_graphs().expect("refresh graphs");
+        app.graph_selected_spec = 0;
+        app.graph_selected_node = 0;
         assert_eq!(
-            app.selected_loop_node().map(|n| n.id.as_str()),
+            app.selected_graph_node().map(|n| n.id.as_str()),
             Some("check1"),
             "fixture invariant: check node must be selected"
         );
 
-        app.open_loop_editor_dialog().expect("open editor");
+        app.open_graph_editor_dialog().expect("open editor");
         assert!(matches!(
-            app.loop_editor_dialog.as_ref().unwrap().mode,
-            crate::tui::app::types::LoopEditorMode::NodeConfig
+            app.graph_editor_dialog.as_ref().unwrap().mode,
+            crate::tui::app::types::GraphEditorMode::NodeConfig
         ));
-        app.loop_editor_dialog.as_mut().unwrap().buffer =
+        app.graph_editor_dialog.as_mut().unwrap().buffer =
             serde_json::json!({"command": "true", "unexpected_field": true}).to_string();
 
-        let result = app.save_loop_editor_dialog();
+        let result = app.save_graph_editor_dialog();
         assert!(result.is_err(), "an unrecognized config key must not save");
 
         let dialog = app
-            .loop_editor_dialog
+            .graph_editor_dialog
             .as_ref()
             .expect("dialog reopens with the error visible");
         assert!(
@@ -6403,11 +7463,778 @@ mod tests {
             dialog.parse_error
         );
 
-        let stored = db.get_loop_node("check1").unwrap().unwrap();
+        let stored = db.get_graph_node("check1").unwrap().unwrap();
         assert_eq!(
             stored.config,
             serde_json::json!({"command": "true"}),
             "the invalid config must never reach the DB"
         );
+    }
+
+    #[test]
+    fn graph_live_view_scroll_step_clamps_at_zero() {
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        app.graph_live_view_scroll = 0;
+        app.graph_live_view_total_lines = 50;
+        app.last_panel_inner = (80, 20);
+        app.graph_live_view_scroll_step(-10);
+        assert_eq!(app.graph_live_view_scroll, 0, "scroll must not go below 0");
+    }
+
+    #[test]
+    fn graph_live_view_scroll_step_clamps_at_max() {
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        app.graph_live_view_total_lines = 50;
+        app.last_panel_inner = (80, 20);
+        app.graph_live_view_scroll = 30;
+        app.graph_live_view_scroll_step(10);
+        assert_eq!(
+            app.graph_live_view_scroll, 30,
+            "scroll must not exceed total_lines - height (30)"
+        );
+        app.graph_live_view_scroll = 10;
+        app.graph_live_view_scroll_step(5);
+        assert_eq!(app.graph_live_view_scroll, 15);
+        app.graph_live_view_scroll_step(100);
+        assert_eq!(app.graph_live_view_scroll, 30);
+    }
+    // --- CT2 navigation tests ---
+
+    fn graph_state(
+        nodes: &[(&str, &str)],
+        edges: &[(&str, &str, crate::domain::graphs::GraphEdgeCondition)],
+        current: Option<&str>,
+    ) -> GraphLiveState {
+        use crate::domain::graphs::{GraphEdge, GraphNode, GraphNodeKind};
+        use chrono::Utc;
+        use serde_json::json;
+        let effective_nodes = nodes
+            .iter()
+            .enumerate()
+            .map(|(i, (id, name))| GraphNode {
+                id: id.to_string(),
+                spec_id: Some("s1".to_string()),
+                graph_id: None,
+                name: name.to_string(),
+                kind: GraphNodeKind::Agent,
+                config: json!({}),
+                position: i as i64,
+                created_at: Utc::now(),
+            })
+            .collect::<Vec<_>>();
+        let effective_edges = edges
+            .iter()
+            .enumerate()
+            .map(|(i, (from, to, cond))| GraphEdge {
+                id: format!("e{i}"),
+                spec_id: Some("s1".to_string()),
+                graph_id: None,
+                from_node: from.to_string(),
+                to_node: to.to_string(),
+                condition: (*cond).clone(),
+            })
+            .collect::<Vec<_>>();
+        GraphLiveState {
+            graph_id: "lp1".to_string(),
+            graph_name: "graph".to_string(),
+            graph_status: GraphStatus::Running,
+            workdir: "/tmp".to_string(),
+            trigger_type: "manual".to_string(),
+            schedule_expr: None,
+            watch_path: None,
+            autorun_at: None,
+            spec_queue: Vec::new(),
+            done_count: 0,
+            total_count: 0,
+            current_spec_id: Some("s1".to_string()),
+            effective_nodes,
+            effective_edges,
+            ensembles: Vec::new(),
+            router_taken_routes: HashMap::new(),
+            current_node_id: current.map(|s| s.to_string()),
+            current_node_status: None,
+            current_node_started_at: None,
+            current_node_iteration: None,
+            current_node_output_tail: None,
+        }
+    }
+
+    #[test]
+    fn navigate_child_follows_pass_edge() {
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        let state = graph_state(
+            &[("a", "A"), ("b", "B"), ("c", "C")],
+            &[
+                ("a", "b", crate::domain::graphs::GraphEdgeCondition::Pass),
+                ("a", "c", crate::domain::graphs::GraphEdgeCondition::Fail),
+            ],
+            Some("a"),
+        );
+        app.graph_live_state = Some(state);
+        app.graph_live_follow = true; // starts auto-following at a
+                                      // child should follow pass edge to b
+        app.graph_live_navigate_child();
+        assert_eq!(app.graph_live_highlighted_node_id(), Some("b"));
+        assert!(!app.graph_live_follow);
+    }
+
+    #[test]
+    fn navigate_parent_follows_incoming_edge() {
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        let state = graph_state(
+            &[("a", "A"), ("b", "B")],
+            &[("a", "b", crate::domain::graphs::GraphEdgeCondition::Pass)],
+            Some("b"),
+        );
+        app.graph_live_state = Some(state);
+        app.graph_live_follow = false;
+        app.graph_live_selected_node = Some("b".to_string());
+        app.graph_live_navigate_parent();
+        assert_eq!(app.graph_live_highlighted_node_id(), Some("a"));
+    }
+
+    #[test]
+    fn navigate_child_no_op_at_leaf() {
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        let state = graph_state(&[("a", "A")], &[], Some("a"));
+        app.graph_live_state = Some(state);
+        app.graph_live_follow = false;
+        app.graph_live_selected_node = Some("a".to_string());
+        app.graph_live_navigate_child();
+        assert_eq!(
+            app.graph_live_highlighted_node_id(),
+            Some("a"),
+            "leaf child should be no-op"
+        );
+    }
+
+    #[test]
+    fn navigate_parent_no_op_at_root() {
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        let state = graph_state(
+            &[("a", "A"), ("b", "B")],
+            &[("a", "b", crate::domain::graphs::GraphEdgeCondition::Pass)],
+            Some("a"),
+        );
+        app.graph_live_state = Some(state);
+        app.graph_live_follow = false;
+        app.graph_live_selected_node = Some("a".to_string());
+        app.graph_live_navigate_parent();
+        assert_eq!(
+            app.graph_live_highlighted_node_id(),
+            Some("a"),
+            "root parent should be no-op"
+        );
+    }
+
+    #[test]
+    fn navigate_sibling_follows_dfs_order() {
+        // Graph: a pass->b, a fail->c, b pass->d
+        // DFS order should be a,b,d,c
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        let state = graph_state(
+            &[("a", "A"), ("b", "B"), ("c", "C"), ("d", "D")],
+            &[
+                ("a", "b", crate::domain::graphs::GraphEdgeCondition::Pass),
+                ("a", "c", crate::domain::graphs::GraphEdgeCondition::Fail),
+                ("b", "d", crate::domain::graphs::GraphEdgeCondition::Pass),
+            ],
+            Some("a"),
+        );
+        app.graph_live_state = Some(state);
+        app.graph_live_follow = false;
+        app.graph_live_selected_node = Some("a".to_string());
+        let expected = vec!["b", "d", "c"];
+        for exp in expected {
+            app.graph_live_navigate_sibling(true);
+            assert_eq!(
+                app.graph_live_highlighted_node_id(),
+                Some(exp),
+                "sibling order mismatch"
+            );
+        }
+        // wrap? sibling move_index wraps, so next should go to a again
+        app.graph_live_navigate_sibling(true);
+        assert_eq!(app.graph_live_highlighted_node_id(), Some("a"));
+    }
+
+    #[test]
+    fn graph_live_enter_seeds_from_most_recent_run_on_finished_graph() {
+        // CT24 FR1 (b): on a finished graph with recorded runs, Enter seeds
+        // the manual selection at the most recent run's node of the
+        // last-queued (or strip-selected) spec — not the entry node.
+        use crate::domain::graphs::{
+            Graph, GraphEdge, GraphEdgeCondition, GraphNode, GraphNodeKind, GraphNodeRun,
+            GraphRunStatus, GraphSpec, GraphSpecStatus, GraphStatus,
+        };
+        let db = test_db();
+        db.insert_graph(&Graph {
+            archived: false,
+            paused_by_reconciliation: false,
+            allow_dirty_start: false,
+            infra_node_id: None,
+            id: "lp1".to_string(),
+            name: "Nightly review".to_string(),
+            description: None,
+            workdir: "/tmp".to_string(),
+            status: GraphStatus::Completed,
+            trigger: None,
+            created_at: chrono::Utc::now(),
+            started_at: None,
+            completed_at: None,
+            autorun_at: None,
+            auto_continue_at: None,
+            auto_continue_action: None,
+            active_run_queue_id: None,
+            hooks: std::collections::BTreeMap::new(),
+        })
+        .unwrap();
+        db.insert_graph_spec(&GraphSpec {
+            id: "s1".to_string(),
+            graph_id: Some("lp1".to_string()),
+            name: "Spec".to_string(),
+            description: None,
+            position: 0,
+            parallelizable: false,
+            status: GraphSpecStatus::Completed,
+            started_at: None,
+            completed_at: None,
+            spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
+            spec_committed_head: None,
+            workdir: None,
+            completed_via: None,
+            completed_via_reason: None,
+            completed_via_at: None,
+        })
+        .unwrap();
+        for (position, id) in ["n1", "n2"].iter().enumerate() {
+            db.insert_graph_node(&GraphNode {
+                id: id.to_string(),
+                spec_id: None,
+                graph_id: Some("lp1".to_string()),
+                name: id.to_string(),
+                kind: GraphNodeKind::Agent,
+                config: serde_json::json!({}),
+                position: position as i64,
+                created_at: chrono::Utc::now(),
+            })
+            .unwrap();
+        }
+        db.insert_graph_edge(&GraphEdge {
+            id: "e1".to_string(),
+            spec_id: None,
+            graph_id: Some("lp1".to_string()),
+            from_node: "n1".to_string(),
+            to_node: "n2".to_string(),
+            condition: GraphEdgeCondition::Pass,
+        })
+        .unwrap();
+        // One completed run on n2 for s1: the "most recent run" the seed
+        // must prefer over the entry node.
+        db.insert_graph_run(&GraphNodeRun {
+            id: uuid::Uuid::new_v4().to_string(),
+            graph_id: "lp1".to_string(),
+            spec_id: "s1".to_string(),
+            node_id: "n2".to_string(),
+            status: GraphRunStatus::Pass,
+            input: None,
+            output: None,
+            started_at: chrono::Utc::now(),
+            completed_at: None,
+            iteration: 0,
+            pid: None,
+            boot_id: None,
+            session_id: None,
+            executed_platform: None,
+            executed_model: None,
+        })
+        .unwrap();
+
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        let details = db
+            .get_graph_details("lp1")
+            .ok()
+            .flatten()
+            .expect("seeded graph resolves");
+        app.graph_live_state =
+            crate::tui::app::graph_live_state::assemble_graph_live_state(&db, &details);
+        app.graph_live_follow = true;
+        app.graph_live_selected_node = None;
+        app.graph_spec_strip_selected = None;
+
+        app.graph_live_enter();
+        assert!(!app.graph_live_follow, "Enter must switch to manual mode");
+        assert_eq!(
+            app.graph_live_selected_node.as_deref(),
+            Some("n2"),
+            "seed must be the most recent run's node, not the entry node"
+        );
+    }
+}
+
+// ── CT14: sidebar focus/selection stale-index regressions ────────────────
+// Each test covers one stale index from the CT14 design plan. They use the
+// same `test_db()` + `App::new(...)` pattern as the existing sidebar tests.
+#[cfg(test)]
+mod ct14_sidebar_tests {
+    use super::App;
+    use crate::db::Database;
+    use crate::domain::graphs::GraphStatus;
+    use crate::tui::app::types::{
+        AgentEntry, AgentSectionFocus, AutomationKind, ProjectTab, SidebarLayer,
+    };
+    use std::sync::Arc;
+    use tempfile::{tempdir, NamedTempFile};
+
+    fn test_db() -> Arc<Database> {
+        let tmp = NamedTempFile::new().expect("create temp file");
+        let path = tmp.path().to_path_buf();
+        std::mem::forget(tmp);
+        Arc::new(Database::new(&path).expect("create test db"))
+    }
+
+    fn make_project(hash: &str, path: &str) -> crate::domain::project::Project {
+        crate::domain::project::Project {
+            hash: hash.to_string(),
+            path: path.to_string(),
+            name: hash.to_string(),
+            description: None,
+            tags: None,
+            indexed_at: None,
+            created_at: 0,
+        }
+    }
+
+    fn make_graph(id: &str, name: &str) -> crate::domain::graphs::Graph {
+        crate::domain::graphs::Graph {
+            archived: false,
+            paused_by_reconciliation: false,
+            allow_dirty_start: false,
+            infra_node_id: None,
+            id: id.to_string(),
+            name: name.to_string(),
+            description: None,
+            workdir: "/tmp".to_string(),
+            status: GraphStatus::Running,
+            trigger: None,
+            created_at: chrono::Utc::now(),
+            started_at: None,
+            completed_at: None,
+            autorun_at: None,
+            auto_continue_at: None,
+            auto_continue_action: None,
+            active_run_queue_id: None,
+            hooks: std::collections::BTreeMap::new(),
+        }
+    }
+
+    fn bg_agent(id: &str) -> crate::domain::models::Agent {
+        crate::domain::models::Agent {
+            id: id.to_string(),
+            prompt: String::new(),
+            trigger: None,
+            cli: crate::domain::models::Cli::new("claude"),
+            model: None,
+            effort: None,
+            working_dir: None,
+            enabled: true,
+            enable_at: None,
+            created_at: chrono::Utc::now(),
+            log_path: format!("/tmp/{id}.log"),
+            timeout_minutes: 15,
+            expires_at: None,
+            last_run_at: None,
+            last_run_ok: None,
+            last_triggered_at: None,
+            trigger_count: 0,
+        }
+    }
+
+    fn history_entry(name: &str) -> crate::db::project::ProjectHistoryEntry {
+        crate::db::project::ProjectHistoryEntry {
+            kind: crate::db::project::ProjectHistoryKind::Graph,
+            name: name.to_string(),
+            status: "done".to_string(),
+            at: 0,
+        }
+    }
+
+    #[test]
+    fn ct14_shift_arrows_cycle_after_knowledge_round_trip() {
+        // FOCUS bug #1: `project_focus` must not survive leaving Knowledge —
+        // a surviving focus traps Shift+←/→ in the project-tab keymap.
+        let db = test_db();
+        db.upsert_project(&make_project("hash0", "/tmp/proj0"))
+            .unwrap();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        app.agents = vec![AgentEntry::Group(0), AgentEntry::Group(1)];
+        app.sidebar_layer = SidebarLayer::Knowledge;
+        app.selected_project = 0;
+
+        app.enter_project_focus(ProjectTab::Overview);
+        assert_eq!(app.project_focus, Some(ProjectTab::Overview));
+
+        // Leave Knowledge via the F2 ring walk.
+        app.cycle_sidebar_layer();
+        assert!(
+            app.project_focus.is_none(),
+            "leaving Knowledge must clear the deep project focus"
+        );
+        assert_ne!(
+            app.sidebar_layer,
+            SidebarLayer::Knowledge,
+            "F2 must land on another tab"
+        );
+
+        // Shift+←/→ steps the sidebar tab ring (not the project tabs).
+        let before = app.sidebar_layer;
+        app.step_sidebar_tab(true);
+        assert!(
+            app.project_focus.is_none(),
+            "tab stepping must not re-enter project focus"
+        );
+        assert_ne!(
+            app.sidebar_layer, before,
+            "Shift+→ must advance the sidebar tab ring"
+        );
+        app.step_sidebar_tab(false);
+        assert_eq!(app.sidebar_layer, before, "Shift+← must step the ring back");
+    }
+
+    #[test]
+    fn ct14_automation_kind_flips_when_its_list_empties_and_graphs_still_reachable() {
+        // SELECTION bug #2: `automation_kind` pointing at an emptied sub-list
+        // must flip to the non-empty side so graphs stay reachable.
+        let db = test_db();
+        db.insert_graph(&make_graph("graph-1", "Graph 1")).unwrap();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        app.refresh_graphs().expect("refresh graphs");
+        app.agents = vec![AgentEntry::Agent(bg_agent("bg-1"))];
+        app.automation_kind = AutomationKind::Agent;
+
+        // The last background agent disappears while one graph exists.
+        app.agents
+            .retain(|a| !matches!(a, AgentEntry::Agent(_) | AgentEntry::Corrupt(_)));
+        app.normalize_automation_kind();
+        assert_eq!(app.automation_kind, AutomationKind::Graph);
+        assert_eq!(app.selected_graph_id.as_deref(), Some("graph-1"));
+        assert!(
+            app.enter_layer(SidebarLayer::Automation, true),
+            "graphs section must stay reachable"
+        );
+
+        // Symmetric subcase: graphs vanish while agents remain.
+        app.graphs.clear();
+        app.archived_graphs.clear();
+        app.selected_graph_id = Some("graph-1".to_string());
+        app.automation_kind = AutomationKind::Graph;
+        app.agents = vec![AgentEntry::Agent(bg_agent("bg-2"))];
+        app.selected = 99;
+        app.normalize_automation_kind();
+        assert_eq!(app.automation_kind, AutomationKind::Agent);
+        assert!(
+            app.automation_agent_indices().contains(&app.selected),
+            "agent cursor must name a live row"
+        );
+        assert!(
+            app.enter_layer(SidebarLayer::Automation, true),
+            "agents side must stay reachable"
+        );
+    }
+
+    #[test]
+    fn ct14_agent_section_focus_moves_off_empty_section() {
+        // SELECTION bug #3 (C32 follow-on): a zero-row section must not keep
+        // the focus that `fair_section_heights` turns into a floor.
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+
+        app.agents = vec![AgentEntry::Terminal(0)];
+        app.agent_section_focus = AgentSectionFocus::Terminal;
+        app.agents = vec![AgentEntry::Interactive(0)];
+        app.normalize_agent_section_focus();
+        assert_eq!(app.agent_section_focus, AgentSectionFocus::Interactive);
+
+        // Subcase: only Groups remain.
+        app.split_groups.push(crate::domain::models::SplitGroup {
+            id: "g0".to_string(),
+            orientation: crate::domain::models::SplitOrientation::Horizontal,
+            session_a: "a".to_string(),
+            session_b: "b".to_string(),
+            created_at: chrono::Utc::now(),
+        });
+        app.agents = vec![AgentEntry::Group(0)];
+        app.agent_section_focus = AgentSectionFocus::Terminal;
+        app.normalize_agent_section_focus();
+        assert_eq!(app.agent_section_focus, AgentSectionFocus::Groups);
+    }
+
+    #[test]
+    fn ct14_selected_and_scroll_clamped_after_shrink() {
+        // SELECTION bugs #4/#5/#7: every stored cursor is corrected at the
+        // moment of use instead of failing silently.
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+
+        // `selected` past the end of a shrunk agent list.
+        app.agents = vec![
+            AgentEntry::Group(0),
+            AgentEntry::Group(1),
+            AgentEntry::Group(2),
+            AgentEntry::Group(3),
+            AgentEntry::Group(4),
+        ];
+        app.sidebar_layer = SidebarLayer::Live;
+        app.selected = 4;
+        app.agents.truncate(3);
+        app.clamp_sidebar_selection();
+        assert_eq!(app.selected, 2);
+
+        // `selected_project` past the end of a shrunk project list.
+        app.projects = vec![
+            make_project("h0", "/tmp/a"),
+            make_project("h1", "/tmp/b"),
+            make_project("h2", "/tmp/c"),
+        ];
+        app.selected_project = 2;
+        app.projects.truncate(1);
+        app.clamp_sidebar_selection();
+        assert_eq!(app.selected_project, 0);
+
+        // History cursor belongs to the previous project's longer list.
+        app.projects = vec![make_project("h0", "/tmp/a"), make_project("h1", "/tmp/b")];
+        app.project_history_cache.insert(
+            "h0".to_string(),
+            (0..6).map(|i| history_entry(&format!("e{i}"))).collect(),
+        );
+        app.project_history_cache
+            .insert("h1".to_string(), vec![history_entry("only")]);
+        app.selected_project = 0;
+        app.selected_project_history = 5;
+        app.project_focus = Some(ProjectTab::History);
+        app.selected_project = 1;
+        app.clamp_sidebar_selection();
+        assert_eq!(app.selected_project_history, 0);
+
+        // Scroll offset stranded past the new tab total.
+        app.project_focus = None;
+        app.sidebar_layer = SidebarLayer::Live;
+        app.sidebar_visible_capacity = 5;
+        app.sidebar_scroll_offset = 10;
+        app.agents = vec![AgentEntry::Group(0), AgentEntry::Group(1)];
+        app.selected = 0;
+        app.clamp_sidebar_selection();
+        assert_eq!(app.sidebar_scroll_offset, 0);
+
+        // Arrow navigation stays within the new bounds.
+        let live: Vec<usize> = app.live_indices();
+        app.select_next();
+        assert!(
+            live.contains(&app.selected),
+            "select_next must land on an existing row"
+        );
+        app.select_prev();
+        assert!(
+            live.contains(&app.selected),
+            "select_prev must land on an existing row"
+        );
+    }
+
+    #[test]
+    fn ct14_tab_memory_dead_slot_cleared_on_failed_restore() {
+        // SELECTION bug #6: a dead `SidebarStepMemory` slot must be cleared on
+        // failed restore, not re-probed on every revisit.
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        app.agents = vec![AgentEntry::Group(0)];
+
+        app.sidebar_step_memory.live_selected = Some(99);
+        assert!(!app.restore_remembered_sidebar_selection(SidebarLayer::Live));
+        assert_eq!(app.sidebar_step_memory.live_selected, None);
+
+        app.sidebar_step_memory.automation_kind = Some(AutomationKind::Graph);
+        app.sidebar_step_memory.automation_graph_id = Some("ghost".to_string());
+        assert!(!app.restore_remembered_sidebar_selection(SidebarLayer::Automation));
+        assert_eq!(app.sidebar_step_memory.automation_graph_id, None);
+
+        app.sidebar_step_memory.knowledge_selected = Some(7);
+        assert!(!app.restore_remembered_sidebar_selection(SidebarLayer::Knowledge));
+        assert_eq!(app.sidebar_step_memory.knowledge_selected, None);
+    }
+
+    #[test]
+    fn ct14_long_scripted_sequence_leaves_navigation_working() {
+        // The spec's scripted reproduction: start Live → enter Knowledge →
+        // move within it → leave → F2 cycle → Shift+←/→ both ways → enter
+        // Automation → navigate both ways → shrink graphs between ticks →
+        // navigate again. Navigation must work throughout.
+        let db = test_db();
+        db.upsert_project(&make_project("hash0", "/tmp/proj0"))
+            .unwrap();
+        db.insert_graph(&make_graph("graph-1", "Graph 1")).unwrap();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        app.refresh_graphs().expect("refresh graphs");
+        app.agents = vec![
+            AgentEntry::Group(0),
+            AgentEntry::Group(1),
+            AgentEntry::Agent(bg_agent("bg-1")),
+        ];
+        app.sidebar_layer = SidebarLayer::Live;
+        app.selected = 0;
+
+        // Enter Knowledge, move within the project tabs, leave via Esc.
+        app.sidebar_layer = SidebarLayer::Knowledge;
+        app.selected_project = 0;
+        app.enter_project_focus(ProjectTab::Overview);
+        app.navigate_project_tab_list(true);
+        app.cycle_project_tab(true);
+        assert_eq!(app.project_focus, Some(ProjectTab::Backlog));
+        app.navigate_project_tab_list(true);
+        app.exit_project_focus();
+        assert!(app.project_focus.is_none());
+
+        // Switch sections a few times (F2) and cycle tabs (Shift+←/→).
+        app.cycle_sidebar_layer();
+        app.cycle_sidebar_layer();
+        let ring_pos = app.sidebar_layer;
+        app.step_sidebar_tab(true);
+        app.step_sidebar_tab(false);
+        assert_eq!(app.sidebar_layer, ring_pos);
+        assert!(app.project_focus.is_none());
+
+        // Reach the graphs section and move within Automation.
+        app.switch_sidebar_tab(SidebarLayer::Automation);
+        assert_eq!(app.sidebar_layer, SidebarLayer::Automation);
+        app.select_next();
+        app.select_prev();
+
+        // Shrink the graphs list between ticks, then navigate again.
+        app.graphs.clear();
+        app.archived_graphs.clear();
+        app.refresh_graphs_selection();
+        app.normalize_automation_kind();
+        app.normalize_agent_section_focus();
+        app.clamp_sidebar_selection();
+        app.select_next();
+        app.select_prev();
+
+        // Every cursor still names something that exists.
+        match app.sidebar_layer {
+            SidebarLayer::Live => {
+                assert!(app.live_indices().contains(&app.selected));
+            }
+            SidebarLayer::Automation => match app.automation_kind {
+                AutomationKind::Agent => {
+                    assert!(app.automation_agent_indices().contains(&app.selected));
+                }
+                AutomationKind::Graph => {
+                    let id = app.selected_graph_id.clone().expect("graph cursor set");
+                    assert!(app.sidebar_graphs().iter().any(|lp| lp.id == id));
+                }
+            },
+            SidebarLayer::Knowledge => {
+                assert!(app.selected_project < app.projects.len());
+            }
+        }
+
+        // Shift+←/→ still cycles the tab ring.
+        let before = app.sidebar_layer;
+        app.step_sidebar_tab(true);
+        assert_ne!(app.sidebar_layer, before);
+        assert!(app.project_focus.is_none());
     }
 }

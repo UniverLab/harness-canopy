@@ -26,7 +26,7 @@ pub fn relative_time(dt: &DateTime<Utc>) -> String {
     }
 }
 
-/// Compact form for narrow columns (sidebar loop rows): `2m`, `1h`, `3d`,
+/// Compact form for narrow columns (sidebar graph rows): `2m`, `1h`, `3d`,
 /// no "ago" suffix. Same thresholds as [`relative_time`] — see
 /// [`relative_time_parts`].
 pub fn relative_time_compact(dt: &DateTime<Utc>) -> String {
@@ -37,7 +37,7 @@ pub fn relative_time_compact(dt: &DateTime<Utc>) -> String {
 }
 
 /// Compact form for a future instant relative to now: `2m`, `1h`, `3d`, or
-/// `"due"` once `dt` has passed — used for a loop's pending `autorun_at` in
+/// `"due"` once `dt` has passed — used for a graph's pending `autorun_at` in
 /// the sidebar. Mirrors [`relative_time_compact`]'s thresholds but counts
 /// down instead of up.
 pub fn relative_time_until_compact(dt: &DateTime<Utc>) -> String {

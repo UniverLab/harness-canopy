@@ -20,8 +20,12 @@ Canopy persists what agents learn, scoped to projects.
   to a configurable depth, returning connected facts, patterns and
   cross-references.
 - **Project relationships** — `intelligence_link_projects` links projects
-  with typed relations (`depends_on`, `complements`, `relates_to`,
-  `independent`).
+  with typed relations (`depends_on`, `complements`, `extends`, `publishes`;
+  `relates_to` accepted as legacy; `contains` is derived from registry paths
+  and cannot be hand-linked). Scoped reads traverse outbound edges (each hit
+  marked with `via_project` + `via_relation`, `contains` hops read as
+  `inherited:contains`), and full context warns about inbound `depends_on`
+  dependents via `dependency_impact`.
 - **Context retrieval** — `intelligence_get_context` auto-detects the
   project and returns a curated mix of session knowledge, project facts
   and related-project summaries.
@@ -32,9 +36,13 @@ starts smarter.
 
 ## Project registry
 
-Canopy automatically indexes every project it sees, keyed by workdir
-hash, extracting descriptions from project READMEs. `project_search` and
-`project_update` expose the registry to agents.
+Canopy registers a project only explicitly: a `.canopy-project` marker file
+in the directory root enables automatic registration, or call
+`project_register` with the directory path. Registration derives `contains`
+edges from registry paths automatically. `project_search` and
+`project_update` expose the registry to agents; registry noise is removable
+via project deletion / `canopy clean`, and `project_remap` moves a project
+(including its graph node) after a directory rename or move.
 
 ## Sync — multi-agent coordination
 
@@ -54,6 +62,13 @@ stepping on each other:
 Messages flow through per-workdir in-memory broadcast channels and are
 persisted to the database; relevant ones are auto-upserted as
 intelligence nodes.
+
+The graph engine narrates itself into this same stream: graph lifecycle
+transitions, spec starts/completions, node and ensemble terminal states, and
+hook firings are written directly into the activity log the TUI's activity
+panel already reads, attributed as `graph:<name>`. No new surface, no new
+table — a running graph's history is visible in the same place agent chatter
+is, and reachable via `sync_get_context` without a live TUI session.
 
 ## Action protocol advisor
 

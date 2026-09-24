@@ -5,11 +5,11 @@ use ratatui::widgets::{Block, Clear, Paragraph};
 use ratatui::Frame;
 
 use super::centered_rect;
-use crate::tui::app::types::{App, LoopEditorDialog, LoopEditorMode, RouterField};
+use crate::tui::app::types::{App, GraphEditorDialog, GraphEditorMode, RouterField};
 use crate::tui::ui::theme::Theme;
 
-pub fn draw_loop_editor_dialog(frame: &mut Frame, app: &App, theme: &Theme) {
-    let Some(dialog) = &app.loop_editor_dialog else {
+pub fn draw_graph_editor_dialog(frame: &mut Frame, app: &App, theme: &Theme) {
+    let Some(dialog) = &app.graph_editor_dialog else {
         return;
     };
 
@@ -26,7 +26,7 @@ pub fn draw_loop_editor_dialog(frame: &mut Frame, app: &App, theme: &Theme) {
 
     let block = Block::default()
         .title(dialog.title.as_str())
-        .borders(crate::tui::ui::borders_for(theme))
+        .borders(crate::tui::ui::dialog_borders_for(theme))
         .border_style(Style::default().fg(border_color))
         .style(Style::default().bg(theme.dialog_bg));
     let inner = block.inner(area);
@@ -56,9 +56,9 @@ pub fn draw_loop_editor_dialog(frame: &mut Frame, app: &App, theme: &Theme) {
     );
 
     match dialog.mode {
-        LoopEditorMode::RouterRoutes => draw_router_routes_body(frame, dialog, editor_area, theme),
-        LoopEditorMode::Edges => draw_edges_body(frame, dialog, editor_area, theme),
-        LoopEditorMode::AgentPrompt | LoopEditorMode::NodeConfig => {
+        GraphEditorMode::RouterRoutes => draw_router_routes_body(frame, dialog, editor_area, theme),
+        GraphEditorMode::Edges => draw_edges_body(frame, dialog, editor_area, theme),
+        GraphEditorMode::AgentPrompt | GraphEditorMode::NodeConfig => {
             draw_text_buffer_body(frame, dialog, editor_area);
         }
     }
@@ -79,7 +79,7 @@ pub fn draw_loop_editor_dialog(frame: &mut Frame, app: &App, theme: &Theme) {
     }
 }
 
-fn draw_text_buffer_body(frame: &mut Frame, dialog: &LoopEditorDialog, editor_area: Rect) {
+fn draw_text_buffer_body(frame: &mut Frame, dialog: &GraphEditorDialog, editor_area: Rect) {
     let body_height = editor_area.height.max(1) as usize;
 
     let lines: Vec<&str> = dialog.buffer.lines().collect();
@@ -129,10 +129,10 @@ fn cursor_line_col(text: &str, cursor: usize) -> (usize, usize) {
 /// route's label + description, wires it to a target node, and marks one as
 /// the fallback (functional requirement: "declares routes, wires an edge to
 /// each, and picks the fallback"). No cursor to place: every field is a
-/// short append/pop-at-end edit (see [`LoopEditorDialog::router_push_char`]).
+/// short append/pop-at-end edit (see [`GraphEditorDialog::router_push_char`]).
 fn draw_router_routes_body(
     frame: &mut Frame,
-    dialog: &LoopEditorDialog,
+    dialog: &GraphEditorDialog,
     area: Rect,
     theme: &Theme,
 ) {
@@ -161,7 +161,7 @@ fn draw_router_routes_body(
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-fn router_route_lines(dialog: &LoopEditorDialog, theme: &Theme) -> Vec<Line<'static>> {
+fn router_route_lines(dialog: &GraphEditorDialog, theme: &Theme) -> Vec<Line<'static>> {
     dialog
         .router_routes
         .iter()
@@ -236,10 +236,10 @@ fn router_route_lines(dialog: &LoopEditorDialog, theme: &Theme) -> Vec<Line<'sta
 
 /// A node's outgoing `pass`/`fail`/`always` edges: one line per edge naming
 /// its condition and current target, retargetable/deletable in place (see
-/// `handle_edges_key` in `tui::event::loop_editor`). No cursor to place —
+/// `handle_edges_key` in `tui::event::graph_editor`). No cursor to place —
 /// every action is a whole-row operation (move focus, cycle target,
 /// delete), unlike the free-cursor `buffer` used by the text-editing modes.
-fn draw_edges_body(frame: &mut Frame, dialog: &LoopEditorDialog, area: Rect, theme: &Theme) {
+fn draw_edges_body(frame: &mut Frame, dialog: &GraphEditorDialog, area: Rect, theme: &Theme) {
     if dialog.edge_rows.is_empty() {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
@@ -330,8 +330,13 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(db, data_dir.path()).unwrap();
-        app.loop_editor_dialog = Some(LoopEditorDialog::new_router_routes(
+        let mut app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
+        app.graph_editor_dialog = Some(GraphEditorDialog::new_router_routes(
             "router1".to_string(),
             "Classify".to_string(),
             " Router Routes · Classify ".to_string(),
@@ -359,7 +364,7 @@ mod tests {
         let app = test_app_with_router_dialog();
         let theme = Theme::classic();
         let text = render_to_text(100, 30, |frame, _area| {
-            draw_loop_editor_dialog(frame, &app, &theme);
+            draw_graph_editor_dialog(frame, &app, &theme);
         });
 
         assert!(text.contains("Router Routes"), "{text}");
@@ -374,11 +379,11 @@ mod tests {
     #[test]
     fn router_routes_dialog_shows_the_domain_validation_error_readably() {
         let mut app = test_app_with_router_dialog();
-        app.loop_editor_dialog.as_mut().unwrap().parse_error =
+        app.graph_editor_dialog.as_mut().unwrap().parse_error =
             Some("A router must declare one route as fallback.".to_string());
         let theme = Theme::classic();
         let text = render_to_text(100, 30, |frame, _area| {
-            draw_loop_editor_dialog(frame, &app, &theme);
+            draw_graph_editor_dialog(frame, &app, &theme);
         });
 
         assert!(

@@ -19,15 +19,6 @@ const MESSAGE_WINDOW_ITEMS_PER_STEP: usize = 8;
 const CHATTER_LIMIT: usize = 8;
 
 impl App {
-    /// Whether sync is available for the currently selected session,
-    /// regardless of whether the panel is currently visible.
-    pub(crate) fn sync_available(&self) -> bool {
-        let Some(workdir) = self.selected_activity_workdir() else {
-            return false;
-        };
-        self.live_session_count_for_sync(workdir) >= 2
-    }
-
     pub(crate) fn activity_panel_available(&self) -> bool {
         self.selected_activity_workdir().is_some()
     }
@@ -47,9 +38,28 @@ impl App {
         &self,
         workdir: &str,
     ) -> Vec<crate::domain::sync::ActiveIntent> {
-        let Ok(messages) = self.db.list_sync_messages(workdir, RECENT_MESSAGE_LIMIT) else {
+        let Ok(mut messages) = self
+            .db
+            .list_activity_log_entries(workdir, RECENT_MESSAGE_LIMIT)
+            .map(|entries| {
+                entries
+                    .into_iter()
+                    .map(crate::domain::sync::SyncMessage::from)
+                    .collect::<Vec<_>>()
+            })
+        else {
             return Vec::new();
         };
+        // The bitácora stores `source` (e.g. "sync"), not the actor's display
+        // name — resolve it the same way the activity face does so intents
+        // carry a real identity, not the literal source tag.
+        for message in &mut messages {
+            if let Ok(Some(session_name)) =
+                self.db.resolve_sync_actor_name(workdir, &message.agent_id)
+            {
+                message.agent_name = session_name;
+            }
+        }
         let active_agent_ids = messages
             .iter()
             .map(|m| m.agent_id.clone())
@@ -125,7 +135,16 @@ impl App {
 
     pub(crate) fn activity_panel_state_for_workdir(&self, workdir: &str) -> Option<SyncPanelState> {
         let recent_limit = self.message_window_limit_for_scroll();
-        let mut recent_messages = self.db.list_sync_messages(workdir, recent_limit).ok()?;
+        let mut recent_messages = self
+            .db
+            .list_activity_log_entries(workdir, recent_limit)
+            .map(|entries| {
+                entries
+                    .into_iter()
+                    .map(crate::domain::sync::SyncMessage::from)
+                    .collect::<Vec<_>>()
+            })
+            .ok()?;
 
         for message in &mut recent_messages {
             if let Ok(Some(session_name)) =
@@ -165,13 +184,6 @@ impl App {
         })
     }
 
-    fn live_session_count_for_sync(&self, workdir: &str) -> usize {
-        self.db
-            .list_active_sync_agent_ids(workdir)
-            .map(|agent_ids| agent_ids.len())
-            .unwrap_or(0)
-    }
-
     fn message_window_limit_for_scroll(&self) -> usize {
         let steps = (self.sync_scroll_offset / MESSAGE_WINDOW_LINES_PER_STEP) as usize;
         (RECENT_MESSAGE_LIMIT + steps.saturating_mul(MESSAGE_WINDOW_ITEMS_PER_STEP))
@@ -203,6 +215,7 @@ mod tests {
             trigger: None,
             cli: Cli::new("opencode"),
             model: None,
+            effort: None,
             working_dir: Some(workdir.to_string()),
             enabled: true,
             enable_at: None,
@@ -224,18 +237,24 @@ mod tests {
     #[test]
     fn activity_panel_auto_shows_for_single_agent_when_messages_exist() {
         let db = test_db();
-        db.insert_sync_message(
+        // The panel renders the bitácora, not `sync_messages`.
+        db.insert_activity_log_entry(
             "/tmp/project",
-            "agent-a",
-            "copilot",
-            crate::domain::sync::MessageKind::Info,
+            "sync",
+            Some("agent-a"),
+            "info",
             "first activity",
             None,
         )
         .unwrap();
 
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.agents = vec![AgentEntry::Agent(sample_agent("bg-1", "/tmp/project"))];
         app.selected = 0;
 
@@ -249,6 +268,87 @@ mod tests {
     }
 
     #[test]
+    fn activity_panel_reads_from_activity_log() {
+        let db = test_db();
+        // Seed ONLY the bitácora — nothing in sync_messages.
+        db.insert_activity_log_entry(
+            "/tmp/project",
+            "graph",
+            Some("graph-7"),
+            "info",
+            "bitacora-only event",
+            None,
+        )
+        .unwrap();
+
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        app.agents = vec![AgentEntry::Agent(sample_agent("bg-1", "/tmp/project"))];
+        app.selected = 0;
+
+        let state = app
+            .activity_panel_state()
+            .expect("activity panel should render from the bitácora");
+        assert_eq!(state.workdir, "/tmp/project");
+        assert_eq!(state.recent_messages.len(), 1);
+        assert_eq!(state.recent_messages[0].message, "bitacora-only event");
+        // Panel and direct read return the same entries.
+        let direct = db.list_activity_log_entries("/tmp/project", 10).unwrap();
+        assert_eq!(direct.len(), 1);
+        assert_eq!(direct[0].message, state.recent_messages[0].message);
+    }
+
+    #[test]
+    fn active_missions_resolves_actor_name_from_bitacora() {
+        let db = test_db();
+        db.insert_interactive_session(
+            "agent-x",
+            "test-display",
+            "copilot",
+            "/tmp/project",
+            None,
+            None,
+            "interactive",
+            None,
+        )
+        .unwrap();
+
+        let intent_payload = serde_json::to_string(&crate::domain::sync::IntentPayload {
+            mission: "deploy".to_string(),
+            impact: crate::domain::sync::MissionImpact::High,
+            description: "ship it".to_string(),
+        })
+        .unwrap();
+        db.insert_activity_log_entry(
+            "/tmp/project",
+            "sync",
+            Some("agent-x"),
+            "intent",
+            "intent",
+            Some(intent_payload.as_str()),
+        )
+        .unwrap();
+
+        let data_dir = tempdir().expect("create data dir");
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+
+        let intents = app.active_missions_for_workdir("/tmp/project");
+        assert_eq!(intents.len(), 1);
+        assert_ne!(intents[0].agent_name, "sync");
+        assert_eq!(intents[0].agent_name, "test-display · copilot");
+    }
+
+    #[test]
     fn activity_panel_hides_intents_for_inactive_agents() {
         let db = test_db();
         let intent_payload = serde_json::to_string(&crate::domain::sync::IntentPayload {
@@ -257,18 +357,24 @@ mod tests {
             description: "should not show when inactive".to_string(),
         })
         .expect("serialize intent payload");
-        db.insert_sync_message(
+        // The panel renders the bitácora, not `sync_messages`.
+        db.insert_activity_log_entry(
             "/tmp/project",
-            "agent-a",
-            "copilot",
-            crate::domain::sync::MessageKind::Intent,
+            "sync",
+            Some("agent-a"),
+            "intent",
             "intent",
             Some(intent_payload.as_str()),
         )
         .expect("insert intent");
 
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.agents = vec![AgentEntry::Agent(sample_agent("bg-1", "/tmp/project"))];
         app.selected = 0;
 
@@ -283,11 +389,12 @@ mod tests {
     fn activity_panel_expands_message_window_with_scroll() {
         let db = test_db();
         for index in 0..(RECENT_MESSAGE_LIMIT + 4) {
-            db.insert_sync_message(
+            // The panel renders the bitácora, not `sync_messages`.
+            db.insert_activity_log_entry(
                 "/tmp/project",
-                &format!("agent-{index}"),
-                "copilot",
-                crate::domain::sync::MessageKind::Info,
+                "sync",
+                Some(&format!("agent-{index}")),
+                "info",
                 &format!("message-{index}"),
                 None,
             )
@@ -295,7 +402,12 @@ mod tests {
         }
 
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.agents = vec![AgentEntry::Agent(sample_agent("bg-1", "/tmp/project"))];
         app.selected = 0;
 
@@ -315,7 +427,12 @@ mod tests {
     fn selected_activity_workdir_uses_selected_project_in_projects_mode() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         let project = sample_project("/tmp/project");
         app.projects = vec![project];
         app.sidebar_layer = SidebarLayer::Knowledge;
@@ -327,7 +444,12 @@ mod tests {
     fn activity_panel_stays_visible_in_projects_mode_without_messages() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         let project = sample_project("/tmp/project");
         app.projects = vec![project];
         app.sidebar_layer = SidebarLayer::Knowledge;
@@ -345,7 +467,12 @@ mod tests {
     fn toggle_activity_panel_is_ignored_in_projects_mode() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         let project = sample_project("/tmp/project");
         app.projects = vec![project];
         app.sidebar_layer = SidebarLayer::Knowledge;
@@ -358,18 +485,23 @@ mod tests {
     #[test]
     fn explicit_activity_toggle_forces_width_on_narrow_screens() {
         let db = test_db();
-        db.insert_sync_message(
+        db.insert_activity_log_entry(
             "/tmp/project",
-            "agent-a",
-            "copilot",
-            crate::domain::sync::MessageKind::Info,
+            "sync",
+            Some("agent-a"),
+            "info",
             "first activity",
             None,
         )
         .unwrap();
 
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.agents = vec![AgentEntry::Agent(sample_agent("bg-1", "/tmp/project"))];
         app.selected = 0;
         app.hidden_activity_workdirs
@@ -386,18 +518,24 @@ mod tests {
     #[test]
     fn toggle_activity_panel_shows_when_auto_panel_is_suppressed_by_width() {
         let db = test_db();
-        db.insert_sync_message(
+        // The panel renders the bitácora, not `sync_messages`.
+        db.insert_activity_log_entry(
             "/tmp/project",
-            "agent-a",
-            "copilot",
-            crate::domain::sync::MessageKind::Info,
+            "sync",
+            Some("agent-a"),
+            "info",
             "first activity",
             None,
         )
         .unwrap();
 
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.agents = vec![AgentEntry::Agent(sample_agent("bg-1", "/tmp/project"))];
         app.selected = 0;
         app.term_width = 60;
@@ -421,7 +559,12 @@ mod tests {
     fn activity_panel_width_is_30_percent_clamped_between_24_and_80() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
 
         assert_eq!(app.activity_panel_layout_width(100, true), 30);
         assert_eq!(app.activity_panel_layout_width(70, true), 0);
@@ -431,7 +574,12 @@ mod tests {
     fn activity_panel_width_grows_proportionally_past_the_old_fixed_cap() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
 
         // Narrow: below the minimum, panel is hidden.
         assert_eq!(app.activity_panel_layout_width(70, true), 0);
@@ -454,18 +602,23 @@ mod tests {
     #[test]
     fn activity_panel_width_uses_forced_minimum_when_narrow() {
         let db = test_db();
-        db.insert_sync_message(
+        db.insert_activity_log_entry(
             "/tmp/project",
-            "agent-a",
-            "copilot",
-            crate::domain::sync::MessageKind::Info,
+            "sync",
+            Some("agent-a"),
+            "info",
             "first activity",
             None,
         )
         .unwrap();
 
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.agents = vec![AgentEntry::Agent(sample_agent("bg-1", "/tmp/project"))];
         app.selected = 0;
         app.hidden_activity_workdirs

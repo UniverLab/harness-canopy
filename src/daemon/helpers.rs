@@ -19,6 +19,29 @@ pub(crate) fn error_result(message: &str) -> CallToolResult {
     CallToolResult::error(vec![rmcp::model::Content::text(message.to_string())])
 }
 
+/// CB68 FR1: shape a deprecated alias tool's *successful* response so it
+/// carries a `deprecated` marker alongside the original message, without
+/// duplicating the underlying handler's logic — callers run the real
+/// `graph_*` handler first, then wrap its `CallToolResult` with this.
+/// Error results pass through unchanged: only a successful call is
+/// "deprecated behaviour that still worked slightly differently than
+/// advertised"; a rejected call is just rejected, same as the non-alias tool.
+pub(crate) fn with_deprecated_note(result: CallToolResult, note: &str) -> CallToolResult {
+    if result.is_error == Some(true) {
+        return result;
+    }
+    let message = result
+        .content
+        .first()
+        .and_then(|c| c.as_text())
+        .map(|t| t.text.clone())
+        .unwrap_or_default();
+    CallToolResult::structured(serde_json::json!({
+        "message": message,
+        "deprecated": note,
+    }))
+}
+
 pub(crate) fn filter_log_line(
     line: &str,
     since_dt: &chrono::DateTime<chrono::FixedOffset>,
@@ -202,6 +225,31 @@ mod tests {
         let result = error_result("Something went wrong");
         assert_eq!(result.is_error, Some(true));
         assert_eq!(result.content.len(), 1);
+    }
+
+    #[test]
+    fn with_deprecated_note_adds_marker_on_success() {
+        let result = success_result("Graph node result recorded.");
+        let wrapped = with_deprecated_note(
+            result,
+            "loop_complete_node was renamed graph_complete_node in 3.0.0",
+        );
+        assert_eq!(wrapped.is_error, Some(false));
+        let text = wrapped.content[0].as_text().unwrap().text.clone();
+        assert!(text.contains("Graph node result recorded."));
+        assert!(text.contains("loop_complete_node was renamed graph_complete_node in 3.0.0"));
+        let structured = wrapped.structured_content.unwrap();
+        assert_eq!(
+            structured["deprecated"],
+            "loop_complete_node was renamed graph_complete_node in 3.0.0"
+        );
+    }
+
+    #[test]
+    fn with_deprecated_note_passes_through_errors_unchanged() {
+        let result = error_result("status must be pass or fail");
+        let wrapped = with_deprecated_note(result.clone(), "some note");
+        assert_eq!(wrapped, result);
     }
 
     #[test]

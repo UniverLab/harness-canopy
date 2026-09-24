@@ -48,7 +48,7 @@ pub struct FileCandidate {
 /// rows a human would scan when judging whether to nuke a project).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ProjectDependentCounts {
-    pub loops: i64,
+    pub graphs: i64,
     pub interactive_sessions: i64,
     pub terminal_sessions: i64,
 }
@@ -57,8 +57,8 @@ pub struct ProjectDependentCounts {
 /// soft-mode trio, this includes every project-scoped table the cascade
 /// actually deletes (sessions, prompts, scheduled sends, sync state) plus
 /// every row that is auto-cascade-deleted by SQLite's FK rules when the
-/// owning loop / interactive_session / intelligence_node is removed (the
-/// `loop_*` / `ensemble_*` / `queue_members` / `seed_sessions` /
+/// owning graph / interactive_session / intelligence_node is removed (the
+/// `graph_*` / `ensemble_*` / `queue_members` / `seed_sessions` /
 /// `intelligence_edges` rows). Surfaced in the pre-delete prompt so the
 /// reader sees the entire blast radius, not just the rows the cascade
 /// driver issues a `DELETE` for.
@@ -66,7 +66,7 @@ pub struct ProjectDependentCounts {
 pub struct HardCascadeCounts {
     // Direct targets (rows whose own `workdir`/`working_dir`/`project_hash`
     // column points at this project).
-    pub loops: i64,
+    pub graphs: i64,
     pub interactive_sessions: i64,
     pub terminal_sessions: i64,
     pub last_prompts: i64,
@@ -75,13 +75,14 @@ pub struct HardCascadeCounts {
     pub sync_messages: i64,
     pub sync_locks: i64,
     pub intelligence_nodes: i64,
+    pub operational_sessions: i64,
     // Auto-cascade targets (rows removed by FK ON DELETE CASCADE once the
     // direct target above is deleted; counted up front for the prompt).
-    pub loop_specs: i64,
-    pub loop_nodes: i64,
-    pub loop_edges: i64,
-    pub loop_runs: i64,
-    pub loop_completion_hook_runs: i64,
+    pub graph_specs: i64,
+    pub graph_nodes: i64,
+    pub graph_edges: i64,
+    pub graph_runs: i64,
+    pub graph_completion_hook_runs: i64,
     pub ensembles: i64,
     pub ensemble_members: i64,
     pub queue_members: i64,
@@ -91,7 +92,7 @@ pub struct HardCascadeCounts {
 
 impl HardCascadeCounts {
     pub fn is_empty(&self) -> bool {
-        self.loops == 0
+        self.graphs == 0
             && self.interactive_sessions == 0
             && self.terminal_sessions == 0
             && self.last_prompts == 0
@@ -100,11 +101,12 @@ impl HardCascadeCounts {
             && self.sync_messages == 0
             && self.sync_locks == 0
             && self.intelligence_nodes == 0
-            && self.loop_specs == 0
-            && self.loop_nodes == 0
-            && self.loop_edges == 0
-            && self.loop_runs == 0
-            && self.loop_completion_hook_runs == 0
+            && self.operational_sessions == 0
+            && self.graph_specs == 0
+            && self.graph_nodes == 0
+            && self.graph_edges == 0
+            && self.graph_runs == 0
+            && self.graph_completion_hook_runs == 0
             && self.ensembles == 0
             && self.ensemble_members == 0
             && self.queue_members == 0
@@ -116,13 +118,13 @@ impl HardCascadeCounts {
 /// Why a project that *would* have been cascaded was instead skipped.
 ///
 /// Spec C2: a project is never deleted by `--hard` if it has a currently
-/// running loop, or an `active`/`resumed` interactive session, even when
+/// running graph, or an `active`/`resumed` interactive session, even when
 /// the workdir is missing. The skip reason is what the prompt reports back
-/// (so the user can decide whether to retry after the loop ends).
+/// (so the user can decide whether to retry after the graph ends).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HardCascadeSkipReason {
-    /// At least one loop for this project has `status = 'running'`.
-    RunningLoop,
+    /// At least one graph for this project has `status = 'running'`.
+    RunningGraph,
     /// At least one interactive session for this project is `active` or
     /// `resumed`.
     ActiveSession,
@@ -131,7 +133,7 @@ pub enum HardCascadeSkipReason {
 impl HardCascadeSkipReason {
     pub fn describe(self) -> &'static str {
         match self {
-            Self::RunningLoop => "has a running loop",
+            Self::RunningGraph => "has a running graph",
             Self::ActiveSession => "has an active/resumed interactive session",
         }
     }
@@ -170,7 +172,7 @@ pub struct HardCascadeCandidate {
     pub path: String,
     pub workdir_exists: bool,
     pub counts: HardCascadeCounts,
-    /// `Some(reason)` if this project has a running loop or an
+    /// `Some(reason)` if this project has a running graph or an
     /// `active`/`resumed` interactive session, in which case the cascade
     /// MUST skip it. The reason is reported in the printed plan so the
     /// user can see why their orphan wasn't eligible.
@@ -190,7 +192,7 @@ pub struct HardCascadeTarget {
 }
 
 /// A project that `--hard` would have deleted but skipped because of an
-/// in-flight guard (running loop / active session).
+/// in-flight guard (running graph / active session).
 #[derive(Debug, Clone)]
 pub struct HardCascadeSkip {
     pub hash: String,
@@ -213,6 +215,41 @@ impl HardCascadePlan {
     }
 }
 
+/// A sandbox worktree as input to [`plan_sandbox_cleanup`].
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct SandboxCandidate {
+    pub id: String,
+    pub path: PathBuf,
+    pub graph_id: String,
+    pub branch: String,
+    pub run_over: bool,
+    pub has_unique_commits: Option<bool>,
+}
+
+/// A sandbox worktree `canopy clean` will reclaim in bulk.
+#[derive(Debug, Clone)]
+pub struct SandboxCleanTarget {
+    pub id: String,
+    pub path: PathBuf,
+    pub branch: String,
+}
+
+/// Which sandboxes `canopy clean` may reclaim in bulk (CB42 req 3's rule
+/// with force=false): the run is over AND the branch provably holds no
+/// commits that exist nowhere else. `None` (uncertain) is excluded — keep.
+pub fn plan_sandbox_cleanup(candidates: &[SandboxCandidate]) -> Vec<SandboxCleanTarget> {
+    candidates
+        .iter()
+        .filter(|c| c.run_over && c.has_unique_commits == Some(false))
+        .map(|c| SandboxCleanTarget {
+            id: c.id.clone(),
+            path: c.path.clone(),
+            branch: c.branch.clone(),
+        })
+        .collect()
+}
+
 /// Everything a `canopy clean` run decided to do (or, under `--dry-run`,
 /// decided it *would* do).
 #[derive(Debug, Clone, Default)]
@@ -222,6 +259,11 @@ pub struct CleanPlan {
     pub terminal_dirs: Vec<FileCandidate>,
     pub rag_residue_files: Vec<FileCandidate>,
     pub orphaned_projects: Vec<OrphanProjectReport>,
+    /// Sandbox worktrees to reclaim (bulk discard, never forced).
+    pub sandbox_removals: Vec<SandboxCleanTarget>,
+    /// Anonymous worktree directories with no run record. Reported as
+    /// skipped — never removed.
+    pub sandbox_untracked: Vec<PathBuf>,
 }
 
 impl CleanPlan {
@@ -248,12 +290,14 @@ impl CleanPlan {
     }
 
     /// Whether the plan deletes anything at all (orphaned-project *reports*
-    /// don't count — soft mode never deletes those).
+    /// and untracked-sandbox *skips* don't count — soft mode never deletes
+    /// those).
     pub fn is_empty(&self) -> bool {
         self.session_ids.is_empty()
             && self.log_files.is_empty()
             && self.terminal_dirs.is_empty()
             && self.rag_residue_files.is_empty()
+            && self.sandbox_removals.is_empty()
     }
 }
 
@@ -347,7 +391,7 @@ pub fn plan_orphaned_projects(candidates: &[ProjectCandidate]) -> Vec<OrphanProj
 /// it must skip. A project is included in `targets` iff:
 ///
 /// - its workdir is missing (the only thing `--hard` cleans up), AND
-/// - it has no running loop and no `active`/`resumed` session (the
+/// - it has no running graph and no `active`/`resumed` session (the
 ///   in-flight guard: deleting state out from under a live agent would
 ///   corrupt the run), AND
 /// - the caller has at least one row to clean (an orphan with zero
@@ -506,7 +550,7 @@ mod tests {
                 path: "/missing".to_string(),
                 workdir_exists: false,
                 dependents: ProjectDependentCounts {
-                    loops: 2,
+                    graphs: 2,
                     interactive_sessions: 3,
                     terminal_sessions: 1,
                 },
@@ -515,7 +559,7 @@ mod tests {
         let report = plan_orphaned_projects(&candidates);
         assert_eq!(report.len(), 1);
         assert_eq!(report[0].hash, "bbbb");
-        assert_eq!(report[0].dependents.loops, 2);
+        assert_eq!(report[0].dependents.graphs, 2);
     }
 
     #[test]
@@ -546,7 +590,7 @@ mod tests {
     #[test]
     fn hard_plan_only_targets_missing_workdirs() {
         let counts = HardCascadeCounts {
-            loops: 1,
+            graphs: 1,
             ..Default::default()
         };
         let candidates = vec![
@@ -560,9 +604,9 @@ mod tests {
     }
 
     #[test]
-    fn hard_plan_skips_projects_with_running_loops() {
+    fn hard_plan_skips_projects_with_running_graphs() {
         let counts = HardCascadeCounts {
-            loops: 1,
+            graphs: 1,
             ..Default::default()
         };
         let candidates = vec![hard_candidate(
@@ -571,12 +615,12 @@ mod tests {
             "/r",
             false,
             counts,
-            Some(HardCascadeSkipReason::RunningLoop),
+            Some(HardCascadeSkipReason::RunningGraph),
         )];
         let plan = plan_hard_cascade(&candidates);
         assert!(plan.targets.is_empty());
         assert_eq!(plan.skips.len(), 1);
-        assert_eq!(plan.skips[0].reason, HardCascadeSkipReason::RunningLoop);
+        assert_eq!(plan.skips[0].reason, HardCascadeSkipReason::RunningGraph);
         assert_eq!(plan.skips[0].hash, "running");
     }
 
@@ -620,8 +664,8 @@ mod tests {
 
     #[test]
     fn hard_plan_reports_all_targets_and_skips_independently() {
-        let counts_with_loops = HardCascadeCounts {
-            loops: 2,
+        let counts_with_graphs = HardCascadeCounts {
+            graphs: 2,
             interactive_sessions: 1,
             ..Default::default()
         };
@@ -630,7 +674,7 @@ mod tests {
             ..Default::default()
         };
         let candidates = vec![
-            hard_candidate("ok", "ok", "/ok", false, counts_with_loops, None),
+            hard_candidate("ok", "ok", "/ok", false, counts_with_graphs, None),
             hard_candidate(
                 "live",
                 "live",
@@ -639,12 +683,12 @@ mod tests {
                 counts_with_sessions,
                 Some(HardCascadeSkipReason::ActiveSession),
             ),
-            hard_candidate("kept", "kept", "/kept", true, counts_with_loops, None),
+            hard_candidate("kept", "kept", "/kept", true, counts_with_graphs, None),
         ];
         let plan = plan_hard_cascade(&candidates);
         assert_eq!(plan.targets.len(), 1);
         assert_eq!(plan.targets[0].hash, "ok");
-        assert_eq!(plan.targets[0].counts.loops, 2);
+        assert_eq!(plan.targets[0].counts.graphs, 2);
         assert_eq!(plan.targets[0].counts.interactive_sessions, 1);
         assert_eq!(plan.skips.len(), 1);
         assert_eq!(plan.skips[0].hash, "live");
@@ -653,8 +697,8 @@ mod tests {
     #[test]
     fn skip_reason_describe_is_human_readable() {
         assert_eq!(
-            HardCascadeSkipReason::RunningLoop.describe(),
-            "has a running loop"
+            HardCascadeSkipReason::RunningGraph.describe(),
+            "has a running graph"
         );
         assert_eq!(
             HardCascadeSkipReason::ActiveSession.describe(),
@@ -666,7 +710,7 @@ mod tests {
     fn hard_cascade_counts_is_empty_when_all_zero() {
         assert!(HardCascadeCounts::default().is_empty());
         assert!(!HardCascadeCounts {
-            loop_edges: 1,
+            graph_edges: 1,
             ..Default::default()
         }
         .is_empty());
@@ -717,6 +761,8 @@ mod tests {
                 size_bytes: 300,
             }],
             orphaned_projects: vec![],
+            sandbox_removals: vec![],
+            sandbox_untracked: vec![],
         };
         assert_eq!(plan.reclaimed_bytes(), 600);
     }
@@ -734,6 +780,8 @@ mod tests {
                 missing_path: "/missing".to_string(),
                 dependents: ProjectDependentCounts::default(),
             }],
+            sandbox_removals: vec![],
+            sandbox_untracked: vec![],
         };
         assert_eq!(plan.reclaimed_bytes(), 0);
     }
@@ -748,6 +796,8 @@ mod tests {
             terminal_dirs: vec![],
             rag_residue_files: vec![],
             orphaned_projects: vec![],
+            sandbox_removals: vec![],
+            sandbox_untracked: vec![],
         };
         assert!(!plan.is_empty());
     }
@@ -765,6 +815,8 @@ mod tests {
             terminal_dirs: vec![],
             rag_residue_files: vec![],
             orphaned_projects: vec![],
+            sandbox_removals: vec![],
+            sandbox_untracked: vec![],
         };
         assert!(!plan.is_empty());
     }
@@ -782,6 +834,8 @@ mod tests {
                 size_bytes: 5,
             }],
             orphaned_projects: vec![],
+            sandbox_removals: vec![],
+            sandbox_untracked: vec![],
         };
         assert!(!plan.is_empty());
     }
@@ -796,7 +850,7 @@ mod tests {
                 hash: "h".to_string(),
                 name: "n".to_string(),
                 missing_path: "/p".to_string(),
-                reason: HardCascadeSkipReason::RunningLoop,
+                reason: HardCascadeSkipReason::RunningGraph,
             }],
         };
         // is_empty only checks targets, not skips
@@ -811,7 +865,7 @@ mod tests {
                 name: "n".to_string(),
                 missing_path: "/p".to_string(),
                 counts: HardCascadeCounts {
-                    loops: 1,
+                    graphs: 1,
                     ..Default::default()
                 },
             }],
@@ -825,7 +879,7 @@ mod tests {
     #[test]
     fn hard_cascade_counts_any_nonzero_field_makes_it_not_empty() {
         assert!(!HardCascadeCounts {
-            loops: 0,
+            graphs: 0,
             interactive_sessions: 0,
             terminal_sessions: 0,
             last_prompts: 1,
@@ -847,7 +901,7 @@ mod tests {
     #[test]
     fn hard_cascade_counts_all_fields_zero() {
         let c = HardCascadeCounts {
-            loops: 0,
+            graphs: 0,
             interactive_sessions: 0,
             terminal_sessions: 0,
             last_prompts: 0,
@@ -856,11 +910,12 @@ mod tests {
             sync_messages: 0,
             sync_locks: 0,
             intelligence_nodes: 0,
-            loop_specs: 0,
-            loop_nodes: 0,
-            loop_edges: 0,
-            loop_runs: 0,
-            loop_completion_hook_runs: 0,
+            operational_sessions: 0,
+            graph_specs: 0,
+            graph_nodes: 0,
+            graph_edges: 0,
+            graph_runs: 0,
+            graph_completion_hook_runs: 0,
             ensembles: 0,
             ensemble_members: 0,
             queue_members: 0,
@@ -875,22 +930,22 @@ mod tests {
     #[test]
     fn hard_cascade_skip_reason_eq() {
         assert_eq!(
-            HardCascadeSkipReason::RunningLoop,
-            HardCascadeSkipReason::RunningLoop
+            HardCascadeSkipReason::RunningGraph,
+            HardCascadeSkipReason::RunningGraph
         );
         assert_eq!(
             HardCascadeSkipReason::ActiveSession,
             HardCascadeSkipReason::ActiveSession
         );
         assert_ne!(
-            HardCascadeSkipReason::RunningLoop,
+            HardCascadeSkipReason::RunningGraph,
             HardCascadeSkipReason::ActiveSession
         );
     }
 
     #[test]
     fn hard_cascade_skip_reason_debug() {
-        let _ = format!("{:?}", HardCascadeSkipReason::RunningLoop);
+        let _ = format!("{:?}", HardCascadeSkipReason::RunningGraph);
         let _ = format!("{:?}", HardCascadeSkipReason::ActiveSession);
     }
 
@@ -1110,7 +1165,7 @@ mod tests {
                 "/t",
                 false,
                 HardCascadeCounts {
-                    loops: 1,
+                    graphs: 1,
                     ..Default::default()
                 },
                 None,
@@ -1132,7 +1187,7 @@ mod tests {
                 "/e",
                 true,
                 HardCascadeCounts {
-                    loops: 1,
+                    graphs: 1,
                     ..Default::default()
                 },
                 None,
@@ -1177,6 +1232,8 @@ mod tests {
             terminal_dirs: vec![],
             rag_residue_files: vec![],
             orphaned_projects: vec![],
+            sandbox_removals: vec![],
+            sandbox_untracked: vec![],
         };
         // Bytes from log_files must never leak into the row count.
         assert_eq!(plan.deleted_row_count(), 3);
@@ -1200,5 +1257,44 @@ mod tests {
     #[test]
     fn is_rag_residue_name_false_for_no_extension() {
         assert!(!is_rag_residue_name(std::path::Path::new("/noext")));
+    }
+
+    // ── CB42: plan_sandbox_cleanup ─────────────────────────────────────
+
+    fn sandbox_candidate(
+        id: &str,
+        run_over: bool,
+        has_unique_commits: Option<bool>,
+    ) -> SandboxCandidate {
+        SandboxCandidate {
+            id: id.to_string(),
+            path: PathBuf::from(format!("/wt/{id}")),
+            graph_id: "graph-1".to_string(),
+            branch: format!("canopy/sandbox-{id}"),
+            run_over,
+            has_unique_commits,
+        }
+    }
+
+    #[test]
+    fn plan_sandbox_cleanup_keeps_unique_uncertain_and_live() {
+        let candidates = vec![
+            sandbox_candidate("clean-done", true, Some(false)),
+            sandbox_candidate("unique-done", true, Some(true)),
+            sandbox_candidate("uncertain-done", true, None),
+            sandbox_candidate("clean-live", false, Some(false)),
+            sandbox_candidate("unique-live", false, Some(true)),
+        ];
+        let plan = plan_sandbox_cleanup(&candidates);
+        // Only `run_over && Some(false)` is selected — anything else keeps.
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].id, "clean-done");
+        assert_eq!(plan[0].branch, "canopy/sandbox-clean-done");
+    }
+
+    #[test]
+    fn plan_sandbox_cleanup_empty() {
+        let plan = plan_sandbox_cleanup(&[]);
+        assert!(plan.is_empty());
     }
 }

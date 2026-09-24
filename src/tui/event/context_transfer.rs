@@ -52,19 +52,18 @@ pub fn handle_context_transfer_key(app: &mut App, code: KeyCode) -> Result<()> {
                     modal.step = ContextTransferStep::Preview;
                 }
             }
-            KeyCode::Up => {
-                if let Some(modal) = app.context_transfer_modal.as_mut() {
-                    if modal.picker_selected > 0 {
-                        modal.picker_selected -= 1;
-                    }
-                }
-            }
-            KeyCode::Down => {
+            KeyCode::Up | KeyCode::Down => {
                 let picker_len = app.picker_interactive_entries().len();
+                if picker_len == 0 {
+                    return Ok(());
+                }
+                let forward = matches!(code, KeyCode::Down);
                 if let Some(modal) = app.context_transfer_modal.as_mut() {
-                    if modal.picker_selected + 1 < picker_len {
-                        modal.picker_selected += 1;
-                    }
+                    modal.picker_selected = crate::tui::selection::move_index(
+                        modal.picker_selected,
+                        picker_len,
+                        forward,
+                    );
                 }
             }
             KeyCode::Enter => {
@@ -137,7 +136,12 @@ mod split_focus_tests {
     fn app_with_split_group(right_focused: bool) -> App {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.split_groups.push(SplitGroup {
             id: "split-1".to_string(),
             orientation: SplitOrientation::Horizontal,
@@ -166,7 +170,12 @@ mod split_focus_tests {
     fn none_when_no_split_is_active() {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         assert_eq!(active_split_session_name(&app), None);
     }
 

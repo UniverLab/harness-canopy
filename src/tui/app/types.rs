@@ -5,18 +5,18 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 
-use super::loop_live_state::LoopLiveState;
+use super::graph_live_state::GraphLiveState;
 use crate::application::notification_service::NotificationService;
 use crate::db::project::{RagInfoSummary, RagQueueItem};
 use crate::db::Database;
-use crate::domain::loops::{Loop, LoopDetails, LoopNodeRun, LoopSpec};
+use crate::domain::graphs::{Graph, GraphDetails, GraphNodeRun, GraphSpec};
 use crate::domain::models::{Agent, CorruptAgent, RunLog};
 use crate::domain::project::Project;
 use crate::domain::sync::{ActiveIntent, SyncMessage, WorkspaceStatus};
 use crate::rag::vector_store::SearchResult;
 use crate::tui::agent::InteractiveAgent;
 use crate::tui::app::dialog::{
-    LaunchpadDialog, LoopFormDialog, NewAgentDialog, SimplePromptDialog,
+    GraphFormDialog, LaunchpadDialog, NewAgentDialog, SimplePromptDialog,
 };
 use crate::tui::app::terminal_search::TerminalSearch;
 /// Unified entry in the sidebar.
@@ -61,8 +61,8 @@ pub enum Focus {
     ContextTransfer,
     RagTransfer,
     PromptTemplateDialog,
-    LoopEditorDialog,
-    LoopFormDialog,
+    GraphEditorDialog,
+    GraphFormDialog,
     ProjectRelationDialog,
 }
 
@@ -95,18 +95,55 @@ impl TerminalSelection {
 pub enum SidebarLayer {
     /// Interactive agents + terminals — the things with a PTY right now.
     Live,
-    /// Background agents + loops — live/recent runs, global across projects.
+    /// Background agents + graphs — live/recent runs, global across projects.
     Automation,
     /// The projects list.
     Knowledge,
 }
 
-/// Which of Automation's two sub-lists (background agents, loops) arrow-key
+/// Which of Automation's two sub-lists (background agents, graphs) arrow-key
 /// navigation is currently cycling through.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AutomationKind {
     Agent,
-    Loop,
+    Graph,
+}
+
+/// The right panel's faces (CT1): one panel, three views. Activity is the
+/// resting face when nothing else applies; Knowledge shows activity moved
+/// under it plus the project-relations graph; Graph shows a read-only view
+/// of the running graph.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PanelFace {
+    #[default]
+    Activity,
+    Knowledge,
+    Graph,
+}
+
+impl PanelFace {
+    pub const ALL: [PanelFace; 3] = [PanelFace::Activity, PanelFace::Knowledge, PanelFace::Graph];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PanelFace::Activity => "activity",
+            PanelFace::Knowledge => "knowledge",
+            PanelFace::Graph => "graph",
+        }
+    }
+
+    /// Parse the persisted config string. Unknown values map to `None` so a
+    /// config written by a newer binary never breaks this one — the panel
+    /// just stays in automatic mode.
+    pub fn from_str(value: &str) -> Option<PanelFace> {
+        match value {
+            "activity" => Some(PanelFace::Activity),
+            "knowledge" => Some(PanelFace::Knowledge),
+            "graph" => Some(PanelFace::Graph),
+            _ => None,
+        }
+    }
 }
 
 /// Tabs shown inside a project once it's entered (`Focus::Agent` while
@@ -131,7 +168,7 @@ pub(crate) struct SidebarStepMemory {
     pub(crate) live_selected: Option<usize>,
     pub(crate) automation_kind: Option<AutomationKind>,
     pub(crate) automation_selected: Option<usize>,
-    pub(crate) automation_loop_id: Option<String>,
+    pub(crate) automation_graph_id: Option<String>,
     pub(crate) knowledge_selected: Option<usize>,
 }
 
@@ -170,41 +207,41 @@ pub(crate) struct ProjectPreviewSummary {
     pub pending_backlog: usize,
     pub knowledge_entries: usize,
     pub last_activity: Option<i64>,
-    pub loop_running: bool,
+    pub graph_running: bool,
 }
 
-/// Per-loop rendering data for the sidebar's `Loops` section: when the loop
+/// Per-graph rendering data for the sidebar's `Graphs` section: when the graph
 /// last did something, and whether it is stuck on a reported blocker (a
-/// `Paused` loop whose latest run recorded a `blocker`, see
-/// `loop_report_blocker`). Computed once per refresh cycle
-/// (`App::refresh_loops`) rather than queried or formatted per frame — the
+/// `Paused` graph whose latest run recorded a `blocker`, see
+/// `graph_report_blocker`). Computed once per refresh cycle
+/// (`App::refresh_graphs`) rather than queried or formatted per frame — the
 /// sidebar just prints `last_run_label` as-is.
 ///
-/// Deliberately not a per-loop spec count: that reads `0/0` for a
-/// queue-driven loop, whose specs live on the queue rather than on the loop
-/// itself (the loop focus view's `state.done_count`/`total_count` is the
+/// Deliberately not a per-graph spec count: that reads `0/0` for a
+/// queue-driven graph, whose specs live on the queue rather than on the graph
+/// itself (the graph focus view's `state.done_count`/`total_count` is the
 /// correct place for that number, and is unaffected by this struct).
 #[derive(Clone)]
-pub(crate) struct LoopSidebarMeta {
-    /// Last recorded activity for this loop: the latest `loop_runs.started_at`
+pub(crate) struct GraphSidebarMeta {
+    /// Last recorded activity for this graph: the latest `graph_runs.started_at`
     /// across every node run belonging to it, or — if it has never run — the
-    /// loop's own `created_at`. A single monotonic "last activity" key that
-    /// is defined for every loop regardless of status — the sort key behind
-    /// `App::sidebar_loops`' most-recent-first ordering.
+    /// graph's own `created_at`. A single monotonic "last activity" key that
+    /// is defined for every graph regardless of status — the sort key behind
+    /// `App::sidebar_graphs`' most-recent-first ordering.
     pub last_activity: DateTime<Utc>,
     /// Precomputed display text for `last_activity`: a compact relative
-    /// time (`2m`, `1h`, `3d`), `"running"` while the loop is actively
+    /// time (`2m`, `1h`, `3d`), `"running"` while the graph is actively
     /// executing, or `"never"` if it has never run.
     pub last_run_label: String,
     pub blocked: bool,
-    /// `"resumes 5m"`-style label when the loop has a pending
-    /// `loop_schedule_autorun`, `None` otherwise.
+    /// `"resumes 5m"`-style label when the graph has a pending
+    /// `graph_schedule_autorun`, `None` otherwise.
     pub autorun_label: Option<String>,
 }
 
-impl Default for LoopSidebarMeta {
-    /// Only used as a placeholder before the first `refresh_loops` populates
-    /// the real map — every loop gets a real entry on every refresh, so this
+impl Default for GraphSidebarMeta {
+    /// Only used as a placeholder before the first `refresh_graphs` populates
+    /// the real map — every graph gets a real entry on every refresh, so this
     /// value is never actually shown.
     fn default() -> Self {
         Self {
@@ -227,37 +264,37 @@ pub enum AgentSectionFocus {
     Brain,
 }
 
-/// Which sub-region of the live loop view owns plain arrow-key navigation:
-/// the node graph (`loop_graph_move_highlight`, the long-standing default)
-/// or the spec marker strip at the top (`loop_spec_strip_move_selection`).
-/// Toggled with Tab/BackTab while a loop is the active sidebar selection —
-/// see `on_loop` in `crate::tui::event::home_preview`.
+/// Which sub-region of the live graph view owns plain arrow-key navigation:
+/// the node graph (`graph_live_move_highlight`, the long-standing default)
+/// or the spec marker strip at the top (`graph_spec_strip_move_selection`).
+/// Toggled with Tab/BackTab while a graph is the active sidebar selection —
+/// see `on_graph` in `crate::tui::event::home_preview`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub(crate) enum LoopLiveFocus {
+pub(crate) enum GraphLiveFocus {
     #[default]
     Graph,
     SpecStrip,
 }
 
 #[derive(Clone)]
-pub(crate) enum LoopEditorMode {
+pub(crate) enum GraphEditorMode {
     AgentPrompt,
     NodeConfig,
-    /// A [`crate::domain::loops::LoopNodeKind::Router`] node's structured
+    /// A [`crate::domain::graphs::GraphNodeKind::Router`] node's structured
     /// routes/fallback/wiring editor — replaces the raw JSON buffer used by
-    /// [`LoopEditorMode::NodeConfig`] with the `router_*` fields below, since
+    /// [`GraphEditorMode::NodeConfig`] with the `router_*` fields below, since
     /// wiring an edge per route isn't expressible as node config alone.
     RouterRoutes,
     /// A node's outgoing `pass`/`fail`/`always` edges — lets an ordinary
     /// edge be retargeted or deleted, through the same validated path
-    /// (`daemon::handler::retarget_loop_edge`/`delete_loop_edge_checked`)
-    /// the `loop_update_edge`/`loop_delete_edge` MCP tools use, rather than
-    /// only a router's route edges (see [`LoopEditorMode::RouterRoutes`]).
+    /// (`daemon::handler::retarget_graph_edge`/`delete_graph_edge_checked`)
+    /// the `graph_update_edge`/`graph_delete_edge` MCP tools use, rather than
+    /// only a router's route edges (see [`GraphEditorMode::RouterRoutes`]).
     Edges,
 }
 
 /// Which sub-field of the currently-focused route row
-/// [`LoopEditorDialog::router_field`] points at.
+/// [`GraphEditorDialog::router_field`] points at.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum RouterField {
     Label,
@@ -268,7 +305,7 @@ pub(crate) enum RouterField {
 /// One route being edited in the router routes dialog: the declared
 /// label/description (persisted into the node's `config`) plus the target
 /// node its `route` edge should point at (persisted as a separate
-/// [`crate::domain::loops::LoopEdge`] on save — `None` means not wired yet).
+/// [`crate::domain::graphs::GraphEdge`] on save — `None` means not wired yet).
 #[derive(Clone, Default)]
 pub(crate) struct RouterRouteDraft {
     pub label: String,
@@ -277,14 +314,14 @@ pub(crate) struct RouterRouteDraft {
 }
 
 #[derive(Clone)]
-pub(crate) struct LoopEditorDialog {
+pub(crate) struct GraphEditorDialog {
     pub node_id: String,
     pub node_name: String,
     pub title: String,
     pub help: String,
     pub buffer: String,
     pub cursor: usize,
-    pub mode: LoopEditorMode,
+    pub mode: GraphEditorMode,
     pub parse_error: Option<String>,
     /// `RouterRoutes` mode only, below — unused (empty) otherwise.
     pub router_routes: Vec<RouterRouteDraft>,
@@ -297,21 +334,21 @@ pub(crate) struct LoopEditorDialog {
     /// `Edges` mode only, below — unused (empty) otherwise. This node's
     /// outgoing `pass`/`fail`/`always` edges (route edges are managed via
     /// `RouterRoutes` instead).
-    pub edge_rows: Vec<crate::domain::loops::LoopEdge>,
+    pub edge_rows: Vec<crate::domain::graphs::GraphEdge>,
     pub edge_row_index: usize,
     /// Candidate `(node_id, node_name)` retarget destinations: every other
     /// node in the edge's graph — same set as `router_targets`.
     pub edge_targets: Vec<(String, String)>,
 }
 
-impl LoopEditorDialog {
+impl GraphEditorDialog {
     pub fn new(
         node_id: String,
         node_name: String,
         title: String,
         help: String,
         buffer: String,
-        mode: LoopEditorMode,
+        mode: GraphEditorMode,
     ) -> Self {
         let cursor = buffer.chars().count();
         Self {
@@ -339,7 +376,7 @@ impl LoopEditorDialog {
         node_name: String,
         title: String,
         help: String,
-        edges: Vec<crate::domain::loops::LoopEdge>,
+        edges: Vec<crate::domain::graphs::GraphEdge>,
         targets: Vec<(String, String)>,
     ) -> Self {
         Self {
@@ -349,7 +386,7 @@ impl LoopEditorDialog {
             help,
             buffer: String::new(),
             cursor: 0,
-            mode: LoopEditorMode::Edges,
+            mode: GraphEditorMode::Edges,
             parse_error: None,
             router_routes: Vec::new(),
             router_fallback: String::new(),
@@ -368,15 +405,12 @@ impl LoopEditorDialog {
         if self.edge_rows.is_empty() {
             return;
         }
-        self.edge_row_index = if forward {
-            (self.edge_row_index + 1) % self.edge_rows.len()
-        } else {
-            (self.edge_row_index + self.edge_rows.len() - 1) % self.edge_rows.len()
-        };
+        self.edge_row_index =
+            crate::tui::selection::move_index(self.edge_row_index, self.edge_rows.len(), forward);
     }
 
     /// The edge currently focused in `Edges` mode's row list.
-    pub fn focused_edge(&self) -> Option<&crate::domain::loops::LoopEdge> {
+    pub fn focused_edge(&self) -> Option<&crate::domain::graphs::GraphEdge> {
         self.edge_rows.get(self.edge_row_index)
     }
 
@@ -395,8 +429,7 @@ impl LoopEditorDialog {
             .position(|(id, _)| id == &edge.to_node);
         let len = self.edge_targets.len();
         let next_index = match current {
-            Some(index) if forward => (index + 1) % len,
-            Some(index) => (index + len - 1) % len,
+            Some(index) => crate::tui::selection::move_index(index, len, forward),
             None => 0,
         };
         Some(self.edge_targets[next_index].0.clone())
@@ -419,7 +452,7 @@ impl LoopEditorDialog {
             help,
             buffer: String::new(),
             cursor: 0,
-            mode: LoopEditorMode::RouterRoutes,
+            mode: GraphEditorMode::RouterRoutes,
             parse_error: None,
             router_routes: routes,
             router_fallback: fallback,
@@ -485,11 +518,7 @@ impl LoopEditorDialog {
         // Index space is `[None, targets[0], targets[1], ...]`.
         let len = self.router_targets.len() + 1;
         let current_index = current.map(|i| i + 1).unwrap_or(0);
-        let next_index = if forward {
-            (current_index + 1) % len
-        } else {
-            (current_index + len - 1) % len
-        };
+        let next_index = crate::tui::selection::move_index(current_index, len, forward);
         route.target_node_id = if next_index == 0 {
             None
         } else {
@@ -505,8 +534,11 @@ impl LoopEditorDialog {
             RouterField::Description => RouterField::Target,
             RouterField::Target => {
                 if !self.router_routes.is_empty() {
-                    self.router_route_index =
-                        (self.router_route_index + 1) % self.router_routes.len();
+                    self.router_route_index = crate::tui::selection::move_index(
+                        self.router_route_index,
+                        self.router_routes.len(),
+                        true,
+                    );
                 }
                 RouterField::Label
             }
@@ -519,10 +551,11 @@ impl LoopEditorDialog {
             RouterField::Description => RouterField::Label,
             RouterField::Label => {
                 if !self.router_routes.is_empty() {
-                    self.router_route_index = self
-                        .router_route_index
-                        .checked_sub(1)
-                        .unwrap_or(self.router_routes.len() - 1);
+                    self.router_route_index = crate::tui::selection::move_index(
+                        self.router_route_index,
+                        self.router_routes.len(),
+                        false,
+                    );
                 }
                 RouterField::Target
             }
@@ -535,13 +568,11 @@ impl LoopEditorDialog {
         if self.router_routes.is_empty() {
             return;
         }
-        self.router_route_index = if forward {
-            (self.router_route_index + 1) % self.router_routes.len()
-        } else {
-            self.router_route_index
-                .checked_sub(1)
-                .unwrap_or(self.router_routes.len() - 1)
-        };
+        self.router_route_index = crate::tui::selection::move_index(
+            self.router_route_index,
+            self.router_routes.len(),
+            forward,
+        );
     }
 
     /// Append a fresh, unwired route and focus it (Ctrl+N).
@@ -552,7 +583,7 @@ impl LoopEditorDialog {
     }
 
     /// Drop the focused route (Ctrl+D). If it was the fallback, the fallback
-    /// is cleared — [`crate::domain::loops::validate_router_routes`] will
+    /// is cleared — [`crate::domain::graphs::validate_router_routes`] will
     /// catch an empty/dangling fallback on save.
     pub fn router_remove_route(&mut self) {
         if self.router_routes.is_empty() {
@@ -684,6 +715,8 @@ pub struct App {
     pub(crate) daemon_running: bool,
     pub(crate) daemon_pid: Option<u32>,
     pub(crate) daemon_version: String,
+    /// Latest stable release found by the background notice check.
+    pub(crate) update_available: Option<String>,
 
     // UI state
     pub(crate) selected: usize,
@@ -714,16 +747,16 @@ pub struct App {
     pub(crate) pending_launch_dialog: Option<NewAgentDialog>,
     pub(crate) quit_confirm: bool,
     pub(crate) delete_project_confirm: bool,
-    pub(crate) archive_loop_confirm: bool,
+    pub(crate) archive_graph_confirm: bool,
     /// Permanent-delete confirmation, reachable only from the archived
-    /// view on an already-archived loop — see [`App::permanent_delete_selected_archived_loop`].
-    pub(crate) permanent_delete_loop_confirm: bool,
-    /// Confirmation gate for `loop_reset` (mirrors `archive_loop_confirm`) —
+    /// view on an already-archived graph — see [`App::permanent_delete_selected_archived_graph`].
+    pub(crate) permanent_delete_graph_confirm: bool,
+    /// Confirmation gate for `graph_reset` (mirrors `archive_graph_confirm`) —
     /// reset clears progress on every non-completed spec, so it asks first,
     /// with the same wording the CLI's own prompt uses (see
-    /// `daemon::loop_cli::confirm_reset`) so the two surfaces never teach
+    /// `daemon::graph_cli::confirm_reset`) so the two surfaces never teach
     /// different levels of caution.
-    pub(crate) loop_reset_confirm: bool,
+    pub(crate) graph_reset_confirm: bool,
 
     // Brian's Brain automaton (sidebar decoration)
     pub(crate) sidebar_brain: Option<crate::tui::brians_brain::BriansBrain>,
@@ -753,9 +786,9 @@ pub struct App {
     pub(crate) projects: Vec<Project>,
     pub(crate) selected_project: usize,
     pub(crate) agent_section_focus: AgentSectionFocus,
-    /// Mouse hit-test rows for the Automation layer's loop cards, populated
-    /// during draw: `(loop id, row_start, row_end)`.
-    pub(crate) automation_loop_click_map: Vec<(String, u16, u16)>,
+    /// Mouse hit-test rows for the Automation layer's graph cards, populated
+    /// during draw: `(graph id, row_start, row_end)`.
+    pub(crate) automation_graph_click_map: Vec<(String, u16, u16)>,
     /// Mouse hit-test rows for the Knowledge layer's project list,
     /// populated during draw: `(project index, row_start, row_end)`.
     pub(crate) project_click_map: Vec<(usize, u16, u16)>,
@@ -768,84 +801,107 @@ pub struct App {
     /// draw: `(tab, row, col_start, col_end)` — clicking switches the active
     /// tab.
     pub(crate) sidebar_tab_click_map: Vec<(SidebarLayer, u16, u16, u16)>,
-    pub(crate) loops: Vec<Loop>,
-    /// Archived loops (excluded from `loops`), populated only while
-    /// `loop_view_archived` is true — see [`App::refresh_loops`].
-    pub(crate) archived_loops: Vec<Loop>,
-    /// Count of archived loops, kept up to date on every refresh so it's
+    pub(crate) graphs: Vec<Graph>,
+    /// Archived graphs (excluded from `graphs`), populated only while
+    /// `graph_view_archived` is true — see [`App::refresh_graphs`].
+    pub(crate) archived_graphs: Vec<Graph>,
+    /// Count of archived graphs, kept up to date on every refresh so it's
     /// visible from the main view at all times regardless of
-    /// `loop_view_archived`.
-    pub(crate) archived_loop_count: usize,
-    /// Whether the Loops sidebar section is currently showing the archive
+    /// `graph_view_archived`.
+    pub(crate) archived_graph_count: usize,
+    /// Whether the Graphs sidebar section is currently showing the archive
     /// (`true`) instead of the main list (`false`) — a toggle on the
-    /// existing Loops section rather than a separate sidebar layer, so
-    /// archived loops stay in the same mental place as active ones.
-    pub(crate) loop_view_archived: bool,
-    pub(crate) selected_loop_id: Option<String>,
-    pub(crate) loop_details: Option<LoopDetails>,
-    pub(crate) loop_runs: Vec<LoopNodeRun>,
-    pub(crate) loop_selected_spec: usize,
-    pub(crate) loop_selected_node: usize,
-    pub(crate) loop_editor_dialog: Option<LoopEditorDialog>,
-    pub(crate) loop_form_dialog: Option<LoopFormDialog>,
-    /// Per-loop spec progress ("done/total") and blocked status for the
-    /// sidebar's `Loops` section, keyed by loop id. Refreshed alongside
-    /// `loops` in `App::refresh_loops`.
-    pub(crate) loop_sidebar_meta: HashMap<String, LoopSidebarMeta>,
-    /// Live snapshot of the currently-selected loop's runtime state,
-    /// refreshed every tick. `None` when no loop is selected.
-    pub(crate) loop_live_state: Option<LoopLiveState>,
-    /// Whether the live loop view's graph highlight auto-follows the
+    /// existing Graphs section rather than a separate sidebar layer, so
+    /// archived graphs stay in the same mental place as active ones.
+    pub(crate) graph_view_archived: bool,
+    pub(crate) selected_graph_id: Option<String>,
+    pub(crate) graph_details: Option<GraphDetails>,
+    pub(crate) graph_runs: Vec<GraphNodeRun>,
+    pub(crate) graph_selected_spec: usize,
+    pub(crate) graph_selected_node: usize,
+    pub(crate) graph_editor_dialog: Option<GraphEditorDialog>,
+    pub(crate) graph_form_dialog: Option<GraphFormDialog>,
+    /// Per-graph spec progress ("done/total") and blocked status for the
+    /// sidebar's `Graphs` section, keyed by graph id. Refreshed alongside
+    /// `graphs` in `App::refresh_graphs`.
+    pub(crate) graph_sidebar_meta: HashMap<String, GraphSidebarMeta>,
+    /// Live snapshot of the currently-selected graph's runtime state,
+    /// refreshed every tick. `None` when no graph is selected.
+    pub(crate) graph_live_state: Option<GraphLiveState>,
+    /// Whether the live graph view's graph highlight auto-follows the
     /// engine's current node (`true`, the default) or sits on a node the
-    /// user manually navigated to (`false`, see `loop_graph_selected_node`).
-    /// Reset to `true` whenever the selected loop changes.
-    pub(crate) loop_graph_follow: bool,
-    /// The node id manually highlighted in the live loop view's graph.
-    /// Only meaningful while `loop_graph_follow` is `false`.
-    pub(crate) loop_graph_selected_node: Option<String>,
-    /// Which sub-region of the live loop view plain arrow keys drive.
-    /// Reset to `Graph` whenever the selected loop changes.
-    pub(crate) loop_live_focus: LoopLiveFocus,
-    /// The spec id manually selected in the live loop view's marker strip
+    /// user manually navigated to (`false`, see `graph_live_selected_node`).
+    /// Reset to `true` whenever the selected graph changes. CT23: this is
+    /// also the graph's entered/not-entered state — it only becomes `false`
+    /// via `App::graph_live_enter` (`Enter`), and plain arrow keys drive the
+    /// graph's internal navigation only while it is `false`; while `true`,
+    /// plain arrows fall through to ordinary sidebar navigation instead.
+    pub(crate) graph_live_follow: bool,
+    /// The node id manually highlighted in the live graph view's graph.
+    /// Only meaningful while `graph_live_follow` is `false`.
+    pub(crate) graph_live_selected_node: Option<String>,
+    /// CT8: the node id the live graph last re-centred the scroll onto while
+    /// auto-following. Auto-follow re-centres ONLY when the engine's current
+    /// node changes away from this anchor; every other redraw (same node,
+    /// changed status/elapsed, the user scrolling) leaves the scroll alone.
+    /// `None` forces exactly one re-centre on the next render — set when a
+    /// graph is selected, when `Esc` restores follow, and when a vanished
+    /// manual selection falls back to follow.
+    pub(crate) graph_live_follow_anchor: Option<String>,
+    /// Which sub-region of the live graph view plain arrow keys drive.
+    /// Reset to `Graph` whenever the selected graph changes.
+    pub(crate) graph_live_focus: GraphLiveFocus,
+    /// The spec id manually selected in the live graph view's marker strip
     /// (independent of `current_spec_id` / the graph's own follow state —
-    /// selecting a spec here never touches `loop_graph_follow`). `None`
+    /// selecting a spec here never touches `graph_live_follow`). `None`
     /// means the strip shows the running/next-pending spec by default.
-    pub(crate) loop_spec_strip_selected: Option<String>,
-    /// First visible index into `LoopLiveState::spec_queue` for the marker
+    pub(crate) graph_spec_strip_selected: Option<String>,
+    /// First visible index into `GraphLiveState::spec_queue` for the marker
     /// strip, when there are more specs than fit in the panel's width.
-    pub(crate) loop_spec_strip_scroll: usize,
+    pub(crate) graph_spec_strip_scroll: usize,
     /// How many marker chips fit in the panel's width on the last render —
     /// used to keep keyboard navigation's scroll offset in sync with what's
-    /// actually drawn. Populated in `draw_loop_live_view`.
-    pub(crate) loop_spec_strip_capacity: usize,
+    /// actually drawn. Populated in `draw_graph_live_view`.
+    pub(crate) graph_spec_strip_capacity: usize,
     /// Mouse hit-test cells for the marker strip, populated during draw:
     /// `(spec id, row, col_start, col_end)` — mirrors `sidebar_tab_click_map`.
-    pub(crate) loop_spec_strip_click_map: Vec<(String, u16, u16, u16)>,
-    /// Open autorun-scheduling input for the loop currently focused in the
+    pub(crate) graph_spec_strip_click_map: Vec<(String, u16, u16, u16)>,
+    /// Vertical scroll offset (in text lines) for the live graph view's main
+    /// content area. Clamped to `[0, total_lines - panel_height]` on every
+    /// render. Reset to 0 whenever the selected graph changes.
+    pub(crate) graph_live_view_scroll: u16,
+    /// Total number of content lines rendered on the last frame — used to
+    /// clamp `graph_live_view_scroll`. Populated by `render_graph_live_view`.
+    pub(crate) graph_live_view_total_lines: u16,
+    /// Open autorun-scheduling input for the graph currently focused in the
     /// live view — `None` when not open. See
-    /// [`crate::tui::app::dialog::LoopAutorunDialog`].
-    pub(crate) loop_autorun_dialog: Option<crate::tui::app::dialog::LoopAutorunDialog>,
-    /// True while a loop-control dispatch (`loop_run`/`loop_pause`/
-    /// `loop_continue`/`loop_reset`/`loop_schedule_autorun`) is in flight on
-    /// `loop_action_rx` — guards against a second dispatch racing the first.
-    pub(crate) loop_action_pending: bool,
-    /// Receiver for the background thread running the current loop-control
-    /// dispatch (see `App::dispatch_loop_action`), polled non-blockingly by
-    /// `App::poll_loop_action` every tick so the UI thread never waits on the
+    /// [`crate::tui::app::dialog::GraphAutorunDialog`].
+    pub(crate) graph_autorun_dialog: Option<crate::tui::app::dialog::GraphAutorunDialog>,
+    /// CT3 live-tail viewer for a running check node. Diagnostic-only: all
+    /// reads, so dismissing it can never affect execution. `Some` while
+    /// open (including after the node finishes, showing the final banner).
+    pub(crate) node_tail_dialog: Option<crate::tui::app::dialog::NodeTailDialog>,
+    /// True while a graph-control dispatch (`graph_run`/`graph_pause`/
+    /// `graph_continue`/`graph_reset`/`graph_schedule_autorun`) is in flight on
+    /// `graph_action_rx` — guards against a second dispatch racing the first.
+    pub(crate) graph_action_pending: bool,
+    /// Receiver for the background thread running the current graph-control
+    /// dispatch (see `App::dispatch_graph_action`), polled non-blockingly by
+    /// `App::poll_graph_action` every tick so the UI thread never waits on the
     /// daemon's HTTP round-trip.
-    pub(crate) loop_action_rx:
-        Option<std::sync::mpsc::Receiver<crate::tui::app::dialog::LoopActionOutcome>>,
-    /// The daemon's verbatim response to the last loop-control action, shown
+    pub(crate) graph_action_rx:
+        Option<std::sync::mpsc::Receiver<crate::tui::app::dialog::GraphActionOutcome>>,
+    /// The daemon's verbatim response to the last graph-control action, shown
     /// until dismissed or superseded by the next dispatch — success or
-    /// error, per the loop controls' "always shown, never swallowed" rule.
-    pub(crate) loop_action_message: Option<crate::tui::app::dialog::LoopActionMessage>,
-    /// When the current `loop_action_message` was set — drives its
+    /// error, per the graph controls' "always shown, never swallowed" rule.
+    pub(crate) graph_action_message: Option<crate::tui::app::dialog::GraphActionMessage>,
+    /// When the current `graph_action_message` was set — drives its
     /// auto-dismiss (mirrors `copied_at`/`dismiss_copied`).
-    pub(crate) loop_action_message_at: std::time::Instant,
-    /// Standalone/backlog specs (no loop yet), filtered to the selected
+    pub(crate) graph_action_message_at: std::time::Instant,
+    /// Standalone/backlog specs (no graph yet), filtered to the selected
     /// project's workdir tag when a project is selected. Refreshed alongside
     /// `projects` in `App::refresh_projects`.
-    pub(crate) backlog_specs: Vec<LoopSpec>,
+    pub(crate) backlog_specs: Vec<GraphSpec>,
     pub(crate) selected_backlog: usize,
     pub(crate) global_rag_queue: Vec<RagQueueItem>,
     pub(crate) selected_rag_queue: usize,
@@ -855,6 +911,15 @@ pub struct App {
     /// Knowledge nodes (facts/patterns) for the selected project.
     pub(crate) project_knowledge: Vec<crate::db::intelligence::IntelligenceNodeRecord>,
     pub(crate) selected_knowledge: usize,
+    /// Wheel-scroll offset for the right panel's knowledge list (Knowledge
+    /// face). Independent of `selected_knowledge`, which the main Knowledge
+    /// tab (`ProjectTab::Knowledge`) owns — this only affects what the right
+    /// panel shows.
+    pub(crate) knowledge_list_scroll: u16,
+    /// Wheel-scroll offset (in edges) for the right panel's project-relations
+    /// graph (Knowledge face). Fed into `draw_project_graph`'s new `offset`
+    /// parameter; the sidebar's own project-graph card always passes 0.
+    pub(crate) knowledge_graph_scroll: u16,
     pub(crate) knowledge_filter: String,
     pub(crate) knowledge_filter_mode: bool,
     pub(crate) sidebar_visible: bool,
@@ -918,6 +983,65 @@ pub struct App {
     pub(crate) sync_scroll_offset: u16,
     /// Last rendered area of the activity panel (used for mouse hit-testing).
     pub(crate) last_sync_area: Option<ratatui::layout::Rect>,
+    /// Last-rendered rect of the activity section — the full Activity face,
+    /// or the activity sub-area inside the Knowledge face. Populated during
+    /// draw, cleared to `None` for a frame where it isn't drawn.
+    pub(crate) last_activity_rect: Option<ratatui::layout::Rect>,
+    /// Last-rendered rect of the Knowledge face's project-relations graph.
+    pub(crate) last_knowledge_graph_rect: Option<ratatui::layout::Rect>,
+    /// Last-rendered rect of the Knowledge face's knowledge/backlog list.
+    pub(crate) last_knowledge_list_rect: Option<ratatui::layout::Rect>,
+    /// Last-rendered rect of the Graph face's content (the whole face — it
+    /// isn't sub-divided).
+    pub(crate) last_graph_face_rect: Option<ratatui::layout::Rect>,
+    /// Wheel-scroll offset (lines) for the right panel's Graph face. Own
+    /// field, NOT shared with the main preview pane's
+    /// `graph_live_view_scroll` — see design note in canopy-design.md: the
+    /// right panel's Graph face can be visible independently of the main
+    /// pane's live graph view, so sharing bookkeeping would clamp against
+    /// stale/unrelated state.
+    pub(crate) graph_face_scroll: u16,
+    /// Total rendered line count of the Graph face's last draw, written by
+    /// `draw_graph_face`. Used to clamp `graph_face_scroll`.
+    pub(crate) graph_face_total_lines: u16,
+
+    // CT1 multi-face right panel: the switching rule lives in
+    // `crate::tui::app::panel_face` — these are its inputs and outputs.
+    /// Currently visible face. Only ever changed by the panel-face tick or
+    /// by an explicit pin/pick — never as a side effect of rendering — so
+    /// switching faces can't flicker or force a full-screen redraw.
+    pub(crate) panel_face: PanelFace,
+    /// The face pinned from the picker (`None` = automatic mode).
+    pub(crate) panel_pinned: Option<PanelFace>,
+    /// Event-driven face with its 10-second dwell deadline. A newer event
+    /// replaces it and restarts the dwell; events never queue.
+    pub(crate) panel_dwell_face: Option<PanelFace>,
+    pub(crate) panel_dwell_until: Option<std::time::Instant>,
+    /// Human-readable reason for the current dwell (`"new knowledge"`,
+    /// `"backlog changed"`). Shown in the title while the dwell holds.
+    pub(crate) panel_dwell_reason: Option<String>,
+    /// Reason for the last automatic switch (`"graph running"`, `"new
+    /// knowledge"`, …). Rendered as a badge so a face never appears
+    /// unexplained. `None` after a manual pin/pick.
+    pub(crate) panel_last_reason: Option<String>,
+    /// Whether the face picker overlay is open, and its cursor.
+    pub(crate) panel_picker_open: bool,
+    pub(crate) panel_picker_idx: usize,
+    /// True while the mouse is pressed/dragging inside the panel or the
+    /// panel was clicked into (keyboard focus claimed by the panel).
+    /// While set, any pending automatic switch is dropped, not deferred.
+    pub(crate) panel_focused: bool,
+    /// Set by a mouse-wheel scroll over the panel; consumed (cleared) by
+    /// the next panel-face tick, which drops the pending switch with it.
+    pub(crate) panel_interacting: bool,
+    /// Baselines for event detection, independent of the capped display lists.
+    pub(crate) panel_last_knowledge_updated: Option<i64>,
+    pub(crate) panel_last_backlog_updated: Option<i64>,
+    /// Graph-running state at the last tick (the STATE input).
+    pub(crate) panel_last_graph_running: bool,
+    /// False until the first tick has seeded the baselines above, so the
+    /// initial data load never fires a spurious event.
+    pub(crate) panel_baselines_init: bool,
 
     // RAG pause state (synced from daemon_state table)
     pub(crate) rag_paused: bool,
@@ -965,12 +1089,14 @@ pub struct App {
     /// delivery state.
     pub(crate) session_protocol_state: HashMap<String, SessionProtocolState>,
 
+    pub(crate) active_sandbox: Option<crate::domain::sandbox::Sandbox>,
+
     // Project relation graph
     pub(crate) project_relation_dialog: Option<ProjectRelationDialog>,
     pub(crate) project_graph_edges: Vec<ProjectGraphEdge>,
     pub(crate) project_graph_trees: Vec<Vec<String>>,
 
-    // Nursery — temporary path for seed creation loop
+    // Nursery — temporary path for seed creation graph
     pub(crate) nursery_path: Option<std::path::PathBuf>,
 
     /// Whether the terminal supports and has enabled the Kitty keyboard
@@ -1023,14 +1149,13 @@ pub(crate) struct ProjectRelationDialog {
 #[derive(Clone, Default)]
 pub(crate) struct SessionProtocolState {
     pub protocol_sent: bool,
-    pub sent_as_solo: bool,
 }
 
 #[cfg(test)]
 mod router_routes_dialog_tests {
-    use super::{LoopEditorDialog, RouterField, RouterRouteDraft};
+    use super::{GraphEditorDialog, RouterField, RouterRouteDraft};
 
-    fn dialog_with_routes(labels: &[&str]) -> LoopEditorDialog {
+    fn dialog_with_routes(labels: &[&str]) -> GraphEditorDialog {
         let routes = labels
             .iter()
             .map(|label| RouterRouteDraft {
@@ -1043,7 +1168,7 @@ mod router_routes_dialog_tests {
             ("n1".to_string(), "Node One".to_string()),
             ("n2".to_string(), "Node Two".to_string()),
         ];
-        LoopEditorDialog::new_router_routes(
+        GraphEditorDialog::new_router_routes(
             "router1".to_string(),
             "Classify".to_string(),
             "title".to_string(),

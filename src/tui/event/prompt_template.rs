@@ -486,11 +486,7 @@ fn move_preset_picker(dialog: &mut SimplePromptDialog, forward: bool) {
     let SectionPickerMode::PresetPicker { selected, .. } = &mut dialog.picker_mode else {
         return;
     };
-    *selected = if forward {
-        (*selected + 1) % filtered_len
-    } else {
-        selected.checked_sub(1).unwrap_or(filtered_len - 1)
-    };
+    *selected = crate::tui::selection::move_index(*selected, filtered_len, forward);
 }
 
 fn push_preset_picker_filter(dialog: &mut SimplePromptDialog, c: char) {
@@ -518,7 +514,7 @@ fn pop_preset_picker_filter(dialog: &mut SimplePromptDialog) {
 /// so the preset becomes a normal, freely-editable field — never a locked
 /// reference — and closes the picker either way.
 ///
-/// Presets under `~/.canopy/prompts/` also serve the loop engine's own role
+/// Presets under `~/.canopy/prompts/` also serve the graph engine's own role
 /// templates (implementer/reviewer/resilience), which carry `{{spec_content}}`/
 /// `{{previous_feedback}}` placeholders meant to be filled at agent-spawn
 /// time. This TUI composes ad hoc prompts with no such bindings to offer, so
@@ -668,8 +664,8 @@ fn handle_at_picker_key(
 
     match code {
         KeyCode::Esc => dialog.at_picker = None,
-        KeyCode::Up => move_at_picker_up(dialog),
-        KeyCode::Down => move_at_picker_down(dialog),
+        KeyCode::Up => move_at_picker(dialog, false),
+        KeyCode::Down => move_at_picker(dialog, true),
         KeyCode::Left => go_up_at_picker_dir(dialog),
         KeyCode::Right => enter_selected_at_picker_dir(dialog),
         KeyCode::Enter | KeyCode::Tab => {
@@ -685,28 +681,12 @@ fn handle_at_picker_key(
     true
 }
 
-fn move_at_picker_up(dialog: &mut SimplePromptDialog) {
+fn move_at_picker(dialog: &mut SimplePromptDialog, forward: bool) {
     let Some(picker) = dialog.at_picker.as_mut() else {
         return;
     };
-
-    if picker.selected > 0 {
-        picker.selected -= 1;
-    } else {
-        picker.selected = picker.entries.len().saturating_sub(1);
-    }
-}
-
-fn move_at_picker_down(dialog: &mut SimplePromptDialog) {
-    let Some(picker) = dialog.at_picker.as_mut() else {
-        return;
-    };
-
-    if picker.selected + 1 < picker.entries.len() {
-        picker.selected += 1;
-    } else {
-        picker.selected = 0;
-    }
+    picker.selected =
+        crate::tui::selection::move_index(picker.selected, picker.entries.len(), forward);
 }
 
 fn go_up_at_picker_dir(dialog: &mut SimplePromptDialog) {
@@ -1065,10 +1045,8 @@ fn handle_dialog_key(
             Ok(build_prompt_action(dialog, db, workdir))
         }
 
-        // Plain Enter: newline in instruction sections, send in others.
-        KeyCode::Enter => {
-            handle_enter_key(dialog, modifiers, section_name, field_width, db, workdir)
-        }
+        // Plain Enter: always a newline in text fields; sending is Ctrl+S.
+        KeyCode::Enter => handle_enter_key(dialog, modifiers, section_name, field_width),
 
         // Navigation: Tab / Shift+Tab / Shift+Up/Down move between fields in
         // visual order, wrapping through the send control at the bottom.
@@ -1185,23 +1163,13 @@ fn handle_enter_key(
     modifiers: KeyModifiers,
     section_name: &str,
     field_width: usize,
-    db: &Database,
-    workdir: &Path,
 ) -> Result<PromptAction> {
     if !modifiers.is_empty() {
         return Ok(PromptAction::None);
     }
 
-    if is_instruction_section(section_name) {
-        dialog.insert_newline_at_cursor(section_name, field_width);
-        return Ok(PromptAction::None);
-    }
-
-    Ok(build_prompt_action(dialog, db, workdir))
-}
-
-fn is_instruction_section(section_name: &str) -> bool {
-    section_name == "instruction" || section_name.starts_with("instruction_")
+    dialog.insert_newline_at_cursor(section_name, field_width);
+    Ok(PromptAction::None)
 }
 
 fn build_prompt_action(dialog: &SimplePromptDialog, db: &Database, workdir: &Path) -> PromptAction {
@@ -1281,7 +1249,6 @@ fn submit_prompt(app: &mut App, prompt: &str) {
         .simple_prompt_dialog
         .as_ref()
         .is_some_and(|d| d.protocol_included);
-    let is_solo = !app.sync_available();
     let workdir = app.current_workdir();
     let session_key = app.current_prompt_session_key();
 
@@ -1295,7 +1262,6 @@ fn submit_prompt(app: &mut App, prompt: &str) {
     if had_protocol {
         let state = app.session_protocol_state.entry(session_key).or_default();
         state.protocol_sent = true;
-        state.sent_as_solo = is_solo;
     }
 }
 
@@ -1408,10 +1374,32 @@ fn schedule_send_prompt(app: &mut App, prompt: &str, when: chrono::NaiveDateTime
     // Persist the scheduled send.
     let id = format!("ss-{}", uuid::Uuid::new_v4());
     let workdir_opt = (!target_workdir.is_empty()).then_some(target_workdir.as_str());
-    if let Err(e) =
-        app.db
-            .insert_scheduled_send(&id, prompt, &target_session_id, workdir_opt, fire_time)
-    {
+    // Only persist the structured view when it is what's being sent. A
+    // non-empty Raw buffer sends verbatim (see `resolve_outgoing_prompt`), so
+    // the structured sections no longer describe the outgoing text — raw
+    // wins, and the structure is discarded (spec CP2). Reopening such a row
+    // then falls back to the Raw tab with the flat text, rather than
+    // restoring stale sections the user never sees.
+    let raw_wins = app.simple_prompt_dialog.as_ref().is_some_and(|d| {
+        d.active_tab == crate::tui::app::dialog::PromptTab::Raw && !d.raw_is_empty()
+    });
+    let builder_state_json = if raw_wins {
+        None
+    } else {
+        app.simple_prompt_dialog
+            .as_ref()
+            .map(crate::tui::app::dialog::PersistedBuilderState::from_dialog)
+            .and_then(|state| serde_json::to_string(&state).ok())
+    };
+    if let Err(e) = app.db.insert_scheduled_send(
+        &id,
+        prompt,
+        &target_session_id,
+        workdir_opt,
+        fire_time,
+        builder_state_json.as_deref(),
+        None,
+    ) {
         tracing::error!("Failed to persist scheduled send: {e}");
         crate::domain::notification::send_notification(
             "Schedule failed",
@@ -1552,8 +1540,9 @@ fn handle_scheduled_list_key(app: &mut App, code: KeyCode, modifiers: KeyModifie
             let send = &pending[sel];
             let fire_local = send.fire_at.with_timezone(&chrono::Local).naive_local();
             let (id, prompt) = (send.id.clone(), send.prompt.clone());
+            let builder_state = send.builder_state.clone();
             if let Some(dialog) = app.simple_prompt_dialog.as_mut() {
-                dialog.load_scheduled_for_edit(&id, &prompt, fire_local);
+                dialog.load_scheduled_for_edit(&id, &prompt, fire_local, builder_state.as_deref());
             }
         }
         _ => {}
@@ -1745,7 +1734,7 @@ mod preset_picker_tests {
 
     #[test]
     fn enter_refuses_a_preset_with_an_unfilled_placeholder_and_inserts_nothing() {
-        // Mirrors the observed C11 incident: picking a loop-engine role
+        // Mirrors the observed C11 incident: picking a graph-engine role
         // preset (carrying {{spec_content}}) from the TUI's ad hoc composer,
         // which has no such binding to offer.
         let mut dialog = dialog_with_presets(vec![(
@@ -1824,7 +1813,12 @@ mod recall_last_prompt_tests {
         std::mem::forget(tmp);
         let db = Arc::new(Database::new(&path).expect("create test db"));
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(db, data_dir.path()).expect("create app");
+        let app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         (app, data_dir)
     }
 
@@ -2080,6 +2074,52 @@ mod recall_last_prompt_tests {
         // Raw fallback is a single section — no structure to have restored.
         assert_eq!(dialog.enabled_sections, vec!["instruction_1".to_string()]);
     }
+
+    /// A scheduled send confirmed from the Raw tab persists NO structured
+    /// state: the raw buffer is what gets delivered, so the stale sections are
+    /// discarded and reopening the row lands back in Raw with the flat text
+    /// (spec CP2: raw wins when it is out of sync with the structure).
+    #[test]
+    fn scheduling_from_the_raw_tab_discards_structure_and_reopens_in_raw() {
+        use crate::tui::app::dialog::{PromptTab, SimplePromptDialog, RAW_SECTION_ID};
+
+        let (mut app, _dir) = test_app();
+        app.open_simple_prompt_dialog(None);
+        {
+            let dialog = app.simple_prompt_dialog.as_mut().unwrap();
+            dialog.set_section_content("instruction_1", "stale structured leftover".to_string());
+            dialog.set_tab(PromptTab::Raw);
+            dialog.set_section_content(RAW_SECTION_ID, "raw text that wins".to_string());
+        }
+
+        let when = (chrono::Local::now() + chrono::Duration::hours(1)).naive_local();
+        super::schedule_send_prompt(&mut app, "raw text that wins", when);
+
+        let rows = app
+            .db
+            .list_due_scheduled_sends(chrono::Utc::now() + chrono::Duration::hours(2))
+            .unwrap();
+        let row = rows
+            .iter()
+            .find(|s| s.prompt == "raw text that wins")
+            .expect("scheduled row persisted");
+        assert!(
+            row.builder_state.is_none(),
+            "a raw-tab schedule must not persist structured state"
+        );
+
+        // Reopening lands in Raw with the flat text — never the stale section.
+        let mut fresh = SimplePromptDialog::new();
+        let fire_local = row.fire_at.with_timezone(&chrono::Local).naive_local();
+        fresh.load_scheduled_for_edit(
+            &row.id,
+            &row.prompt,
+            fire_local,
+            row.builder_state.as_deref(),
+        );
+        assert_eq!(fresh.active_tab, PromptTab::Raw);
+        assert_eq!(fresh.raw_text(), "raw text that wins");
+    }
 }
 
 #[cfg(test)]
@@ -2098,7 +2138,12 @@ mod session_protocol_tests {
         std::mem::forget(tmp);
         let db = Arc::new(Database::new(&path).expect("create test db"));
         let data_dir = tempdir().expect("create data dir");
-        let app = App::new(db, data_dir.path()).expect("create app");
+        let app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         (app, data_dir)
     }
 
@@ -2168,6 +2213,37 @@ mod session_protocol_tests {
         assert!(new_turn_1.contains(FIRST_ACTION));
     }
 
+    /// The protocol is gated solely by `protocol_sent` now — the solo/sync
+    /// mode of the session no longer feeds into the decision (the
+    /// `sent_as_solo`/`sync_available` re-injection path was removed). Once
+    /// turn 1 delivers it, no later turn re-arms it, and `submit_prompt`
+    /// records the delivery on `session_protocol_state`.
+    #[test]
+    fn protocol_is_gated_only_by_protocol_sent_not_by_session_mode() {
+        let (mut app, _dir) = test_app();
+
+        app.open_simple_prompt_dialog(None);
+        assert!(
+            app.simple_prompt_dialog.as_ref().unwrap().protocol_included,
+            "turn 1 must include the protocol"
+        );
+        submit_prompt(&mut app, "do the first thing");
+
+        let key = app.current_prompt_session_key();
+        assert!(
+            app.session_protocol_state
+                .get(&key)
+                .is_some_and(|s| s.protocol_sent),
+            "submitting turn 1 must record protocol_sent"
+        );
+
+        // No per-turn condition remains that could re-inject the block.
+        let turn_2 = send_turn(&mut app, "do the second thing");
+        assert!(!turn_2.contains("[START HERE — required]"));
+        let turn_3 = send_turn(&mut app, "do the third thing");
+        assert!(!turn_3.contains("[START HERE — required]"));
+    }
+
     #[test]
     fn first_action_phrase_appears_at_most_once_across_a_ten_turn_session() {
         let (mut app, _dir) = test_app();
@@ -2186,9 +2262,10 @@ mod session_protocol_tests {
         );
     }
 
-    /// FR5: measures the assembled system-block size for a ten-turn session
-    /// before this fix (protocol block repeated every turn) against after
-    /// (protocol block sent once, per-turn context sent every turn).
+    /// FR5: measures the assembled system-block size for a ten-turn session,
+    /// comparing a hypothetical baseline where the protocol block is repeated
+    /// every turn against the actual behavior (protocol block sent once,
+    /// per-turn context sent every turn).
     #[test]
     fn ten_turn_session_sends_far_fewer_protocol_tokens_than_resending_every_turn() {
         let (mut app, _dir) = test_app();
@@ -2609,31 +2686,6 @@ mod normalize_altgr_char_tests {
         assert_eq!(normalize_altgr_char('z'), 'z');
         assert_eq!(normalize_altgr_char(' '), ' ');
         assert_eq!(normalize_altgr_char('1'), '1');
-    }
-}
-
-#[cfg(test)]
-mod is_instruction_section_tests {
-    use super::is_instruction_section;
-
-    #[test]
-    fn plain_instruction() {
-        assert!(is_instruction_section("instruction"));
-    }
-
-    #[test]
-    fn numbered_instruction() {
-        assert!(is_instruction_section("instruction_1"));
-        assert!(is_instruction_section("instruction_42"));
-    }
-
-    #[test]
-    fn non_instruction_sections() {
-        assert!(!is_instruction_section("tools"));
-        assert!(!is_instruction_section("project_context"));
-        assert!(!is_instruction_section("context"));
-        assert!(!is_instruction_section(""));
-        assert!(!is_instruction_section("instructions"));
     }
 }
 
@@ -3172,32 +3224,6 @@ mod utility_function_tests {
         assert_eq!(normalize_altgr_char('@'), '@');
     }
 
-    /// is_instruction_section recognizes "instruction"
-    #[test]
-    fn is_instruction_section_exact_match() {
-        assert!(is_instruction_section("instruction"));
-    }
-
-    /// is_instruction_section recognizes "instruction_*" prefixes
-    #[test]
-    fn is_instruction_section_with_prefix() {
-        assert!(is_instruction_section("instruction_first"));
-        assert!(is_instruction_section("instruction_system"));
-        assert!(is_instruction_section("instruction_"));
-        assert!(is_instruction_section("instruction_complex_name"));
-    }
-
-    /// is_instruction_section rejects non-instruction sections
-    #[test]
-    fn is_instruction_section_rejects_other() {
-        assert!(!is_instruction_section("context"));
-        assert!(!is_instruction_section("knowledge"));
-        assert!(!is_instruction_section("tools"));
-        assert!(!is_instruction_section("instruct"));
-        assert!(!is_instruction_section("instructions"));
-        assert!(!is_instruction_section(""));
-    }
-
     /// should_expand_on_key with various modifier combinations
     #[test]
     fn should_expand_on_key_modifier_combinations() {
@@ -3232,15 +3258,6 @@ mod utility_function_tests {
         );
     }
 
-    /// is_instruction_section with case sensitivity
-    #[test]
-    fn is_instruction_section_case_sensitive() {
-        assert!(is_instruction_section("instruction"));
-        assert!(!is_instruction_section("Instruction"));
-        assert!(!is_instruction_section("INSTRUCTION"));
-        assert!(!is_instruction_section("iNsTrUcTiOn"));
-    }
-
     /// should_expand_on_key exhaustive key coverage
     #[test]
     fn should_expand_on_key_escape_and_special() {
@@ -3257,5 +3274,80 @@ mod utility_function_tests {
             KeyCode::PageDown,
             KeyModifiers::empty()
         ));
+    }
+}
+
+#[cfg(test)]
+mod enter_key_tests {
+    use super::*;
+    use crate::tui::app::dialog::SimplePromptDialog;
+
+    #[test]
+    fn enter_in_context_inserts_newline_does_not_send() {
+        let mut dialog = SimplePromptDialog::new();
+        let id = dialog.add_section_with_content("context", "hello".to_string());
+        let action = handle_enter_key(&mut dialog, KeyModifiers::empty(), &id, 80)
+            .expect("enter handling succeeds");
+        assert!(
+            matches!(action, PromptAction::None),
+            "Enter in a context section must not send"
+        );
+        assert!(
+            dialog.get_section_content(&id).contains('\n'),
+            "Enter in a context section must insert a newline"
+        );
+    }
+
+    #[test]
+    fn enter_in_instruction_inserts_newline() {
+        let mut dialog = SimplePromptDialog::new();
+        let id = dialog.add_section_with_content("instruction", "hello".to_string());
+        let action = handle_enter_key(&mut dialog, KeyModifiers::empty(), &id, 80)
+            .expect("enter handling succeeds");
+        assert!(
+            matches!(action, PromptAction::None),
+            "Enter in an instruction section must not send"
+        );
+        assert!(
+            dialog.get_section_content(&id).contains('\n'),
+            "Enter in an instruction section must insert a newline"
+        );
+    }
+
+    // The raw tab's own key handler already inserts a newline on plain Enter
+    // (it never routes through `handle_enter_key`), so no test is needed here.
+
+    #[test]
+    fn enter_with_nonempty_modifiers_is_noop() {
+        let mut dialog = SimplePromptDialog::new();
+        let id = dialog.add_section_with_content("context", "hello".to_string());
+        let before = dialog.get_section_content(&id);
+        let action = handle_enter_key(&mut dialog, KeyModifiers::CONTROL, &id, 80)
+            .expect("enter handling succeeds");
+        assert!(
+            matches!(action, PromptAction::None),
+            "Enter with modifiers must not send"
+        );
+        assert_eq!(
+            dialog.get_section_content(&id),
+            before,
+            "Enter with modifiers must leave content unchanged"
+        );
+    }
+
+    #[test]
+    fn enter_in_unknown_section_inserts_newline() {
+        let mut dialog = SimplePromptDialog::new();
+        let id = dialog.add_section_with_content("banana", "hello".to_string());
+        let action = handle_enter_key(&mut dialog, KeyModifiers::empty(), &id, 80)
+            .expect("enter handling succeeds");
+        assert!(
+            matches!(action, PromptAction::None),
+            "Enter in an unknown section must not send"
+        );
+        assert!(
+            dialog.get_section_content(&id).contains('\n'),
+            "Enter in an unknown section must insert a newline"
+        );
     }
 }

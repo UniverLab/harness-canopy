@@ -16,9 +16,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::application::ports::{AgentRepository, RunRepository};
 use crate::db::Database;
-use crate::domain::loops::{LoopResetOutcome, LoopStatus};
+use crate::domain::activity;
+use crate::domain::graphs::{GraphResetOutcome, GraphStatus};
 use crate::executor::Executor;
-use crate::loop_engine::LoopEngine;
+use crate::graph_engine::GraphEngine;
 
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
@@ -82,17 +83,17 @@ pub struct CronScheduler {
     cancel: CancellationToken,
     /// Wakes the scheduler to recalculate the next fire time.
     notify: Arc<Notify>,
-    /// Optional loop engine — when set, the scheduler also evaluates loops
+    /// Optional graph engine — when set, the scheduler also evaluates graphs
     /// whose trigger is `Cron` and launches them alongside agents.
-    loop_engine: Option<Arc<LoopEngine>>,
+    graph_engine: Option<Arc<GraphEngine>>,
     /// Tick idempotency: the most recent *scheduled* tick already fired per
-    /// schedulable (agents keyed by their id; loops by [`loop_key`] to avoid
+    /// schedulable (agents keyed by their id; graphs by [`graph_key`] to avoid
     /// colliding with an agent that happens to share the same id).
     ///
     /// The stored value is the matched fire time itself (what
     /// [`due_fire_local`] returned), not the wall-clock instant the
     /// evaluation ran at. Two evaluations of the *same* tick — whether from
-    /// the regular tick loop firing twice in a row or a second evaluation
+    /// the regular tick graph firing twice in a row or a second evaluation
     /// path racing it — compute the identical scheduled-tick value, so a
     /// plain equality/`>=` check dedupes them exactly. A wall-clock window
     /// (e.g. "fired within the last 60s") would instead depend on how long
@@ -109,9 +110,9 @@ pub struct CronScheduler {
     retry: RetryPolicy,
 }
 
-/// Namespace a loop id in the shared `last_fired` map.
-fn loop_key(loop_id: &str) -> String {
-    format!("loop:{loop_id}")
+/// Namespace a graph id in the shared `last_fired` map.
+fn graph_key(graph_id: &str) -> String {
+    format!("graph:{graph_id}")
 }
 
 impl CronScheduler {
@@ -121,21 +122,21 @@ impl CronScheduler {
             executor,
             cancel: CancellationToken::new(),
             notify: Arc::new(Notify::new()),
-            loop_engine: None,
+            graph_engine: None,
             last_fired: Arc::new(Mutex::new(std::collections::HashMap::new())),
             in_flight: Arc::new(Mutex::new(std::collections::HashSet::new())),
             retry: RetryPolicy::from_env(),
         }
     }
 
-    /// Build a scheduler that also fires cron-triggered loops via `loop_engine`.
-    pub fn with_loops(
+    /// Build a scheduler that also fires cron-triggered graphs via `graph_engine`.
+    pub fn with_graphs(
         db: Arc<Database>,
         executor: Arc<Executor>,
-        loop_engine: Arc<LoopEngine>,
+        graph_engine: Arc<GraphEngine>,
     ) -> Self {
         Self {
-            loop_engine: Some(loop_engine),
+            graph_engine: Some(graph_engine),
             ..Self::new(db, executor)
         }
     }
@@ -165,7 +166,7 @@ impl CronScheduler {
         }
     }
 
-    /// Start the scheduler loop as a background tokio task.
+    /// Start the scheduler graph as a background tokio task.
     ///
     /// Returns a `CancellationToken` that can be used to stop the scheduler.
     pub fn start(self: Arc<Self>) -> CancellationToken {
@@ -176,16 +177,16 @@ impl CronScheduler {
             tracing::info!("Internal cron scheduler started");
             // Initialize from database to prevent duplicate executions after restart
             scheduler.initialize_last_fired().await;
-            scheduler.run_loop().await;
+            scheduler.run_graph().await;
             tracing::info!("Internal cron scheduler stopped");
         });
 
         cancel
     }
 
-    /// The main scheduler loop. Sleeps until the next agent is due,
+    /// The main scheduler graph. Sleeps until the next agent is due,
     /// or wakes early on cancel/notify.
-    async fn run_loop(&self) {
+    async fn run_graph(&self) {
         loop {
             let sleep_dur = self.next_sleep_duration();
 
@@ -232,10 +233,10 @@ impl CronScheduler {
             fold_earliest(&mut earliest, agent.schedule_expr(), now_local);
         }
 
-        // Cron-triggered loops share the same sleep math as agents.
-        if self.loop_engine.is_some() {
-            if let Ok(loops) = self.db.list_cron_loops() {
-                for lp in &loops {
+        // Cron-triggered graphs share the same sleep math as agents.
+        if self.graph_engine.is_some() {
+            if let Ok(graphs) = self.db.list_cron_graphs() {
+                for lp in &graphs {
                     if !lp.is_fireable() {
                         continue;
                     }
@@ -260,10 +261,10 @@ impl CronScheduler {
             }
         }
 
-        // One-shot `autorun_at` loop schedules need a wakeup too, independent
-        // of any cron trigger on the loop.
-        if self.loop_engine.is_some() {
-            if let Ok(pending) = self.db.list_pending_autorun_loops() {
+        // One-shot `autorun_at` graph schedules need a wakeup too, independent
+        // of any cron trigger on the graph.
+        if self.graph_engine.is_some() {
+            if let Ok(pending) = self.db.list_pending_autorun_graphs() {
                 for lp in &pending {
                     if let Some(autorun_at) = lp.autorun_at {
                         let nearer = match earliest {
@@ -278,10 +279,10 @@ impl CronScheduler {
             }
         }
 
-        // One-shot `auto_continue_at` loop schedules (deferred resume of a
-        // paused loop) need a wakeup too, same as `autorun_at` above.
-        if self.loop_engine.is_some() {
-            if let Ok(pending) = self.db.list_pending_auto_continue_loops() {
+        // One-shot `auto_continue_at` graph schedules (deferred resume of a
+        // paused graph) need a wakeup too, same as `autorun_at` above.
+        if self.graph_engine.is_some() {
+            if let Ok(pending) = self.db.list_pending_auto_continue_graphs() {
                 for lp in &pending {
                     if let Some(auto_continue_at) = lp.auto_continue_at {
                         let nearer = match earliest {
@@ -348,17 +349,17 @@ impl CronScheduler {
             self.try_fire_agent(agent, now_local).await?;
         }
 
-        // Cron-triggered loops are evaluated in the same local frame.
-        if self.loop_engine.is_some() {
-            let loops = self.db.list_cron_loops()?;
-            for lp in &loops {
-                self.try_fire_loop(lp, now_local).await?;
+        // Cron-triggered graphs are evaluated in the same local frame.
+        if self.graph_engine.is_some() {
+            let graphs = self.db.list_cron_graphs()?;
+            for lp in &graphs {
+                self.try_fire_graph(lp, now_local).await?;
             }
         }
 
         self.fire_due_enable_at(now_utc)?;
-        self.fire_due_autorun_loops(now_utc)?;
-        self.fire_due_auto_continue_loops(now_utc)?;
+        self.fire_due_autorun_graphs(now_utc).await?;
+        self.fire_due_auto_continue_graphs(now_utc)?;
 
         Ok(())
     }
@@ -378,30 +379,30 @@ impl CronScheduler {
         Ok(())
     }
 
-    /// One-shot `autorun_at`: for each loop with a pending `autorun_at` in
+    /// One-shot `autorun_at`: for each graph with a pending `autorun_at` in
     /// the past that is still fireable (not `Running`/`Paused`) — or `Paused`
-    /// because `reconcile_orphaned_loops` put it there, see
-    /// [`crate::domain::loops::Loop::is_autorun_due`] — clear the schedule
-    /// and launch it once via the loop engine. Unlike cron loops, this never
+    /// because `reconcile_orphaned_graphs` put it there, see
+    /// [`crate::domain::graphs::Graph::is_autorun_due`] — clear the schedule
+    /// and launch it once via the graph engine. Unlike cron graphs, this never
     /// repeats.
     ///
-    /// A `failed` loop is not launched as-is — `loop_run` refuses `failed`
-    /// loops, so firing here performs an explicit auto-reset-and-resume
-    /// first: the same transition [`Database::reset_loop`] that backs the
-    /// `loop_reset` MCP tool, logged at INFO. That is the sanctioned,
-    /// intentional way a quota-failed loop revives itself unattended (see
-    /// [`crate::daemon::handler`] `loop_reset`/`loop_schedule_autorun` tool
-    /// docs). A `completed` loop is deliberately left alone — re-running a
-    /// finished loop is a human decision via `loop_reset` + `loop_run` — so
+    /// A `failed` graph is not launched as-is — `graph_run` refuses `failed`
+    /// graphs, so firing here performs an explicit auto-reset-and-resume
+    /// first: the same transition [`Database::reset_graph`] that backs the
+    /// `graph_reset` MCP tool, logged at INFO. That is the sanctioned,
+    /// intentional way a quota-failed graph revives itself unattended (see
+    /// [`crate::daemon::handler`] `graph_reset`/`graph_schedule_autorun` tool
+    /// docs). A `completed` graph is deliberately left alone — re-running a
+    /// finished graph is a human decision via `graph_reset` + `graph_run` — so
     /// firing on one only logs a WARN and clears the schedule.
-    fn fire_due_autorun_loops(&self, now_utc: chrono::DateTime<Utc>) -> anyhow::Result<()> {
-        let Some(loop_engine) = self.loop_engine.as_ref() else {
+    async fn fire_due_autorun_graphs(&self, now_utc: chrono::DateTime<Utc>) -> anyhow::Result<()> {
+        let Some(graph_engine) = self.graph_engine.as_ref() else {
             return Ok(());
         };
-        let pending = self.db.list_pending_autorun_loops()?;
+        let pending = self.db.list_pending_autorun_graphs()?;
         for lp in &pending {
             if !lp.is_autorun_due(now_utc) {
-                // C1: a due schedule on a loop the *operator* paused
+                // C1: a due schedule on a graph the *operator* paused
                 // (`paused_by_reconciliation` is false) can never fire on its
                 // own — `is_fireable()` deliberately keeps excluding `Paused`
                 // for every caller but reconciliation's. That's correct, but
@@ -409,44 +410,48 @@ impl CronScheduler {
                 // tick it's still blocked, so an operator watching logs sees
                 // why the resume never happened instead of concluding canopy
                 // forgot.
-                if lp.status == LoopStatus::Paused
+                if lp.status == GraphStatus::Paused
                     && !lp.paused_by_reconciliation
                     && lp.autorun_at.is_some_and(|at| now_utc >= at)
                 {
                     tracing::warn!(
-                        "Loop '{}' autorun_at is due but the loop is paused (not by \
+                        "Graph '{}' autorun_at is due but the graph is paused (not by \
                          reconciliation); it will not fire until resumed manually via \
-                         loop_continue or loop_run — the schedule remains pending.",
+                         graph_continue or graph_run — the schedule remains pending.",
                         lp.id
                     );
                 }
                 continue;
             }
-            self.db.clear_loop_autorun(&lp.id)?;
+            self.db.clear_graph_autorun(&lp.id)?;
 
-            if lp.status == LoopStatus::Completed {
+            if lp.status == GraphStatus::Completed {
                 tracing::warn!(
-                    "Loop '{}' autorun fired but the loop is already completed; clearing the \
-                     schedule without re-running it (re-running a finished loop is a human \
-                     decision via loop_reset + loop_run)",
+                    "Graph '{}' autorun fired but the graph is already completed; clearing the \
+                     schedule without re-running it (re-running a finished graph is a human \
+                     decision via graph_reset + graph_run)",
                     lp.id
                 );
                 continue;
             }
 
-            if lp.status == LoopStatus::Failed {
-                match self.db.reset_loop(&lp.id, None)? {
-                    LoopResetOutcome::Reset { spec_count } => {
+            if lp.status == GraphStatus::Failed {
+                match self.db.reset_graph(&lp.id, None)? {
+                    GraphResetOutcome::Reset {
+                        spec_count,
+                        skipped_count,
+                    } => {
                         tracing::info!(
-                            "Loop '{}' was failed; auto-reset by its schedule ({} spec(s) reset) \
+                            "Graph '{}' was failed; auto-reset by its schedule ({} spec(s) reset, {} skipped preserved) \
                              and resuming",
                             lp.id,
-                            spec_count
+                            spec_count,
+                            skipped_count
                         );
                     }
                     other => {
                         tracing::warn!(
-                            "Loop '{}' autorun could not auto-reset it ({:?}); skipping launch",
+                            "Graph '{}' autorun could not auto-reset it ({:?}); skipping launch",
                             lp.id,
                             other
                         );
@@ -455,49 +460,92 @@ impl CronScheduler {
                 }
             }
 
-            tracing::info!("Loop '{}' reached its autorun_at time; launching", lp.id);
-            // Resume with the loop's persisted run context (its queue, if any)
+            tracing::info!("Graph '{}' reached its autorun_at time; launching", lp.id);
+            activity::publish(
+                &self.db,
+                &lp.workdir,
+                &lp.id,
+                &lp.name,
+                "Autorun fired; resuming.",
+            );
+
+            let next_spec_preview = graph_engine
+                .preview_next_spec_id(&lp.id, lp.active_run_queue_id.as_deref())
+                .unwrap_or(None);
+            match graph_engine
+                .dirty_start_check(
+                    &lp.id,
+                    &lp.workdir,
+                    next_spec_preview.as_deref(),
+                    lp.allow_dirty_start,
+                )
+                .await
+            {
+                Ok(Some(notice)) if notice.refuse => {
+                    tracing::warn!(
+                        "Graph '{}' autorun refused: {}. The schedule was one-shot and is \
+                         already cleared — relaunch manually via graph_run (or graph_continue) \
+                         once resolved.",
+                        lp.id,
+                        notice.message
+                    );
+                    continue;
+                }
+                Ok(Some(notice)) => {
+                    tracing::warn!(
+                        "Graph '{}' autorun launching with a warning: {}",
+                        lp.id,
+                        notice.message
+                    );
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::error!("Graph '{}' autorun dirty-start check failed: {}", lp.id, e);
+                }
+            }
+
+            // Resume with the graph's persisted run context (its queue, if any)
             // rather than a fresh `start_background`, which would fall back
-            // to the loop's own bound specs — empty for a queue run, and
+            // to the graph's own bound specs — empty for a queue run, and
             // exactly how a resumed queue run used to be mistaken for
             // "nothing to do" and marked completed with members still
             // pending.
-            Arc::clone(loop_engine).resume_background(lp.id.clone());
+            Arc::clone(graph_engine).resume_background(lp.id.clone());
         }
         Ok(())
     }
 
-    /// One-shot `auto_continue_at`: for each loop with a pending
+    /// One-shot `auto_continue_at`: for each graph with a pending
     /// auto-continue schedule whose time has been reached, clear the
-    /// schedule and — only if the loop is still `Paused` — fire the
-    /// requested `loop_continue` action (`retry_current_node` by default) and
+    /// schedule and — only if the graph is still `Paused` — fire the
+    /// requested `graph_continue` action (`retry_current_node` by default) and
     /// resume it in place.
     ///
-    /// Unlike [`Self::fire_due_autorun_loops`], a loop that is no longer
+    /// Unlike [`Self::fire_due_autorun_graphs`], a graph that is no longer
     /// `Paused` by the scheduled time (already continued manually, failed,
     /// completed, or running) is *not* waited on further — the schedule is
     /// cleared right away without firing, so a stale deferred-resume can
-    /// never double-run a loop that moved on some other way. This never
-    /// resets or relaunches the loop (that's `autorun_at`'s job): it goes
-    /// straight through the same action-then-resume path the `loop_continue`
+    /// never double-run a graph that moved on some other way. This never
+    /// resets or relaunches the graph (that's `autorun_at`'s job): it goes
+    /// straight through the same action-then-resume path the `graph_continue`
     /// MCP tool uses, preserving the paused cursor/context.
-    fn fire_due_auto_continue_loops(&self, now_utc: chrono::DateTime<Utc>) -> anyhow::Result<()> {
-        let Some(loop_engine) = self.loop_engine.as_ref() else {
+    fn fire_due_auto_continue_graphs(&self, now_utc: chrono::DateTime<Utc>) -> anyhow::Result<()> {
+        let Some(graph_engine) = self.graph_engine.as_ref() else {
             return Ok(());
         };
-        let pending = self.db.list_pending_auto_continue_loops()?;
+        let pending = self.db.list_pending_auto_continue_graphs()?;
         for lp in &pending {
             if !lp.is_auto_continue_due(now_utc) {
-                // Not firing this tick. If the time has passed but the loop
-                // left `Paused` some other way (manual `loop_continue`,
+                // Not firing this tick. If the time has passed but the graph
+                // left `Paused` some other way (manual `graph_continue`,
                 // failure) before the schedule fired, it's stale — clear it
                 // now rather than leaving it to linger forever waiting for
                 // `Paused` to recur (unlike `autorun_at`, which does wait,
                 // since its target statuses don't otherwise repeat).
                 if lp.is_auto_continue_time_reached(now_utc) {
-                    self.db.clear_loop_auto_continue(&lp.id)?;
+                    self.db.clear_graph_auto_continue(&lp.id)?;
                     tracing::warn!(
-                        "Loop '{}' auto-continue fired but the loop is no longer paused ({}); \
+                        "Graph '{}' auto-continue fired but the graph is no longer paused ({}); \
                          clearing the schedule without resuming it",
                         lp.id,
                         lp.status.as_str()
@@ -505,7 +553,7 @@ impl CronScheduler {
                 }
                 continue;
             }
-            self.db.clear_loop_auto_continue(&lp.id)?;
+            self.db.clear_graph_auto_continue(&lp.id)?;
 
             let action = lp
                 .auto_continue_action
@@ -517,7 +565,7 @@ impl CronScheduler {
             };
             if let Err(error) = applied {
                 tracing::warn!(
-                    "Loop '{}' auto-continue could not apply action '{}' ({}); skipping resume",
+                    "Graph '{}' auto-continue could not apply action '{}' ({}); skipping resume",
                     lp.id,
                     action,
                     error.message
@@ -526,25 +574,25 @@ impl CronScheduler {
             }
 
             tracing::info!(
-                "Loop '{}' reached its auto_continue_at time; resuming with action '{}'",
+                "Graph '{}' reached its auto_continue_at time; resuming with action '{}'",
                 lp.id,
                 action
             );
-            Arc::clone(loop_engine).resume_background(lp.id.clone());
+            Arc::clone(graph_engine).resume_background(lp.id.clone());
         }
         Ok(())
     }
 
-    /// Evaluate a single cron loop and launch it via the loop engine if due.
-    async fn try_fire_loop(
+    /// Evaluate a single cron graph and launch it via the graph engine if due.
+    async fn try_fire_graph(
         &self,
-        lp: &crate::domain::loops::Loop,
+        lp: &crate::domain::graphs::Graph,
         now_local: chrono::DateTime<Local>,
     ) -> anyhow::Result<()> {
-        let Some(loop_engine) = self.loop_engine.as_ref() else {
+        let Some(graph_engine) = self.graph_engine.as_ref() else {
             return Ok(());
         };
-        // A loop already running/paused must not be relaunched by its trigger.
+        // A graph already running/paused must not be relaunched by its trigger.
         if !lp.is_fireable() {
             return Ok(());
         }
@@ -556,7 +604,7 @@ impl CronScheduler {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!(
-                    "Loop '{}' has invalid cron expression '{}': {}",
+                    "Graph '{}' has invalid cron expression '{}': {}",
                     lp.id,
                     schedule_expr,
                     e
@@ -570,9 +618,9 @@ impl CronScheduler {
         };
         let scheduled_tick = due_local.with_timezone(&Utc);
 
-        // Tick idempotency in a loop-namespaced key: dedupe by the scheduled
+        // Tick idempotency in a graph-namespaced key: dedupe by the scheduled
         // tick itself, not by when this evaluation happened to run.
-        let key = loop_key(&lp.id);
+        let key = graph_key(&lp.id);
         {
             let mut last_fired = self.last_fired.lock().await;
             if last_fired
@@ -580,7 +628,7 @@ impl CronScheduler {
                 .is_some_and(|last| *last >= scheduled_tick)
             {
                 tracing::info!(
-                    "Loop '{}' tick {} already fired; skipping duplicate evaluation",
+                    "Graph '{}' tick {} already fired; skipping duplicate evaluation",
                     lp.id,
                     scheduled_tick
                 );
@@ -589,11 +637,11 @@ impl CronScheduler {
             last_fired.insert(key, scheduled_tick);
         }
 
-        tracing::info!("Cron loop '{}' is due; launching", lp.id);
-        // Loops are launched fire-and-forget: the loop engine drives the graph
+        tracing::info!("Cron graph '{}' is due; launching", lp.id);
+        // Graphs are launched fire-and-forget: the graph engine drives the graph
         // and owns its own failure handling, so the agent RetryPolicy does not
         // apply here.
-        Arc::clone(loop_engine).start_background(lp.id.clone());
+        Arc::clone(graph_engine).start_background(lp.id.clone());
         Ok(())
     }
 
@@ -642,7 +690,7 @@ impl CronScheduler {
         // Tick idempotency: dedupe by the scheduled tick itself (in UTC, so
         // it lines up with the rest of the system — DB schema, `last_run_at`,
         // daemon JSON), not by when this evaluation happened to run. Two
-        // evaluations of the same tick — the regular tick loop firing twice,
+        // evaluations of the same tick — the regular tick graph firing twice,
         // or a second evaluation path racing it — compute the identical
         // `scheduled_tick`, so this is an exact key, not a time-window guess.
         {
@@ -688,6 +736,9 @@ impl CronScheduler {
                     finished_at: Some(now),
                     exit_code: None,
                     timeout_at: None,
+                    // CB43: nothing executed on a skipped run — no pair.
+                    executed_platform: None,
+                    executed_model: None,
                 };
                 let _ = self.db.insert_run(&missed);
                 return Ok(());
@@ -823,7 +874,7 @@ fn next_fire_utc(
 
 /// Parse `schedule_expr` and, if it yields a nearer next fire than `earliest`,
 /// update `earliest`. A `None` expression or an unparseable one is skipped.
-/// Shared by agents and cron loops so both walk fire times identically.
+/// Shared by agents and cron graphs so both walk fire times identically.
 fn fold_earliest(
     earliest: &mut Option<chrono::DateTime<Utc>>,
     schedule_expr: Option<&str>,
@@ -885,6 +936,7 @@ mod tests {
             trigger: None,
             cli: Cli::new("opencode"),
             model: None,
+            effort: None,
             working_dir: None,
             enabled,
             enable_at: None,
@@ -911,7 +963,7 @@ mod tests {
         (db, scheduler)
     }
 
-    fn test_scheduler_with_loops() -> (Arc<Database>, CronScheduler) {
+    fn test_scheduler_with_graphs() -> (Arc<Database>, CronScheduler) {
         let dir = tempfile::tempdir().unwrap();
         let db = Arc::new(Database::new(&dir.path().join("test.db")).unwrap());
         std::mem::forget(dir);
@@ -919,20 +971,20 @@ mod tests {
             db.clone(),
             Arc::new(DefaultNotificationService),
         ));
-        let loop_engine = Arc::new(crate::loop_engine::LoopEngine::new(
+        let graph_engine = Arc::new(crate::graph_engine::GraphEngine::new(
             db.clone(),
             Arc::new(DefaultNotificationService),
         ));
-        let scheduler = CronScheduler::with_loops(db.clone(), executor, loop_engine);
+        let scheduler = CronScheduler::with_graphs(db.clone(), executor, graph_engine);
         (db, scheduler)
     }
 
-    /// Like [`test_scheduler_with_loops`], but also hands back the
-    /// [`LoopEngine`] itself, with the cross-run attempt budget floored to a
+    /// Like [`test_scheduler_with_graphs`], but also hands back the
+    /// [`GraphEngine`] itself, with the cross-run attempt budget floored to a
     /// single attempt, so a test can drive a spec to a genuine C19 `Blocked`
-    /// loop through real execution and then check the scheduler's autorun
+    /// graph through real execution and then check the scheduler's autorun
     /// behavior against that exact state.
-    fn test_scheduler_and_engine() -> (Arc<Database>, CronScheduler, Arc<LoopEngine>) {
+    fn test_scheduler_and_engine() -> (Arc<Database>, CronScheduler, Arc<GraphEngine>) {
         let dir = tempfile::tempdir().unwrap();
         let db = Arc::new(Database::new(&dir.path().join("test.db")).unwrap());
         std::mem::forget(dir);
@@ -940,25 +992,27 @@ mod tests {
             db.clone(),
             Arc::new(DefaultNotificationService),
         ));
-        let loop_engine = Arc::new(
-            LoopEngine::new(db.clone(), Arc::new(DefaultNotificationService))
+        let graph_engine = Arc::new(
+            GraphEngine::new(db.clone(), Arc::new(DefaultNotificationService))
                 .with_spec_attempt_limit(1),
         );
-        let scheduler = CronScheduler::with_loops(db.clone(), executor, Arc::clone(&loop_engine));
-        (db, scheduler, loop_engine)
+        let scheduler = CronScheduler::with_graphs(db.clone(), executor, Arc::clone(&graph_engine));
+        (db, scheduler, graph_engine)
     }
 
-    fn sample_loop(
+    fn sample_graph(
         id: &str,
-        status: crate::domain::loops::LoopStatus,
-    ) -> crate::domain::loops::Loop {
-        crate::domain::loops::Loop {
+        status: crate::domain::graphs::GraphStatus,
+    ) -> crate::domain::graphs::Graph {
+        crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
+            infra_node_id: None,
             id: id.to_string(),
-            name: "Autorun test loop".to_string(),
+            name: "Autorun test graph".to_string(),
             description: None,
-            workdir: "/tmp/loop-autorun-test".to_string(),
+            workdir: "/tmp/graph-autorun-test".to_string(),
             status,
             trigger: None,
             created_at: Utc::now(),
@@ -968,140 +1022,142 @@ mod tests {
             auto_continue_at: None,
             auto_continue_action: None,
             active_run_queue_id: None,
-            on_completed: None,
+            hooks: std::collections::BTreeMap::new(),
         }
     }
 
-    /// A future `autorun_at` must not launch the loop — it's a schedule, not
+    /// A future `autorun_at` must not launch the graph — it's a schedule, not
     /// an immediate action.
     #[tokio::test]
-    async fn fire_due_autorun_loops_ignores_future_schedule() {
-        use crate::domain::loops::LoopStatus;
+    async fn fire_due_autorun_graphs_ignores_future_schedule() {
+        use crate::domain::graphs::GraphStatus;
 
-        let (db, scheduler) = test_scheduler_with_loops();
-        db.insert_loop(&sample_loop("future-autorun", LoopStatus::Failed))
+        let (db, scheduler) = test_scheduler_with_graphs();
+        db.insert_graph(&sample_graph("future-autorun", GraphStatus::Failed))
             .unwrap();
-        db.schedule_loop_autorun("future-autorun", Utc::now() + chrono::Duration::hours(1))
+        db.schedule_graph_autorun("future-autorun", Utc::now() + chrono::Duration::hours(1))
             .unwrap();
 
-        scheduler.fire_due_autorun_loops(Utc::now()).unwrap();
+        scheduler.fire_due_autorun_graphs(Utc::now()).await.unwrap();
 
-        let lp = db.get_loop("future-autorun").unwrap().unwrap();
-        assert_eq!(lp.status, LoopStatus::Failed, "must not launch yet");
+        let lp = db.get_graph("future-autorun").unwrap().unwrap();
+        assert_eq!(lp.status, GraphStatus::Failed, "must not launch yet");
         assert!(
             lp.autorun_at.is_some(),
             "future autorun_at must remain pending"
         );
     }
 
-    /// A past-due `autorun_at` on a fireable (`failed`) loop must launch it
+    /// A past-due `autorun_at` on a fireable (`failed`) graph must launch it
     /// once and clear the schedule — the one-shot semantics from the spec.
     #[tokio::test]
-    async fn fire_due_autorun_loops_fires_past_schedule_once_and_clears_it() {
-        use crate::domain::loops::LoopStatus;
+    async fn fire_due_autorun_graphs_fires_past_schedule_once_and_clears_it() {
+        use crate::domain::graphs::GraphStatus;
 
-        let (db, scheduler) = test_scheduler_with_loops();
-        db.insert_loop(&sample_loop("past-autorun", LoopStatus::Failed))
+        let (db, scheduler) = test_scheduler_with_graphs();
+        db.insert_graph(&sample_graph("past-autorun", GraphStatus::Failed))
             .unwrap();
-        db.schedule_loop_autorun("past-autorun", Utc::now() - chrono::Duration::minutes(1))
+        db.schedule_graph_autorun("past-autorun", Utc::now() - chrono::Duration::minutes(1))
             .unwrap();
 
-        scheduler.fire_due_autorun_loops(Utc::now()).unwrap();
+        scheduler.fire_due_autorun_graphs(Utc::now()).await.unwrap();
 
-        let lp = db.get_loop("past-autorun").unwrap().unwrap();
+        let lp = db.get_graph("past-autorun").unwrap().unwrap();
         assert!(
             lp.autorun_at.is_none(),
             "firing must clear autorun_at (one-shot)"
         );
 
         // Firing again must be a no-op: the schedule is already cleared, so
-        // it must not appear among pending autorun loops anymore.
-        let pending = db.list_pending_autorun_loops().unwrap();
+        // it must not appear among pending autorun graphs anymore.
+        let pending = db.list_pending_autorun_graphs().unwrap();
         assert!(
             pending.iter().all(|l| l.id != "past-autorun"),
-            "loop must not remain pending after firing once"
+            "graph must not remain pending after firing once"
         );
     }
 
-    /// B41: a schedule cancelled via `clear_loop_autorun` (the path
-    /// `loop_schedule_autorun` with `at` omitted takes) must not fire later,
+    /// B41: a schedule cancelled via `clear_graph_autorun` (the path
+    /// `graph_schedule_autorun` with `at` omitted takes) must not fire later,
     /// even past its original due time — cancelling must actually prevent
     /// the wake-up, not just delay it.
     #[tokio::test]
-    async fn fire_due_autorun_loops_never_fires_a_cancelled_schedule() {
-        use crate::domain::loops::LoopStatus;
+    async fn fire_due_autorun_graphs_never_fires_a_cancelled_schedule() {
+        use crate::domain::graphs::GraphStatus;
 
-        let (db, scheduler) = test_scheduler_with_loops();
-        db.insert_loop(&sample_loop("cancelled-autorun", LoopStatus::Failed))
+        let (db, scheduler) = test_scheduler_with_graphs();
+        db.insert_graph(&sample_graph("cancelled-autorun", GraphStatus::Failed))
             .unwrap();
-        db.schedule_loop_autorun(
+        db.schedule_graph_autorun(
             "cancelled-autorun",
             Utc::now() - chrono::Duration::minutes(1),
         )
         .unwrap();
-        db.clear_loop_autorun("cancelled-autorun").unwrap();
+        db.clear_graph_autorun("cancelled-autorun").unwrap();
 
-        scheduler.fire_due_autorun_loops(Utc::now()).unwrap();
+        scheduler.fire_due_autorun_graphs(Utc::now()).await.unwrap();
 
-        let lp = db.get_loop("cancelled-autorun").unwrap().unwrap();
+        let lp = db.get_graph("cancelled-autorun").unwrap().unwrap();
         assert_eq!(
             lp.status,
-            LoopStatus::Failed,
-            "a cancelled schedule must not auto-reset/resume the loop"
+            GraphStatus::Failed,
+            "a cancelled schedule must not auto-reset/resume the graph"
         );
         assert!(lp.autorun_at.is_none());
     }
 
-    /// A `Running`/`Paused` loop must not be relaunched by its own
+    /// A `Running`/`Paused` graph must not be relaunched by its own
     /// `autorun_at`, even if it's past due — that would spawn a duplicate
     /// execution over the same graph.
     #[tokio::test]
-    async fn fire_due_autorun_loops_skips_running_and_paused_loops() {
-        use crate::domain::loops::LoopStatus;
+    async fn fire_due_autorun_graphs_skips_running_and_paused_graphs() {
+        use crate::domain::graphs::GraphStatus;
 
-        for status in [LoopStatus::Running, LoopStatus::Paused] {
-            let (db, scheduler) = test_scheduler_with_loops();
+        for status in [GraphStatus::Running, GraphStatus::Paused] {
+            let (db, scheduler) = test_scheduler_with_graphs();
             let id = format!("busy-autorun-{}", status.as_str());
-            db.insert_loop(&sample_loop(&id, status)).unwrap();
-            db.schedule_loop_autorun(&id, Utc::now() - chrono::Duration::minutes(1))
+            db.insert_graph(&sample_graph(&id, status)).unwrap();
+            db.schedule_graph_autorun(&id, Utc::now() - chrono::Duration::minutes(1))
                 .unwrap();
 
-            scheduler.fire_due_autorun_loops(Utc::now()).unwrap();
+            scheduler.fire_due_autorun_graphs(Utc::now()).await.unwrap();
 
-            let lp = db.get_loop(&id).unwrap().unwrap();
+            let lp = db.get_graph(&id).unwrap().unwrap();
             assert_eq!(lp.status, status, "status must be untouched");
             assert!(
                 lp.autorun_at.is_some(),
-                "{status:?} loop must not have its autorun_at cleared"
+                "{status:?} graph must not have its autorun_at cleared"
             );
         }
     }
 
-    /// `loop_run` refuses a `failed` loop directly, so firing autorun on one
+    /// `graph_run` refuses a `failed` graph directly, so firing autorun on one
     /// must not call `start_background` on it as-is. Instead it must go
-    /// through the same reset transition as `loop_reset`
-    /// ([`Database::reset_loop`]) and then resume — the resilience pattern a
-    /// quota-failed loop relies on to revive itself unattended.
+    /// through the same reset transition as `graph_reset`
+    /// ([`Database::reset_graph`]) and then resume — the resilience pattern a
+    /// quota-failed graph relies on to revive itself unattended.
     #[tokio::test]
-    async fn fire_due_autorun_loops_resets_failed_loop_through_shared_path_and_resumes() {
-        use crate::domain::loops::{
-            Loop, LoopNode, LoopNodeKind, LoopSpec, LoopSpecStatus, LoopStatus,
+    async fn fire_due_autorun_graphs_resets_failed_graph_through_shared_path_and_resumes() {
+        use crate::domain::graphs::{
+            Graph, GraphNode, GraphNodeKind, GraphSpec, GraphSpecStatus, GraphStatus,
         };
 
-        let (db, scheduler) = test_scheduler_with_loops();
+        let (db, scheduler) = test_scheduler_with_graphs();
         // A real, existing workdir: the resumed run's check node actually
         // spawns a shell in it, unlike the other autorun tests which only
-        // assert on synchronous state and never let the loop engine run.
+        // assert on synchronous state and never let the graph engine run.
         let workdir = tempfile::tempdir().unwrap();
-        let loop_id = "failed-autorun".to_string();
-        db.insert_loop(&Loop {
+        let graph_id = "failed-autorun".to_string();
+        db.insert_graph(&Graph {
             archived: false,
             paused_by_reconciliation: false,
-            id: loop_id.clone(),
-            name: "Autorun test loop".to_string(),
+            allow_dirty_start: false,
+            infra_node_id: None,
+            id: graph_id.clone(),
+            name: "Autorun test graph".to_string(),
             description: None,
             workdir: workdir.path().to_string_lossy().to_string(),
-            status: LoopStatus::Failed,
+            status: GraphStatus::Failed,
             trigger: None,
             created_at: Utc::now(),
             started_at: None,
@@ -1110,22 +1166,25 @@ mod tests {
             auto_continue_at: None,
             auto_continue_action: None,
             active_run_queue_id: None,
-            on_completed: None,
+            hooks: std::collections::BTreeMap::new(),
         })
         .unwrap();
-        db.insert_loop_spec(&LoopSpec {
+        db.insert_graph_spec(&GraphSpec {
             id: "spec-1".to_string(),
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             name: "Spec 1".to_string(),
             description: Some(
                 "Functional Requirements:\n- A\n\nNon-Functional Requirements:\n- B\n\nObjective:\n- C\n\nConstraints:\n- D\n\nGuidelines:\n- E\n\nIn Scope:\n- F\n\nOut of Scope:\n- G".to_string(),
             ),
             position: 1,
             parallelizable: false,
-            status: LoopSpecStatus::Failed,
+            status: GraphSpecStatus::Failed,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -1133,12 +1192,12 @@ mod tests {
             completed_via_at: None,
         })
         .unwrap();
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-check".to_string(),
             spec_id: None,
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             name: "check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "printf APPROVED",
                 "success_condition": "exit_code_0"
@@ -1147,94 +1206,239 @@ mod tests {
             created_at: Utc::now(),
         })
         .unwrap();
-        db.schedule_loop_autorun(&loop_id, Utc::now() - chrono::Duration::minutes(1))
+        db.schedule_graph_autorun(&graph_id, Utc::now() - chrono::Duration::minutes(1))
             .unwrap();
 
-        scheduler.fire_due_autorun_loops(Utc::now()).unwrap();
+        scheduler.fire_due_autorun_graphs(Utc::now()).await.unwrap();
 
         // The reset happens synchronously, before the resumed run is spawned
         // in the background.
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
         assert!(lp.autorun_at.is_none(), "firing must clear autorun_at");
         assert_ne!(
             lp.status,
-            LoopStatus::Failed,
-            "the loop must be reset off `failed` before resuming"
+            GraphStatus::Failed,
+            "the graph must be reset off `failed` before resuming"
         );
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
-            let lp = db.get_loop(&loop_id).unwrap().unwrap();
-            if lp.status == LoopStatus::Completed {
+            let lp = db.get_graph(&graph_id).unwrap().unwrap();
+            if lp.status == GraphStatus::Completed {
                 break;
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "resumed run did not complete in time; loop status is {:?}",
+                "resumed run did not complete in time; graph status is {:?}",
                 lp.status
             );
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
 
-        let spec = db.get_loop_spec("spec-1").unwrap().unwrap();
+        let spec = db.get_graph_spec("spec-1").unwrap().unwrap();
         assert_eq!(
             spec.status,
-            LoopSpecStatus::Completed,
+            GraphSpecStatus::Completed,
             "the auto-resumed run must have actually executed the spec's graph"
         );
     }
 
-    /// C1's regression test — the real sequence: a loop is genuinely
-    /// `Running` when the daemon dies uncleanly; `reconcile_orphaned_loops`
+    /// CB27: the unattended quota autorun must preserve administratively
+    /// skipped specs the same way a manual blanket reset does.
+    #[tokio::test]
+    async fn fire_due_autorun_graphs_preserves_admin_skipped_specs() {
+        use crate::domain::graphs::{
+            Graph, GraphNode, GraphNodeKind, GraphSpec, GraphSpecStatus, GraphStatus,
+        };
+
+        let (db, scheduler) = test_scheduler_with_graphs();
+        let workdir = tempfile::tempdir().unwrap();
+        let graph_id = "failed-autorun-admin-skip".to_string();
+        db.insert_graph(&Graph {
+            archived: false,
+            paused_by_reconciliation: false,
+            allow_dirty_start: false,
+            infra_node_id: None,
+            id: graph_id.clone(),
+            name: "Autorun admin-skip test".to_string(),
+            description: None,
+            workdir: workdir.path().to_string_lossy().to_string(),
+            status: GraphStatus::Failed,
+            trigger: None,
+            created_at: Utc::now(),
+            started_at: None,
+            completed_at: None,
+            autorun_at: None,
+            auto_continue_at: None,
+            auto_continue_action: None,
+            active_run_queue_id: None,
+            hooks: std::collections::BTreeMap::new(),
+        })
+        .unwrap();
+        // One failed spec — will be reset and resumed.
+        db.insert_graph_spec(&GraphSpec {
+            id: "spec-failed".to_string(),
+            graph_id: Some(graph_id.clone()),
+            name: "Failed spec".to_string(),
+            description: Some(
+                "Functional Requirements:\n- A\n\nNon-Functional Requirements:\n- B\n\nObjective:\n- C\n\nConstraints:\n- D\n\nGuidelines:\n- E\n\nIn Scope:\n- F\n\nOut of Scope:\n- G".to_string(),
+            ),
+            position: 1,
+            parallelizable: false,
+            status: GraphSpecStatus::Failed,
+            started_at: None,
+            completed_at: None,
+            spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
+            spec_committed_head: None,
+            workdir: None,
+            completed_via: None,
+            completed_via_reason: None,
+            completed_via_at: None,
+        })
+        .unwrap();
+        // One admin-skipped spec — must survive the autorun reset.
+        db.insert_graph_spec(&GraphSpec {
+            id: "spec-admin-skipped".to_string(),
+            graph_id: Some(graph_id.clone()),
+            name: "Admin skipped spec".to_string(),
+            description: None,
+            position: 2,
+            parallelizable: false,
+            status: GraphSpecStatus::Skipped,
+            started_at: None,
+            completed_at: Some(Utc::now()),
+            spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
+            spec_committed_head: None,
+            workdir: None,
+            completed_via: Some("admin".to_string()),
+            completed_via_reason: Some("premise false".to_string()),
+            completed_via_at: Some(Utc::now()),
+        })
+        .unwrap();
+        db.insert_graph_node(&GraphNode {
+            id: "node-check".to_string(),
+            spec_id: None,
+            graph_id: Some(graph_id.clone()),
+            name: "check".to_string(),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({
+                "command": "printf APPROVED",
+                "success_condition": "exit_code_0"
+            }),
+            position: 1,
+            created_at: Utc::now(),
+        })
+        .unwrap();
+        db.schedule_graph_autorun(&graph_id, Utc::now() - chrono::Duration::minutes(1))
+            .unwrap();
+
+        scheduler.fire_due_autorun_graphs(Utc::now()).await.unwrap();
+
+        // Synchronous assertions — before the background resume can finish.
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        assert!(lp.autorun_at.is_none(), "firing must clear autorun_at");
+
+        let admin_skip = db.get_graph_spec("spec-admin-skipped").unwrap().unwrap();
+        assert_eq!(
+            admin_skip.status,
+            GraphSpecStatus::Skipped,
+            "admin-skipped spec must survive the autorun reset"
+        );
+        assert_eq!(
+            admin_skip.completed_via.as_deref(),
+            Some("admin"),
+            "admin provenance must be preserved"
+        );
+
+        let failed_spec = db.get_graph_spec("spec-failed").unwrap().unwrap();
+        assert_ne!(
+            failed_spec.status,
+            GraphSpecStatus::Failed,
+            "the failed spec must be reset off Failed"
+        );
+
+        // Wait for the resumed run to complete.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let lp = db.get_graph(&graph_id).unwrap().unwrap();
+            if lp.status == GraphStatus::Completed {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "resumed run did not complete in time; graph status is {:?}",
+                lp.status
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        // Final assertion — the admin skip must still be skipped after the run.
+        let admin_skip = db.get_graph_spec("spec-admin-skipped").unwrap().unwrap();
+        assert_eq!(
+            admin_skip.status,
+            GraphSpecStatus::Skipped,
+            "admin-skipped spec must remain skipped after the resumed run"
+        );
+    }
+    /// `Running` when the daemon dies uncleanly; `reconcile_orphaned_graphs`
     /// (as it would run at the next boot) pauses it and marks its dangling
-    /// run interrupted; the resilience node's `loop_schedule_autorun` is
+    /// run interrupted; the resilience node's `graph_schedule_autorun` is
     /// already due by the time the scheduler next evaluates it. Before this
-    /// fix, `is_autorun_due` excluded every `Paused` loop unconditionally, so
+    /// fix, `is_autorun_due` excluded every `Paused` graph unconditionally, so
     /// this schedule would sit forever and never fire. It must fire now,
-    /// through the same `resume_background` path a manual `loop_continue`
+    /// through the same `resume_background` path a manual `graph_continue`
     /// takes, and actually finish the interrupted spec.
     #[tokio::test]
-    async fn fire_due_autorun_loops_fires_reconciliation_paused_loop() {
-        use crate::domain::loops::{LoopNodeRun, LoopRunStatus, LoopSpecStatus};
+    async fn fire_due_autorun_graphs_fires_reconciliation_paused_graph() {
+        use crate::domain::graphs::{GraphNodeRun, GraphRunStatus, GraphSpecStatus};
 
-        let (db, scheduler) = test_scheduler_with_loops();
+        let (db, scheduler) = test_scheduler_with_graphs();
         let workdir = tempfile::tempdir().unwrap();
         let data_dir = tempfile::tempdir().unwrap();
-        let loop_id = "reconciled-autorun".to_string();
+        let graph_id = "reconciled-autorun".to_string();
 
-        let mut lp = sample_loop(&loop_id, LoopStatus::Running);
+        let mut lp = sample_graph(&graph_id, GraphStatus::Running);
         lp.workdir = workdir.path().to_string_lossy().to_string();
-        db.insert_loop(&lp).unwrap();
+        db.insert_graph(&lp).unwrap();
 
-        let spec = crate::domain::loops::LoopSpec {
+        let spec = crate::domain::graphs::GraphSpec {
             id: "spec-reconciled".to_string(),
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             name: "Spec 1".to_string(),
             description: Some(
                 "Functional Requirements:\n- A\n\nNon-Functional Requirements:\n- B\n\nObjective:\n- C\n\nConstraints:\n- D\n\nGuidelines:\n- E\n\nIn Scope:\n- F\n\nOut of Scope:\n- G".to_string(),
             ),
             position: 1,
             parallelizable: false,
-            status: LoopSpecStatus::Running,
+            status: GraphSpecStatus::Running,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
         };
-        db.insert_loop_spec(&spec).unwrap();
-        db.update_loop_spec_status(&spec.id, LoopSpecStatus::Running, Some(Utc::now()), None)
+        db.insert_graph_spec(&spec).unwrap();
+        db.update_graph_spec_status(&spec.id, GraphSpecStatus::Running, Some(Utc::now()), None)
             .unwrap();
 
-        let node = crate::domain::loops::LoopNode {
+        let node = crate::domain::graphs::GraphNode {
             id: "node-reconciled".to_string(),
             spec_id: None,
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             name: "check".to_string(),
-            kind: crate::domain::loops::LoopNodeKind::Check,
+            kind: crate::domain::graphs::GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "printf APPROVED",
                 "success_condition": "exit_code_0"
@@ -1242,15 +1446,15 @@ mod tests {
             position: 1,
             created_at: Utc::now(),
         };
-        db.insert_loop_node(&node).unwrap();
+        db.insert_graph_node(&node).unwrap();
 
         // The run left dangling by the daemon that died uncleanly.
-        db.insert_loop_run(&LoopNodeRun {
+        db.insert_graph_run(&GraphNodeRun {
             id: "run-reconciled".to_string(),
-            loop_id: loop_id.clone(),
+            graph_id: graph_id.clone(),
             spec_id: spec.id.clone(),
             node_id: node.id.clone(),
-            status: LoopRunStatus::Running,
+            status: GraphRunStatus::Running,
             input: None,
             output: None,
             started_at: Utc::now(),
@@ -1259,26 +1463,28 @@ mod tests {
             pid: None,
             boot_id: None,
             session_id: None,
+            executed_platform: None,
+            executed_model: None,
         })
         .unwrap();
 
         // The next boot's reconciliation pass — this is what must leave the
-        // loop resumable, not the test hand-setting `paused_by_reconciliation`.
-        assert_eq!(db.reconcile_orphaned_loops(data_dir.path()).unwrap(), 1);
-        let lp_after_reconcile = db.get_loop(&loop_id).unwrap().unwrap();
-        assert_eq!(lp_after_reconcile.status, LoopStatus::Paused);
+        // graph resumable, not the test hand-setting `paused_by_reconciliation`.
+        assert_eq!(db.reconcile_orphaned_graphs(data_dir.path()).unwrap(), 1);
+        let lp_after_reconcile = db.get_graph(&graph_id).unwrap().unwrap();
+        assert_eq!(lp_after_reconcile.status, GraphStatus::Paused);
         assert!(
             lp_after_reconcile.paused_by_reconciliation,
             "reconciliation must flag its own pause"
         );
 
         // The resilience node's scheduled resume, already due.
-        db.schedule_loop_autorun(&loop_id, Utc::now() - chrono::Duration::minutes(1))
+        db.schedule_graph_autorun(&graph_id, Utc::now() - chrono::Duration::minutes(1))
             .unwrap();
 
-        scheduler.fire_due_autorun_loops(Utc::now()).unwrap();
+        scheduler.fire_due_autorun_graphs(Utc::now()).await.unwrap();
 
-        let lp_fired = db.get_loop(&loop_id).unwrap().unwrap();
+        let lp_fired = db.get_graph(&graph_id).unwrap().unwrap();
         assert!(
             lp_fired.autorun_at.is_none(),
             "firing must clear autorun_at"
@@ -1286,99 +1492,101 @@ mod tests {
 
         // Unlike the `failed` case, there's no synchronous reset step here —
         // `resume_background`'s spawned task is what actually claims the
-        // loop off `Paused` (via `claim_loop_for_run`). Prove it left
+        // graph off `Paused` (via `claim_graph_for_run`). Prove it left
         // `Paused` by waiting for the resumed run to actually complete.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
-            let lp = db.get_loop(&loop_id).unwrap().unwrap();
-            if lp.status == LoopStatus::Completed {
+            let lp = db.get_graph(&graph_id).unwrap().unwrap();
+            if lp.status == GraphStatus::Completed {
                 break;
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "resumed run did not complete in time; loop status is {:?}",
+                "resumed run did not complete in time; graph status is {:?}",
                 lp.status
             );
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
 
-        let spec_after = db.get_loop_spec(&spec.id).unwrap().unwrap();
+        let spec_after = db.get_graph_spec(&spec.id).unwrap().unwrap();
         assert_eq!(
             spec_after.status,
-            LoopSpecStatus::Completed,
+            GraphSpecStatus::Completed,
             "the auto-resumed run must have actually executed the interrupted spec"
         );
     }
 
-    /// C1: firing on a reconciliation-paused loop must clear `autorun_at`
+    /// C1: firing on a reconciliation-paused graph must clear `autorun_at`
     /// exactly like every other autorun fire — a second scheduler tick must
     /// not resume it again.
     #[tokio::test]
-    async fn fire_due_autorun_loops_on_reconciliation_paused_loop_is_one_shot() {
-        let (db, scheduler) = test_scheduler_with_loops();
-        let loop_id = "reconciled-once".to_string();
-        let mut lp = sample_loop(&loop_id, LoopStatus::Paused);
+    async fn fire_due_autorun_graphs_on_reconciliation_paused_graph_is_one_shot() {
+        let (db, scheduler) = test_scheduler_with_graphs();
+        let graph_id = "reconciled-once".to_string();
+        let mut lp = sample_graph(&graph_id, GraphStatus::Paused);
         lp.paused_by_reconciliation = true;
-        db.insert_loop(&lp).unwrap();
-        db.schedule_loop_autorun(&loop_id, Utc::now() - chrono::Duration::minutes(1))
+        db.insert_graph(&lp).unwrap();
+        db.schedule_graph_autorun(&graph_id, Utc::now() - chrono::Duration::minutes(1))
             .unwrap();
 
-        scheduler.fire_due_autorun_loops(Utc::now()).unwrap();
-        let pending = db.list_pending_autorun_loops().unwrap();
+        scheduler.fire_due_autorun_graphs(Utc::now()).await.unwrap();
+        let pending = db.list_pending_autorun_graphs().unwrap();
         assert!(
-            pending.iter().all(|l| l.id != loop_id),
+            pending.iter().all(|l| l.id != graph_id),
             "firing must clear autorun_at so a second tick can't resume it again"
         );
     }
 
-    /// C1: a due `autorun_at` on a loop the operator paused (not
-    /// reconciliation) must never fire — `loop_pause`/`loop_report_blocker`
-    /// both route through `update_loop_status`, which clears
+    /// C1: a due `autorun_at` on a graph the operator paused (not
+    /// reconciliation) must never fire — `graph_pause`/`graph_report_blocker`
+    /// both route through `update_graph_status`, which clears
     /// `paused_by_reconciliation`, so this is the default state of any
-    /// `Paused` loop that didn't come through reconciliation.
+    /// `Paused` graph that didn't come through reconciliation.
     #[tokio::test]
-    async fn fire_due_autorun_loops_never_fires_on_an_operator_paused_loop() {
-        let (db, scheduler) = test_scheduler_with_loops();
-        let loop_id = "operator-paused-autorun".to_string();
-        let lp = sample_loop(&loop_id, LoopStatus::Paused);
+    async fn fire_due_autorun_graphs_never_fires_on_an_operator_paused_graph() {
+        let (db, scheduler) = test_scheduler_with_graphs();
+        let graph_id = "operator-paused-autorun".to_string();
+        let lp = sample_graph(&graph_id, GraphStatus::Paused);
         assert!(!lp.paused_by_reconciliation);
-        db.insert_loop(&lp).unwrap();
-        db.schedule_loop_autorun(&loop_id, Utc::now() - chrono::Duration::minutes(1))
+        db.insert_graph(&lp).unwrap();
+        db.schedule_graph_autorun(&graph_id, Utc::now() - chrono::Duration::minutes(1))
             .unwrap();
 
-        scheduler.fire_due_autorun_loops(Utc::now()).unwrap();
+        scheduler.fire_due_autorun_graphs(Utc::now()).await.unwrap();
 
-        let lp_after = db.get_loop(&loop_id).unwrap().unwrap();
-        assert_eq!(lp_after.status, LoopStatus::Paused, "must stay paused");
+        let lp_after = db.get_graph(&graph_id).unwrap().unwrap();
+        assert_eq!(lp_after.status, GraphStatus::Paused, "must stay paused");
         assert!(
             lp_after.autorun_at.is_some(),
             "operator pause must not be silently discarded either — the schedule stays pending"
         );
     }
 
-    /// C19: a loop the engine itself paused because a spec exceeded its
+    /// C19: a graph the engine itself paused because a spec exceeded its
     /// persisted cross-run attempt budget must not be silently relaunched by
     /// a pending autorun schedule either — it needs a human, exactly like
-    /// any other blocker. `LoopEngine::block_loop` reaches this state
-    /// through the exact same `update_loop_status(..., Paused, ...)` path
+    /// any other blocker. `GraphEngine::block_graph` reaches this state
+    /// through the exact same `update_graph_status(..., Paused, ...)` path
     /// as an operator pause (clearing `paused_by_reconciliation` on every
     /// call), so `is_autorun_due` already refuses it — this exercises that
-    /// through real execution rather than a hand-built `Loop` row.
+    /// through real execution rather than a hand-built `Graph` row.
     #[tokio::test]
-    async fn fire_due_autorun_loops_never_fires_a_c19_blocked_loop() {
-        use crate::domain::loops::{Loop, LoopNode, LoopNodeKind, LoopSpec, LoopSpecStatus};
+    async fn fire_due_autorun_graphs_never_fires_a_c19_blocked_graph() {
+        use crate::domain::graphs::{Graph, GraphNode, GraphNodeKind, GraphSpec, GraphSpecStatus};
 
-        let (db, scheduler, loop_engine) = test_scheduler_and_engine();
+        let (db, scheduler, graph_engine) = test_scheduler_and_engine();
         let workdir = tempfile::tempdir().unwrap();
-        let loop_id = "c19-blocked-autorun".to_string();
-        db.insert_loop(&Loop {
+        let graph_id = "c19-blocked-autorun".to_string();
+        db.insert_graph(&Graph {
             archived: false,
             paused_by_reconciliation: false,
-            id: loop_id.clone(),
+            allow_dirty_start: false,
+            infra_node_id: None,
+            id: graph_id.clone(),
             name: "C19 blocked autorun test".to_string(),
             description: None,
             workdir: workdir.path().to_string_lossy().to_string(),
-            status: LoopStatus::Draft,
+            status: GraphStatus::Draft,
             trigger: None,
             created_at: Utc::now(),
             started_at: None,
@@ -1387,14 +1595,14 @@ mod tests {
             auto_continue_at: None,
             auto_continue_action: None,
             active_run_queue_id: None,
-            on_completed: None,
+            hooks: std::collections::BTreeMap::new(),
         })
         .unwrap();
 
         let spec_id = "c19-blocked-spec".to_string();
-        db.insert_loop_spec(&LoopSpec {
+        db.insert_graph_spec(&GraphSpec {
             id: spec_id.clone(),
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             name: "Spec".to_string(),
             description: Some(
                 "Functional Requirements:\n- A\n\nNon-Functional Requirements:\n- B\n\n\
@@ -1404,10 +1612,13 @@ mod tests {
             ),
             position: 1,
             parallelizable: false,
-            status: LoopSpecStatus::Pending,
+            status: GraphSpecStatus::Pending,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -1415,12 +1626,12 @@ mod tests {
             completed_via_at: None,
         })
         .unwrap();
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "dead-end".to_string(),
             spec_id: Some(spec_id.clone()),
-            loop_id: None,
+            graph_id: None,
             name: "dead-end".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "exit 1",
                 "success_condition": "exit_code_0",
@@ -1432,24 +1643,28 @@ mod tests {
         // No outgoing edge from "dead-end": one genuine Fail is enough to
         // exceed the attempt limit of 1 this fixture set up.
 
-        loop_engine
-            .run_loop(loop_id.clone(), None, None)
+        graph_engine
+            .run_graph(graph_id.clone(), None, None, None, None)
             .await
             .unwrap();
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
-        assert_eq!(lp.status, LoopStatus::Paused, "must be blocked, not failed");
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        assert_eq!(
+            lp.status,
+            GraphStatus::Paused,
+            "must be blocked, not failed"
+        );
         assert!(!lp.paused_by_reconciliation);
 
-        db.schedule_loop_autorun(&loop_id, Utc::now() - chrono::Duration::minutes(1))
+        db.schedule_graph_autorun(&graph_id, Utc::now() - chrono::Duration::minutes(1))
             .unwrap();
 
-        scheduler.fire_due_autorun_loops(Utc::now()).unwrap();
+        scheduler.fire_due_autorun_graphs(Utc::now()).await.unwrap();
 
-        let lp_after = db.get_loop(&loop_id).unwrap().unwrap();
+        let lp_after = db.get_graph(&graph_id).unwrap().unwrap();
         assert_eq!(
             lp_after.status,
-            LoopStatus::Paused,
-            "a C19-blocked loop must not autorun"
+            GraphStatus::Paused,
+            "a C19-blocked graph must not autorun"
         );
         assert!(
             lp_after.autorun_at.is_some(),
@@ -1457,31 +1672,33 @@ mod tests {
         );
     }
 
-    /// The exact incident this spec fixes: a loop was launched with
-    /// `loop_run { queue_id }`, failed mid-queue (e.g. a quota error), and its
-    /// `loop_schedule_autorun` fired to revive it. Before this fix, autorun
-    /// resumed the loop with its own bound specs — empty for a queue run — so
-    /// the engine found nothing to do and marked the loop `completed` with
+    /// The exact incident this spec fixes: a graph was launched with
+    /// `graph_run { queue_id }`, failed mid-queue (e.g. a quota error), and its
+    /// `graph_schedule_autorun` fired to revive it. Before this fix, autorun
+    /// resumed the graph with its own bound specs — empty for a queue run — so
+    /// the engine found nothing to do and marked the graph `completed` with
     /// queue members still pending. Firing autorun now must reset and resume
     /// against the *same queue*, in queue order, until it's genuinely done.
     #[tokio::test]
-    async fn fire_due_autorun_loops_resumes_same_queue_after_failed_run() {
-        use crate::domain::loops::{
-            Loop, LoopNode, LoopNodeKind, LoopSpec, LoopSpecStatus, LoopStatus,
+    async fn fire_due_autorun_graphs_resumes_same_queue_after_failed_run() {
+        use crate::domain::graphs::{
+            Graph, GraphNode, GraphNodeKind, GraphSpec, GraphSpecStatus, GraphStatus,
         };
         use crate::domain::queues::Queue;
 
-        let (db, scheduler) = test_scheduler_with_loops();
+        let (db, scheduler) = test_scheduler_with_graphs();
         let workdir = tempfile::tempdir().unwrap();
-        let loop_id = "failed-queue-autorun".to_string();
-        db.insert_loop(&Loop {
+        let graph_id = "failed-queue-autorun".to_string();
+        db.insert_graph(&Graph {
             archived: false,
             paused_by_reconciliation: false,
-            id: loop_id.clone(),
-            name: "Autorun queue test loop".to_string(),
+            allow_dirty_start: false,
+            infra_node_id: None,
+            id: graph_id.clone(),
+            name: "Autorun queue test graph".to_string(),
             description: None,
             workdir: workdir.path().to_string_lossy().to_string(),
-            status: LoopStatus::Failed,
+            status: GraphStatus::Failed,
             trigger: None,
             created_at: Utc::now(),
             started_at: None,
@@ -1490,13 +1707,13 @@ mod tests {
             auto_continue_at: None,
             auto_continue_action: None,
             active_run_queue_id: Some("queue-1".to_string()),
-            on_completed: None,
+            hooks: std::collections::BTreeMap::new(),
         })
         .unwrap();
 
-        let standalone = |id: &str, position: i64, status: LoopSpecStatus| LoopSpec {
+        let standalone = |id: &str, position: i64, status: GraphSpecStatus| GraphSpec {
             id: id.to_string(),
-            loop_id: None,
+            graph_id: None,
             name: id.to_string(),
             description: None,
             position,
@@ -1505,19 +1722,22 @@ mod tests {
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
             completed_via_reason: None,
             completed_via_at: None,
         };
-        db.insert_loop_spec(&standalone("queue-done", 1, LoopSpecStatus::Completed))
+        db.insert_graph_spec(&standalone("queue-done", 1, GraphSpecStatus::Completed))
             .unwrap();
         // Left `failed` by the run that hit quota mid-queue — never explicitly
-        // reset, unlike the loop's own status.
-        db.insert_loop_spec(&standalone("queue-failed", 2, LoopSpecStatus::Failed))
+        // reset, unlike the graph's own status.
+        db.insert_graph_spec(&standalone("queue-failed", 2, GraphSpecStatus::Failed))
             .unwrap();
-        db.insert_loop_spec(&standalone("queue-pending", 3, LoopSpecStatus::Pending))
+        db.insert_graph_spec(&standalone("queue-pending", 3, GraphSpecStatus::Pending))
             .unwrap();
         db.insert_queue(&Queue {
             id: "queue-1".to_string(),
@@ -1528,14 +1748,14 @@ mod tests {
         for spec_id in ["queue-done", "queue-failed", "queue-pending"] {
             db.append_queue_member("queue-1", spec_id, None).unwrap();
         }
-        // No bound specs on the loop itself — this is what the real incident
-        // hit: a `loop_run { queue_id }` launch never binds specs to the loop.
-        db.insert_loop_node(&LoopNode {
+        // No bound specs on the graph itself — this is what the real incident
+        // hit: a `graph_run { queue_id }` launch never binds specs to the graph.
+        db.insert_graph_node(&GraphNode {
             id: "node-check".to_string(),
             spec_id: None,
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             name: "check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "printf APPROVED",
                 "success_condition": "exit_code_0"
@@ -1544,28 +1764,28 @@ mod tests {
             created_at: Utc::now(),
         })
         .unwrap();
-        db.schedule_loop_autorun(&loop_id, Utc::now() - chrono::Duration::minutes(1))
+        db.schedule_graph_autorun(&graph_id, Utc::now() - chrono::Duration::minutes(1))
             .unwrap();
 
-        scheduler.fire_due_autorun_loops(Utc::now()).unwrap();
+        scheduler.fire_due_autorun_graphs(Utc::now()).await.unwrap();
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
         assert!(lp.autorun_at.is_none(), "firing must clear autorun_at");
         assert_ne!(
             lp.status,
-            LoopStatus::Failed,
-            "the loop must be reset off `failed` before resuming"
+            GraphStatus::Failed,
+            "the graph must be reset off `failed` before resuming"
         );
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
-            let lp = db.get_loop(&loop_id).unwrap().unwrap();
-            if lp.status == LoopStatus::Completed {
+            let lp = db.get_graph(&graph_id).unwrap().unwrap();
+            if lp.status == GraphStatus::Completed {
                 break;
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "resumed queue run did not complete in time; loop status is {:?}",
+                "resumed queue run did not complete in time; graph status is {:?}",
                 lp.status
             );
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -1574,21 +1794,21 @@ mod tests {
         // All three queue members ran to completion via the *same* queue — not
         // a false completion with them left pending.
         for spec_id in ["queue-done", "queue-failed", "queue-pending"] {
-            let spec = db.get_loop_spec(spec_id).unwrap().unwrap();
+            let spec = db.get_graph_spec(spec_id).unwrap().unwrap();
             assert_eq!(
                 spec.status,
-                LoopSpecStatus::Completed,
+                GraphSpecStatus::Completed,
                 "spec '{spec_id}' should have completed via the resumed queue run"
             );
         }
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
         assert_eq!(
             lp.status,
-            LoopStatus::Completed,
+            GraphStatus::Completed,
             "the resumed queue run must reach genuine completion"
         );
         // B31: the run context survives genuine completion as last-run data
-        // so `loop list` / `loop info` keep rendering the finished loop's
+        // so `graph list` / `graph info` keep rendering the finished graph's
         // real n/n queue progress. B8's anti-pollution guarantee is upheld at
         // launch time (every path re-persists this before the first spec),
         // not by clearing it on completion.
@@ -1599,150 +1819,235 @@ mod tests {
         );
     }
 
-    /// Firing autorun on an already-`completed` loop must not silently
-    /// re-run it — that's a human decision via `loop_reset` + `loop_run`.
+    fn init_git_repo(path: &std::path::Path) {
+        let run = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(path)
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .status()
+                .expect("git command failed to run");
+            assert!(status.success(), "git {:?} failed", args);
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.name", "Test"]);
+        run(&["config", "user.email", "test@example.com"]);
+        std::fs::write(path.join("README.md"), "test").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", "init"]);
+    }
+
+    /// CM29: a predecessor spec left the shared workdir dirty on a failed
+    /// attempt; autorun on a *different* graph pointed at the same workdir
+    /// must refuse to launch rather than pile onto the mess. The one-shot
+    /// schedule is still cleared (never retried automatically) — a human
+    /// must relaunch manually once the tree is resolved.
+    #[tokio::test]
+    async fn fire_due_autorun_graphs_refuses_dirty_predecessor_and_stays_cleared() {
+        use crate::domain::graphs::{GraphSpec, GraphSpecStatus, GraphStatus};
+
+        let (db, scheduler) = test_scheduler_with_graphs();
+        let git_dir = tempfile::tempdir().unwrap();
+        init_git_repo(git_dir.path());
+        let workdir = git_dir.path().to_string_lossy().to_string();
+
+        // A predecessor spec, standalone, tagged with the shared workdir,
+        // left `failed` by an earlier (unrelated) attempt.
+        db.insert_graph_spec(&GraphSpec {
+            id: "pred-spec".to_string(),
+            graph_id: None,
+            name: "Predecessor".to_string(),
+            description: None,
+            position: 1,
+            parallelizable: false,
+            status: GraphSpecStatus::Failed,
+            started_at: None,
+            completed_at: None,
+            spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
+            spec_committed_head: None,
+            workdir: Some(workdir.clone()),
+            completed_via: None,
+            completed_via_reason: None,
+            completed_via_at: None,
+        })
+        .unwrap();
+        std::fs::write(git_dir.path().join("dirty.txt"), "dirty").unwrap();
+
+        let mut lp = sample_graph("dirty-autorun", GraphStatus::Draft);
+        lp.workdir = workdir;
+        db.insert_graph(&lp).unwrap();
+        db.schedule_graph_autorun(&lp.id, Utc::now() - chrono::Duration::minutes(1))
+            .unwrap();
+
+        scheduler.fire_due_autorun_graphs(Utc::now()).await.unwrap();
+
+        let after = db.get_graph(&lp.id).unwrap().unwrap();
+        assert!(
+            after.autorun_at.is_none(),
+            "the one-shot schedule must still be cleared, refused or not"
+        );
+        assert_eq!(
+            after.status,
+            GraphStatus::Draft,
+            "a refused autorun must never have launched (status would have moved off Draft)"
+        );
+    }
+
+    /// Firing autorun on an already-`completed` graph must not silently
+    /// re-run it — that's a human decision via `graph_reset` + `graph_run`.
     /// The scheduler should warn and clear the schedule instead.
     #[tokio::test]
-    async fn fire_due_autorun_loops_on_completed_loop_warns_and_does_not_run() {
-        use crate::domain::loops::LoopStatus;
+    async fn fire_due_autorun_graphs_on_completed_graph_warns_and_does_not_run() {
+        use crate::domain::graphs::GraphStatus;
 
-        let (db, scheduler) = test_scheduler_with_loops();
-        let loop_id = "completed-autorun".to_string();
-        db.insert_loop(&sample_loop(&loop_id, LoopStatus::Completed))
+        let (db, scheduler) = test_scheduler_with_graphs();
+        let graph_id = "completed-autorun".to_string();
+        db.insert_graph(&sample_graph(&graph_id, GraphStatus::Completed))
             .unwrap();
-        db.schedule_loop_autorun(&loop_id, Utc::now() - chrono::Duration::minutes(1))
+        db.schedule_graph_autorun(&graph_id, Utc::now() - chrono::Duration::minutes(1))
             .unwrap();
 
-        scheduler.fire_due_autorun_loops(Utc::now()).unwrap();
+        scheduler.fire_due_autorun_graphs(Utc::now()).await.unwrap();
 
         // Give any (unexpected) spawned background run a chance to run.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
         assert!(
             lp.autorun_at.is_none(),
             "the one-shot schedule must still be cleared"
         );
         assert_eq!(
             lp.status,
-            LoopStatus::Completed,
-            "a completed loop must not be re-run by its own autorun"
+            GraphStatus::Completed,
+            "a completed graph must not be re-run by its own autorun"
         );
     }
 
-    /// A future `auto_continue_at` must not resume the loop — it's a
+    /// A future `auto_continue_at` must not resume the graph — it's a
     /// schedule, not an immediate action.
     #[tokio::test]
-    async fn fire_due_auto_continue_loops_ignores_future_schedule() {
-        use crate::domain::loops::LoopStatus;
+    async fn fire_due_auto_continue_graphs_ignores_future_schedule() {
+        use crate::domain::graphs::GraphStatus;
 
-        let (db, scheduler) = test_scheduler_with_loops();
-        db.insert_loop(&sample_loop("future-auto-continue", LoopStatus::Paused))
+        let (db, scheduler) = test_scheduler_with_graphs();
+        db.insert_graph(&sample_graph("future-auto-continue", GraphStatus::Paused))
             .unwrap();
-        db.schedule_loop_auto_continue(
+        db.schedule_graph_auto_continue(
             "future-auto-continue",
             Utc::now() + chrono::Duration::hours(1),
             None,
         )
         .unwrap();
 
-        scheduler.fire_due_auto_continue_loops(Utc::now()).unwrap();
+        scheduler.fire_due_auto_continue_graphs(Utc::now()).unwrap();
 
-        let lp = db.get_loop("future-auto-continue").unwrap().unwrap();
-        assert_eq!(lp.status, LoopStatus::Paused, "must not resume yet");
+        let lp = db.get_graph("future-auto-continue").unwrap().unwrap();
+        assert_eq!(lp.status, GraphStatus::Paused, "must not resume yet");
         assert!(
             lp.auto_continue_at.is_some(),
             "future auto_continue_at must remain pending"
         );
     }
 
-    /// A schedule cancelled via `clear_loop_auto_continue` must not fire
+    /// A schedule cancelled via `clear_graph_auto_continue` must not fire
     /// later, even past its original due time.
     #[tokio::test]
-    async fn fire_due_auto_continue_loops_never_fires_a_cancelled_schedule() {
-        use crate::domain::loops::LoopStatus;
+    async fn fire_due_auto_continue_graphs_never_fires_a_cancelled_schedule() {
+        use crate::domain::graphs::GraphStatus;
 
-        let (db, scheduler) = test_scheduler_with_loops();
-        db.insert_loop(&sample_loop("cancelled-auto-continue", LoopStatus::Paused))
-            .unwrap();
-        db.schedule_loop_auto_continue(
+        let (db, scheduler) = test_scheduler_with_graphs();
+        db.insert_graph(&sample_graph(
+            "cancelled-auto-continue",
+            GraphStatus::Paused,
+        ))
+        .unwrap();
+        db.schedule_graph_auto_continue(
             "cancelled-auto-continue",
             Utc::now() - chrono::Duration::minutes(1),
             None,
         )
         .unwrap();
-        db.clear_loop_auto_continue("cancelled-auto-continue")
+        db.clear_graph_auto_continue("cancelled-auto-continue")
             .unwrap();
 
-        scheduler.fire_due_auto_continue_loops(Utc::now()).unwrap();
+        scheduler.fire_due_auto_continue_graphs(Utc::now()).unwrap();
 
-        let lp = db.get_loop("cancelled-auto-continue").unwrap().unwrap();
+        let lp = db.get_graph("cancelled-auto-continue").unwrap().unwrap();
         assert_eq!(
             lp.status,
-            LoopStatus::Paused,
-            "a cancelled schedule must not resume the loop"
+            GraphStatus::Paused,
+            "a cancelled schedule must not resume the graph"
         );
         assert!(lp.auto_continue_at.is_none());
     }
 
-    /// If the loop is no longer `Paused` by the scheduled time (already
+    /// If the graph is no longer `Paused` by the scheduled time (already
     /// continued manually, failed, completed, or running), the schedule must
     /// be cleared without resuming it — never double-run.
     #[tokio::test]
-    async fn fire_due_auto_continue_loops_clears_without_firing_when_not_paused() {
-        use crate::domain::loops::LoopStatus;
+    async fn fire_due_auto_continue_graphs_clears_without_firing_when_not_paused() {
+        use crate::domain::graphs::GraphStatus;
 
         for status in [
-            LoopStatus::Draft,
-            LoopStatus::Running,
-            LoopStatus::Completed,
-            LoopStatus::Failed,
+            GraphStatus::Draft,
+            GraphStatus::Running,
+            GraphStatus::Completed,
+            GraphStatus::Failed,
         ] {
-            let (db, scheduler) = test_scheduler_with_loops();
+            let (db, scheduler) = test_scheduler_with_graphs();
             let id = format!("not-paused-auto-continue-{}", status.as_str());
-            db.insert_loop(&sample_loop(&id, status)).unwrap();
-            db.schedule_loop_auto_continue(&id, Utc::now() - chrono::Duration::minutes(1), None)
+            db.insert_graph(&sample_graph(&id, status)).unwrap();
+            db.schedule_graph_auto_continue(&id, Utc::now() - chrono::Duration::minutes(1), None)
                 .unwrap();
 
-            scheduler.fire_due_auto_continue_loops(Utc::now()).unwrap();
+            scheduler.fire_due_auto_continue_graphs(Utc::now()).unwrap();
 
-            let lp = db.get_loop(&id).unwrap().unwrap();
+            let lp = db.get_graph(&id).unwrap().unwrap();
             assert_eq!(
                 lp.status, status,
-                "{status:?} loop's status must be untouched"
+                "{status:?} graph's status must be untouched"
             );
             assert!(
                 lp.auto_continue_at.is_none(),
-                "{status:?} loop's stale schedule must still be cleared, not left pending forever"
+                "{status:?} graph's stale schedule must still be cleared, not left pending forever"
             );
         }
     }
 
-    /// The functional core of this feature: a `Paused` loop's
+    /// The functional core of this feature: a `Paused` graph's
     /// `auto_continue_at` firing must go straight through the
-    /// `loop_continue`/`resume_background` path — never `loop_reset` and
+    /// `graph_continue`/`resume_background` path — never `graph_reset` and
     /// never a fresh dispatch — preserving the paused cursor. Verified by
     /// checking the in-flight spec's status is untouched *synchronously*,
     /// right after firing (a reset would flip it to `Pending` immediately,
     /// before any background dispatch runs), then letting the real resumed
     /// dispatch run to completion.
     #[tokio::test]
-    async fn fire_due_auto_continue_loops_resumes_paused_loop_without_reset_or_relaunch() {
-        use crate::domain::loops::{
-            Loop, LoopNode, LoopNodeKind, LoopSpec, LoopSpecStatus, LoopStatus,
+    async fn fire_due_auto_continue_graphs_resumes_paused_graph_without_reset_or_relaunch() {
+        use crate::domain::graphs::{
+            Graph, GraphNode, GraphNodeKind, GraphSpec, GraphSpecStatus, GraphStatus,
         };
 
-        let (db, scheduler) = test_scheduler_with_loops();
+        let (db, scheduler) = test_scheduler_with_graphs();
         let workdir = tempfile::tempdir().unwrap();
-        let loop_id = "paused-auto-continue".to_string();
-        db.insert_loop(&Loop {
+        let graph_id = "paused-auto-continue".to_string();
+        db.insert_graph(&Graph {
             archived: false,
             paused_by_reconciliation: false,
-            id: loop_id.clone(),
-            name: "Auto-continue test loop".to_string(),
+            allow_dirty_start: false,
+            infra_node_id: None,
+            id: graph_id.clone(),
+            name: "Auto-continue test graph".to_string(),
             description: None,
             workdir: workdir.path().to_string_lossy().to_string(),
-            status: LoopStatus::Paused,
+            status: GraphStatus::Paused,
             trigger: None,
             created_at: Utc::now(),
             started_at: None,
@@ -1751,24 +2056,27 @@ mod tests {
             auto_continue_at: None,
             auto_continue_action: None,
             active_run_queue_id: None,
-            on_completed: None,
+            hooks: std::collections::BTreeMap::new(),
         })
         .unwrap();
-        db.insert_loop_spec(&LoopSpec {
+        db.insert_graph_spec(&GraphSpec {
             id: "spec-1".to_string(),
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             name: "Spec 1".to_string(),
             description: Some(
                 "Functional Requirements:\n- A\n\nNon-Functional Requirements:\n- B\n\nObjective:\n- C\n\nConstraints:\n- D\n\nGuidelines:\n- E\n\nIn Scope:\n- F\n\nOut of Scope:\n- G".to_string(),
             ),
             position: 1,
             parallelizable: false,
-            // A loop paused mid-spec leaves that spec `running` — `loop_pause`
-            // never touches spec status, only the loop's own.
-            status: LoopSpecStatus::Running,
+            // A graph paused mid-spec leaves that spec `running` — `graph_pause`
+            // never touches spec status, only the graph's own.
+            status: GraphSpecStatus::Running,
             started_at: Some(Utc::now()),
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -1776,12 +2084,12 @@ mod tests {
             completed_via_at: None,
         })
         .unwrap();
-        db.insert_loop_node(&LoopNode {
+        db.insert_graph_node(&GraphNode {
             id: "node-check".to_string(),
             spec_id: None,
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             name: "check".to_string(),
-            kind: LoopNodeKind::Check,
+            kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": "printf APPROVED",
                 "success_condition": "exit_code_0"
@@ -1790,16 +2098,16 @@ mod tests {
             created_at: Utc::now(),
         })
         .unwrap();
-        db.schedule_loop_auto_continue(
-            &loop_id,
+        db.schedule_graph_auto_continue(
+            &graph_id,
             Utc::now() - chrono::Duration::minutes(1),
             Some("retry_current_node"),
         )
         .unwrap();
 
-        scheduler.fire_due_auto_continue_loops(Utc::now()).unwrap();
+        scheduler.fire_due_auto_continue_graphs(Utc::now()).unwrap();
 
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
         assert!(
             lp.auto_continue_at.is_none(),
             "firing must clear auto_continue_at"
@@ -1808,53 +2116,55 @@ mod tests {
         // `retry_current_node` never mutates the spec, and a reset would have
         // flipped it to `Pending` synchronously, before the background
         // dispatch even starts — so `Running` here proves no reset happened.
-        let spec = db.get_loop_spec("spec-1").unwrap().unwrap();
+        let spec = db.get_graph_spec("spec-1").unwrap().unwrap();
         assert_eq!(
             spec.status,
-            LoopSpecStatus::Running,
+            GraphSpecStatus::Running,
             "auto-continue must not reset the in-flight spec"
         );
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
-            let lp = db.get_loop(&loop_id).unwrap().unwrap();
-            if lp.status == LoopStatus::Completed {
+            let lp = db.get_graph(&graph_id).unwrap().unwrap();
+            if lp.status == GraphStatus::Completed {
                 break;
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "resumed run did not complete in time; loop status is {:?}",
+                "resumed run did not complete in time; graph status is {:?}",
                 lp.status
             );
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
 
-        let spec = db.get_loop_spec("spec-1").unwrap().unwrap();
+        let spec = db.get_graph_spec("spec-1").unwrap().unwrap();
         assert_eq!(
             spec.status,
-            LoopSpecStatus::Completed,
+            GraphSpecStatus::Completed,
             "the auto-continued run must have actually executed the spec's graph"
         );
     }
 
     /// `skip_next_spec` must be honored too, not just the default
     /// `retry_current_node` — the scheduler must pass the configured action
-    /// through exactly like the `loop_continue` MCP tool would.
+    /// through exactly like the `graph_continue` MCP tool would.
     #[tokio::test]
-    async fn fire_due_auto_continue_loops_applies_skip_next_spec_action() {
-        use crate::domain::loops::{Loop, LoopSpec, LoopSpecStatus, LoopStatus};
+    async fn fire_due_auto_continue_graphs_applies_skip_next_spec_action() {
+        use crate::domain::graphs::{Graph, GraphSpec, GraphSpecStatus, GraphStatus};
 
-        let (db, scheduler) = test_scheduler_with_loops();
+        let (db, scheduler) = test_scheduler_with_graphs();
         let workdir = tempfile::tempdir().unwrap();
-        let loop_id = "paused-auto-continue-skip".to_string();
-        db.insert_loop(&Loop {
+        let graph_id = "paused-auto-continue-skip".to_string();
+        db.insert_graph(&Graph {
             archived: false,
             paused_by_reconciliation: false,
-            id: loop_id.clone(),
-            name: "Auto-continue skip test loop".to_string(),
+            allow_dirty_start: false,
+            infra_node_id: None,
+            id: graph_id.clone(),
+            name: "Auto-continue skip test graph".to_string(),
             description: None,
             workdir: workdir.path().to_string_lossy().to_string(),
-            status: LoopStatus::Paused,
+            status: GraphStatus::Paused,
             trigger: None,
             created_at: Utc::now(),
             started_at: None,
@@ -1863,20 +2173,23 @@ mod tests {
             auto_continue_at: None,
             auto_continue_action: None,
             active_run_queue_id: None,
-            on_completed: None,
+            hooks: std::collections::BTreeMap::new(),
         })
         .unwrap();
-        db.insert_loop_spec(&LoopSpec {
+        db.insert_graph_spec(&GraphSpec {
             id: "spec-skip".to_string(),
-            loop_id: Some(loop_id.clone()),
+            graph_id: Some(graph_id.clone()),
             name: "Spec skip".to_string(),
             description: Some("desc".to_string()),
             position: 1,
             parallelizable: false,
-            status: LoopSpecStatus::Running,
+            status: GraphSpecStatus::Running,
             started_at: Some(Utc::now()),
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -1884,22 +2197,22 @@ mod tests {
             completed_via_at: None,
         })
         .unwrap();
-        db.schedule_loop_auto_continue(
-            &loop_id,
+        db.schedule_graph_auto_continue(
+            &graph_id,
             Utc::now() - chrono::Duration::minutes(1),
             Some("skip_next_spec"),
         )
         .unwrap();
 
-        scheduler.fire_due_auto_continue_loops(Utc::now()).unwrap();
+        scheduler.fire_due_auto_continue_graphs(Utc::now()).unwrap();
 
-        let spec = db.get_loop_spec("spec-skip").unwrap().unwrap();
+        let spec = db.get_graph_spec("spec-skip").unwrap().unwrap();
         assert_eq!(
             spec.status,
-            LoopSpecStatus::Skipped,
+            GraphSpecStatus::Skipped,
             "skip_next_spec must mark the in-flight spec skipped, synchronously"
         );
-        let lp = db.get_loop(&loop_id).unwrap().unwrap();
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
         assert!(lp.auto_continue_at.is_none(), "firing must be one-shot");
     }
 
@@ -1962,16 +2275,16 @@ mod tests {
     }
 
     /// `next_sleep_duration` must also wake for a pending `auto_continue_at`,
-    /// same as `autorun_at` — otherwise a deferred paused-loop resume would
+    /// same as `autorun_at` — otherwise a deferred paused-graph resume would
     /// rely on the reconcile fallback instead of firing on time.
     #[test]
     fn next_sleep_duration_wakes_for_pending_auto_continue_at() {
-        use crate::domain::loops::LoopStatus;
+        use crate::domain::graphs::GraphStatus;
 
-        let (db, scheduler) = test_scheduler_with_loops();
-        db.insert_loop(&sample_loop("soon-auto-continue", LoopStatus::Paused))
+        let (db, scheduler) = test_scheduler_with_graphs();
+        db.insert_graph(&sample_graph("soon-auto-continue", GraphStatus::Paused))
             .unwrap();
-        db.schedule_loop_auto_continue(
+        db.schedule_graph_auto_continue(
             "soon-auto-continue",
             Utc::now() + chrono::Duration::seconds(5),
             None,
@@ -2191,37 +2504,37 @@ mod tests {
         assert_eq!(next_local.minute(), 30, "fire must be at xx:30 local");
     }
 
-    /// A cron loop shares the agents' fire math: `fold_earliest` on a loop's
+    /// A cron graph shares the agents' fire math: `fold_earliest` on a graph's
     /// schedule lands the next fire at the local wall-clock time the expression
     /// names (08:30 local for `30 8 * * *`), not 08:30 UTC.
     #[test]
-    fn fold_earliest_lands_loop_cron_at_local_wall_clock() {
+    fn fold_earliest_lands_graph_cron_at_local_wall_clock() {
         use chrono::Timelike;
         let mut earliest: Option<chrono::DateTime<Utc>> = None;
         fold_earliest(&mut earliest, Some("30 8 * * *"), chrono::Local::now());
         let next_local = earliest
-            .expect("cron loop yields a fire time")
+            .expect("cron graph yields a fire time")
             .with_timezone(&Local);
-        assert_eq!(next_local.hour(), 8, "loop fire must be at 08:xx local");
-        assert_eq!(next_local.minute(), 30, "loop fire must be at xx:30 local");
+        assert_eq!(next_local.hour(), 8, "graph fire must be at 08:xx local");
+        assert_eq!(next_local.minute(), 30, "graph fire must be at xx:30 local");
     }
 
-    /// A manual loop (no schedule) never contributes a fire time, so the
-    /// scheduler never launches it on its own — it only runs via `loop_run`.
+    /// A manual graph (no schedule) never contributes a fire time, so the
+    /// scheduler never launches it on its own — it only runs via `graph_run`.
     #[test]
-    fn fold_earliest_ignores_manual_loop() {
+    fn fold_earliest_ignores_manual_graph() {
         let mut earliest: Option<chrono::DateTime<Utc>> = Some(Utc::now());
         let before = earliest;
         fold_earliest(&mut earliest, None, chrono::Local::now());
         assert_eq!(
             earliest, before,
-            "a manual loop must not change the nearest fire time"
+            "a manual graph must not change the nearest fire time"
         );
     }
 
     #[test]
-    fn loop_key_namespaces_ids() {
-        assert_eq!(loop_key("abc"), "loop:abc");
+    fn graph_key_namespaces_ids() {
+        assert_eq!(graph_key("abc"), "graph:abc");
     }
 
     /// `due_fire_local` fires within the local minute the cron field names and
@@ -2259,7 +2572,7 @@ mod tests {
 
     /// B15: booting the scheduler and then evaluating the same cron tick a
     /// second time (simulating a second firing path racing the regular tick
-    /// loop) must record exactly one execution for that tick, never two.
+    /// graph) must record exactly one execution for that tick, never two.
     ///
     /// Uses an every-minute schedule: thanks to `due_fire_local`'s 60-second
     /// lookback, the most recent minute boundary is *always* due at the
@@ -2286,7 +2599,7 @@ mod tests {
 
         // Advance the virtual clock past the scheduler's first computed
         // sleep (at most ~60s until the next minute boundary) in small
-        // steps, yielding between each so the background `run_loop` task
+        // steps, yielding between each so the background `run_graph` task
         // actually gets polled and reaches its own `fire_due_tasks` call —
         // a single large `advance` only fast-forwards the clock, it doesn't
         // by itself guarantee the woken task has run before this test task
@@ -2300,7 +2613,7 @@ mod tests {
         }
         assert!(
             !db.list_runs("b15-once-per-tick", 10).unwrap().is_empty(),
-            "the scheduler's own tick loop never fired the due agent"
+            "the scheduler's own tick graph never fired the due agent"
         );
 
         // Simulate a second evaluation path for the same tick (e.g. a

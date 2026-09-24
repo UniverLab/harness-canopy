@@ -17,6 +17,7 @@ pub(super) fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Them
             let mut h = vec![("↑↓", "select"), ("n", "new")];
             if activity_available {
                 h.push(("F3", "activity"));
+                h.push(("F6", "panel"));
             }
             h.push(("Shift+←→", "panels"));
             h.push(("F10", "preview"));
@@ -42,16 +43,34 @@ pub(super) fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Them
                 h.push(("Esc", "home"));
                 h
             } else {
-                let on_loop = app.sidebar_layer == SidebarLayer::Automation
-                    && app.automation_kind == AutomationKind::Loop;
+                let on_graph = app.sidebar_layer == SidebarLayer::Automation
+                    && app.automation_kind == AutomationKind::Graph;
                 let is_bg = matches!(app.selected_agent(), Some(AgentEntry::Agent(_)));
-                let mut h = vec![("↑↓", "nav"), ("Enter", "focus"), ("Shift+←→", "tab")];
-                if on_loop {
+                // CT24: on the graph face, Enter/Esc are how manual mode is
+                // reached/left, so advertise them; the spec strip keeps plain
+                // `Enter focus` (it is driven by Tab/←→, not Enter/Esc).
+                let mut h: Vec<(&str, &str)> = if on_graph
+                    && app.graph_live_focus == crate::tui::app::types::GraphLiveFocus::Graph
+                {
+                    if app.graph_live_follow {
+                        vec![("↑↓", "nav"), ("Enter", "manual"), ("Shift+←→", "tab")]
+                    } else {
+                        vec![("↑↓", "nav"), ("Esc", "auto"), ("Shift+←→", "tab")]
+                    }
+                } else {
+                    vec![("↑↓", "nav"), ("Enter", "focus"), ("Shift+←→", "tab")]
+                };
+                if on_graph && app.graph_live_focus == crate::tui::app::types::GraphLiveFocus::Graph
+                {
+                    h.push(("←→", "graph ↑↓"));
+                }
+                if on_graph {
                     // Run-time controls apply only to the live (non-archived)
-                    // list — an archived loop is inert until restored.
-                    if !app.loop_view_archived {
-                        if let Some(lp) = app.selected_loop() {
-                            for action in crate::tui::app::dialog::available_loop_actions(lp.status)
+                    // list — an archived graph is inert until restored.
+                    if !app.graph_view_archived {
+                        if let Some(lp) = app.selected_graph() {
+                            for action in
+                                crate::tui::app::dialog::available_graph_actions(lp.status)
                             {
                                 h.push((action.key(), action.label()));
                             }
@@ -59,7 +78,7 @@ pub(super) fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Them
                         }
                     }
                     h.push(("e", "edit"));
-                    if app.loop_view_archived {
+                    if app.graph_view_archived {
                         h.push(("R", "restore"));
                         h.push(("F4", "delete forever"));
                     } else {
@@ -67,9 +86,9 @@ pub(super) fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Them
                     }
                     h.push((
                         "A",
-                        if app.loop_view_archived {
-                            "loops"
-                        } else if app.archived_loop_count > 0 {
+                        if app.graph_view_archived {
+                            "graphs"
+                        } else if app.archived_graph_count > 0 {
                             "archived"
                         } else {
                             "archive"
@@ -84,6 +103,7 @@ pub(super) fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Them
                 h.push(("n", "new"));
                 if activity_available {
                     h.push(("F3", "activity"));
+                    h.push(("F6", "panel"));
                 }
                 h.push(("Esc", "home"));
                 h
@@ -131,7 +151,7 @@ pub(super) fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Them
                 // While the focused child has claimed the keyboard (alternate
                 // screen or Kitty keyboard protocol), every canopy shortcut
                 // below yields to it except F10, the Shift+arrow frame
-                // navigation, and Ctrl+T — see
+                // navigation, Ctrl+T, and Shift+F4 (end) — see
                 // `agent_focus::RESERVED_FOCUS_KEYS`. Reflect that here so a
                 // shortcut that "did nothing" is explainable instead of
                 // looking broken.
@@ -140,9 +160,13 @@ pub(super) fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Them
                 if child_claimed {
                     // Frame navigation stays with canopy even then, so it is
                     // still worth showing: only the content shortcuts yield.
+                    // Shift+F4 is the one session action that also survives a
+                    // claimed keyboard (see agent_focus::RESERVED_FOCUS_KEYS) —
+                    // plain F4 still belongs to the child while claimed.
                     h.push(("Shift+↑↓", "agents/rag"));
                     h.push(("Shift+←→", if in_split { "split focus" } else { "tab" }));
                     h.push(("Ctrl+T", "context"));
+                    h.push(("Shift+F4", "end"));
                 } else {
                     h.push(("Shift+↑↓", "agents/rag"));
                     h.push(("Ctrl+T", "context"));
@@ -164,6 +188,7 @@ pub(super) fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Them
                 }
                 if activity_available {
                     h.push(("F3", "activity"));
+                    h.push(("F6", "panel"));
                 }
                 h.push(("Ctrl+N", "new"));
                 if !child_claimed {
@@ -180,6 +205,7 @@ pub(super) fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Them
                 }
                 if activity_available {
                     h.push(("F3", "activity"));
+                    h.push(("F6", "panel"));
                 }
                 h.push(("Ctrl+N", "new"));
                 h.push(("F1", "legend"));
@@ -200,14 +226,14 @@ pub(super) fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Them
             ("Ctrl+L", "recall last"),
             ("Esc", "cancel"),
         ],
-        Focus::LoopEditorDialog => vec![
+        Focus::GraphEditorDialog => vec![
             ("type", "edit"),
             ("←→", "cursor"),
             ("Enter", "newline"),
             ("Ctrl+S", "save"),
             ("Esc", "cancel"),
         ],
-        Focus::LoopFormDialog => vec![
+        Focus::GraphFormDialog => vec![
             ("Tab/↑↓", "field"),
             ("←→", "trigger"),
             ("Enter", "save"),
@@ -265,17 +291,20 @@ pub(super) fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Them
     } else {
         format!(" v{} ", app.daemon_version)
     };
+    let update_notice = app
+        .update_available
+        .as_deref()
+        .map(|tag| format!(" canopy {tag} available — run canopy update"))
+        .unwrap_or_default();
 
     let hints_line = Line::from(spans);
     let hints_p = Paragraph::new(hints_line);
     frame.render_widget(hints_p, area);
 
-    // Render split label + version on the right side
-    let right_text = match (&split_label, version.is_empty()) {
-        (Some(sl), false) => format!("{sl}{version}"),
-        (Some(sl), true) => sl.clone(),
-        (None, false) => version.clone(),
-        (None, true) => String::new(),
+    // Render split label + version + update notice on the right side.
+    let right_text = match &split_label {
+        Some(sl) => format!("{sl}{version}{update_notice}"),
+        None => format!("{version}{update_notice}"),
     };
     let right_w = right_text.len() as u16;
 
@@ -296,6 +325,14 @@ pub(super) fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Them
                 &version,
                 Style::default()
                     .fg(theme.dim_text)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        if !update_notice.is_empty() {
+            right_spans.push(Span::styled(
+                &update_notice,
+                Style::default()
+                    .fg(theme.header_color)
                     .add_modifier(Modifier::BOLD),
             ));
         }
@@ -345,22 +382,37 @@ fn draw_footer_playground(
     } else {
         format!(" v{} ", app.daemon_version)
     };
+    let update_notice = app
+        .update_available
+        .as_deref()
+        .map(|tag| format!(" canopy {tag} available — run canopy update"))
+        .unwrap_or_default();
 
     let hints_line = Line::from(spans);
     frame.render_widget(Paragraph::new(hints_line), area);
 
-    if !version.is_empty() && area.width > version.len() as u16 {
-        let right_w = version.len() as u16;
+    let right_text = format!("{version}{update_notice}");
+    if !right_text.is_empty() && area.width > right_text.len() as u16 {
+        let right_w = right_text.len() as u16;
         let right_area = Rect::new(area.x + area.width - right_w, area.y, right_w, 1);
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
+        let mut right_spans = Vec::new();
+        if !version.is_empty() {
+            right_spans.push(Span::styled(
                 version,
                 Style::default()
                     .fg(theme.dim_text)
                     .add_modifier(Modifier::BOLD),
-            ))),
-            right_area,
-        );
+            ));
+        }
+        if !update_notice.is_empty() {
+            right_spans.push(Span::styled(
+                update_notice,
+                Style::default()
+                    .fg(theme.header_color)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        frame.render_widget(Paragraph::new(Line::from(right_spans)), right_area);
     }
 }
 
@@ -379,7 +431,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        App::new(db, data_dir.path()).unwrap()
+        App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap()
     }
 
     fn render_footer_to_text(
@@ -404,6 +461,20 @@ mod tests {
             text.push('\n');
         }
         text
+    }
+
+    #[test]
+    fn footer_renders_update_notice() {
+        let mut app = make_app();
+        app.update_available = Some("v3.0.1".to_string());
+        let theme = Theme::classic();
+        let text = render_footer_to_text(120, 1, |frame, area| {
+            draw_footer(frame, area, &app, &theme);
+        });
+        assert!(
+            text.contains("run canopy update"),
+            "footer notice missing: {text}"
+        );
     }
 
     #[test]
@@ -513,30 +584,30 @@ mod tests {
     }
 
     #[test]
-    fn footer_renders_in_loop_editor_dialog() {
+    fn footer_renders_in_graph_editor_dialog() {
         let mut app = make_app();
-        app.focus = Focus::LoopEditorDialog;
+        app.focus = Focus::GraphEditorDialog;
         let theme = Theme::classic();
         let text = render_footer_to_text(80, 1, |frame, area| {
             draw_footer(frame, area, &app, &theme);
         });
         assert!(
             text.contains("save"),
-            "LoopEditorDialog footer should show 'save': {text}"
+            "GraphEditorDialog footer should show 'save': {text}"
         );
     }
 
     #[test]
-    fn footer_renders_in_loop_form_dialog() {
+    fn footer_renders_in_graph_form_dialog() {
         let mut app = make_app();
-        app.focus = Focus::LoopFormDialog;
+        app.focus = Focus::GraphFormDialog;
         let theme = Theme::classic();
         let text = render_footer_to_text(80, 1, |frame, area| {
             draw_footer(frame, area, &app, &theme);
         });
         assert!(
             text.contains("field"),
-            "LoopFormDialog footer should show 'field': {text}"
+            "GraphFormDialog footer should show 'field': {text}"
         );
     }
 
@@ -769,6 +840,56 @@ mod tests {
     }
 
     #[test]
+    fn footer_with_claimed_keyboard_advertises_shift_f4_end() {
+        // CT10 (T4): while the child has claimed the keyboard, the footer
+        // must list Shift+F4 as `end` — the way out must be visible without
+        // leaving the session. Plain-F4-only hints (dissolve) stay hidden
+        // because plain F4 belongs to the child while claimed.
+        let agent = crate::tui::agent::InteractiveAgent::spawn(
+            crate::domain::models::Cli::new("cat"),
+            ".",
+            80,
+            24,
+            None,
+            None,
+            Color::Reset,
+            Some("claimed-end-agent"),
+            &[],
+            None,
+            None,
+            None,
+        )
+        .expect("spawn cat as a stand-in interactive child");
+        *agent.kitty_keyboard_flags.lock().expect("lock") = Some(7);
+
+        let mut app = make_app();
+        app.interactive_agents = vec![agent];
+        app.agents = vec![crate::tui::app::types::AgentEntry::Interactive(0)];
+        app.selected = 0;
+        app.focus = Focus::Agent;
+
+        let theme = Theme::classic();
+        let text = render_footer_to_text(200, 1, |frame, area| {
+            draw_footer(frame, area, &app, &theme);
+        });
+
+        assert!(
+            text.contains("Shift+F4"),
+            "claimed-keyboard footer must advertise Shift+F4: {text}"
+        );
+        assert!(
+            text.contains("end"),
+            "claimed-keyboard footer must label Shift+F4 as end: {text}"
+        );
+        assert!(
+            !text.contains("dissolve"),
+            "dissolve is plain-F4-only and must stay hidden while claimed: {text}"
+        );
+
+        app.interactive_agents[0].kill();
+    }
+
+    #[test]
     fn footer_renders_in_preview_with_playground_active() {
         let mut app = make_app();
         app.focus = Focus::Preview;
@@ -813,10 +934,14 @@ mod tests {
         );
     }
 
-    fn loop_with_status(status: crate::domain::loops::LoopStatus) -> crate::domain::loops::Loop {
-        crate::domain::loops::Loop {
+    fn graph_with_status(
+        status: crate::domain::graphs::GraphStatus,
+    ) -> crate::domain::graphs::Graph {
+        crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
+            infra_node_id: None,
             id: "lp1".to_string(),
             name: "Nightly review".to_string(),
             description: None,
@@ -830,23 +955,23 @@ mod tests {
             auto_continue_at: None,
             auto_continue_action: None,
             active_run_queue_id: None,
-            on_completed: None,
+            hooks: std::collections::BTreeMap::new(),
         }
     }
 
-    fn app_on_loop(status: crate::domain::loops::LoopStatus) -> App {
+    fn app_on_graph(status: crate::domain::graphs::GraphStatus) -> App {
         let mut app = make_app();
         app.focus = Focus::Preview;
         app.sidebar_layer = SidebarLayer::Automation;
-        app.automation_kind = crate::tui::app::AutomationKind::Loop;
-        app.loops = vec![loop_with_status(status)];
-        app.selected_loop_id = Some("lp1".to_string());
+        app.automation_kind = crate::tui::app::AutomationKind::Graph;
+        app.graphs = vec![graph_with_status(status)];
+        app.selected_graph_id = Some("lp1".to_string());
         app
     }
 
     #[test]
-    fn footer_on_a_running_loop_offers_only_pause() {
-        let app = app_on_loop(crate::domain::loops::LoopStatus::Running);
+    fn footer_on_a_running_graph_offers_only_pause() {
+        let app = app_on_graph(crate::domain::graphs::GraphStatus::Running);
         let theme = Theme::classic();
         let text = render_footer_to_text(200, 1, |frame, area| {
             draw_footer(frame, area, &app, &theme);
@@ -861,8 +986,8 @@ mod tests {
     }
 
     #[test]
-    fn footer_on_a_paused_loop_offers_both_continue_modes() {
-        let app = app_on_loop(crate::domain::loops::LoopStatus::Paused);
+    fn footer_on_a_paused_graph_offers_both_continue_modes() {
+        let app = app_on_graph(crate::domain::graphs::GraphStatus::Paused);
         let theme = Theme::classic();
         let text = render_footer_to_text(200, 1, |frame, area| {
             draw_footer(frame, area, &app, &theme);
@@ -873,8 +998,8 @@ mod tests {
     }
 
     #[test]
-    fn footer_on_a_completed_loop_offers_reset_and_run() {
-        let app = app_on_loop(crate::domain::loops::LoopStatus::Completed);
+    fn footer_on_a_completed_graph_offers_reset_and_run() {
+        let app = app_on_graph(crate::domain::graphs::GraphStatus::Completed);
         let theme = Theme::classic();
         let text = render_footer_to_text(200, 1, |frame, area| {
             draw_footer(frame, area, &app, &theme);
@@ -885,15 +1010,15 @@ mod tests {
     }
 
     #[test]
-    fn footer_always_offers_autorun_for_a_selected_live_loop() {
+    fn footer_always_offers_autorun_for_a_selected_live_graph() {
         for status in [
-            crate::domain::loops::LoopStatus::Draft,
-            crate::domain::loops::LoopStatus::Running,
-            crate::domain::loops::LoopStatus::Paused,
-            crate::domain::loops::LoopStatus::Completed,
-            crate::domain::loops::LoopStatus::Failed,
+            crate::domain::graphs::GraphStatus::Draft,
+            crate::domain::graphs::GraphStatus::Running,
+            crate::domain::graphs::GraphStatus::Paused,
+            crate::domain::graphs::GraphStatus::Completed,
+            crate::domain::graphs::GraphStatus::Failed,
         ] {
-            let app = app_on_loop(status);
+            let app = app_on_graph(status);
             let theme = Theme::classic();
             let text = render_footer_to_text(200, 1, |frame, area| {
                 draw_footer(frame, area, &app, &theme);
@@ -904,13 +1029,42 @@ mod tests {
 
     #[test]
     fn footer_omits_run_time_controls_in_the_archived_view() {
-        let mut app = app_on_loop(crate::domain::loops::LoopStatus::Completed);
-        app.loop_view_archived = true;
+        let mut app = app_on_graph(crate::domain::graphs::GraphStatus::Completed);
+        app.graph_view_archived = true;
         let theme = Theme::classic();
         let text = render_footer_to_text(200, 1, |frame, area| {
             draw_footer(frame, area, &app, &theme);
         });
         assert!(!text.contains("autorun"), "{text}");
         assert!(!text.contains("reset"), "{text}");
+    }
+
+    #[test]
+    fn footer_on_graph_view_shows_enter_manual_in_auto_and_esc_auto_in_manual() {
+        // CT24 FR3: on the graph view the footer must advertise manual mode's
+        // real entry point — "Enter manual" in auto-follow, "Esc auto" in
+        // manual — never the old "Enter focus".
+        let mut app = app_on_graph(crate::domain::graphs::GraphStatus::Completed);
+        let theme = Theme::classic();
+
+        app.graph_live_follow = true;
+        app.graph_live_selected_node = None;
+        let text = render_footer_to_text(200, 1, |frame, area| {
+            draw_footer(frame, area, &app, &theme);
+        });
+        // Match the full key+label pair: loose `contains("auto")` or
+        // `contains("Esc")` would false-positive on the always-present
+        // "a autorun" / "Esc home" hints (same trap as the "r run" note in
+        // `footer_on_a_running_graph_offers_only_pause`).
+        assert!(text.contains("Enter manual"), "{text}");
+        assert!(!text.contains("focus"), "{text}");
+
+        app.graph_live_follow = false;
+        app.graph_live_selected_node = Some("n1".to_string());
+        let text = render_footer_to_text(200, 1, |frame, area| {
+            draw_footer(frame, area, &app, &theme);
+        });
+        assert!(text.contains("Esc auto"), "{text}");
+        assert!(!text.contains("Enter focus"), "{text}");
     }
 }

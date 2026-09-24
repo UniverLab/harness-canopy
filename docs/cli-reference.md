@@ -11,7 +11,8 @@ canopy [command] [options]
 ```
 
 Running `canopy` with no command opens the [TUI](tui.md) (running setup
-first if needed, and checking for updates).
+first if needed, and checking for updates (notice only — run `canopy update`
+to install)).
 
 ## Daemon
 
@@ -25,6 +26,22 @@ first if needed, and checking for updates).
 | `canopy daemon install-service` | Register as a system service |
 | `canopy daemon uninstall-service` | Remove the system service |
 
+## Updates
+
+| Command | Description |
+|---|---|
+| `canopy update` | Check the latest stable release, ask `Update to <tag>? [y/N]` (default no), and install it atomically; prints `canopy <current> → <latest>` or `canopy <current> is up to date` |
+| `canopy update --check` | Print the update status without changing anything; exits 1 when an update exists and 0 when up to date |
+| `canopy update --yes` | Install without the confirmation prompt |
+
+A cargo-installed binary is never overwritten: `canopy update` prints
+`installed with cargo — run: cargo install harness-canopy --force`.
+After a successful replacement, a running systemd-managed daemon is restarted
+with `systemctl --user restart canopy.service`; an unmanaged daemon uses the
+normal `canopy daemon stop/start` path. If a graph is running, update asks
+before restarting and otherwise leaves the daemon untouched and prints the
+command to run later.
+
 ## Setup & diagnostics
 
 | Command | Description |
@@ -32,44 +49,58 @@ first if needed, and checking for updates).
 | `canopy setup` | Interactive setup wizard — detects AI CLIs, generates `~/.canopy/config.toml` |
 | `canopy setup --local-registry <path>` | Use a local registry directory (for registry development) |
 | `canopy mcp` | MCP wizard — sync/add/remove canopy's MCP entry across platforms |
+| `canopy mcp --local-registry <path>` | Run the MCP wizard against a local registry directory instead of GitHub (same flag as `canopy setup --local-registry`) |
+| `canopy mcp` → Add | Add a server via pasted README JSON, local stdio command (with args + env), or remote URL (with headers); previews entries, marks `(replaces existing)` overwrites, then asks `Install on N platform(s)?` |
+| `canopy uninstall --dry-run` | Preview removal: stop daemon, remove service unit + `canopy.service.d/` drop-ins, revert platform configs, remove skill symlinks (changes nothing) |
+| `canopy uninstall --keep-shared-servers` | Only remove canopy's own `canopy` server entry; leave shared `fetch`/`filesystem` entries in place |
 | `canopy doctor` | Full health diagnostics |
 
-## Loop inspection
+## Graph inspection
 
 | Command | Description |
 |---|---|
-| `canopy loop list` | List all loops with status and spec progress |
-| `canopy loop list --workdir <path>` | Filter loops by workdir |
-| `canopy loop info <id-or-name>` | Detailed status for a single loop (specs, runs, hooks) |
+| `canopy graph list` | List all graphs with status and spec progress |
+| `canopy graph list --workdir <path>` | Filter graphs by workdir |
+| `canopy graph info <id-or-name>` | Detailed status for a single graph (specs, runs, hooks) |
 
-Loop ids can be specified by exact id, exact name, or unambiguous id
+Graph ids can be specified by exact id, exact name, or unambiguous id
 prefix. Ambiguous references list the candidates.
 
-## Loop control
+## Graph control
 
-Mirrors the `loop_run`/`loop_pause`/`loop_continue`/`loop_reset`/
-`loop_schedule_autorun` MCP tools — a second way to reach the same daemon
+Mirrors the `graph_run`/`graph_pause`/`graph_continue`/`graph_reset`/
+`graph_schedule_autorun` MCP tools — a second way to reach the same daemon
 operations when an MCP client can't. Every command resolves `<id-or-name>`
-locally (same rule as loop inspection above) and then delegates the actual
+locally (same rule as graph inspection above) and then delegates the actual
 state change to the daemon over its existing MCP endpoint; it never writes
 to the database directly. If the daemon isn't reachable on the resolved
-port, the error says so explicitly instead of looking like the loop is
+port, the error says so explicitly instead of looking like the graph is
 missing.
 
 | Command | Description |
 |---|---|
-| `canopy loop run <id-or-name>` | Run a loop in the background, spec by spec |
-| `canopy loop run <id-or-name> --queue <queue-id>` | Run the queue's pending specs through the loop's graph instead |
-| `canopy loop run <id-or-name> --workdir <path>` | Override the loop's workdir for this run only |
-| `canopy loop pause <id-or-name>` | Pause a running loop after the current node finishes |
-| `canopy loop continue <id-or-name> --retry-current-node` | Resume a paused loop by retrying the current node |
-| `canopy loop continue <id-or-name> --skip-next-spec` | Resume a paused loop by skipping to the next spec |
-| `canopy loop reset <id-or-name>` | Reset a completed/failed loop back to pending (prompts for confirmation) |
-| `canopy loop reset <id-or-name> --specs <id>...` | Reset specific spec ids, even if already completed |
-| `canopy loop reset <id-or-name> --yes` | Skip the confirmation prompt |
-| `canopy loop autorun <id-or-name> --at <iso8601>` | Schedule a one-shot resume at a future time |
-| `canopy loop autorun <id-or-name> --quota-reset-message <text>` | Schedule a resume from a raw CLI quota-limit message |
-| `canopy loop autorun <id-or-name> --cancel` | Cancel a pending autorun schedule |
+| `canopy graph run <id-or-name>` | Run a graph in the background, spec by spec |
+| `canopy graph run <id-or-name> --queue <queue-id>` | Run the queue's pending specs through the graph instead |
+| `canopy graph run <id-or-name> --workdir <path>` | Override the graph's workdir for this run only |
+| `canopy graph pause <id-or-name>` | Pause a running graph after the current node finishes |
+| `canopy graph continue <id-or-name> --retry-current-node` | Resume a paused graph by retrying the current node |
+| `canopy graph continue <id-or-name> --skip-next-spec` | Resume a paused graph by skipping to the next spec |
+| `canopy graph reset <id-or-name>` | Reset a completed/failed graph back to pending (prompts for confirmation) |
+| `canopy graph reset <id-or-name> --specs <id>...` | Reset specific spec ids, even if already completed |
+| `canopy graph reset <id-or-name> --yes` | Skip the confirmation prompt |
+| `canopy graph autorun <id-or-name> --at <iso8601>` | Schedule a one-shot resume at a future time |
+| `canopy graph autorun <id-or-name> --quota-reset-message <text>` | Schedule a resume from a raw CLI quota-limit message |
+| `canopy graph autorun <id-or-name> --cancel` | Cancel a pending autorun schedule |
+
+## Agents
+
+Read-only inspection of registered agents, served from the local database
+(like `canopy graph info` — no daemon required).
+
+| Command | Description |
+|---|---|
+| `canopy agent show <id>` | Show one agent's full stored definition, prompt last and untruncated |
+| `canopy agent show <id> --json` | Print the same definition as JSON (identical to the `agent_get` MCP tool's output) |
 
 ## Spec backlog
 
@@ -82,6 +113,7 @@ missing.
 | `canopy spec complete <spec-id> --reason <text>` | Mark a standalone spec as completed |
 | `canopy spec skip <spec-id> --reason <text>` | Mark a standalone spec as skipped |
 | `canopy spec reopen <spec-id> --reason <text>` | Reopen a completed/skipped spec back to pending |
+| `canopy spec convert` | Migrate legacy heading-format spec bodies to the tagged `<spec>` format (skips tagged and running specs; prints a report) |
 
 ## RAG
 

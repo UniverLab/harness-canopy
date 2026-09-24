@@ -38,7 +38,7 @@ pub struct LaunchpadDialog {
 
 impl LaunchpadDialog {
     pub fn for_workdir(db: &Database, workdir: &str) -> Result<Self> {
-        let nodes = db.search_intelligence_nodes(workdir, Some("session"), 50)?;
+        let nodes = db.search_operational_sessions(workdir, 50)?;
         let mut recent_missions: Vec<LaunchpadContext> = Vec::new();
         let mut seen_titles = std::collections::HashSet::new();
         let mut run_summary: Option<String> = None;
@@ -100,9 +100,13 @@ impl LaunchpadDialog {
         let selected_index = 0;
 
         let active_missions = db
-            .list_sync_messages(workdir, 30)
+            .list_activity_log_entries(workdir, 30)
             .ok()
-            .map(|messages| {
+            .map(|entries| {
+                let messages: Vec<crate::domain::sync::SyncMessage> = entries
+                    .into_iter()
+                    .map(crate::domain::sync::SyncMessage::from)
+                    .collect();
                 let agent_ids = messages
                     .iter()
                     .map(|m| m.agent_id.clone())

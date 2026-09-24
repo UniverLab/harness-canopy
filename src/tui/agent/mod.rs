@@ -89,6 +89,40 @@ fn decode_osc52_payload(data: &[u8]) -> Option<String> {
 /// vt100 parser wired with our clipboard-forwarding callbacks.
 pub(crate) type Vt = vt100::Parser<ClipboardForwarder>;
 
+/// Before shrinking a vt100 screen from `old_rows` to `new_rows`, move the rows
+/// that would fall off the bottom into the scrollback.
+///
+/// vt100's `set_size` shrink path ends in `Vec::resize`, which truncates the
+/// tail rows — the newest output — and never hands them to the scrollback. A
+/// Scroll Up first routes them through `scroll_up`, which does push evicted rows
+/// onto the scrollback deque; the matching Cursor Up keeps the shell's prompt on
+/// its logical line so it does not appear to jump. A grow (or an unchanged
+/// height, e.g. a cols-only resize) is a no-op.
+///
+/// The scroll is anchored at the cursor (what xterm does): only the overflow
+/// of the cursor past the new bottom is scrolled, so a shrink of a
+/// mostly-blank screen — cursor near the top, blanks below — scrolls nothing
+/// and keeps the newest output (the just-finished command's) on screen. A
+/// blind `old_rows - new_rows` scroll anchored at the top would discard the
+/// oldest rows first and push the newest content off into scrollback or drop
+/// it (CT15); when the screen is full the cursor sits at the bottom and both
+/// computations agree (CT9).
+fn preserve_rows_on_shrink<C: vt100::Callbacks>(
+    parser: &mut vt100::Parser<C>,
+    old_rows: u16,
+    new_rows: u16,
+) {
+    if new_rows >= old_rows {
+        return;
+    }
+    let cursor_row = parser.screen().cursor_position().0;
+    let needed = (cursor_row + 1).saturating_sub(new_rows);
+    if needed == 0 {
+        return;
+    }
+    parser.process(format!("\x1b[{needed}S\x1b[{needed}A").as_bytes());
+}
+
 fn apply_canopy_session_env(
     cmd: &mut CommandBuilder,
     agent_id: &str,
@@ -545,6 +579,7 @@ impl InteractiveAgent {
 
     /// Resize the PTY and virtual terminal (e.g. on terminal window resize).
     pub fn resize(&mut self, cols: u16, rows: u16) {
+        let old_rows = self.last_pty_rows;
         self.last_pty_cols = cols;
         self.last_pty_rows = rows;
         // A resize makes the app repaint; that output burst is not activity.
@@ -562,8 +597,12 @@ impl InteractiveAgent {
                 pixel_height: 0,
             });
         }
-        // Also resize the virtual terminal screen
+        // Resize the virtual terminal screen. On a shrink, first scroll the rows
+        // that would otherwise be truncated into the scrollback — both steps run
+        // under one `vt` acquisition so a PTY reader thread can't slip output in
+        // between the scroll and the resize.
         if let Ok(mut vt) = self.vt.lock() {
+            preserve_rows_on_shrink(&mut vt, old_rows, rows);
             vt.screen_mut().set_size(rows, cols);
         }
     }
@@ -579,8 +618,24 @@ pub use screen::ScreenSnapshot;
 
 #[cfg(test)]
 mod tests {
-    use super::decode_osc52_payload;
+    use super::{decode_osc52_payload, preserve_rows_on_shrink, ClipboardForwarder};
     use base64::Engine as _;
+
+    /// A parser wired the way `InteractiveAgent` builds its `vt` (see the
+    /// `new_with_callbacks` call in `InteractiveAgent::new`).
+    fn agent_parser(rows: u16) -> vt100::Parser<ClipboardForwarder> {
+        vt100::Parser::new_with_callbacks(rows, 80, super::VT_SCROLLBACK_LINES, ClipboardForwarder)
+    }
+
+    /// Number of rows currently held in the parser's scrollback deque.
+    /// `Screen::scrollback()` reports the *scroll position*, so read it back at
+    /// its clamped maximum, then restore the live view.
+    fn scrollback_len(parser: &mut vt100::Parser<ClipboardForwarder>) -> usize {
+        parser.screen_mut().set_scrollback(usize::MAX);
+        let len = parser.screen().scrollback();
+        parser.screen_mut().set_scrollback(0);
+        len
+    }
 
     #[test]
     fn decodes_padded_osc52_payload() {
@@ -605,5 +660,160 @@ mod tests {
     #[test]
     fn rejects_non_base64_payload() {
         assert_eq!(decode_osc52_payload(b"!!! not base64 !!!"), None);
+    }
+
+    // T1: shrinking the virtual screen must move the rows that fall off into
+    // scrollback instead of letting `set_size` truncate them.
+    #[test]
+    fn shrink_preserves_content_in_scrollback() {
+        let mut parser = agent_parser(10);
+        for i in 0..10 {
+            parser.process(format!("line{i}\r\n").as_bytes());
+        }
+        // Writing the 10th line's newline already pushed `line0` back.
+        assert_eq!(scrollback_len(&mut parser), 1);
+
+        // The shrink routine, then the resize it guards.
+        preserve_rows_on_shrink(&mut parser, 10, 7);
+        parser.screen_mut().set_size(7, 80);
+
+        // The 3 rows that left the visible screen joined `line0` in scrollback
+        // rather than being lost: 1 + 3 = 4.
+        assert_eq!(scrollback_len(&mut parser), 4);
+        parser.screen_mut().set_scrollback(usize::MAX);
+        let scrolled_back = parser.screen().contents();
+        for line in ["line1", "line2", "line3"] {
+            assert!(
+                scrolled_back.contains(line),
+                "{line} was dropped instead of scrolled back: {scrolled_back:?}"
+            );
+        }
+        // The newest line was at the bottom of the screen and must survive.
+        parser.screen_mut().set_scrollback(0);
+        assert!(parser.screen().contents().contains("line9"));
+    }
+
+    // T2: the reported case — a shrink then a regrow (input box grows, then
+    // collapses on submit). The last line written before the shrink must still
+    // be on screen and the pushed-off rows must stay reachable by scrolling.
+    #[test]
+    fn shrink_then_regrow_preserves_last_line() {
+        let mut parser = agent_parser(10);
+        for i in 0..10 {
+            parser.process(format!("line{i}\r\n").as_bytes());
+        }
+
+        preserve_rows_on_shrink(&mut parser, 10, 7);
+        parser.screen_mut().set_size(7, 80);
+        preserve_rows_on_shrink(&mut parser, 7, 10); // regrow: no-op
+        parser.screen_mut().set_size(10, 80);
+
+        let contents = parser.screen().contents();
+        assert!(
+            contents.contains("line9"),
+            "last pre-shrink line was destroyed by the shrink: {contents:?}"
+        );
+        assert!(
+            contents
+                .lines()
+                .next_back()
+                .is_some_and(|l| !l.trim().is_empty()),
+            "screen bottom collapsed to a band of blanks: {contents:?}"
+        );
+        // The rows the shrink pushed off are still in scrollback.
+        parser.screen_mut().set_scrollback(usize::MAX);
+        assert!(parser.screen().contents().contains("line1"));
+    }
+
+    // T3: a grow-only resize must not feed any scroll sequence to the parser.
+    #[test]
+    fn grow_only_resize_emits_no_scroll() {
+        let mut parser = agent_parser(10);
+        for i in 0..10 {
+            parser.process(format!("line{i}\r\n").as_bytes());
+        }
+        let before = scrollback_len(&mut parser);
+
+        preserve_rows_on_shrink(&mut parser, 10, 15);
+        parser.screen_mut().set_size(15, 80);
+
+        assert_eq!(
+            scrollback_len(&mut parser),
+            before,
+            "a grow moved rows into scrollback"
+        );
+    }
+
+    #[test]
+    fn ct15_ordinary_lines_survive_el_then_exit() {
+        let mut parser = agent_parser(24);
+        for i in 1..=5 {
+            parser.process(format!("ordinary line {i}\r\n").as_bytes());
+        }
+        // The installer's progress bar: every frame carriage-returns,
+        // erases the previous frame with ESC[K, and writes the new one with
+        // no newline. Frame 2's EL erases frame 1 — a legitimate request
+        // that must keep working. The final frame stays on screen, exactly
+        // as in a system terminal (only a later EL could remove it).
+        parser.process(b"\r\x1b[K  progress 10%\r");
+        parser.process(b"\x1b[K  progress 42%\r\n");
+        parser.process(b"error: boom\r\nexit status 1\r\n$ ");
+
+        let contents = parser.screen().contents();
+        for line in [
+            "ordinary line 1",
+            "ordinary line 2",
+            "ordinary line 3",
+            "ordinary line 4",
+            "ordinary line 5",
+            "error: boom",
+            "exit status 1",
+        ] {
+            assert!(
+                contents.contains(line),
+                "output was lost: {line:?}: {contents:?}"
+            );
+        }
+        // The program deliberately erased frame 1 — it stays erased. The
+        // fix restores what canopy destroyed, never what the program
+        // deliberately overwrote. The final frame remains, as it would in
+        // a system terminal.
+        assert!(
+            !contents.contains("progress 10%"),
+            "ESC[K must keep erasing what the program overwrote: {contents:?}"
+        );
+        assert!(
+            contents.contains("progress 42%"),
+            "the final progress frame must stay visible like in a system terminal: {contents:?}"
+        );
+    }
+
+    #[test]
+    fn ct15_shrink_of_mostly_blank_screen_preserves_newest() {
+        let mut parser = agent_parser(21);
+        for i in 0..10 {
+            parser.process(format!("real line {i}\r\n").as_bytes());
+        }
+        parser.process(b"$ ");
+        preserve_rows_on_shrink(&mut parser, 21, 8);
+        parser.screen_mut().set_size(8, 80);
+
+        assert!(parser.screen().contents().contains("real line 9"));
+        parser.screen_mut().set_scrollback(usize::MAX);
+        assert!(parser.screen().contents().contains("real line 0"));
+    }
+
+    #[test]
+    fn ct15_shrink_that_still_fits_scrolls_nothing() {
+        let mut parser = agent_parser(21);
+        for i in 0..10 {
+            parser.process(format!("real line {i}\r\n").as_bytes());
+        }
+        parser.process(b"$ ");
+        preserve_rows_on_shrink(&mut parser, 21, 16);
+        parser.screen_mut().set_size(16, 80);
+        assert_eq!(scrollback_len(&mut parser), 0);
+        let live = parser.screen().contents();
+        assert!(live.contains("real line 9") && live.contains("real line 0"));
     }
 }

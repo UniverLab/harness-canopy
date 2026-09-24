@@ -1,4 +1,4 @@
-/// Set when `SIGHUP` is received. Checked once per event-loop iteration so
+/// Set when `SIGHUP` is received. Checked once per event-graph iteration so
 /// closing the terminal window shuts canopy down through the same
 /// `app.cleanup()` path as a normal quit, instead of the process either
 /// ignoring the signal (never shutting down) or dying at `SIG_DFL` (skipping

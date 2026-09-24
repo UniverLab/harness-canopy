@@ -7,7 +7,7 @@ use std::io::{Error as IoError, ErrorKind};
 
 use crate::db::Database;
 use crate::domain::blueprints::{builtin_blueprint_specs, Blueprint};
-use crate::domain::loops::LoopNodeKind;
+use crate::domain::graphs::GraphNodeKind;
 
 impl Database {
     pub fn insert_blueprint(&self, blueprint: &Blueprint) -> Result<()> {
@@ -124,7 +124,12 @@ impl Database {
     /// ever called by [`Self::seed_builtin_blueprints`] to reconcile a
     /// stale builtin shape with the current spec — builtins have no
     /// caller-facing update tool.
-    fn update_builtin_blueprint(&self, id: &str, kind: LoopNodeKind, config: &Value) -> Result<()> {
+    fn update_builtin_blueprint(
+        &self,
+        id: &str,
+        kind: GraphNodeKind,
+        config: &Value,
+    ) -> Result<()> {
         let conn = self
             .conn
             .lock()
@@ -138,7 +143,7 @@ impl Database {
 }
 
 fn map_blueprint_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Blueprint> {
-    let kind = LoopNodeKind::from_str(&row.get::<_, String>(2)?).ok_or_else(|| {
+    let kind = GraphNodeKind::from_str(&row.get::<_, String>(2)?).ok_or_else(|| {
         rusqlite::Error::FromSqlConversionFailure(
             2,
             rusqlite::types::Type::Text,
@@ -224,28 +229,28 @@ mod tests {
         let legacy = [
             (
                 "implementer-claude",
-                LoopNodeKind::Agent,
+                GraphNodeKind::Agent,
                 serde_json::json!({"platform": "claude", "prompt": "Implement this spec: …"}),
             ),
             (
                 "cargo-gates",
-                LoopNodeKind::Check,
+                GraphNodeKind::Check,
                 serde_json::json!({"command": "cargo test"}),
             ),
             (
                 "reviewer-committer-mimo",
-                LoopNodeKind::Agent,
+                GraphNodeKind::Agent,
                 serde_json::json!({"platform": "mimo", "prompt": "Review the changes …"}),
             ),
             (
                 "commit-check",
-                LoopNodeKind::Check,
+                GraphNodeKind::Check,
                 serde_json::json!({"command": "test \"$(git rev-parse HEAD)\" != \"{{spec_start_head}}\""}),
             ),
             (
                 "resilience-mimo",
-                LoopNodeKind::Agent,
-                serde_json::json!({"platform": "mimo", "prompt": "A node in this loop failed …"}),
+                GraphNodeKind::Agent,
+                serde_json::json!({"platform": "mimo", "prompt": "A node in this graph failed …"}),
             ),
         ];
         for (name, kind, config) in legacy {
@@ -299,7 +304,7 @@ mod tests {
         let custom = Blueprint {
             id: uuid::Uuid::new_v4().to_string(),
             name: "implementer".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({"platform": "codex", "prompt": "my own take"}),
             builtin: false,
             created_at: Utc::now(),
@@ -322,7 +327,7 @@ mod tests {
         let custom = Blueprint {
             id: uuid::Uuid::new_v4().to_string(),
             name: "my-custom-gate".to_string(),
-            kind: LoopNodeKind::Gate,
+            kind: GraphNodeKind::Gate,
             config: serde_json::json!({ "evaluate": "output_contains", "value": "ok" }),
             builtin: false,
             created_at: Utc::now(),
@@ -378,7 +383,7 @@ mod tests {
         let bp = Blueprint {
             id: uuid::Uuid::new_v4().to_string(),
             name: "test-blueprint-unique".to_string(),
-            kind: LoopNodeKind::Agent,
+            kind: GraphNodeKind::Agent,
             config: serde_json::json!({ "key": "value" }),
             builtin: false,
             created_at: Utc::now(),
@@ -390,6 +395,6 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(fetched.name, "test-blueprint-unique");
-        assert_eq!(fetched.kind, LoopNodeKind::Agent);
+        assert_eq!(fetched.kind, GraphNodeKind::Agent);
     }
 }

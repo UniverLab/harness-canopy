@@ -32,7 +32,7 @@ pub(crate) fn draw_section_picker_modal(
             let title = " Add Section ";
             let block = Block::default()
                 .title(title)
-                .borders(crate::tui::ui::borders_for(theme))
+                .borders(crate::tui::ui::dialog_borders_for(theme))
                 .border_style(Style::default().fg(accent))
                 .style(Style::default().bg(theme.dialog_bg));
 
@@ -87,7 +87,7 @@ pub(crate) fn draw_section_picker_modal(
             let title = " Custom Section ";
             let block = Block::default()
                 .title(title)
-                .borders(crate::tui::ui::borders_for(theme))
+                .borders(crate::tui::ui::dialog_borders_for(theme))
                 .border_style(Style::default().fg(accent))
                 .style(Style::default().bg(theme.dialog_bg));
 
@@ -148,7 +148,7 @@ pub(crate) fn draw_section_picker_modal(
             let title = " Remove Section ";
             let block = Block::default()
                 .title(title)
-                .borders(crate::tui::ui::borders_for(theme))
+                .borders(crate::tui::ui::dialog_borders_for(theme))
                 .border_style(Style::default().fg(accent))
                 .style(Style::default().bg(theme.dialog_bg));
 
@@ -218,7 +218,7 @@ pub(crate) fn draw_section_picker_modal(
 
             let block = Block::default()
                 .title(" Tools — Pick a Skill ")
-                .borders(crate::tui::ui::borders_for(theme))
+                .borders(crate::tui::ui::dialog_borders_for(theme))
                 .border_style(Style::default().fg(accent))
                 .style(Style::default().bg(Color::Rgb(10, 20, 30)));
 
@@ -318,7 +318,7 @@ pub(crate) fn draw_section_picker_modal(
 
             let block = Block::default()
                 .title(title)
-                .borders(crate::tui::ui::borders_for(theme))
+                .borders(crate::tui::ui::dialog_borders_for(theme))
                 .border_style(Style::default().fg(accent))
                 .style(Style::default().bg(Color::Rgb(10, 20, 30)));
 
@@ -436,7 +436,7 @@ pub(crate) fn draw_section_picker_modal(
 
             let block = Block::default()
                 .title(" Preset ")
-                .borders(crate::tui::ui::borders_for(theme))
+                .borders(crate::tui::ui::dialog_borders_for(theme))
                 .border_style(Style::default().fg(accent))
                 .style(Style::default().bg(Color::Rgb(10, 20, 30)));
 
@@ -560,7 +560,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(db, data_dir.path()).unwrap();
+        let mut app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         app.simple_prompt_dialog = Some(SimplePromptDialog::new());
         app
     }

@@ -6,7 +6,7 @@ use crate::application::ports::StateRepository;
 mod test {
     use super::*;
     use crate::application::notification_service::{
-        DefaultNotificationService, LoopFinishOutcome, NotificationService,
+        DefaultNotificationService, GraphFinishOutcome, NotificationService,
     };
     use crate::db::Database;
     use tempfile::tempdir;
@@ -50,27 +50,29 @@ mod test {
         // Test nursery failed notification
         service.notify_nursery_failed("identity.toml not found");
 
-        // Test loop lifecycle notifications (return ())
-        service.notify_loop_started("R4 loop", 19, false, Some("R4"));
-        service.notify_spec_completed("R4 loop", "R4", 11, 19, Some("R5"));
-        service.notify_loop_finished(
-            "R4 loop",
-            LoopFinishOutcome::Completed {
+        // Test graph lifecycle notifications (return ())
+        service.notify_graph_started("R4 graph", 19, false, Some("R4"));
+        service.notify_spec_completed("R4 graph", "R4", 11, 19, Some("R5"));
+        service.notify_graph_finished(
+            "R4 graph",
+            GraphFinishOutcome::Completed {
                 done: 19,
                 total: 19,
                 hook_launched: false,
             },
         );
-        service.notify_loop_finished("R4 loop", LoopFinishOutcome::Failed { spec_name: "R4" });
-        service.notify_loop_finished(
-            "R4 loop",
-            LoopFinishOutcome::Blocked {
+        service.notify_graph_finished("R4 graph", GraphFinishOutcome::Failed { spec_name: "R4" });
+        service.notify_graph_finished(
+            "R4 graph",
+            GraphFinishOutcome::Blocked {
                 summary: "needs human review",
             },
         );
 
         // N2: post-completion hook failure notification.
-        service
-            .notify_loop_completion_hook_failed("R4 loop", "on_completed hook exited with code 1.");
+        service.notify_graph_completion_hook_failed(
+            "R4 graph",
+            "on_completed hook exited with code 1.",
+        );
     }
 }

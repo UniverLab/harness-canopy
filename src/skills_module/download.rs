@@ -20,7 +20,7 @@ const SKILLS_TOML_URL: &str = "https://raw.githubusercontent.com/UniverLab/skill
 /// unless `force` is set. See `sync_policy` for the decision logic.
 pub fn download_essential_pack(force: bool) -> Result<usize> {
     let global = ensure_global_skills_dir()?;
-    migrate_loop_design_rename(&global);
+    migrate_graph_design_rename(&global);
     let client = build_github_client()?;
 
     let registry = fetch_skills_registry(&client);
@@ -33,9 +33,9 @@ pub fn download_essential_pack(force: bool) -> Result<usize> {
 }
 
 /// Explicit rename migration (S3): the Essential Pack catalog renamed
-/// `loop-design` to `canopy-loop-design` (canopy-family naming, gated by
+/// `graph-design` to `canopy-graph-design` (canopy-family naming, gated by
 /// `requires = "canopy"`). A machine that installed the pack before the
-/// rename has `~/.agents/skills/loop-design/` on disk; left alone, that
+/// rename has `~/.agents/skills/graph-design/` on disk; left alone, that
 /// directory would become a permanent stale copy — its name no longer
 /// appears in the catalog, so the per-file sync loop below would never
 /// touch it again. Moving it under the new name makes it a live entry
@@ -44,12 +44,12 @@ pub fn download_essential_pack(force: bool) -> Result<usize> {
 /// the directory, never its content, so it can't violate B4's
 /// never-clobber-newer-local-content rule.
 ///
-/// If `canopy-loop-design` already exists too, the rename is skipped rather
+/// If `canopy-graph-design` already exists too, the rename is skipped rather
 /// than guessing which copy should win — the legacy directory is left in
 /// place with a log line for manual reconciliation.
-fn migrate_loop_design_rename(global: &Path) {
-    let old = global.join("loop-design");
-    let new = global.join("canopy-loop-design");
+fn migrate_graph_design_rename(global: &Path) {
+    let old = global.join("graph-design");
+    let new = global.join("canopy-graph-design");
     if !old.exists() {
         return;
     }
@@ -309,43 +309,43 @@ mod tests {
     use super::*;
 
     #[test]
-    fn migrate_loop_design_rename_moves_legacy_directory_to_new_name() {
+    fn migrate_graph_design_rename_moves_legacy_directory_to_new_name() {
         let dir = tempfile::tempdir().unwrap();
-        let old = dir.path().join("loop-design");
+        let old = dir.path().join("graph-design");
         std::fs::create_dir_all(&old).unwrap();
-        std::fs::write(old.join("SKILL.md"), b"loop-design content").unwrap();
+        std::fs::write(old.join("SKILL.md"), b"graph-design content").unwrap();
 
-        migrate_loop_design_rename(dir.path());
+        migrate_graph_design_rename(dir.path());
 
         assert!(!old.exists());
-        let new = dir.path().join("canopy-loop-design");
+        let new = dir.path().join("canopy-graph-design");
         assert!(new.exists());
         assert_eq!(
             std::fs::read(new.join("SKILL.md")).unwrap(),
-            b"loop-design content"
+            b"graph-design content"
         );
     }
 
     #[test]
-    fn migrate_loop_design_rename_is_noop_when_legacy_directory_absent() {
+    fn migrate_graph_design_rename_is_noop_when_legacy_directory_absent() {
         let dir = tempfile::tempdir().unwrap();
         // Neither directory exists — must not panic or create anything.
-        migrate_loop_design_rename(dir.path());
-        assert!(!dir.path().join("loop-design").exists());
-        assert!(!dir.path().join("canopy-loop-design").exists());
+        migrate_graph_design_rename(dir.path());
+        assert!(!dir.path().join("graph-design").exists());
+        assert!(!dir.path().join("canopy-graph-design").exists());
     }
 
     #[test]
-    fn migrate_loop_design_rename_leaves_both_when_new_name_already_exists() {
+    fn migrate_graph_design_rename_leaves_both_when_new_name_already_exists() {
         let dir = tempfile::tempdir().unwrap();
-        let old = dir.path().join("loop-design");
-        let new = dir.path().join("canopy-loop-design");
+        let old = dir.path().join("graph-design");
+        let new = dir.path().join("canopy-graph-design");
         std::fs::create_dir_all(&old).unwrap();
         std::fs::write(old.join("SKILL.md"), b"legacy content").unwrap();
         std::fs::create_dir_all(&new).unwrap();
         std::fs::write(new.join("SKILL.md"), b"already-migrated content").unwrap();
 
-        migrate_loop_design_rename(dir.path());
+        migrate_graph_design_rename(dir.path());
 
         // Neither directory is touched — B4 never-clobber, no guessing which wins.
         assert!(old.exists());
@@ -370,7 +370,7 @@ requires = "canopy"
 [skills.canopy-sync]
 requires = "canopy"
 
-[skills.canopy-loop-design]
+[skills.canopy-graph-design]
 requires = "canopy"
 
 [skills.canopy-capabilities]
@@ -383,7 +383,7 @@ requires = "canopy"
         for name in [
             "canopy-intelligence",
             "canopy-sync",
-            "canopy-loop-design",
+            "canopy-graph-design",
             "canopy-capabilities",
         ] {
             assert_eq!(
@@ -422,9 +422,9 @@ requires = "canopy"
         let mut registry = SkillsRegistry::default();
         registry
             .requires
-            .insert("canopy-loop-design".to_string(), "canopy".to_string());
+            .insert("canopy-graph-design".to_string(), "canopy".to_string());
 
-        assert!(registry.should_install_with_path("canopy-loop-design", &path_value));
+        assert!(registry.should_install_with_path("canopy-graph-design", &path_value));
     }
 
     #[test]
@@ -433,9 +433,9 @@ requires = "canopy"
         let mut registry = SkillsRegistry::default();
         registry
             .requires
-            .insert("canopy-loop-design".to_string(), "canopy".to_string());
+            .insert("canopy-graph-design".to_string(), "canopy".to_string());
 
-        assert!(!registry.should_install_with_path("canopy-loop-design", empty_path));
+        assert!(!registry.should_install_with_path("canopy-graph-design", empty_path));
     }
 
     #[test]

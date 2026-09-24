@@ -17,7 +17,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-2E8B57?style=for-the-badge" alt="License"/></a>
 </p>
 
-harness-canopy is a modern, self-contained MCP (Model Context Protocol) server and TUI for orchestrating AI agent sessions, background tasks, and file event triggers. Designed for reliability, modularity, and performance — it enables advanced scheduling, persistent knowledge graphs, multi-agent coordination, loop automation, and interactive terminal management with zero runtime dependencies.
+harness-canopy is a modern, self-contained MCP (Model Context Protocol) server and TUI for orchestrating AI agent sessions, background tasks, and file event triggers. Designed for reliability, modularity, and performance — it enables advanced scheduling, persistent knowledge graphs, multi-agent coordination, graph automation, and interactive terminal management with zero runtime dependencies.
 
 ---
 
@@ -80,20 +80,10 @@ tools will otherwise tell you the moment you actually run them for real.
 
 ### If no platform is installed
 
-`canopy setup` is meant to detect nothing, say so, list every platform it
-supports, and finish with zero platforms configured so you can install one
-and re-run. In practice it doesn't reach that message: the registry fetch
-(`src/setup_module/registry_fetch.rs`, `try_fetch_v6` / `try_fetch_v5` /
-`try_fetch_local`) filters the platform list down to already-installed
-binaries *before* returning it, and bails out if that filtered list is
-empty — discarding the full list that the "no platforms detected" branch
-(`src/setup_module/wizard.rs:50-61`) needs. Verified by running
-`canopy setup` with no supported binary on `PATH`: the real registry path
-fails with `Error: Registry returned HTTP 404 Not Found` (it falls through
-to a dead legacy endpoint), and `canopy setup --local-registry <dir>` fails
-with `Error: Local registry not found or invalid at: <dir>`. Either way,
-setup exits instead of guiding you — this is a bug in `canopy setup`,
-tracked separately, not fixed here.
+`canopy setup` detects nothing, lists every supported platform with its
+CLI binary name, and exits cleanly without writing any configuration.
+Install one of the listed binaries, make sure it's on your PATH, then
+re-run `canopy setup`.
 
 ---
 
@@ -111,7 +101,7 @@ See [`docs/installation.md`](docs/installation.md) for all methods and first-tim
 ## Documentation
 
 Full documentation lives in [`docs/`](docs/): installation, quick start, the
-TUI, agents and seed identities, intelligence & sync, loops, the RAG
+TUI, agents and seed identities, intelligence & sync, graphs, the RAG
 pipeline, all 83 MCP tools, and the complete CLI reference.
 
 ---
@@ -123,8 +113,8 @@ pipeline, all 83 MCP tools, and the complete CLI reference.
 
 - **🚀 High-Performance Scheduler** — Event-driven cron scheduler using Tokio with zero polling overhead. Computes precise wake-up times and sleeps until needed; CPU usage drops to near-zero when idle.
 - **📊 Real-time File Watcher** — Instantly reacts to file system events (create, modify, delete, move) using the `notify` crate with configurable debouncing, recursive directory monitoring, and macOS FSEvents compatibility.
-- **💾 Persistent State** — All tasks, watchers, execution logs, agent state, sync messages, intelligence nodes, loops, and projects are stored in an embedded SQLite database with WAL mode and automatic schema migration.
-- **🔄 Auto-Update** — Checks GitHub releases daily for new stable versions, downloads the platform-specific binary (linux-musl, macos-darwin; x86_64/aarch64), and atomically replaces the running executable.
+- **💾 Persistent State** — All tasks, watchers, execution logs, agent state, sync messages, intelligence nodes, graphs, and projects are stored in an embedded SQLite database with WAL mode and automatic schema migration.
+- **🔄 Auto-Update** — `canopy update` checks GitHub releases for a newer stable version, asks first (default no), refuses cargo installs, and restarts the daemon.
 - **🔔 Cross-Platform Notifications** — Native desktop notifications for task completions, failures, and watcher triggers. Auto-detects platform: WSL (PowerShell toasts with AUMID), macOS (`osascript`), Linux (`notify-send`).
 
 ### 🤖 Agent Management
@@ -132,7 +122,7 @@ pipeline, all 83 MCP tools, and the complete CLI reference.
 - **Interactive PTY Agents** — Each agent runs in a dedicated pseudo-terminal with full vt100 emulation, 24-bit color support, cursor positioning, and interactive applications.
 - **Terminal Sessions** — Raw shell sessions with per-session command history (TOML-backed), cross-session autocomplete search, and Warp-like input mode for efficient command entry.
 - **Background Agents** — Cron-scheduled and file-watcher-triggered agents with configurable timeouts, automatic retries, execution logging (5 MB rotation), and per-run status tracking.
-- **Platform Liveness Probe** — `agent_probe` tests whether a platform+model pair can actually respond before loop_run spends real quota on it. Probes the exact pair a node would use, not just the platform default.
+- **Platform Liveness Probe** — `agent_probe` tests whether a platform+model pair can actually respond before graph_run spends real quota on it. Probes the exact pair a node would use, not just the platform default.
 - **Seed Identity System** — Persistent, evolvable agent identities stored as structured TOML at `~/.canopy/seeds/<id>/identity.toml`. Each seed has a unique name, family, behavioral directives, and personality traits. Binded sessions receive the seed's prompt injection automatically. The `evolve_identity` MCP tool lets agents refine themselves over time. 4 KB size cap, case-insensitive name uniqueness, and mandatory field validation.
 - **Seed Nursery** — Collaborative workspace for creating new seed identities. Creates a temporary directory with a draft `identity.toml` and CLI-specific instruction files (e.g. `CLAUDE.md`, `AGENTS.md`) that guide the agent to interview the user and define the seed's personality. Validates and registers the seed on completion.
 - **Context Transfer** — Seamlessly transfer conversation context, prompts, and output between agents while preserving session state and scrollback history.
@@ -144,7 +134,7 @@ pipeline, all 83 MCP tools, and the complete CLI reference.
 - **Project-Scoped Knowledge** — Store facts, patterns, and session summaries scoped to individual projects via `project_hash` (SHA-256 of canonical workdir path, truncated to 8 hex). Auto-detected from the session workdir — agents never need to set it manually.
 - **Full-Text Search** — Search intelligence nodes by query and optional kind filter across all projects.
 - **Graph Walk** — Traverse the knowledge graph from any node up to a configurable depth, returning connected facts, patterns, and cross-references.
-- **Project Relationships** — Link projects with typed relations (`depends_on`, `complements`, `relates_to`, `independent`) and query related projects for context enrichment.
+- **Project Relationships** — Link projects with typed relations (`depends_on`, `complements`, `extends`, `publishes`; `relates_to` accepted as legacy, `contains` derived) and query related projects for context enrichment.
 - **Context Retrieval** — `intelligence_get_context` auto-detects the project, returns a curated mix of session knowledge, project facts, and related-project summaries.
 
 ### 🔄 Multi-Agent Sync
@@ -154,22 +144,22 @@ pipeline, all 83 MCP tools, and the complete CLI reference.
 - **Broadcast Messaging** — Info, query, and answer messages between agents in the same workdir.
 - **Active Context** — `sync_get_context` returns active missions, recent chatter, and a computed workspace "vibe" (worst status among active intents).
 
-### 🔀 Loop DAG Engine
+### 🔀 Graph DAG Engine
 
-- **Ordered Specs** — Loops contain sequenced `Spec`s, each with `Node`s connected by `Edge`s with routing conditions (`pass`/`fail`/`always`).
-- **Standalone Spec Backlog** — Specs exist independently from loops; tag them to a workdir for filtering. Managed via `spec_create`, `spec_list`, `spec_update`, `spec_delete`.
-- **Spec Queues** — Ordered queues of existing specs that a loop drains one by one. Append and reorder while a loop is running via `queue_create`, `queue_add_spec`, `queue_list`, `queue_remove_spec`, `queue_reorder`.
+- **Ordered Specs** — Graphs contain sequenced `Spec`s, each with `Node`s connected by `Edge`s with routing conditions (`pass`/`fail`/`always`).
+- **Standalone Spec Backlog** — Specs exist independently from graphs; tag them to a workdir for filtering. Managed via `spec_create`, `spec_list`, `spec_update`, `spec_delete`.
+- **Spec Queues** — Ordered queues of existing specs that a graph drains one by one. Append and reorder while a graph is running via `queue_create`, `queue_add_spec`, `queue_list`, `queue_remove_spec`, `queue_reorder`.
 - **Node Kinds** — `agent` nodes invoke CLI tools with prompt templates; `check` nodes execute shell commands; `gate` nodes validate previous output (e.g., `output_contains`); `router` nodes classify and route by token matching with fallback; `quorum` is the engine-managed node that closes an ensemble.
-- **Ensembles** — `loop_add_ensemble` creates a parallel group of 2-8 agent-node members sharing one prompt (or per-member prompt overrides for specialist panels), plus a wait-all quorum that consolidates their outputs and routes onward, in a single MCP call. `loop_update_ensemble` edits the shared prompt, member list, and quorum/exit config as one unit. See [docs/loops.md](docs/loops.md#ensembles).
-- **Node Blueprints** — Reusable `{name, kind, config}` templates referenced by name in `loop_add_node`. Five builtins seeded at startup; custom blueprints via `blueprint_create`/`blueprint_delete`/`blueprint_list`.
-- **Full Lifecycle** — Create, update, run, pause, continue (retry or skip), reset, complete nodes, and report blockers for human intervention. `loop_schedule_autorun` resumes failed/completed loops at a future time. Archive and restore loops without losing history. Export and import loop designs as shareable JSON documents. Copy nodes and ensembles within or across loops. View node run history for failure diagnosis.
-- **`on_completed` Hook** — Post-completion agent execution (e.g. documentation maintenance) that fires once per completion.
-- **Template Variables** — Loop prompts support `{{loop_name}}`, `{{workdir}}`, `{{spec_id}}`, `{{spec_name}}`, `{{spec_content}}`, `{{node_id}}`, `{{previous_feedback}}`, and `{{spec_start_head}}` (git HEAD at spec start, for check nodes).
+- **Ensembles** — `graph_add_ensemble` creates a parallel group of 2-8 agent-node members sharing one prompt (or per-member prompt overrides for specialist panels), plus a wait-all quorum that consolidates their outputs and routes onward, in a single MCP call. `graph_update_ensemble` edits the shared prompt, member list, quorum/exit config, and entry wiring (including multi-source entry and chaining a quorum into another ensemble) as one unit; `graph_delete_ensemble` removes the whole unit. See [docs/graphs.md](docs/graphs.md#ensembles).
+- **Node Blueprints** — Reusable `{name, kind, config}` templates referenced by name in `graph_add_node`. Five builtins seeded at startup; custom blueprints via `blueprint_create`/`blueprint_delete`/`blueprint_list`.
+- **Full Lifecycle** — Create, update, run, pause, continue (retry or skip), reset, complete nodes, and report blockers for human intervention. `graph_schedule_autorun` resumes failed/completed graphs at a future time. Archive and restore graphs without losing history. Export and import graph designs as shareable JSON documents. Copy nodes and ensembles within or across graphs. View node run history for failure diagnosis.
+- **Event-keyed Hooks** — Agent execution, direct shell commands, or interactive messages into a live session on `on_completed`, `on_failed`, `on_blocked`, and `on_spec_completed` (e.g. documentation maintenance fires once per completion; a failing graph at midnight puts a message in the operator's session, delivered when they next open the TUI). Several hooks can serve one event in order; hooks are not retroactive and never change the graph's status.
+- **Template Variables** — Graph prompts support `{{graph_name}}`, `{{workdir}}`, `{{spec_id}}`, `{{spec_name}}`, `{{spec_content}}`, `{{node_id}}`, `{{previous_feedback}}`, and `{{spec_start_head}}` (git HEAD at spec start, for check nodes).
 - **24 MCP Tools** — Complete authoring, inspection, runtime, spec, queue, and blueprint management.
 
 ### 📚 Personal RAG Pipeline
 
-- **Semantic Search** — Embed and query personal documents (Markdown, MDX, PDF) with local ONNX models (fastembed/BGE, multilingual-e5) or remote APIs (OpenAI, Gemini).
+- **Semantic Search** — Embed and query personal documents (Markdown, MDX, PDF) with local ONNX models (fastembed/BGE, multilingual-e5). No cloud provider, no API key.
 - **Language-Aware Chunking** — Markdown split by headings with paragraph fallback, similarity-aware merging, and overlap for context preservation.
 - **PDF Extraction** — Isolated subprocess prevents parser crashes from taking down the daemon, with HTML detection and raw-text salvage fallback.
 - **Auto-Ingestion** — Background watcher monitors configured RAG roots with 3-second debounce, enqueues changes, and reconciles orphan chunks on startup.
@@ -182,15 +172,15 @@ pipeline, all 83 MCP tools, and the complete CLI reference.
 - **Scheduled Delivery** — `Shift+Enter` (Kitty keyboard protocol) sends prompts at a chosen time instead of immediately.
 - **Split Groups** — Side-by-side horizontal/vertical views for monitoring multiple agents simultaneously.
 - **System Dashboard** — CPU, memory, disk, GPU (NVIDIA/Linux/macOS), temperatures with amber/red alert thresholds. WSL queries Windows host metrics via PowerShell.
-- **Live Loop View** — Real-time graph rendering with auto-follow on the running node, manual node inspection, and per-node run info (status, elapsed, output tail).
+- **Live Graph View** — Real-time graph rendering with auto-follow on the running node, manual node inspection, and per-node run info (status, elapsed, output tail).
 - **Agent Status Colors** — Green for working (recent output), blue for idle, red for failed, gray for exited.
-- **Projects Sidebar** — Sections for active loops, backlog specs, and loop history, filterable by project workdir.
-- **Loop Editor** — Inline node config JSON editing with validation.
+- **Projects Sidebar** — Sections for active graphs, backlog specs, and graph history, filterable by project workdir.
+- **Graph Editor** — Inline node config JSON editing with validation.
 - **RAG Transfer Modal** — Send semantic search results to other agents as injected context.
 - **Context Transfer** — Two-step modal (preview → agent picker) to inject conversation context between sessions.
 - **Brian's Brain** — 3-state cellular automaton with auto-noise for idle state visualization.
 - **Whimsg** — Animated kaomoji status messages with typing effects.
-- **Gamification** — 28 achievement-style missions across 6 categories (Environment, Intelligence, Projects, Loop, Seeds, SysInfo) tracked automatically during normal TUI operation.
+- **Gamification** — 28 achievement-style missions across 6 categories (Environment, Intelligence, Projects, Graph, Seeds, SysInfo) tracked automatically during normal TUI operation.
 
 ### 🔧 Additional Features
 
@@ -201,11 +191,11 @@ pipeline, all 83 MCP tools, and the complete CLI reference.
 - **MCP Wizard** — `canopy mcp` subcommand for syncing, adding, and removing MCP server entries across all detected platforms with automatic format conversion (JSON ↔ TOML).
 - **Skills Manager** — Global skill directory at `~/.agents/skills/` with cross-platform symlinks. List, validate symlink integrity, and remove installed skills across platforms.
 - **Doctor Diagnostics** — `canopy doctor` checks data directory, database, config, harnesses, RAG status, file watchers, daemon process, registry connectivity, and auto-update health.
-- **Desktop Notifications** — Cross-platform alerts for task completions, failures, watcher triggers, RAG indexing events, and loop lifecycle (started, spec completed, finished with outcome, blocker, hook failure).
+- **Desktop Notifications** — Cross-platform alerts for task completions, failures, watcher triggers, RAG indexing events, and graph lifecycle (started, spec completed, finished with outcome, blocker, hook failure).
 
 ---
 
-## MCP Tools (83)
+## MCP Tools (84)
 
 | Category | Tools |
 |----------|-------|
@@ -213,11 +203,11 @@ pipeline, all 83 MCP tools, and the complete CLI reference.
 | **Multi-Agent Sync** (4) | `sync_declare_intent`, `sync_report_status`, `sync_broadcast`, `sync_get_context` |
 | **Intelligence V2** (8) | `intelligence_get_context`, `intelligence_upsert`, `intelligence_search`, `intelligence_graph_walk`, `intelligence_list_projects`, `intelligence_link_projects`, `intelligence_delete_node`, `intelligence_delete_relation` |
 | **Seed Identity** (5) | `get_identity`, `evolve_identity`, `create_seed`, `list_seeds`, `remove_seed` |
-| **Loop Engine** (32) | `loop_create`, `loop_update`, `loop_add_spec`, `loop_update_spec`, `loop_add_node`, `loop_update_node`, `loop_add_edge`, `loop_update_edge`, `loop_delete_edge`, `loop_delete_node`, `loop_add_ensemble`, `loop_update_ensemble`, `loop_get`, `loop_list`, `loop_run`, `loop_reset`, `loop_schedule_autorun`, `loop_pause`, `loop_continue`, `loop_complete_node`, `loop_report_blocker`, `loop_export`, `loop_import`, `loop_archive`, `loop_restore`, `loop_node_runs_list`, `loop_node_run_get`, `loop_copy_node`, `loop_copy_ensemble`, `loop_audit_node_configs`, `loop_schedule_continue`, `loop_preflight` |
+| **Graph Engine** (33) | `graph_create`, `graph_update`, `graph_add_spec`, `graph_update_spec`, `graph_add_node`, `graph_update_node`, `graph_add_edge`, `graph_update_edge`, `graph_delete_edge`, `graph_delete_node`, `graph_add_ensemble`, `graph_update_ensemble`, `graph_delete_ensemble`, `graph_get`, `graph_list`, `graph_run`, `graph_reset`, `graph_schedule_autorun`, `graph_pause`, `graph_continue`, `graph_complete_node`, `graph_report_blocker`, `graph_export`, `graph_import`, `graph_archive`, `graph_restore`, `graph_node_runs_list`, `graph_node_run_get`, `graph_copy_node`, `graph_copy_ensemble`, `graph_audit_node_configs`, `graph_schedule_continue`, `graph_preflight` |
 | **Spec Backlog** (5) | `spec_create`, `spec_list`, `spec_update`, `spec_delete`, `spec_set_status` |
 | **Spec Queues** (5) | `queue_create`, `queue_add_spec`, `queue_list`, `queue_remove_spec`, `queue_reorder` |
 | **Node Blueprints** (3) | `blueprint_list`, `blueprint_create`, `blueprint_delete` |
-| **Project** (3) | `project_search`, `project_update`, `project_remap` |
+| **Project** (4) | `project_search`, `project_update`, `project_remap`, `project_register` |
 | **RAG** (1) | `rag_search` |
 | **Protocol** (1) | `get_tools` |
 
@@ -231,9 +221,9 @@ pipeline, all 83 MCP tools, and the complete CLI reference.
 - **Executor** — Runs tasks and agents, manages locking, logs, and status.
 - **Intelligence V2** — Project-scoped knowledge graph with node/edge CRUD, deletion tools, graph walk, project relationships.
 - **Sync Manager** — Per-workdir in-memory broadcast channels (64 capacity), DB persistence, and intelligence node auto-upsert.
-- **Loop Engine** — DAG execution engine: agent/check/gate/router node runners, iteration limits, pause/continue, blocker reporting, spec queues, node blueprints, scheduled autorun, archive/restore, export/import, node run history, and copy tools.
+- **Graph Engine** — DAG execution engine: agent/check/gate/router node runners, iteration limits, pause/continue, blocker reporting, spec queues, node blueprints, scheduled autorun, archive/restore, export/import, node run history, and copy tools.
 - **RAG Pipeline** — Background ingestion, language-aware chunking, embedding client, vector store, and rate-limited search.
-- **TUI** — Full-screen ratatui terminal UI for managing agents, viewing output, loops, and system metrics in real time.
+- **TUI** — Full-screen ratatui terminal UI for managing agents, viewing output, graphs, and system metrics in real time.
 - **Gamification** — Mission tracker with 28 achievements across 6 categories, persisted in the database.
 - **Skills Manager** — Global skills directory with cross-platform symlinks and integrity validation.
 
@@ -244,15 +234,15 @@ pipeline, all 83 MCP tools, and the complete CLI reference.
 - `application/` — Application ports and abstractions
 - `autoupdate/` — Self-update system (GitHub releases)
 - `daemon/` — MCP server, handler, params, RAG CLI, doctor
-- `db/` — SQLite persistence and migrations (agents, runs, sessions, sync, intelligence, loops, projects, seeds, groups, state)
-- `domain/` — Core models: Agent, Trigger, WatchEvent, Project, SeedIdentity, Loop, LoopSpec, Queue, LoopNodeBlueprint, SyncMessage, IntelligenceNode
+- `db/` — SQLite persistence and migrations (agents, runs, sessions, sync, intelligence, graphs, projects, seeds, groups, state)
+- `domain/` — Core models: Agent, Trigger, WatchEvent, Project, SeedIdentity, Graph, GraphSpec, Queue, GraphNodeBlueprint, SyncMessage, IntelligenceNode
 - `executor/` — Task and agent execution logic
 - `rag/` — RAG pipeline (ingestion, chunking, embedding, vector store, rate limiting)
 - `scheduler/` — Internal cron scheduler with template variables
 - `sync_manager/` — Multi-agent coordination broadcast
 - `tui/` — Terminal UI: agent management, dialogs, sidebar, system dashboard, context transfer
 - `watchers/` — File system watcher engine
-- `loop_engine/` — DAG loop execution engine
+- `graph_engine/` — DAG graph execution engine
 
 ---
 
@@ -307,7 +297,7 @@ pipeline, all 83 MCP tools, and the complete CLI reference.
    canopy rag report             # Per-file indexing report
    ```
 
-All state persists in `~/.canopy/`. The daemon auto-updates to stable releases every 24 hours.
+All state persists in `~/.canopy/`. The TUI shows an update notice at most every 24 hours — `canopy update` installs it.
 
 ---
 

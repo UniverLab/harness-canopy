@@ -18,7 +18,11 @@ pub(crate) fn format_uptime(secs: u64) -> String {
 
 pub(crate) fn format_agent_info(a: &Agent) -> String {
     let prompt_preview = if a.prompt.len() > 80 {
-        format!("{}...", &a.prompt[..80])
+        format!(
+            "{}… (agent_get {} for the full prompt)",
+            &a.prompt[..80],
+            a.id
+        )
     } else {
         a.prompt.clone()
     };
@@ -69,6 +73,37 @@ pub(crate) fn format_agent_info(a: &Agent) -> String {
     }
 
     info
+}
+
+/// The full stored definition of one agent as JSON — shared by the MCP
+/// `agent_get` tool and `canopy agent show --json` so both surfaces emit
+/// byte-identical output (both serialize with `serde_json::to_string_pretty`).
+/// `notify_on_success` lives outside `AGENT_COLUMNS` (owned solely by
+/// `set_agent_notify_on_success`), so callers fetch it separately and pass
+/// it in. `trigger_type`/`trigger_config` are null for a manual (trigger-less)
+/// agent — they mirror the stored columns, not the "manual" display label.
+pub(crate) fn agent_detail_json(a: &Agent, notify_on_success: bool) -> serde_json::Value {
+    serde_json::json!({
+        "id": &a.id,
+        "trigger_type": a.trigger.as_ref().map(|t| t.type_str()),
+        "trigger_config": &a.trigger,
+        "cli": a.cli.as_str(),
+        "model": &a.model,
+        "effort": &a.effort,
+        "working_dir": &a.working_dir,
+        "enabled": a.enabled,
+        "timeout_minutes": a.timeout_minutes,
+        "expires_at": a.expires_at.as_ref().map(|t| t.to_rfc3339()),
+        "enable_at": a.enable_at.as_ref().map(|t| t.to_rfc3339()),
+        "notify_on_success": notify_on_success,
+        "log_path": &a.log_path,
+        "created_at": a.created_at.to_rfc3339(),
+        "last_run_at": a.last_run_at.as_ref().map(|t| t.to_rfc3339()),
+        "last_run_ok": a.last_run_ok,
+        "last_triggered_at": a.last_triggered_at.as_ref().map(|t| t.to_rfc3339()),
+        "trigger_count": a.trigger_count,
+        "prompt": &a.prompt,
+    })
 }
 
 pub(crate) fn resolve_log_path(db: &Database, id: &str) -> Result<String, McpError> {
@@ -207,19 +242,22 @@ const MODEL_PROVIDERS: &[(&str, &str)] = &[
     ("alibaba", "Alibaba"),
 ];
 
-/// Cap on how many models are shown per provider in `agent_models` before
-/// `full: true` is required to see the rest — *not* a "newest N" guarantee:
-/// ordering is source-dependent (see [`format_models_for_providers`], which
-/// sorts by release date, and [`format_native_models`], which preserves
-/// whatever order the CLI itself enumerated in, e.g. alphabetical for
-/// opencode-go). Anything this cap cuts is reported via [`ModelTruncation`].
+/// Cap on how many models are shown per provider in the **unfiltered**
+/// (no-platform) `agent_models` listing before `full: true` is required to see
+/// the rest — *not* a "newest N" guarantee: ordering is source-dependent (see
+/// [`format_models_for_providers`], which sorts by release date, and
+/// [`format_native_models`], which preserves whatever order the CLI itself
+/// enumerated in, e.g. alphabetical for opencode-go). Anything this cap cuts
+/// is reported via [`ModelTruncation`]. Platform-scoped listings (with
+/// `platform` set) are never capped — the caller already narrowed by platform
+/// (CB37 FR1).
 const MODELS_PER_PROVIDER: usize = 8;
 
-/// Cap on how many providers a single (platform-scoped) listing renders, so a
-/// universal-gateway platform mapped to many providers still can't blow past
-/// MCP result size limits: at most `MAX_PROVIDERS * MODELS_PER_PROVIDER` lines.
-/// Bypassed by `full: true`; anything it cuts is reported via
-/// [`ModelTruncation`].
+/// Cap on how many providers the **unfiltered** (no-platform) listing renders,
+/// so the full models.dev catalogue can't blow past MCP result size limits: at
+/// most `MAX_PROVIDERS * MODELS_PER_PROVIDER` lines. Bypassed by `full: true`;
+/// anything it cuts is reported via [`ModelTruncation`]. Platform-scoped
+/// listings (with `platform` set) are never capped (CB37 FR1).
 const MAX_PROVIDERS: usize = 12;
 
 /// What a `format_*_models` call left out, so the caller can render an honest
@@ -232,6 +270,10 @@ pub(crate) struct ModelTruncation {
     per_provider: Vec<(String, usize, usize)>,
     /// Providers dropped entirely by [`MAX_PROVIDERS`]: (shown, total).
     providers: Option<(usize, usize)>,
+    /// Why the shown models were chosen (FR3) — e.g. "newest first by release
+    /// date". Stated per-provider in the notice so the caller can judge
+    /// whether the missing ones matter.
+    ordering_rule: Option<String>,
 }
 
 impl ModelTruncation {
@@ -245,8 +287,15 @@ impl ModelTruncation {
             return None;
         }
         let mut lines = Vec::new();
+        let rule_suffix = self
+            .ordering_rule
+            .as_deref()
+            .map(|r| format!(" ({r})"))
+            .unwrap_or_default();
         for (display, shown, total) in &self.per_provider {
-            lines.push(format!("  {display}: showing {shown} of {total} models"));
+            lines.push(format!(
+                "  {display}: showing {shown} of {total} models{rule_suffix}"
+            ));
         }
         if let Some((shown, total)) = self.providers {
             lines.push(format!("  showing {shown} of {total} providers"));
@@ -288,12 +337,14 @@ pub(crate) fn format_catalog_models(
         .iter()
         .map(|(slug, display)| (*slug, (*display).to_string()))
         .collect();
-    format_models_for_providers(catalog, &providers, full)
+    format_models_for_providers(catalog, &providers, full, false)
 }
 
 /// Format only the models available to `provider_slugs` (a platform's mapped
-/// providers), source order (release-date descending when dates are present),
-/// bounded by [`MAX_PROVIDERS`] x [`MODELS_PER_PROVIDER`] unless `full` is true.
+/// providers), source order (release-date descending when dates are present).
+/// Platform-scoped listings return every model uncapped (CB37 FR1) — the
+/// caller already narrowed by platform, so an additional cap is neither
+/// protective nor defensible.
 pub(crate) fn format_platform_models(
     catalog: &crate::domain::models_db::ModelCatalog,
     provider_slugs: &[&str],
@@ -303,18 +354,18 @@ pub(crate) fn format_platform_models(
         .iter()
         .map(|slug| (*slug, provider_display(slug)))
         .collect();
-    format_models_for_providers(catalog, &providers, full)
+    format_models_for_providers(catalog, &providers, full, true)
 }
 
 /// Format a platform's native enumeration (e.g. `opencode models`): the ids are
 /// already the literal, passable strings the CLI accepts (`opencode/big-pickle`),
 /// so they are rendered verbatim — never re-derived — grouped by their provider
-/// prefix (the segment before the first `/`) for readability and bounded by the
-/// same [`MAX_PROVIDERS`] x [`MODELS_PER_PROVIDER`] caps as the models.dev path
-/// unless `full` is true. The id is always the first token on the line; the
-/// parenthetical is only a human label, so a caller copying the id verbatim
-/// always succeeds.
-pub(crate) fn format_native_models(ids: &[String], full: bool) -> (String, ModelTruncation) {
+/// prefix (the segment before the first `/`) for readability. Platform-scoped
+/// listings return every model uncapped (CB37 FR1) — the caller already narrowed
+/// by platform, so an additional cap is neither protective nor defensible. The
+/// `full` parameter is accepted for API compatibility but is a no-op here.
+pub(crate) fn format_native_models(ids: &[String], _full: bool) -> (String, ModelTruncation) {
+    // full is a no-op: platform-scoped listings are never capped (CB37)
     let mut groups: Vec<(String, Vec<&String>)> = Vec::new();
     for id in ids {
         let provider = id.split_once('/').map(|(p, _)| p).unwrap_or("");
@@ -324,73 +375,50 @@ pub(crate) fn format_native_models(ids: &[String], full: bool) -> (String, Model
         }
     }
 
-    let mut truncation = ModelTruncation::default();
-    let total_providers = groups.len();
-    let providers_to_show = if full {
-        total_providers
-    } else {
-        total_providers.min(MAX_PROVIDERS)
-    };
-
-    if !full && total_providers > MAX_PROVIDERS {
-        truncation.providers = Some((providers_to_show, total_providers));
-    }
-
     let sections: Vec<String> = groups
         .iter()
-        .take(providers_to_show)
         .map(|(provider, models)| {
             let display = if provider.is_empty() {
                 "native".to_string()
             } else {
                 provider_display(provider)
             };
-            let total_models = models.len();
-            let models_to_show = if full {
-                total_models
-            } else {
-                total_models.min(MODELS_PER_PROVIDER)
-            };
-
-            if !full && total_models > MODELS_PER_PROVIDER {
-                truncation
-                    .per_provider
-                    .push((display.clone(), models_to_show, total_models));
-            }
-
             models
                 .iter()
-                .take(models_to_show)
                 .map(|id| format!("  {id}  ({display})"))
                 .collect::<Vec<_>>()
                 .join("\n")
         })
         .collect();
 
-    (sections.join("\n"), truncation)
+    (sections.join("\n"), ModelTruncation::default())
 }
 
 /// Shared renderer: source order (release-date descending when dates are
 /// present) models for each listed provider that has any, skipping empty
-/// providers, capped at [`MAX_PROVIDERS`] non-empty providers x
-/// [`MODELS_PER_PROVIDER`] models unless `full` is true.
+/// providers. When `platform_scoped` is true (CB37), returns every model for
+/// every provider — no per-provider or per-listing cap. When false (the
+/// unfiltered, provider-wide listing), capped at [`MAX_PROVIDERS`] non-empty
+/// providers x [`MODELS_PER_PROVIDER`] models unless `full` is true.
 fn format_models_for_providers(
     catalog: &crate::domain::models_db::ModelCatalog,
     providers: &[(&str, String)],
     full: bool,
+    platform_scoped: bool,
 ) -> (String, ModelTruncation) {
     let mut sections = Vec::new();
     let mut truncation = ModelTruncation::default();
 
     let total_providers = providers.len();
-    let providers_to_show = if full {
+    let providers_to_show = if full || platform_scoped {
         total_providers
     } else {
         total_providers.min(MAX_PROVIDERS)
     };
 
-    if !full && total_providers > MAX_PROVIDERS {
+    if !full && !platform_scoped && total_providers > MAX_PROVIDERS {
         truncation.providers = Some((providers_to_show, total_providers));
+        truncation.ordering_rule = Some("newest first by release date".to_string());
     }
 
     for (slug, display) in providers.iter().take(providers_to_show) {
@@ -405,16 +433,17 @@ fn format_models_for_providers(
         models.sort_by(|a, b| b.release_date.cmp(&a.release_date));
 
         let total_models = models.len();
-        let models_to_show = if full {
+        let models_to_show = if full || platform_scoped {
             total_models
         } else {
             total_models.min(MODELS_PER_PROVIDER)
         };
 
-        if !full && total_models > MODELS_PER_PROVIDER {
+        if !full && !platform_scoped && total_models > MODELS_PER_PROVIDER {
             truncation
                 .per_provider
                 .push((display.clone(), models_to_show, total_models));
+            truncation.ordering_rule = Some("newest first by release date".to_string());
         }
 
         let lines = models
@@ -442,6 +471,7 @@ mod formatting_unit_tests {
             trigger: None,
             cli: Cli("opencode".to_string()),
             model: None,
+            effort: None,
             working_dir: None,
             enabled: true,
             enable_at: None,
@@ -467,6 +497,8 @@ mod formatting_unit_tests {
             finished_at: None,
             exit_code: None,
             timeout_at: None,
+            executed_platform: None,
+            executed_model: None,
         }
     }
 
@@ -577,11 +609,56 @@ mod formatting_unit_tests {
         let mut a = make_agent("long-1");
         a.prompt = "x".repeat(120);
         let info = format_agent_info(&a);
-        assert!(info.contains("..."));
         let prompt_line = info.lines().find(|l| l.contains("Prompt:")).unwrap();
-        // The prompt value should be at most 80 chars + "..."
         let after_prompt = prompt_line.split("Prompt: ").nth(1).unwrap();
-        assert!(after_prompt.len() <= 84);
+        assert!(after_prompt.starts_with(&"x".repeat(80)));
+        assert!(after_prompt.ends_with("… (agent_get long-1 for the full prompt)"));
+    }
+
+    #[test]
+    fn agent_detail_json_carries_every_field_and_full_prompt() {
+        let mut a = make_agent("json-1");
+        a.prompt = "p".repeat(2000);
+        a.trigger = Some(Trigger::Cron {
+            schedule_expr: "0 9 * * *".to_string(),
+        });
+        let v = agent_detail_json(&a, true);
+        assert_eq!(v["prompt"].as_str().unwrap(), "p".repeat(2000));
+        assert_eq!(v["trigger_type"], serde_json::json!("cron"));
+        assert_eq!(
+            v["trigger_config"]["schedule_expr"],
+            serde_json::json!("0 9 * * *")
+        );
+        assert_eq!(v["notify_on_success"], serde_json::json!(true));
+        for field in [
+            "id",
+            "trigger_type",
+            "trigger_config",
+            "cli",
+            "model",
+            "effort",
+            "working_dir",
+            "enabled",
+            "timeout_minutes",
+            "expires_at",
+            "enable_at",
+            "notify_on_success",
+            "log_path",
+            "created_at",
+            "last_run_at",
+            "last_run_ok",
+            "last_triggered_at",
+            "trigger_count",
+            "prompt",
+        ] {
+            assert!(v.get(field).is_some(), "missing field {field}");
+        }
+        // Null-valued optional fields are present as null, not omitted.
+        assert!(v["model"].is_null());
+        // A trigger-less agent reports null trigger fields, not "manual".
+        let manual = agent_detail_json(&make_agent("json-2"), false);
+        assert!(manual["trigger_type"].is_null());
+        assert!(manual["trigger_config"].is_null());
     }
 
     #[test]
@@ -911,7 +988,7 @@ mod formatting_unit_tests {
     }
 
     #[test]
-    fn platform_models_capped_providers() {
+    fn platform_models_uncapped() {
         use crate::domain::models_db::{ModelCatalog, ModelEntry};
         use std::time::SystemTime;
         let models: Vec<ModelEntry> = (0..15)
@@ -930,9 +1007,10 @@ mod formatting_unit_tests {
         let slugs: Vec<&str> = (0..15)
             .map(|i| Box::leak(format!("provider-{i}").into_boxed_str()) as &str)
             .collect();
-        let (_, truncation) = format_platform_models(&catalog, &slugs, false);
-        assert!(truncation.providers.is_some());
-        assert_eq!(truncation.providers.unwrap(), (MAX_PROVIDERS, 15));
+        let (out, truncation) = format_platform_models(&catalog, &slugs, false);
+        assert!(truncation.is_empty());
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 15);
     }
 
     // ── format_native_models edge cases ──────────────────────────────
@@ -968,26 +1046,21 @@ mod formatting_unit_tests {
     }
 
     #[test]
-    fn native_models_many_providers_capped() {
+    fn native_models_many_providers_uncapped_when_platform_scoped() {
         let ids: Vec<String> = (0..30).map(|i| format!("prov{i}/model-{i}")).collect();
         let (out, truncation) = format_native_models(&ids, false);
         let lines: Vec<&str> = out.lines().collect();
-        assert!(lines.len() <= MAX_PROVIDERS * MODELS_PER_PROVIDER);
-        assert!(truncation.providers.is_some());
-        assert_eq!(truncation.providers.unwrap(), (MAX_PROVIDERS, 30));
+        assert_eq!(lines.len(), 30);
+        assert!(truncation.is_empty());
     }
 
     #[test]
-    fn native_models_many_models_per_provider_capped() {
+    fn native_models_many_models_per_provider_uncapped() {
         let ids: Vec<String> = (0..30).map(|i| format!("anthropic/model-{i}")).collect();
         let (out, truncation) = format_native_models(&ids, false);
         let anthropic_lines = out.lines().filter(|l| l.contains("Anthropic")).count();
-        assert_eq!(anthropic_lines, MODELS_PER_PROVIDER);
-        assert_eq!(truncation.per_provider.len(), 1);
-        assert_eq!(
-            truncation.per_provider[0],
-            ("Anthropic".to_string(), MODELS_PER_PROVIDER, 30)
-        );
+        assert_eq!(anthropic_lines, 30);
+        assert!(truncation.is_empty());
     }
 
     // ── format_log_output edge cases ─────────────────────────────────
@@ -1059,23 +1132,27 @@ mod model_listing_tests {
     }
 
     #[test]
-    fn native_listing_is_bounded() {
-        // Far more than the caps allow; output must stay bounded.
+    fn native_listing_platform_scoped_returns_all() {
+        // CB37: platform-scoped native listings are uncapped — every model
+        // appears with no truncation notice.
         let ids: Vec<String> = (0..50)
             .map(|i| format!("nvidia/model-{i}"))
             .chain((0..50).map(|i| format!("opencode/zen-{i}")))
             .collect();
         let (out, truncation) = format_native_models(&ids, false);
-        assert!(out.lines().count() <= MAX_PROVIDERS * MODELS_PER_PROVIDER);
-        assert!(truncation.notice().is_some());
+        assert_eq!(out.lines().count(), 100);
+        assert!(truncation.is_empty());
     }
 
     #[test]
-    fn native_listing_full_bypasses_caps() {
+    fn native_listing_full_is_noop() {
+        // CB37: full is a no-op for native (platform-scoped) listings —
+        // both produce the same uncapped output.
         let ids: Vec<String> = (0..50).map(|i| format!("nvidia/model-{i}")).collect();
-        let (out, truncation) = format_native_models(&ids, true);
-        assert_eq!(out.lines().count(), 50);
-        assert!(truncation.notice().is_none());
+        let (out_false, _) = format_native_models(&ids, false);
+        let (out_true, _) = format_native_models(&ids, true);
+        assert_eq!(out_false, out_true);
+        assert_eq!(out_false.lines().count(), 50);
     }
 
     #[test]
@@ -1086,5 +1163,62 @@ mod model_listing_tests {
         };
         let (_, truncation) = format_platform_models(&catalog, &["anthropic"], false);
         assert!(truncation.notice().is_none());
+    }
+
+    // ── CB37: platform-scoped uncapped, unfiltered still capped ──────
+
+    /// T1 — platform-scoped call returns all models, no truncation notice.
+    #[test]
+    fn platform_scoped_returns_all_models_no_truncation() {
+        let ids: Vec<String> = (0..30).map(|i| format!("opencode/model-{i}")).collect();
+        let (out, truncation) = format_native_models(&ids, false);
+        assert_eq!(out.lines().count(), 30, "all 30 models must appear");
+        assert!(truncation.is_empty());
+    }
+
+    /// T2 — unfiltered listing still caps per provider.
+    #[test]
+    fn unfiltered_listing_still_capped() {
+        let models: Vec<ModelEntry> = (0..20)
+            .map(|i| entry("anthropic", &format!("claude-{i}")))
+            .collect();
+        let catalog = ModelCatalog {
+            models,
+            fetched_at: SystemTime::now(),
+        };
+        let (out, truncation) = format_catalog_models(&catalog, false);
+        let anthropic_lines = out.lines().filter(|l| l.contains("Anthropic")).count();
+        assert_eq!(anthropic_lines, MODELS_PER_PROVIDER);
+        assert!(!truncation.is_empty());
+    }
+
+    /// T3 — truncation notice carries the ordering rule.
+    #[test]
+    fn truncation_notice_includes_ordering_rule() {
+        let models: Vec<ModelEntry> = (0..20)
+            .map(|i| entry("anthropic", &format!("claude-{i}")))
+            .collect();
+        let catalog = ModelCatalog {
+            models,
+            fetched_at: SystemTime::now(),
+        };
+        let (_, truncation) = format_catalog_models(&catalog, false);
+        let notice = truncation.notice().expect("should be truncated");
+        assert!(
+            notice.contains("newest first by release date"),
+            "notice must state ordering rule: {notice}"
+        );
+    }
+
+    /// T4 — platform-scoped ordering is deterministic across calls.
+    #[test]
+    fn platform_scoped_ordering_is_deterministic() {
+        let ids: Vec<String> = (0..20).map(|i| format!("opencode/model-{i}")).collect();
+        let (out1, _) = format_native_models(&ids, false);
+        let (out2, _) = format_native_models(&ids, false);
+        assert_eq!(
+            out1, out2,
+            "two consecutive calls must produce identical output"
+        );
     }
 }

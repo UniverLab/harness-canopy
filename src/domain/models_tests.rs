@@ -9,6 +9,7 @@ fn sample_agent(id: &str, trigger: Option<Trigger>) -> Agent {
         trigger,
         cli: Cli::new("opencode"),
         model: None,
+        effort: None,
         working_dir: Some("/tmp/project".to_string()),
         enabled: true,
         enable_at: None,
@@ -447,6 +448,8 @@ fn test_start_run_already_active() {
         finished_at: None,
         exit_code: None,
         timeout_at: None,
+        executed_platform: None,
+        executed_model: None,
     };
     let outcome = StartRunOutcome::AlreadyActive(run_log);
     assert!(matches!(outcome, StartRunOutcome::AlreadyActive(_)));
@@ -470,6 +473,8 @@ fn test_run_log_creation() {
         finished_at: Some(Utc::now()),
         exit_code: Some(0),
         timeout_at: None,
+        executed_platform: None,
+        executed_model: None,
     };
     assert_eq!(log.id, "run-1");
     assert_eq!(log.background_agent_id, "agent-1");

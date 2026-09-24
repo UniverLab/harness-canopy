@@ -48,8 +48,15 @@ canopy mcp
 
 The MCP wizard syncs, adds and removes canopy's MCP server entry across
 all detected platforms, converting formats automatically (JSON ↔ TOML).
+`Add` offers three input modes: **Paste JSON** (the snippet from the
+server's README, installed verbatim under its own name), **Local command
+(stdio)** (command with its arguments plus optional `KEY=VALUE` env vars),
+and **Remote URL (http)** (URL plus optional `Name=Value` HTTP headers).
+Entries are previewed before writing — overwrites are marked
+`(replaces existing)` — and one confirm installs them everywhere.
+See the [CLI reference](cli-reference.md) for details.
 After that, your AI agents can call all
-[83 MCP tools](mcp-tools.md) — schedule background agents, store
+[84 MCP tools](mcp-tools.md) — schedule background agents, store
 knowledge, coordinate with each other.
 
 ## 5. Verify
@@ -64,5 +71,5 @@ canopy daemon logs     # tail the daemon log
 
 - [Agents](agents.md) — the three agent kinds and seed identities.
 - [Intelligence & Sync](intelligence-and-sync.md) — persistent knowledge.
-- [Loops](loops.md) — multi-step automation.
+- [Graphs](graphs.md) — multi-step automation.
 - [RAG Pipeline](rag.md) — index and search your documents.

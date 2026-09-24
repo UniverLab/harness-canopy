@@ -1,4 +1,4 @@
-//! Event loop — polls crossterm events with a tick for data refresh.
+//! Event graph — polls crossterm events with a tick for data refresh.
 //!
 //! Navigation flow:
 //!   Home (screensaver) → Preview (agent details) → Focus (log / PTY)
@@ -21,10 +21,10 @@ use crate::tui::ui;
 
 use agent_focus::handle_agent_key;
 use context_transfer::{handle_context_transfer_key, resolve_split_focused_terminal_like};
+use graph_editor::handle_graph_editor_key;
+use graph_form::handle_graph_form_key;
 use home_preview::{handle_home_key, handle_preview_key};
 use launchpad::handle_launchpad_key;
-use loop_editor::handle_loop_editor_key;
-use loop_form::handle_loop_form_key;
 use new_agent_dialog::handle_dialog_key;
 use paste::handle_paste;
 use prompt_template::handle_prompt_template_key;
@@ -33,7 +33,7 @@ use rag_transfer::handle_rag_transfer_key;
 type Terminal = ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>;
 
 /// Main event loop: draw → poll events → refresh data.
-pub fn run_event_loop(terminal: &mut Terminal, app: &mut App) -> Result<()> {
+pub fn run_event_graph(terminal: &mut Terminal, app: &mut App) -> Result<()> {
     while app.running {
         terminal.draw(|frame| ui::draw(frame, app))?;
 
@@ -62,8 +62,8 @@ fn tick_duration(app: &App) -> Duration {
         | Focus::ContextTransfer
         | Focus::RagTransfer
         | Focus::PromptTemplateDialog
-        | Focus::LoopEditorDialog
-        | Focus::LoopFormDialog => Duration::from_millis(50),
+        | Focus::GraphEditorDialog
+        | Focus::GraphFormDialog => Duration::from_millis(50),
         Focus::ProjectRelationDialog => Duration::from_millis(50),
         Focus::Preview => Duration::from_millis(100),
         Focus::Home if app.home_brain.is_some() => Duration::from_millis(50),
@@ -130,10 +130,14 @@ mod search_picker;
 mod terminal_warp;
 
 use knowledge_dialog::handle_knowledge_dialog_key;
-mod loop_editor;
-mod loop_form;
+mod graph_editor;
+mod graph_form;
 
 pub fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> Result<()> {
+    if app.panel_picker_open {
+        handle_panel_picker_key(app, code);
+        return Ok(());
+    }
     if dismiss_legend(app, code) || handle_global_key(app, code, modifiers) {
         return Ok(());
     }
@@ -150,18 +154,18 @@ fn dismiss_legend(app: &mut App, code: KeyCode) -> bool {
         return false;
     }
 
-    let unlocked_count = app.mission_manager.unlocked_count();
-    let max_selected = unlocked_count.saturating_sub(1);
-
     match code {
         KeyCode::Esc | KeyCode::F(1) | KeyCode::Enter => {
             app.show_legend = false;
         }
-        KeyCode::Up | KeyCode::Char('k') if app.legend_selected > 0 => {
-            app.legend_selected -= 1;
-        }
-        KeyCode::Down | KeyCode::Char('j') if app.legend_selected < max_selected => {
-            app.legend_selected += 1;
+        KeyCode::Up | KeyCode::Char('k') | KeyCode::Down | KeyCode::Char('j') => {
+            let unlocked_count = app.mission_manager.unlocked_count();
+            if unlocked_count == 0 {
+                return true;
+            }
+            let forward = matches!(code, KeyCode::Down | KeyCode::Char('j'));
+            app.legend_selected =
+                crate::tui::selection::move_index(app.legend_selected, unlocked_count, forward);
         }
         _ => {}
     }
@@ -200,7 +204,7 @@ fn handle_global_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> b
     // pane. Wherever a split isn't active, Shift+←/→ steps the sidebar tab
     // instead — matching Home/Preview and, per functional requirement 1,
     // making the strip reachable without backing out of focus first. Plain
-    // ←/→ is untouched either way (loop collapse/expand on Home, forwarded
+    // ←/→ is untouched either way (graph collapse/expand on Home, forwarded
     // to the PTY / cursor movement everywhere else), and project focus /
     // playground keep opting out entirely per the existing guard below.
     if matches!(code, KeyCode::Left | KeyCode::Right)
@@ -219,6 +223,12 @@ fn handle_global_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> b
 
     if code == KeyCode::F(3) {
         app.toggle_activity_panel();
+        return true;
+    }
+
+    // CT1 multi-face panel picker: pin any face, or back to automatic.
+    if code == KeyCode::F(6) {
+        app.open_panel_picker();
         return true;
     }
 
@@ -248,6 +258,11 @@ fn sidebar_tab_step_applies(app: &App) -> bool {
 /// Shared by the F2 key and a sidebar right-click.
 fn cycle_sidebar_layer_and_normalize_focus(app: &mut App) {
     app.cycle_sidebar_layer();
+    // CT14: defensive (idempotent with the `cycle/step/switch` clears in
+    // `App` itself) — no dangling `project_focus` may survive a layer change.
+    if app.project_focus.is_some() && app.sidebar_layer != SidebarLayer::Knowledge {
+        app.exit_project_focus();
+    }
     if matches!(app.focus, Focus::Agent) {
         app.focus = Focus::Preview;
     }
@@ -259,6 +274,10 @@ fn cycle_sidebar_layer_and_normalize_focus(app: &mut App) {
 /// not whatever agent happened to be focused on the previous tab.
 fn switch_sidebar_tab_and_normalize_focus(app: &mut App, layer: SidebarLayer) {
     app.switch_sidebar_tab(layer);
+    // CT14: defensive (idempotent) — see `cycle_sidebar_layer_and_normalize_focus`.
+    if app.project_focus.is_some() && app.sidebar_layer != SidebarLayer::Knowledge {
+        app.exit_project_focus();
+    }
     if matches!(app.focus, Focus::Agent) {
         app.focus = Focus::Preview;
     }
@@ -275,13 +294,47 @@ fn dispatch_focus_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> 
         Focus::ContextTransfer => handle_context_transfer_key(app, code),
         Focus::RagTransfer => handle_rag_transfer_key(app, code),
         Focus::PromptTemplateDialog => handle_prompt_template_key(app, code, modifiers),
-        Focus::LoopEditorDialog => handle_loop_editor_key(app, code, modifiers),
-        Focus::LoopFormDialog => handle_loop_form_key(app, code, modifiers),
+        Focus::GraphEditorDialog => handle_graph_editor_key(app, code, modifiers),
+        Focus::GraphFormDialog => handle_graph_form_key(app, code, modifiers),
         Focus::ProjectRelationDialog => handle_preview_key(app, code, modifiers),
     }
 }
 
 // ── Mouse: scroll wheel + Shift+Click to copy selection ─────────────
+
+/// CT1 face picker keys: ↑↓/jk move, Enter pins the highlighted row
+/// (Automatic unpins back to the switching rule), Esc closes.
+fn handle_panel_picker_key(app: &mut App, code: KeyCode) {
+    match code {
+        KeyCode::Up | KeyCode::Char('k') => app.move_panel_picker(false),
+        KeyCode::Down | KeyCode::Char('j') => app.move_panel_picker(true),
+        KeyCode::Enter => app.confirm_panel_picker(),
+        KeyCode::Esc => app.close_panel_picker(),
+        _ => {}
+    }
+}
+
+/// A left-click inside the right panel claims its focus (automatic switches
+/// are dropped while focused); a left-click anywhere else releases it.
+fn handle_panel_mouse(app: &mut App, mouse: &MouseEvent) -> bool {
+    if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+        return false;
+    }
+    let Some(sync_area) = app.last_sync_area else {
+        if app.panel_focused {
+            app.on_panel_clicked(false);
+        }
+        return false;
+    };
+    if rect_contains_point(sync_area, mouse.column, mouse.row) {
+        app.on_panel_clicked(true);
+        return true;
+    }
+    if app.panel_focused {
+        app.on_panel_clicked(false);
+    }
+    false
+}
 
 fn handle_mouse(app: &mut App, mouse: MouseEvent) -> Result<()> {
     // The prompt builder is a modal overlay: it owns the mouse while open.
@@ -296,11 +349,19 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) -> Result<()> {
         return Ok(());
     }
 
+    if handle_panel_mouse(app, &mouse) {
+        return Ok(());
+    }
+
     if handle_project_panel_mouse(app, &mouse) {
         return Ok(());
     }
 
-    if handle_loop_live_panel_mouse(app, &mouse) {
+    if handle_graph_live_panel_mouse(app, &mouse) {
+        return Ok(());
+    }
+
+    if handle_preview_focus_click(app, &mouse) {
         return Ok(());
     }
 
@@ -397,7 +458,7 @@ fn handle_prompt_dialog_mouse(app: &mut App, mouse: &MouseEvent) {
 
 /// Handle a mouse event landing on the sidebar: tab-bar clicks (switch the
 /// active tab), left-click to select/enter a row in the active tab's body
-/// (Live/Automation agent card, Automation loop card, Knowledge project
+/// (Live/Automation agent card, Automation graph card, Knowledge project
 /// row), scroll to page the active tab's list, and right-click as a
 /// shortcut for F2 (cycle tab). Returns `true` if the event was consumed
 /// and no further mouse handling should run.
@@ -451,13 +512,13 @@ fn handle_sidebar_left_click(app: &mut App, row: u16, col: u16) {
         };
         return;
     }
-    if let Some(loop_id) = automation_loop_at(app, row) {
+    if let Some(graph_id) = automation_graph_at(app, row) {
         let reselect = app.sidebar_layer == SidebarLayer::Automation
-            && app.selected_loop_id.as_deref() == Some(loop_id.as_str());
+            && app.selected_graph_id.as_deref() == Some(graph_id.as_str());
         app.sidebar_layer = SidebarLayer::Automation;
-        app.automation_kind = crate::tui::app::AutomationKind::Loop;
-        app.selected_loop_id = Some(loop_id);
-        app.refresh_loops_selection();
+        app.automation_kind = crate::tui::app::AutomationKind::Graph;
+        app.selected_graph_id = Some(graph_id);
+        app.refresh_graphs_selection();
         app.focus = Focus::Preview;
         let _ = reselect;
         return;
@@ -466,7 +527,7 @@ fn handle_sidebar_left_click(app: &mut App, row: u16, col: u16) {
         let reenter = app.sidebar_layer == SidebarLayer::Knowledge && app.selected_project == idx;
         app.sidebar_layer = SidebarLayer::Knowledge;
         app.selected_project = idx;
-        app.refresh_loops_selection();
+        app.refresh_graphs_selection();
         if reenter {
             app.enter_project_focus(ProjectTab::Overview);
             app.focus = Focus::Agent;
@@ -495,9 +556,9 @@ fn sidebar_agent_at(app: &App, row: u16) -> Option<usize> {
         .map(|&(idx, _, _)| idx)
 }
 
-/// Map a sidebar row to the Automation-layer loop id rendered there.
-fn automation_loop_at(app: &App, row: u16) -> Option<String> {
-    app.automation_loop_click_map
+/// Map a sidebar row to the Automation-layer graph id rendered there.
+fn automation_graph_at(app: &App, row: u16) -> Option<String> {
+    app.automation_graph_click_map
         .iter()
         .find(|&&(_, start, end)| row >= start && row < end)
         .map(|(id, _, _)| id.clone())
@@ -553,16 +614,16 @@ fn handle_project_panel_mouse(app: &mut App, mouse: &MouseEvent) -> bool {
     }
 }
 
-/// Handle a mouse event landing on the live loop view's spec marker strip —
+/// Handle a mouse event landing on the live graph view's spec marker strip —
 /// reuses the click-map-populated-during-draw pattern from the sidebar and
 /// project panel rather than a second hit-testing mechanism. A left-click on
 /// a chip selects that spec (entering manual selection, same as arrow-key
 /// navigation); the scroll wheel over the chip row pages a truncated strip.
 /// Returns `true` if consumed.
-fn handle_loop_live_panel_mouse(app: &mut App, mouse: &MouseEvent) -> bool {
+fn handle_graph_live_panel_mouse(app: &mut App, mouse: &MouseEvent) -> bool {
     if app.focus != Focus::Preview
         || app.sidebar_layer != SidebarLayer::Automation
-        || app.automation_kind != crate::tui::app::AutomationKind::Loop
+        || app.automation_kind != crate::tui::app::AutomationKind::Graph
     {
         return false;
     }
@@ -575,51 +636,122 @@ fn handle_loop_live_panel_mouse(app: &mut App, mouse: &MouseEvent) -> bool {
 
     match mouse.kind {
         MouseEventKind::Down(MouseButton::Left) => {
-            match loop_spec_strip_at(app, mouse.row, mouse.column) {
+            match graph_spec_strip_at(app, mouse.row, mouse.column) {
                 Some(spec_id) => {
-                    app.loop_spec_strip_select(spec_id);
+                    app.graph_spec_strip_select(spec_id);
                     true
                 }
                 None => false,
             }
         }
-        MouseEventKind::ScrollUp if loop_spec_strip_row(app) == Some(mouse.row) => {
-            scroll_loop_spec_strip(app, 1);
+        MouseEventKind::ScrollUp
+            if graph_spec_strip_row_range(app)
+                .is_some_and(|(lo, hi)| mouse.row >= lo && mouse.row <= hi) =>
+        {
+            scroll_graph_spec_strip(app, 1);
             true
         }
-        MouseEventKind::ScrollDown if loop_spec_strip_row(app) == Some(mouse.row) => {
-            scroll_loop_spec_strip(app, -1);
+        MouseEventKind::ScrollDown
+            if graph_spec_strip_row_range(app)
+                .is_some_and(|(lo, hi)| mouse.row >= lo && mouse.row <= hi) =>
+        {
+            scroll_graph_spec_strip(app, -1);
+            true
+        }
+        MouseEventKind::ScrollUp => {
+            app.graph_live_view_scroll_step(-3);
+            true
+        }
+        MouseEventKind::ScrollDown => {
+            app.graph_live_view_scroll_step(3);
             true
         }
         _ => false,
     }
 }
 
-/// Map a loop-live-panel (row, col) to the spec id whose marker chip is
+/// A left-click on the central preview area enters focus on the previewed
+/// session (CT6) — the mouse equivalent of pressing Enter in Preview.
+/// Consumes the click so it never reaches PTY forwarding or
+/// copy/selection below; once focused, later clicks flow to the child as
+/// before. Only terminal-like sessions qualify: project cards, the graph
+/// live view, playground, RAG overview, and background/session-less
+/// previews keep their current mouse behavior. Placed after the panel
+/// handlers above and immediately before PTY forwarding so it shadows
+/// neither.
+fn handle_preview_focus_click(app: &mut App, mouse: &MouseEvent) -> bool {
+    if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+        return false;
+    }
+    if app.focus != Focus::Preview {
+        return false;
+    }
+    if app.playground_active || app.agents_rag_focused || app.project_focus.is_some() {
+        return false;
+    }
+    if app.sidebar_layer == SidebarLayer::Knowledge {
+        return false;
+    }
+    if app.sidebar_layer == SidebarLayer::Automation
+        && app.automation_kind == crate::tui::app::AutomationKind::Graph
+    {
+        return false;
+    }
+    if !matches!(
+        app.selected_agent(),
+        Some(AgentEntry::Interactive(_)) | Some(AgentEntry::Terminal(_))
+    ) {
+        return false;
+    }
+    let (panel_w, panel_h) = app.last_panel_inner;
+    let panel_rect =
+        ratatui::layout::Rect::new(app.last_panel_x, app.last_panel_y, panel_w, panel_h);
+    if !rect_contains_point(panel_rect, mouse.column, mouse.row) {
+        return false;
+    }
+    // Same state transition as keyboard focus entry in `handle_preview_key`:
+    // reset the log scroll, then enter Agent focus.
+    app.log_scroll = 0;
+    app.focus = Focus::Agent;
+    true
+}
+
+/// Map a graph-live-panel (row, col) to the spec id whose marker chip is
 /// rendered there, via the click map populated during draw.
-fn loop_spec_strip_at(app: &App, row: u16, col: u16) -> Option<String> {
-    app.loop_spec_strip_click_map
+fn graph_spec_strip_at(app: &App, row: u16, col: u16) -> Option<String> {
+    app.graph_spec_strip_click_map
         .iter()
         .find(|&&(_, chip_row, start, end)| row == chip_row && col >= start && col < end)
         .map(|(id, _, _, _)| id.clone())
 }
 
-/// The screen row the marker strip's chips are rendered on, if any are
+/// The screen row range the marker strip's chips are rendered on, if any are
 /// currently visible (empty when there's no spec queue to show).
-fn loop_spec_strip_row(app: &App) -> Option<u16> {
-    app.loop_spec_strip_click_map
-        .first()
-        .map(|&(_, row, _, _)| row)
+fn graph_spec_strip_row_range(app: &App) -> Option<(u16, u16)> {
+    if app.graph_spec_strip_click_map.is_empty() {
+        return None;
+    }
+    let min_row = app
+        .graph_spec_strip_click_map
+        .iter()
+        .map(|&(_, r, _, _)| r)
+        .min()?;
+    let max_row = app
+        .graph_spec_strip_click_map
+        .iter()
+        .map(|&(_, r, _, _)| r)
+        .max()?;
+    Some((min_row, max_row))
 }
 
-fn scroll_loop_spec_strip(app: &mut App, dir: i32) {
+fn scroll_graph_spec_strip(app: &mut App, dir: i32) {
     let total = app
-        .loop_live_state
+        .graph_live_state
         .as_ref()
         .map_or(0, |state| state.spec_queue.len());
-    let capacity = app.loop_spec_strip_capacity.max(1);
-    app.loop_spec_strip_scroll =
-        clamp_sidebar_scroll(app.loop_spec_strip_scroll, total, capacity, dir);
+    let capacity = app.graph_spec_strip_capacity.max(1);
+    app.graph_spec_strip_scroll =
+        clamp_sidebar_scroll(app.graph_spec_strip_scroll, total, capacity, dir);
 }
 
 /// Map a main-panel column (on the tab-bar row) to the `ProjectTab` rendered
@@ -758,15 +890,10 @@ fn handle_mouse_scroll(app: &mut App, mouse: &MouseEvent) {
 
     if app.show_legend {
         let unlocked_count = app.mission_manager.unlocked_count();
-        let max_selected = unlocked_count.saturating_sub(1);
-        if dir > 0 {
-            if app.legend_selected > 0 {
-                app.legend_selected -= 1;
-            }
-        } else {
-            if app.legend_selected < max_selected {
-                app.legend_selected += 1;
-            }
+        if unlocked_count != 0 {
+            let forward = dir < 0;
+            app.legend_selected =
+                crate::tui::selection::move_index(app.legend_selected, unlocked_count, forward);
         }
         return;
     }
@@ -790,17 +917,68 @@ fn handle_sync_panel_scroll(app: &mut App, mouse: &MouseEvent, dir: i32) -> bool
     let Some(sync_area) = app.last_sync_area else {
         return false;
     };
-
     if !rect_contains_point(sync_area, mouse.column, mouse.row) {
         return false;
     }
 
-    if dir > 0 {
-        app.sync_scroll_offset = app.sync_scroll_offset.saturating_sub(3);
-    } else {
-        app.sync_scroll_offset = app.sync_scroll_offset.saturating_add(3);
+    // Scrolling anywhere in the panel counts as interacting with it: the
+    // pending automatic face switch (if any) is dropped, not deferred —
+    // covers every branch below, including the no-op fallback.
+    app.on_panel_scrolled();
+
+    if let Some(rect) = app.last_activity_rect {
+        if rect_contains_point(rect, mouse.column, mouse.row) {
+            if dir > 0 {
+                app.sync_scroll_offset = app.sync_scroll_offset.saturating_sub(3);
+            } else {
+                app.sync_scroll_offset = app.sync_scroll_offset.saturating_add(3);
+            }
+            return true;
+        }
     }
 
+    if let Some(rect) = app.last_knowledge_graph_rect {
+        if rect_contains_point(rect, mouse.column, mouse.row) {
+            let total = app.project_graph_edges.len();
+            let visible = rect.height as usize;
+            app.knowledge_graph_scroll = clamp_sidebar_scroll(
+                app.knowledge_graph_scroll as usize,
+                total,
+                visible.max(1),
+                dir,
+            ) as u16;
+            return true;
+        }
+    }
+
+    if let Some(rect) = app.last_knowledge_list_rect {
+        if rect_contains_point(rect, mouse.column, mouse.row) {
+            let total = app.project_knowledge.len();
+            let visible = (rect.height as usize).saturating_sub(1);
+            app.knowledge_list_scroll = clamp_sidebar_scroll(
+                app.knowledge_list_scroll as usize,
+                total,
+                visible.max(1),
+                dir,
+            ) as u16;
+            return true;
+        }
+    }
+
+    if let Some(rect) = app.last_graph_face_rect {
+        if rect_contains_point(rect, mouse.column, mouse.row) {
+            // `graph_face_scroll_step` mirrors `graph_live_view_scroll_step`'s
+            // convention (positive = forward into content), the opposite of
+            // this function's `dir` (ScrollDown = -1 must move forward, to
+            // match `sync_scroll_offset` and `clamp_sidebar_scroll` above) —
+            // negate to translate between the two.
+            app.graph_face_scroll_step(-dir * 3);
+            return true;
+        }
+    }
+
+    // Inside the panel but outside every scrollable region: consumed, no-op
+    // (functional requirement 3).
     true
 }
 
@@ -910,10 +1088,11 @@ fn handle_scroll(app: &mut App, dir: i32) {
         Focus::NewAgentDialog => {
             if let Some(dialog) = &mut app.new_agent_dialog {
                 let len = dialog.filtered_dir_entries().len();
-                if dir > 0 && dialog.dir_selected > 0 {
-                    dialog.dir_selected -= 1;
-                } else if dir < 0 && dialog.dir_selected + 1 < len {
-                    dialog.dir_selected += 1;
+                if len != 0 {
+                    let forward = dir < 0;
+                    dialog.dir_selected =
+                        crate::tui::selection::move_index(dialog.dir_selected, len, forward);
+                    dialog.update_dir_preview();
                 }
             }
         }
@@ -922,8 +1101,8 @@ fn handle_scroll(app: &mut App, dir: i32) {
         | Focus::ContextTransfer
         | Focus::RagTransfer
         | Focus::PromptTemplateDialog
-        | Focus::LoopEditorDialog
-        | Focus::LoopFormDialog => {}
+        | Focus::GraphEditorDialog
+        | Focus::GraphFormDialog => {}
         Focus::ProjectRelationDialog => {}
     }
 }
@@ -1164,6 +1343,7 @@ mod sidebar_mouse_tests {
             }),
             cli: Cli::new("claude"),
             model: None,
+            effort: None,
             working_dir: None,
             enabled: true,
             enable_at: None,
@@ -1184,7 +1364,12 @@ mod sidebar_mouse_tests {
     fn app_with_agents(count: usize) -> App {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.agents = (0..count)
             .map(|i| AgentEntry::Agent(cron_agent(&format!("agent-{i}"))))
             .collect();
@@ -1414,7 +1599,7 @@ mod sidebar_mouse_tests {
 
     #[test]
     fn unshifted_arrows_do_not_switch_sidebar_tabs() {
-        // Plain ←/→ belongs to the loop expand/collapse handler; only the
+        // Plain ←/→ belongs to the graph expand/collapse handler; only the
         // shifted pair is ours.
         let mut app = app_with_agents(3);
         app.focus = Focus::Home;
@@ -1522,7 +1707,7 @@ mod sidebar_mouse_tests {
 mod project_panel_mouse_tests {
     use super::*;
     use crate::db::Database;
-    use crate::domain::loops::{LoopSpec, LoopSpecStatus};
+    use crate::domain::graphs::{GraphSpec, GraphSpecStatus};
     use crate::domain::project::Project;
     use crate::tui::app::types::ProjectTab;
     use std::sync::Arc;
@@ -1535,18 +1720,21 @@ mod project_panel_mouse_tests {
         Arc::new(Database::new(&path).expect("create test db"))
     }
 
-    fn backlog_spec(id: &str, name: &str) -> LoopSpec {
-        LoopSpec {
+    fn backlog_spec(id: &str, name: &str) -> GraphSpec {
+        GraphSpec {
             id: id.to_string(),
-            loop_id: None,
+            graph_id: None,
             name: name.to_string(),
             description: None,
             position: 0,
             parallelizable: false,
-            status: LoopSpecStatus::Pending,
+            status: GraphSpecStatus::Pending,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -1562,7 +1750,12 @@ mod project_panel_mouse_tests {
     fn app_with_project_backlog(count: usize) -> App {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.projects = vec![Project::new("/tmp/project")];
         app.sidebar_layer = crate::tui::app::SidebarLayer::Knowledge;
         app.selected_project = 0;
@@ -1720,12 +1913,12 @@ mod project_panel_mouse_tests {
 }
 
 #[cfg(test)]
-mod loop_live_panel_mouse_tests {
+mod graph_live_panel_mouse_tests {
     use super::*;
     use crate::db::Database;
-    use crate::domain::loops::{LoopSpecStatus, LoopStatus};
-    use crate::tui::app::loop_live_state::{LoopLiveState, SpecQueueEntry};
-    use crate::tui::app::{AutomationKind, LoopLiveFocus};
+    use crate::domain::graphs::{GraphSpecStatus, GraphStatus};
+    use crate::tui::app::graph_live_state::{GraphLiveState, SpecQueueEntry};
+    use crate::tui::app::{AutomationKind, GraphLiveFocus};
     use std::collections::HashMap;
     use std::sync::Arc;
     use tempfile::{tempdir, NamedTempFile};
@@ -1737,7 +1930,7 @@ mod loop_live_panel_mouse_tests {
         Arc::new(Database::new(&path).expect("create test db"))
     }
 
-    fn spec_entry(id: &str, status: LoopSpecStatus) -> SpecQueueEntry {
+    fn spec_entry(id: &str, status: GraphSpecStatus) -> SpecQueueEntry {
         SpecQueueEntry {
             spec_id: id.to_string(),
             spec_name: format!("Spec {id}"),
@@ -1746,29 +1939,34 @@ mod loop_live_panel_mouse_tests {
         }
     }
 
-    /// Builds an App on the live loop view with a 3-spec queue and a marker
-    /// strip click map matching what `draw_loop_live_view` would have
+    /// Builds an App on the live graph view with a 3-spec queue and a marker
+    /// strip click map matching what `draw_graph_live_view` would have
     /// produced for chips at columns `[0,3)`, `[4,7)`, `[8,11)` on row 5.
-    fn app_on_loop_live_view() -> App {
+    fn app_on_graph_live_view() -> App {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.focus = Focus::Preview;
         app.sidebar_layer = SidebarLayer::Automation;
-        app.automation_kind = AutomationKind::Loop;
-        app.loop_live_state = Some(LoopLiveState {
-            loop_id: "lp1".to_string(),
-            loop_name: "loop".to_string(),
-            loop_status: LoopStatus::Running,
+        app.automation_kind = AutomationKind::Graph;
+        app.graph_live_state = Some(GraphLiveState {
+            graph_id: "lp1".to_string(),
+            graph_name: "graph".to_string(),
+            graph_status: GraphStatus::Running,
             workdir: "/tmp".to_string(),
             trigger_type: "manual".to_string(),
             schedule_expr: None,
             watch_path: None,
             autorun_at: None,
             spec_queue: vec![
-                spec_entry("s1", LoopSpecStatus::Completed),
-                spec_entry("s2", LoopSpecStatus::Running),
-                spec_entry("s3", LoopSpecStatus::Failed),
+                spec_entry("s1", GraphSpecStatus::Completed),
+                spec_entry("s2", GraphSpecStatus::Running),
+                spec_entry("s3", GraphSpecStatus::Failed),
             ],
             done_count: 1,
             total_count: 3,
@@ -1787,65 +1985,65 @@ mod loop_live_panel_mouse_tests {
         app.last_panel_x = 0;
         app.last_panel_y = 2;
         app.last_panel_inner = (40, 20);
-        app.loop_spec_strip_click_map = vec![
+        app.graph_spec_strip_click_map = vec![
             ("s1".to_string(), 5, 0, 3),
             ("s2".to_string(), 5, 4, 7),
             ("s3".to_string(), 5, 8, 11),
         ];
-        app.loop_spec_strip_capacity = 3;
+        app.graph_spec_strip_capacity = 3;
         app
     }
 
     #[test]
     fn clicking_a_marker_selects_that_spec_and_focuses_the_strip() {
-        let mut app = app_on_loop_live_view();
+        let mut app = app_on_graph_live_view();
         let mouse = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: 9,
             row: 5,
             modifiers: KeyModifiers::NONE,
         };
-        let consumed = handle_loop_live_panel_mouse(&mut app, &mouse);
+        let consumed = handle_graph_live_panel_mouse(&mut app, &mouse);
 
         assert!(consumed);
-        assert_eq!(app.loop_spec_strip_selected.as_deref(), Some("s3"));
-        assert_eq!(app.loop_live_focus, LoopLiveFocus::SpecStrip);
+        assert_eq!(app.graph_spec_strip_selected.as_deref(), Some("s3"));
+        assert_eq!(app.graph_live_focus, GraphLiveFocus::SpecStrip);
     }
 
     #[test]
     fn clicking_the_gap_between_chips_is_not_consumed() {
-        let mut app = app_on_loop_live_view();
+        let mut app = app_on_graph_live_view();
         let mouse = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: 3,
             row: 5,
             modifiers: KeyModifiers::NONE,
         };
-        let consumed = handle_loop_live_panel_mouse(&mut app, &mouse);
+        let consumed = handle_graph_live_panel_mouse(&mut app, &mouse);
 
         assert!(!consumed);
-        assert!(app.loop_spec_strip_selected.is_none());
+        assert!(app.graph_spec_strip_selected.is_none());
     }
 
     #[test]
     fn scroll_over_the_marker_row_pages_the_strip() {
-        let mut app = app_on_loop_live_view();
-        app.loop_spec_strip_capacity = 1; // force scrolling to matter
+        let mut app = app_on_graph_live_view();
+        app.graph_spec_strip_capacity = 1; // force scrolling to matter
         let mouse = MouseEvent {
             kind: MouseEventKind::ScrollDown,
             column: 5,
             row: 5,
             modifiers: KeyModifiers::NONE,
         };
-        let consumed = handle_loop_live_panel_mouse(&mut app, &mouse);
+        let consumed = handle_graph_live_panel_mouse(&mut app, &mouse);
 
         assert!(consumed);
-        assert_eq!(app.loop_spec_strip_scroll, 1);
+        assert_eq!(app.graph_spec_strip_scroll, 1);
     }
 
     #[test]
-    fn mouse_ignored_when_not_on_the_loop_live_view() {
-        let mut app = app_on_loop_live_view();
+    fn mouse_ignored_when_not_on_the_graph_live_view() {
+        let mut app = app_on_graph_live_view();
         app.automation_kind = AutomationKind::Agent;
         let mouse = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
@@ -1853,10 +2051,10 @@ mod loop_live_panel_mouse_tests {
             row: 5,
             modifiers: KeyModifiers::NONE,
         };
-        let consumed = handle_loop_live_panel_mouse(&mut app, &mouse);
+        let consumed = handle_graph_live_panel_mouse(&mut app, &mouse);
 
         assert!(!consumed);
-        assert!(app.loop_spec_strip_selected.is_none());
+        assert!(app.graph_spec_strip_selected.is_none());
     }
 }
 
@@ -1896,7 +2094,12 @@ mod split_selection_tests {
     fn app_with_split_terminals(right_focused: bool) -> App {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.terminal_agents.push(spawn_test_terminal("left-term"));
         app.terminal_agents.push(spawn_test_terminal("right-term"));
         app.split_groups.push(SplitGroup {
@@ -2054,7 +2257,12 @@ mod tick_duration_tests {
         let path = tmp.path().to_path_buf();
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(db, dir.path()).unwrap();
+        let mut app = App::new(
+            db,
+            dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         app.focus = focus;
         app
     }
@@ -2189,7 +2397,12 @@ mod sidebar_tab_at_tests {
         let path = tmp.path().to_path_buf();
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let dir = tempfile::tempdir().unwrap();
-        App::new(db, dir.path()).unwrap()
+        App::new(
+            db,
+            dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -2226,7 +2439,12 @@ mod sidebar_agent_at_tests {
         let path = tmp.path().to_path_buf();
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(db, dir.path()).unwrap();
+        let mut app = App::new(
+            db,
+            dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         app.sidebar_click_map = vec![(0, 0, 3), (1, 4, 7), (2, 8, 11)];
 
         assert_eq!(sidebar_agent_at(&app, 1), Some(0));
@@ -2247,7 +2465,12 @@ mod is_terminal_agent_selected_tests {
         let path = tmp.path().to_path_buf();
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let dir = tempfile::tempdir().unwrap();
-        let app = App::new(db, dir.path()).unwrap();
+        let app = App::new(
+            db,
+            dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         assert!(!is_terminal_agent_selected(&app));
     }
 }
@@ -2271,7 +2494,12 @@ mod mouse_pty_position_tests {
         let path = tmp.path().to_path_buf();
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let dir = tempfile::tempdir().unwrap();
-        App::new(db, dir.path()).unwrap()
+        App::new(
+            db,
+            dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -2309,7 +2537,12 @@ mod clamped_pty_position_tests {
         let path = tmp.path().to_path_buf();
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(db, dir.path()).unwrap();
+        let mut app = App::new(
+            db,
+            dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         app.last_panel_x = 10;
         app.last_panel_y = 5;
         app.last_panel_inner = (40, 20);
@@ -2380,5 +2613,436 @@ mod scroll_terminal_like_agent_tests {
         // Routed to the child: local scroll_offset is untouched.
         assert_eq!(agent.scroll_offset, 5);
         agent.kill();
+    }
+}
+
+// CT6: a left-click on the central preview area enters focus on the
+// previewed session — the mouse equivalent of Enter in Preview. Spawns
+// real (harmless) `cat` children so the terminal-like entries are genuine.
+#[cfg(test)]
+mod preview_focus_click_tests {
+    use super::*;
+    use crate::application::ports::AgentRepository;
+    use crate::domain::models::Cli;
+    use ratatui::style::Color;
+    use std::sync::Arc;
+
+    fn spawn_cat_interactive(name: &str) -> InteractiveAgent {
+        InteractiveAgent::spawn(
+            Cli::new("cat"),
+            ".",
+            80,
+            24,
+            None,
+            None,
+            Color::Reset,
+            Some(name),
+            &[],
+            None,
+            None,
+            None,
+        )
+        .expect("spawn cat as a stand-in interactive child")
+    }
+
+    fn spawn_cat_terminal(name: &str) -> InteractiveAgent {
+        InteractiveAgent::spawn_terminal("cat", "/tmp", 80, 24, Some(name), &[], Color::White)
+            .expect("spawn cat as a stand-in terminal child")
+    }
+
+    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    /// Previewing an interactive session with the central panel last
+    /// rendered at (30, 5) of size 80x20 — so (35, 10) is inside it.
+    fn app_previewing_interactive() -> App {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        std::mem::forget(tmp);
+        let db = Arc::new(crate::db::Database::new(&path).unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(
+            db,
+            dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
+        app.interactive_agents = vec![spawn_cat_interactive("ct6-click")];
+        app.agents = vec![AgentEntry::Interactive(0)];
+        app.selected = 0;
+        app.focus = Focus::Preview;
+        app.last_panel_x = 30;
+        app.last_panel_y = 5;
+        app.last_panel_inner = (80, 20);
+        app
+    }
+
+    #[test]
+    fn central_left_click_on_interactive_session_enters_focus() {
+        let mut app = app_previewing_interactive();
+        app.log_scroll = 7;
+
+        let consumed = handle_preview_focus_click(
+            &mut app,
+            &mouse(MouseEventKind::Down(MouseButton::Left), 35, 10),
+        );
+
+        assert!(consumed, "central click must be consumed, not forwarded");
+        assert!(matches!(app.focus, Focus::Agent));
+        assert_eq!(app.log_scroll, 0, "same reset as keyboard focus entry");
+        app.interactive_agents[0].kill();
+    }
+
+    #[test]
+    fn central_left_click_on_terminal_session_enters_focus() {
+        let mut app = app_previewing_interactive();
+        app.terminal_agents = vec![spawn_cat_terminal("ct6-click-term")];
+        app.agents = vec![AgentEntry::Terminal(0)];
+
+        let consumed = handle_preview_focus_click(
+            &mut app,
+            &mouse(MouseEventKind::Down(MouseButton::Left), 35, 10),
+        );
+
+        assert!(consumed);
+        assert!(matches!(app.focus, Focus::Agent));
+        app.terminal_agents[0].kill();
+        app.interactive_agents[0].kill();
+    }
+
+    #[test]
+    fn click_with_agent_focus_does_not_reenter() {
+        // Once focused, clicks belong to the child — the helper must not
+        // consume them, preserving focused-child mouse behavior.
+        let mut app = app_previewing_interactive();
+        app.focus = Focus::Agent;
+
+        assert!(!handle_preview_focus_click(
+            &mut app,
+            &mouse(MouseEventKind::Down(MouseButton::Left), 35, 10)
+        ));
+        assert!(matches!(app.focus, Focus::Agent));
+        app.interactive_agents[0].kill();
+    }
+
+    #[test]
+    fn click_outside_the_central_rectangle_is_not_consumed() {
+        let mut app = app_previewing_interactive();
+
+        assert!(!handle_preview_focus_click(
+            &mut app,
+            &mouse(MouseEventKind::Down(MouseButton::Left), 5, 10)
+        ));
+        assert!(matches!(app.focus, Focus::Preview));
+        app.interactive_agents[0].kill();
+    }
+
+    #[test]
+    fn non_left_clicks_are_not_consumed() {
+        let mut app = app_previewing_interactive();
+
+        assert!(!handle_preview_focus_click(
+            &mut app,
+            &mouse(MouseEventKind::Down(MouseButton::Right), 35, 10)
+        ));
+        assert!(!handle_preview_focus_click(
+            &mut app,
+            &mouse(MouseEventKind::ScrollDown, 35, 10)
+        ));
+        assert!(matches!(app.focus, Focus::Preview));
+        app.interactive_agents[0].kill();
+    }
+
+    #[test]
+    fn background_agent_preview_is_not_consumed() {
+        // A background (non-terminal) preview keeps its current behavior.
+        let mut app = app_previewing_interactive();
+        let db = app.db.clone();
+        let agent = crate::domain::models::Agent {
+            id: "bg-1".to_string(),
+            prompt: "prompt".to_string(),
+            trigger: None,
+            cli: Cli::new("claude"),
+            model: None,
+            effort: None,
+            working_dir: None,
+            enabled: true,
+            enable_at: None,
+            created_at: chrono::Utc::now(),
+            log_path: "/tmp/ct6-click.log".to_string(),
+            timeout_minutes: 15,
+            expires_at: None,
+            last_run_at: None,
+            last_run_ok: None,
+            last_triggered_at: None,
+            trigger_count: 0,
+        };
+        db.upsert_agent(&agent).expect("seed agent");
+        app.agents = vec![AgentEntry::Agent(agent)];
+
+        assert!(!handle_preview_focus_click(
+            &mut app,
+            &mouse(MouseEventKind::Down(MouseButton::Left), 35, 10)
+        ));
+        assert!(matches!(app.focus, Focus::Preview));
+        app.interactive_agents[0].kill();
+    }
+
+    #[test]
+    fn graph_live_view_central_click_is_not_consumed() {
+        // The graph owns the centre in the graph view — even with a
+        // terminal-like sidebar selection underneath.
+        let mut app = app_previewing_interactive();
+        app.sidebar_layer = SidebarLayer::Automation;
+        app.automation_kind = crate::tui::app::AutomationKind::Graph;
+
+        assert!(!handle_preview_focus_click(
+            &mut app,
+            &mouse(MouseEventKind::Down(MouseButton::Left), 35, 10)
+        ));
+        assert!(matches!(app.focus, Focus::Preview));
+        app.interactive_agents[0].kill();
+    }
+
+    #[test]
+    fn playground_central_click_is_not_consumed() {
+        let mut app = app_previewing_interactive();
+        app.playground_active = true;
+
+        assert!(!handle_preview_focus_click(
+            &mut app,
+            &mouse(MouseEventKind::Down(MouseButton::Left), 35, 10)
+        ));
+        assert!(matches!(app.focus, Focus::Preview));
+        app.interactive_agents[0].kill();
+    }
+
+    #[test]
+    fn missing_geometry_is_not_consumed() {
+        // No frame rendered yet: leave dispatch unchanged.
+        let mut app = app_previewing_interactive();
+        app.last_panel_inner = (0, 0);
+
+        assert!(!handle_preview_focus_click(
+            &mut app,
+            &mouse(MouseEventKind::Down(MouseButton::Left), 35, 10)
+        ));
+        assert!(matches!(app.focus, Focus::Preview));
+        app.interactive_agents[0].kill();
+    }
+
+    #[test]
+    fn central_click_through_handle_mouse_enters_focus() {
+        // End-to-end through the real dispatch order: the sidebar must not
+        // see the click (hide it), panels above must pass, and the helper
+        // consumes before PTY forwarding / selection below.
+        let mut app = app_previewing_interactive();
+        app.sidebar_visible = false;
+
+        handle_mouse(
+            &mut app,
+            mouse(MouseEventKind::Down(MouseButton::Left), 35, 10),
+        )
+        .expect("handle mouse");
+
+        assert!(matches!(app.focus, Focus::Agent));
+        assert!(app.terminal_selection.is_none());
+        app.interactive_agents[0].kill();
+    }
+}
+
+// ── CT14: defensive focus clears on the F2 / click wrappers ──────────────
+#[cfg(test)]
+mod ct14_sidebar_tests {
+    use super::*;
+    use crate::db::Database;
+    use crate::tui::app::types::ProjectTab;
+    use std::sync::Arc;
+    use tempfile::{tempdir, NamedTempFile};
+
+    fn test_db() -> Arc<Database> {
+        let tmp = NamedTempFile::new().expect("create temp file");
+        let path = tmp.path().to_path_buf();
+        std::mem::forget(tmp);
+        Arc::new(Database::new(&path).expect("create test db"))
+    }
+
+    #[test]
+    fn ct14_f2_clears_dangling_project_focus_defensively() {
+        // Inject the illegal state directly: a `project_focus` surviving on a
+        // non-Knowledge layer. Both wrappers must clear it idempotently.
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+
+        app.sidebar_layer = SidebarLayer::Live;
+        app.project_focus = Some(ProjectTab::Backlog);
+        cycle_sidebar_layer_and_normalize_focus(&mut app);
+        assert!(
+            app.project_focus.is_none(),
+            "F2 cycle must clear a dangling project focus"
+        );
+
+        app.sidebar_layer = SidebarLayer::Live;
+        app.project_focus = Some(ProjectTab::Backlog);
+        switch_sidebar_tab_and_normalize_focus(&mut app, SidebarLayer::Automation);
+        assert!(
+            app.project_focus.is_none(),
+            "tab click must clear a dangling project focus"
+        );
+    }
+}
+
+// ── CT19: per-region wheel scroll on the right panel ──────────────────────
+#[cfg(test)]
+mod ct19_panel_region_scroll_tests {
+    use super::*;
+    use crate::db::Database;
+    use std::sync::Arc;
+    use tempfile::{tempdir, NamedTempFile};
+
+    fn test_db() -> Arc<Database> {
+        let tmp = NamedTempFile::new().expect("create temp file");
+        let path = tmp.path().to_path_buf();
+        std::mem::forget(tmp);
+        Arc::new(Database::new(&path).expect("create test db"))
+    }
+
+    fn test_app() -> App {
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app")
+    }
+
+    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    /// Panel spans (0,0)-(40,20); knowledge list rect sits inside it at
+    /// (0,10)-(40,20). Scrolling with the pointer inside the list rect must
+    /// move only the list offset, not `sync_scroll_offset` — the CT19 bug
+    /// was every region moving the activity offset.
+    #[test]
+    fn scroll_inside_knowledge_list_rect_moves_only_list_offset() {
+        let mut app = test_app();
+        app.last_sync_area = Some(ratatui::layout::Rect::new(0, 0, 40, 20));
+        app.last_activity_rect = Some(ratatui::layout::Rect::new(0, 0, 40, 6));
+        app.last_knowledge_list_rect = Some(ratatui::layout::Rect::new(0, 10, 40, 10));
+        app.project_knowledge = (0..20)
+            .map(|i| crate::db::intelligence::IntelligenceNodeRecord {
+                id: format!("k{i}"),
+                kind: "fact".to_string(),
+                status: "active".to_string(),
+                title: format!("node {i}"),
+                body: String::new(),
+                metadata: None,
+                project_hash: None,
+                session_id: None,
+                created_at: 0,
+                updated_at: 0,
+            })
+            .collect();
+        app.sync_scroll_offset = 5;
+
+        let consumed =
+            handle_sync_panel_scroll(&mut app, &mouse(MouseEventKind::ScrollDown, 5, 15), -1);
+
+        assert!(consumed);
+        assert_eq!(app.sync_scroll_offset, 5, "activity offset must not move");
+        assert_eq!(app.knowledge_list_scroll, 1);
+        assert!(app.panel_interacting, "scroll must mark panel interaction");
+    }
+
+    /// Pointer inside the Graph face's rect calls the graph-face scroll,
+    /// clamped by its own bookkeeping (not the main pane's).
+    #[test]
+    fn scroll_inside_graph_face_rect_calls_graph_face_scroll() {
+        let mut app = test_app();
+        app.last_sync_area = Some(ratatui::layout::Rect::new(0, 0, 40, 20));
+        app.last_graph_face_rect = Some(ratatui::layout::Rect::new(0, 0, 40, 20));
+        app.graph_face_total_lines = 50;
+        app.graph_face_scroll = 0;
+
+        let consumed =
+            handle_sync_panel_scroll(&mut app, &mouse(MouseEventKind::ScrollDown, 5, 5), -1);
+
+        assert!(consumed);
+        assert_eq!(app.graph_face_scroll, 3);
+        // The main pane's own field is untouched by this path.
+        assert_eq!(app.graph_live_view_scroll, 0);
+    }
+
+    /// Pointer inside the panel but outside every recorded region: consumed
+    /// (never falls through to the sidebar), and changes nothing.
+    #[test]
+    fn scroll_inside_panel_outside_every_region_is_consumed_and_noop() {
+        let mut app = test_app();
+        app.last_sync_area = Some(ratatui::layout::Rect::new(0, 0, 40, 20));
+        app.last_activity_rect = Some(ratatui::layout::Rect::new(0, 0, 40, 6));
+        app.last_knowledge_graph_rect = None;
+        app.last_knowledge_list_rect = None;
+        app.last_graph_face_rect = None;
+        app.sync_scroll_offset = 5;
+        app.knowledge_list_scroll = 2;
+
+        // Row 15 is inside the panel (0..20) but outside the activity rect
+        // (0..6) and no other region is recorded this frame.
+        let consumed =
+            handle_sync_panel_scroll(&mut app, &mouse(MouseEventKind::ScrollDown, 5, 15), -1);
+
+        assert!(
+            consumed,
+            "a wheel event inside the panel is always consumed"
+        );
+        assert_eq!(app.sync_scroll_offset, 5);
+        assert_eq!(app.knowledge_list_scroll, 2);
+        assert!(app.panel_interacting);
+    }
+
+    /// Pointer inside the knowledge-graph rect moves only the graph offset,
+    /// clamped to the edge count (functional requirement 5: never blank).
+    #[test]
+    fn scroll_inside_knowledge_graph_rect_clamps_to_edge_count() {
+        let mut app = test_app();
+        app.last_sync_area = Some(ratatui::layout::Rect::new(0, 0, 40, 20));
+        app.last_knowledge_graph_rect = Some(ratatui::layout::Rect::new(0, 6, 40, 3));
+        app.project_graph_edges = (0..4)
+            .map(|i| crate::tui::app::types::ProjectGraphEdge {
+                from_name: format!("a{i}"),
+                to_name: format!("b{i}"),
+                from_hash: format!("ha{i}"),
+                to_hash: format!("hb{i}"),
+                relation: "relates_to".to_string(),
+            })
+            .collect();
+
+        // Scroll down repeatedly past the end: must clamp, not grow forever.
+        for _ in 0..10 {
+            handle_sync_panel_scroll(&mut app, &mouse(MouseEventKind::ScrollDown, 5, 7), -1);
+        }
+
+        // 4 edges, 3 visible rows -> max_offset = 1.
+        assert_eq!(app.knowledge_graph_scroll, 1);
     }
 }

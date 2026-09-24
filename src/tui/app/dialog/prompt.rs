@@ -99,7 +99,7 @@ pub const TAB_RAW_LABEL: &str = " Raw ";
 /// Inline date-time picker state for the send control (U11). Opened with
 /// Enter on `send: date`, preseeded with the current local time. An alias
 /// for the shared picker ([`crate::tui::app::dialog::datetime_picker::DateTimeEdit`])
-/// also used by the loop autorun dialog (C18), so the two never diverge into
+/// also used by the graph autorun dialog (C18), so the two never diverge into
 /// separate widgets.
 pub type SendAtEdit = crate::tui::app::dialog::datetime_picker::DateTimeEdit;
 
@@ -1708,25 +1708,40 @@ impl SimplePromptDialog {
 
     // ── Scheduled-sends list panel (B33) ────────────────────────────────
 
-    /// Load a queued scheduled send into the Raw tab for in-place editing.
-    /// A scheduled send stores a single already-resolved string, which the
-    /// Normal field-stack cannot un-compose — so the Raw free-text field is its
-    /// natural home. Switches to the Raw tab, loads the prompt (cursor at end),
-    /// preseeds the send control with the entry's fire time, and records the id
-    /// so re-confirming a schedule replaces that row instead of duplicating it.
+    /// Load a queued scheduled send for in-place editing. If `builder_state`
+    /// carries valid JSON, the structured view is restored (Normal tab with
+    /// its sections); otherwise falls back to the Raw tab with the flat text.
+    /// Records the id so re-confirming a schedule replaces that row.
     pub fn load_scheduled_for_edit(
         &mut self,
         id: &str,
         prompt: &str,
         fire_local: chrono::NaiveDateTime,
+        builder_state: Option<&str>,
     ) {
-        self.active_tab = PromptTab::Raw;
         self.raw_preview = None;
         self.raw_preview_scroll = 0;
-        self.sections
-            .insert(RAW_SECTION_ID.to_string(), prompt.to_string());
-        let end = prompt.chars().count();
-        self.section_cursors.insert(RAW_SECTION_ID.to_string(), end);
+
+        let restored =
+            builder_state.and_then(|json| serde_json::from_str::<PersistedBuilderState>(json).ok());
+
+        if let Some(state) = restored {
+            state.restore_into(self);
+            let has_raw_only =
+                state.sections.len() == 1 && state.sections.contains_key(RAW_SECTION_ID);
+            if has_raw_only {
+                self.active_tab = PromptTab::Raw;
+            } else {
+                self.active_tab = PromptTab::Normal;
+            }
+        } else {
+            self.active_tab = PromptTab::Raw;
+            self.sections
+                .insert(RAW_SECTION_ID.to_string(), prompt.to_string());
+            let end = prompt.chars().count();
+            self.section_cursors.insert(RAW_SECTION_ID.to_string(), end);
+        }
+
         // Raw's first focus target is the buffer (index 1), never the send control.
         self.focused_section = 1;
         self.editing_scheduled_id = Some(id.to_string());
@@ -2359,6 +2374,25 @@ mod tests {
     }
 
     #[test]
+    fn for_instruction_prompt_restores_into_a_normal_tab_dialog() {
+        let prompt = "Graph nightly failed: build broke";
+        let state = PersistedBuilderState::for_instruction_prompt(prompt);
+        let json = serde_json::to_string(&state).expect("serialize");
+        let restored: PersistedBuilderState = serde_json::from_str(&json).expect("deserialize");
+
+        let mut target = SimplePromptDialog::new();
+        restored.restore_into(&mut target);
+
+        assert_eq!(target.get_section_content("instruction_1"), prompt);
+        assert_eq!(target.enabled_sections, vec!["instruction_1".to_string()]);
+        // Normal-tab structure: no schedule re-armed, empty collapse/lock maps.
+        assert!(target.send_at.is_none());
+        assert!(target.collapsed_pastes.is_empty());
+        assert!(target.locked_sections.is_empty());
+        assert_eq!(target.active_tab, PromptTab::Normal);
+    }
+
+    #[test]
     fn add_section_focuses_the_new_section_with_cursor_at_start() {
         let mut dialog = SimplePromptDialog::new();
         dialog.add_section("goal");
@@ -2559,7 +2593,7 @@ mod tests {
             .unwrap()
             .and_hms_opt(9, 15, 0)
             .unwrap();
-        dialog.load_scheduled_for_edit("ss-42", "deliver this later", fire);
+        dialog.load_scheduled_for_edit("ss-42", "deliver this later", fire, None);
 
         assert_eq!(dialog.active_tab, PromptTab::Raw);
         assert_eq!(dialog.raw_text(), "deliver this later");
@@ -2573,6 +2607,71 @@ mod tests {
         // Focus lands on the raw buffer, and the list focus is released.
         assert_eq!(dialog.focused_section, 1);
         assert!(dialog.scheduled_list_selected.is_none());
+    }
+
+    #[test]
+    fn load_scheduled_for_edit_with_builder_state_restores_structured_view() {
+        let mut source = SimplePromptDialog::new();
+        source.set_tab(PromptTab::Normal);
+        source.set_section_content("instruction_1", "do the thing".to_string());
+        source.set_section_content("context_1", "some context".to_string());
+
+        let snapshot = PersistedBuilderState::from_dialog(&source);
+        let json = serde_json::to_string(&snapshot).unwrap();
+
+        let mut dialog = SimplePromptDialog::new();
+        let fire = chrono::NaiveDate::from_ymd_opt(2030, 6, 15)
+            .unwrap()
+            .and_hms_opt(10, 0, 0)
+            .unwrap();
+        dialog.load_scheduled_for_edit(
+            "ss-struct",
+            "ignored when state present",
+            fire,
+            Some(&json),
+        );
+
+        assert_eq!(dialog.active_tab, PromptTab::Normal);
+        assert_eq!(
+            dialog.sections.get("instruction_1").map(|s| s.as_str()),
+            Some("do the thing")
+        );
+        assert_eq!(
+            dialog.sections.get("context_1").map(|s| s.as_str()),
+            Some("some context")
+        );
+        assert_eq!(dialog.editing_scheduled_id.as_deref(), Some("ss-struct"));
+        assert_eq!(dialog.send_choice, SendChoice::Date);
+        assert_eq!(dialog.send_at, Some(fire));
+        assert!(dialog.scheduled_list_selected.is_none());
+    }
+
+    #[test]
+    fn load_scheduled_for_edit_with_none_builder_state_falls_back_to_raw() {
+        let mut dialog = SimplePromptDialog::new();
+        let fire = chrono::NaiveDate::from_ymd_opt(2030, 1, 1)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap();
+        dialog.load_scheduled_for_edit("ss-old", "plain text prompt", fire, None);
+
+        assert_eq!(dialog.active_tab, PromptTab::Raw);
+        assert_eq!(dialog.raw_text(), "plain text prompt");
+        assert_eq!(dialog.editing_scheduled_id.as_deref(), Some("ss-old"));
+    }
+
+    #[test]
+    fn load_scheduled_for_edit_with_invalid_json_falls_back_to_raw() {
+        let mut dialog = SimplePromptDialog::new();
+        let fire = chrono::NaiveDate::from_ymd_opt(2030, 1, 1)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap();
+        dialog.load_scheduled_for_edit("ss-bad", "fallback text", fire, Some("not valid json{{{"));
+
+        assert_eq!(dialog.active_tab, PromptTab::Raw);
+        assert_eq!(dialog.raw_text(), "fallback text");
+        assert_eq!(dialog.editing_scheduled_id.as_deref(), Some("ss-bad"));
     }
 
     #[test]
@@ -3244,13 +3343,12 @@ mod tests {
     fn send_edit_adjust_day() {
         let mut dialog = SimplePromptDialog::new();
         dialog.send_begin_edit();
+        let before = dialog.send_edit.as_ref().unwrap().value;
         dialog.send_edit.as_mut().unwrap().field = 2; // day
         dialog.send_edit_adjust(1);
         let edit = dialog.send_edit.unwrap();
-        assert_eq!(
-            edit.value.day(),
-            chrono::Local::now().naive_local().day() + 1
-        );
+        let expected = (before + chrono::Duration::days(1)).day();
+        assert_eq!(edit.value.day(), expected);
     }
 
     #[test]
@@ -4432,6 +4530,35 @@ pub struct PersistedBuilderState {
 }
 
 impl PersistedBuilderState {
+    /// Canonical minimal structured state for a single instruction prompt —
+    /// the same shape [`SimplePromptDialog::new`] produces, with
+    /// `instruction_1` holding `prompt`. Used by graph interactive hooks so a
+    /// hook-enqueued scheduled send carries the structured representation an
+    /// equivalent promptbuilder message would have, rather than an ad-hoc
+    /// JSON blob the builder cannot restore. The raw prompt itself is
+    /// unchanged; this is only the reopen/edit representation.
+    pub fn for_instruction_prompt(prompt: &str) -> Self {
+        let mut sections = HashMap::new();
+        sections.insert("instruction_1".to_string(), prompt.to_string());
+        let mut section_counters = HashMap::new();
+        section_counters.insert("instruction".to_string(), 2usize);
+        section_counters.insert("context".to_string(), 2usize);
+        let mut section_cursors = HashMap::new();
+        section_cursors.insert("instruction_1".to_string(), 0usize);
+        let mut section_scrolls = HashMap::new();
+        section_scrolls.insert("instruction_1".to_string(), 0usize);
+        Self {
+            sections,
+            enabled_sections: vec!["instruction_1".to_string()],
+            focused_section: 1,
+            section_counters,
+            section_cursors,
+            section_scrolls,
+            collapsed_pastes: HashMap::new(),
+            locked_sections: HashSet::new(),
+        }
+    }
+
     pub fn from_dialog(dialog: &SimplePromptDialog) -> Self {
         Self {
             sections: dialog.sections.clone(),

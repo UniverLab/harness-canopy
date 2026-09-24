@@ -31,7 +31,7 @@ pub fn draw_split_picker(frame: &mut Frame, app: &App, theme: &Theme) {
 
     let block = Block::default()
         .title(" Split con... ")
-        .borders(crate::tui::ui::borders_for(theme))
+        .borders(crate::tui::ui::dialog_borders_for(theme))
         .border_style(Style::default().fg(Color::Green))
         .style(Style::default().bg(theme.dialog_bg));
     let inner = block.inner(area);
@@ -155,7 +155,7 @@ pub fn draw_suggestion_picker(
         );
         frame.render_widget(Clear, area);
         let block = Block::default()
-            .borders(crate::tui::ui::borders_for(theme))
+            .borders(crate::tui::ui::dialog_borders_for(theme))
             .border_style(Style::default().fg(theme.border_color))
             .style(Style::default().bg(Color::Rgb(15, 15, 25)));
         let inner = block.inner(area);
@@ -204,7 +204,7 @@ pub fn draw_suggestion_picker(
 
     let block = Block::default()
         .title(title)
-        .borders(crate::tui::ui::borders_for(theme))
+        .borders(crate::tui::ui::dialog_borders_for(theme))
         .border_style(Style::default().fg(theme.header_color))
         .style(Style::default().bg(theme.dialog_bg));
     let inner = block.inner(area);

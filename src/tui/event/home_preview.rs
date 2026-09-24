@@ -1,7 +1,7 @@
 use anyhow::Result;
 use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 
-use crate::tui::app::types::{AgentEntry, App, Focus, LoopLiveFocus, ProjectTab, SidebarLayer};
+use crate::tui::app::types::{AgentEntry, App, Focus, GraphLiveFocus, ProjectTab, SidebarLayer};
 
 // ── Home: screensaver — arrows enter Preview ────────────────────────
 
@@ -17,7 +17,7 @@ pub fn handle_home_key(app: &mut App, code: KeyCode, _modifiers: KeyModifiers) -
 
     let has_sidebar_preview = !app.agents.is_empty()
         || !app.projects.is_empty()
-        || !app.visible_loops().is_empty()
+        || !app.visible_graphs().is_empty()
         || app.rag_info.has_rag_activity();
 
     match code {
@@ -82,108 +82,108 @@ pub fn handle_preview_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers)
         }
         return Ok(());
     }
-    if app.archive_loop_confirm {
+    if app.archive_graph_confirm {
         match code {
             KeyCode::Char('y') | KeyCode::Enter => {
-                let _ = app.archive_selected_loop();
-                app.archive_loop_confirm = false;
+                let _ = app.archive_selected_graph();
+                app.archive_graph_confirm = false;
             }
             KeyCode::Char('n') | KeyCode::Esc => {
-                app.archive_loop_confirm = false;
+                app.archive_graph_confirm = false;
             }
             _ => {}
         }
         return Ok(());
     }
-    if app.permanent_delete_loop_confirm {
+    if app.permanent_delete_graph_confirm {
         match code {
             KeyCode::Char('y') | KeyCode::Enter => {
-                let _ = app.permanent_delete_selected_archived_loop();
-                app.permanent_delete_loop_confirm = false;
+                let _ = app.permanent_delete_selected_archived_graph();
+                app.permanent_delete_graph_confirm = false;
             }
             KeyCode::Char('n') | KeyCode::Esc => {
-                app.permanent_delete_loop_confirm = false;
+                app.permanent_delete_graph_confirm = false;
             }
             _ => {}
         }
         return Ok(());
     }
-    if app.loop_reset_confirm {
+    if app.graph_reset_confirm {
         match code {
             KeyCode::Char('y') | KeyCode::Enter => {
-                app.confirm_reset_selected_loop();
-                app.loop_reset_confirm = false;
+                app.confirm_reset_selected_graph();
+                app.graph_reset_confirm = false;
             }
             KeyCode::Char('n') | KeyCode::Esc => {
-                app.loop_reset_confirm = false;
+                app.graph_reset_confirm = false;
             }
             _ => {}
         }
         return Ok(());
     }
-    if app.loop_autorun_dialog.is_some() {
-        use crate::tui::app::dialog::LoopAutorunMode;
+    if app.graph_autorun_dialog.is_some() {
+        use crate::tui::app::dialog::GraphAutorunMode;
         match code {
-            KeyCode::Esc => app.close_loop_autorun_dialog(),
-            KeyCode::Enter => app.submit_loop_autorun_dialog(),
+            KeyCode::Esc => app.close_graph_autorun_dialog(),
+            KeyCode::Enter => app.submit_graph_autorun_dialog(),
             // Tab switches between picking a time and typing a raw
             // quota-reset message — the two mutually exclusive submit paths.
             KeyCode::Tab | KeyCode::BackTab => {
-                if let Some(dialog) = app.loop_autorun_dialog.as_mut() {
+                if let Some(dialog) = app.graph_autorun_dialog.as_mut() {
                     dialog.toggle_mode();
                 }
             }
             KeyCode::Up
-                if app.loop_autorun_dialog.as_ref().map(|d| d.mode)
-                    == Some(LoopAutorunMode::Picker) =>
+                if app.graph_autorun_dialog.as_ref().map(|d| d.mode)
+                    == Some(GraphAutorunMode::Picker) =>
             {
-                if let Some(dialog) = app.loop_autorun_dialog.as_mut() {
+                if let Some(dialog) = app.graph_autorun_dialog.as_mut() {
                     dialog.picker.adjust(1);
                     dialog.error = None;
                 }
             }
             KeyCode::Down
-                if app.loop_autorun_dialog.as_ref().map(|d| d.mode)
-                    == Some(LoopAutorunMode::Picker) =>
+                if app.graph_autorun_dialog.as_ref().map(|d| d.mode)
+                    == Some(GraphAutorunMode::Picker) =>
             {
-                if let Some(dialog) = app.loop_autorun_dialog.as_mut() {
+                if let Some(dialog) = app.graph_autorun_dialog.as_mut() {
                     dialog.picker.adjust(-1);
                     dialog.error = None;
                 }
             }
             KeyCode::Left
-                if app.loop_autorun_dialog.as_ref().map(|d| d.mode)
-                    == Some(LoopAutorunMode::Picker) =>
+                if app.graph_autorun_dialog.as_ref().map(|d| d.mode)
+                    == Some(GraphAutorunMode::Picker) =>
             {
-                if let Some(dialog) = app.loop_autorun_dialog.as_mut() {
+                if let Some(dialog) = app.graph_autorun_dialog.as_mut() {
                     dialog.picker.move_field(-1);
                 }
             }
             KeyCode::Right
-                if app.loop_autorun_dialog.as_ref().map(|d| d.mode)
-                    == Some(LoopAutorunMode::Picker) =>
+                if app.graph_autorun_dialog.as_ref().map(|d| d.mode)
+                    == Some(GraphAutorunMode::Picker) =>
             {
-                if let Some(dialog) = app.loop_autorun_dialog.as_mut() {
+                if let Some(dialog) = app.graph_autorun_dialog.as_mut() {
                     dialog.picker.move_field(1);
                 }
             }
             KeyCode::Backspace => {
-                if let Some(dialog) = app.loop_autorun_dialog.as_mut() {
-                    if dialog.mode == LoopAutorunMode::QuotaMessage {
+                if let Some(dialog) = app.graph_autorun_dialog.as_mut() {
+                    if dialog.mode == GraphAutorunMode::QuotaMessage {
                         dialog.quota_input.pop();
                     }
                 }
             }
             KeyCode::Char(c) if !modifiers.contains(KeyModifiers::CONTROL) => {
-                if let Some(dialog) = app.loop_autorun_dialog.as_mut() {
+                if let Some(dialog) = app.graph_autorun_dialog.as_mut() {
                     match dialog.mode {
-                        LoopAutorunMode::Picker => {
+                        GraphAutorunMode::Picker => {
                             if let Some(digit) = c.to_digit(10) {
                                 dialog.picker.type_digit(digit);
                                 dialog.error = None;
                             }
                         }
-                        LoopAutorunMode::QuotaMessage => {
+                        GraphAutorunMode::QuotaMessage => {
                             dialog.quota_input.push(c);
                         }
                     }
@@ -201,23 +201,48 @@ pub fn handle_preview_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers)
         return Ok(());
     }
 
-    let on_loop = app.sidebar_layer == SidebarLayer::Automation
-        && app.automation_kind == crate::tui::app::AutomationKind::Loop;
+    let on_graph = app.sidebar_layer == SidebarLayer::Automation
+        && app.automation_kind == crate::tui::app::AutomationKind::Graph;
 
     match code {
+        // CT23: Shift+↑/↓ are reserved frame navigation (RESERVED_FOCUS_KEYS
+        // in src/tui/event/agent_focus.rs) — they move the sidebar selection
+        // between graphs from anywhere in the graph view, including while a
+        // graph is entered (manual mode). Matched first, before any of the
+        // graph's own Up/Down arms below, or they get swallowed as internal
+        // sibling navigation instead (the CT23 bug).
+        KeyCode::Down if modifiers.contains(KeyModifiers::SHIFT) => {
+            app.select_next();
+        }
+        KeyCode::Up if modifiers.contains(KeyModifiers::SHIFT) => {
+            app.select_prev();
+        }
+        // CT3: an open tail dialog intercepts Esc first — dismissing a
+        // diagnostic viewer never touches the run or the graph state below.
+        KeyCode::Esc if on_graph && app.node_tail_dialog_active() => {
+            app.close_node_tail_dialog();
+        }
         // A spec-strip selection intercepts Esc first (back to the graph
         // sub-focus, selection cleared); manual node inspection in the
         // graph intercepts a following Esc to return to auto-follow; only
         // then does Esc fall through to the general "back to Home" below.
-        KeyCode::Esc if on_loop && app.loop_live_focus == LoopLiveFocus::SpecStrip => {
-            app.loop_live_focus = LoopLiveFocus::Graph;
-            app.loop_spec_strip_selected = None;
+        KeyCode::Esc if on_graph && app.graph_live_focus == GraphLiveFocus::SpecStrip => {
+            app.graph_live_focus = GraphLiveFocus::Graph;
+            app.graph_spec_strip_selected = None;
         }
-        KeyCode::Esc if on_loop && !app.loop_graph_follow => {
-            app.loop_graph_reset_follow();
+        KeyCode::Esc if on_graph && !app.graph_live_follow => {
+            app.graph_live_reset_follow();
         }
         KeyCode::Esc | KeyCode::Char('h') => {
             app.focus = Focus::Home;
+        }
+        // CT23: Enter on a selected graph enters its manual navigation — the
+        // only way to reach manual mode (functional requirement 4, no
+        // separate toggle). 'l' is untouched below: it keeps opening the
+        // node editor.
+        KeyCode::Enter if on_graph => {
+            app.graph_live_enter();
+            return Ok(());
         }
         KeyCode::Enter | KeyCode::Char('l') => {
             if app.agents_rag_focused {
@@ -229,8 +254,8 @@ pub fn handle_preview_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers)
                 app.focus = Focus::Agent;
                 return Ok(());
             }
-            if on_loop {
-                let _ = app.open_loop_editor_dialog();
+            if on_graph {
+                let _ = app.open_graph_editor_dialog();
                 return Ok(());
             }
             // For Group entries: Enter activates the split and enters focus
@@ -247,82 +272,141 @@ pub fn handle_preview_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers)
             app.log_scroll = 0;
             app.focus = Focus::Agent;
         }
-        KeyCode::Down | KeyCode::Char('j') => {
+        // CT23: the `!graph_live_follow` clause alone would let this arm
+        // steal plain Down/Up from the tail dialog whenever it's opened in
+        // auto mode (dialog open doesn't require entering the graph first),
+        // reaching this arm before the dedicated tail-scroll arms below —
+        // the explicit `node_tail_dialog_active()` exclusion keeps the
+        // dialog's scroll working regardless of entered/not-entered state.
+        KeyCode::Down | KeyCode::Char('j')
+            if !(on_graph
+                && app.graph_live_focus == GraphLiveFocus::Graph
+                && !app.graph_live_follow)
+                && !(on_graph && app.node_tail_dialog_active()) =>
+        {
             app.select_next();
         }
-        KeyCode::Up | KeyCode::Char('k') => {
+        KeyCode::Up | KeyCode::Char('k')
+            if !(on_graph
+                && app.graph_live_focus == GraphLiveFocus::Graph
+                && !app.graph_live_follow)
+                && !(on_graph && app.node_tail_dialog_active()) =>
+        {
             app.select_prev();
+        }
+        // CT3: while the tail dialog is open, Up/Down scroll its output
+        // instead of driving graph navigation underneath.
+        KeyCode::Down if on_graph && app.node_tail_dialog_active() => {
+            app.node_tail_scroll(true);
+        }
+        KeyCode::Up if on_graph && app.node_tail_dialog_active() => {
+            app.node_tail_scroll(false);
+        }
+        // CT3: `t` toggles the live tail for the highlighted node. Opens
+        // only for a currently-running node (no empty panes); closing is a
+        // pure viewer dismiss. Guarded against Ctrl+T (context transfer).
+        KeyCode::Char('t') if on_graph && !modifiers.contains(KeyModifiers::CONTROL) => {
+            if app.node_tail_dialog_active() {
+                app.close_node_tail_dialog();
+            } else if let Some(node_id) = app.graph_live_highlighted_node_id().map(str::to_string) {
+                let _ = app.open_node_tail_dialog(&node_id);
+            }
+        }
+        // Graph navigation: Right = child (forward along edges, pass first),
+        // Left = parent (back along incoming), Up/Down = sibling in DFS order.
+        // Documented: "next" at a branch = pass > fail > always > route(alpha) > error.
+        KeyCode::Right
+            if on_graph
+                && app.graph_live_focus == GraphLiveFocus::Graph
+                && !app.graph_live_follow =>
+        {
+            app.graph_live_navigate_child();
+        }
+        KeyCode::Left
+            if on_graph
+                && app.graph_live_focus == GraphLiveFocus::Graph
+                && !app.graph_live_follow =>
+        {
+            app.graph_live_navigate_parent();
+        }
+        KeyCode::Down
+            if on_graph
+                && app.graph_live_focus == GraphLiveFocus::Graph
+                && !app.graph_live_follow =>
+        {
+            app.graph_live_navigate_sibling(true);
+        }
+        KeyCode::Up
+            if on_graph
+                && app.graph_live_focus == GraphLiveFocus::Graph
+                && !app.graph_live_follow =>
+        {
+            app.graph_live_navigate_sibling(false);
         }
         // Plain Tab/BackTab hand arrow-key ownership between the graph and
         // the spec marker strip — the strip participates in the panel's
         // existing focus order rather than a bespoke mode. Shift+←/→ is
         // already claimed globally for the sidebar tab strip (see
         // `sidebar_tab_step_applies`), so this uses plain Tab instead.
-        KeyCode::Tab | KeyCode::BackTab if on_loop => {
-            app.loop_live_toggle_focus();
+        KeyCode::Tab | KeyCode::BackTab if on_graph => {
+            app.graph_live_toggle_focus();
         }
-        KeyCode::Left if on_loop && app.loop_live_focus == LoopLiveFocus::SpecStrip => {
-            app.loop_spec_strip_move_selection(false);
+        KeyCode::Left if on_graph && app.graph_live_focus == GraphLiveFocus::SpecStrip => {
+            app.graph_spec_strip_move_selection(false);
         }
-        KeyCode::Right if on_loop && app.loop_live_focus == LoopLiveFocus::SpecStrip => {
-            app.loop_spec_strip_move_selection(true);
+        KeyCode::Right if on_graph && app.graph_live_focus == GraphLiveFocus::SpecStrip => {
+            app.graph_spec_strip_move_selection(true);
         }
-        KeyCode::Left if on_loop => {
-            app.loop_graph_move_highlight(false);
+        KeyCode::Char('[') if on_graph => {
+            app.cycle_graph_spec(false);
         }
-        KeyCode::Right if on_loop => {
-            app.loop_graph_move_highlight(true);
-        }
-        KeyCode::Char('[') if on_loop => {
-            app.cycle_loop_spec(false);
-        }
-        KeyCode::Char(']') if on_loop => {
-            app.cycle_loop_spec(true);
+        KeyCode::Char(']') if on_graph => {
+            app.cycle_graph_spec(true);
         }
         KeyCode::Char('e') if !app.agents_rag_focused => {
-            if on_loop {
-                let _ = app.open_loop_editor_dialog();
+            if on_graph {
+                let _ = app.open_graph_editor_dialog();
             } else if app.sidebar_layer != SidebarLayer::Knowledge {
                 app.open_edit_dialog();
             }
         }
-        KeyCode::Char('d') if on_loop => {
-            // U10: duplicate the highlighted loop node in place.
-            let _ = app.duplicate_selected_loop_node();
+        KeyCode::Char('d') if on_graph => {
+            // U10: duplicate the highlighted graph node in place.
+            let _ = app.duplicate_selected_graph_node();
         }
         // Edit the highlighted node's outgoing pass/fail/always edges
         // (retarget or delete) — a router's route edges stay under 'e'/
         // Enter's RouterRoutes dialog instead.
-        KeyCode::Char('w') if on_loop => {
-            let _ = app.open_loop_edges_dialog();
+        KeyCode::Char('w') if on_graph => {
+            let _ = app.open_graph_edges_dialog();
         }
         KeyCode::Char('d')
             if !app.agents_rag_focused && app.sidebar_layer != SidebarLayer::Knowledge =>
         {
             let _ = app.toggle_enable();
         }
-        // Loop run-time controls (run/pause/continue/reset/autorun),
+        // Graph run-time controls (run/pause/continue/reset/autorun),
         // delegated to the daemon's MCP tools — see
-        // `app::dialog::loop_control`. Only the action valid for the
-        // focused loop's current status actually does anything; the others
+        // `app::dialog::graph_control`. Only the action valid for the
+        // focused graph's current status actually does anything; the others
         // are simply absent from the footer's hints.
-        KeyCode::Char('r') if on_loop => {
-            app.run_selected_loop();
+        KeyCode::Char('r') if on_graph => {
+            app.run_selected_graph();
         }
-        KeyCode::Char('p') if on_loop => {
-            app.pause_selected_loop();
+        KeyCode::Char('p') if on_graph => {
+            app.pause_selected_graph();
         }
-        KeyCode::Char('c') if on_loop => {
-            app.continue_selected_loop_retry();
+        KeyCode::Char('c') if on_graph => {
+            app.continue_selected_graph_retry();
         }
-        KeyCode::Char('C') if on_loop => {
-            app.continue_selected_loop_skip();
+        KeyCode::Char('C') if on_graph => {
+            app.continue_selected_graph_skip();
         }
-        KeyCode::Char('x') if on_loop => {
-            app.open_loop_reset_confirm();
+        KeyCode::Char('x') if on_graph => {
+            app.open_graph_reset_confirm();
         }
-        KeyCode::Char('a') if on_loop => {
-            app.open_loop_autorun_dialog();
+        KeyCode::Char('a') if on_graph => {
+            app.open_graph_autorun_dialog();
         }
         KeyCode::Char('r')
             if !app.agents_rag_focused && app.sidebar_layer != SidebarLayer::Knowledge =>
@@ -336,25 +420,25 @@ pub fn handle_preview_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers)
             app.toggle_rag_pause();
         }
         KeyCode::Char('n') => {
-            if on_loop {
-                app.open_new_loop_dialog();
+            if on_graph {
+                app.open_new_graph_dialog();
             } else if app.sidebar_layer != SidebarLayer::Knowledge {
                 app.open_new_agent_dialog();
             }
         }
-        KeyCode::Char('E') if on_loop => {
-            app.open_edit_loop_dialog();
+        KeyCode::Char('E') if on_graph => {
+            app.open_edit_graph_dialog();
         }
-        // 'A' toggles the Loops section between the main list and the
+        // 'A' toggles the Graphs section between the main list and the
         // archive — the archive's only entry point, deliberately a toggle
         // on the existing section rather than a separate sidebar layer, so
-        // archived loops stay in the same mental place as active ones.
-        KeyCode::Char('A') if on_loop => {
-            app.toggle_loop_archive_view();
+        // archived graphs stay in the same mental place as active ones.
+        KeyCode::Char('A') if on_graph => {
+            app.toggle_graph_archive_view();
         }
-        // 'R' restores the highlighted archived loop back to the main list.
-        KeyCode::Char('R') if on_loop && app.loop_view_archived => {
-            let _ = app.restore_selected_archived_loop();
+        // 'R' restores the highlighted archived graph back to the main list.
+        KeyCode::Char('R') if on_graph && app.graph_view_archived => {
+            let _ = app.restore_selected_archived_graph();
         }
         KeyCode::Char('t') if modifiers.contains(KeyModifiers::CONTROL) => {
             if matches!(
@@ -367,12 +451,12 @@ pub fn handle_preview_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers)
         KeyCode::F(4) => {
             if app.sidebar_layer == SidebarLayer::Knowledge {
                 app.delete_project_confirm = true;
-            } else if on_loop && app.loop_view_archived {
+            } else if on_graph && app.graph_view_archived {
                 // Permanent deletion is reachable only from the archive, on
-                // an already-archived loop — never the first press of F4.
-                app.permanent_delete_loop_confirm = true;
-            } else if on_loop {
-                app.archive_loop_confirm = true;
+                // an already-archived graph — never the first press of F4.
+                app.permanent_delete_graph_confirm = true;
+            } else if on_graph {
+                app.archive_graph_confirm = true;
             } else if !app.agents_rag_focused {
                 let _ = app.delete_selected();
             }
@@ -450,11 +534,12 @@ pub(super) fn handle_playground_key(app: &mut App, code: KeyCode, modifiers: Key
                 app.select_next();
             }
         }
-        KeyCode::Up if app.playground_selected > 0 => {
-            app.playground_selected -= 1;
-        }
-        KeyCode::Down if app.playground_selected + 1 < app.playground_results.len() => {
-            app.playground_selected += 1;
+        KeyCode::Up | KeyCode::Down if !app.playground_results.is_empty() => {
+            app.playground_selected = crate::tui::selection::move_index(
+                app.playground_selected,
+                app.playground_results.len(),
+                matches!(code, KeyCode::Down),
+            );
         }
         KeyCode::Enter | KeyCode::Char('l') => {
             if app.playground_last_executed_query != app.playground_query.trim() {
@@ -553,6 +638,7 @@ mod playground_key_tests {
             }),
             cli: Cli::new("claude"),
             model: None,
+            effort: None,
             working_dir: None,
             enabled: true,
             enable_at: None,
@@ -570,7 +656,12 @@ mod playground_key_tests {
     fn app_with_agents() -> App {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.agents = vec![AgentEntry::Agent(cron_agent("a1"))];
         app.selected = 0;
         app
@@ -895,6 +986,7 @@ mod home_key_tests {
             }),
             cli: Cli::new("claude"),
             model: None,
+            effort: None,
             working_dir: None,
             enabled: true,
             enable_at: None,
@@ -912,7 +1004,12 @@ mod home_key_tests {
     fn app_with_agents() -> App {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.agents = vec![AgentEntry::Agent(cron_agent("a1"))];
         app.selected = 0;
         app
@@ -1047,6 +1144,7 @@ mod preview_key_tests {
             }),
             cli: Cli::new("claude"),
             model: None,
+            effort: None,
             working_dir: None,
             enabled: true,
             enable_at: None,
@@ -1064,7 +1162,12 @@ mod preview_key_tests {
     fn app_with_agents() -> App {
         let db = test_db();
         let data_dir = tempdir().expect("create data dir");
-        let mut app = App::new(Arc::clone(&db), data_dir.path()).expect("create app");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
         app.agents = vec![AgentEntry::Agent(cron_agent("a1"))];
         app.selected = 0;
         app
@@ -1202,51 +1305,51 @@ mod preview_key_tests {
     }
 
     #[test]
-    fn preview_archive_loop_confirm_y_archives() {
+    fn preview_archive_graph_confirm_y_archives() {
         let mut app = app_with_agents();
         app.focus = Focus::Preview;
-        app.archive_loop_confirm = true;
+        app.archive_graph_confirm = true;
         handle_preview_key(&mut app, KeyCode::Char('y'), KeyModifiers::NONE).unwrap();
-        assert!(!app.archive_loop_confirm);
+        assert!(!app.archive_graph_confirm);
     }
 
     #[test]
-    fn preview_archive_loop_confirm_n_cancels() {
+    fn preview_archive_graph_confirm_n_cancels() {
         let mut app = app_with_agents();
         app.focus = Focus::Preview;
-        app.archive_loop_confirm = true;
+        app.archive_graph_confirm = true;
         handle_preview_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE).unwrap();
-        assert!(!app.archive_loop_confirm);
+        assert!(!app.archive_graph_confirm);
     }
 
     #[test]
-    fn preview_permanent_delete_loop_confirm_y_deletes() {
+    fn preview_permanent_delete_graph_confirm_y_deletes() {
         let mut app = app_with_agents();
         app.focus = Focus::Preview;
-        app.permanent_delete_loop_confirm = true;
+        app.permanent_delete_graph_confirm = true;
         handle_preview_key(&mut app, KeyCode::Char('y'), KeyModifiers::NONE).unwrap();
-        assert!(!app.permanent_delete_loop_confirm);
+        assert!(!app.permanent_delete_graph_confirm);
     }
 
     #[test]
-    fn preview_permanent_delete_loop_confirm_n_cancels() {
+    fn preview_permanent_delete_graph_confirm_n_cancels() {
         let mut app = app_with_agents();
         app.focus = Focus::Preview;
-        app.permanent_delete_loop_confirm = true;
+        app.permanent_delete_graph_confirm = true;
         handle_preview_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE).unwrap();
-        assert!(!app.permanent_delete_loop_confirm);
+        assert!(!app.permanent_delete_graph_confirm);
     }
 
     #[test]
-    fn preview_f4_on_loop_opens_archive_confirm_not_permanent_delete() {
+    fn preview_f4_on_graph_opens_archive_confirm_not_permanent_delete() {
         let mut app = app_with_agents();
         app.focus = Focus::Preview;
         app.sidebar_layer = SidebarLayer::Automation;
-        app.automation_kind = crate::tui::app::AutomationKind::Loop;
-        app.loop_view_archived = false;
+        app.automation_kind = crate::tui::app::AutomationKind::Graph;
+        app.graph_view_archived = false;
         handle_preview_key(&mut app, KeyCode::F(4), KeyModifiers::NONE).unwrap();
-        assert!(app.archive_loop_confirm);
-        assert!(!app.permanent_delete_loop_confirm);
+        assert!(app.archive_graph_confirm);
+        assert!(!app.permanent_delete_graph_confirm);
     }
 
     #[test]
@@ -1254,26 +1357,26 @@ mod preview_key_tests {
         let mut app = app_with_agents();
         app.focus = Focus::Preview;
         app.sidebar_layer = SidebarLayer::Automation;
-        app.automation_kind = crate::tui::app::AutomationKind::Loop;
-        app.loop_view_archived = true;
+        app.automation_kind = crate::tui::app::AutomationKind::Graph;
+        app.graph_view_archived = true;
         handle_preview_key(&mut app, KeyCode::F(4), KeyModifiers::NONE).unwrap();
-        assert!(app.permanent_delete_loop_confirm);
-        assert!(!app.archive_loop_confirm);
+        assert!(app.permanent_delete_graph_confirm);
+        assert!(!app.archive_graph_confirm);
     }
 
     #[test]
-    fn preview_shift_a_toggles_loop_archive_view() {
+    fn preview_shift_a_toggles_graph_archive_view() {
         let mut app = app_with_agents();
         app.focus = Focus::Preview;
         app.sidebar_layer = SidebarLayer::Automation;
-        app.automation_kind = crate::tui::app::AutomationKind::Loop;
-        assert!(!app.loop_view_archived);
+        app.automation_kind = crate::tui::app::AutomationKind::Graph;
+        assert!(!app.graph_view_archived);
 
         handle_preview_key(&mut app, KeyCode::Char('A'), KeyModifiers::NONE).unwrap();
-        assert!(app.loop_view_archived);
+        assert!(app.graph_view_archived);
 
         handle_preview_key(&mut app, KeyCode::Char('A'), KeyModifiers::NONE).unwrap();
-        assert!(!app.loop_view_archived);
+        assert!(!app.graph_view_archived);
     }
 
     #[test]
@@ -1304,12 +1407,16 @@ mod preview_key_tests {
         let _ = handle_preview_key(&mut app, KeyCode::Char('e'), KeyModifiers::NONE);
     }
 
-    // ── Loop run-time controls ──────────────────────────────────────
+    // ── Graph run-time controls ──────────────────────────────────────
 
-    fn loop_with_status(status: crate::domain::loops::LoopStatus) -> crate::domain::loops::Loop {
-        crate::domain::loops::Loop {
+    fn graph_with_status(
+        status: crate::domain::graphs::GraphStatus,
+    ) -> crate::domain::graphs::Graph {
+        crate::domain::graphs::Graph {
             archived: false,
             paused_by_reconciliation: false,
+            allow_dirty_start: false,
+            infra_node_id: None,
             id: "lp1".to_string(),
             name: "Nightly review".to_string(),
             description: None,
@@ -1323,181 +1430,29 @@ mod preview_key_tests {
             auto_continue_at: None,
             auto_continue_action: None,
             active_run_queue_id: None,
-            on_completed: None,
+            hooks: std::collections::BTreeMap::new(),
         }
     }
 
-    fn app_on_loop(status: crate::domain::loops::LoopStatus) -> App {
+    fn app_on_graph(status: crate::domain::graphs::GraphStatus) -> App {
         let mut app = app_with_agents();
         app.focus = Focus::Preview;
         app.sidebar_layer = SidebarLayer::Automation;
-        app.automation_kind = crate::tui::app::AutomationKind::Loop;
-        app.loops = vec![loop_with_status(status)];
-        app.selected_loop_id = Some("lp1".to_string());
+        app.automation_kind = crate::tui::app::AutomationKind::Graph;
+        app.graphs = vec![graph_with_status(status)];
+        app.selected_graph_id = Some("lp1".to_string());
         app
     }
 
-    #[test]
-    fn preview_r_on_a_completed_loop_dispatches_run() {
-        let mut app = app_on_loop(crate::domain::loops::LoopStatus::Completed);
-        handle_preview_key(&mut app, KeyCode::Char('r'), KeyModifiers::NONE).unwrap();
-        assert!(app.loop_action_pending);
-        assert!(app.loop_action_rx.is_some());
-    }
-
-    #[test]
-    fn preview_r_on_a_running_loop_is_not_bound() {
-        // Run is not a valid action for a running loop (decision 3) — 'r'
-        // must be a no-op, not a dispatch the daemon then refuses.
-        let mut app = app_on_loop(crate::domain::loops::LoopStatus::Running);
-        handle_preview_key(&mut app, KeyCode::Char('r'), KeyModifiers::NONE).unwrap();
-        assert!(!app.loop_action_pending);
-        assert!(app.loop_action_rx.is_none());
-    }
-
-    #[test]
-    fn preview_p_on_a_running_loop_dispatches_pause() {
-        let mut app = app_on_loop(crate::domain::loops::LoopStatus::Running);
-        handle_preview_key(&mut app, KeyCode::Char('p'), KeyModifiers::NONE).unwrap();
-        assert!(app.loop_action_pending);
-    }
-
-    #[test]
-    fn preview_p_on_a_non_running_loop_is_not_bound() {
-        let mut app = app_on_loop(crate::domain::loops::LoopStatus::Draft);
-        handle_preview_key(&mut app, KeyCode::Char('p'), KeyModifiers::NONE).unwrap();
-        assert!(!app.loop_action_pending);
-    }
-
-    #[test]
-    fn preview_c_and_shift_c_on_a_paused_loop_dispatch_continue() {
-        let mut app = app_on_loop(crate::domain::loops::LoopStatus::Paused);
-        handle_preview_key(&mut app, KeyCode::Char('c'), KeyModifiers::NONE).unwrap();
-        assert!(app.loop_action_pending);
-
-        let mut app = app_on_loop(crate::domain::loops::LoopStatus::Paused);
-        handle_preview_key(&mut app, KeyCode::Char('C'), KeyModifiers::SHIFT).unwrap();
-        assert!(app.loop_action_pending);
-    }
-
-    #[test]
-    fn preview_continue_keys_on_a_non_paused_loop_are_not_bound() {
-        let mut app = app_on_loop(crate::domain::loops::LoopStatus::Running);
-        handle_preview_key(&mut app, KeyCode::Char('c'), KeyModifiers::NONE).unwrap();
-        assert!(!app.loop_action_pending);
-        handle_preview_key(&mut app, KeyCode::Char('C'), KeyModifiers::SHIFT).unwrap();
-        assert!(!app.loop_action_pending);
-    }
-
-    #[test]
-    fn preview_x_on_a_completed_loop_opens_reset_confirm() {
-        let mut app = app_on_loop(crate::domain::loops::LoopStatus::Completed);
-        handle_preview_key(&mut app, KeyCode::Char('x'), KeyModifiers::NONE).unwrap();
-        assert!(app.loop_reset_confirm);
-    }
-
-    #[test]
-    fn preview_x_on_a_running_loop_is_not_bound() {
-        let mut app = app_on_loop(crate::domain::loops::LoopStatus::Running);
-        handle_preview_key(&mut app, KeyCode::Char('x'), KeyModifiers::NONE).unwrap();
-        assert!(!app.loop_reset_confirm);
-    }
-
-    #[test]
-    fn loop_reset_confirm_y_dispatches_reset_and_closes_the_modal() {
-        let mut app = app_on_loop(crate::domain::loops::LoopStatus::Failed);
-        app.loop_reset_confirm = true;
-        handle_preview_key(&mut app, KeyCode::Char('y'), KeyModifiers::NONE).unwrap();
-        assert!(!app.loop_reset_confirm);
-        assert!(app.loop_action_pending);
-    }
-
-    #[test]
-    fn loop_reset_confirm_n_cancels_without_dispatching() {
-        let mut app = app_on_loop(crate::domain::loops::LoopStatus::Failed);
-        app.loop_reset_confirm = true;
-        handle_preview_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE).unwrap();
-        assert!(!app.loop_reset_confirm);
-        assert!(!app.loop_action_pending);
-    }
-
-    #[test]
-    fn preview_a_opens_autorun_dialog_regardless_of_status() {
-        for status in [
-            crate::domain::loops::LoopStatus::Draft,
-            crate::domain::loops::LoopStatus::Running,
-            crate::domain::loops::LoopStatus::Paused,
-            crate::domain::loops::LoopStatus::Completed,
-            crate::domain::loops::LoopStatus::Failed,
-        ] {
-            let mut app = app_on_loop(status);
-            handle_preview_key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE).unwrap();
-            assert!(app.loop_autorun_dialog.is_some(), "status {status:?}");
-        }
-    }
-
-    #[test]
-    fn loop_autorun_dialog_quota_message_typing_backspace_and_submit() {
-        let mut app = app_on_loop(crate::domain::loops::LoopStatus::Failed);
-        handle_preview_key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE).unwrap();
-        // Tab switches into the free-text quota-message mode (the picker is
-        // the default mode on open).
-        handle_preview_key(&mut app, KeyCode::Tab, KeyModifiers::NONE).unwrap();
-
-        handle_preview_key(&mut app, KeyCode::Char('1'), KeyModifiers::NONE).unwrap();
-        handle_preview_key(&mut app, KeyCode::Char('2'), KeyModifiers::NONE).unwrap();
-        handle_preview_key(&mut app, KeyCode::Backspace, KeyModifiers::NONE).unwrap();
-        assert_eq!(app.loop_autorun_dialog.as_ref().unwrap().quota_input, "1");
-
-        handle_preview_key(&mut app, KeyCode::Enter, KeyModifiers::NONE).unwrap();
-        assert!(app.loop_autorun_dialog.is_none());
-        assert!(app.loop_action_pending);
-    }
-
-    #[test]
-    fn loop_autorun_dialog_picker_mode_default_seed_is_rejected_on_submit() {
-        // The picker seeds to "now" absent a pending autorun (see
-        // `LoopAutorunDialog::new`), which is already past by the time
-        // submit runs a moment later — the dialog must stay open with an
-        // inline error rather than dispatch (requirement 7).
-        let mut app = app_on_loop(crate::domain::loops::LoopStatus::Failed);
-        handle_preview_key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE).unwrap();
-        handle_preview_key(&mut app, KeyCode::Enter, KeyModifiers::NONE).unwrap();
-        assert!(app.loop_autorun_dialog.is_some());
-        assert!(!app.loop_action_pending);
-        assert!(app.loop_autorun_dialog.as_ref().unwrap().error.is_some());
-    }
-
-    #[test]
-    fn loop_autorun_dialog_picker_mode_future_time_submits() {
-        let mut app = app_on_loop(crate::domain::loops::LoopStatus::Failed);
-        handle_preview_key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE).unwrap();
-        // Field 0 (year) is focused on open; bump it a year forward so the
-        // picked time is unambiguously in the future.
-        handle_preview_key(&mut app, KeyCode::Up, KeyModifiers::NONE).unwrap();
-        handle_preview_key(&mut app, KeyCode::Enter, KeyModifiers::NONE).unwrap();
-        assert!(app.loop_autorun_dialog.is_none());
-        assert!(app.loop_action_pending);
-    }
-
-    #[test]
-    fn loop_autorun_dialog_esc_closes_without_dispatching() {
-        let mut app = app_on_loop(crate::domain::loops::LoopStatus::Failed);
-        handle_preview_key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE).unwrap();
-        handle_preview_key(&mut app, KeyCode::Esc, KeyModifiers::NONE).unwrap();
-        assert!(app.loop_autorun_dialog.is_none());
-        assert!(!app.loop_action_pending);
-    }
-
-    #[test]
-    fn existing_navigation_keys_are_unaffected_by_the_new_bindings() {
-        // Arrows/Tab must keep meaning exactly what they meant before —
-        // decision 8 of the loop controls spec.
-        let mut app = app_on_loop(crate::domain::loops::LoopStatus::Running);
-        app.loop_live_state = Some(crate::tui::app::loop_live_state::LoopLiveState {
-            loop_id: "lp1".to_string(),
-            loop_name: "Nightly review".to_string(),
-            loop_status: crate::domain::loops::LoopStatus::Running,
+    /// The Running-graph live snapshot the CT23/CT24 graph-view key tests
+    /// navigate: engine on `n1`, effective nodes `n1 -> n2` (pass). Since the
+    /// temp DB has no graph rows, tests that drive Enter/Esc must install it
+    /// themselves (a None live state makes Enter a no-op by design — CT24).
+    fn running_live_state() -> crate::tui::app::graph_live_state::GraphLiveState {
+        crate::tui::app::graph_live_state::GraphLiveState {
+            graph_id: "lp1".to_string(),
+            graph_name: "Nightly review".to_string(),
+            graph_status: crate::domain::graphs::GraphStatus::Running,
             workdir: "/tmp".to_string(),
             trigger_type: "manual".to_string(),
             schedule_expr: None,
@@ -1507,17 +1462,485 @@ mod preview_key_tests {
             done_count: 0,
             total_count: 0,
             current_spec_id: None,
-            effective_nodes: vec![crate::domain::loops::LoopNode {
-                id: "n1".to_string(),
+            effective_nodes: vec![
+                crate::domain::graphs::GraphNode {
+                    id: "n1".to_string(),
+                    spec_id: None,
+                    graph_id: Some("lp1".to_string()),
+                    name: "Implement".to_string(),
+                    kind: crate::domain::graphs::GraphNodeKind::Agent,
+                    config: serde_json::json!({}),
+                    position: 0,
+                    created_at: Utc::now(),
+                },
+                crate::domain::graphs::GraphNode {
+                    id: "n2".to_string(),
+                    spec_id: None,
+                    graph_id: Some("lp1".to_string()),
+                    name: "Review".to_string(),
+                    kind: crate::domain::graphs::GraphNodeKind::Check,
+                    config: serde_json::json!({}),
+                    position: 1,
+                    created_at: Utc::now(),
+                },
+            ],
+            effective_edges: vec![crate::domain::graphs::GraphEdge {
+                id: "e1".to_string(),
                 spec_id: None,
-                loop_id: Some("lp1".to_string()),
-                name: "Implement".to_string(),
-                kind: crate::domain::loops::LoopNodeKind::Agent,
-                config: serde_json::json!({}),
-                position: 0,
-                created_at: Utc::now(),
+                graph_id: Some("lp1".to_string()),
+                from_node: "n1".to_string(),
+                to_node: "n2".to_string(),
+                condition: crate::domain::graphs::GraphEdgeCondition::Pass,
             }],
-            effective_edges: Vec::new(),
+            ensembles: Vec::new(),
+            router_taken_routes: std::collections::HashMap::new(),
+            current_node_id: Some("n1".to_string()),
+            current_node_status: None,
+            current_node_started_at: None,
+            current_node_iteration: None,
+            current_node_output_tail: None,
+        }
+    }
+
+    #[test]
+    fn preview_r_on_a_completed_graph_dispatches_run() {
+        let mut app = app_on_graph(crate::domain::graphs::GraphStatus::Completed);
+        handle_preview_key(&mut app, KeyCode::Char('r'), KeyModifiers::NONE).unwrap();
+        assert!(app.graph_action_pending);
+        assert!(app.graph_action_rx.is_some());
+    }
+
+    #[test]
+    fn preview_r_on_a_running_graph_is_not_bound() {
+        // Run is not a valid action for a running graph (decision 3) — 'r'
+        // must be a no-op, not a dispatch the daemon then refuses.
+        let mut app = app_on_graph(crate::domain::graphs::GraphStatus::Running);
+        handle_preview_key(&mut app, KeyCode::Char('r'), KeyModifiers::NONE).unwrap();
+        assert!(!app.graph_action_pending);
+        assert!(app.graph_action_rx.is_none());
+    }
+
+    #[test]
+    fn preview_p_on_a_running_graph_dispatches_pause() {
+        let mut app = app_on_graph(crate::domain::graphs::GraphStatus::Running);
+        handle_preview_key(&mut app, KeyCode::Char('p'), KeyModifiers::NONE).unwrap();
+        assert!(app.graph_action_pending);
+    }
+
+    #[test]
+    fn preview_p_on_a_non_running_graph_is_not_bound() {
+        let mut app = app_on_graph(crate::domain::graphs::GraphStatus::Draft);
+        handle_preview_key(&mut app, KeyCode::Char('p'), KeyModifiers::NONE).unwrap();
+        assert!(!app.graph_action_pending);
+    }
+
+    #[test]
+    fn preview_c_and_shift_c_on_a_paused_graph_dispatch_continue() {
+        let mut app = app_on_graph(crate::domain::graphs::GraphStatus::Paused);
+        handle_preview_key(&mut app, KeyCode::Char('c'), KeyModifiers::NONE).unwrap();
+        assert!(app.graph_action_pending);
+
+        let mut app = app_on_graph(crate::domain::graphs::GraphStatus::Paused);
+        handle_preview_key(&mut app, KeyCode::Char('C'), KeyModifiers::SHIFT).unwrap();
+        assert!(app.graph_action_pending);
+    }
+
+    #[test]
+    fn preview_continue_keys_on_a_non_paused_graph_are_not_bound() {
+        let mut app = app_on_graph(crate::domain::graphs::GraphStatus::Running);
+        handle_preview_key(&mut app, KeyCode::Char('c'), KeyModifiers::NONE).unwrap();
+        assert!(!app.graph_action_pending);
+        handle_preview_key(&mut app, KeyCode::Char('C'), KeyModifiers::SHIFT).unwrap();
+        assert!(!app.graph_action_pending);
+    }
+
+    #[test]
+    fn preview_x_on_a_completed_graph_opens_reset_confirm() {
+        let mut app = app_on_graph(crate::domain::graphs::GraphStatus::Completed);
+        handle_preview_key(&mut app, KeyCode::Char('x'), KeyModifiers::NONE).unwrap();
+        assert!(app.graph_reset_confirm);
+    }
+
+    #[test]
+    fn preview_x_on_a_running_graph_is_not_bound() {
+        let mut app = app_on_graph(crate::domain::graphs::GraphStatus::Running);
+        handle_preview_key(&mut app, KeyCode::Char('x'), KeyModifiers::NONE).unwrap();
+        assert!(!app.graph_reset_confirm);
+    }
+
+    // ── CT3: tail dialog key bindings ──────────────────────────────
+
+    fn app_with_open_tail() -> App {
+        let mut app = app_on_graph(crate::domain::graphs::GraphStatus::Running);
+        app.node_tail_dialog = Some(crate::tui::app::dialog::NodeTailDialog {
+            run_id: "run1".to_string(),
+            node_id: "node1".to_string(),
+            node_name: "Node node1".to_string(),
+            stdout_lines: vec!["out".to_string()],
+            stderr_lines: Vec::new(),
+            status: crate::domain::graphs::GraphRunStatus::Running,
+            timed_out: false,
+            started_at: chrono::Utc::now(),
+            scroll: 0,
+        });
+        app
+    }
+
+    #[test]
+    fn preview_t_closes_open_tail_dialog() {
+        let mut app = app_with_open_tail();
+        handle_preview_key(&mut app, KeyCode::Char('t'), KeyModifiers::NONE).unwrap();
+        assert!(!app.node_tail_dialog_active());
+    }
+
+    #[test]
+    fn preview_esc_closes_open_tail_dialog() {
+        let mut app = app_with_open_tail();
+        handle_preview_key(&mut app, KeyCode::Esc, KeyModifiers::NONE).unwrap();
+        assert!(!app.node_tail_dialog_active());
+    }
+
+    #[test]
+    fn preview_t_with_no_highlighted_node_is_a_noop() {
+        // No live state, so nothing is highlighted: `t` must not open a
+        // dialog, panic, or disturb the graph view.
+        let mut app = app_on_graph(crate::domain::graphs::GraphStatus::Running);
+        handle_preview_key(&mut app, KeyCode::Char('t'), KeyModifiers::NONE).unwrap();
+        assert!(!app.node_tail_dialog_active());
+    }
+
+    #[test]
+    fn preview_ctrl_t_still_opens_context_transfer_not_tail() {
+        // Guard against the plain-`t` arm swallowing Ctrl+T: with no live
+        // state the tail cannot open, and the Ctrl+T arm must run instead
+        // (no-op here without an interactive agent, but crucially not a
+        // tail dialog).
+        let mut app = app_on_graph(crate::domain::graphs::GraphStatus::Running);
+        handle_preview_key(&mut app, KeyCode::Char('t'), KeyModifiers::CONTROL).unwrap();
+        assert!(!app.node_tail_dialog_active());
+    }
+
+    #[test]
+    fn preview_up_down_scroll_open_tail_instead_of_graph() {
+        let mut app = app_with_open_tail();
+        handle_preview_key(&mut app, KeyCode::Up, KeyModifiers::NONE).unwrap();
+        assert_eq!(app.node_tail_dialog.as_ref().unwrap().scroll, 3);
+        handle_preview_key(&mut app, KeyCode::Down, KeyModifiers::NONE).unwrap();
+        assert_eq!(app.node_tail_dialog.as_ref().unwrap().scroll, 0);
+    }
+
+    #[test]
+    fn graph_reset_confirm_y_dispatches_reset_and_closes_the_modal() {
+        let mut app = app_on_graph(crate::domain::graphs::GraphStatus::Failed);
+        app.graph_reset_confirm = true;
+        handle_preview_key(&mut app, KeyCode::Char('y'), KeyModifiers::NONE).unwrap();
+        assert!(!app.graph_reset_confirm);
+        assert!(app.graph_action_pending);
+    }
+
+    #[test]
+    fn graph_reset_confirm_n_cancels_without_dispatching() {
+        let mut app = app_on_graph(crate::domain::graphs::GraphStatus::Failed);
+        app.graph_reset_confirm = true;
+        handle_preview_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE).unwrap();
+        assert!(!app.graph_reset_confirm);
+        assert!(!app.graph_action_pending);
+    }
+
+    #[test]
+    fn preview_a_opens_autorun_dialog_regardless_of_status() {
+        for status in [
+            crate::domain::graphs::GraphStatus::Draft,
+            crate::domain::graphs::GraphStatus::Running,
+            crate::domain::graphs::GraphStatus::Paused,
+            crate::domain::graphs::GraphStatus::Completed,
+            crate::domain::graphs::GraphStatus::Failed,
+        ] {
+            let mut app = app_on_graph(status);
+            handle_preview_key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE).unwrap();
+            assert!(app.graph_autorun_dialog.is_some(), "status {status:?}");
+        }
+    }
+
+    #[test]
+    fn graph_autorun_dialog_quota_message_typing_backspace_and_submit() {
+        let mut app = app_on_graph(crate::domain::graphs::GraphStatus::Failed);
+        handle_preview_key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE).unwrap();
+        // Tab switches into the free-text quota-message mode (the picker is
+        // the default mode on open).
+        handle_preview_key(&mut app, KeyCode::Tab, KeyModifiers::NONE).unwrap();
+
+        handle_preview_key(&mut app, KeyCode::Char('1'), KeyModifiers::NONE).unwrap();
+        handle_preview_key(&mut app, KeyCode::Char('2'), KeyModifiers::NONE).unwrap();
+        handle_preview_key(&mut app, KeyCode::Backspace, KeyModifiers::NONE).unwrap();
+        assert_eq!(app.graph_autorun_dialog.as_ref().unwrap().quota_input, "1");
+
+        handle_preview_key(&mut app, KeyCode::Enter, KeyModifiers::NONE).unwrap();
+        assert!(app.graph_autorun_dialog.is_none());
+        assert!(app.graph_action_pending);
+    }
+
+    #[test]
+    fn graph_autorun_dialog_picker_mode_default_seed_is_rejected_on_submit() {
+        // The picker seeds to "now" absent a pending autorun (see
+        // `GraphAutorunDialog::new`), which is already past by the time
+        // submit runs a moment later — the dialog must stay open with an
+        // inline error rather than dispatch (requirement 7).
+        let mut app = app_on_graph(crate::domain::graphs::GraphStatus::Failed);
+        handle_preview_key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE).unwrap();
+        handle_preview_key(&mut app, KeyCode::Enter, KeyModifiers::NONE).unwrap();
+        assert!(app.graph_autorun_dialog.is_some());
+        assert!(!app.graph_action_pending);
+        assert!(app.graph_autorun_dialog.as_ref().unwrap().error.is_some());
+    }
+
+    #[test]
+    fn graph_autorun_dialog_picker_mode_future_time_submits() {
+        let mut app = app_on_graph(crate::domain::graphs::GraphStatus::Failed);
+        handle_preview_key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE).unwrap();
+        // Field 0 (year) is focused on open; bump it a year forward so the
+        // picked time is unambiguously in the future.
+        handle_preview_key(&mut app, KeyCode::Up, KeyModifiers::NONE).unwrap();
+        handle_preview_key(&mut app, KeyCode::Enter, KeyModifiers::NONE).unwrap();
+        assert!(app.graph_autorun_dialog.is_none());
+        assert!(app.graph_action_pending);
+    }
+
+    #[test]
+    fn graph_autorun_dialog_esc_closes_without_dispatching() {
+        let mut app = app_on_graph(crate::domain::graphs::GraphStatus::Failed);
+        handle_preview_key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE).unwrap();
+        handle_preview_key(&mut app, KeyCode::Esc, KeyModifiers::NONE).unwrap();
+        assert!(app.graph_autorun_dialog.is_none());
+        assert!(!app.graph_action_pending);
+    }
+
+    #[test]
+    fn entering_a_graph_lets_plain_arrows_navigate_it() {
+        // CT23 FR2/FR3: before Enter, plain arrows must not touch the
+        // graph's internal navigation; after Enter, they must.
+        let mut app = app_on_graph(crate::domain::graphs::GraphStatus::Running);
+        app.graph_live_state = Some(crate::tui::app::graph_live_state::GraphLiveState {
+            graph_id: "lp1".to_string(),
+            graph_name: "Nightly review".to_string(),
+            graph_status: crate::domain::graphs::GraphStatus::Running,
+            workdir: "/tmp".to_string(),
+            trigger_type: "manual".to_string(),
+            schedule_expr: None,
+            watch_path: None,
+            autorun_at: None,
+            spec_queue: Vec::new(),
+            done_count: 0,
+            total_count: 0,
+            current_spec_id: None,
+            effective_nodes: vec![
+                crate::domain::graphs::GraphNode {
+                    id: "n1".to_string(),
+                    spec_id: None,
+                    graph_id: Some("lp1".to_string()),
+                    name: "Implement".to_string(),
+                    kind: crate::domain::graphs::GraphNodeKind::Agent,
+                    config: serde_json::json!({}),
+                    position: 0,
+                    created_at: Utc::now(),
+                },
+                crate::domain::graphs::GraphNode {
+                    id: "n2".to_string(),
+                    spec_id: None,
+                    graph_id: Some("lp1".to_string()),
+                    name: "Review".to_string(),
+                    kind: crate::domain::graphs::GraphNodeKind::Check,
+                    config: serde_json::json!({}),
+                    position: 1,
+                    created_at: Utc::now(),
+                },
+            ],
+            effective_edges: vec![crate::domain::graphs::GraphEdge {
+                id: "e1".to_string(),
+                spec_id: None,
+                graph_id: Some("lp1".to_string()),
+                from_node: "n1".to_string(),
+                to_node: "n2".to_string(),
+                condition: crate::domain::graphs::GraphEdgeCondition::Pass,
+            }],
+            ensembles: Vec::new(),
+            router_taken_routes: std::collections::HashMap::new(),
+            current_node_id: Some("n1".to_string()),
+            current_node_status: None,
+            current_node_started_at: None,
+            current_node_iteration: None,
+            current_node_output_tail: None,
+        });
+
+        assert!(app.graph_live_follow);
+        handle_preview_key(&mut app, KeyCode::Right, KeyModifiers::NONE).unwrap();
+        assert!(
+            app.graph_live_follow,
+            "plain Right before Enter must not move the graph or leave auto-follow"
+        );
+
+        handle_preview_key(&mut app, KeyCode::Enter, KeyModifiers::NONE).unwrap();
+        assert!(!app.graph_live_follow, "Enter must switch to manual mode");
+
+        handle_preview_key(&mut app, KeyCode::Right, KeyModifiers::NONE).unwrap();
+        assert_eq!(
+            app.graph_live_selected_node.as_deref(),
+            Some("n2"),
+            "plain Right after entering must move to the child node"
+        );
+    }
+
+    #[test]
+    fn esc_leaves_manual_navigation_back_to_auto() {
+        // CT23 FR3/FR5: Esc must leave manual navigation, returning to auto.
+        let mut app = app_on_graph(crate::domain::graphs::GraphStatus::Running);
+        app.graph_live_state = Some(running_live_state());
+        handle_preview_key(&mut app, KeyCode::Enter, KeyModifiers::NONE).unwrap();
+        assert!(!app.graph_live_follow, "Enter must switch to manual mode");
+
+        handle_preview_key(&mut app, KeyCode::Esc, KeyModifiers::NONE).unwrap();
+        assert!(
+            app.graph_live_follow,
+            "Esc must return the graph view to auto mode"
+        );
+    }
+
+    /// Seeds a Completed graph `lp1` with a bound Completed spec `s1` and two
+    /// graph-level nodes `n1 -> n2` (pass). No runs recorded. Used by the
+    /// CT24 tests so the refresh path (`refresh_graphs_selection`) can
+    /// reassemble a live state whose effective nodes still contain the graph.
+    fn seed_completed_graph_with_nodes(db: &Database) {
+        db.insert_graph(&crate::domain::graphs::Graph {
+            archived: false,
+            paused_by_reconciliation: false,
+            allow_dirty_start: false,
+            infra_node_id: None,
+            id: "lp1".to_string(),
+            name: "Nightly review".to_string(),
+            description: None,
+            workdir: "/tmp".to_string(),
+            status: crate::domain::graphs::GraphStatus::Completed,
+            trigger: None,
+            created_at: Utc::now(),
+            started_at: None,
+            completed_at: None,
+            autorun_at: None,
+            auto_continue_at: None,
+            auto_continue_action: None,
+            active_run_queue_id: None,
+            hooks: std::collections::BTreeMap::new(),
+        })
+        .unwrap();
+        db.insert_graph_spec(&crate::domain::graphs::GraphSpec {
+            id: "s1".to_string(),
+            graph_id: Some("lp1".to_string()),
+            name: "Spec".to_string(),
+            description: None,
+            position: 0,
+            parallelizable: false,
+            status: crate::domain::graphs::GraphSpecStatus::Completed,
+            started_at: None,
+            completed_at: None,
+            spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
+            spec_committed_head: None,
+            workdir: None,
+            completed_via: None,
+            completed_via_reason: None,
+            completed_via_at: None,
+        })
+        .unwrap();
+        for (position, id) in ["n1", "n2"].iter().enumerate() {
+            db.insert_graph_node(&crate::domain::graphs::GraphNode {
+                id: id.to_string(),
+                spec_id: None,
+                graph_id: Some("lp1".to_string()),
+                name: id.to_string(),
+                kind: crate::domain::graphs::GraphNodeKind::Agent,
+                config: serde_json::json!({}),
+                position: position as i64,
+                created_at: Utc::now(),
+            })
+            .unwrap();
+        }
+        db.insert_graph_edge(&crate::domain::graphs::GraphEdge {
+            id: "e1".to_string(),
+            spec_id: None,
+            graph_id: Some("lp1".to_string()),
+            from_node: "n1".to_string(),
+            to_node: "n2".to_string(),
+            condition: crate::domain::graphs::GraphEdgeCondition::Pass,
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn enter_on_completed_graph_seeds_manual_and_stays_manual() {
+        // CT24 FR1/FR2: a finished graph has no engine current node, so Enter
+        // must seed a manual selection (entry node) and the next refresh tick
+        // must keep manual mode as long as that node still exists — never
+        // flip back just because the graph is not running.
+        let db = test_db();
+        seed_completed_graph_with_nodes(&db);
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        app.focus = Focus::Preview;
+        app.sidebar_layer = SidebarLayer::Automation;
+        app.automation_kind = crate::tui::app::AutomationKind::Graph;
+        app.graphs = vec![graph_with_status(
+            crate::domain::graphs::GraphStatus::Completed,
+        )];
+        app.selected_graph_id = Some("lp1".to_string());
+        app.graph_live_state = Some(crate::tui::app::graph_live_state::GraphLiveState {
+            graph_id: "lp1".to_string(),
+            graph_name: "Nightly review".to_string(),
+            graph_status: crate::domain::graphs::GraphStatus::Completed,
+            workdir: "/tmp".to_string(),
+            trigger_type: "manual".to_string(),
+            schedule_expr: None,
+            watch_path: None,
+            autorun_at: None,
+            spec_queue: Vec::new(),
+            done_count: 0,
+            total_count: 0,
+            current_spec_id: None,
+            effective_nodes: vec![
+                crate::domain::graphs::GraphNode {
+                    id: "n1".to_string(),
+                    spec_id: None,
+                    graph_id: Some("lp1".to_string()),
+                    name: "Implement".to_string(),
+                    kind: crate::domain::graphs::GraphNodeKind::Agent,
+                    config: serde_json::json!({}),
+                    position: 0,
+                    created_at: Utc::now(),
+                },
+                crate::domain::graphs::GraphNode {
+                    id: "n2".to_string(),
+                    spec_id: None,
+                    graph_id: Some("lp1".to_string()),
+                    name: "Review".to_string(),
+                    kind: crate::domain::graphs::GraphNodeKind::Check,
+                    config: serde_json::json!({}),
+                    position: 1,
+                    created_at: Utc::now(),
+                },
+            ],
+            effective_edges: vec![crate::domain::graphs::GraphEdge {
+                id: "e1".to_string(),
+                spec_id: None,
+                graph_id: Some("lp1".to_string()),
+                from_node: "n1".to_string(),
+                to_node: "n2".to_string(),
+                condition: crate::domain::graphs::GraphEdgeCondition::Pass,
+            }],
             ensembles: Vec::new(),
             router_taken_routes: std::collections::HashMap::new(),
             current_node_id: None,
@@ -1526,15 +1949,152 @@ mod preview_key_tests {
             current_node_iteration: None,
             current_node_output_tail: None,
         });
+        app.graph_live_follow = true;
+        app.graph_live_selected_node = None;
 
-        let before_follow = app.loop_graph_follow;
-        handle_preview_key(&mut app, KeyCode::Right, KeyModifiers::NONE).unwrap();
-        // Moving the graph highlight right drops auto-follow, same as always.
-        assert_ne!(before_follow, app.loop_graph_follow);
+        handle_preview_key(&mut app, KeyCode::Enter, KeyModifiers::NONE).unwrap();
+        assert!(!app.graph_live_follow, "Enter must switch to manual mode");
+        assert!(
+            app.graph_live_selected_node.is_some(),
+            "a seed must exist on a finished graph"
+        );
 
-        let before_focus = app.loop_live_focus;
-        handle_preview_key(&mut app, KeyCode::Tab, KeyModifiers::NONE).unwrap();
-        assert_ne!(before_focus, app.loop_live_focus);
+        app.refresh_graphs_selection();
+        assert!(
+            !app.graph_live_follow,
+            "refresh must keep manual mode when the seed still exists"
+        );
+
+        let before = app.graph_live_selected_node.clone();
+        handle_preview_key(&mut app, KeyCode::Down, KeyModifiers::NONE).unwrap();
+        assert_ne!(
+            app.graph_live_selected_node, before,
+            "plain Down must move inside the graph"
+        );
+        assert_eq!(
+            app.selected_graph_id.as_deref(),
+            Some("lp1"),
+            "plain Down must not move the sidebar to the next graph"
+        );
+    }
+
+    #[test]
+    fn enter_on_a_paused_graph_seeds_the_entry_node() {
+        // CT24 FR1 (c): with no runs to consult, Enter must seed the graph's
+        // entry node (first effective node) — not stay in follow with a None
+        // selection.
+        let mut app = app_on_graph(crate::domain::graphs::GraphStatus::Paused);
+        app.graph_live_state = Some(crate::tui::app::graph_live_state::GraphLiveState {
+            graph_id: "lp1".to_string(),
+            graph_name: "Nightly review".to_string(),
+            graph_status: crate::domain::graphs::GraphStatus::Paused,
+            workdir: "/tmp".to_string(),
+            trigger_type: "manual".to_string(),
+            schedule_expr: None,
+            watch_path: None,
+            autorun_at: None,
+            spec_queue: Vec::new(),
+            done_count: 0,
+            total_count: 0,
+            current_spec_id: None,
+            effective_nodes: vec![
+                crate::domain::graphs::GraphNode {
+                    id: "n1".to_string(),
+                    spec_id: None,
+                    graph_id: Some("lp1".to_string()),
+                    name: "Implement".to_string(),
+                    kind: crate::domain::graphs::GraphNodeKind::Agent,
+                    config: serde_json::json!({}),
+                    position: 0,
+                    created_at: Utc::now(),
+                },
+                crate::domain::graphs::GraphNode {
+                    id: "n2".to_string(),
+                    spec_id: None,
+                    graph_id: Some("lp1".to_string()),
+                    name: "Review".to_string(),
+                    kind: crate::domain::graphs::GraphNodeKind::Check,
+                    config: serde_json::json!({}),
+                    position: 1,
+                    created_at: Utc::now(),
+                },
+            ],
+            effective_edges: vec![crate::domain::graphs::GraphEdge {
+                id: "e1".to_string(),
+                spec_id: None,
+                graph_id: Some("lp1".to_string()),
+                from_node: "n1".to_string(),
+                to_node: "n2".to_string(),
+                condition: crate::domain::graphs::GraphEdgeCondition::Pass,
+            }],
+            ensembles: Vec::new(),
+            router_taken_routes: std::collections::HashMap::new(),
+            current_node_id: None,
+            current_node_status: None,
+            current_node_started_at: None,
+            current_node_iteration: None,
+            current_node_output_tail: None,
+        });
+        app.graph_live_follow = true;
+        app.graph_live_selected_node = None;
+
+        handle_preview_key(&mut app, KeyCode::Enter, KeyModifiers::NONE).unwrap();
+        assert!(!app.graph_live_follow, "Enter must switch to manual mode");
+        assert_eq!(
+            app.graph_live_selected_node.as_deref(),
+            Some("n1"),
+            "the entry node must be selected when there is no run to seed from"
+        );
+    }
+
+    fn app_on_two_graphs() -> App {
+        let mut app = app_with_agents();
+        app.focus = Focus::Preview;
+        app.sidebar_layer = SidebarLayer::Automation;
+        app.automation_kind = crate::tui::app::AutomationKind::Graph;
+        app.agents = Vec::new();
+        let now = Utc::now();
+        let mut g1 = graph_with_status(crate::domain::graphs::GraphStatus::Running);
+        g1.id = "g1".to_string();
+        g1.created_at = now;
+        let mut g2 = graph_with_status(crate::domain::graphs::GraphStatus::Running);
+        g2.id = "g2".to_string();
+        g2.created_at = now - chrono::Duration::seconds(10);
+        app.graphs = vec![g1, g2];
+        app.selected_graph_id = Some("g1".to_string());
+        app
+    }
+
+    #[test]
+    fn shift_down_moves_between_graphs_without_entering_either() {
+        // CT23 FR1/FR5: Shift+Down must move the sidebar selection to the
+        // next graph, not navigate inside the first one, and the
+        // destination must land in auto mode (not entered).
+        let mut app = app_on_two_graphs();
+
+        handle_preview_key(&mut app, KeyCode::Down, KeyModifiers::SHIFT).unwrap();
+
+        assert_eq!(app.selected_graph_id.as_deref(), Some("g2"));
+        assert!(
+            app.graph_live_follow,
+            "landing on the next graph must not be in manual/entered mode"
+        );
+    }
+
+    #[test]
+    fn shift_down_reaches_next_graph_even_while_entered() {
+        // CT23 FR1: once a graph is entered (manual navigation active),
+        // Shift+Down must still move to the next graph — the previous bug
+        // captured it as internal sibling navigation instead.
+        let mut app = app_on_two_graphs();
+        app.graph_live_state = Some(running_live_state());
+
+        handle_preview_key(&mut app, KeyCode::Enter, KeyModifiers::NONE).unwrap();
+        assert!(!app.graph_live_follow, "Enter must switch to manual mode");
+
+        handle_preview_key(&mut app, KeyCode::Down, KeyModifiers::SHIFT).unwrap();
+
+        assert_eq!(app.selected_graph_id.as_deref(), Some("g2"));
     }
 
     fn spawn_cat_agent(name: &str) -> crate::tui::agent::InteractiveAgent {
@@ -1592,5 +2152,74 @@ mod preview_key_tests {
 
         assert!(!matches!(app.focus, Focus::ContextTransfer));
         app.interactive_agents[0].kill();
+    }
+
+    // ── CT6: preview owns plain Up/Down regardless of child claim ────
+
+    fn app_with_two_claimed_interactive_sessions() -> App {
+        let first = spawn_cat_agent("ct6-first");
+        *first.kitty_keyboard_flags.lock().expect("lock") = Some(7);
+        let second = spawn_cat_agent("ct6-second");
+        second.vt.lock().expect("vt lock").process(b"\x1b[?1049h");
+        assert!(first.kitty_keyboard_negotiated());
+        assert!(second.in_alternate_screen());
+
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        app.interactive_agents = vec![first, second];
+        app.agents = vec![AgentEntry::Interactive(0), AgentEntry::Interactive(1)];
+        app.selected = 0;
+        app.focus = Focus::Preview;
+        app
+    }
+
+    #[test]
+    fn preview_down_navigates_despite_claimed_selected_child() {
+        // The selected session negotiated Kitty (Codex shape); plain Down
+        // must still move the preview selection, not reach the child.
+        let mut app = app_with_two_claimed_interactive_sessions();
+
+        handle_preview_key(&mut app, KeyCode::Down, KeyModifiers::NONE).unwrap();
+
+        assert_eq!(app.selected, 1);
+        assert!(matches!(app.focus, Focus::Preview));
+        app.interactive_agents[0].kill();
+        app.interactive_agents[1].kill();
+    }
+
+    #[test]
+    fn preview_up_navigates_despite_claimed_selected_child() {
+        // The selected session entered the alternate screen (vim shape);
+        // plain Up must still move the preview selection.
+        let mut app = app_with_two_claimed_interactive_sessions();
+        app.selected = 1;
+
+        handle_preview_key(&mut app, KeyCode::Up, KeyModifiers::NONE).unwrap();
+
+        assert_eq!(app.selected, 0);
+        assert!(matches!(app.focus, Focus::Preview));
+        app.interactive_agents[0].kill();
+        app.interactive_agents[1].kill();
+    }
+
+    #[test]
+    fn preview_enter_on_claimed_child_still_enters_focus() {
+        // Entering focus by keyboard is unchanged: log scroll resets and
+        // focus becomes Agent, exactly as for an unclaimed child.
+        let mut app = app_with_two_claimed_interactive_sessions();
+        app.log_scroll = 9;
+
+        handle_preview_key(&mut app, KeyCode::Enter, KeyModifiers::NONE).unwrap();
+
+        assert!(matches!(app.focus, Focus::Agent));
+        assert_eq!(app.log_scroll, 0);
+        app.interactive_agents[0].kill();
+        app.interactive_agents[1].kill();
     }
 }

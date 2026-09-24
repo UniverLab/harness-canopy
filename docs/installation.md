@@ -72,6 +72,14 @@ canopy daemon install-service     # register with systemd/launchd
 canopy daemon uninstall-service
 ```
 
+`canopy daemon install-service` (and first-time `canopy setup` when it
+installs the unit) copies `BROWSER`, `DISPLAY` and `WAYLAND_DISPLAY` —
+only when set in the installing shell, verbatim, with whitespace quoted —
+into the systemd unit. Re-running preserves previously stored values for
+keys missing from the current environment. Hand drop-ins under
+`~/.config/systemd/user/canopy.service.d/` are never touched. `canopy
+doctor` warns when the unit lacks `BROWSER`.
+
 ## Data directory
 
 All state lives under `~/.canopy/`:
@@ -85,6 +93,12 @@ All state lives under `~/.canopy/`:
 | Configuration | `~/.canopy/config.toml` | TOML |
 | Agent logs | `~/.canopy/logs/<id>.log` | Text (5 MB rotation) |
 | Daemon log | `~/.canopy/daemon.log` | Text |
+
+Each `[[clis]]` entry in `~/.canopy/config.toml` may also carry the
+infra-retry budget for every agent node/member dispatched on that
+platform: `infra_retry_limit` (default 2), `infra_crash_max_seconds`
+(default 60) and `infra_backoff_seconds` (default 30). More specific
+ensemble/member/node overrides win; see docs/graphs.md.
 
 ## Health check
 

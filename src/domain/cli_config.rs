@@ -44,7 +44,7 @@ pub struct CliConfig {
     pub session_resume_cmd: Option<String>,
     /// Flag that SETS the session id when spawning a NEW headless session,
     /// e.g. `"--session-id"` on claude/gemini/qwen/copilot. Canopy mints a
-    /// UUID, passes it after this flag, and records it on the loop run so
+    /// UUID, passes it after this flag, and records it on the graph run so
     /// the session can be resumed later. Preferred capture strategy: the id
     /// is known before the process even starts, so nothing has to be parsed
     /// from output or session listings.
@@ -86,6 +86,13 @@ pub struct CliConfig {
     /// hot path.
     #[serde(default)]
     pub models_list_cmd: Option<String>,
+    /// Command + expected substring that proves the resolved binary is this platform.
+    /// When `None`, no verification is done (backward compatible).
+    /// `cmd` is shell-words-split and appended to the resolved binary, e.g. `"--version"`.
+    /// `contains` is matched case-insensitively against combined stdout+stderr.
+    /// Example (registry): `identity_check = { cmd = "--version", contains = "blackbox" }`
+    #[serde(default)]
+    pub identity_check: Option<IdentityCheck>,
     /// RGB accent color for this CLI's agents in the TUI.
     #[serde(default)]
     pub accent_color: Option<[u8; 3]>,
@@ -131,6 +138,168 @@ pub struct CliConfig {
     /// rather than just closing multi-line entry. Defaults to 1.
     #[serde(default = "default_paste_submit_presses")]
     pub paste_submit_presses: u8,
+    /// Declarative template for argv assembly. Whitespace-separated tokens;
+    /// each token may contain `{{marker}}` (required) or `{{marker?}}`
+    /// (optional) placeholders. Markers: `{{prompt}}`, `{{model}}`,
+    /// `{{effort}}`, `{{mcp_config}}`, `{{session_id}}`, `{{session_flag}}`,
+    /// `{{workdir}}`. Headless mode flags (`headless_mode`) are always
+    /// prepended before the template tokens; they are not part of the
+    /// template. When `None`, falls back to the legacy fixed-order assembly
+    /// (backward compat for platforms not yet migrated).
+    ///
+    /// Substitution rules:
+    /// - A token containing any unavailable REQUIRED marker (`{{marker}}`)
+    ///   is dropped entirely.
+    /// - An unavailable OPTIONAL marker (`{{marker?}}`) is removed from its
+    ///   token along with the literal text bound to it — the run of
+    ///   non-marker characters immediately before it inside the token
+    ///   (e.g. the `#` in `{{model}}#{{effort?}}`) — and the rest of the
+    ///   token still renders from its remaining markers.
+    /// - A token that renders empty (all its markers were optional and
+    ///   unavailable) is dropped entirely, same as a required-marker drop.
+    /// - A literal flag token (starts with `-`) immediately followed by a
+    ///   dropped token is also dropped (prevents orphan flags).
+    /// - A token like `--flag={{marker}}` is dropped as a unit if the marker
+    ///   is unavailable (no orphan flag possible).
+    /// - A token like `{{model}}[effort={{effort}}]` is dropped if either
+    ///   marker is unavailable; if both are available, the result is one
+    ///   argv word (no shell reinterpretation).
+    /// - `{{model}}` must always stay required in a model-bearing token —
+    ///   spelling it `{{model?}}` is rejected (see
+    ///   `CliStrategy::unsafe_optional_model_token`): it would let the
+    ///   model argument silently vanish when model is absent.
+    #[serde(default)]
+    pub invocation_template: Option<String>,
+    /// Declarative effort support. See [`EffortDeclaration`].
+    #[serde(default)]
+    pub effort_declaration: Option<EffortDeclaration>,
+    /// CM30: infra-retry budget for every agent node/member dispatched on
+    /// this platform, absent a more specific override (node config, ensemble
+    /// default, member override — see `graph_engine::resolve_node_infra_config`).
+    /// `None` means "defer to the engine default" (`DEFAULT_INFRA_RETRY_LIMIT`
+    /// = 2). Read fresh from `~/.canopy/config.toml` on every dispatch — no
+    /// caching, no daemon restart needed to pick up an edit.
+    #[serde(default)]
+    pub infra_retry_limit: Option<u32>,
+    /// CM30: see `infra_retry_limit`. `None` defers to
+    /// `DEFAULT_INFRA_CRASH_MAX_SECONDS` (60).
+    #[serde(default)]
+    pub infra_crash_max_seconds: Option<u64>,
+    /// CM30: see `infra_retry_limit`. `None` defers to
+    /// `DEFAULT_INFRA_BACKOFF_SECONDS` (30).
+    #[serde(default)]
+    pub infra_backoff_seconds: Option<u64>,
+    /// Human product identity from the registry (canopy-registry PR #2).
+    /// Optional: hand-added or pre-PR#2 entries lack them and render as slug.
+    /// Identity/matching/storage always use `name`; these are display-only.
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub tool_name: Option<String>,
+}
+
+/// Display string for a platform slug: "Provider · Tool" when both known,
+/// "Tool" when only tool known, slug otherwise. Pure; never used for matching.
+pub fn platform_display_name(
+    slug: &str,
+    provider: Option<&str>,
+    tool_name: Option<&str>,
+) -> String {
+    let provider = provider.map(str::trim).filter(|s| !s.is_empty());
+    let tool_name = tool_name.map(str::trim).filter(|s| !s.is_empty());
+    match (provider, tool_name) {
+        (Some(p), Some(t)) => format!("{p} · {t}"),
+        (None, Some(t)) => t.to_string(),
+        _ => {
+            if slug.is_empty() {
+                tool_name.or(provider).unwrap_or("unknown").to_string()
+            } else {
+                slug.to_string()
+            }
+        }
+    }
+}
+
+/// Identity check proving the resolved binary is the intended AI CLI.
+///
+/// `cmd` is shell-words-split and appended to the resolved binary path
+/// (e.g. `"--version"`); `contains` must appear (case-insensitively) in the
+/// combined stdout+stderr for the binary to be accepted. Diagnosis-only
+/// (probe/doctor, CB44) — never run on dispatch.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IdentityCheck {
+    pub cmd: String,
+    pub contains: String,
+}
+
+/// How this CLI exposes reasoning-effort control.
+/// `None` = not yet declared (legacy compat); `Some` with empty `values`
+/// = explicitly not supported; `Some` with values = supported.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct EffortDeclaration {
+    /// The flag/form used to pass effort. Examples:
+    /// - `"--effort"` (claude) — simple flag, value as next arg
+    /// - `"-c"` (codex) — value is `'model_reasoning_effort="{{effort}}"'`
+    /// - `""` (platforms that don't support effort)
+    #[serde(default)]
+    pub form: Option<String>,
+    /// The values this CLI accepts, e.g. `["low", "medium", "high"]`.
+    /// Empty = not supported.
+    #[serde(default)]
+    pub values: Vec<String>,
+}
+
+/// The one place the "why `effort = value` won't apply on `platform`" wording
+/// is produced. `None` means it WILL apply. Every surface that reports
+/// non-application — the graph run record, `graph_preflight`, the background
+/// agent log — goes through this so the message can never drift between them
+/// (the CM7 pre-mortem: a notice that says one thing here and another there
+/// is a notice someone stops trusting).
+pub fn effort_rejection_reason(
+    declaration: Option<&EffortDeclaration>,
+    platform: &str,
+    value: &str,
+) -> Option<String> {
+    match declaration {
+        None => Some(format!("platform '{platform}' does not support effort")),
+        Some(d) if d.values.is_empty() => {
+            Some(format!("platform '{platform}' does not support effort"))
+        }
+        Some(d) if d.values.iter().any(|v| v == value) => None,
+        Some(d) => Some(format!(
+            "value '{value}' not in platform's accepted values: [{}]",
+            d.values.join(", ")
+        )),
+    }
+}
+
+/// Whether `model_flag` names a real model-selection flag. `None` (the
+/// platform never declared one) and a blank string (CB34 — antigravity's
+/// `model_flag = ""`, which was being emitted as a stray empty argv word the
+/// CLI rejects before the run starts) both mean "this platform cannot select
+/// a model explicitly". The invocation path, the probe and `graph_preflight`
+/// all read this one function so they can never disagree.
+pub fn model_flag_selects_model(model_flag: Option<&str>) -> bool {
+    matches!(model_flag, Some(f) if !f.trim().is_empty())
+}
+
+/// The one place the "why `model = value` won't apply on `platform`" wording
+/// is produced, mirroring [`effort_rejection_reason`]. `None` means the model
+/// WILL be applied. `Some(msg)` names both the platform and the model that
+/// was asked for and could not be honoured — never a silent drop, never a
+/// silent fallback to a default.
+pub fn model_rejection_reason(
+    model_flag: Option<&str>,
+    platform: &str,
+    model: &str,
+) -> Option<String> {
+    if model_flag_selects_model(model_flag) {
+        None
+    } else {
+        Some(format!(
+            "platform '{platform}' cannot select a model; requested model '{model}' was not applied"
+        ))
+    }
 }
 
 fn default_paste_submit_presses() -> u8 {
@@ -198,6 +367,15 @@ pub struct CliRegistry {
 }
 
 impl CliConfig {
+    /// Display string for this platform; see [`platform_display_name`].
+    pub fn display_name(&self) -> String {
+        platform_display_name(
+            &self.name,
+            self.provider.as_deref(),
+            self.tool_name.as_deref(),
+        )
+    }
+
     /// Check if this CLI is available in the given PATH.
     ///
     /// Uses the shared resolver (`resolve_binary_in`) so detection can never
@@ -324,6 +502,7 @@ mod tests {
             session_list_format_args: None,
             session_id_pattern: None,
             models_list_cmd: None,
+            identity_check: None,
             accent_color: None,
             yolo_flag: None,
             trust_flag: None,
@@ -332,6 +511,13 @@ mod tests {
             paste_submit_delay_ms: None,
             paste_submit_key: None,
             paste_submit_presses: 1,
+            invocation_template: None,
+            effort_declaration: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
+            provider: None,
+            tool_name: None,
         }
     }
 
@@ -554,6 +740,11 @@ mod tests {
         assert!(config.paste_submit_key.is_none());
         // Default derive uses u8::default() = 0, not the serde default fn
         assert_eq!(config.paste_submit_presses, 0);
+        assert!(config.invocation_template.is_none());
+        assert!(config.effort_declaration.is_none());
+        assert!(config.infra_retry_limit.is_none());
+        assert!(config.infra_crash_max_seconds.is_none());
+        assert!(config.infra_backoff_seconds.is_none());
     }
 
     #[test]
@@ -643,5 +834,186 @@ mod tests {
         let json = serde_json::to_string(&config).unwrap();
         let deserialized: CliConfig = serde_json::from_str(&json).unwrap();
         assert!(deserialized.accent_color.is_none());
+    }
+
+    #[test]
+    fn effort_declaration_deserialize_supported() {
+        let json =
+            r#"{"effort_declaration": {"form": "--effort", "values": ["low", "medium", "high"]}}"#;
+        let config: CliConfig = serde_json::from_str(json).unwrap();
+        assert!(config.effort_declaration.is_some());
+        let decl = config.effort_declaration.unwrap();
+        assert_eq!(decl.form, Some("--effort".to_string()));
+        assert_eq!(decl.values, vec!["low", "medium", "high"]);
+    }
+
+    #[test]
+    fn effort_declaration_deserialize_not_supported() {
+        let json = r#"{"effort_declaration": {"form": "", "values": []}}"#;
+        let config: CliConfig = serde_json::from_str(json).unwrap();
+        assert!(config.effort_declaration.is_some());
+        let decl = config.effort_declaration.unwrap();
+        assert_eq!(decl.form, Some(String::new()));
+        assert!(decl.values.is_empty());
+    }
+
+    #[test]
+    fn effort_declaration_absent_when_not_in_json() {
+        let json = r#"{}"#;
+        let config: CliConfig = serde_json::from_str(json).unwrap();
+        assert!(config.effort_declaration.is_none());
+    }
+
+    #[test]
+    fn effort_declaration_serde_roundtrip() {
+        let mut config = sample_cli_config();
+        config.effort_declaration = Some(EffortDeclaration {
+            form: Some("--variant".to_string()),
+            values: vec!["high".to_string(), "max".to_string()],
+        });
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: CliConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.effort_declaration, config.effort_declaration);
+    }
+
+    #[test]
+    fn infra_retry_fields_serde_roundtrip() {
+        let mut config = sample_cli_config();
+        config.infra_retry_limit = Some(0);
+        config.infra_crash_max_seconds = Some(120);
+        config.infra_backoff_seconds = Some(15);
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: CliConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.infra_retry_limit, Some(0));
+        assert_eq!(deserialized.infra_crash_max_seconds, Some(120));
+        assert_eq!(deserialized.infra_backoff_seconds, Some(15));
+    }
+
+    #[test]
+    fn effort_rejection_reason_none_declaration_is_unsupported() {
+        let r = effort_rejection_reason(None, "opencode", "high");
+        assert_eq!(
+            r.as_deref(),
+            Some("platform 'opencode' does not support effort")
+        );
+    }
+
+    #[test]
+    fn effort_rejection_reason_empty_values_is_unsupported() {
+        let decl = EffortDeclaration {
+            form: Some(String::new()),
+            values: vec![],
+        };
+        let r = effort_rejection_reason(Some(&decl), "cline", "high");
+        assert_eq!(
+            r.as_deref(),
+            Some("platform 'cline' does not support effort")
+        );
+    }
+
+    #[test]
+    fn effort_rejection_reason_none_when_value_accepted() {
+        let decl = EffortDeclaration {
+            form: Some("--effort".to_string()),
+            values: vec!["low".to_string(), "medium".to_string(), "high".to_string()],
+        };
+        assert_eq!(effort_rejection_reason(Some(&decl), "claude", "high"), None);
+    }
+
+    #[test]
+    fn effort_rejection_reason_lists_accepted_values_when_value_rejected() {
+        let decl = EffortDeclaration {
+            form: Some("--effort".to_string()),
+            values: vec!["low".to_string(), "high".to_string()],
+        };
+        let r = effort_rejection_reason(Some(&decl), "claude", "ultra");
+        assert_eq!(
+            r.as_deref(),
+            Some("value 'ultra' not in platform's accepted values: [low, high]")
+        );
+    }
+
+    #[test]
+    fn model_flag_selects_model_true_only_for_nonblank() {
+        assert!(model_flag_selects_model(Some("--model")));
+        assert!(!model_flag_selects_model(Some("")));
+        assert!(!model_flag_selects_model(Some("   ")));
+        assert!(!model_flag_selects_model(None));
+    }
+
+    #[test]
+    fn model_rejection_reason_none_when_flag_is_real() {
+        assert_eq!(
+            model_rejection_reason(Some("--model"), "codex", "gpt-5"),
+            None
+        );
+    }
+
+    #[test]
+    fn model_rejection_reason_names_platform_and_model_when_flag_blank() {
+        let r = model_rejection_reason(Some(""), "antigravity", "claude-opus-4-8")
+            .expect("blank model_flag must produce a reason");
+        assert!(r.contains("antigravity"), "must name the platform: {r}");
+        assert!(r.contains("claude-opus-4-8"), "must name the model: {r}");
+    }
+
+    #[test]
+    fn model_rejection_reason_names_platform_and_model_when_flag_absent() {
+        let r = model_rejection_reason(None, "mistral", "mistral-medium-latest")
+            .expect("absent model_flag must produce a reason");
+        assert!(r.contains("mistral"));
+        assert!(r.contains("mistral-medium-latest"));
+    }
+
+    #[test]
+    fn display_both_known_uses_middle_dot() {
+        assert_eq!(
+            platform_display_name("mistral", Some("Mistral AI"), Some("Vibe")),
+            "Mistral AI · Vibe"
+        );
+    }
+
+    #[test]
+    fn display_tool_only() {
+        assert_eq!(
+            platform_display_name("mimo", None, Some("MiMo Code CLI")),
+            "MiMo Code CLI"
+        );
+    }
+
+    #[test]
+    fn display_none_falls_back_to_slug() {
+        assert_eq!(platform_display_name("mistral", None, None), "mistral");
+    }
+
+    #[test]
+    fn display_provider_only_falls_back_to_slug() {
+        assert_eq!(platform_display_name("x", Some("Google"), None), "x");
+    }
+
+    #[test]
+    fn display_trims_and_treats_blank_as_absent() {
+        assert_eq!(
+            platform_display_name("x", Some("  "), Some(" Vibe ")),
+            "Vibe"
+        );
+    }
+
+    #[test]
+    fn serde_absent_fields_default_to_none() {
+        let config: CliConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(config.provider, None);
+        assert_eq!(config.tool_name, None);
+    }
+
+    #[test]
+    fn serde_roundtrip_carries_new_fields() {
+        let mut config = sample_cli_config();
+        config.provider = Some("Mistral AI".to_string());
+        config.tool_name = Some("Vibe".to_string());
+        let json = serde_json::to_string(&config).unwrap();
+        let back: CliConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.provider.as_deref(), Some("Mistral AI"));
+        assert_eq!(back.tool_name.as_deref(), Some("Vibe"));
     }
 }

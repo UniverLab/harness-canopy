@@ -21,6 +21,10 @@ const CLI_PICKER_VISIBLE: usize = 6;
 const MODEL_PICKER_VISIBLE: usize = 5;
 const SESSION_PICKER_VISIBLE: usize = 6;
 const DIR_BROWSER_VISIBLE: usize = 10;
+/// Floor for the folder list when the frame is too short for the whole dialog:
+/// the list shrinks first, and never below this many rows, before any other
+/// row is cut (CT25 FR2).
+const MIN_DIR_BROWSER_VISIBLE: usize = 3;
 pub(crate) const SESSION_RESUME_PICKER_VISIBLE: usize = 6;
 
 #[derive(Clone, Copy)]
@@ -32,6 +36,7 @@ struct FieldLayout {
     extra: usize,
     dir: usize,
     yolo: usize,
+    sandbox: usize,
 }
 
 impl FieldLayout {
@@ -45,6 +50,7 @@ impl FieldLayout {
                 extra: 5,
                 dir: 6,
                 yolo: 4,
+                sandbox: 7,
             },
             NewTaskType::Terminal => Self {
                 cli: 0,
@@ -54,6 +60,7 @@ impl FieldLayout {
                 extra: 5,
                 dir: TERMINAL_DIR_FIELD,
                 yolo: 4,
+                sandbox: 0,
             },
             NewTaskType::Background => Self {
                 cli: 2,
@@ -63,6 +70,7 @@ impl FieldLayout {
                 extra: 5,
                 dir: 6,
                 yolo: 4,
+                sandbox: 0,
             },
         }
     }
@@ -77,7 +85,7 @@ struct PickerWindow {
 
 impl PickerWindow {
     fn new(selected: usize, total: usize, max_visible: usize) -> Self {
-        let scroll = selected.saturating_sub(max_visible.saturating_sub(1));
+        let scroll = crate::tui::selection::clamp_scroll(selected, 0, total, max_visible);
         Self {
             scroll,
             has_above: scroll > 0,
@@ -93,82 +101,74 @@ pub fn draw_new_agent_dialog(frame: &mut Frame, app: &App, theme: &Theme) {
 
     let accent = dialog.selected_accent_color(theme);
     let filtered_clis = dialog.filtered_cli_indices();
-    let area = centered_rect(65, dialog_height(dialog, &filtered_clis), frame.area());
+    let field_width = prompt_field_width(frame.area());
+    let dir_visible = visible_dir_rows(
+        dialog,
+        accent,
+        &filtered_clis,
+        field_width,
+        theme,
+        frame.area(),
+    );
+    let lines = build_dialog_lines(
+        dialog,
+        accent,
+        &filtered_clis,
+        field_width,
+        theme,
+        dir_visible,
+    );
+    let height = dialog_height(&lines, frame.area());
+
+    let area = centered_rect(65, height, frame.area());
     frame.render_widget(Clear, area);
     draw_dialog_left_wave(frame, area, app.animation_tick.into());
 
-    let field_width = prompt_field_width(frame.area());
-
     let block = Block::default()
         .title(dialog_title(dialog))
-        .borders(crate::tui::ui::borders_for(theme))
+        .borders(crate::tui::ui::dialog_borders_for(theme))
         .border_style(Style::default().fg(accent))
         .style(Style::default().bg(theme.dialog_bg));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
-
-    let lines = build_dialog_lines(dialog, accent, &filtered_clis, field_width, theme);
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
 // ── Form state ───────────────────────────────────────────────────────────────
 
-fn dialog_height(dialog: &NewAgentDialog, filtered_clis: &[usize]) -> u16 {
-    let dir_rows = dir_browser_rows(dialog);
-    let prompt_rows = if matches!(dialog.task_type, NewTaskType::Background) {
-        // 1 label row + 3 visible prompt rows
-        1 + PROMPT_VISIBLE_ROWS as u16
-    } else {
-        0
-    };
-    let base_height = match dialog.task_type {
-        NewTaskType::Interactive => 14 + dir_rows,
-        NewTaskType::Terminal => 10 + dir_rows,
-        NewTaskType::Background => 15 + dir_rows + prompt_rows,
-    };
-
-    base_height
-        + cli_picker_rows(dialog, filtered_clis.len())
-        + model_picker_rows(dialog)
-        + session_resume_picker_rows(dialog)
+/// Total dialog height (content lines + 2 border rows), clamped to the frame.
+fn dialog_height(lines: &[Line<'static>], frame_area: Rect) -> u16 {
+    (lines.len() + 2).min(frame_area.height as usize) as u16
 }
 
-fn session_resume_picker_rows(dialog: &NewAgentDialog) -> u16 {
-    let Some(picker) = &dialog.session_resume_picker else {
-        return 0;
-    };
-
-    let visible = picker.sessions.len().min(SESSION_RESUME_PICKER_VISIBLE);
-    let overflow_line = usize::from(picker.sessions.len() > SESSION_RESUME_PICKER_VISIBLE);
-    (visible + overflow_line) as u16
-}
-
-fn cli_picker_rows(dialog: &NewAgentDialog, filtered_clis_len: usize) -> u16 {
-    if !dialog.cli_picker_open {
+/// How many folder rows fit the frame: try the preferred window
+/// (`DIR_BROWSER_VISIBLE`), and when the built dialog would overflow, shrink the
+/// folder list by exactly the overflow — never below `MIN_DIR_BROWSER_VISIBLE` —
+/// before any other row is cut. Returns 0 when the browser has nothing to list
+/// (the `(no matches)` / absent browser states don't depend on this count).
+fn visible_dir_rows(
+    dialog: &NewAgentDialog,
+    accent: Color,
+    filtered_clis: &[usize],
+    field_width: usize,
+    theme: &Theme,
+    frame_area: Rect,
+) -> usize {
+    let filtered = dialog.filtered_dir_entries();
+    if filtered.is_empty() {
         return 0;
     }
-
-    filtered_clis_len.clamp(1, CLI_PICKER_VISIBLE) as u16 + 2
-}
-
-fn model_picker_rows(dialog: &NewAgentDialog) -> u16 {
-    if !dialog.model_picker_open || dialog.model_suggestions.is_empty() {
-        return 0;
+    let preferred = filtered.len().min(DIR_BROWSER_VISIBLE);
+    let inner = frame_area.height.saturating_sub(2) as usize;
+    let full =
+        build_dialog_lines(dialog, accent, filtered_clis, field_width, theme, preferred).len();
+    if full <= inner {
+        return preferred;
     }
-
-    let visible = dialog.model_suggestions.len().min(MODEL_PICKER_VISIBLE);
-    let overflow_line = usize::from(dialog.model_suggestions.len() > MODEL_PICKER_VISIBLE);
-    (visible + overflow_line) as u16
-}
-
-fn dir_browser_rows(dialog: &NewAgentDialog) -> u16 {
-    let filtered_entries = dialog.filtered_dir_entries();
-    if filtered_entries.is_empty() && dialog.dir_entries.is_empty() {
-        return 0;
-    }
-
-    3 + filtered_entries.len().min(DIR_BROWSER_VISIBLE) as u16
+    preferred
+        .saturating_sub(full - inner)
+        .max(MIN_DIR_BROWSER_VISIBLE)
 }
 
 fn dialog_title(dialog: &NewAgentDialog) -> &'static str {
@@ -245,6 +245,7 @@ fn build_dialog_lines(
     filtered_clis: &[usize],
     field_width: usize,
     theme: &Theme,
+    dir_visible: usize,
 ) -> Vec<Line<'static>> {
     let layout = FieldLayout::for_task(dialog.task_type);
     let mut lines = dialog_header_lines(dialog, accent, theme);
@@ -259,10 +260,11 @@ fn build_dialog_lines(
                 layout,
                 field_width,
                 theme,
+                dir_visible,
             );
         }
         NewTaskType::Terminal => {
-            append_terminal_sections(&mut lines, dialog, accent, field_width, theme);
+            append_terminal_sections(&mut lines, dialog, accent, field_width, theme, dir_visible);
         }
         NewTaskType::Background => {
             append_background_sections(
@@ -273,6 +275,7 @@ fn build_dialog_lines(
                 layout,
                 field_width,
                 theme,
+                dir_visible,
             );
         }
     }
@@ -415,6 +418,7 @@ fn append_interactive_sections(
     layout: FieldLayout,
     _field_width: usize,
     theme: &Theme,
+    dir_visible: usize,
 ) {
     if !dialog.is_edit_mode() {
         push_spaced_row(lines, interactive_mode_row(dialog, accent, theme));
@@ -427,7 +431,17 @@ fn append_interactive_sections(
     append_session_picker_rows(lines, dialog, theme);
     append_identity_section(lines, dialog, accent, layout.identity, theme);
     append_yolo_section(lines, dialog, accent, layout.yolo, theme);
-    append_directory_section(lines, dialog, accent, layout.dir, false, layout.dir, theme);
+    append_sandbox_section(lines, dialog, accent, layout.sandbox, theme);
+    append_directory_section(
+        lines,
+        dialog,
+        accent,
+        layout.dir,
+        false,
+        layout.dir,
+        theme,
+        dir_visible,
+    );
 }
 
 fn append_terminal_sections(
@@ -436,6 +450,7 @@ fn append_terminal_sections(
     accent: Color,
     _field_width: usize,
     theme: &Theme,
+    dir_visible: usize,
 ) {
     append_directory_section(
         lines,
@@ -445,6 +460,7 @@ fn append_terminal_sections(
         false,
         TERMINAL_DIR_FIELD,
         theme,
+        dir_visible,
     );
     push_spaced_row(lines, terminal_shell_row(dialog, accent, theme));
 }
@@ -458,6 +474,7 @@ fn append_background_sections(
     layout: FieldLayout,
     field_width: usize,
     theme: &Theme,
+    dir_visible: usize,
 ) {
     append_trigger_section(lines, dialog, accent, theme);
     append_cli_section(lines, dialog, accent, filtered_clis, layout.cli, theme);
@@ -474,6 +491,7 @@ fn append_background_sections(
         hide_dir,
         browser_field,
         theme,
+        dir_visible,
     );
 }
 
@@ -570,7 +588,7 @@ fn append_cli_section(
     lines.push(Line::from(vec![
         Span::styled("  Harness: ", Style::default().fg(theme.dim_text)),
         Span::styled(
-            format!(" {} ", dialog.selected_cli()),
+            format!(" {} ", dialog.cli_display_label(dialog.cli_index)),
             focus_style(dialog.field, cli_field, accent),
         ),
         Span::styled(
@@ -601,7 +619,7 @@ fn append_cli_picker_rows(
     let window = PickerWindow::new(dialog.cli_picker_idx, total_matches, CLI_PICKER_VISIBLE);
 
     lines.push(filter_row(
-        "    🔍 ",
+        "    filter: ",
         &dialog.cli_picker_filter,
         dialog.field == cli_field,
         accent,
@@ -627,7 +645,7 @@ fn append_cli_picker_rows(
                     format!("    {} ", if is_selected { "›" } else { " " }),
                     style,
                 ),
-                Span::styled(dialog.available_clis[*cli_idx].as_str().to_string(), style),
+                Span::styled(dialog.cli_display_label(*cli_idx), style),
             ]));
         }
     }
@@ -1127,6 +1145,41 @@ fn append_yolo_section(
     push_spaced_row(lines, Line::from(spans));
 }
 
+fn append_sandbox_section(
+    lines: &mut Vec<Line<'static>>,
+    dialog: &NewAgentDialog,
+    accent: Color,
+    sandbox_field: usize,
+    theme: &Theme,
+) {
+    if sandbox_field == 0 {
+        return;
+    }
+    let checkbox = if dialog.sandbox_mode { "◉" } else { "○" };
+    let checkbox_style = if dialog.field == sandbox_field {
+        focus_style(dialog.field, sandbox_field, accent)
+    } else if dialog.sandbox_mode {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::White)
+    };
+
+    let mut spans = vec![
+        Span::styled("  Sandbox:  ", Style::default().fg(theme.dim_text)),
+        Span::styled(format!("{checkbox} Isolated worktree"), checkbox_style),
+    ];
+    if dialog.sandbox_mode {
+        spans.push(Span::styled(
+            "  no protocol file in repo",
+            Style::default().fg(Color::Cyan),
+        ));
+    }
+
+    push_spaced_row(lines, Line::from(spans));
+}
+
 #[allow(clippy::too_many_arguments)]
 fn append_directory_section(
     lines: &mut Vec<Line<'static>>,
@@ -1136,6 +1189,7 @@ fn append_directory_section(
     hide_dir: bool,
     browser_field: usize,
     theme: &Theme,
+    dir_visible: usize,
 ) {
     if !hide_dir {
         push_spaced_row(lines, working_dir_row(dialog, accent, dir_field, theme));
@@ -1149,6 +1203,7 @@ fn append_directory_section(
         accent,
         dialog.field == browser_field,
         theme,
+        dir_visible,
     ));
 }
 
@@ -1190,11 +1245,12 @@ fn dir_browser_lines(
     accent: Color,
     focused: bool,
     theme: &Theme,
+    max_visible: usize,
 ) -> Vec<Line<'static>> {
     let filtered = dialog.filtered_dir_entries();
-    let window = PickerWindow::new(dialog.dir_selected, filtered.len(), DIR_BROWSER_VISIBLE);
+    let window = PickerWindow::new(dialog.dir_selected, filtered.len(), max_visible);
     let mut lines = vec![filter_row(
-        "  🔍 ",
+        "  filter: ",
         &dialog.dir_filter,
         focused,
         accent,
@@ -1211,7 +1267,7 @@ fn dir_browser_lines(
             .iter()
             .enumerate()
             .skip(window.scroll)
-            .take(DIR_BROWSER_VISIBLE)
+            .take(max_visible)
         {
             let style = picker_item_style(accent, i == dialog.dir_selected);
             lines.push(Line::from(Span::styled(format!("    {entry}"), style)));
@@ -1240,7 +1296,13 @@ fn dir_browser_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::Database;
+    use crate::domain::canopy_config::CanopyConfig;
     use crate::tui::app::dialog::new_agent::NewAgentDialog;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use std::sync::Arc;
+    use tempfile::tempdir;
 
     fn dialog_with(prompt: &str) -> NewAgentDialog {
         let mut d = NewAgentDialog::new(Some("."));
@@ -1315,9 +1377,14 @@ mod tests {
     fn background_dialog_height_includes_prompt_block() {
         let mut d = NewAgentDialog::new(Some("."));
         d.task_type = NewTaskType::Background;
-        let h = dialog_height(&d, &[]);
-        // base 15 + 1 label row + 3 input rows = 19 when no pickers / no dir entries
-        assert!(h >= 19, "expected >= 19, got {h}");
+        let theme = Theme::classic();
+        let frame_area = Rect::new(0, 0, 200, 50);
+        let visible = visible_dir_rows(&d, Color::White, &[], 40, &theme, frame_area);
+        let lines = build_dialog_lines(&d, Color::White, &[], 40, &theme, visible);
+        let h = dialog_height(&lines, frame_area);
+        // 16 base rows + 1 label + 3 prompt rows + 2 borders = 22, well above the
+        // old floor of 19; the point is the prompt block is no longer eaten.
+        assert!(h >= 22, "expected >= 22, got {h}");
     }
 
     fn spans_text(spans: &[Span<'static>]) -> String {
@@ -1763,5 +1830,250 @@ mod tests {
     #[test]
     fn filter_display_special_chars() {
         assert_eq!(filter_display("test@#$%"), "test@#$%");
+    }
+
+    #[test]
+    fn dialog_renders_no_effort_field() {
+        let mut d = NewAgentDialog::new(Some("."));
+        // Interactive dialog
+        d.task_type = NewTaskType::Interactive;
+        let lines = build_dialog_lines(
+            &d,
+            Color::White,
+            &[],
+            40,
+            &Theme::classic(),
+            DIR_BROWSER_VISIBLE,
+        );
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(
+            !text.contains("Effort"),
+            "interactive dialog must not show effort field"
+        );
+
+        // Background dialog
+        d.task_type = NewTaskType::Background;
+        let lines = build_dialog_lines(
+            &d,
+            Color::White,
+            &[],
+            40,
+            &Theme::classic(),
+            DIR_BROWSER_VISIBLE,
+        );
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(
+            !text.contains("Effort"),
+            "background dialog must not show effort field"
+        );
+    }
+
+    /// (CM32) The dialog renders the product to the person: both the
+    /// selected-harness line and the picker rows show
+    /// `provider · tool_name (slug)`, never the bare slug for a platform
+    /// the registry describes. Storage stays the slug (`selected_cli`),
+    /// proven in the state-level test.
+    #[test]
+    fn cli_section_renders_product_labels() {
+        use crate::domain::cli_config::CliConfig;
+        use crate::domain::models::Cli;
+        let mut d = NewAgentDialog::new(Some("."));
+        d.available_clis = vec![Cli::new("claude"), Cli::new("mistral")];
+        d.cli_configs = vec![
+            Some(CliConfig {
+                name: "claude".to_string(),
+                provider: Some("Anthropic".to_string()),
+                tool_name: Some("Claude Code".to_string()),
+                ..Default::default()
+            }),
+            Some(CliConfig {
+                name: "mistral".to_string(),
+                provider: Some("Mistral AI".to_string()),
+                tool_name: Some("Vibe".to_string()),
+                ..Default::default()
+            }),
+        ];
+        d.cli_picker_open = true;
+        let lines = build_dialog_lines(
+            &d,
+            Color::White,
+            &[0, 1],
+            40,
+            &Theme::classic(),
+            DIR_BROWSER_VISIBLE,
+        );
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(
+            text.contains("Anthropic \u{b7} Claude Code (claude)"),
+            "picker must name the product: {text}"
+        );
+        assert!(
+            text.contains("Mistral AI \u{b7} Vibe (mistral)"),
+            "picker must name the product: {text}"
+        );
+    }
+
+    /// A rendered dialog row: its text, and the bg color of every cell.
+    type RenderedRow = (String, Vec<Option<Color>>);
+
+    fn render_dialog(width: u16, height: u16, app: &App) -> Vec<RenderedRow> {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let theme = Theme::classic();
+        terminal
+            .draw(|frame| draw_new_agent_dialog(frame, app, &theme))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|y| {
+                let mut text = String::new();
+                let mut bgs = Vec::new();
+                for x in 0..buffer.area.width {
+                    let cell = &buffer[(x, y)];
+                    text.push_str(cell.symbol());
+                    bgs.push(Some(cell.bg));
+                }
+                (text, bgs)
+            })
+            .collect()
+    }
+
+    fn join_rows(rows: &[RenderedRow]) -> String {
+        rows.iter()
+            .map(|(t, _)| t.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn app_with_dialog(dialog: NewAgentDialog) -> App {
+        let db_file = tempfile::NamedTempFile::new().unwrap();
+        let path = db_file.path().to_path_buf();
+        std::mem::forget(db_file); // keep the sqlite file alive for the test
+        let db = Arc::new(Database::new(&path).unwrap());
+        let data_dir = tempdir().unwrap();
+        let mut app = App::new(db, data_dir.path(), &CanopyConfig::default()).unwrap();
+        app.new_agent_dialog = Some(dialog);
+        app
+    }
+
+    fn root_with_dirs(names: &[&str]) -> tempfile::TempDir {
+        let root = tempdir().unwrap();
+        for n in names {
+            std::fs::create_dir(root.path().join(n)).unwrap();
+        }
+        root
+    }
+
+    #[test]
+    fn all_six_folders_and_footer_are_drawn_in_a_tall_frame() {
+        let names = ["Academic", "Projects", "bin", "go", "nltk_data", "temp"];
+        let root = root_with_dirs(&names);
+        let dialog = NewAgentDialog::new(Some(root.path().to_string_lossy().as_ref()));
+        let app = app_with_dialog(dialog);
+        let rows = render_dialog(200, 50, &app);
+        let text = join_rows(&rows);
+        for n in names {
+            assert!(
+                text.contains(&format!("{n}/")),
+                "folder {n} must be drawn inside the dialog, screen was:\n{text}"
+            );
+        }
+        assert!(
+            text.contains("1/6"),
+            "footer 1/6 missing, screen was:\n{text}"
+        );
+    }
+
+    #[test]
+    fn scrolled_selection_tenth_of_twelve_is_drawn_and_highlighted() {
+        let names: Vec<String> = (0..12).map(|i| format!("dir{i:02}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let root = root_with_dirs(&refs);
+        let mut dialog = NewAgentDialog::new(Some(root.path().to_string_lossy().as_ref()));
+        // 9× ↓ from 0: the list handler ends in selection index 9.
+        dialog.dir_selected = 9;
+        let accent = dialog.selected_accent_color(&Theme::classic());
+        let app = app_with_dialog(dialog);
+        let rows = render_dialog(200, 50, &app);
+        let text = join_rows(&rows);
+        assert!(
+            text.contains("dir09/"),
+            "10th folder must be drawn, screen was:\n{text}"
+        );
+        let row = rows
+            .iter()
+            .find(|(t, _)| t.contains("dir09/"))
+            .expect("dir09 row present");
+        assert!(
+            row.1.contains(&Some(accent)),
+            "dir09 row must carry the selected accent background"
+        );
+        assert!(
+            text.contains("10/12"),
+            "footer 10/12 missing, screen was:\n{text}"
+        );
+    }
+
+    #[test]
+    fn folder_list_shrinks_to_three_rows_in_a_short_frame() {
+        let names: Vec<String> = (0..12).map(|i| format!("dir{i:02}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let root = root_with_dirs(&refs);
+        let mut dialog = NewAgentDialog::new(Some(root.path().to_string_lossy().as_ref()));
+        dialog.dir_selected = 5; // selection must stay on a drawn row even at the floor
+        let app = app_with_dialog(dialog);
+        let rows = render_dialog(200, 24, &app);
+        let text = join_rows(&rows);
+        // 200x24 fits exactly: 15 chrome lines + filter + 3 entries + footer + blank
+        // + help = 22 content lines, +2 borders = 24 (visible_dir_rows shrinks 10→3).
+        assert!(
+            text.contains("6/12"),
+            "footer must show selected/total: {text}"
+        );
+        let drawn = names
+            .iter()
+            .filter(|n| text.contains(&format!("{n}/")))
+            .count();
+        assert!(
+            drawn >= 3,
+            "at least 3 folder rows must be drawn, got {drawn}:\n{text}"
+        );
+        assert!(
+            text.contains("dir05/"),
+            "the selected entry must be among the drawn rows, screen was:\n{text}"
+        );
+    }
+
+    #[test]
+    fn no_folder_or_filter_glyphs_are_rendered() {
+        let root = root_with_dirs(&["alpha", "bravo"]);
+        let mut dialog = NewAgentDialog::new(Some(root.path().to_string_lossy().as_ref()));
+        dialog.cli_picker_open = true; // the harness picker's filter row shares the glyph
+        let app = app_with_dialog(dialog);
+        let text = join_rows(&render_dialog(200, 50, &app));
+        assert!(
+            !text.contains('📁'),
+            "no folder emoji may be rendered: {text}"
+        );
+        assert!(
+            !text.contains('🔍'),
+            "no magnifier glyph may be rendered: {text}"
+        );
+        assert!(
+            text.contains("filter:"),
+            "filter rows use the plain label: {text}"
+        );
     }
 }

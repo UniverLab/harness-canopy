@@ -9,28 +9,25 @@ use ratatui::widgets::{Block, Paragraph, Wrap};
 use ratatui::Frame;
 
 use super::theme::Theme;
-use super::{
-    truncate_str, truncate_str_keep_tail, INTERACTIVE_COLOR, KIND_ROUTER, STATUS_DISABLED,
-    STATUS_FAIL, STATUS_INTERRUPTED, STATUS_OK, STATUS_RUNNING,
-};
+use super::{truncate_str, truncate_str_keep_tail, STATUS_RUNNING};
 use crate::tui::agent::ScreenSnapshot;
 use crate::tui::app::types::{AgentEntry, App, Focus, ProjectTab, SidebarLayer};
 
 pub mod background_agent;
 pub mod details;
+mod graph_live;
 pub mod home;
 pub mod log_fallback;
-mod loop_live;
 pub mod sync;
 pub mod vt100;
 pub mod warp;
 
 pub(crate) use background_agent::draw_background_agent_panel;
 pub use details::{draw_agent_details, draw_group_details};
+use graph_live::draw_graph_live_view;
 pub(crate) use home::draw_brians_brain;
 pub use log_fallback::draw_log_text;
-use loop_live::draw_loop_live_view;
-pub(crate) use sync::draw_activity_panel;
+pub(crate) use sync::draw_panel_face;
 use vt100::render_vt_screen;
 #[allow(unused_imports)]
 pub use warp::compact_cwd;
@@ -92,9 +89,9 @@ fn recent_project_session_summaries(
     project: &crate::domain::project::Project,
     limit: usize,
 ) -> Vec<(String, String)> {
-    let Ok(nodes) =
-        app.db
-            .search_intelligence_nodes(&project.path, Some("session"), limit.saturating_mul(4))
+    let Ok(nodes) = app
+        .db
+        .search_operational_sessions(&project.path, limit.saturating_mul(4))
     else {
         return Vec::new();
     };
@@ -240,6 +237,62 @@ fn panel_mode_label(app: &App) -> Option<&'static str> {
     }
 }
 
+fn graph_live_mode_label(app: &App) -> Option<&'static str> {
+    if app.sidebar_layer == SidebarLayer::Automation
+        && app.automation_kind == crate::tui::app::AutomationKind::Graph
+        && app.graph_live_state.is_some()
+    {
+        if app.graph_live_follow {
+            Some(" Auto-follow ")
+        } else {
+            Some(" Manual ")
+        }
+    } else {
+        None
+    }
+}
+
+fn render_focus_indicator(
+    frame: &mut Frame,
+    area: Rect,
+    inner: Rect,
+    app: &App,
+    theme: &Theme,
+    label: Option<&str>,
+) {
+    if theme.show_borders || area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let rail_color = match app.focus {
+        Focus::Agent => theme.header_color,
+        Focus::Preview => theme.dim_text,
+        _ => return,
+    };
+    let rail = Rect::new(area.x, area.y, 1, area.height);
+    frame.render_widget(
+        Paragraph::new("█".repeat(rail.height as usize))
+            .style(Style::default().fg(rail_color).bg(rail_color)),
+        rail,
+    );
+
+    if let Some(label) = label.filter(|_| inner.height > 0 && inner.width > 4) {
+        let text = label.trim();
+        let width = text.chars().count() as u16;
+        if width + 2 <= inner.width {
+            let pill_area = Rect::new(inner.x + 1, inner.y, width + 2, 1);
+            let pill = Span::styled(
+                format!(" {text} "),
+                Style::default()
+                    .fg(theme.accent_fg)
+                    .bg(theme.header_color)
+                    .add_modifier(Modifier::BOLD),
+            );
+            frame.render_widget(Paragraph::new(Line::from(pill)), pill_area);
+        }
+    }
+}
+
 fn show_home_fallback(app: &App) -> bool {
     app.agents.is_empty()
         && app.projects.is_empty()
@@ -250,8 +303,8 @@ fn show_home_fallback(app: &App) -> bool {
                 | Focus::ContextTransfer
                 | Focus::RagTransfer
                 | Focus::PromptTemplateDialog
-                | Focus::LoopEditorDialog
-                | Focus::LoopFormDialog
+                | Focus::GraphEditorDialog
+                | Focus::GraphFormDialog
                 | Focus::ProjectRelationDialog
         )
 }
@@ -281,8 +334,8 @@ fn draw_log_panel_focus(frame: &mut Frame, area: Rect, app: &mut App, theme: &Th
         | Focus::ContextTransfer
         | Focus::RagTransfer
         | Focus::PromptTemplateDialog
-        | Focus::LoopEditorDialog
-        | Focus::LoopFormDialog => false,
+        | Focus::GraphEditorDialog
+        | Focus::GraphFormDialog => false,
         Focus::ProjectRelationDialog => {
             draw_project_preview_card(frame, area, app, theme);
             true
@@ -302,9 +355,9 @@ fn draw_preview_panel(frame: &mut Frame, area: Rect, app: &mut App, theme: &Them
     }
 
     if app.sidebar_layer == SidebarLayer::Automation
-        && app.automation_kind == crate::tui::app::AutomationKind::Loop
+        && app.automation_kind == crate::tui::app::AutomationKind::Graph
     {
-        draw_loop_live_view(frame, area, app, theme);
+        draw_graph_live_view(frame, area, app, theme);
         return true;
     }
 
@@ -430,6 +483,28 @@ fn draw_focused_terminal_panel(frame: &mut Frame, area: Rect, app: &mut App, idx
         return false;
     };
 
+    // CT16: the alternate screen must always be full-pane. `last_panel_inner`
+    // is left at the full `inner` size on this path (only
+    // `draw_terminal_warp_mode` overwrites it with the smaller `pty_area`),
+    // which is what `resize_interactive_agents` reports to the child.
+    debug_assert!(
+        !agent.in_alternate_screen() || !(agent.warp_mode && !agent.should_bypass_warp_input()),
+        "alt screen must be full-pane (warp_active false)"
+    );
+    // CT16 fallback: never render nothing. If the pane is too small to host
+    // a full-screen child, say so on screen and point at an interactive
+    // session instead of leaving a blank pane.
+    if agent.in_alternate_screen() && (area.width < 20 || area.height < 6) {
+        let msg = format!(
+            "{} wants full screen — open as interactive session (Ctrl+N)",
+            agent.shell
+        );
+        frame.render_widget(
+            Paragraph::new(msg).style(Style::default().fg(Color::Yellow)),
+            area,
+        );
+        return true;
+    }
     let sensitive = agent.is_sensitive_input_active();
     // Warp input box only while the shell itself owns the terminal; when a
     // wizard/TUI/foreground command is running the PTY gets the whole pane.
@@ -579,14 +654,27 @@ pub(super) fn draw_log_panel(frame: &mut Frame, area: Rect, app: &mut App, theme
 
     let border_color = log_panel_border_color(app, theme);
     let label_color = panel_mode_label_color(app, theme);
-    let title = panel_mode_label(app).map(|label| {
-        Span::styled(
-            label,
-            Style::default()
-                .fg(label_color)
-                .add_modifier(Modifier::BOLD),
-        )
-    });
+    let graph_title = graph_live_mode_label(app);
+    let indicator_label = graph_title.or_else(|| panel_mode_label(app));
+    let title = if theme.show_borders {
+        match (graph_title, panel_mode_label(app)) {
+            (Some(lt), _) => Some(Span::styled(
+                lt,
+                Style::default()
+                    .fg(label_color)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            (None, Some(bt)) => Some(Span::styled(
+                bt,
+                Style::default()
+                    .fg(label_color)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            (None, None) => None,
+        }
+    } else {
+        None
+    };
     let inner = render_panel_block(frame, area, border_color, title, theme);
     if inner.width == 0 || inner.height == 0 {
         return;
@@ -598,14 +686,17 @@ pub(super) fn draw_log_panel(frame: &mut Frame, area: Rect, app: &mut App, theme
 
     if show_home_fallback(app) {
         draw_home_panel(frame, inner, app);
+        render_focus_indicator(frame, area, inner, app, theme, indicator_label);
         return;
     }
 
     if draw_log_panel_focus(frame, inner, app, theme) {
+        render_focus_indicator(frame, area, inner, app, theme, indicator_label);
         return;
     }
 
     draw_log_text(frame, area, inner, app);
+    render_focus_indicator(frame, area, inner, app, theme, indicator_label);
 }
 
 fn format_intent_lines(
@@ -769,7 +860,7 @@ fn draw_project_overview(frame: &mut Frame, area: Rect, app: &App, theme: &Theme
 
 /// Knowledge layer's Preview (project highlighted, not entered): a cheap
 /// summary card — pending backlog count, knowledge entry count, last
-/// activity, and a badge if a loop is running against this project's
+/// activity, and a badge if a graph is running against this project's
 /// workdir (functional requirement 3). Reads `App::selected_project_preview`,
 /// a cache refreshed on the normal tick cadence — never recomputed here.
 fn draw_project_preview_card(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
@@ -787,8 +878,8 @@ fn draw_project_preview_card(frame: &mut Frame, area: Rect, app: &App, theme: &T
     };
 
     let summary = app.selected_project_preview();
-    let running_badge = if summary.is_some_and(|s| s.loop_running) {
-        Span::styled("  ● loop running", Style::default().fg(STATUS_RUNNING))
+    let running_badge = if summary.is_some_and(|s| s.graph_running) {
+        Span::styled("  ● graph running", Style::default().fg(STATUS_RUNNING))
     } else {
         Span::raw("")
     };
@@ -936,7 +1027,7 @@ fn draw_project_tab_bar(
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-/// Persisted per-project History tab: finished loops + past sessions for
+/// Persisted per-project History tab: finished graphs + past sessions for
 /// this project's workdir, read straight from the DB (functional
 /// requirement 5) — see `App::selected_project_history_entries`.
 fn draw_project_history_tab(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
@@ -956,7 +1047,7 @@ fn draw_project_history_tab(frame: &mut Frame, area: Rect, app: &mut App, theme:
         let is_selected = idx == selected;
         let (style, marker) = selected_row_style(is_selected, theme);
         let kind_label = match entry.kind {
-            crate::db::project::ProjectHistoryKind::Loop => "loop",
+            crate::db::project::ProjectHistoryKind::Graph => "graph",
             crate::db::project::ProjectHistoryKind::InteractiveSession => "session",
             crate::db::project::ProjectHistoryKind::TerminalSession => "terminal",
         };
@@ -982,7 +1073,7 @@ fn draw_project_history_tab(frame: &mut Frame, area: Rect, app: &mut App, theme:
 }
 
 /// Read-only preview of the selected backlog spec — name + description,
-/// same "focus already previews it" convention as `draw_loop_overview` and
+/// same "focus already previews it" convention as `draw_graph_overview` and
 /// `draw_knowledge_overview` (no dedicated confirm step needed).
 fn draw_backlog_overview(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     if app.backlog_specs.is_empty() {
@@ -1406,13 +1497,9 @@ fn playground_empty_state(app: &App, theme: &Theme) -> Line<'static> {
     Line::from(Span::styled(message, Style::default().fg(color)))
 }
 
-fn visible_playground_window(area: Rect, selected: usize) -> (usize, usize) {
+fn visible_playground_window(area: Rect, selected: usize, total: usize) -> (usize, usize) {
     let max_visible = ((area.height.saturating_sub(4)) / 5).max(1) as usize;
-    let scroll_start = if selected >= max_visible {
-        selected.saturating_sub(max_visible - 1)
-    } else {
-        0
-    };
+    let scroll_start = crate::tui::selection::clamp_scroll(selected, 0, total, max_visible);
     (max_visible, scroll_start)
 }
 
@@ -1436,7 +1523,8 @@ fn draw_playground_list(frame: &mut Frame, area: Rect, app: &App, theme: &Theme)
     }
 
     let total = app.playground_results.len();
-    let (max_visible, scroll_start) = visible_playground_window(area, app.playground_selected);
+    let (max_visible, scroll_start) =
+        visible_playground_window(area, app.playground_selected, total);
     for (idx, chunk) in app
         .playground_results
         .iter()
@@ -1780,24 +1868,27 @@ mod tests {
     #[test]
     fn backlog_overview_previews_selected_spec_name_and_description_read_only() {
         use crate::db::Database;
-        use crate::domain::loops::{LoopSpec, LoopSpecStatus};
+        use crate::domain::graphs::{GraphSpec, GraphSpecStatus};
         use std::sync::Arc;
 
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let path = tmp.path().to_path_buf();
         std::mem::forget(tmp);
         let db = Arc::new(Database::new(&path).unwrap());
-        db.insert_loop_spec(&LoopSpec {
+        db.insert_graph_spec(&GraphSpec {
             id: "spec-1".to_string(),
-            loop_id: None,
+            graph_id: None,
             name: "Add retry backoff".to_string(),
             description: Some("## Objective\nRetry requests with backoff.".to_string()),
             position: 0,
             parallelizable: false,
-            status: LoopSpecStatus::Pending,
+            status: GraphSpecStatus::Pending,
             started_at: None,
             completed_at: None,
             spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
             spec_committed_head: None,
             workdir: None,
             completed_via: None,
@@ -1807,7 +1898,12 @@ mod tests {
         .unwrap();
 
         let data_dir = tempfile::tempdir().unwrap();
-        let app = App::new(Arc::clone(&db), data_dir.path()).unwrap();
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         assert_eq!(app.backlog_specs.len(), 1, "backlog spec should be loaded");
 
         let text = render_to_text(50, 10, |frame, area| {
@@ -2095,7 +2191,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(db, data_dir.path()).unwrap();
+        let mut app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         app.focus = Focus::Preview;
         assert_eq!(panel_mode_label(&app), Some(" Preview "));
     }
@@ -2107,7 +2208,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(db, data_dir.path()).unwrap();
+        let mut app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         app.focus = Focus::Agent;
         assert_eq!(panel_mode_label(&app), Some(" Focus "));
     }
@@ -2119,9 +2225,133 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(db, data_dir.path()).unwrap();
+        let mut app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         app.focus = Focus::Home;
         assert_eq!(panel_mode_label(&app), None);
+    }
+
+    #[test]
+    fn focus_preview_is_evident_in_modern_buffer_without_border_title() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        std::mem::forget(tmp);
+        let db = Arc::new(crate::db::Database::new(&path).unwrap());
+        let data_dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
+        let theme = Theme::modern();
+        let area = Rect::new(0, 0, 30, 8);
+
+        for (focus, expected_color, expected_label) in [
+            (Focus::Agent, theme.header_color, "Focus"),
+            (Focus::Preview, theme.dim_text, "Preview"),
+        ] {
+            app.focus = focus;
+            let backend = TestBackend::new(area.width, area.height);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal
+                .draw(|frame| {
+                    render_focus_indicator(frame, area, area, &app, &theme, panel_mode_label(&app));
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            assert_eq!(buffer[(0, 0)].symbol(), "█");
+            assert_eq!(buffer[(0, 0)].fg, expected_color);
+            let text: String = (0..area.height)
+                .flat_map(|y| (0..area.width).map(move |x| buffer[(x, y)].symbol()))
+                .collect();
+            assert!(
+                text.contains(expected_label),
+                "missing {expected_label}: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn draw_log_panel_modern_renders_rail_and_hides_border_title() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        std::mem::forget(tmp);
+        let db = Arc::new(crate::db::Database::new(&path).unwrap());
+        let data_dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
+        app.focus = Focus::Agent;
+        // Prevent the home fallback (empty workspace) from taking over the
+        // panel and hiding the rail/title distinction we want to assert.
+        app.projects
+            .push(crate::domain::project::Project::new("/tmp/proj"));
+        // Also seed a minimal agent so the Agent-focused branch doesn't fall
+        // through to an empty log (keeps the exercised path stable).
+        {
+            let mut agent = crate::tui::agent::InteractiveAgent::spawn_terminal(
+                "cat",
+                "/tmp",
+                80,
+                24,
+                Some("focus-agent"),
+                &[],
+                ratatui::style::Color::White,
+            )
+            .expect("spawn");
+            agent.status = crate::tui::agent::AgentStatus::Running;
+            app.interactive_agents.push(agent);
+            app.agents
+                .push(crate::tui::app::types::AgentEntry::Interactive(0));
+        }
+        let modern = Theme::modern();
+        let area = Rect::new(0, 0, 40, 12);
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| draw_log_panel(frame, area, &mut app, &modern))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        // Modern must show the 1-col rail at the panel's left edge.
+        assert_eq!(buffer[(area.x, area.y)].symbol(), "█");
+        assert_eq!(buffer[(area.x, area.y)].fg, modern.header_color);
+        // The border title for Focus must NOT be drawn as a top border (it's the
+        // pill instead), so the top row should be the rail, not box-drawing.
+        let top_row: String = (0..area.width)
+            .map(|x| buffer[(x, area.y)].symbol())
+            .collect();
+        assert!(
+            !top_row.contains('┌') && !top_row.contains('─'),
+            "modern must not render a border title, top row was {top_row:?}"
+        );
+
+        // Classic still uses the border title (and no rail).
+        let classic = Theme::classic();
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| draw_log_panel(frame, area, &mut app, &classic))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        assert_eq!(buffer[(area.x, area.y)].symbol(), "┌");
+        let mut text = String::new();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                text.push_str(buffer[(x, y)].symbol());
+            }
+        }
+        assert!(
+            text.contains("Focus"),
+            "classic title must contain Focus, got {text:?}"
+        );
     }
 
     #[test]
@@ -2131,7 +2361,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(db, data_dir.path()).unwrap();
+        let mut app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         app.focus = Focus::Home;
         assert!(show_home_fallback(&app));
     }
@@ -2143,7 +2378,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(db, data_dir.path()).unwrap();
+        let mut app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         app.focus = Focus::NewAgentDialog;
         assert!(!show_home_fallback(&app));
     }
@@ -2155,7 +2395,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(db, data_dir.path()).unwrap();
+        let mut app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         let backend = TestBackend::new(20, 10);
         let mut terminal = Terminal::new(backend).unwrap();
         let theme = Theme::classic();
@@ -2174,7 +2419,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(db, data_dir.path()).unwrap();
+        let mut app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         let backend = TestBackend::new(20, 10);
         let mut terminal = Terminal::new(backend).unwrap();
         let theme = Theme::classic();
@@ -2223,7 +2473,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let app = App::new(db, data_dir.path()).unwrap();
+        let app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
@@ -2317,7 +2572,7 @@ mod tests {
     #[test]
     fn visible_playground_window_basic() {
         let area = Rect::new(0, 0, 80, 20);
-        let (max_visible, scroll_start) = visible_playground_window(area, 0);
+        let (max_visible, scroll_start) = visible_playground_window(area, 0, 20);
         assert!(max_visible > 0);
         assert_eq!(scroll_start, 0);
     }
@@ -2325,7 +2580,7 @@ mod tests {
     #[test]
     fn visible_playground_window_scrolled() {
         let area = Rect::new(0, 0, 80, 20);
-        let (max_visible, scroll_start) = visible_playground_window(area, 10);
+        let (max_visible, scroll_start) = visible_playground_window(area, 10, 20);
         assert!(scroll_start > 0 || max_visible >= 10);
     }
 
@@ -2336,7 +2591,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let app = App::new(db, data_dir.path()).unwrap();
+        let app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         assert_eq!(playground_scope_label(&app), "Global");
     }
 
@@ -2361,7 +2621,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(db, data_dir.path()).unwrap();
+        let mut app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         app.rag_info.queued_items = 0;
         let theme = Theme::classic();
         let lines = rag_summary_lines(&app, "● ready", theme.header_color, String::new(), &theme);
@@ -2375,7 +2640,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let app = App::new(db, data_dir.path()).unwrap();
+        let app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         let theme = Theme::classic();
         let lines = rag_summary_lines(
             &app,
@@ -2395,7 +2665,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(db, data_dir.path()).unwrap();
+        let mut app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         // Even a "loaded" daemon state must not mask the capability gap.
         app.rag_embeddings_model = "baai/bge-small-en-v1.5".to_string();
         app.rag_model_loaded = true;
@@ -2412,7 +2687,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(db, data_dir.path()).unwrap();
+        let mut app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         app.rag_embeddings_model = "text-embedding-3-small".to_string();
         // Even a "loaded" daemon state must not hide an in-progress download.
         app.rag_model_loaded = true;
@@ -2431,7 +2711,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(db, data_dir.path()).unwrap();
+        let mut app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         app.rag_embeddings_model = "text-embedding-3-small".to_string();
         app.rag_acquisition_state =
             Some(crate::rag::status::AcquisitionState::Preparing { started_at: 0 });
@@ -2448,7 +2733,12 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let mut app = App::new(db, data_dir.path()).unwrap();
+        let mut app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
         app.rag_embeddings_model = "text-embedding-3-small".to_string();
         app.rag_acquisition_state = Some(crate::rag::status::AcquisitionState::Failed {
             reason: "connection reset".to_string(),
@@ -2457,5 +2747,148 @@ mod tests {
         let (text, color) = rag_status(&app, &theme);
         assert_eq!(text, "✗ download failed");
         assert_eq!(color, Color::Red);
+    }
+
+    fn graph_live_state() -> crate::tui::app::graph_live_state::GraphLiveState {
+        crate::tui::app::graph_live_state::GraphLiveState {
+            graph_id: "lp1".to_string(),
+            graph_name: "test".to_string(),
+            graph_status: crate::domain::graphs::GraphStatus::Running,
+            workdir: "/tmp".to_string(),
+            trigger_type: "manual".to_string(),
+            schedule_expr: None,
+            watch_path: None,
+            autorun_at: None,
+            spec_queue: vec![],
+            done_count: 0,
+            total_count: 0,
+            current_spec_id: None,
+            effective_nodes: vec![],
+            effective_edges: vec![],
+            ensembles: vec![],
+            router_taken_routes: std::collections::HashMap::new(),
+            current_node_id: None,
+            current_node_status: None,
+            current_node_started_at: None,
+            current_node_iteration: None,
+            current_node_output_tail: None,
+        }
+    }
+
+    fn graph_app(follow: bool) -> App {
+        let db_file = tempfile::NamedTempFile::new().unwrap();
+        let db_path: std::path::PathBuf = db_file.path().to_path_buf();
+        std::mem::forget(db_file);
+        let mut app = App::new(
+            Arc::new(crate::db::Database::new(&db_path).unwrap()),
+            tempfile::tempdir().unwrap().path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
+        app.focus = Focus::Preview;
+        app.sidebar_layer = SidebarLayer::Automation;
+        app.automation_kind = crate::tui::app::AutomationKind::Graph;
+        app.graph_live_state = Some(graph_live_state());
+        app.graph_live_follow = follow;
+        app
+    }
+
+    #[test]
+    fn graph_mode_appears_in_border_title_auto_follow() {
+        let mut app = graph_app(true);
+        let theme = Theme::classic();
+        let text = render_to_text(80, 24, |frame, area| {
+            draw_log_panel(frame, area, &mut app, &theme);
+        });
+        assert!(
+            text.contains("Auto-follow"),
+            "border title should show Auto-follow in graph view:\n{text}"
+        );
+        assert!(
+            !text.contains("AUTO-FOLLOW"),
+            "strip must not appear in the live view:\n{text}"
+        );
+    }
+
+    #[test]
+    fn graph_mode_appears_in_border_title_manual() {
+        let mut app = graph_app(false);
+        let theme = Theme::classic();
+        let text = render_to_text(80, 24, |frame, area| {
+            draw_log_panel(frame, area, &mut app, &theme);
+        });
+        assert!(
+            text.contains("Manual"),
+            "border title should show Manual in manual mode:\n{text}"
+        );
+        assert!(
+            !text.contains("MANUAL"),
+            "all-caps strip text must not appear:\n{text}"
+        );
+        assert!(
+            !text.contains("Esc"),
+            "instruction must not leak into border title:\n{text}"
+        );
+    }
+
+    #[test]
+    fn narrow_pane_keeps_mode_label() {
+        // At narrow width the border title must still show the mode label.
+        // (FR4: mode survives when pane is too narrow for both title and label.)
+        let app = graph_app(false);
+        assert_eq!(graph_live_mode_label(&app), Some(" Manual "));
+        let title = graph_live_mode_label(&app).map(|label| {
+            Span::styled(
+                label,
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            )
+        });
+        let backend = TestBackend::new(10, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                render_panel_block(frame, area, Color::DarkGray, title, &Theme::classic());
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let mut text = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                text.push_str(buffer[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+        assert!(
+            text.contains("Manual"),
+            "mode label must survive at narrow width:\n{text}"
+        );
+    }
+
+    #[test]
+    fn graph_mode_label_changes_with_follow() {
+        let mut app = graph_app(true);
+        assert_eq!(graph_live_mode_label(&app), Some(" Auto-follow "));
+        app.graph_live_follow = false;
+        assert_eq!(graph_live_mode_label(&app), Some(" Manual "));
+    }
+
+    #[test]
+    fn graph_mode_not_shown_when_not_graph_view() {
+        // Outside the graph live view the graph mode must not appear; the
+        // panel falls back to the interactive session label (or none).
+        let mut app = graph_app(true);
+        app.sidebar_layer = SidebarLayer::Live;
+        assert_eq!(graph_live_mode_label(&app), None);
+
+        let mut app = graph_app(true);
+        app.automation_kind = crate::tui::app::AutomationKind::Agent;
+        assert_eq!(graph_live_mode_label(&app), None);
+
+        let mut app = graph_app(true);
+        app.graph_live_state = None;
+        assert_eq!(graph_live_mode_label(&app), None);
     }
 }

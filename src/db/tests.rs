@@ -1,8 +1,8 @@
 use super::*;
 use crate::db::intelligence::{IntelligenceNodeInput, IntelligenceRelationInput};
-use crate::domain::loops::{
-    Loop, LoopEdge, LoopEdgeCondition, LoopNode, LoopNodeKind, LoopNodeRun, LoopRunStatus,
-    LoopSpec, LoopSpecStatus, LoopStatus, SpecAdminStatusOutcome,
+use crate::domain::graphs::{
+    Graph, GraphEdge, GraphEdgeCondition, GraphNode, GraphNodeKind, GraphNodeRun, GraphRunStatus,
+    GraphSpec, GraphSpecStatus, GraphStatus, SpecAdminStatusOutcome,
 };
 use crate::domain::models::{Agent, Cli, RunLog, RunStatus, Trigger, TriggerType, WatchEvent};
 use crate::domain::queues::Queue;
@@ -20,6 +20,252 @@ fn test_db() -> Database {
     Database::new(&path).expect("create test db")
 }
 
+/// CB52: an existing database whose `ensembles` entry/exit FKs are still
+/// `ON DELETE CASCADE` / `ON DELETE SET NULL` is rebuilt to `ON DELETE
+/// RESTRICT` — data preserved, migration idempotent, and afterwards a
+/// direct SQL delete of a referenced node fails instead of silently
+/// deleting the ensemble.
+#[test]
+fn cb52_ensemble_fk_migration_rebuilds_entry_exit_to_restrict() {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "PRAGMA foreign_keys = ON;
+         CREATE TABLE graphs (id TEXT PRIMARY KEY);
+         CREATE TABLE graph_specs (id TEXT PRIMARY KEY);
+         CREATE TABLE graph_nodes (id TEXT PRIMARY KEY);
+         CREATE TABLE ensembles (
+             id TEXT PRIMARY KEY,
+             spec_id TEXT REFERENCES graph_specs(id) ON DELETE CASCADE,
+             graph_id TEXT REFERENCES graphs(id) ON DELETE CASCADE,
+             name TEXT NOT NULL,
+             prompt_template TEXT NOT NULL,
+             join_node_id TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE,
+             entry_from_node TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE,
+             entry_condition TEXT NOT NULL,
+             min_pass INTEGER NOT NULL,
+             timeout_minutes INTEGER NOT NULL,
+             on_pass_to TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE,
+             on_fail_to TEXT REFERENCES graph_nodes(id) ON DELETE SET NULL,
+             created_at INTEGER NOT NULL,
+             CHECK ((spec_id IS NULL) <> (graph_id IS NULL))
+         );
+         CREATE INDEX idx_ensembles_join_node ON ensembles(join_node_id);
+         INSERT INTO graphs VALUES ('g1');
+         INSERT INTO graph_nodes VALUES ('kickoff'), ('join1'), ('arbiter'), ('loner');
+         INSERT INTO ensembles VALUES ('ens1', NULL, 'g1', 'Ens', 'tmpl', 'join1', 'kickoff', 'always', 2, 30, 'arbiter', NULL, 0);",
+    )
+    .unwrap();
+
+    Database::migrate_cb52_ensemble_fk(&conn).unwrap();
+    // Idempotent: a second run is a no-op.
+    Database::migrate_cb52_ensemble_fk(&conn).unwrap();
+
+    let ddl: String = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'ensembles'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        ddl.contains("entry_from_node TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE RESTRICT"),
+        "{ddl}"
+    );
+    assert!(
+        ddl.contains("on_pass_to TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE RESTRICT"),
+        "{ddl}"
+    );
+    assert!(
+        ddl.contains("on_fail_to TEXT REFERENCES graph_nodes(id) ON DELETE RESTRICT"),
+        "{ddl}"
+    );
+    // The ensemble still owns its join: that cascade stays.
+    assert!(
+        ddl.contains("join_node_id TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE"),
+        "{ddl}"
+    );
+
+    // Data survived the rebuild.
+    let entry: String = conn
+        .query_row(
+            "SELECT entry_from_node FROM ensembles WHERE id = 'ens1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(entry, "kickoff");
+
+    // The helper index survived the drop/rename.
+    let index_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_ensembles_join_node'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(index_count, 1);
+
+    // RESTRICT now bites: deleting a referenced node fails instead of
+    // silently deleting the ensemble row.
+    assert!(conn
+        .execute("DELETE FROM graph_nodes WHERE id = 'kickoff'", [])
+        .is_err());
+    assert!(conn
+        .execute("DELETE FROM graph_nodes WHERE id = 'arbiter'", [])
+        .is_err());
+    let remaining: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM ensembles WHERE id = 'ens1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(remaining, 1);
+
+    // An unreferenced node still deletes fine.
+    assert_eq!(
+        conn.execute("DELETE FROM graph_nodes WHERE id = 'loner'", [])
+            .unwrap(),
+        1
+    );
+
+    // The join cascade (FR2 exception) still works: deleting the join
+    // removes the ensemble row it owns.
+    assert_eq!(
+        conn.execute("DELETE FROM graph_nodes WHERE id = 'join1'", [])
+            .unwrap(),
+        1
+    );
+    let remaining: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM ensembles WHERE id = 'ens1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(remaining, 0);
+}
+
+// RETIRED-SCHEMA-NAME-BEGIN (CC3 loop → graph migration: the old names below
+// are the pre-migration schema this test simulates, so they are exempt from
+// the retired-vocabulary guard by design)
+#[test]
+fn graph_schema_migration_is_idempotent_and_preserves_error_edges() {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "PRAGMA foreign_keys = ON;
+         CREATE TABLE loops (id TEXT PRIMARY KEY, name TEXT NOT NULL, workdir TEXT NOT NULL, status TEXT NOT NULL, created_at INTEGER NOT NULL);
+         CREATE TABLE loop_specs (id TEXT PRIMARY KEY, loop_id TEXT NOT NULL, name TEXT NOT NULL, position INTEGER NOT NULL, status TEXT NOT NULL);
+         CREATE TABLE loop_nodes (id TEXT PRIMARY KEY, spec_id TEXT, loop_id TEXT, name TEXT NOT NULL, kind TEXT NOT NULL, config TEXT NOT NULL, position INTEGER NOT NULL, created_at INTEGER NOT NULL);
+         CREATE TABLE loop_edges (id TEXT PRIMARY KEY, spec_id TEXT, loop_id TEXT, from_node TEXT NOT NULL, to_node TEXT NOT NULL, condition TEXT NOT NULL);
+         CREATE TABLE loop_runs (id TEXT PRIMARY KEY, loop_id TEXT NOT NULL, spec_id TEXT NOT NULL, node_id TEXT NOT NULL, status TEXT NOT NULL, started_at INTEGER NOT NULL, iteration INTEGER NOT NULL DEFAULT 1);
+         CREATE TABLE loop_completion_hook_runs (id TEXT PRIMARY KEY, loop_id TEXT NOT NULL, status TEXT NOT NULL, started_at INTEGER NOT NULL);
+         CREATE TABLE ensembles (id TEXT PRIMARY KEY, spec_id TEXT, loop_id TEXT, name TEXT NOT NULL, prompt_template TEXT NOT NULL, join_node_id TEXT NOT NULL, entry_from_node TEXT NOT NULL, entry_condition TEXT NOT NULL, min_pass INTEGER NOT NULL, timeout_minutes INTEGER NOT NULL, on_pass_to TEXT NOT NULL, created_at INTEGER NOT NULL);
+         CREATE UNIQUE INDEX idx_loop_specs_position ON loop_specs(loop_id, position);
+         INSERT INTO loops VALUES ('g1', 'Graph', '/tmp', 'running', 0);
+         INSERT INTO loop_specs VALUES ('s1', 'g1', 'Spec', 1, 'running');
+         INSERT INTO loop_nodes VALUES ('n1', 's1', NULL, 'Node', 'check', '{\"prompt_template\": \"hi {{loop_name}}\"}', 1, 0);
+         INSERT INTO loop_nodes VALUES ('n2', 's1', NULL, 'Next', 'check', '{}', 2, 0);
+         INSERT INTO loop_edges VALUES ('e1', 's1', NULL, 'n1', 'n2', 'break');
+         INSERT INTO loop_runs VALUES ('r1', 'g1', 's1', 'n1', 'running', 0, 1);
+         INSERT INTO loop_completion_hook_runs VALUES ('h1', 'g1', 'running', 0);
+         INSERT INTO ensembles VALUES ('en1', 's1', NULL, 'Ens', 'tmpl', 'n1', 'n1', 'break', 1, 5, 'n2', 0);",
+    )
+    .unwrap();
+
+    Database::migrate_loop_to_graph_schema(&conn).unwrap();
+    // Re-running after the migration already ran must be a no-op: same data,
+    // no error (idempotent).
+    Database::migrate_loop_to_graph_schema(&conn).unwrap();
+
+    let table_names: Vec<String> = conn
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    for new in [
+        "graphs",
+        "graph_specs",
+        "graph_nodes",
+        "graph_edges",
+        "graph_runs",
+        "graph_completion_hook_runs",
+    ] {
+        assert!(table_names.iter().any(|name| name == new), "missing {new}");
+    }
+    for old in [
+        "loops",
+        "loop_specs",
+        "loop_nodes",
+        "loop_edges",
+        "loop_runs",
+        "loop_completion_hook_runs",
+    ] {
+        assert!(
+            !table_names.iter().any(|name| name == old),
+            "retired table {old} still present"
+        );
+    }
+    // Running graph survives with its status intact.
+    let status: String = conn
+        .query_row("SELECT status FROM graphs WHERE id = 'g1'", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(status, "running");
+    // `loop_id` columns became `graph_id`.
+    let spec_cols: Vec<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('graph_specs')")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert!(spec_cols.iter().any(|c| c == "graph_id"));
+    assert!(!spec_cols.iter().any(|c| c == "loop_id"));
+    // `break` conditions read as `error` everywhere they were stored.
+    assert_eq!(
+        conn.query_row(
+            "SELECT condition FROM graph_edges WHERE id = 'e1'",
+            [],
+            |row| row.get::<_, String>(0)
+        )
+        .unwrap(),
+        "error"
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT entry_condition FROM ensembles WHERE id = 'en1'",
+            [],
+            |row| row.get::<_, String>(0)
+        )
+        .unwrap(),
+        "error"
+    );
+    // Stored `{{loop_name}}` prompt templates were rewritten.
+    assert_eq!(
+        conn.query_row(
+            "SELECT config FROM graph_nodes WHERE id = 'n1'",
+            [],
+            |row| row.get::<_, String>(0)
+        )
+        .unwrap(),
+        "{\"prompt_template\": \"hi {{graph_name}}\"}"
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT graph_id FROM graph_runs WHERE id = 'r1'",
+            [],
+            |row| row.get::<_, String>(0)
+        )
+        .unwrap(),
+        "g1"
+    );
+}
+// RETIRED-SCHEMA-NAME-END
+
 fn sample_cron_agent(id: &str) -> Agent {
     Agent {
         id: id.to_string(),
@@ -29,6 +275,7 @@ fn sample_cron_agent(id: &str) -> Agent {
         }),
         cli: Cli::new("opencode"),
         model: None,
+        effort: None,
         working_dir: Some("/tmp/project".to_string()),
         enabled: true,
         enable_at: None,
@@ -55,6 +302,7 @@ fn sample_watch_agent(id: &str) -> Agent {
         }),
         cli: Cli::new("kiro"),
         model: Some("claude-4".to_string()),
+        effort: None,
         working_dir: None,
         enabled: true,
         enable_at: None,
@@ -76,6 +324,7 @@ fn sample_manual_agent(id: &str) -> Agent {
         trigger: None,
         cli: Cli::new("opencode"),
         model: None,
+        effort: None,
         working_dir: None,
         enabled: true,
         enable_at: None,
@@ -90,15 +339,17 @@ fn sample_manual_agent(id: &str) -> Agent {
     }
 }
 
-fn sample_loop(id: &str) -> Loop {
-    Loop {
+fn sample_graph(id: &str) -> Graph {
+    Graph {
         archived: false,
         paused_by_reconciliation: false,
+        allow_dirty_start: false,
+        infra_node_id: None,
         id: id.to_string(),
-        name: "Auth loop".to_string(),
+        name: "Auth graph".to_string(),
         description: Some("Implements auth in ordered specs".to_string()),
         workdir: "/tmp/project".to_string(),
-        status: LoopStatus::Draft,
+        status: GraphStatus::Draft,
         trigger: None,
         created_at: Utc::now(),
         started_at: None,
@@ -107,22 +358,25 @@ fn sample_loop(id: &str) -> Loop {
         auto_continue_at: None,
         auto_continue_action: None,
         active_run_queue_id: None,
-        on_completed: None,
+        hooks: std::collections::BTreeMap::new(),
     }
 }
 
-fn sample_loop_spec(loop_id: &str, id: &str, position: i64) -> LoopSpec {
-    LoopSpec {
+fn sample_graph_spec(graph_id: &str, id: &str, position: i64) -> GraphSpec {
+    GraphSpec {
         id: id.to_string(),
-        loop_id: Some(loop_id.to_string()),
+        graph_id: Some(graph_id.to_string()),
         name: format!("Spec {position}"),
         description: Some("Do a slice of the feature".to_string()),
         position,
         parallelizable: false,
-        status: LoopSpecStatus::Pending,
+        status: GraphSpecStatus::Pending,
         started_at: None,
         completed_at: None,
         spec_start_head: None,
+        spec_start_dirty: None,
+        spec_end_dirty: None,
+        spec_end_dirty_paths: None,
         spec_committed_head: None,
         workdir: None,
         completed_via: None,
@@ -131,13 +385,13 @@ fn sample_loop_spec(loop_id: &str, id: &str, position: i64) -> LoopSpec {
     }
 }
 
-fn sample_loop_node(spec_id: &str, id: &str, position: i64) -> LoopNode {
-    LoopNode {
+fn sample_graph_node(spec_id: &str, id: &str, position: i64) -> GraphNode {
+    GraphNode {
         id: id.to_string(),
         spec_id: Some(spec_id.to_string()),
-        loop_id: None,
+        graph_id: None,
         name: format!("Node {position}"),
-        kind: LoopNodeKind::Check,
+        kind: GraphNodeKind::Check,
         config: serde_json::json!({
             "command": "cargo test",
             "success_condition": "exit_code_0"
@@ -291,7 +545,7 @@ fn scheduled_sends_for_closed_session_are_dropped_on_missing_target_restore() {
         None,
     )
     .unwrap();
-    db.insert_scheduled_send("ss-x", "ping", "sess-x", None, Utc::now())
+    db.insert_scheduled_send("ss-x", "ping", "sess-x", None, Utc::now(), None, None)
         .unwrap();
     assert_eq!(
         db.list_pending_scheduled_sends_for_session("sess-x")
@@ -371,6 +625,8 @@ fn test_list_active_sync_agent_ids_includes_live_sessions_and_running_background
         finished_at: None,
         exit_code: None,
         timeout_at: None,
+        executed_platform: None,
+        executed_model: None,
     };
     db.insert_run(&run).unwrap();
 
@@ -521,11 +777,13 @@ fn test_intelligence_upsert_search_and_graph_walk() {
     let db = test_db();
     db.upsert_intelligence_node(IntelligenceNodeInput {
         id: Some("node-b".to_string()),
-        kind: "pattern".to_string(),
-        title: "Connection caching".to_string(),
-        body: "Cache expensive clients".to_string(),
+        kind: Some("pattern".to_string()),
+        status: None,
+        title: Some("Connection caching".to_string()),
+        body: Some("Cache expensive clients".to_string()),
+        body_replace: None,
         metadata: None,
-        project_hash: Some("project-1".to_string()),
+        project_hash: Some(Some("project-1".to_string())),
         session_id: None,
         relations: None,
     })
@@ -533,25 +791,28 @@ fn test_intelligence_upsert_search_and_graph_walk() {
     let base = db
         .upsert_intelligence_node(IntelligenceNodeInput {
             id: Some("node-a".to_string()),
-            kind: "fact".to_string(),
-            title: "Database rule".to_string(),
-            body: "Use a single connection".to_string(),
-            metadata: Some(serde_json::json!({"topic": "db"})),
-            project_hash: Some("project-1".to_string()),
-            session_id: Some("session-1".to_string()),
+            kind: Some("fact".to_string()),
+            status: None,
+            title: Some("Database rule".to_string()),
+            body: Some("Use a single connection".to_string()),
+            body_replace: None,
+            metadata: Some(Some(serde_json::json!({"topic": "db"}))),
+            project_hash: Some(Some("project-1".to_string())),
+            session_id: Some(Some("session-1".to_string())),
             relations: Some(vec![IntelligenceRelationInput {
                 to_node_id: "node-b".to_string(),
-                relation: "related_to".to_string(),
+                relation: "extends".to_string(),
                 weight: Some(0.8),
             }]),
         })
-        .unwrap();
+        .unwrap()
+        .record;
 
     let search = db
         .search_intelligence_nodes("connection", Some("pattern"), 10)
         .unwrap();
-    assert_eq!(search.len(), 1);
-    assert_eq!(search[0].id, "node-b");
+    assert_eq!(search.results.len(), 1);
+    assert_eq!(search.results[0].id, "node-b");
 
     let walk = db
         .walk_intelligence_graph(&base.id, 2)
@@ -567,64 +828,227 @@ fn test_intelligence_search_tokenizes_multi_term_queries() {
     let db = test_db();
     db.upsert_intelligence_node(IntelligenceNodeInput {
         id: Some("node-multi".to_string()),
-        kind: "fact".to_string(),
-        title: "Alpha overview".to_string(),
-        body: "This section covers alpha in detail. Later on we discuss beta too.".to_string(),
+        kind: Some("fact".to_string()),
+        status: None,
+        title: Some("Alpha overview".to_string()),
+        body: Some(
+            "This section covers alpha in detail. Later on we discuss beta too.".to_string(),
+        ),
+        body_replace: None,
         metadata: None,
-        project_hash: Some("project-1".to_string()),
+        project_hash: Some(Some("project-1".to_string())),
         session_id: None,
         relations: None,
     })
     .unwrap();
 
-    // 1. Terms in different places of the body both match with AND semantics.
+    // 1. Both terms match the same node — still found (OR semantics).
     let both = db
         .search_intelligence_nodes("alpha beta", None, 10)
         .unwrap();
-    assert_eq!(both.len(), 1);
-    assert_eq!(both[0].id, "node-multi");
+    assert_eq!(both.results.len(), 1);
+    assert_eq!(both.results[0].id, "node-multi");
 
-    // 2. A query with one absent term should not match.
-    let missing = db.search_intelligence_nodes("alpha zzz", None, 10).unwrap();
-    assert!(missing.is_empty());
+    // 2. One present term + one absent term now returns the partial match (OR).
+    let partial = db.search_intelligence_nodes("alpha zzz", None, 10).unwrap();
+    assert_eq!(partial.results.len(), 1);
+    assert_eq!(partial.results[0].id, "node-multi");
+    assert_eq!(partial.examined_count, 1);
 
     // 3. Single-term queries keep working as before.
     let single = db.search_intelligence_nodes("beta", None, 10).unwrap();
-    assert_eq!(single.len(), 1);
-    assert_eq!(single[0].id, "node-multi");
+    assert_eq!(single.results.len(), 1);
+    assert_eq!(single.results[0].id, "node-multi");
 
-    // 4. Empty/whitespace-only queries return an empty list.
+    // 4. Empty/whitespace-only queries return empty results but report count.
     let empty = db.search_intelligence_nodes("   ", None, 10).unwrap();
-    assert!(empty.is_empty());
+    assert!(empty.results.is_empty());
+    assert_eq!(empty.examined_count, 1);
 }
 
-// ── Loop persistence ──────────────────────────────────────────
+#[test]
+fn test_intelligence_search_or_ranking() {
+    let db = test_db();
+
+    // Node A: matches "retry" in body only → 1pt
+    db.upsert_intelligence_node(IntelligenceNodeInput {
+        id: Some("node-a".to_string()),
+        kind: Some("fact".to_string()),
+        status: None,
+        title: Some("Unrelated title".to_string()),
+        body: Some("Discusses retry strategies.".to_string()),
+        body_replace: None,
+        metadata: None,
+        project_hash: Some(Some("proj".to_string())),
+        session_id: None,
+        relations: None,
+    })
+    .unwrap();
+
+    // Node B: matches "retry" in title + "backoff" in body → 2 terms
+    db.upsert_intelligence_node(IntelligenceNodeInput {
+        id: Some("node-b".to_string()),
+        kind: Some("fact".to_string()),
+        status: None,
+        title: Some("Retry patterns".to_string()),
+        body: Some("Covers backoff strategies.".to_string()),
+        body_replace: None,
+        metadata: None,
+        project_hash: Some(Some("proj".to_string())),
+        session_id: None,
+        relations: None,
+    })
+    .unwrap();
+
+    // Node C: matches "retry", "backoff" and "future" in body → 3 terms
+    db.upsert_intelligence_node(IntelligenceNodeInput {
+        id: Some("node-c".to_string()),
+        kind: Some("fact".to_string()),
+        status: None,
+        title: Some("Overview".to_string()),
+        body: Some("Retry logic, backoff, and future plans.".to_string()),
+        body_replace: None,
+        metadata: None,
+        project_hash: Some(Some("proj".to_string())),
+        session_id: None,
+        relations: None,
+    })
+    .unwrap();
+
+    // Node D: matches nothing
+    db.upsert_intelligence_node(IntelligenceNodeInput {
+        id: Some("node-d".to_string()),
+        kind: Some("fact".to_string()),
+        status: None,
+        title: Some("Other".to_string()),
+        body: Some("Nothing relevant.".to_string()),
+        body_replace: None,
+        metadata: None,
+        project_hash: Some(Some("proj".to_string())),
+        session_id: None,
+        relations: None,
+    })
+    .unwrap();
+
+    // Seven-word query whose matching terms are spread across the nodes; the
+    // four trailing words match nothing and must degrade rank without emptying.
+    let result = db
+        .search_intelligence_nodes(
+            "retry backoff future missingp missingq missingr missings",
+            None,
+            10,
+        )
+        .unwrap();
+
+    // Primary ordering is number of matching terms (guideline), so the
+    // three-term body match outranks the two-term match that includes a title:
+    //   node-c: 3 terms (retry+backoff+future, all body)
+    //   node-b: 2 terms (retry in title, backoff in body)
+    //   node-a: 1 term  (retry in body)
+    //   node-d: excluded
+    assert_eq!(result.results.len(), 3);
+    assert_eq!(result.results[0].id, "node-c");
+    assert_eq!(result.results[1].id, "node-b");
+    assert_eq!(result.results[2].id, "node-a");
+    assert_eq!(result.examined_count, 4);
+}
 
 #[test]
-fn loop_details_roundtrip_preserves_order_and_graph() {
+fn test_intelligence_search_ranks_title_over_body_on_equal_term_count() {
     let db = test_db();
-    let lp = sample_loop("wf-1");
-    let spec_one = sample_loop_spec(&lp.id, "spec-1", 1);
-    let spec_two = sample_loop_spec(&lp.id, "spec-2", 2);
-    let node_one = sample_loop_node(&spec_one.id, "node-1", 1);
-    let node_two = sample_loop_node(&spec_one.id, "node-2", 2);
-    let edge = LoopEdge {
+
+    // Both nodes match exactly one term; the tiebreak is *where* it matches.
+    // The title match is inserted first so that a naive recency-only ordering
+    // would put the body match on top — only the field weighting flips them.
+    db.upsert_intelligence_node(IntelligenceNodeInput {
+        id: Some("title-hit".to_string()),
+        kind: Some("fact".to_string()),
+        status: None,
+        title: Some("Resilience".to_string()),
+        body: Some("Body text with no query terms at all.".to_string()),
+        body_replace: None,
+        metadata: None,
+        project_hash: Some(Some("proj".to_string())),
+        session_id: None,
+        relations: None,
+    })
+    .unwrap();
+    db.upsert_intelligence_node(IntelligenceNodeInput {
+        id: Some("body-hit".to_string()),
+        kind: Some("fact".to_string()),
+        status: None,
+        title: Some("Generic heading".to_string()),
+        body: Some("A passing mention of resilience somewhere in here.".to_string()),
+        body_replace: None,
+        metadata: None,
+        project_hash: Some(Some("proj".to_string())),
+        session_id: None,
+        relations: None,
+    })
+    .unwrap();
+
+    let result = db
+        .search_intelligence_nodes("resilience", None, 10)
+        .unwrap();
+    assert_eq!(result.results.len(), 2);
+    assert_eq!(result.results[0].id, "title-hit");
+    assert_eq!(result.results[1].id, "body-hit");
+}
+
+#[test]
+fn test_intelligence_search_zero_match_returns_count() {
+    let db = test_db();
+
+    for i in 0..3 {
+        db.upsert_intelligence_node(IntelligenceNodeInput {
+            id: Some(format!("node-{i}")),
+            kind: Some("fact".to_string()),
+            status: None,
+            title: Some(format!("Fact {i}")),
+            body: Some(format!("Body {i}")),
+            body_replace: None,
+            metadata: None,
+            project_hash: Some(Some("proj".to_string())),
+            session_id: None,
+            relations: None,
+        })
+        .unwrap();
+    }
+
+    let result = db
+        .search_intelligence_nodes("xyzzy nonexistent", None, 10)
+        .unwrap();
+    assert_eq!(result.results.len(), 0);
+    assert_eq!(result.examined_count, 3);
+}
+
+// ── Graph persistence ──────────────────────────────────────────
+
+#[test]
+fn graph_details_roundtrip_preserves_order_and_graph() {
+    let db = test_db();
+    let lp = sample_graph("wf-1");
+    let spec_one = sample_graph_spec(&lp.id, "spec-1", 1);
+    let spec_two = sample_graph_spec(&lp.id, "spec-2", 2);
+    let node_one = sample_graph_node(&spec_one.id, "node-1", 1);
+    let node_two = sample_graph_node(&spec_one.id, "node-2", 2);
+    let edge = GraphEdge {
         id: "edge-1".to_string(),
         spec_id: Some(spec_one.id.clone()),
-        loop_id: None,
+        graph_id: None,
         from_node: node_one.id.clone(),
         to_node: node_two.id.clone(),
-        condition: LoopEdgeCondition::Pass,
+        condition: GraphEdgeCondition::Pass,
     };
 
-    db.insert_loop(&lp).unwrap();
-    db.insert_loop_spec(&spec_two).unwrap();
-    db.insert_loop_spec(&spec_one).unwrap();
-    db.insert_loop_node(&node_two).unwrap();
-    db.insert_loop_node(&node_one).unwrap();
-    db.insert_loop_edge(&edge).unwrap();
+    db.insert_graph(&lp).unwrap();
+    db.insert_graph_spec(&spec_two).unwrap();
+    db.insert_graph_spec(&spec_one).unwrap();
+    db.insert_graph_node(&node_two).unwrap();
+    db.insert_graph_node(&node_one).unwrap();
+    db.insert_graph_edge(&edge).unwrap();
 
-    let details = db.get_loop_details(&lp.id).unwrap().unwrap();
+    let details = db.get_graph_details(&lp.id).unwrap().unwrap();
 
     assert_eq!(details.lp.id, lp.id);
     assert_eq!(details.specs.len(), 2);
@@ -633,95 +1057,95 @@ fn loop_details_roundtrip_preserves_order_and_graph() {
     assert_eq!(details.specs[0].nodes[1].id, node_two.id);
     assert_eq!(details.specs[0].edges[0].id, edge.id);
     assert_eq!(details.specs[1].spec.id, spec_two.id);
-    // Spec-level graph must be untouched by the loop-level graph work: no
-    // loop-level nodes/edges were defined for this loop.
+    // Spec-level graph must be untouched by the graph-level graph work: no
+    // graph-level nodes/edges were defined for this graph.
     assert!(details.graph_nodes.is_empty());
     assert!(details.graph_edges.is_empty());
 }
 
 #[test]
-fn loop_level_graph_round_trips_through_insert_and_get_loop_details() {
-    // R1: a loop can define its graph once, at the loop level, instead of
-    // repeating the same nodes/edges in every spec. `get_loop_details` is
-    // exactly what the `loop_get` MCP tool returns.
+fn graph_level_graph_round_trips_through_insert_and_get_graph_details() {
+    // R1: a graph can define its graph once, at the graph level, instead of
+    // repeating the same nodes/edges in every spec. `get_graph_details` is
+    // exactly what the `graph_get` MCP tool returns.
     let db = test_db();
-    let lp = sample_loop("wf-graph");
-    let node_one = LoopNode {
+    let lp = sample_graph("wf-graph");
+    let node_one = GraphNode {
         id: "graph-node-1".to_string(),
         spec_id: None,
-        loop_id: Some(lp.id.clone()),
+        graph_id: Some(lp.id.clone()),
         name: "implement".to_string(),
-        kind: LoopNodeKind::Agent,
+        kind: GraphNodeKind::Agent,
         config: serde_json::json!({"platform": "claude"}),
         position: 1,
         created_at: Utc::now(),
     };
-    let node_two = LoopNode {
+    let node_two = GraphNode {
         id: "graph-node-2".to_string(),
         spec_id: None,
-        loop_id: Some(lp.id.clone()),
+        graph_id: Some(lp.id.clone()),
         name: "review".to_string(),
-        kind: LoopNodeKind::Gate,
+        kind: GraphNodeKind::Gate,
         config: serde_json::json!({}),
         position: 2,
         created_at: Utc::now(),
     };
-    let edge = LoopEdge {
+    let edge = GraphEdge {
         id: "graph-edge-1".to_string(),
         spec_id: None,
-        loop_id: Some(lp.id.clone()),
+        graph_id: Some(lp.id.clone()),
         from_node: node_one.id.clone(),
         to_node: node_two.id.clone(),
-        condition: LoopEdgeCondition::Always,
+        condition: GraphEdgeCondition::Always,
     };
 
-    db.insert_loop(&lp).unwrap();
-    db.insert_loop_node(&node_one).unwrap();
-    db.insert_loop_node(&node_two).unwrap();
-    db.insert_loop_edge(&edge).unwrap();
+    db.insert_graph(&lp).unwrap();
+    db.insert_graph_node(&node_one).unwrap();
+    db.insert_graph_node(&node_two).unwrap();
+    db.insert_graph_edge(&edge).unwrap();
 
-    let details = db.get_loop_details(&lp.id).unwrap().unwrap();
+    let details = db.get_graph_details(&lp.id).unwrap().unwrap();
 
     assert_eq!(details.graph_nodes.len(), 2);
     assert_eq!(details.graph_nodes[0].id, node_one.id);
     assert_eq!(
-        details.graph_nodes[0].loop_id.as_deref(),
+        details.graph_nodes[0].graph_id.as_deref(),
         Some(lp.id.as_str())
     );
     assert_eq!(details.graph_nodes[0].spec_id, None);
     assert_eq!(details.graph_edges.len(), 1);
     assert_eq!(details.graph_edges[0].id, edge.id);
     assert_eq!(
-        details.graph_edges[0].loop_id.as_deref(),
+        details.graph_edges[0].graph_id.as_deref(),
         Some(lp.id.as_str())
     );
-    // A loop with no specs at all still round-trips a graph-only loop.
+    // A graph with no specs at all still round-trips a graph-only graph.
     assert!(details.specs.is_empty());
 }
 
 #[test]
-fn loop_node_and_edge_require_exactly_one_target() {
-    // R1: every node/edge must target exactly one of (spec_id, loop_id).
+fn graph_node_and_edge_require_exactly_one_target() {
+    // R1: every node/edge must target exactly one of (spec_id, graph_id).
     // Enforced in the DB layer with an actionable error, not a raw SQLite
     // CHECK constraint failure.
     let db = test_db();
-    let lp = sample_loop("wf-target-validation");
-    let spec = sample_loop_spec(&lp.id, "spec-target-validation", 1);
-    db.insert_loop(&lp).unwrap();
-    db.insert_loop_spec(&spec).unwrap();
+    let lp = sample_graph("wf-target-validation");
+    let spec = sample_graph_spec(&lp.id, "spec-target-validation", 1);
+    db.insert_graph(&lp).unwrap();
+    db.insert_graph_spec(&spec).unwrap();
 
-    let base_node = LoopNode {
+    let base_node = GraphNode {
         id: "node-both-or-neither".to_string(),
         spec_id: None,
-        loop_id: None,
+        graph_id: None,
         name: "n".to_string(),
-        kind: LoopNodeKind::Check,
+        kind: GraphNodeKind::Check,
         config: serde_json::json!({"command": "true"}),
         position: 1,
         created_at: Utc::now(),
     };
 
-    let neither_err = db.insert_loop_node(&base_node).unwrap_err().to_string();
+    let neither_err = db.insert_graph_node(&base_node).unwrap_err().to_string();
     assert!(
         neither_err.contains("exactly one"),
         "expected actionable message, got: {neither_err}"
@@ -729,35 +1153,35 @@ fn loop_node_and_edge_require_exactly_one_target() {
 
     let mut both_node = base_node;
     both_node.spec_id = Some(spec.id.clone());
-    both_node.loop_id = Some(lp.id.clone());
-    let both_err = db.insert_loop_node(&both_node).unwrap_err().to_string();
+    both_node.graph_id = Some(lp.id.clone());
+    let both_err = db.insert_graph_node(&both_node).unwrap_err().to_string();
     assert!(
         both_err.contains("exactly one"),
         "expected actionable message, got: {both_err}"
     );
 
-    let base_edge = LoopEdge {
+    let base_edge = GraphEdge {
         id: "edge-both-or-neither".to_string(),
         spec_id: None,
-        loop_id: None,
+        graph_id: None,
         from_node: "a".to_string(),
         to_node: "b".to_string(),
-        condition: LoopEdgeCondition::Always,
+        condition: GraphEdgeCondition::Always,
     };
-    let neither_edge_err = db.insert_loop_edge(&base_edge).unwrap_err().to_string();
+    let neither_edge_err = db.insert_graph_edge(&base_edge).unwrap_err().to_string();
     assert!(neither_edge_err.contains("exactly one"));
 
     let mut both_edge = base_edge;
     both_edge.spec_id = Some(spec.id);
-    both_edge.loop_id = Some(lp.id);
-    let both_edge_err = db.insert_loop_edge(&both_edge).unwrap_err().to_string();
+    both_edge.graph_id = Some(lp.id);
+    let both_edge_err = db.insert_graph_edge(&both_edge).unwrap_err().to_string();
     assert!(both_edge_err.contains("exactly one"));
 }
 
 #[test]
-fn loop_graph_migration_adds_loop_id_and_is_idempotent_across_reopen() {
-    // Simulate a pre-R1 database: `loop_nodes`/`loop_edges` with `spec_id
-    // NOT NULL` and no `loop_id` column — the real shape of databases in the
+fn graph_migration_adds_graph_id_and_is_idempotent_across_reopen() {
+    // Simulate a pre-R1 database: `graph_nodes`/`graph_edges` with `spec_id
+    // NOT NULL` and no `graph_id` column — the real shape of databases in the
     // field before this migration. The migration must rebuild both tables
     // (SQLite can't relax NOT NULL via ALTER TABLE ADD COLUMN) without
     // losing the existing rows, and running it again on an already-migrated
@@ -769,7 +1193,7 @@ fn loop_graph_migration_adds_loop_id_and_is_idempotent_across_reopen() {
     {
         let conn = rusqlite::Connection::open(&path).expect("open raw legacy db");
         conn.execute_batch(
-            "CREATE TABLE loops (
+            "CREATE TABLE graphs (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 description TEXT,
@@ -782,9 +1206,9 @@ fn loop_graph_migration_adds_loop_id_and_is_idempotent_across_reopen() {
                 completed_at INTEGER,
                 autorun_at INTEGER
              );
-             CREATE TABLE loop_specs (
+             CREATE TABLE graph_specs (
                 id TEXT PRIMARY KEY,
-                loop_id TEXT NOT NULL REFERENCES loops(id) ON DELETE CASCADE,
+                graph_id TEXT NOT NULL REFERENCES graphs(id) ON DELETE CASCADE,
                 name TEXT NOT NULL,
                 description TEXT,
                 position INTEGER NOT NULL,
@@ -793,30 +1217,30 @@ fn loop_graph_migration_adds_loop_id_and_is_idempotent_across_reopen() {
                 started_at INTEGER,
                 completed_at INTEGER
              );
-             CREATE TABLE loop_nodes (
+             CREATE TABLE graph_nodes (
                 id TEXT PRIMARY KEY,
-                spec_id TEXT NOT NULL REFERENCES loop_specs(id) ON DELETE CASCADE,
+                spec_id TEXT NOT NULL REFERENCES graph_specs(id) ON DELETE CASCADE,
                 name TEXT NOT NULL,
                 kind TEXT NOT NULL,
                 config TEXT NOT NULL,
                 position INTEGER NOT NULL,
                 created_at INTEGER NOT NULL
              );
-             CREATE UNIQUE INDEX idx_loop_nodes_position ON loop_nodes(spec_id, position);
-             CREATE TABLE loop_edges (
+             CREATE UNIQUE INDEX idx_graph_nodes_position ON graph_nodes(spec_id, position);
+             CREATE TABLE graph_edges (
                 id TEXT PRIMARY KEY,
-                spec_id TEXT NOT NULL REFERENCES loop_specs(id) ON DELETE CASCADE,
-                from_node TEXT NOT NULL REFERENCES loop_nodes(id) ON DELETE CASCADE,
-                to_node TEXT NOT NULL REFERENCES loop_nodes(id) ON DELETE CASCADE,
+                spec_id TEXT NOT NULL REFERENCES graph_specs(id) ON DELETE CASCADE,
+                from_node TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE,
+                to_node TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE,
                 condition TEXT NOT NULL
              );
-             INSERT INTO loops (id, name, workdir, status, created_at)
-                 VALUES ('legacy-loop', 'Legacy', '/tmp', 'draft', 0);
-             INSERT INTO loop_specs (id, loop_id, name, position, status)
-                 VALUES ('legacy-spec', 'legacy-loop', 'Spec', 1, 'pending');
-             INSERT INTO loop_nodes (id, spec_id, name, kind, config, position, created_at)
+             INSERT INTO graphs (id, name, workdir, status, created_at)
+                 VALUES ('legacy-graph', 'Legacy', '/tmp', 'draft', 0);
+             INSERT INTO graph_specs (id, graph_id, name, position, status)
+                 VALUES ('legacy-spec', 'legacy-graph', 'Spec', 1, 'pending');
+             INSERT INTO graph_nodes (id, spec_id, name, kind, config, position, created_at)
                  VALUES ('legacy-node', 'legacy-spec', 'Node', 'check', '{\"command\":\"true\"}', 1, 0);
-             INSERT INTO loop_edges (id, spec_id, from_node, to_node, condition)
+             INSERT INTO graph_edges (id, spec_id, from_node, to_node, condition)
                  VALUES ('legacy-edge', 'legacy-spec', 'legacy-node', 'legacy-node', 'always');",
         )
         .expect("seed legacy schema");
@@ -825,47 +1249,50 @@ fn loop_graph_migration_adds_loop_id_and_is_idempotent_across_reopen() {
     // Opening the DB (Database::new runs the migration) must rebuild both
     // tables without losing the pre-existing rows.
     let db = Database::new(&path).expect("open db, running migration");
-    let node = db.get_loop_node("legacy-node").unwrap().unwrap();
+    let node = db.get_graph_node("legacy-node").unwrap().unwrap();
     assert_eq!(node.spec_id.as_deref(), Some("legacy-spec"));
-    assert_eq!(node.loop_id, None);
-    let edge = db.get_loop_edge("legacy-edge").unwrap().unwrap();
+    assert_eq!(node.graph_id, None);
+    let edge = db.get_graph_edge("legacy-edge").unwrap().unwrap();
     assert_eq!(edge.spec_id.as_deref(), Some("legacy-spec"));
-    assert_eq!(edge.loop_id, None);
+    assert_eq!(edge.graph_id, None);
     drop(db);
 
     // Reopening after the migration already ran must be a no-op: same data,
     // no error (idempotent).
     let db = Database::new(&path).expect("reopen db after migration already applied");
-    let node = db.get_loop_node("legacy-node").unwrap().unwrap();
+    let node = db.get_graph_node("legacy-node").unwrap().unwrap();
     assert_eq!(node.spec_id.as_deref(), Some("legacy-spec"));
     assert_eq!(
-        db.list_loop_edges("legacy-spec").unwrap().len(),
+        db.list_graph_edges("legacy-spec").unwrap().len(),
         1,
         "spec-level edge must survive the rebuild"
     );
 
-    // The rebuilt table now supports loop-level nodes/edges too.
-    db.insert_loop_node(&LoopNode {
+    // The rebuilt table now supports graph-level nodes/edges too.
+    db.insert_graph_node(&GraphNode {
         id: "graph-node".to_string(),
         spec_id: None,
-        loop_id: Some("legacy-loop".to_string()),
+        graph_id: Some("legacy-graph".to_string()),
         name: "Graph node".to_string(),
-        kind: LoopNodeKind::Agent,
+        kind: GraphNodeKind::Agent,
         config: serde_json::json!({}),
         position: 1,
         created_at: Utc::now(),
     })
     .unwrap();
-    assert_eq!(db.list_loop_nodes_for_loop("legacy-loop").unwrap().len(), 1);
+    assert_eq!(
+        db.list_graph_nodes_for_graph("legacy-graph").unwrap().len(),
+        1
+    );
 }
 
 #[test]
-fn loop_specs_migration_relaxes_loop_id_and_adds_workdir_and_is_idempotent() {
-    // Simulate a pre-R3 database: `loop_specs` with `loop_id NOT NULL` and
+fn graph_specs_migration_relaxes_graph_id_and_adds_workdir_and_is_idempotent() {
+    // Simulate a pre-R3 database: `graph_specs` with `graph_id NOT NULL` and
     // no `workdir` column — the real shape of databases in the field before
     // this migration. The migration must rebuild the table (SQLite can't
     // relax NOT NULL via ALTER TABLE ADD COLUMN) without losing existing
-    // (loop-bound) rows, and running it again on an already-migrated
+    // (graph-bound) rows, and running it again on an already-migrated
     // database must be a no-op.
     let tmp = NamedTempFile::new().expect("create temp file");
     let path = tmp.path().to_path_buf();
@@ -874,7 +1301,7 @@ fn loop_specs_migration_relaxes_loop_id_and_adds_workdir_and_is_idempotent() {
     {
         let conn = rusqlite::Connection::open(&path).expect("open raw legacy db");
         conn.execute_batch(
-            "CREATE TABLE loops (
+            "CREATE TABLE graphs (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 description TEXT,
@@ -887,9 +1314,9 @@ fn loop_specs_migration_relaxes_loop_id_and_adds_workdir_and_is_idempotent() {
                 completed_at INTEGER,
                 autorun_at INTEGER
              );
-             CREATE TABLE loop_specs (
+             CREATE TABLE graph_specs (
                 id TEXT PRIMARY KEY,
-                loop_id TEXT NOT NULL REFERENCES loops(id) ON DELETE CASCADE,
+                graph_id TEXT NOT NULL REFERENCES graphs(id) ON DELETE CASCADE,
                 name TEXT NOT NULL,
                 description TEXT,
                 position INTEGER NOT NULL,
@@ -898,45 +1325,48 @@ fn loop_specs_migration_relaxes_loop_id_and_adds_workdir_and_is_idempotent() {
                 started_at INTEGER,
                 completed_at INTEGER
              );
-             INSERT INTO loops (id, name, workdir, status, created_at)
-                 VALUES ('legacy-loop', 'Legacy', '/tmp', 'draft', 0);
-             INSERT INTO loop_specs (id, loop_id, name, position, status)
-                 VALUES ('legacy-spec', 'legacy-loop', 'Spec', 1, 'pending');",
+             INSERT INTO graphs (id, name, workdir, status, created_at)
+                 VALUES ('legacy-graph', 'Legacy', '/tmp', 'draft', 0);
+             INSERT INTO graph_specs (id, graph_id, name, position, status)
+                 VALUES ('legacy-spec', 'legacy-graph', 'Spec', 1, 'pending');",
         )
         .expect("seed legacy schema");
     }
 
     // Opening the DB (Database::new runs the migration) must rebuild the
-    // table without losing the pre-existing, loop-bound row.
+    // table without losing the pre-existing, graph-bound row.
     let db = Database::new(&path).expect("open db, running migration");
-    let spec = db.get_loop_spec("legacy-spec").unwrap().unwrap();
-    assert_eq!(spec.loop_id.as_deref(), Some("legacy-loop"));
+    let spec = db.get_graph_spec("legacy-spec").unwrap().unwrap();
+    assert_eq!(spec.graph_id.as_deref(), Some("legacy-graph"));
     assert_eq!(spec.workdir, None);
     drop(db);
 
     // Reopening after the migration already ran must be a no-op: same data,
     // no error (idempotent).
     let db = Database::new(&path).expect("reopen db after migration already applied");
-    let spec = db.get_loop_spec("legacy-spec").unwrap().unwrap();
-    assert_eq!(spec.loop_id.as_deref(), Some("legacy-loop"));
+    let spec = db.get_graph_spec("legacy-spec").unwrap().unwrap();
+    assert_eq!(spec.graph_id.as_deref(), Some("legacy-graph"));
     assert_eq!(
-        db.list_loop_specs("legacy-loop").unwrap().len(),
+        db.list_graph_specs("legacy-graph").unwrap().len(),
         1,
-        "loop-bound spec must survive the rebuild"
+        "graph-bound spec must survive the rebuild"
     );
 
-    // The rebuilt table now supports standalone specs (no loop) too.
-    db.insert_loop_spec(&LoopSpec {
+    // The rebuilt table now supports standalone specs (no graph) too.
+    db.insert_graph_spec(&GraphSpec {
         id: "standalone-spec".to_string(),
-        loop_id: None,
+        graph_id: None,
         name: "Backlog item".to_string(),
         description: Some("Do a thing".to_string()),
         position: 0,
         parallelizable: false,
-        status: LoopSpecStatus::Pending,
+        status: GraphSpecStatus::Pending,
         started_at: None,
         completed_at: None,
         spec_start_head: None,
+        spec_start_dirty: None,
+        spec_end_dirty: None,
+        spec_end_dirty_paths: None,
         spec_committed_head: None,
         workdir: Some("/tmp/project".to_string()),
         completed_via: None,
@@ -944,25 +1374,105 @@ fn loop_specs_migration_relaxes_loop_id_and_adds_workdir_and_is_idempotent() {
         completed_via_at: None,
     })
     .unwrap();
-    let standalone = db.get_loop_spec("standalone-spec").unwrap().unwrap();
-    assert_eq!(standalone.loop_id, None);
+    let standalone = db.get_graph_spec("standalone-spec").unwrap().unwrap();
+    assert_eq!(standalone.graph_id, None);
     assert_eq!(standalone.workdir.as_deref(), Some("/tmp/project"));
 }
 
-fn sample_standalone_spec(id: &str, workdir: Option<&str>) -> LoopSpec {
-    LoopSpec {
+#[test]
+fn graph_specs_migration_carries_spec_end_dirty_columns() {
+    // Same pre-R3 legacy shape as the sibling migration test above, missing
+    // every column CM29 adds — `spec_end_dirty`/`spec_end_dirty_paths` on
+    // `graph_specs` and `allow_dirty_start` on `graphs`.
+    let tmp = NamedTempFile::new().expect("create temp file");
+    let path = tmp.path().to_path_buf();
+    std::mem::forget(tmp);
+
+    {
+        let conn = rusqlite::Connection::open(&path).expect("open raw legacy db");
+        conn.execute_batch(
+            "CREATE TABLE graphs (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT,
+                workdir TEXT NOT NULL,
+                status TEXT NOT NULL,
+                trigger_type TEXT,
+                trigger_config TEXT,
+                created_at INTEGER NOT NULL,
+                started_at INTEGER,
+                completed_at INTEGER,
+                autorun_at INTEGER
+             );
+             CREATE TABLE graph_specs (
+                id TEXT PRIMARY KEY,
+                graph_id TEXT NOT NULL REFERENCES graphs(id) ON DELETE CASCADE,
+                name TEXT NOT NULL,
+                description TEXT,
+                position INTEGER NOT NULL,
+                parallelizable INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL,
+                started_at INTEGER,
+                completed_at INTEGER
+             );
+             INSERT INTO graphs (id, name, workdir, status, created_at)
+                 VALUES ('legacy-graph', 'Legacy', '/tmp', 'draft', 0);
+             INSERT INTO graph_specs (id, graph_id, name, position, status)
+                 VALUES ('legacy-spec', 'legacy-graph', 'Spec', 1, 'pending');",
+        )
+        .expect("seed legacy schema");
+    }
+
+    let has_column = |table: &str, column: &str| -> bool {
+        let conn = rusqlite::Connection::open(&path).expect("open db for pragma check");
+        conn.query_row(
+            &format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = '{column}'"),
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .expect("pragma_table_info query")
+            > 0
+    };
+
+    let db = Database::new(&path).expect("open db, running migration");
+    // Existing rows read back as unknown, not as clean (non-functional
+    // requirement) — `None`, not `Some(0)`.
+    let spec = db.get_graph_spec("legacy-spec").unwrap().unwrap();
+    assert_eq!(spec.spec_end_dirty, None);
+    assert_eq!(spec.spec_end_dirty_paths, None);
+    let lp = db.get_graph("legacy-graph").unwrap().unwrap();
+    assert!(!lp.allow_dirty_start);
+    drop(db);
+
+    assert!(has_column("graph_specs", "spec_end_dirty"));
+    assert!(has_column("graph_specs", "spec_end_dirty_paths"));
+    assert!(has_column("graphs", "allow_dirty_start"));
+
+    // Running the migration again (reopening) must be a no-op.
+    let db = Database::new(&path).expect("reopen db after migration already applied");
+    let spec = db.get_graph_spec("legacy-spec").unwrap().unwrap();
+    assert_eq!(spec.spec_end_dirty, None);
+    assert!(has_column("graph_specs", "spec_end_dirty"));
+    assert!(has_column("graphs", "allow_dirty_start"));
+}
+
+fn sample_standalone_spec(id: &str, workdir: Option<&str>) -> GraphSpec {
+    GraphSpec {
         id: id.to_string(),
-        loop_id: None,
+        graph_id: None,
         name: format!("Backlog {id}"),
         description: Some(
             "Functional Requirements:\n- A\n\nNon-Functional Requirements:\n- B\n\nObjective:\n- C\n\nConstraints:\n- D\n\nGuidelines:\n- E\n\nIn Scope:\n- F\n\nOut of Scope:\n- G".to_string(),
         ),
         position: 0,
         parallelizable: false,
-        status: LoopSpecStatus::Pending,
+        status: GraphSpecStatus::Pending,
         started_at: None,
         completed_at: None,
         spec_start_head: None,
+        spec_start_dirty: None,
+        spec_end_dirty: None,
+        spec_end_dirty_paths: None,
         spec_committed_head: None,
         workdir: workdir.map(str::to_string),
         completed_via: None,
@@ -975,10 +1485,10 @@ fn sample_standalone_spec(id: &str, workdir: Option<&str>) -> LoopSpec {
 fn standalone_spec_crud_round_trip() {
     let db = test_db();
     let spec = sample_standalone_spec("backlog-1", Some("/tmp/project-a"));
-    db.insert_loop_spec(&spec).unwrap();
+    db.insert_graph_spec(&spec).unwrap();
 
-    let fetched = db.get_loop_spec("backlog-1").unwrap().unwrap();
-    assert_eq!(fetched.loop_id, None);
+    let fetched = db.get_graph_spec("backlog-1").unwrap().unwrap();
+    assert_eq!(fetched.graph_id, None);
     assert_eq!(fetched.workdir.as_deref(), Some("/tmp/project-a"));
     assert_eq!(fetched.name, "Backlog backlog-1");
 
@@ -991,27 +1501,27 @@ fn standalone_spec_crud_round_trip() {
         )
         .unwrap();
     assert!(updated);
-    let fetched = db.get_loop_spec("backlog-1").unwrap().unwrap();
+    let fetched = db.get_graph_spec("backlog-1").unwrap().unwrap();
     assert_eq!(fetched.name, "Renamed");
     assert_eq!(fetched.workdir.as_deref(), Some("/tmp/project-b"));
 
-    let deleted = db.delete_loop_spec("backlog-1").unwrap();
+    let deleted = db.delete_graph_spec("backlog-1").unwrap();
     assert!(deleted);
-    assert!(db.get_loop_spec("backlog-1").unwrap().is_none());
+    assert!(db.get_graph_spec("backlog-1").unwrap().is_none());
 }
 
 #[test]
 fn list_specs_filters_by_workdir_and_unassigned_only() {
     let db = test_db();
-    let lp = sample_loop("wf-backlog");
-    db.insert_loop(&lp).unwrap();
-    let bound_spec = sample_loop_spec(&lp.id, "bound-spec", 1);
-    db.insert_loop_spec(&bound_spec).unwrap();
+    let lp = sample_graph("wf-backlog");
+    db.insert_graph(&lp).unwrap();
+    let bound_spec = sample_graph_spec(&lp.id, "bound-spec", 1);
+    db.insert_graph_spec(&bound_spec).unwrap();
 
     let standalone_a = sample_standalone_spec("standalone-a", Some("/tmp/project-a"));
     let standalone_b = sample_standalone_spec("standalone-b", Some("/tmp/project-b"));
-    db.insert_loop_spec(&standalone_a).unwrap();
-    db.insert_loop_spec(&standalone_b).unwrap();
+    db.insert_graph_spec(&standalone_a).unwrap();
+    db.insert_graph_spec(&standalone_b).unwrap();
 
     // No filters: every spec, bound or not.
     let all = db.list_specs(None, None, false).unwrap();
@@ -1022,36 +1532,36 @@ fn list_specs_filters_by_workdir_and_unassigned_only() {
     assert_eq!(by_workdir.len(), 1);
     assert_eq!(by_workdir[0].id, "standalone-a");
 
-    // unassigned_only excludes the loop-bound spec.
+    // unassigned_only excludes the graph-bound spec.
     let unassigned = db.list_specs(None, None, true).unwrap();
     assert_eq!(unassigned.len(), 2);
-    assert!(unassigned.iter().all(|s| s.loop_id.is_none()));
+    assert!(unassigned.iter().all(|s| s.graph_id.is_none()));
     assert!(unassigned.iter().any(|s| s.id == "standalone-a"));
     assert!(unassigned.iter().any(|s| s.id == "standalone-b"));
 
     // Filter by status: none of these are running.
     let running = db
-        .list_specs(None, Some(LoopSpecStatus::Running), false)
+        .list_specs(None, Some(GraphSpecStatus::Running), false)
         .unwrap();
     assert!(running.is_empty());
     let pending = db
-        .list_specs(None, Some(LoopSpecStatus::Pending), false)
+        .list_specs(None, Some(GraphSpecStatus::Pending), false)
         .unwrap();
     assert_eq!(pending.len(), 3);
 }
 
 #[test]
-fn loop_run_roundtrip_preserves_json_payloads() {
+fn graph_run_roundtrip_preserves_json_payloads() {
     let db = test_db();
-    let lp = sample_loop("wf-2");
-    let spec = sample_loop_spec(&lp.id, "spec-run", 1);
-    let node = sample_loop_node(&spec.id, "node-run", 1);
-    let run = LoopNodeRun {
+    let lp = sample_graph("wf-2");
+    let spec = sample_graph_spec(&lp.id, "spec-run", 1);
+    let node = sample_graph_node(&spec.id, "node-run", 1);
+    let run = GraphNodeRun {
         id: "run-1".to_string(),
-        loop_id: lp.id.clone(),
+        graph_id: lp.id.clone(),
         spec_id: spec.id.clone(),
         node_id: node.id.clone(),
-        status: LoopRunStatus::Pass,
+        status: GraphRunStatus::Pass,
         input: Some(serde_json::json!({"feedback": "previous"})),
         output: Some(serde_json::json!({"summary": "ok"})),
         started_at: Utc::now(),
@@ -1060,18 +1570,20 @@ fn loop_run_roundtrip_preserves_json_payloads() {
         pid: Some(4242),
         boot_id: Some("boot-abc".to_string()),
         session_id: None,
+        executed_platform: None,
+        executed_model: None,
     };
 
-    db.insert_loop(&lp).unwrap();
-    db.insert_loop_spec(&spec).unwrap();
-    db.insert_loop_node(&node).unwrap();
-    db.insert_loop_run(&run).unwrap();
+    db.insert_graph(&lp).unwrap();
+    db.insert_graph_spec(&spec).unwrap();
+    db.insert_graph_node(&node).unwrap();
+    db.insert_graph_run(&run).unwrap();
 
-    let runs = db.list_loop_runs_for_spec(&spec.id).unwrap();
+    let runs = db.list_graph_runs_for_spec(&spec.id).unwrap();
 
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].iteration, 2);
-    assert_eq!(runs[0].status, LoopRunStatus::Pass);
+    assert_eq!(runs[0].status, GraphRunStatus::Pass);
     assert_eq!(runs[0].pid, Some(4242));
     assert_eq!(runs[0].boot_id.as_deref(), Some("boot-abc"));
     assert_eq!(
@@ -1091,33 +1603,33 @@ fn loop_run_roundtrip_preserves_json_payloads() {
 }
 
 #[test]
-fn loop_updates_persist_metadata_and_positions() {
+fn graph_updates_persist_metadata_and_positions() {
     let db = test_db();
-    let lp = sample_loop("wf-update");
-    let spec = sample_loop_spec(&lp.id, "spec-update", 1);
-    let node = sample_loop_node(&spec.id, "node-update", 1);
-    let edge = LoopEdge {
+    let lp = sample_graph("wf-update");
+    let spec = sample_graph_spec(&lp.id, "spec-update", 1);
+    let node = sample_graph_node(&spec.id, "node-update", 1);
+    let edge = GraphEdge {
         id: "edge-update".to_string(),
         spec_id: Some(spec.id.clone()),
-        loop_id: None,
+        graph_id: None,
         from_node: node.id.clone(),
         to_node: node.id.clone(),
-        condition: LoopEdgeCondition::Always,
+        condition: GraphEdgeCondition::Always,
     };
 
-    db.insert_loop(&lp).unwrap();
-    db.insert_loop_spec(&spec).unwrap();
-    db.insert_loop_node(&node).unwrap();
-    db.insert_loop_edge(&edge).unwrap();
+    db.insert_graph(&lp).unwrap();
+    db.insert_graph_spec(&spec).unwrap();
+    db.insert_graph_node(&node).unwrap();
+    db.insert_graph_edge(&edge).unwrap();
 
-    db.update_loop_details(
+    db.update_graph_details(
         &lp.id,
-        Some("Auth refresh loop"),
+        Some("Auth refresh graph"),
         Some(Some("Updated description")),
         Some("/tmp/other-project"),
     )
     .unwrap();
-    db.update_loop_spec_details(
+    db.update_graph_spec_details(
         &spec.id,
         Some("Spec updated"),
         Some("Functional Requirements:\n- A\n\nNon-Functional Requirements:\n- B\n\nObjective:\n- C\n\nConstraints:\n- D\n\nGuidelines:\n- E\n\nIn Scope:\n- F\n\nOut of Scope:\n- G"),
@@ -1125,87 +1637,87 @@ fn loop_updates_persist_metadata_and_positions() {
         Some(true),
     )
     .unwrap();
-    db.update_loop_node_details(
+    db.update_graph_node_details(
         &node.id,
         Some("Verification node"),
-        Some(LoopNodeKind::Gate),
+        Some(GraphNodeKind::Gate),
         Some(&serde_json::json!({"evaluate": "output_contains", "value": "APPROVED"})),
         Some(4),
     )
     .unwrap();
-    db.update_loop_edge_condition(&edge.id, &LoopEdgeCondition::Fail)
+    db.update_graph_edge_condition(&edge.id, &GraphEdgeCondition::Fail)
         .unwrap();
 
-    let lp = db.get_loop(&lp.id).unwrap().unwrap();
-    let spec = db.get_loop_spec(&spec.id).unwrap().unwrap();
-    let node = db.get_loop_node(&node.id).unwrap().unwrap();
-    let edge = db.get_loop_edge(&edge.id).unwrap().unwrap();
+    let lp = db.get_graph(&lp.id).unwrap().unwrap();
+    let spec = db.get_graph_spec(&spec.id).unwrap().unwrap();
+    let node = db.get_graph_node(&node.id).unwrap().unwrap();
+    let edge = db.get_graph_edge(&edge.id).unwrap().unwrap();
 
-    assert_eq!(lp.name, "Auth refresh loop");
+    assert_eq!(lp.name, "Auth refresh graph");
     assert_eq!(lp.description.as_deref(), Some("Updated description"));
     assert_eq!(lp.workdir, "/tmp/other-project");
     assert_eq!(spec.name, "Spec updated");
     assert_eq!(spec.position, 3);
     assert!(spec.parallelizable);
     assert_eq!(node.name, "Verification node");
-    assert_eq!(node.kind, LoopNodeKind::Gate);
+    assert_eq!(node.kind, GraphNodeKind::Gate);
     assert_eq!(node.position, 4);
     assert_eq!(
         node.config.get("evaluate"),
         Some(&serde_json::json!("output_contains"))
     );
-    assert_eq!(edge.condition, LoopEdgeCondition::Fail);
+    assert_eq!(edge.condition, GraphEdgeCondition::Fail);
 }
 
 #[test]
-fn loop_spec_start_head_persists_through_reread() {
+fn graph_spec_start_head_persists_through_reread() {
     // G4: spec_start_head must survive a fresh read from the DB (e.g. after a
-    // daemon restart), not just live on the in-memory LoopSpec that set it.
+    // daemon restart), not just live on the in-memory GraphSpec that set it.
     let db = test_db();
-    let lp = sample_loop("wf-start-head");
-    let spec = sample_loop_spec(&lp.id, "spec-start-head", 1);
+    let lp = sample_graph("wf-start-head");
+    let spec = sample_graph_spec(&lp.id, "spec-start-head", 1);
 
-    db.insert_loop(&lp).unwrap();
-    db.insert_loop_spec(&spec).unwrap();
+    db.insert_graph(&lp).unwrap();
+    db.insert_graph_spec(&spec).unwrap();
 
-    let fresh = db.get_loop_spec(&spec.id).unwrap().unwrap();
+    let fresh = db.get_graph_spec(&spec.id).unwrap().unwrap();
     assert_eq!(fresh.spec_start_head, None);
 
     assert!(db
-        .set_loop_spec_start_head(&spec.id, Some("e1c134b"))
+        .set_graph_spec_start_head(&spec.id, Some("e1c134b"))
         .unwrap());
 
-    let reread = db.get_loop_spec(&spec.id).unwrap().unwrap();
+    let reread = db.get_graph_spec(&spec.id).unwrap().unwrap();
     assert_eq!(reread.spec_start_head.as_deref(), Some("e1c134b"));
 
     let listed = db
-        .list_loop_specs(&lp.id)
+        .list_graph_specs(&lp.id)
         .unwrap()
         .into_iter()
         .find(|item| item.id == spec.id)
         .unwrap();
     assert_eq!(listed.spec_start_head.as_deref(), Some("e1c134b"));
 
-    assert!(db.set_loop_spec_start_head(&spec.id, None).unwrap());
-    let cleared = db.get_loop_spec(&spec.id).unwrap().unwrap();
+    assert!(db.set_graph_spec_start_head(&spec.id, None).unwrap());
+    let cleared = db.get_graph_spec(&spec.id).unwrap().unwrap();
     assert_eq!(cleared.spec_start_head, None);
 }
 
 #[test]
-fn reconcile_orphaned_loops_pauses_running_loop_and_interrupts_its_run() {
+fn reconcile_orphaned_graphs_pauses_running_graph_and_interrupts_its_run() {
     let db = test_db();
     let data_dir = tempdir().unwrap();
-    let mut lp = sample_loop("wf-orphan");
-    lp.status = LoopStatus::Running;
-    let mut spec = sample_loop_spec(&lp.id, "spec-orphan", 1);
-    spec.status = LoopSpecStatus::Running;
-    let node = sample_loop_node(&spec.id, "node-orphan", 1);
-    let run = LoopNodeRun {
+    let mut lp = sample_graph("wf-orphan");
+    lp.status = GraphStatus::Running;
+    let mut spec = sample_graph_spec(&lp.id, "spec-orphan", 1);
+    spec.status = GraphSpecStatus::Running;
+    let node = sample_graph_node(&spec.id, "node-orphan", 1);
+    let run = GraphNodeRun {
         id: "run-orphan".to_string(),
-        loop_id: lp.id.clone(),
+        graph_id: lp.id.clone(),
         spec_id: spec.id.clone(),
         node_id: node.id.clone(),
-        status: LoopRunStatus::Running,
+        status: GraphRunStatus::Running,
         input: None,
         output: None,
         started_at: Utc::now(),
@@ -1214,27 +1726,29 @@ fn reconcile_orphaned_loops_pauses_running_loop_and_interrupts_its_run() {
         pid: None,
         boot_id: None,
         session_id: None,
+        executed_platform: None,
+        executed_model: None,
     };
 
-    db.insert_loop(&lp).unwrap();
-    db.insert_loop_spec(&spec).unwrap();
-    db.insert_loop_node(&node).unwrap();
-    db.insert_loop_run(&run).unwrap();
+    db.insert_graph(&lp).unwrap();
+    db.insert_graph_spec(&spec).unwrap();
+    db.insert_graph_node(&node).unwrap();
+    db.insert_graph_run(&run).unwrap();
     // Prove the reconcile pass actually clears these, not that they were
     // never set.
-    db.update_loop_spec_status(&spec.id, LoopSpecStatus::Running, Some(Utc::now()), None)
+    db.update_graph_spec_status(&spec.id, GraphSpecStatus::Running, Some(Utc::now()), None)
         .unwrap();
-    db.set_loop_spec_start_head(&spec.id, Some("deadbeef"))
+    db.set_graph_spec_start_head(&spec.id, Some("deadbeef"))
         .unwrap();
 
-    let reconciled = db.reconcile_orphaned_loops(data_dir.path()).unwrap();
+    let reconciled = db.reconcile_orphaned_graphs(data_dir.path()).unwrap();
     assert_eq!(reconciled, 1);
 
-    // Test 1: the loop is paused, and its dangling run is no longer `running`.
-    let lp_after = db.get_loop(&lp.id).unwrap().unwrap();
-    assert_eq!(lp_after.status, LoopStatus::Paused);
-    let run_after = db.get_loop_run(&run.id).unwrap().unwrap();
-    assert_ne!(run_after.status, LoopRunStatus::Running);
+    // Test 1: the graph is paused, and its dangling run is no longer `running`.
+    let lp_after = db.get_graph(&lp.id).unwrap().unwrap();
+    assert_eq!(lp_after.status, GraphStatus::Paused);
+    let run_after = db.get_graph_run(&run.id).unwrap().unwrap();
+    assert_ne!(run_after.status, GraphRunStatus::Running);
     assert_eq!(
         run_after
             .output
@@ -1249,33 +1763,33 @@ fn reconcile_orphaned_loops_pauses_running_loop_and_interrupts_its_run() {
     // worktree/commits, not by its status, and leaving it `running` would
     // make it invisible to queue selection (`queue_next_pending_spec_id`
     // picks `pending` and `interrupted` alike).
-    let spec_after = db.get_loop_spec(&spec.id).unwrap().unwrap();
-    assert_eq!(spec_after.status, LoopSpecStatus::Interrupted);
+    let spec_after = db.get_graph_spec(&spec.id).unwrap().unwrap();
+    assert_eq!(spec_after.status, GraphSpecStatus::Interrupted);
     assert_eq!(spec_after.started_at, None);
     assert_eq!(spec_after.spec_start_head, None);
 }
 
 /// B18: the real incident — a queue-driven run's in-flight member (a
-/// standalone spec, `loop_id: None`, never bound to the loop that's
+/// standalone spec, `graph_id: None`, never bound to the graph that's
 /// currently running it) must be marked `interrupted` exactly like a
-/// loop-bound spec is. Left `running`, it would be invisible to
+/// graph-bound spec is. Left `running`, it would be invisible to
 /// `queue_next_pending_spec_id` forever — the orphan this whole fix exists
 /// to prevent — and `queue_next_pending_spec_id` must pick an `interrupted`
 /// member right back up, in the same position, exactly as it would a
 /// `pending` one.
 #[test]
-fn reconcile_orphaned_loops_marks_queue_member_spec_interrupted() {
+fn reconcile_orphaned_graphs_marks_queue_member_spec_interrupted() {
     let db = test_db();
     let data_dir = tempdir().unwrap();
-    let mut lp = sample_loop("wf-orphan-queue");
-    lp.status = LoopStatus::Running;
+    let mut lp = sample_graph("wf-orphan-queue");
+    lp.status = GraphStatus::Running;
     lp.active_run_queue_id = Some("queue-1".to_string());
-    db.insert_loop(&lp).unwrap();
+    db.insert_graph(&lp).unwrap();
 
-    let mut spec = sample_loop_spec("unused-loop-id", "spec-orphan-queue", 1);
-    spec.loop_id = None; // queue membership never binds the spec to a loop
-    spec.status = LoopSpecStatus::Running;
-    db.insert_loop_spec(&spec).unwrap();
+    let mut spec = sample_graph_spec("unused-graph-id", "spec-orphan-queue", 1);
+    spec.graph_id = None; // queue membership never binds the spec to a graph
+    spec.status = GraphSpecStatus::Running;
+    db.insert_graph_spec(&spec).unwrap();
     db.insert_queue(&Queue {
         id: "queue-1".to_string(),
         name: "queue-1".to_string(),
@@ -1284,14 +1798,14 @@ fn reconcile_orphaned_loops_marks_queue_member_spec_interrupted() {
     .unwrap();
     db.append_queue_member("queue-1", &spec.id, None).unwrap();
 
-    let node = sample_loop_node(&spec.id, "node-orphan-queue", 1);
-    db.insert_loop_node(&node).unwrap();
-    db.insert_loop_run(&LoopNodeRun {
+    let node = sample_graph_node(&spec.id, "node-orphan-queue", 1);
+    db.insert_graph_node(&node).unwrap();
+    db.insert_graph_run(&GraphNodeRun {
         id: "run-orphan-queue".to_string(),
-        loop_id: lp.id.clone(),
+        graph_id: lp.id.clone(),
         spec_id: spec.id.clone(),
         node_id: node.id,
-        status: LoopRunStatus::Running,
+        status: GraphRunStatus::Running,
         input: None,
         output: None,
         started_at: Utc::now(),
@@ -1300,15 +1814,17 @@ fn reconcile_orphaned_loops_marks_queue_member_spec_interrupted() {
         pid: None,
         boot_id: None,
         session_id: None,
+        executed_platform: None,
+        executed_model: None,
     })
     .unwrap();
 
-    assert_eq!(db.reconcile_orphaned_loops(data_dir.path()).unwrap(), 1);
+    assert_eq!(db.reconcile_orphaned_graphs(data_dir.path()).unwrap(), 1);
 
-    let lp_after = db.get_loop(&lp.id).unwrap().unwrap();
-    assert_eq!(lp_after.status, LoopStatus::Paused);
-    let spec_after = db.get_loop_spec(&spec.id).unwrap().unwrap();
-    assert_eq!(spec_after.status, LoopSpecStatus::Interrupted);
+    let lp_after = db.get_graph(&lp.id).unwrap().unwrap();
+    assert_eq!(lp_after.status, GraphStatus::Paused);
+    let spec_after = db.get_graph_spec(&spec.id).unwrap().unwrap();
+    assert_eq!(spec_after.status, GraphSpecStatus::Interrupted);
     // The queue's live pick can now find it again, exactly as it would a
     // `pending` member.
     assert_eq!(
@@ -1318,24 +1834,24 @@ fn reconcile_orphaned_loops_marks_queue_member_spec_interrupted() {
 }
 
 /// R3 (B18): the defensive selection safety net. A queue member left
-/// `running` with no `loop_runs` row proving it's still live in *this*
+/// `running` with no `graph_runs` row proving it's still live in *this*
 /// daemon's lifetime must be flagged as stale — but a member whose `running`
 /// node run really does carry the current boot id (i.e. genuinely still in
 /// flight right now) must not be.
 #[test]
 fn queue_stale_running_members_flags_only_the_member_with_no_live_run() {
     let db = test_db();
-    let lp = sample_loop("wf-queue-stale");
-    db.insert_loop(&lp).unwrap();
+    let lp = sample_graph("wf-queue-stale");
+    db.insert_graph(&lp).unwrap();
 
-    let mut stale = sample_loop_spec("unused-loop-id", "spec-stale", 1);
-    stale.loop_id = None;
-    stale.status = LoopSpecStatus::Running;
-    let mut live = sample_loop_spec("unused-loop-id", "spec-live", 2);
-    live.loop_id = None;
-    live.status = LoopSpecStatus::Running;
-    db.insert_loop_spec(&stale).unwrap();
-    db.insert_loop_spec(&live).unwrap();
+    let mut stale = sample_graph_spec("unused-graph-id", "spec-stale", 1);
+    stale.graph_id = None;
+    stale.status = GraphSpecStatus::Running;
+    let mut live = sample_graph_spec("unused-graph-id", "spec-live", 2);
+    live.graph_id = None;
+    live.status = GraphSpecStatus::Running;
+    db.insert_graph_spec(&stale).unwrap();
+    db.insert_graph_spec(&live).unwrap();
 
     db.insert_queue(&Queue {
         id: "queue-1".to_string(),
@@ -1347,14 +1863,14 @@ fn queue_stale_running_members_flags_only_the_member_with_no_live_run() {
     db.append_queue_member("queue-1", &live.id, None).unwrap();
 
     // `live`'s node run genuinely belongs to the current daemon's boot.
-    let node = sample_loop_node(&live.id, "node-live", 1);
-    db.insert_loop_node(&node).unwrap();
-    db.insert_loop_run(&LoopNodeRun {
+    let node = sample_graph_node(&live.id, "node-live", 1);
+    db.insert_graph_node(&node).unwrap();
+    db.insert_graph_run(&GraphNodeRun {
         id: "run-live".to_string(),
-        loop_id: lp.id,
+        graph_id: lp.id,
         spec_id: live.id,
         node_id: node.id,
-        status: LoopRunStatus::Running,
+        status: GraphRunStatus::Running,
         input: None,
         output: None,
         started_at: Utc::now(),
@@ -1363,6 +1879,8 @@ fn queue_stale_running_members_flags_only_the_member_with_no_live_run() {
         pid: None,
         boot_id: Some("boot-current".to_string()),
         session_id: None,
+        executed_platform: None,
+        executed_model: None,
     })
     .unwrap();
 
@@ -1373,20 +1891,20 @@ fn queue_stale_running_members_flags_only_the_member_with_no_live_run() {
 }
 
 #[test]
-fn reconcile_orphaned_loops_is_idempotent() {
+fn reconcile_orphaned_graphs_is_idempotent() {
     let db = test_db();
     let data_dir = tempdir().unwrap();
-    let mut lp = sample_loop("wf-orphan-idempotent");
-    lp.status = LoopStatus::Running;
-    let mut spec = sample_loop_spec(&lp.id, "spec-orphan-idempotent", 1);
-    spec.status = LoopSpecStatus::Running;
-    let node = sample_loop_node(&spec.id, "node-orphan-idempotent", 1);
-    let run = LoopNodeRun {
+    let mut lp = sample_graph("wf-orphan-idempotent");
+    lp.status = GraphStatus::Running;
+    let mut spec = sample_graph_spec(&lp.id, "spec-orphan-idempotent", 1);
+    spec.status = GraphSpecStatus::Running;
+    let node = sample_graph_node(&spec.id, "node-orphan-idempotent", 1);
+    let run = GraphNodeRun {
         id: "run-orphan-idempotent".to_string(),
-        loop_id: lp.id.clone(),
+        graph_id: lp.id.clone(),
         spec_id: spec.id.clone(),
         node_id: node.id.clone(),
-        status: LoopRunStatus::Running,
+        status: GraphRunStatus::Running,
         input: None,
         output: None,
         started_at: Utc::now(),
@@ -1395,24 +1913,26 @@ fn reconcile_orphaned_loops_is_idempotent() {
         pid: None,
         boot_id: None,
         session_id: None,
+        executed_platform: None,
+        executed_model: None,
     };
 
-    db.insert_loop(&lp).unwrap();
-    db.insert_loop_spec(&spec).unwrap();
-    db.insert_loop_node(&node).unwrap();
-    db.insert_loop_run(&run).unwrap();
+    db.insert_graph(&lp).unwrap();
+    db.insert_graph_spec(&spec).unwrap();
+    db.insert_graph_node(&node).unwrap();
+    db.insert_graph_run(&run).unwrap();
 
-    let first_pass = db.reconcile_orphaned_loops(data_dir.path()).unwrap();
+    let first_pass = db.reconcile_orphaned_graphs(data_dir.path()).unwrap();
     assert_eq!(first_pass, 1);
-    let lp_after_first = db.get_loop(&lp.id).unwrap().unwrap();
-    let run_after_first = db.get_loop_run(&run.id).unwrap().unwrap();
+    let lp_after_first = db.get_graph(&lp.id).unwrap().unwrap();
+    let run_after_first = db.get_graph_run(&run.id).unwrap().unwrap();
 
     // Test 3: a second reconcile pass finds nothing left to reconcile, and
-    // leaves the already-paused loop/run untouched.
-    let second_pass = db.reconcile_orphaned_loops(data_dir.path()).unwrap();
+    // leaves the already-paused graph/run untouched.
+    let second_pass = db.reconcile_orphaned_graphs(data_dir.path()).unwrap();
     assert_eq!(second_pass, 0);
-    let lp_after_second = db.get_loop(&lp.id).unwrap().unwrap();
-    let run_after_second = db.get_loop_run(&run.id).unwrap().unwrap();
+    let lp_after_second = db.get_graph(&lp.id).unwrap().unwrap();
+    let run_after_second = db.get_graph_run(&run.id).unwrap().unwrap();
     assert_eq!(lp_after_second.status, lp_after_first.status);
     assert_eq!(run_after_second.status, run_after_first.status);
     assert_eq!(run_after_second.completed_at, run_after_first.completed_at);
@@ -1424,7 +1944,7 @@ fn reconcile_orphaned_loops_is_idempotent() {
 /// rebooted since (same `boot_id`), reconciliation should still attempt a
 /// best-effort kill of the survivor instead of just abandoning it.
 #[tokio::test]
-async fn reconcile_orphaned_loops_kills_survivor_pid_from_same_boot() {
+async fn reconcile_orphaned_graphs_kills_survivor_pid_from_same_boot() {
     let Some(current_boot_id) = crate::system::boot_id() else {
         // Non-Linux host (or /proc unavailable): boot_id is never known, so
         // the same-boot check can never match — nothing to test here.
@@ -1433,11 +1953,11 @@ async fn reconcile_orphaned_loops_kills_survivor_pid_from_same_boot() {
 
     let db = test_db();
     let data_dir = tempdir().unwrap();
-    let mut lp = sample_loop("wf-orphan-survivor");
-    lp.status = LoopStatus::Running;
-    let mut spec = sample_loop_spec(&lp.id, "spec-orphan-survivor", 1);
-    spec.status = LoopSpecStatus::Running;
-    let node = sample_loop_node(&spec.id, "node-orphan-survivor", 1);
+    let mut lp = sample_graph("wf-orphan-survivor");
+    lp.status = GraphStatus::Running;
+    let mut spec = sample_graph_spec(&lp.id, "spec-orphan-survivor", 1);
+    spec.status = GraphSpecStatus::Running;
+    let node = sample_graph_node(&spec.id, "node-orphan-survivor", 1);
 
     // A real, still-running process group leader to stand in for a `mimo
     // run` that outlived the daemon that spawned it. Must be its own
@@ -1454,12 +1974,12 @@ async fn reconcile_orphaned_loops_kills_survivor_pid_from_same_boot() {
     let mut child = command.spawn().expect("spawn survivor process");
     let pid = child.id() as i64;
 
-    let run = LoopNodeRun {
+    let run = GraphNodeRun {
         id: "run-orphan-survivor".to_string(),
-        loop_id: lp.id.clone(),
+        graph_id: lp.id.clone(),
         spec_id: spec.id.clone(),
         node_id: node.id.clone(),
-        status: LoopRunStatus::Running,
+        status: GraphRunStatus::Running,
         input: None,
         output: None,
         started_at: Utc::now(),
@@ -1468,14 +1988,16 @@ async fn reconcile_orphaned_loops_kills_survivor_pid_from_same_boot() {
         pid: Some(pid),
         boot_id: Some(current_boot_id),
         session_id: None,
+        executed_platform: None,
+        executed_model: None,
     };
 
-    db.insert_loop(&lp).unwrap();
-    db.insert_loop_spec(&spec).unwrap();
-    db.insert_loop_node(&node).unwrap();
-    db.insert_loop_run(&run).unwrap();
+    db.insert_graph(&lp).unwrap();
+    db.insert_graph_spec(&spec).unwrap();
+    db.insert_graph_node(&node).unwrap();
+    db.insert_graph_run(&run).unwrap();
 
-    assert_eq!(db.reconcile_orphaned_loops(data_dir.path()).unwrap(), 1);
+    assert_eq!(db.reconcile_orphaned_graphs(data_dir.path()).unwrap(), 1);
 
     // The kill is fired via a detached task (see
     // `terminate_process_group_async`); poll briefly for the SIGTERM to
@@ -1500,20 +2022,20 @@ async fn reconcile_orphaned_loops_kills_survivor_pid_from_same_boot() {
 /// by an unrelated process since the reboot, so killing it would be
 /// dangerous, not just useless.
 #[test]
-fn reconcile_orphaned_loops_skips_kill_for_mismatched_boot_id() {
+fn reconcile_orphaned_graphs_skips_kill_for_mismatched_boot_id() {
     let db = test_db();
     let data_dir = tempdir().unwrap();
-    let mut lp = sample_loop("wf-orphan-stale-boot");
-    lp.status = LoopStatus::Running;
-    let mut spec = sample_loop_spec(&lp.id, "spec-orphan-stale-boot", 1);
-    spec.status = LoopSpecStatus::Running;
-    let node = sample_loop_node(&spec.id, "node-orphan-stale-boot", 1);
-    let run = LoopNodeRun {
+    let mut lp = sample_graph("wf-orphan-stale-boot");
+    lp.status = GraphStatus::Running;
+    let mut spec = sample_graph_spec(&lp.id, "spec-orphan-stale-boot", 1);
+    spec.status = GraphSpecStatus::Running;
+    let node = sample_graph_node(&spec.id, "node-orphan-stale-boot", 1);
+    let run = GraphNodeRun {
         id: "run-orphan-stale-boot".to_string(),
-        loop_id: lp.id.clone(),
+        graph_id: lp.id.clone(),
         spec_id: spec.id.clone(),
         node_id: node.id.clone(),
-        status: LoopRunStatus::Running,
+        status: GraphRunStatus::Running,
         input: None,
         output: None,
         started_at: Utc::now(),
@@ -1524,44 +2046,46 @@ fn reconcile_orphaned_loops_skips_kill_for_mismatched_boot_id() {
         pid: Some(1),
         boot_id: Some("some-other-boot-that-is-not-current".to_string()),
         session_id: None,
+        executed_platform: None,
+        executed_model: None,
     };
 
-    db.insert_loop(&lp).unwrap();
-    db.insert_loop_spec(&spec).unwrap();
-    db.insert_loop_node(&node).unwrap();
-    db.insert_loop_run(&run).unwrap();
+    db.insert_graph(&lp).unwrap();
+    db.insert_graph_spec(&spec).unwrap();
+    db.insert_graph_node(&node).unwrap();
+    db.insert_graph_run(&run).unwrap();
 
     // Must not panic or error even though pid 1 is a real (unkillable by
     // us) process — the boot_id mismatch must short-circuit before any
     // signal is ever attempted.
-    assert_eq!(db.reconcile_orphaned_loops(data_dir.path()).unwrap(), 1);
-    let run_after = db.get_loop_run(&run.id).unwrap().unwrap();
-    assert_ne!(run_after.status, LoopRunStatus::Running);
+    assert_eq!(db.reconcile_orphaned_graphs(data_dir.path()).unwrap(), 1);
+    let run_after = db.get_graph_run(&run.id).unwrap().unwrap();
+    assert_ne!(run_after.status, GraphRunStatus::Running);
 }
 
 #[test]
-fn reconcile_orphaned_loops_leaves_completed_loop_untouched() {
+fn reconcile_orphaned_graphs_leaves_completed_graph_untouched() {
     let db = test_db();
     let data_dir = tempdir().unwrap();
-    let mut lp = sample_loop("wf-completed");
-    lp.status = LoopStatus::Completed;
-    db.insert_loop(&lp).unwrap();
+    let mut lp = sample_graph("wf-completed");
+    lp.status = GraphStatus::Completed;
+    db.insert_graph(&lp).unwrap();
 
-    // Test 4: a `Completed` loop is not reconciled.
-    let reconciled = db.reconcile_orphaned_loops(data_dir.path()).unwrap();
+    // Test 4: a `Completed` graph is not reconciled.
+    let reconciled = db.reconcile_orphaned_graphs(data_dir.path()).unwrap();
     assert_eq!(reconciled, 0);
-    let lp_after = db.get_loop(&lp.id).unwrap().unwrap();
-    assert_eq!(lp_after.status, LoopStatus::Completed);
+    let lp_after = db.get_graph(&lp.id).unwrap().unwrap();
+    assert_eq!(lp_after.status, GraphStatus::Completed);
 }
 
 /// The ownership gate (second line of defence, alongside never calling this
 /// from `run_stdio_server` at all — see the doc comment on
-/// `reconcile_orphaned_loops`): when the on-disk `daemon.pid` names a *live*
+/// `reconcile_orphaned_graphs`): when the on-disk `daemon.pid` names a *live*
 /// process that isn't this one, some other process owns the daemon
 /// lifecycle right now, and this call must not touch graph state at all —
 /// no signal, no pause, no interrupted-run marking.
 #[tokio::test]
-async fn reconcile_orphaned_loops_skips_everything_when_foreign_daemon_pid_is_live() {
+async fn reconcile_orphaned_graphs_skips_everything_when_foreign_daemon_pid_is_live() {
     let Some(current_boot_id) = crate::system::boot_id() else {
         return;
     };
@@ -1580,19 +2104,19 @@ async fn reconcile_orphaned_loops_skips_everything_when_foreign_daemon_pid_is_li
     .unwrap();
 
     let db = test_db();
-    let mut lp = sample_loop("wf-foreign-daemon-owned");
-    lp.status = LoopStatus::Running;
-    let mut spec = sample_loop_spec(&lp.id, "spec-foreign-daemon-owned", 1);
-    spec.status = LoopSpecStatus::Running;
-    let node = sample_loop_node(&spec.id, "node-foreign-daemon-owned", 1);
+    let mut lp = sample_graph("wf-foreign-daemon-owned");
+    lp.status = GraphStatus::Running;
+    let mut spec = sample_graph_spec(&lp.id, "spec-foreign-daemon-owned", 1);
+    spec.status = GraphSpecStatus::Running;
+    let node = sample_graph_node(&spec.id, "node-foreign-daemon-owned", 1);
     // A pid/boot_id that WOULD be killed if the gate failed to short-circuit
     // (same boot, matching the same-boot kill precondition tested elsewhere).
-    let run = LoopNodeRun {
+    let run = GraphNodeRun {
         id: "run-foreign-daemon-owned".to_string(),
-        loop_id: lp.id.clone(),
+        graph_id: lp.id.clone(),
         spec_id: spec.id.clone(),
         node_id: node.id.clone(),
-        status: LoopRunStatus::Running,
+        status: GraphRunStatus::Running,
         input: None,
         output: None,
         started_at: Utc::now(),
@@ -1601,29 +2125,31 @@ async fn reconcile_orphaned_loops_skips_everything_when_foreign_daemon_pid_is_li
         pid: Some(foreign_daemon.id() as i64),
         boot_id: Some(current_boot_id),
         session_id: None,
+        executed_platform: None,
+        executed_model: None,
     };
 
-    db.insert_loop(&lp).unwrap();
-    db.insert_loop_spec(&spec).unwrap();
-    db.insert_loop_node(&node).unwrap();
-    db.insert_loop_run(&run).unwrap();
+    db.insert_graph(&lp).unwrap();
+    db.insert_graph_spec(&spec).unwrap();
+    db.insert_graph_node(&node).unwrap();
+    db.insert_graph_run(&run).unwrap();
 
-    let reconciled = db.reconcile_orphaned_loops(data_dir.path()).unwrap();
+    let reconciled = db.reconcile_orphaned_graphs(data_dir.path()).unwrap();
     assert_eq!(
         reconciled, 0,
-        "must not report any loop reconciled while a foreign live daemon owns the pid file"
+        "must not report any graph reconciled while a foreign live daemon owns the pid file"
     );
 
-    let lp_after = db.get_loop(&lp.id).unwrap().unwrap();
+    let lp_after = db.get_graph(&lp.id).unwrap().unwrap();
     assert_eq!(
         lp_after.status,
-        LoopStatus::Running,
+        GraphStatus::Running,
         "the graph must be left exactly as found, not paused"
     );
-    let run_after = db.get_loop_run(&run.id).unwrap().unwrap();
+    let run_after = db.get_graph_run(&run.id).unwrap().unwrap();
     assert_eq!(
         run_after.status,
-        LoopRunStatus::Running,
+        GraphRunStatus::Running,
         "the run must not be reported as interrupted by a restart that never happened"
     );
 
@@ -1639,25 +2165,147 @@ async fn reconcile_orphaned_loops_skips_everything_when_foreign_daemon_pid_is_li
     let _ = foreign_daemon.wait();
 }
 
-fn loop_with_trigger(id: &str, trigger: Option<Trigger>) -> Loop {
-    Loop {
+#[cfg(target_os = "linux")]
+#[test]
+fn reconcile_orphaned_graphs_skips_kill_for_own_ancestor_pid() {
+    let Some(current_boot_id) = crate::system::boot_id() else {
+        return;
+    };
+
+    // Read our own PPid — the parent of this test process. This process's
+    // own pid can't be used (it would be killed), but the parent is an
+    // ancestor and must be skipped by the ancestor guard.
+    let ppid: u32 = std::fs::read_to_string("/proc/self/status")
+        .expect("read /proc/self/status")
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("PPid:")
+                .and_then(|rest| rest.trim().parse::<u32>().ok())
+        })
+        .expect("PPid line must be present");
+    assert!(ppid != 0 && ppid != 1);
+    // Sanity: parent must be alive at test start.
+    assert!(
+        crate::daemon::process::is_process_running(ppid),
+        "parent pid {ppid} must be alive"
+    );
+
+    let db = test_db();
+    let data_dir = tempdir().unwrap();
+    let mut lp = sample_graph("wf-ancestor-skip");
+    lp.status = GraphStatus::Running;
+    let mut spec = sample_graph_spec(&lp.id, "spec-ancestor-skip", 1);
+    spec.status = GraphSpecStatus::Running;
+    let node = sample_graph_node(&spec.id, "node-ancestor-skip", 1);
+    let run = GraphNodeRun {
+        id: "run-ancestor-skip".to_string(),
+        graph_id: lp.id.clone(),
+        spec_id: spec.id.clone(),
+        node_id: node.id.clone(),
+        status: GraphRunStatus::Running,
+        input: None,
+        output: None,
+        started_at: Utc::now(),
+        completed_at: None,
+        iteration: 1,
+        pid: Some(ppid as i64),
+        boot_id: Some(current_boot_id),
+        session_id: None,
+        executed_platform: None,
+        executed_model: None,
+    };
+
+    db.insert_graph(&lp).unwrap();
+    db.insert_graph_spec(&spec).unwrap();
+    db.insert_graph_node(&node).unwrap();
+    db.insert_graph_run(&run).unwrap();
+
+    let reconciled = db.reconcile_orphaned_graphs(data_dir.path()).unwrap();
+    assert_eq!(reconciled, 1);
+
+    // Run must be marked interrupted in DB, but parent process must still be alive.
+    let run_after = db.get_graph_run(&run.id).unwrap().unwrap();
+    assert_ne!(run_after.status, GraphRunStatus::Running);
+    assert_eq!(
+        run_after
+            .output
+            .as_ref()
+            .and_then(|value| value.get("interrupted")),
+        Some(&serde_json::json!(true))
+    );
+    assert!(
+        crate::daemon::process::is_process_running(ppid),
+        "ancestor pid {ppid} must still be alive — the guard must have skipped the kill"
+    );
+}
+
+#[test]
+fn new_safe_skips_migration_when_foreign_daemon_is_live() {
+    let data_dir = tempdir().unwrap();
+    // Simulate a live daemon by writing our own pid (guaranteed live).
+    std::fs::write(
+        data_dir.path().join("daemon.pid"),
+        std::process::id().to_string(),
+    )
+    .unwrap();
+
+    let db_path = data_dir.path().join("fresh.db");
+    // Empty DB, but foreign daemon is live — new_safe must skip migrations.
+    let _db = Database::new_safe(&db_path, data_dir.path())
+        .expect("new_safe should open without migrating");
+    drop(_db);
+    // Verify no tables were created: `graphs` table must not exist.
+    let graphs_exists: i32 = rusqlite::Connection::open(&db_path)
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'graphs'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        graphs_exists, 0,
+        "new_safe with a live daemon must not have run migrations (graphs table must not exist)"
+    );
+
+    // Without the foreign daemon, the same path must migrate normally.
+    std::fs::remove_file(data_dir.path().join("daemon.pid")).unwrap();
+    let _db2 = Database::new_safe(&db_path, data_dir.path())
+        .expect("new_safe without daemon should migrate");
+    drop(_db2);
+    let graphs_exists_after: i32 = rusqlite::Connection::open(&db_path)
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'graphs'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        graphs_exists_after, 1,
+        "new_safe without a live daemon must run migrations"
+    );
+}
+
+fn graph_with_trigger(id: &str, trigger: Option<Trigger>) -> Graph {
+    Graph {
         trigger,
-        ..sample_loop(id)
+        ..sample_graph(id)
     }
 }
 
 #[test]
-fn loop_trigger_round_trips_through_insert_and_get() {
+fn graph_trigger_round_trips_through_insert_and_get() {
     let db = test_db();
-    let cron = loop_with_trigger(
+    let cron = graph_with_trigger(
         "wf-cron",
         Some(Trigger::Cron {
             schedule_expr: "30 8 * * *".to_string(),
         }),
     );
-    db.insert_loop(&cron).unwrap();
+    db.insert_graph(&cron).unwrap();
 
-    let fetched = db.get_loop("wf-cron").unwrap().unwrap();
+    let fetched = db.get_graph("wf-cron").unwrap().unwrap();
     assert_eq!(fetched.schedule_expr(), Some("30 8 * * *"));
     assert!(fetched.is_cron());
 }
@@ -1674,7 +2322,7 @@ fn sample_queue(id: &str) -> Queue {
 fn queue_and_members_round_trip_through_insert_and_get_details() {
     let db = test_db();
     for id in ["spec-a", "spec-b", "spec-c"] {
-        db.insert_loop_spec(&sample_standalone_spec(id, None))
+        db.insert_graph_spec(&sample_standalone_spec(id, None))
             .unwrap();
     }
     db.insert_queue(&sample_queue("queue-1")).unwrap();
@@ -1720,7 +2368,7 @@ fn queue_and_members_round_trip_through_insert_and_get_details() {
 fn reorder_queue_members_replaces_positions_in_given_order() {
     let db = test_db();
     for id in ["spec-a", "spec-b", "spec-c"] {
-        db.insert_loop_spec(&sample_standalone_spec(id, None))
+        db.insert_graph_spec(&sample_standalone_spec(id, None))
             .unwrap();
     }
     db.insert_queue(&sample_queue("queue-1")).unwrap();
@@ -1755,35 +2403,35 @@ fn append_queue_member_rejects_nonexistent_spec() {
 #[test]
 fn deleting_a_spec_cascades_its_queue_membership() {
     let db = test_db();
-    db.insert_loop_spec(&sample_standalone_spec("spec-a", None))
+    db.insert_graph_spec(&sample_standalone_spec("spec-a", None))
         .unwrap();
     db.insert_queue(&sample_queue("queue-1")).unwrap();
     db.append_queue_member("queue-1", "spec-a", None).unwrap();
 
-    db.delete_loop_spec("spec-a").unwrap();
+    db.delete_graph_spec("spec-a").unwrap();
 
     assert!(db.list_queue_member_spec_ids("queue-1").unwrap().is_empty());
 }
 
 // ── RS3: context groups within a queue ──────────────────────────
 
-/// Seed a `loop_runs` row for `spec_id`/`node_id` carrying `session_id`, then
+/// Seed a `graph_runs` row for `spec_id`/`node_id` carrying `session_id`, then
 /// stamp `spec_id`'s terminal status — the shape a completed/failed grouped
 /// sibling leaves behind for `group_session_for_node` to read.
 fn seed_group_sibling(
     db: &Database,
-    loop_id: &str,
+    graph_id: &str,
     spec_id: &str,
     node_id: &str,
     session_id: Option<&str>,
-    status: LoopSpecStatus,
+    status: GraphSpecStatus,
 ) {
-    let run = LoopNodeRun {
+    let run = GraphNodeRun {
         id: format!("run-{spec_id}-{node_id}"),
-        loop_id: loop_id.to_string(),
+        graph_id: graph_id.to_string(),
         spec_id: spec_id.to_string(),
         node_id: node_id.to_string(),
-        status: LoopRunStatus::Pass,
+        status: GraphRunStatus::Pass,
         input: None,
         output: None,
         started_at: Utc::now(),
@@ -1792,32 +2440,34 @@ fn seed_group_sibling(
         pid: None,
         boot_id: None,
         session_id: session_id.map(str::to_string),
+        executed_platform: None,
+        executed_model: None,
     };
-    db.insert_loop_run(&run).unwrap();
-    db.update_loop_spec_status(spec_id, status, Some(Utc::now()), Some(Utc::now()))
+    db.insert_graph_run(&run).unwrap();
+    db.update_graph_spec_status(spec_id, status, Some(Utc::now()), Some(Utc::now()))
         .unwrap();
 }
 
-/// Scaffold a loop with two grouped members (`spec-a`, `spec-b`) and one
-/// grouped/ungrouped setup, returning the db. Both share a single loop-level
+/// Scaffold a graph with two grouped members (`spec-a`, `spec-b`) and one
+/// grouped/ungrouped setup, returning the db. Both share a single graph-level
 /// node id `node-impl`.
 fn rs3_fixture() -> Database {
     let db = test_db();
-    let lp = sample_loop("wf-rs3");
-    db.insert_loop(&lp).unwrap();
+    let lp = sample_graph("wf-rs3");
+    db.insert_graph(&lp).unwrap();
     for id in ["spec-a", "spec-b", "spec-c"] {
-        db.insert_loop_spec(&sample_standalone_spec(id, None))
+        db.insert_graph_spec(&sample_standalone_spec(id, None))
             .unwrap();
     }
-    // A loop-level node the runs can reference (loop_runs FK to loop_nodes).
-    let mut node = sample_loop_node("spec-a", "node-impl", 1);
+    // A graph-level node the runs can reference (graph_runs FK to graph_nodes).
+    let mut node = sample_graph_node("spec-a", "node-impl", 1);
     node.spec_id = None;
-    node.loop_id = Some(lp.id.clone());
-    db.insert_loop_node(&node).unwrap();
-    let mut review = sample_loop_node("spec-a", "node-review", 2);
+    node.graph_id = Some(lp.id.clone());
+    db.insert_graph_node(&node).unwrap();
+    let mut review = sample_graph_node("spec-a", "node-review", 2);
     review.spec_id = None;
-    review.loop_id = Some(lp.id);
-    db.insert_loop_node(&review).unwrap();
+    review.graph_id = Some(lp.id);
+    db.insert_graph_node(&review).unwrap();
     db.insert_queue(&sample_queue("queue-1")).unwrap();
     db
 }
@@ -1881,7 +2531,7 @@ fn group_session_for_node_returns_completed_siblings_session() {
         "spec-a",
         "node-impl",
         Some("ses-a"),
-        LoopSpecStatus::Completed,
+        GraphSpecStatus::Completed,
     );
 
     // spec-b's first visit to node-impl inherits spec-a's warm session.
@@ -1915,7 +2565,7 @@ fn group_session_taint_on_failed_nearest_sibling() {
         "spec-a",
         "node-impl",
         Some("ses-a"),
-        LoopSpecStatus::Completed,
+        GraphSpecStatus::Completed,
     );
     // The nearest sibling to spec-c FAILED (even if it captured a session).
     seed_group_sibling(
@@ -1924,7 +2574,7 @@ fn group_session_taint_on_failed_nearest_sibling() {
         "spec-b",
         "node-impl",
         Some("ses-b"),
-        LoopSpecStatus::Failed,
+        GraphSpecStatus::Failed,
     );
 
     // Taint: the broken chain forces a cold start — the earlier completed
@@ -1944,12 +2594,12 @@ fn group_session_is_independent_per_node() {
     db.append_queue_member("queue-1", "spec-b", Some("ctx"))
         .unwrap();
     // spec-a completed after capturing a DISTINCT session on each node.
-    let run_impl = LoopNodeRun {
+    let run_impl = GraphNodeRun {
         id: "run-a-impl".to_string(),
-        loop_id: "wf-rs3".to_string(),
+        graph_id: "wf-rs3".to_string(),
         spec_id: "spec-a".to_string(),
         node_id: "node-impl".to_string(),
-        status: LoopRunStatus::Pass,
+        status: GraphRunStatus::Pass,
         input: None,
         output: None,
         started_at: Utc::now(),
@@ -1958,18 +2608,20 @@ fn group_session_is_independent_per_node() {
         pid: None,
         boot_id: None,
         session_id: Some("ses-impl".to_string()),
+        executed_platform: None,
+        executed_model: None,
     };
-    db.insert_loop_run(&run_impl).unwrap();
-    let run_review = LoopNodeRun {
+    db.insert_graph_run(&run_impl).unwrap();
+    let run_review = GraphNodeRun {
         id: "run-a-review".to_string(),
         node_id: "node-review".to_string(),
         session_id: Some("ses-review".to_string()),
         ..run_impl
     };
-    db.insert_loop_run(&run_review).unwrap();
-    db.update_loop_spec_status(
+    db.insert_graph_run(&run_review).unwrap();
+    db.update_graph_spec_status(
         "spec-a",
-        LoopSpecStatus::Completed,
+        GraphSpecStatus::Completed,
         Some(Utc::now()),
         Some(Utc::now()),
     )
@@ -2005,7 +2657,7 @@ fn ungrouped_and_cross_group_members_never_cross_resume() {
         "spec-a",
         "node-impl",
         Some("ses-a"),
-        LoopSpecStatus::Completed,
+        GraphSpecStatus::Completed,
     );
 
     // An ungrouped member never inherits (queried with its own — absent — group).
@@ -2028,7 +2680,7 @@ fn group_name_column_is_added_to_a_pre_rs3_queue_members_table() {
     {
         let conn = rusqlite::Connection::open(&path).expect("open raw db");
         conn.execute_batch(
-            "CREATE TABLE loops (
+            "CREATE TABLE graphs (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 description TEXT,
@@ -2042,9 +2694,9 @@ fn group_name_column_is_added_to_a_pre_rs3_queue_members_table() {
                 autorun_at INTEGER,
                 spec_queue TEXT
              );
-             CREATE TABLE loop_specs (
+             CREATE TABLE graph_specs (
                 id TEXT PRIMARY KEY,
-                loop_id TEXT REFERENCES loops(id) ON DELETE CASCADE,
+                graph_id TEXT REFERENCES graphs(id) ON DELETE CASCADE,
                 name TEXT NOT NULL,
                 description TEXT,
                 position INTEGER NOT NULL,
@@ -2062,11 +2714,11 @@ fn group_name_column_is_added_to_a_pre_rs3_queue_members_table() {
              -- Pre-RS3 queue_members: no group_name column.
              CREATE TABLE queue_members (
                 queue_id TEXT NOT NULL REFERENCES queues(id) ON DELETE CASCADE,
-                spec_id TEXT NOT NULL REFERENCES loop_specs(id) ON DELETE CASCADE,
+                spec_id TEXT NOT NULL REFERENCES graph_specs(id) ON DELETE CASCADE,
                 position INTEGER NOT NULL,
                 PRIMARY KEY (queue_id, spec_id)
              );
-             INSERT INTO loop_specs (id, loop_id, name, position, status)
+             INSERT INTO graph_specs (id, graph_id, name, position, status)
                  VALUES ('legacy-spec', NULL, 'Spec', 1, 'pending');
              INSERT INTO queues (id, name, created_at) VALUES ('queue-1', 'Queue', 0);
              INSERT INTO queue_members (queue_id, spec_id, position)
@@ -2092,7 +2744,7 @@ fn group_name_column_is_added_to_a_pre_rs3_queue_members_table() {
 
 #[test]
 fn queues_migration_is_idempotent_and_a_pre_r4_database_opens_cleanly() {
-    // Simulate a pre-R4 database: `loops` has the old `spec_queue` column
+    // Simulate a pre-R4 database: `graphs` has the old `spec_queue` column
     // (7f2efdf) but no `queues`/`queue_members` tables at all.
     let tmp = NamedTempFile::new().expect("create temp file");
     let path = tmp.path().to_path_buf();
@@ -2101,7 +2753,7 @@ fn queues_migration_is_idempotent_and_a_pre_r4_database_opens_cleanly() {
     {
         let conn = rusqlite::Connection::open(&path).expect("open raw legacy db");
         conn.execute_batch(
-            "CREATE TABLE loops (
+            "CREATE TABLE graphs (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 description TEXT,
@@ -2115,9 +2767,9 @@ fn queues_migration_is_idempotent_and_a_pre_r4_database_opens_cleanly() {
                 autorun_at INTEGER,
                 spec_queue TEXT
              );
-             CREATE TABLE loop_specs (
+             CREATE TABLE graph_specs (
                 id TEXT PRIMARY KEY,
-                loop_id TEXT REFERENCES loops(id) ON DELETE CASCADE,
+                graph_id TEXT REFERENCES graphs(id) ON DELETE CASCADE,
                 name TEXT NOT NULL,
                 description TEXT,
                 position INTEGER NOT NULL,
@@ -2127,10 +2779,10 @@ fn queues_migration_is_idempotent_and_a_pre_r4_database_opens_cleanly() {
                 completed_at INTEGER,
                 workdir TEXT
              );
-             INSERT INTO loops (id, name, workdir, status, created_at, spec_queue)
-                 VALUES ('legacy-loop', 'Legacy', '/tmp', 'draft', 0, NULL);
-             INSERT INTO loop_specs (id, loop_id, name, position, status)
-                 VALUES ('legacy-spec', 'legacy-loop', 'Spec', 1, 'pending');",
+             INSERT INTO graphs (id, name, workdir, status, created_at, spec_queue)
+                 VALUES ('legacy-graph', 'Legacy', '/tmp', 'draft', 0, NULL);
+             INSERT INTO graph_specs (id, graph_id, name, position, status)
+                 VALUES ('legacy-spec', 'legacy-graph', 'Spec', 1, 'pending');",
         )
         .expect("seed legacy schema");
     }
@@ -2138,7 +2790,7 @@ fn queues_migration_is_idempotent_and_a_pre_r4_database_opens_cleanly() {
     // Opening the DB (Database::new runs the migration) must succeed and add
     // the queues tables without disturbing existing rows.
     let db = Database::new(&path).expect("open pre-R4 db, running migration");
-    let lp = db.get_loop("legacy-loop").unwrap().unwrap();
+    let lp = db.get_graph("legacy-graph").unwrap().unwrap();
     assert_eq!(lp.name, "Legacy");
     db.insert_queue(&sample_queue("queue-1")).unwrap();
     db.append_queue_member("queue-1", "legacy-spec", None)
@@ -2158,14 +2810,14 @@ fn queues_migration_is_idempotent_and_a_pre_r4_database_opens_cleanly() {
     );
 
     // The retired `spec_queue` column is never written by current code: a
-    // freshly inserted loop leaves it NULL.
-    db.insert_loop(&sample_loop("fresh-loop")).unwrap();
+    // freshly inserted graph leaves it NULL.
+    db.insert_graph(&sample_graph("fresh-graph")).unwrap();
     let raw: Option<String> = db
         .conn
         .lock()
         .unwrap()
         .query_row(
-            "SELECT spec_queue FROM loops WHERE id = 'fresh-loop'",
+            "SELECT spec_queue FROM graphs WHERE id = 'fresh-graph'",
             [],
             |row| row.get(0),
         )
@@ -2175,8 +2827,8 @@ fn queues_migration_is_idempotent_and_a_pre_r4_database_opens_cleanly() {
 
 #[test]
 fn active_run_queue_id_migration_is_idempotent_and_a_pre_b8_database_opens_cleanly() {
-    // Simulate a pre-B8 database: `loops` has `autorun_at` and `queues`/
-    // `queue_members` already exist, but `loops` predates `active_run_queue_id`.
+    // Simulate a pre-B8 database: `graphs` has `autorun_at` and `queues`/
+    // `queue_members` already exist, but `graphs` predates `active_run_queue_id`.
     let tmp = NamedTempFile::new().expect("create temp file");
     let path = tmp.path().to_path_buf();
     std::mem::forget(tmp);
@@ -2184,7 +2836,7 @@ fn active_run_queue_id_migration_is_idempotent_and_a_pre_b8_database_opens_clean
     {
         let conn = rusqlite::Connection::open(&path).expect("open raw legacy db");
         conn.execute_batch(
-            "CREATE TABLE loops (
+            "CREATE TABLE graphs (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 description TEXT,
@@ -2198,9 +2850,9 @@ fn active_run_queue_id_migration_is_idempotent_and_a_pre_b8_database_opens_clean
                 autorun_at INTEGER,
                 spec_queue TEXT
              );
-             CREATE TABLE loop_specs (
+             CREATE TABLE graph_specs (
                 id TEXT PRIMARY KEY,
-                loop_id TEXT REFERENCES loops(id) ON DELETE CASCADE,
+                graph_id TEXT REFERENCES graphs(id) ON DELETE CASCADE,
                 name TEXT NOT NULL,
                 description TEXT,
                 position INTEGER NOT NULL,
@@ -2217,13 +2869,13 @@ fn active_run_queue_id_migration_is_idempotent_and_a_pre_b8_database_opens_clean
              );
              CREATE TABLE queue_members (
                 queue_id TEXT NOT NULL REFERENCES queues(id) ON DELETE CASCADE,
-                spec_id TEXT NOT NULL REFERENCES loop_specs(id) ON DELETE CASCADE,
+                spec_id TEXT NOT NULL REFERENCES graph_specs(id) ON DELETE CASCADE,
                 position INTEGER NOT NULL,
                 PRIMARY KEY (queue_id, spec_id)
              );
-             INSERT INTO loops (id, name, workdir, status, created_at)
-                 VALUES ('legacy-loop', 'Legacy', '/tmp', 'failed', 0);
-             INSERT INTO loop_specs (id, loop_id, name, position, status)
+             INSERT INTO graphs (id, name, workdir, status, created_at)
+                 VALUES ('legacy-graph', 'Legacy', '/tmp', 'failed', 0);
+             INSERT INTO graph_specs (id, graph_id, name, position, status)
                  VALUES ('legacy-spec', NULL, 'Spec', 1, 'pending');
              INSERT INTO queues (id, name, created_at) VALUES ('queue-1', 'queue-1', 0);
              INSERT INTO queue_members (queue_id, spec_id, position)
@@ -2235,25 +2887,28 @@ fn active_run_queue_id_migration_is_idempotent_and_a_pre_b8_database_opens_clean
     // Opening the DB (Database::new runs the migration) must succeed and add
     // `active_run_queue_id` without disturbing existing rows.
     let db = Database::new(&path).expect("open pre-B8 db, running migration");
-    let lp = db.get_loop("legacy-loop").unwrap().unwrap();
+    let lp = db.get_graph("legacy-graph").unwrap().unwrap();
     assert_eq!(lp.name, "Legacy");
     assert_eq!(lp.active_run_queue_id, None);
 
     // The new column is actually usable: persist a run context and reset
     // through the shared path picks up the queue's members.
-    db.set_loop_active_run_queue("legacy-loop", Some("queue-1"))
+    db.set_graph_active_run_queue("legacy-graph", Some("queue-1"))
         .unwrap();
-    let outcome = db.reset_loop("legacy-loop", None).unwrap();
+    let outcome = db.reset_graph("legacy-graph", None).unwrap();
     assert_eq!(
         outcome,
-        crate::domain::loops::LoopResetOutcome::Reset { spec_count: 1 }
+        crate::domain::graphs::GraphResetOutcome::Reset {
+            spec_count: 1,
+            skipped_count: 0
+        }
     );
     drop(db);
 
     // Reopening after the migration already ran must be a no-op: same data,
     // no error (idempotent).
     let db = Database::new(&path).expect("reopen db after migration already applied");
-    let lp = db.get_loop("legacy-loop").unwrap().unwrap();
+    let lp = db.get_graph("legacy-graph").unwrap().unwrap();
     assert_eq!(lp.active_run_queue_id.as_deref(), Some("queue-1"));
 }
 
@@ -2273,7 +2928,7 @@ fn legacy_queue_table_names_migrate_preserving_member_order_and_context_groups()
     {
         let conn = rusqlite::Connection::open(&path).expect("open raw legacy db");
         conn.execute_batch(
-            "CREATE TABLE loops (
+            "CREATE TABLE graphs (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 description TEXT,
@@ -2289,9 +2944,9 @@ fn legacy_queue_table_names_migrate_preserving_member_order_and_context_groups()
                 active_run_pool_id TEXT,
                 on_completed TEXT
              );
-             CREATE TABLE loop_specs (
+             CREATE TABLE graph_specs (
                 id TEXT PRIMARY KEY,
-                loop_id TEXT REFERENCES loops(id) ON DELETE CASCADE,
+                graph_id TEXT REFERENCES graphs(id) ON DELETE CASCADE,
                 name TEXT NOT NULL,
                 description TEXT,
                 position INTEGER NOT NULL,
@@ -2308,15 +2963,15 @@ fn legacy_queue_table_names_migrate_preserving_member_order_and_context_groups()
              );
              CREATE TABLE pool_members (
                 pool_id TEXT NOT NULL REFERENCES pools(id) ON DELETE CASCADE,
-                spec_id TEXT NOT NULL REFERENCES loop_specs(id) ON DELETE CASCADE,
+                spec_id TEXT NOT NULL REFERENCES graph_specs(id) ON DELETE CASCADE,
                 position INTEGER NOT NULL,
                 group_name TEXT,
                 PRIMARY KEY (pool_id, spec_id)
              );
              CREATE UNIQUE INDEX idx_pool_members_position
                  ON pool_members(pool_id, position);
-             INSERT INTO loops (id, name, workdir, status, created_at, active_run_pool_id)
-                 VALUES ('legacy-loop', 'Legacy', '/tmp', 'paused', 0, 'queue-a');
+             INSERT INTO graphs (id, name, workdir, status, created_at, active_run_pool_id)
+                 VALUES ('legacy-graph', 'Legacy', '/tmp', 'paused', 0, 'queue-a');
              INSERT INTO pools (id, name, created_at) VALUES
                  ('queue-a', 'Queue A', 0),
                  ('queue-b', 'Queue B', 0);",
@@ -2332,7 +2987,7 @@ fn legacy_queue_table_names_migrate_preserving_member_order_and_context_groups()
             ("spec-b2", 2),
         ] {
             conn.execute(
-                "INSERT INTO loop_specs (id, loop_id, name, position, status)
+                "INSERT INTO graph_specs (id, graph_id, name, position, status)
                  VALUES (?1, NULL, ?1, 1, 'pending')",
                 [spec_id],
             )
@@ -2395,8 +3050,8 @@ fn legacy_queue_table_names_migrate_preserving_member_order_and_context_groups()
         ]
     );
 
-    // The loop's active-run reference survived under its renamed column.
-    let lp = db.get_loop("legacy-loop").unwrap().unwrap();
+    // The graph's active-run reference survived under its renamed column.
+    let lp = db.get_graph("legacy-graph").unwrap().unwrap();
     assert_eq!(lp.active_run_queue_id.as_deref(), Some("queue-a"));
 }
 
@@ -2408,17 +3063,20 @@ fn legacy_queue_table_rename_is_a_noop_on_an_already_migrated_database() {
 
     // First open: fresh database, already on the current (post-rename) schema.
     let db = Database::new(&path).expect("create fresh db");
-    db.insert_loop_spec(&LoopSpec {
+    db.insert_graph_spec(&GraphSpec {
         id: "spec-1".to_string(),
-        loop_id: None,
+        graph_id: None,
         name: "spec-1".to_string(),
         description: None,
         position: 1,
         parallelizable: false,
-        status: LoopSpecStatus::Pending,
+        status: GraphSpecStatus::Pending,
         started_at: None,
         completed_at: None,
         spec_start_head: None,
+        spec_start_dirty: None,
+        spec_end_dirty: None,
+        spec_end_dirty_paths: None,
         spec_committed_head: None,
         workdir: None,
         completed_via: None,
@@ -2484,7 +3142,7 @@ fn a_schema_version_newer_than_this_binary_supports_fails_loudly_instead_of_star
 #[test]
 fn auto_continue_migration_is_idempotent_and_a_pre_migration_database_opens_cleanly() {
     // Simulate a database written before `auto_continue_at`/`auto_continue_action`
-    // existed: `loops` has every other current column, including `autorun_at`.
+    // existed: `graphs` has every other current column, including `autorun_at`.
     let tmp = NamedTempFile::new().expect("create temp file");
     let path = tmp.path().to_path_buf();
     std::mem::forget(tmp);
@@ -2492,7 +3150,7 @@ fn auto_continue_migration_is_idempotent_and_a_pre_migration_database_opens_clea
     {
         let conn = rusqlite::Connection::open(&path).expect("open raw legacy db");
         conn.execute_batch(
-            "CREATE TABLE loops (
+            "CREATE TABLE graphs (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 description TEXT,
@@ -2508,8 +3166,8 @@ fn auto_continue_migration_is_idempotent_and_a_pre_migration_database_opens_clea
                 active_run_queue_id TEXT,
                 on_completed TEXT
              );
-             INSERT INTO loops (id, name, workdir, status, created_at)
-                 VALUES ('legacy-loop', 'Legacy', '/tmp', 'paused', 0);",
+             INSERT INTO graphs (id, name, workdir, status, created_at)
+                 VALUES ('legacy-graph', 'Legacy', '/tmp', 'paused', 0);",
         )
         .expect("seed legacy schema");
     }
@@ -2517,7 +3175,7 @@ fn auto_continue_migration_is_idempotent_and_a_pre_migration_database_opens_clea
     // Opening the DB (Database::new runs the migration) must succeed and add
     // both new columns, NULL on the existing row.
     let db = Database::new(&path).expect("open pre-auto-continue db, running migration");
-    let lp = db.get_loop("legacy-loop").unwrap().unwrap();
+    let lp = db.get_graph("legacy-graph").unwrap().unwrap();
     assert_eq!(lp.name, "Legacy");
     assert_eq!(lp.auto_continue_at, None);
     assert_eq!(lp.auto_continue_action, None);
@@ -2528,28 +3186,28 @@ fn auto_continue_migration_is_idempotent_and_a_pre_migration_database_opens_clea
         0,
     )
     .unwrap();
-    db.schedule_loop_auto_continue("legacy-loop", at, Some("skip_next_spec"))
+    db.schedule_graph_auto_continue("legacy-graph", at, Some("skip_next_spec"))
         .unwrap();
     drop(db);
 
     // Reopening after the migration already ran must be a no-op: same data,
     // no error (idempotent).
     let db = Database::new(&path).expect("reopen db after migration already applied");
-    let lp = db.get_loop("legacy-loop").unwrap().unwrap();
+    let lp = db.get_graph("legacy-graph").unwrap().unwrap();
     assert_eq!(lp.auto_continue_at, Some(at));
     assert_eq!(lp.auto_continue_action.as_deref(), Some("skip_next_spec"));
 }
 
 #[test]
-fn list_cron_and_watch_loops_filter_by_trigger_type() {
+fn list_cron_and_watch_graphs_filter_by_trigger_type() {
     let db = test_db();
-    let cron = loop_with_trigger(
+    let cron = graph_with_trigger(
         "wf-cron",
         Some(Trigger::Cron {
             schedule_expr: "0 9 * * *".to_string(),
         }),
     );
-    let watch = loop_with_trigger(
+    let watch = graph_with_trigger(
         "wf-watch",
         Some(Trigger::Watch {
             path: "/tmp/watch".to_string(),
@@ -2558,50 +3216,50 @@ fn list_cron_and_watch_loops_filter_by_trigger_type() {
             recursive: false,
         }),
     );
-    let manual = loop_with_trigger("wf-manual", None);
+    let manual = graph_with_trigger("wf-manual", None);
 
-    db.insert_loop(&cron).unwrap();
-    db.insert_loop(&watch).unwrap();
-    db.insert_loop(&manual).unwrap();
+    db.insert_graph(&cron).unwrap();
+    db.insert_graph(&watch).unwrap();
+    db.insert_graph(&manual).unwrap();
 
-    let cron_loops = db.list_cron_loops().unwrap();
-    assert_eq!(cron_loops.len(), 1);
-    assert_eq!(cron_loops[0].id, "wf-cron");
+    let cron_graphs = db.list_cron_graphs().unwrap();
+    assert_eq!(cron_graphs.len(), 1);
+    assert_eq!(cron_graphs[0].id, "wf-cron");
 
-    let watch_loops = db.list_watch_loops().unwrap();
-    assert_eq!(watch_loops.len(), 1);
-    assert_eq!(watch_loops[0].id, "wf-watch");
-    assert_eq!(watch_loops[0].watch_path(), Some("/tmp/watch"));
+    let watch_graphs = db.list_watch_graphs().unwrap();
+    assert_eq!(watch_graphs.len(), 1);
+    assert_eq!(watch_graphs[0].id, "wf-watch");
+    assert_eq!(watch_graphs[0].watch_path(), Some("/tmp/watch"));
 
-    // A manual loop appears in neither trigger list — it never self-fires.
-    assert!(!cron_loops.iter().any(|lp| lp.id == "wf-manual"));
-    assert!(!watch_loops.iter().any(|lp| lp.id == "wf-manual"));
+    // A manual graph appears in neither trigger list — it never self-fires.
+    assert!(!cron_graphs.iter().any(|lp| lp.id == "wf-manual"));
+    assert!(!watch_graphs.iter().any(|lp| lp.id == "wf-manual"));
 }
 
 #[test]
-fn update_loop_trigger_sets_and_clears() {
+fn update_graph_trigger_sets_and_clears() {
     let db = test_db();
-    let manual = loop_with_trigger("wf-swap", None);
-    db.insert_loop(&manual).unwrap();
-    assert!(db.list_cron_loops().unwrap().is_empty());
+    let manual = graph_with_trigger("wf-swap", None);
+    db.insert_graph(&manual).unwrap();
+    assert!(db.list_cron_graphs().unwrap().is_empty());
 
     // Set a cron trigger.
-    db.update_loop_trigger(
+    db.update_graph_trigger(
         "wf-swap",
         Some(&Trigger::Cron {
             schedule_expr: "15 6 * * *".to_string(),
         }),
     )
     .unwrap();
-    let cron_loops = db.list_cron_loops().unwrap();
-    assert_eq!(cron_loops.len(), 1);
-    assert_eq!(cron_loops[0].schedule_expr(), Some("15 6 * * *"));
+    let cron_graphs = db.list_cron_graphs().unwrap();
+    assert_eq!(cron_graphs.len(), 1);
+    assert_eq!(cron_graphs[0].schedule_expr(), Some("15 6 * * *"));
 
     // Clear it back to manual.
-    db.update_loop_trigger("wf-swap", None).unwrap();
-    assert!(db.list_cron_loops().unwrap().is_empty());
+    db.update_graph_trigger("wf-swap", None).unwrap();
+    assert!(db.list_cron_graphs().unwrap().is_empty());
     assert_eq!(
-        db.get_loop("wf-swap")
+        db.get_graph("wf-swap")
             .unwrap()
             .unwrap()
             .trigger_type_label(),
@@ -2615,22 +3273,26 @@ fn test_list_cross_project_dependencies_returns_only_project_links() {
 
     db.upsert_intelligence_node(IntelligenceNodeInput {
         id: Some("project-b".to_string()),
-        kind: "project".to_string(),
-        title: "Project B".to_string(),
-        body: "B".to_string(),
+        kind: Some("project".to_string()),
+        status: None,
+        title: Some("Project B".to_string()),
+        body: Some("B".to_string()),
+        body_replace: None,
         metadata: None,
-        project_hash: Some("hash-b".to_string()),
+        project_hash: Some(Some("hash-b".to_string())),
         session_id: None,
         relations: None,
     })
     .unwrap();
     db.upsert_intelligence_node(IntelligenceNodeInput {
         id: Some("project-a".to_string()),
-        kind: "project".to_string(),
-        title: "Project A".to_string(),
-        body: "A".to_string(),
+        kind: Some("project".to_string()),
+        status: None,
+        title: Some("Project A".to_string()),
+        body: Some("A".to_string()),
+        body_replace: None,
         metadata: None,
-        project_hash: Some("hash-a".to_string()),
+        project_hash: Some(Some("hash-a".to_string())),
         session_id: None,
         relations: Some(vec![IntelligenceRelationInput {
             to_node_id: "project-b".to_string(),
@@ -2641,9 +3303,11 @@ fn test_list_cross_project_dependencies_returns_only_project_links() {
     .unwrap();
     db.upsert_intelligence_node(IntelligenceNodeInput {
         id: Some("fact-1".to_string()),
-        kind: "fact".to_string(),
-        title: "Fact".to_string(),
-        body: "Fact body".to_string(),
+        kind: Some("fact".to_string()),
+        status: None,
+        title: Some("Fact".to_string()),
+        body: Some("Fact body".to_string()),
+        body_replace: None,
         metadata: None,
         project_hash: None,
         session_id: None,
@@ -3166,6 +3830,8 @@ fn test_rename_agent_updates_agent_and_run_references() {
         finished_at: Some(Utc::now()),
         exit_code: Some(0),
         timeout_at: None,
+        executed_platform: None,
+        executed_model: None,
     };
     db.insert_run(&run).unwrap();
 
@@ -3224,6 +3890,8 @@ fn test_insert_and_list_runs() {
         finished_at: Some(Utc::now()),
         exit_code: Some(0),
         timeout_at: None,
+        executed_platform: None,
+        executed_model: None,
     };
     db.insert_run(&run).unwrap();
 
@@ -3250,6 +3918,8 @@ fn test_list_runs_limit() {
             finished_at: Some(Utc::now()),
             exit_code: Some(0),
             timeout_at: None,
+            executed_platform: None,
+            executed_model: None,
         };
         db.insert_run(&run).unwrap();
     }
@@ -3273,6 +3943,8 @@ fn test_delete_agent_cascades_runs() {
         finished_at: None,
         exit_code: None,
         timeout_at: None,
+        executed_platform: None,
+        executed_model: None,
     };
     db.insert_run(&run).unwrap();
     assert_eq!(db.list_runs("cascade-agent", 10).unwrap().len(), 1);
@@ -3297,6 +3969,8 @@ fn test_update_run_status() {
         finished_at: None,
         exit_code: None,
         timeout_at: None,
+        executed_platform: None,
+        executed_model: None,
     };
     db.insert_run(&run).unwrap();
 
@@ -3311,10 +3985,9 @@ fn test_update_run_status() {
     assert!(updated.finished_at.is_some());
 
     let snapshot = db
-        .get_intelligence_node(&format!("run:{run_id}"))
+        .get_operational_session(&format!("run:{run_id}"))
         .unwrap()
         .unwrap();
-    assert_eq!(snapshot.kind, "session");
     assert!(snapshot.body.contains("Done"));
     assert!(snapshot
         .metadata
@@ -3339,6 +4012,8 @@ fn test_update_run_exit_code() {
         finished_at: Some(Utc::now()),
         exit_code: None,
         timeout_at: None,
+        executed_platform: None,
+        executed_model: None,
     };
     db.insert_run(&run).unwrap();
 
@@ -3380,11 +4055,13 @@ fn test_list_projects_returns_project_nodes() {
 
     db.upsert_intelligence_node(IntelligenceNodeInput {
         id: Some("proj-a".to_string()),
-        kind: "project".to_string(),
-        title: "Project Alpha".to_string(),
-        body: "Alpha project description".to_string(),
-        metadata: Some(serde_json::json!({"hash": "hash-a"})),
-        project_hash: Some("hash-a".to_string()),
+        kind: Some("project".to_string()),
+        status: None,
+        title: Some("Project Alpha".to_string()),
+        body: Some("Alpha project description".to_string()),
+        body_replace: None,
+        metadata: Some(Some(serde_json::json!({"hash": "hash-a"}))),
+        project_hash: Some(Some("hash-a".to_string())),
         session_id: None,
         relations: None,
     })
@@ -3392,11 +4069,13 @@ fn test_list_projects_returns_project_nodes() {
 
     db.upsert_intelligence_node(IntelligenceNodeInput {
         id: Some("fact-1".to_string()),
-        kind: "fact".to_string(),
-        title: "Some fact".to_string(),
-        body: "fact body".to_string(),
+        kind: Some("fact".to_string()),
+        status: None,
+        title: Some("Some fact".to_string()),
+        body: Some("fact body".to_string()),
+        body_replace: None,
         metadata: None,
-        project_hash: Some("hash-a".to_string()),
+        project_hash: Some(Some("hash-a".to_string())),
         session_id: None,
         relations: None,
     })
@@ -3414,11 +4093,13 @@ fn test_list_projects_filters_by_query() {
 
     db.upsert_intelligence_node(IntelligenceNodeInput {
         id: Some("proj-a".to_string()),
-        kind: "project".to_string(),
-        title: "Alpha Backend".to_string(),
-        body: "Backend services".to_string(),
-        metadata: Some(serde_json::json!({"hash": "hash-a"})),
-        project_hash: Some("hash-a".to_string()),
+        kind: Some("project".to_string()),
+        status: None,
+        title: Some("Alpha Backend".to_string()),
+        body: Some("Backend services".to_string()),
+        body_replace: None,
+        metadata: Some(Some(serde_json::json!({"hash": "hash-a"}))),
+        project_hash: Some(Some("hash-a".to_string())),
         session_id: None,
         relations: None,
     })
@@ -3426,11 +4107,13 @@ fn test_list_projects_filters_by_query() {
 
     db.upsert_intelligence_node(IntelligenceNodeInput {
         id: Some("proj-b".to_string()),
-        kind: "project".to_string(),
-        title: "Beta Frontend".to_string(),
-        body: "Frontend app".to_string(),
-        metadata: Some(serde_json::json!({"hash": "hash-b"})),
-        project_hash: Some("hash-b".to_string()),
+        kind: Some("project".to_string()),
+        status: None,
+        title: Some("Beta Frontend".to_string()),
+        body: Some("Frontend app".to_string()),
+        body_replace: None,
+        metadata: Some(Some(serde_json::json!({"hash": "hash-b"}))),
+        project_hash: Some(Some("hash-b".to_string())),
         session_id: None,
         relations: None,
     })
@@ -3447,11 +4130,13 @@ fn test_link_projects_creates_edge_between_projects() {
 
     db.upsert_intelligence_node(IntelligenceNodeInput {
         id: Some("proj-a".to_string()),
-        kind: "project".to_string(),
-        title: "Project A".to_string(),
-        body: "A".to_string(),
-        metadata: Some(serde_json::json!({"hash": "hash-a"})),
-        project_hash: Some("hash-a".to_string()),
+        kind: Some("project".to_string()),
+        status: None,
+        title: Some("Project A".to_string()),
+        body: Some("A".to_string()),
+        body_replace: None,
+        metadata: Some(Some(serde_json::json!({"hash": "hash-a"}))),
+        project_hash: Some(Some("hash-a".to_string())),
         session_id: None,
         relations: None,
     })
@@ -3459,11 +4144,13 @@ fn test_link_projects_creates_edge_between_projects() {
 
     db.upsert_intelligence_node(IntelligenceNodeInput {
         id: Some("proj-b".to_string()),
-        kind: "project".to_string(),
-        title: "Project B".to_string(),
-        body: "B".to_string(),
-        metadata: Some(serde_json::json!({"hash": "hash-b"})),
-        project_hash: Some("hash-b".to_string()),
+        kind: Some("project".to_string()),
+        status: None,
+        title: Some("Project B".to_string()),
+        body: Some("B".to_string()),
+        body_replace: None,
+        metadata: Some(Some(serde_json::json!({"hash": "hash-b"}))),
+        project_hash: Some(Some("hash-b".to_string())),
         session_id: None,
         relations: None,
     })
@@ -3491,11 +4178,13 @@ fn test_list_project_knowledge_returns_facts_and_patterns() {
 
     db.upsert_intelligence_node(IntelligenceNodeInput {
         id: Some("proj-a".to_string()),
-        kind: "project".to_string(),
-        title: "Project A".to_string(),
-        body: "A".to_string(),
-        metadata: Some(serde_json::json!({"hash": "hash-a"})),
-        project_hash: Some("hash-a".to_string()),
+        kind: Some("project".to_string()),
+        status: None,
+        title: Some("Project A".to_string()),
+        body: Some("A".to_string()),
+        body_replace: None,
+        metadata: Some(Some(serde_json::json!({"hash": "hash-a"}))),
+        project_hash: Some(Some("hash-a".to_string())),
         session_id: None,
         relations: None,
     })
@@ -3503,11 +4192,13 @@ fn test_list_project_knowledge_returns_facts_and_patterns() {
 
     db.upsert_intelligence_node(IntelligenceNodeInput {
         id: Some("fact-1".to_string()),
-        kind: "fact".to_string(),
-        title: "DB convention".to_string(),
-        body: "Always use SQLite".to_string(),
+        kind: Some("fact".to_string()),
+        status: None,
+        title: Some("DB convention".to_string()),
+        body: Some("Always use SQLite".to_string()),
+        body_replace: None,
         metadata: None,
-        project_hash: Some("hash-a".to_string()),
+        project_hash: Some(Some("hash-a".to_string())),
         session_id: None,
         relations: None,
     })
@@ -3515,11 +4206,13 @@ fn test_list_project_knowledge_returns_facts_and_patterns() {
 
     db.upsert_intelligence_node(IntelligenceNodeInput {
         id: Some("pattern-1".to_string()),
-        kind: "pattern".to_string(),
-        title: "Error handling".to_string(),
-        body: "Use anyhow".to_string(),
+        kind: Some("pattern".to_string()),
+        status: None,
+        title: Some("Error handling".to_string()),
+        body: Some("Use anyhow".to_string()),
+        body_replace: None,
         metadata: None,
-        project_hash: Some("hash-a".to_string()),
+        project_hash: Some(Some("hash-a".to_string())),
         session_id: None,
         relations: None,
     })
@@ -3527,11 +4220,13 @@ fn test_list_project_knowledge_returns_facts_and_patterns() {
 
     db.upsert_intelligence_node(IntelligenceNodeInput {
         id: Some("fact-other".to_string()),
-        kind: "fact".to_string(),
-        title: "Other fact".to_string(),
-        body: "unrelated".to_string(),
+        kind: Some("fact".to_string()),
+        status: None,
+        title: Some("Other fact".to_string()),
+        body: Some("unrelated".to_string()),
+        body_replace: None,
         metadata: None,
-        project_hash: Some("hash-other".to_string()),
+        project_hash: Some(Some("hash-other".to_string())),
         session_id: None,
         relations: None,
     })
@@ -3559,11 +4254,13 @@ fn test_list_related_projects_finds_linked_projects() {
 
     db.upsert_intelligence_node(IntelligenceNodeInput {
         id: Some("proj-a".to_string()),
-        kind: "project".to_string(),
-        title: "Project A".to_string(),
-        body: "A".to_string(),
-        metadata: Some(serde_json::json!({"hash": "hash-a"})),
-        project_hash: Some("hash-a".to_string()),
+        kind: Some("project".to_string()),
+        status: None,
+        title: Some("Project A".to_string()),
+        body: Some("A".to_string()),
+        body_replace: None,
+        metadata: Some(Some(serde_json::json!({"hash": "hash-a"}))),
+        project_hash: Some(Some("hash-a".to_string())),
         session_id: None,
         relations: None,
     })
@@ -3571,11 +4268,13 @@ fn test_list_related_projects_finds_linked_projects() {
 
     db.upsert_intelligence_node(IntelligenceNodeInput {
         id: Some("proj-b".to_string()),
-        kind: "project".to_string(),
-        title: "Project B".to_string(),
-        body: "B".to_string(),
-        metadata: Some(serde_json::json!({"hash": "hash-b"})),
-        project_hash: Some("hash-b".to_string()),
+        kind: Some("project".to_string()),
+        status: None,
+        title: Some("Project B".to_string()),
+        body: Some("B".to_string()),
+        body_replace: None,
+        metadata: Some(Some(serde_json::json!({"hash": "hash-b"}))),
+        project_hash: Some(Some("hash-b".to_string())),
         session_id: None,
         relations: None,
     })
@@ -3583,11 +4282,13 @@ fn test_list_related_projects_finds_linked_projects() {
 
     db.upsert_intelligence_node(IntelligenceNodeInput {
         id: Some("proj-c".to_string()),
-        kind: "project".to_string(),
-        title: "Project C".to_string(),
-        body: "C".to_string(),
-        metadata: Some(serde_json::json!({"hash": "hash-c"})),
-        project_hash: Some("hash-c".to_string()),
+        kind: Some("project".to_string()),
+        status: None,
+        title: Some("Project C".to_string()),
+        body: Some("C".to_string()),
+        body_replace: None,
+        metadata: Some(Some(serde_json::json!({"hash": "hash-c"}))),
+        project_hash: Some(Some("hash-c".to_string())),
         session_id: None,
         relations: None,
     })
@@ -3612,11 +4313,13 @@ fn test_list_related_projects_returns_empty_for_unlinked_project() {
 
     db.upsert_intelligence_node(IntelligenceNodeInput {
         id: Some("proj-lone".to_string()),
-        kind: "project".to_string(),
-        title: "Lone Project".to_string(),
-        body: "No relations".to_string(),
-        metadata: Some(serde_json::json!({"hash": "hash-lone"})),
-        project_hash: Some("hash-lone".to_string()),
+        kind: Some("project".to_string()),
+        status: None,
+        title: Some("Lone Project".to_string()),
+        body: Some("No relations".to_string()),
+        body_replace: None,
+        metadata: Some(Some(serde_json::json!({"hash": "hash-lone"}))),
+        project_hash: Some(Some("hash-lone".to_string())),
         session_id: None,
         relations: None,
     })
@@ -3870,7 +4573,7 @@ fn get_active_sessions_by_type_returns_only_matching_bridge_rows() {
 
 #[test]
 fn session_marking_is_per_row_not_a_mass_pre_pass() {
-    // Simulates a crash partway through the auto-resume loop: two active
+    // Simulates a crash partway through the auto-resume graph: two active
     // sessions exist, but only the first gets handled (marked orphaned)
     // before the "crash". The old `mark_orphaned_sessions` mass pre-pass
     // would have flipped both to 'orphaned' up front; the per-session
@@ -4092,13 +4795,13 @@ fn set_spec_admin_status_transitions_each_status() {
     let db = test_db();
 
     for target_status in &[
-        LoopSpecStatus::Completed,
-        LoopSpecStatus::Skipped,
-        LoopSpecStatus::Pending,
+        GraphSpecStatus::Completed,
+        GraphSpecStatus::Skipped,
+        GraphSpecStatus::Pending,
     ] {
-        let mut spec = sample_loop_spec("unused", &format!("spec-{:?}", target_status), 1);
-        spec.loop_id = None;
-        db.insert_loop_spec(&spec).unwrap();
+        let mut spec = sample_graph_spec("unused", &format!("spec-{:?}", target_status), 1);
+        spec.graph_id = None;
+        db.insert_graph_spec(&spec).unwrap();
 
         let outcome = db
             .set_spec_admin_status(&spec.id, *target_status, "test reason")
@@ -4110,7 +4813,7 @@ fn set_spec_admin_status_transitions_each_status() {
             target_status
         );
 
-        let spec_after = db.get_loop_spec(&spec.id).unwrap().unwrap();
+        let spec_after = db.get_graph_spec(&spec.id).unwrap().unwrap();
         assert_eq!(spec_after.status, *target_status);
         assert_eq!(
             spec_after.completed_via,
@@ -4125,7 +4828,7 @@ fn set_spec_admin_status_transitions_each_status() {
             target_status
         );
 
-        if *target_status != LoopSpecStatus::Pending {
+        if *target_status != GraphSpecStatus::Pending {
             assert!(
                 spec_after.completed_via_at.is_some(),
                 "completed_via_at should be set for {:?}",
@@ -4144,7 +4847,7 @@ fn set_spec_admin_status_transitions_each_status() {
 fn set_spec_admin_status_rejects_missing_spec() {
     let db = test_db();
     let outcome = db
-        .set_spec_admin_status("nonexistent", LoopSpecStatus::Completed, "reason")
+        .set_spec_admin_status("nonexistent", GraphSpecStatus::Completed, "reason")
         .unwrap();
     assert!(
         matches!(outcome, SpecAdminStatusOutcome::NotFound),
@@ -4153,43 +4856,67 @@ fn set_spec_admin_status_rejects_missing_spec() {
 }
 
 #[test]
-fn set_spec_admin_status_rejects_loop_bound_spec() {
+fn set_spec_admin_status_rejects_graph_bound_spec() {
     let db = test_db();
-    let lp = sample_loop("loop-bound-test");
-    db.insert_loop(&lp).unwrap();
+    let lp = sample_graph("graph-bound-test");
+    db.insert_graph(&lp).unwrap();
 
-    let spec = sample_loop_spec(&lp.id, "spec-bound", 1);
-    db.insert_loop_spec(&spec).unwrap();
+    let spec = sample_graph_spec(&lp.id, "spec-bound", 1);
+    db.insert_graph_spec(&spec).unwrap();
 
     let outcome = db
-        .set_spec_admin_status(&spec.id, LoopSpecStatus::Completed, "reason")
+        .set_spec_admin_status(&spec.id, GraphSpecStatus::Completed, "reason")
         .unwrap();
 
     assert!(
         matches!(outcome, SpecAdminStatusOutcome::NotStandalone(ref id) if id == &lp.id),
-        "should reject loop-bound spec"
+        "should reject graph-bound spec"
     );
 }
 
 #[test]
-fn set_spec_admin_status_rejects_active_run() {
+fn unbind_graph_spec_clears_graph_id() {
     let db = test_db();
-    let mut spec = sample_loop_spec("unused", "spec-with-run", 1);
-    spec.loop_id = None;
-    db.insert_loop_spec(&spec).unwrap();
+    let lp = sample_graph("graph-unbind");
+    db.insert_graph(&lp).unwrap();
+    let spec = sample_graph_spec(&lp.id, "spec-unbind", 1);
+    let name = spec.name.clone();
+    let description = spec.description.clone();
+    db.insert_graph_spec(&spec).unwrap();
 
-    let lp = sample_loop("loop-for-run");
-    db.insert_loop(&lp).unwrap();
+    assert!(db.unbind_graph_spec(&spec.id).unwrap());
 
-    let node = sample_loop_node(&spec.id, "node-for-run", 1);
-    db.insert_loop_node(&node).unwrap();
+    let after = db.get_graph_spec(&spec.id).unwrap().unwrap();
+    assert!(after.graph_id.is_none());
+    assert_eq!(after.name, name);
+    assert_eq!(after.description, description);
+}
 
-    let run = LoopNodeRun {
-        id: "run-active".to_string(),
-        loop_id: lp.id.clone(),
+#[test]
+fn unbind_graph_spec_noop_for_standalone() {
+    let db = test_db();
+    let mut spec = sample_graph_spec("unused", "spec-standalone", 1);
+    spec.graph_id = None;
+    db.insert_graph_spec(&spec).unwrap();
+
+    assert!(!db.unbind_graph_spec(&spec.id).unwrap());
+}
+
+#[test]
+fn unbind_graph_spec_preserves_execution_history() {
+    let db = test_db();
+    let lp = sample_graph("graph-unbind-hist");
+    db.insert_graph(&lp).unwrap();
+    let spec = sample_graph_spec(&lp.id, "spec-unbind-hist", 1);
+    db.insert_graph_spec(&spec).unwrap();
+    let node = sample_graph_node(&spec.id, "node-unbind-hist", 1);
+    db.insert_graph_node(&node).unwrap();
+    let run = GraphNodeRun {
+        id: "run-unbind-hist".to_string(),
+        graph_id: lp.id,
         spec_id: spec.id.clone(),
         node_id: node.id,
-        status: LoopRunStatus::Running,
+        status: GraphRunStatus::Pass,
         input: None,
         output: None,
         started_at: Utc::now(),
@@ -4198,16 +4925,57 @@ fn set_spec_admin_status_rejects_active_run() {
         pid: None,
         boot_id: None,
         session_id: None,
+        executed_platform: None,
+        executed_model: None,
     };
-    db.insert_loop_run(&run).unwrap();
+    db.insert_graph_run(&run).unwrap();
+
+    assert!(db.unbind_graph_spec(&spec.id).unwrap());
+
+    let runs = db.list_graph_runs_for_spec(&spec.id).unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].id, "run-unbind-hist");
+}
+
+#[test]
+fn set_spec_admin_status_rejects_active_run() {
+    let db = test_db();
+    let mut spec = sample_graph_spec("unused", "spec-with-run", 1);
+    spec.graph_id = None;
+    db.insert_graph_spec(&spec).unwrap();
+
+    let lp = sample_graph("graph-for-run");
+    db.insert_graph(&lp).unwrap();
+
+    let node = sample_graph_node(&spec.id, "node-for-run", 1);
+    db.insert_graph_node(&node).unwrap();
+
+    let run = GraphNodeRun {
+        id: "run-active".to_string(),
+        graph_id: lp.id.clone(),
+        spec_id: spec.id.clone(),
+        node_id: node.id,
+        status: GraphRunStatus::Running,
+        input: None,
+        output: None,
+        started_at: Utc::now(),
+        completed_at: None,
+        iteration: 1,
+        pid: None,
+        boot_id: None,
+        session_id: None,
+        executed_platform: None,
+        executed_model: None,
+    };
+    db.insert_graph_run(&run).unwrap();
 
     let outcome = db
-        .set_spec_admin_status(&spec.id, LoopSpecStatus::Completed, "reason")
+        .set_spec_admin_status(&spec.id, GraphSpecStatus::Completed, "reason")
         .unwrap();
 
     assert!(
-        matches!(outcome, SpecAdminStatusOutcome::ActiveRun { ref loop_id, ref run_id }
-            if loop_id == &lp.id && run_id == "run-active"),
+        matches!(outcome, SpecAdminStatusOutcome::ActiveRun { ref graph_id, ref run_id }
+            if graph_id == &lp.id && run_id == "run-active"),
         "should reject spec with active run"
     );
 }
@@ -4215,9 +4983,9 @@ fn set_spec_admin_status_rejects_active_run() {
 #[test]
 fn set_spec_admin_status_propagates_to_queue_selection() {
     let db = test_db();
-    let mut spec = sample_loop_spec("unused", "spec-queue-prop", 1);
-    spec.loop_id = None;
-    db.insert_loop_spec(&spec).unwrap();
+    let mut spec = sample_graph_spec("unused", "spec-queue-prop", 1);
+    spec.graph_id = None;
+    db.insert_graph_spec(&spec).unwrap();
 
     let queue = Queue {
         id: "queue-test".to_string(),
@@ -4232,7 +5000,7 @@ fn set_spec_admin_status_propagates_to_queue_selection() {
     assert_eq!(before.as_deref(), Some(spec.id.as_str()));
 
     let outcome = db
-        .set_spec_admin_status(&spec.id, LoopSpecStatus::Completed, "reason")
+        .set_spec_admin_status(&spec.id, GraphSpecStatus::Completed, "reason")
         .unwrap();
     assert!(matches!(outcome, SpecAdminStatusOutcome::Success));
 
@@ -4257,24 +5025,24 @@ fn queue_next_pending_spec_id_picks_interrupted_spec_in_position_order() {
     };
     db.insert_queue(&queue).unwrap();
 
-    let mut ahead = sample_loop_spec("unused", "spec-ahead-completed", 1);
-    ahead.loop_id = None;
-    ahead.status = LoopSpecStatus::Completed;
-    db.insert_loop_spec(&ahead).unwrap();
+    let mut ahead = sample_graph_spec("unused", "spec-ahead-completed", 1);
+    ahead.graph_id = None;
+    ahead.status = GraphSpecStatus::Completed;
+    db.insert_graph_spec(&ahead).unwrap();
     db.append_queue_member("queue-interrupted", &ahead.id, None)
         .unwrap();
 
-    let mut interrupted = sample_loop_spec("unused", "spec-interrupted", 2);
-    interrupted.loop_id = None;
-    interrupted.status = LoopSpecStatus::Interrupted;
-    db.insert_loop_spec(&interrupted).unwrap();
+    let mut interrupted = sample_graph_spec("unused", "spec-interrupted", 2);
+    interrupted.graph_id = None;
+    interrupted.status = GraphSpecStatus::Interrupted;
+    db.insert_graph_spec(&interrupted).unwrap();
     db.append_queue_member("queue-interrupted", &interrupted.id, None)
         .unwrap();
 
-    let mut pending = sample_loop_spec("unused", "spec-pending-after", 3);
-    pending.loop_id = None;
-    pending.status = LoopSpecStatus::Pending;
-    db.insert_loop_spec(&pending).unwrap();
+    let mut pending = sample_graph_spec("unused", "spec-pending-after", 3);
+    pending.graph_id = None;
+    pending.status = GraphSpecStatus::Pending;
+    db.insert_graph_spec(&pending).unwrap();
     db.append_queue_member("queue-interrupted", &pending.id, None)
         .unwrap();
 
@@ -4292,17 +5060,17 @@ fn queue_next_pending_spec_id_picks_interrupted_spec_in_position_order() {
 #[test]
 fn queue_running_spec_id_returns_first_running_member() {
     let db = test_db();
-    let lp = sample_loop("wf-queue-running");
-    db.insert_loop(&lp).unwrap();
+    let lp = sample_graph("wf-queue-running");
+    db.insert_graph(&lp).unwrap();
 
-    let mut spec_a = sample_loop_spec("unused", "spec-a", 1);
-    spec_a.loop_id = None;
-    spec_a.status = LoopSpecStatus::Running;
-    let mut spec_b = sample_loop_spec("unused", "spec-b", 2);
-    spec_b.loop_id = None;
-    spec_b.status = LoopSpecStatus::Pending;
-    db.insert_loop_spec(&spec_a).unwrap();
-    db.insert_loop_spec(&spec_b).unwrap();
+    let mut spec_a = sample_graph_spec("unused", "spec-a", 1);
+    spec_a.graph_id = None;
+    spec_a.status = GraphSpecStatus::Running;
+    let mut spec_b = sample_graph_spec("unused", "spec-b", 2);
+    spec_b.graph_id = None;
+    spec_b.status = GraphSpecStatus::Pending;
+    db.insert_graph_spec(&spec_a).unwrap();
+    db.insert_graph_spec(&spec_b).unwrap();
 
     db.insert_queue(&Queue {
         id: "queue-1".to_string(),
@@ -4322,13 +5090,13 @@ fn queue_running_spec_id_returns_first_running_member() {
 #[test]
 fn queue_running_spec_id_returns_none_when_no_running_member() {
     let db = test_db();
-    let lp = sample_loop("wf-queue-no-running");
-    db.insert_loop(&lp).unwrap();
+    let lp = sample_graph("wf-queue-no-running");
+    db.insert_graph(&lp).unwrap();
 
-    let mut spec = sample_loop_spec("unused", "spec-p", 1);
-    spec.loop_id = None;
-    spec.status = LoopSpecStatus::Pending;
-    db.insert_loop_spec(&spec).unwrap();
+    let mut spec = sample_graph_spec("unused", "spec-p", 1);
+    spec.graph_id = None;
+    spec.status = GraphSpecStatus::Pending;
+    db.insert_graph_spec(&spec).unwrap();
 
     db.insert_queue(&Queue {
         id: "queue-1".to_string(),
@@ -4344,15 +5112,15 @@ fn queue_running_spec_id_returns_none_when_no_running_member() {
 #[test]
 fn reconcile_stranded_queue_specs_resets_running_spec_with_no_active_run() {
     let db = test_db();
-    let mut lp = sample_loop("wf-stranded");
-    lp.status = LoopStatus::Paused;
+    let mut lp = sample_graph("wf-stranded");
+    lp.status = GraphStatus::Paused;
     lp.active_run_queue_id = Some("queue-1".to_string());
-    db.insert_loop(&lp).unwrap();
+    db.insert_graph(&lp).unwrap();
 
-    let mut spec = sample_loop_spec("unused", "spec-stranded", 1);
-    spec.loop_id = None;
-    spec.status = LoopSpecStatus::Running;
-    db.insert_loop_spec(&spec).unwrap();
+    let mut spec = sample_graph_spec("unused", "spec-stranded", 1);
+    spec.graph_id = None;
+    spec.status = GraphSpecStatus::Running;
+    db.insert_graph_spec(&spec).unwrap();
 
     db.insert_queue(&Queue {
         id: "queue-1".to_string(),
@@ -4364,8 +5132,8 @@ fn reconcile_stranded_queue_specs_resets_running_spec_with_no_active_run() {
 
     assert_eq!(db.reconcile_stranded_queue_specs().unwrap(), 1);
 
-    let spec_after = db.get_loop_spec(&spec.id).unwrap().unwrap();
-    assert_eq!(spec_after.status, LoopSpecStatus::Pending);
+    let spec_after = db.get_graph_spec(&spec.id).unwrap().unwrap();
+    assert_eq!(spec_after.status, GraphSpecStatus::Pending);
     assert!(spec_after.started_at.is_none());
     assert!(spec_after.spec_start_head.is_none());
 }
@@ -4373,15 +5141,15 @@ fn reconcile_stranded_queue_specs_resets_running_spec_with_no_active_run() {
 #[test]
 fn reconcile_stranded_queue_specs_preserves_spec_with_active_run_in_current_boot() {
     let db = test_db();
-    let mut lp = sample_loop("wf-stranded-live");
-    lp.status = LoopStatus::Paused;
+    let mut lp = sample_graph("wf-stranded-live");
+    lp.status = GraphStatus::Paused;
     lp.active_run_queue_id = Some("queue-1".to_string());
-    db.insert_loop(&lp).unwrap();
+    db.insert_graph(&lp).unwrap();
 
-    let mut spec = sample_loop_spec("unused", "spec-live", 1);
-    spec.loop_id = None;
-    spec.status = LoopSpecStatus::Running;
-    db.insert_loop_spec(&spec).unwrap();
+    let mut spec = sample_graph_spec("unused", "spec-live", 1);
+    spec.graph_id = None;
+    spec.status = GraphSpecStatus::Running;
+    db.insert_graph_spec(&spec).unwrap();
 
     db.insert_queue(&Queue {
         id: "queue-1".to_string(),
@@ -4391,14 +5159,14 @@ fn reconcile_stranded_queue_specs_preserves_spec_with_active_run_in_current_boot
     .unwrap();
     db.append_queue_member("queue-1", &spec.id, None).unwrap();
 
-    let node = sample_loop_node(&spec.id, "node-live", 1);
-    db.insert_loop_node(&node).unwrap();
-    db.insert_loop_run(&LoopNodeRun {
+    let node = sample_graph_node(&spec.id, "node-live", 1);
+    db.insert_graph_node(&node).unwrap();
+    db.insert_graph_run(&GraphNodeRun {
         id: "run-live".to_string(),
-        loop_id: lp.id,
+        graph_id: lp.id,
         spec_id: spec.id.clone(),
         node_id: node.id,
-        status: LoopRunStatus::Running,
+        status: GraphRunStatus::Running,
         input: None,
         output: None,
         started_at: Utc::now(),
@@ -4407,6 +5175,8 @@ fn reconcile_stranded_queue_specs_preserves_spec_with_active_run_in_current_boot
         pid: None,
         boot_id: Some(crate::system::boot_id().unwrap_or_default()),
         session_id: None,
+        executed_platform: None,
+        executed_model: None,
     })
     .unwrap();
 
@@ -4416,22 +5186,22 @@ fn reconcile_stranded_queue_specs_preserves_spec_with_active_run_in_current_boot
         "spec with active run in current boot must not be reset"
     );
 
-    let spec_after = db.get_loop_spec(&spec.id).unwrap().unwrap();
-    assert_eq!(spec_after.status, LoopSpecStatus::Running);
+    let spec_after = db.get_graph_spec(&spec.id).unwrap().unwrap();
+    assert_eq!(spec_after.status, GraphSpecStatus::Running);
 }
 
 #[test]
 fn reconcile_stranded_queue_specs_is_idempotent() {
     let db = test_db();
-    let mut lp = sample_loop("wf-stranded-idem");
-    lp.status = LoopStatus::Paused;
+    let mut lp = sample_graph("wf-stranded-idem");
+    lp.status = GraphStatus::Paused;
     lp.active_run_queue_id = Some("queue-1".to_string());
-    db.insert_loop(&lp).unwrap();
+    db.insert_graph(&lp).unwrap();
 
-    let mut spec = sample_loop_spec("unused", "spec-idem", 1);
-    spec.loop_id = None;
-    spec.status = LoopSpecStatus::Running;
-    db.insert_loop_spec(&spec).unwrap();
+    let mut spec = sample_graph_spec("unused", "spec-idem", 1);
+    spec.graph_id = None;
+    spec.status = GraphSpecStatus::Running;
+    db.insert_graph_spec(&spec).unwrap();
 
     db.insert_queue(&Queue {
         id: "queue-1".to_string(),
@@ -4492,7 +5262,7 @@ fn git_is_clean(path: &std::path::Path) -> bool {
 }
 
 #[test]
-fn reconcile_orphaned_loops_marks_interrupted_and_leaves_dirty_worktree_untouched() {
+fn reconcile_orphaned_graphs_marks_interrupted_and_leaves_dirty_worktree_untouched() {
     let dir = tempdir().unwrap();
     init_git_repo(dir.path());
     let head = git_head(dir.path());
@@ -4502,19 +5272,19 @@ fn reconcile_orphaned_loops_marks_interrupted_and_leaves_dirty_worktree_untouche
 
     let db = test_db();
     let data_dir = tempdir().unwrap();
-    let mut lp = sample_loop("wf-orphan-interrupted-dirty");
-    lp.status = LoopStatus::Running;
+    let mut lp = sample_graph("wf-orphan-interrupted-dirty");
+    lp.status = GraphStatus::Running;
     lp.workdir = dir.path().to_string_lossy().to_string();
-    let mut spec = sample_loop_spec(&lp.id, "spec-orphan-interrupted-dirty", 1);
-    spec.status = LoopSpecStatus::Running;
+    let mut spec = sample_graph_spec(&lp.id, "spec-orphan-interrupted-dirty", 1);
+    spec.status = GraphSpecStatus::Running;
     spec.spec_start_head = Some(head);
-    let node = sample_loop_node(&spec.id, "node-orphan-interrupted-dirty", 1);
-    let run = LoopNodeRun {
+    let node = sample_graph_node(&spec.id, "node-orphan-interrupted-dirty", 1);
+    let run = GraphNodeRun {
         id: "run-orphan-interrupted-dirty".to_string(),
-        loop_id: lp.id.clone(),
+        graph_id: lp.id.clone(),
         spec_id: spec.id.clone(),
         node_id: node.id.clone(),
-        status: LoopRunStatus::Running,
+        status: GraphRunStatus::Running,
         input: None,
         output: None,
         started_at: Utc::now(),
@@ -4523,14 +5293,16 @@ fn reconcile_orphaned_loops_marks_interrupted_and_leaves_dirty_worktree_untouche
         pid: None,
         boot_id: None,
         session_id: None,
+        executed_platform: None,
+        executed_model: None,
     };
 
-    db.insert_loop(&lp).unwrap();
-    db.insert_loop_spec(&spec).unwrap();
-    db.insert_loop_node(&node).unwrap();
-    db.insert_loop_run(&run).unwrap();
+    db.insert_graph(&lp).unwrap();
+    db.insert_graph_spec(&spec).unwrap();
+    db.insert_graph_node(&node).unwrap();
+    db.insert_graph_run(&run).unwrap();
 
-    assert_eq!(db.reconcile_orphaned_loops(data_dir.path()).unwrap(), 1);
+    assert_eq!(db.reconcile_orphaned_graphs(data_dir.path()).unwrap(), 1);
 
     assert!(
         !git_is_clean(dir.path()),
@@ -4542,7 +5314,7 @@ fn reconcile_orphaned_loops_marks_interrupted_and_leaves_dirty_worktree_untouche
         "the partial write itself must be untouched, not just 'still dirty'"
     );
 
-    let run_after = db.get_loop_run(&run.id).unwrap().unwrap();
+    let run_after = db.get_graph_run(&run.id).unwrap().unwrap();
     let output = run_after.output.as_ref().expect("output recorded");
     assert_eq!(output.get("interrupted"), Some(&serde_json::json!(true)));
     assert!(
@@ -4550,12 +5322,12 @@ fn reconcile_orphaned_loops_marks_interrupted_and_leaves_dirty_worktree_untouche
         "there is no quarantine mechanism left to report"
     );
 
-    let spec_after = db.get_loop_spec(&spec.id).unwrap().unwrap();
-    assert_eq!(spec_after.status, LoopSpecStatus::Interrupted);
+    let spec_after = db.get_graph_spec(&spec.id).unwrap().unwrap();
+    assert_eq!(spec_after.status, GraphSpecStatus::Interrupted);
 }
 
 #[test]
-fn reconcile_orphaned_loops_marks_interrupted_for_clean_worktree_too() {
+fn reconcile_orphaned_graphs_marks_interrupted_for_clean_worktree_too() {
     let dir = tempdir().unwrap();
     init_git_repo(dir.path());
     let head = git_head(dir.path());
@@ -4563,19 +5335,19 @@ fn reconcile_orphaned_loops_marks_interrupted_for_clean_worktree_too() {
 
     let db = test_db();
     let data_dir = tempdir().unwrap();
-    let mut lp = sample_loop("wf-orphan-interrupted-clean");
-    lp.status = LoopStatus::Running;
+    let mut lp = sample_graph("wf-orphan-interrupted-clean");
+    lp.status = GraphStatus::Running;
     lp.workdir = dir.path().to_string_lossy().to_string();
-    let mut spec = sample_loop_spec(&lp.id, "spec-orphan-interrupted-clean", 1);
-    spec.status = LoopSpecStatus::Running;
+    let mut spec = sample_graph_spec(&lp.id, "spec-orphan-interrupted-clean", 1);
+    spec.status = GraphSpecStatus::Running;
     spec.spec_start_head = Some(head);
-    let node = sample_loop_node(&spec.id, "node-orphan-interrupted-clean", 1);
-    let run = LoopNodeRun {
+    let node = sample_graph_node(&spec.id, "node-orphan-interrupted-clean", 1);
+    let run = GraphNodeRun {
         id: "run-orphan-interrupted-clean".to_string(),
-        loop_id: lp.id.clone(),
+        graph_id: lp.id.clone(),
         spec_id: spec.id.clone(),
         node_id: node.id.clone(),
-        status: LoopRunStatus::Running,
+        status: GraphRunStatus::Running,
         input: None,
         output: None,
         started_at: Utc::now(),
@@ -4584,26 +5356,28 @@ fn reconcile_orphaned_loops_marks_interrupted_for_clean_worktree_too() {
         pid: None,
         boot_id: None,
         session_id: None,
+        executed_platform: None,
+        executed_model: None,
     };
 
-    db.insert_loop(&lp).unwrap();
-    db.insert_loop_spec(&spec).unwrap();
-    db.insert_loop_node(&node).unwrap();
-    db.insert_loop_run(&run).unwrap();
+    db.insert_graph(&lp).unwrap();
+    db.insert_graph_spec(&spec).unwrap();
+    db.insert_graph_node(&node).unwrap();
+    db.insert_graph_run(&run).unwrap();
 
-    assert_eq!(db.reconcile_orphaned_loops(data_dir.path()).unwrap(), 1);
+    assert_eq!(db.reconcile_orphaned_graphs(data_dir.path()).unwrap(), 1);
 
     assert!(git_is_clean(dir.path()), "still nothing to touch");
 
-    let run_after = db.get_loop_run(&run.id).unwrap().unwrap();
+    let run_after = db.get_graph_run(&run.id).unwrap().unwrap();
     let output = run_after.output.as_ref().expect("output recorded");
     assert_eq!(output.get("interrupted"), Some(&serde_json::json!(true)));
     assert!(output.get("quarantine").is_none());
 
-    let spec_after = db.get_loop_spec(&spec.id).unwrap().unwrap();
+    let spec_after = db.get_graph_spec(&spec.id).unwrap().unwrap();
     assert_eq!(
         spec_after.status,
-        LoopSpecStatus::Interrupted,
+        GraphSpecStatus::Interrupted,
         "a spec becomes interrupted regardless of whether the worktree happened to be dirty"
     );
 }
@@ -4612,26 +5386,26 @@ fn reconcile_orphaned_loops_marks_interrupted_for_clean_worktree_too() {
 /// `git init`ed still gets the spec marked `Interrupted`, with whatever
 /// partial work it holds left completely alone.
 #[test]
-fn reconcile_orphaned_loops_marks_interrupted_in_non_git_workdir() {
+fn reconcile_orphaned_graphs_marks_interrupted_in_non_git_workdir() {
     let dir = tempdir().unwrap();
     // Deliberately no `init_git_repo` — this workdir is not a repository.
     std::fs::write(dir.path().join("truncated.rs"), "fn broken(").unwrap();
 
     let db = test_db();
     let data_dir = tempdir().unwrap();
-    let mut lp = sample_loop("wf-orphan-interrupted-no-git");
-    lp.status = LoopStatus::Running;
+    let mut lp = sample_graph("wf-orphan-interrupted-no-git");
+    lp.status = GraphStatus::Running;
     lp.workdir = dir.path().to_string_lossy().to_string();
-    let mut spec = sample_loop_spec(&lp.id, "spec-orphan-interrupted-no-git", 1);
-    spec.status = LoopSpecStatus::Running;
+    let mut spec = sample_graph_spec(&lp.id, "spec-orphan-interrupted-no-git", 1);
+    spec.status = GraphSpecStatus::Running;
     spec.spec_start_head = None;
-    let node = sample_loop_node(&spec.id, "node-orphan-interrupted-no-git", 1);
-    let run = LoopNodeRun {
+    let node = sample_graph_node(&spec.id, "node-orphan-interrupted-no-git", 1);
+    let run = GraphNodeRun {
         id: "run-orphan-interrupted-no-git".to_string(),
-        loop_id: lp.id.clone(),
+        graph_id: lp.id.clone(),
         spec_id: spec.id.clone(),
         node_id: node.id.clone(),
-        status: LoopRunStatus::Running,
+        status: GraphRunStatus::Running,
         input: None,
         output: None,
         started_at: Utc::now(),
@@ -4640,14 +5414,16 @@ fn reconcile_orphaned_loops_marks_interrupted_in_non_git_workdir() {
         pid: None,
         boot_id: None,
         session_id: None,
+        executed_platform: None,
+        executed_model: None,
     };
 
-    db.insert_loop(&lp).unwrap();
-    db.insert_loop_spec(&spec).unwrap();
-    db.insert_loop_node(&node).unwrap();
-    db.insert_loop_run(&run).unwrap();
+    db.insert_graph(&lp).unwrap();
+    db.insert_graph_spec(&spec).unwrap();
+    db.insert_graph_node(&node).unwrap();
+    db.insert_graph_run(&run).unwrap();
 
-    assert_eq!(db.reconcile_orphaned_loops(data_dir.path()).unwrap(), 1);
+    assert_eq!(db.reconcile_orphaned_graphs(data_dir.path()).unwrap(), 1);
 
     assert_eq!(
         std::fs::read_to_string(dir.path().join("truncated.rs")).unwrap(),
@@ -4655,17 +5431,17 @@ fn reconcile_orphaned_loops_marks_interrupted_in_non_git_workdir() {
         "partial work in a non-git workdir must be left exactly as found"
     );
 
-    let run_after = db.get_loop_run(&run.id).unwrap().unwrap();
+    let run_after = db.get_graph_run(&run.id).unwrap().unwrap();
     let output = run_after.output.as_ref().expect("output recorded");
     assert_eq!(output.get("interrupted"), Some(&serde_json::json!(true)));
     assert!(output.get("quarantine").is_none());
 
-    let spec_after = db.get_loop_spec(&spec.id).unwrap().unwrap();
-    assert_eq!(spec_after.status, LoopSpecStatus::Interrupted);
+    let spec_after = db.get_graph_spec(&spec.id).unwrap().unwrap();
+    assert_eq!(spec_after.status, GraphSpecStatus::Interrupted);
 }
 
 #[test]
-fn reconcile_orphaned_loops_interrupted_marking_is_idempotent_across_two_passes() {
+fn reconcile_orphaned_graphs_interrupted_marking_is_idempotent_across_two_passes() {
     let dir = tempdir().unwrap();
     init_git_repo(dir.path());
     let head = git_head(dir.path());
@@ -4673,19 +5449,19 @@ fn reconcile_orphaned_loops_interrupted_marking_is_idempotent_across_two_passes(
 
     let db = test_db();
     let data_dir = tempdir().unwrap();
-    let mut lp = sample_loop("wf-orphan-interrupted-idempotent");
-    lp.status = LoopStatus::Running;
+    let mut lp = sample_graph("wf-orphan-interrupted-idempotent");
+    lp.status = GraphStatus::Running;
     lp.workdir = dir.path().to_string_lossy().to_string();
-    let mut spec = sample_loop_spec(&lp.id, "spec-orphan-interrupted-idempotent", 1);
-    spec.status = LoopSpecStatus::Running;
+    let mut spec = sample_graph_spec(&lp.id, "spec-orphan-interrupted-idempotent", 1);
+    spec.status = GraphSpecStatus::Running;
     spec.spec_start_head = Some(head);
-    let node = sample_loop_node(&spec.id, "node-orphan-interrupted-idempotent", 1);
-    let run = LoopNodeRun {
+    let node = sample_graph_node(&spec.id, "node-orphan-interrupted-idempotent", 1);
+    let run = GraphNodeRun {
         id: "run-orphan-interrupted-idempotent".to_string(),
-        loop_id: lp.id.clone(),
+        graph_id: lp.id.clone(),
         spec_id: spec.id.clone(),
         node_id: node.id.clone(),
-        status: LoopRunStatus::Running,
+        status: GraphRunStatus::Running,
         input: None,
         output: None,
         started_at: Utc::now(),
@@ -4694,23 +5470,25 @@ fn reconcile_orphaned_loops_interrupted_marking_is_idempotent_across_two_passes(
         pid: None,
         boot_id: None,
         session_id: None,
+        executed_platform: None,
+        executed_model: None,
     };
 
-    db.insert_loop(&lp).unwrap();
-    db.insert_loop_spec(&spec).unwrap();
-    db.insert_loop_node(&node).unwrap();
-    db.insert_loop_run(&run).unwrap();
+    db.insert_graph(&lp).unwrap();
+    db.insert_graph_spec(&spec).unwrap();
+    db.insert_graph_node(&node).unwrap();
+    db.insert_graph_run(&run).unwrap();
 
-    assert_eq!(db.reconcile_orphaned_loops(data_dir.path()).unwrap(), 1);
-    let spec_after_first = db.get_loop_spec(&spec.id).unwrap().unwrap();
-    assert_eq!(spec_after_first.status, LoopSpecStatus::Interrupted);
+    assert_eq!(db.reconcile_orphaned_graphs(data_dir.path()).unwrap(), 1);
+    let spec_after_first = db.get_graph_spec(&spec.id).unwrap().unwrap();
+    assert_eq!(spec_after_first.status, GraphSpecStatus::Interrupted);
 
-    // Second pass: the loop is already `Paused`, so it's not even a
+    // Second pass: the graph is already `Paused`, so it's not even a
     // candidate — nothing should change again, and the worktree stays
     // exactly as it was after the first pass.
-    assert_eq!(db.reconcile_orphaned_loops(data_dir.path()).unwrap(), 0);
-    let spec_after_second = db.get_loop_spec(&spec.id).unwrap().unwrap();
-    assert_eq!(spec_after_second.status, LoopSpecStatus::Interrupted);
+    assert_eq!(db.reconcile_orphaned_graphs(data_dir.path()).unwrap(), 0);
+    let spec_after_second = db.get_graph_spec(&spec.id).unwrap().unwrap();
+    assert_eq!(spec_after_second.status, GraphSpecStatus::Interrupted);
     assert_eq!(
         std::fs::read_to_string(dir.path().join("truncated.rs")).unwrap(),
         "fn broken(",
@@ -4726,17 +5504,17 @@ fn reconcile_stranded_queue_specs_marks_spec_interrupted_and_leaves_worktree_unt
     std::fs::write(dir.path().join("truncated.rs"), "fn broken(").unwrap();
 
     let db = test_db();
-    let mut lp = sample_loop("wf-stranded-interrupted");
-    lp.status = LoopStatus::Paused;
+    let mut lp = sample_graph("wf-stranded-interrupted");
+    lp.status = GraphStatus::Paused;
     lp.workdir = dir.path().to_string_lossy().to_string();
     lp.active_run_queue_id = Some("queue-1".to_string());
-    db.insert_loop(&lp).unwrap();
+    db.insert_graph(&lp).unwrap();
 
-    let mut spec = sample_loop_spec("unused", "spec-stranded-interrupted", 1);
-    spec.loop_id = None;
-    spec.status = LoopSpecStatus::Running;
+    let mut spec = sample_graph_spec("unused", "spec-stranded-interrupted", 1);
+    spec.graph_id = None;
+    spec.status = GraphSpecStatus::Running;
     spec.spec_start_head = Some(head);
-    db.insert_loop_spec(&spec).unwrap();
+    db.insert_graph_spec(&spec).unwrap();
 
     db.insert_queue(&Queue {
         id: "queue-1".to_string(),
@@ -4746,17 +5524,17 @@ fn reconcile_stranded_queue_specs_marks_spec_interrupted_and_leaves_worktree_unt
     .unwrap();
     db.append_queue_member("queue-1", &spec.id, None).unwrap();
 
-    let node = sample_loop_node(&spec.id, "node-stranded-interrupted", 1);
-    db.insert_loop_node(&node).unwrap();
-    // A `loop_runs` row left `running` by a daemon that died before a
-    // graceful path (e.g. `loop_report_blocker`) could finalize it — its
+    let node = sample_graph_node(&spec.id, "node-stranded-interrupted", 1);
+    db.insert_graph_node(&node).unwrap();
+    // A `graph_runs` row left `running` by a daemon that died before a
+    // graceful path (e.g. `graph_report_blocker`) could finalize it — its
     // boot id is stale, proving it from a recorded fact rather than content.
-    db.insert_loop_run(&LoopNodeRun {
+    db.insert_graph_run(&GraphNodeRun {
         id: "run-stranded-interrupted".to_string(),
-        loop_id: lp.id,
+        graph_id: lp.id,
         spec_id: spec.id.clone(),
         node_id: node.id,
-        status: LoopRunStatus::Running,
+        status: GraphRunStatus::Running,
         input: None,
         output: None,
         started_at: Utc::now(),
@@ -4765,6 +5543,8 @@ fn reconcile_stranded_queue_specs_marks_spec_interrupted_and_leaves_worktree_unt
         pid: None,
         boot_id: Some("some-other-boot-that-is-not-current".to_string()),
         session_id: None,
+        executed_platform: None,
+        executed_model: None,
     })
     .unwrap();
 
@@ -4780,10 +5560,10 @@ fn reconcile_stranded_queue_specs_marks_spec_interrupted_and_leaves_worktree_unt
     );
 
     let run_after = db
-        .get_loop_run("run-stranded-interrupted")
+        .get_graph_run("run-stranded-interrupted")
         .unwrap()
         .unwrap();
-    assert_ne!(run_after.status, LoopRunStatus::Running);
+    assert_ne!(run_after.status, GraphRunStatus::Running);
     let output = run_after.output.as_ref().expect("output recorded");
     assert_eq!(output.get("interrupted"), Some(&serde_json::json!(true)));
     assert!(output.get("quarantine").is_none());
@@ -4791,8 +5571,8 @@ fn reconcile_stranded_queue_specs_marks_spec_interrupted_and_leaves_worktree_unt
     // The key behaviour change (B36 → this spec): a genuinely interrupted
     // spec is marked `Interrupted`, not silently reset to `Pending` — it
     // used to be indistinguishable from a spec that never started.
-    let spec_after = db.get_loop_spec(&spec.id).unwrap().unwrap();
-    assert_eq!(spec_after.status, LoopSpecStatus::Interrupted);
+    let spec_after = db.get_graph_spec(&spec.id).unwrap().unwrap();
+    assert_eq!(spec_after.status, GraphSpecStatus::Interrupted);
 }
 
 #[test]
@@ -4803,17 +5583,17 @@ fn reconcile_stranded_queue_specs_leaves_worktree_untouched_for_healthy_run() {
     std::fs::write(dir.path().join("in-progress.rs"), "fn still_writing(").unwrap();
 
     let db = test_db();
-    let mut lp = sample_loop("wf-stranded-healthy");
-    lp.status = LoopStatus::Paused;
+    let mut lp = sample_graph("wf-stranded-healthy");
+    lp.status = GraphStatus::Paused;
     lp.workdir = dir.path().to_string_lossy().to_string();
     lp.active_run_queue_id = Some("queue-1".to_string());
-    db.insert_loop(&lp).unwrap();
+    db.insert_graph(&lp).unwrap();
 
-    let mut spec = sample_loop_spec("unused", "spec-stranded-healthy", 1);
-    spec.loop_id = None;
-    spec.status = LoopSpecStatus::Running;
+    let mut spec = sample_graph_spec("unused", "spec-stranded-healthy", 1);
+    spec.graph_id = None;
+    spec.status = GraphSpecStatus::Running;
     spec.spec_start_head = Some(head);
-    db.insert_loop_spec(&spec).unwrap();
+    db.insert_graph_spec(&spec).unwrap();
 
     db.insert_queue(&Queue {
         id: "queue-1".to_string(),
@@ -4823,16 +5603,16 @@ fn reconcile_stranded_queue_specs_leaves_worktree_untouched_for_healthy_run() {
     .unwrap();
     db.append_queue_member("queue-1", &spec.id, None).unwrap();
 
-    let node = sample_loop_node(&spec.id, "node-stranded-healthy", 1);
-    db.insert_loop_node(&node).unwrap();
+    let node = sample_graph_node(&spec.id, "node-stranded-healthy", 1);
+    db.insert_graph_node(&node).unwrap();
     // Genuinely still in flight: carries the *current* boot id, so it must
     // never be treated as interrupted, and its worktree must not be touched.
-    db.insert_loop_run(&LoopNodeRun {
+    db.insert_graph_run(&GraphNodeRun {
         id: "run-stranded-healthy".to_string(),
-        loop_id: lp.id,
+        graph_id: lp.id,
         spec_id: spec.id,
         node_id: node.id,
-        status: LoopRunStatus::Running,
+        status: GraphRunStatus::Running,
         input: None,
         output: None,
         started_at: Utc::now(),
@@ -4841,6 +5621,8 @@ fn reconcile_stranded_queue_specs_leaves_worktree_untouched_for_healthy_run() {
         pid: None,
         boot_id: Some(crate::system::boot_id().unwrap_or_default()),
         session_id: None,
+        executed_platform: None,
+        executed_model: None,
     })
     .unwrap();
 
@@ -4855,12 +5637,12 @@ fn reconcile_stranded_queue_specs_leaves_worktree_untouched_for_healthy_run() {
         "a healthy run's worktree changes must never be touched"
     );
 
-    let run_after = db.get_loop_run("run-stranded-healthy").unwrap().unwrap();
-    assert_eq!(run_after.status, LoopRunStatus::Running);
+    let run_after = db.get_graph_run("run-stranded-healthy").unwrap().unwrap();
+    assert_eq!(run_after.status, GraphRunStatus::Running);
 }
 
 #[test]
-fn list_project_history_merges_finished_loops_and_past_sessions_newest_first() {
+fn list_project_history_merges_finished_graphs_and_past_sessions_newest_first() {
     use crate::db::project::ProjectHistoryKind;
 
     let tmp = NamedTempFile::new().expect("create temp file");
@@ -4870,27 +5652,27 @@ fn list_project_history_merges_finished_loops_and_past_sessions_newest_first() {
     let workdir = "/tmp/history-project";
     let other_workdir = "/tmp/other-project";
 
-    // A finished loop, scoped to our workdir — the oldest event.
-    let mut finished_loop = sample_loop("loop-finished");
-    finished_loop.workdir = workdir.to_string();
-    finished_loop.name = "Finished loop".to_string();
-    finished_loop.status = LoopStatus::Completed;
-    finished_loop.completed_at = Some(Utc.with_ymd_and_hms(2024, 1, 1, 0, 1, 0).unwrap());
-    db.insert_loop(&finished_loop).unwrap();
+    // A finished graph, scoped to our workdir — the oldest event.
+    let mut finished_graph = sample_graph("graph-finished");
+    finished_graph.workdir = workdir.to_string();
+    finished_graph.name = "Finished graph".to_string();
+    finished_graph.status = GraphStatus::Completed;
+    finished_graph.completed_at = Some(Utc.with_ymd_and_hms(2024, 1, 1, 0, 1, 0).unwrap());
+    db.insert_graph(&finished_graph).unwrap();
 
-    // A still-running loop in the same workdir must NOT show up in history —
-    // only completed/failed loops are "finished".
-    let mut running_loop = sample_loop("loop-running");
-    running_loop.workdir = workdir.to_string();
-    running_loop.status = LoopStatus::Running;
-    db.insert_loop(&running_loop).unwrap();
+    // A still-running graph in the same workdir must NOT show up in history —
+    // only completed/failed graphs are "finished".
+    let mut running_graph = sample_graph("graph-running");
+    running_graph.workdir = workdir.to_string();
+    running_graph.status = GraphStatus::Running;
+    db.insert_graph(&running_graph).unwrap();
 
-    // A finished loop in a *different* workdir must not leak into our results.
-    let mut other_loop = sample_loop("loop-other-project");
-    other_loop.workdir = other_workdir.to_string();
-    other_loop.status = LoopStatus::Completed;
-    other_loop.completed_at = Some(Utc.with_ymd_and_hms(2024, 1, 1, 0, 1, 30).unwrap());
-    db.insert_loop(&other_loop).unwrap();
+    // A finished graph in a *different* workdir must not leak into our results.
+    let mut other_graph = sample_graph("graph-other-project");
+    other_graph.workdir = other_workdir.to_string();
+    other_graph.status = GraphStatus::Completed;
+    other_graph.completed_at = Some(Utc.with_ymd_and_hms(2024, 1, 1, 0, 1, 30).unwrap());
+    db.insert_graph(&other_graph).unwrap();
 
     // A past (closed) interactive session in our workdir — the middle event.
     db.insert_interactive_session(
@@ -4952,11 +5734,11 @@ fn list_project_history_merges_finished_loops_and_past_sessions_newest_first() {
     assert_eq!(
         history.len(),
         3,
-        "only the finished loop and the two closed/finished sessions for this workdir should appear: {:?}",
+        "only the finished graph and the two closed/finished sessions for this workdir should appear: {:?}",
         history.iter().map(|e| &e.name).collect::<Vec<_>>()
     );
-    assert!(history.iter().any(|e| e.name == "Finished loop"
-        && e.kind == ProjectHistoryKind::Loop
+    assert!(history.iter().any(|e| e.name == "Finished graph"
+        && e.kind == ProjectHistoryKind::Graph
         && e.status == "completed"));
     assert!(history
         .iter()
@@ -4966,12 +5748,12 @@ fn list_project_history_merges_finished_loops_and_past_sessions_newest_first() {
         .any(|e| e.name == "Finished terminal" && e.kind == ProjectHistoryKind::TerminalSession));
 
     // Newest-first ordering: the terminal session finished most recently,
-    // then the interactive session was closed, then the loop completed.
+    // then the interactive session was closed, then the graph completed.
     assert_eq!(history[0].name, "Finished terminal");
     assert_eq!(history[1].name, "Past session");
-    assert_eq!(history[2].name, "Finished loop");
+    assert_eq!(history[2].name, "Finished graph");
 
-    // Sessions/loops for other workdirs or still-active never leak in.
+    // Sessions/graphs for other workdirs or still-active never leak in.
     assert!(!history.iter().any(|e| e.name.contains("other-project")));
     assert!(!history.iter().any(|e| e.name == "Active session"));
     assert!(!history.iter().any(|e| e.name == "Idle terminal"));
@@ -4979,23 +5761,23 @@ fn list_project_history_merges_finished_loops_and_past_sessions_newest_first() {
 
 // ── Archiving (F4): archive/restore preserve identity and history ──────
 
-/// The property that matters most: archiving a loop with real run history,
+/// The property that matters most: archiving a graph with real run history,
 /// then restoring it, must leave that history byte-for-byte intact — not
 /// just flip the `archived` flag. Archiving is deliberately a flag flip, not
-/// a delete-and-recreate or a move to another table, so the loop's id and
+/// a delete-and-recreate or a move to another table, so the graph's id and
 /// its specs/nodes/runs (all foreign-keyed to that id) never move either.
 #[test]
 fn archive_then_restore_preserves_identity_and_run_history() {
     let db = test_db();
-    let lp = sample_loop("wf-archive");
-    let spec = sample_loop_spec(&lp.id, "spec-archive", 1);
-    let node = sample_loop_node(&spec.id, "node-archive", 1);
-    let run = LoopNodeRun {
+    let lp = sample_graph("wf-archive");
+    let spec = sample_graph_spec(&lp.id, "spec-archive", 1);
+    let node = sample_graph_node(&spec.id, "node-archive", 1);
+    let run = GraphNodeRun {
         id: "run-archive".to_string(),
-        loop_id: lp.id.clone(),
+        graph_id: lp.id.clone(),
         spec_id: spec.id.clone(),
         node_id: node.id.clone(),
-        status: LoopRunStatus::Pass,
+        status: GraphRunStatus::Pass,
         input: Some(serde_json::json!({"feedback": "prior attempt"})),
         output: Some(serde_json::json!({"summary": "diagnosed the failure"})),
         started_at: Utc::now(),
@@ -5004,40 +5786,45 @@ fn archive_then_restore_preserves_identity_and_run_history() {
         pid: None,
         boot_id: Some("boot-archive".to_string()),
         session_id: Some("session-archive".to_string()),
+        executed_platform: None,
+        executed_model: None,
     };
-    db.insert_loop(&lp).unwrap();
-    db.insert_loop_spec(&spec).unwrap();
-    db.insert_loop_node(&node).unwrap();
-    db.insert_loop_run(&run).unwrap();
+    db.insert_graph(&lp).unwrap();
+    db.insert_graph_spec(&spec).unwrap();
+    db.insert_graph_node(&node).unwrap();
+    db.insert_graph_run(&run).unwrap();
 
-    let outcome = db.archive_loop(&lp.id).unwrap();
-    assert_eq!(outcome, crate::domain::loops::ArchiveLoopOutcome::Archived);
+    let outcome = db.archive_graph(&lp.id).unwrap();
+    assert_eq!(
+        outcome,
+        crate::domain::graphs::ArchiveGraphOutcome::Archived
+    );
 
     // Excluded from the browsing listing (the query itself filters, not an
     // in-memory pass) ...
     assert!(!db
-        .list_loops(None, false)
+        .list_graphs(None, false)
         .unwrap()
         .iter()
         .any(|l| l.id == lp.id));
     // ... but still resolvable directly by id, and it kept its own id (no
     // delete-and-recreate).
-    let archived = db.get_loop(&lp.id).unwrap().unwrap();
+    let archived = db.get_graph(&lp.id).unwrap().unwrap();
     assert_eq!(archived.id, lp.id);
     assert!(archived.archived);
-    // ... and included when a caller explicitly asks for archived loops too.
+    // ... and included when a caller explicitly asks for archived graphs too.
     assert!(db
-        .list_loops(None, true)
+        .list_graphs(None, true)
         .unwrap()
         .iter()
         .any(|l| l.id == lp.id));
 
     // The run history — the entire point of archiving over deleting — is
     // untouched: same spec, same node, same run with its exact payloads.
-    let specs = db.list_loop_specs(&lp.id).unwrap();
+    let specs = db.list_graph_specs(&lp.id).unwrap();
     assert_eq!(specs.len(), 1);
     assert_eq!(specs[0].id, spec.id);
-    let runs = db.list_loop_runs_for_spec(&spec.id).unwrap();
+    let runs = db.list_graph_runs_for_spec(&spec.id).unwrap();
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].id, run.id);
     assert_eq!(runs[0].iteration, 3);
@@ -5050,98 +5837,98 @@ fn archive_then_restore_preserves_identity_and_run_history() {
         Some(&serde_json::json!("diagnosed the failure"))
     );
 
-    // Restoring flips the flag back and the loop reappears in the main
+    // Restoring flips the flag back and the graph reappears in the main
     // listing — still the same row, still the same history.
-    assert!(db.restore_loop(&lp.id).unwrap());
-    let restored = db.get_loop(&lp.id).unwrap().unwrap();
+    assert!(db.restore_graph(&lp.id).unwrap());
+    let restored = db.get_graph(&lp.id).unwrap().unwrap();
     assert!(!restored.archived);
     assert!(db
-        .list_loops(None, false)
+        .list_graphs(None, false)
         .unwrap()
         .iter()
         .any(|l| l.id == lp.id));
-    let runs_after_restore = db.list_loop_runs_for_spec(&spec.id).unwrap();
+    let runs_after_restore = db.list_graph_runs_for_spec(&spec.id).unwrap();
     assert_eq!(runs_after_restore.len(), 1);
     assert_eq!(runs_after_restore[0].id, run.id);
 }
 
 #[test]
-fn count_archived_loops_reflects_archive_state() {
+fn count_archived_graphs_reflects_archive_state() {
     let db = test_db();
-    let a = sample_loop("wf-count-a");
-    let b = sample_loop("wf-count-b");
-    db.insert_loop(&a).unwrap();
-    db.insert_loop(&b).unwrap();
-    assert_eq!(db.count_archived_loops().unwrap(), 0);
+    let a = sample_graph("wf-count-a");
+    let b = sample_graph("wf-count-b");
+    db.insert_graph(&a).unwrap();
+    db.insert_graph(&b).unwrap();
+    assert_eq!(db.count_archived_graphs().unwrap(), 0);
 
-    db.archive_loop(&a.id).unwrap();
-    assert_eq!(db.count_archived_loops().unwrap(), 1);
+    db.archive_graph(&a.id).unwrap();
+    assert_eq!(db.count_archived_graphs().unwrap(), 1);
 
-    db.archive_loop(&b.id).unwrap();
-    assert_eq!(db.count_archived_loops().unwrap(), 2);
+    db.archive_graph(&b.id).unwrap();
+    assert_eq!(db.count_archived_graphs().unwrap(), 2);
 
-    db.restore_loop(&a.id).unwrap();
-    assert_eq!(db.count_archived_loops().unwrap(), 1);
+    db.restore_graph(&a.id).unwrap();
+    assert_eq!(db.count_archived_graphs().unwrap(), 1);
 }
 
 #[test]
-fn archive_loop_refuses_a_running_loop() {
+fn archive_graph_refuses_a_running_graph() {
     let db = test_db();
-    let mut lp = sample_loop("wf-running");
-    lp.status = LoopStatus::Running;
-    db.insert_loop(&lp).unwrap();
+    let mut lp = sample_graph("wf-running");
+    lp.status = GraphStatus::Running;
+    db.insert_graph(&lp).unwrap();
 
-    let outcome = db.archive_loop(&lp.id).unwrap();
-    assert_eq!(outcome, crate::domain::loops::ArchiveLoopOutcome::Running);
+    let outcome = db.archive_graph(&lp.id).unwrap();
+    assert_eq!(outcome, crate::domain::graphs::ArchiveGraphOutcome::Running);
 
-    // Refused, not silently ignored: the loop is still in the main listing.
-    let reloaded = db.get_loop(&lp.id).unwrap().unwrap();
+    // Refused, not silently ignored: the graph is still in the main listing.
+    let reloaded = db.get_graph(&lp.id).unwrap().unwrap();
     assert!(!reloaded.archived);
-    assert_eq!(db.count_archived_loops().unwrap(), 0);
+    assert_eq!(db.count_archived_graphs().unwrap(), 0);
 }
 
 #[test]
-fn archive_loop_already_archived_reports_already_archived() {
+fn archive_graph_already_archived_reports_already_archived() {
     let db = test_db();
-    let lp = sample_loop("wf-double-archive");
-    db.insert_loop(&lp).unwrap();
+    let lp = sample_graph("wf-double-archive");
+    db.insert_graph(&lp).unwrap();
 
     assert_eq!(
-        db.archive_loop(&lp.id).unwrap(),
-        crate::domain::loops::ArchiveLoopOutcome::Archived
+        db.archive_graph(&lp.id).unwrap(),
+        crate::domain::graphs::ArchiveGraphOutcome::Archived
     );
     assert_eq!(
-        db.archive_loop(&lp.id).unwrap(),
-        crate::domain::loops::ArchiveLoopOutcome::AlreadyArchived
+        db.archive_graph(&lp.id).unwrap(),
+        crate::domain::graphs::ArchiveGraphOutcome::AlreadyArchived
     );
 }
 
 #[test]
-fn restore_loop_not_archived_is_a_noop() {
+fn restore_graph_not_archived_is_a_noop() {
     let db = test_db();
-    let lp = sample_loop("wf-not-archived");
-    db.insert_loop(&lp).unwrap();
+    let lp = sample_graph("wf-not-archived");
+    db.insert_graph(&lp).unwrap();
 
-    assert!(!db.restore_loop(&lp.id).unwrap());
-    assert!(!db.restore_loop("ghost-loop").unwrap());
+    assert!(!db.restore_graph(&lp.id).unwrap());
+    assert!(!db.restore_graph("ghost-graph").unwrap());
 }
 
 /// Permanent deletion — reachable only from the archive on an
-/// already-archived loop — must actually destroy the run history it warns
+/// already-archived graph — must actually destroy the run history it warns
 /// about, unlike archiving. Exercises the same cascade `ON DELETE CASCADE`
 /// relationships archiving is designed to never touch.
 #[test]
-fn permanent_delete_removes_the_loop_and_its_run_history() {
+fn permanent_delete_removes_the_graph_and_its_run_history() {
     let db = test_db();
-    let lp = sample_loop("wf-permanent-delete");
-    let spec = sample_loop_spec(&lp.id, "spec-permanent-delete", 1);
-    let node = sample_loop_node(&spec.id, "node-permanent-delete", 1);
-    let run = LoopNodeRun {
+    let lp = sample_graph("wf-permanent-delete");
+    let spec = sample_graph_spec(&lp.id, "spec-permanent-delete", 1);
+    let node = sample_graph_node(&spec.id, "node-permanent-delete", 1);
+    let run = GraphNodeRun {
         id: "run-permanent-delete".to_string(),
-        loop_id: lp.id.clone(),
+        graph_id: lp.id.clone(),
         spec_id: spec.id.clone(),
         node_id: node.id.clone(),
-        status: LoopRunStatus::Fail,
+        status: GraphRunStatus::Fail,
         input: None,
         output: None,
         started_at: Utc::now(),
@@ -5150,18 +5937,20 @@ fn permanent_delete_removes_the_loop_and_its_run_history() {
         pid: None,
         boot_id: None,
         session_id: None,
+        executed_platform: None,
+        executed_model: None,
     };
-    db.insert_loop(&lp).unwrap();
-    db.insert_loop_spec(&spec).unwrap();
-    db.insert_loop_node(&node).unwrap();
-    db.insert_loop_run(&run).unwrap();
-    db.archive_loop(&lp.id).unwrap();
+    db.insert_graph(&lp).unwrap();
+    db.insert_graph_spec(&spec).unwrap();
+    db.insert_graph_node(&node).unwrap();
+    db.insert_graph_run(&run).unwrap();
+    db.archive_graph(&lp.id).unwrap();
 
-    db.delete_loop(&lp.id).unwrap();
+    db.delete_graph(&lp.id).unwrap();
 
-    assert!(db.get_loop(&lp.id).unwrap().is_none());
-    assert!(db.list_loop_specs(&lp.id).unwrap().is_empty());
-    assert!(db.get_loop_run(&run.id).unwrap().is_none());
+    assert!(db.get_graph(&lp.id).unwrap().is_none());
+    assert!(db.list_graph_specs(&lp.id).unwrap().is_empty());
+    assert!(db.get_graph_run(&run.id).unwrap().is_none());
 }
 
 /// Older databases predate the `archived` column entirely. Opening one
@@ -5177,7 +5966,7 @@ fn archived_migration_defaults_existing_rows_and_is_idempotent() {
     {
         let conn = rusqlite::Connection::open(&path).expect("open raw legacy db");
         conn.execute_batch(
-            "CREATE TABLE loops (
+            "CREATE TABLE graphs (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 description TEXT,
@@ -5195,14 +5984,14 @@ fn archived_migration_defaults_existing_rows_and_is_idempotent() {
                 auto_continue_at INTEGER,
                 auto_continue_action TEXT
              );
-             INSERT INTO loops (id, name, workdir, status, created_at)
-                 VALUES ('legacy-loop', 'Legacy', '/tmp', 'completed', 0);",
+             INSERT INTO graphs (id, name, workdir, status, created_at)
+                 VALUES ('legacy-graph', 'Legacy', '/tmp', 'completed', 0);",
         )
         .expect("seed legacy schema");
     }
 
     let db = Database::new(&path).expect("open pre-archived db, running migration");
-    let lp = db.get_loop("legacy-loop").unwrap().unwrap();
+    let lp = db.get_graph("legacy-graph").unwrap().unwrap();
     assert_eq!(lp.name, "Legacy");
     assert!(
         !lp.archived,
@@ -5211,21 +6000,21 @@ fn archived_migration_defaults_existing_rows_and_is_idempotent() {
 
     // The new column is actually usable after migration.
     assert_eq!(
-        db.archive_loop("legacy-loop").unwrap(),
-        crate::domain::loops::ArchiveLoopOutcome::Archived
+        db.archive_graph("legacy-graph").unwrap(),
+        crate::domain::graphs::ArchiveGraphOutcome::Archived
     );
     drop(db);
 
     // Reopening after the migration already ran must be a no-op: same data,
     // no error (idempotent), archived state preserved.
     let db = Database::new(&path).expect("reopen db after migration already applied");
-    let lp = db.get_loop("legacy-loop").unwrap().unwrap();
+    let lp = db.get_graph("legacy-graph").unwrap().unwrap();
     assert!(lp.archived);
 }
 
 #[test]
 fn cross_run_attempts_migration_defaults_existing_rows_and_is_idempotent() {
-    // Simulate a pre-C19 database: `loop_specs` without `cross_run_attempts`.
+    // Simulate a pre-C19 database: `graph_specs` without `cross_run_attempts`.
     let tmp = NamedTempFile::new().expect("create temp file");
     let path = tmp.path().to_path_buf();
     std::mem::forget(tmp);
@@ -5233,9 +6022,9 @@ fn cross_run_attempts_migration_defaults_existing_rows_and_is_idempotent() {
     {
         let conn = rusqlite::Connection::open(&path).expect("open raw legacy db");
         conn.execute_batch(
-            "CREATE TABLE loop_specs (
+            "CREATE TABLE graph_specs (
                 id TEXT PRIMARY KEY,
-                loop_id TEXT,
+                graph_id TEXT,
                 name TEXT NOT NULL,
                 description TEXT,
                 position INTEGER NOT NULL,
@@ -5250,7 +6039,7 @@ fn cross_run_attempts_migration_defaults_existing_rows_and_is_idempotent() {
                 completed_via_at INTEGER,
                 spec_committed_head TEXT
              );
-             INSERT INTO loop_specs (id, loop_id, name, position, status)
+             INSERT INTO graph_specs (id, graph_id, name, position, status)
                  VALUES ('legacy-spec', NULL, 'Spec', 1, 'failed');",
         )
         .expect("seed legacy schema");
@@ -5260,14 +6049,14 @@ fn cross_run_attempts_migration_defaults_existing_rows_and_is_idempotent() {
     // without erroring, defaulting the pre-existing row to zero attempts.
     let db = Database::new(&path).expect("open pre-cross_run_attempts db, running migration");
     assert_eq!(
-        db.get_loop_spec_cross_run_attempts("legacy-spec").unwrap(),
+        db.get_graph_spec_cross_run_attempts("legacy-spec").unwrap(),
         0,
         "pre-existing rows must default to zero attempts"
     );
 
     // The new column is actually usable after migration.
     assert_eq!(
-        db.increment_loop_spec_cross_run_attempts("legacy-spec")
+        db.increment_graph_spec_cross_run_attempts("legacy-spec")
             .unwrap(),
         1
     );
@@ -5277,7 +6066,7 @@ fn cross_run_attempts_migration_defaults_existing_rows_and_is_idempotent() {
     // no error (idempotent), the incremented count preserved.
     let db = Database::new(&path).expect("reopen db after migration already applied");
     assert_eq!(
-        db.get_loop_spec_cross_run_attempts("legacy-spec").unwrap(),
+        db.get_graph_spec_cross_run_attempts("legacy-spec").unwrap(),
         1
     );
 }
@@ -5353,3 +6142,2315 @@ fn no_retired_schema_name_identifiers_remain_outside_its_migration() {
     );
 }
 // RETIRED-SCHEMA-NAME-END
+
+#[test]
+fn ensemble_kind_migration_is_idempotent_and_pre_migration_db_opens_cleanly() {
+    let tmp = NamedTempFile::new().expect("create temp file");
+    let path = tmp.path().to_path_buf();
+    std::mem::forget(tmp);
+
+    {
+        let conn = rusqlite::Connection::open(&path).expect("open raw legacy db");
+        conn.execute_batch(
+            "CREATE TABLE graphs (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT,
+                workdir TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at INTEGER NOT NULL,
+                archived INTEGER NOT NULL DEFAULT 0,
+                trigger_kind TEXT,
+                trigger_schedule TEXT,
+                trigger_path TEXT,
+                trigger_events TEXT,
+                trigger_debounce_seconds INTEGER,
+                trigger_recursive INTEGER,
+                on_completed_hook_platform TEXT,
+                on_completed_hook_prompt TEXT,
+                on_completed_hook_model TEXT,
+                on_completed_hook_timeout_minutes INTEGER
+            );
+            CREATE TABLE graph_specs (
+                id TEXT PRIMARY KEY,
+                graph_id TEXT REFERENCES graphs(id) ON DELETE CASCADE,
+                name TEXT NOT NULL,
+                description TEXT,
+                position INTEGER NOT NULL,
+                parallelizable INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL,
+                started_at INTEGER,
+                completed_at INTEGER,
+                spec_start_head TEXT,
+                workdir TEXT,
+                completed_via TEXT,
+                completed_via_reason TEXT,
+                completed_via_at INTEGER,
+                spec_committed_head TEXT
+            );
+            CREATE TABLE graph_nodes (
+                id TEXT PRIMARY KEY,
+                spec_id TEXT REFERENCES graph_specs(id) ON DELETE CASCADE,
+                graph_id TEXT REFERENCES graphs(id) ON DELETE CASCADE,
+                name TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                config TEXT NOT NULL,
+                position INTEGER NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            CREATE TABLE graph_edges (
+                id TEXT PRIMARY KEY,
+                spec_id TEXT REFERENCES graph_specs(id) ON DELETE CASCADE,
+                graph_id TEXT REFERENCES graphs(id) ON DELETE CASCADE,
+                from_node TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE,
+                to_node TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE,
+                condition TEXT NOT NULL
+            );
+            CREATE TABLE ensembles (
+                id TEXT PRIMARY KEY,
+                spec_id TEXT REFERENCES graph_specs(id) ON DELETE CASCADE,
+                graph_id TEXT REFERENCES graphs(id) ON DELETE CASCADE,
+                name TEXT NOT NULL,
+                prompt_template TEXT NOT NULL,
+                join_node_id TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE,
+                entry_from_node TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE,
+                entry_condition TEXT NOT NULL,
+                min_pass INTEGER NOT NULL,
+                straggler_timeout_minutes INTEGER,
+                timeout_minutes INTEGER NOT NULL,
+                on_pass_to TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE,
+                on_fail_to TEXT REFERENCES graph_nodes(id) ON DELETE SET NULL,
+                created_at INTEGER NOT NULL,
+                CHECK ((spec_id IS NULL) <> (graph_id IS NULL))
+            );",
+        )
+        .expect("create legacy schema");
+    }
+
+    let db = Database::new(&path).expect("open pre-ensemble-kind db, running migration");
+
+    let has_kind: bool = {
+        let conn = rusqlite::Connection::open(&path).expect("reopen");
+        conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('ensembles') WHERE name = 'kind'",
+            [],
+            |row| Ok(row.get::<_, i32>(0)? > 0),
+        )
+        .unwrap()
+    };
+    assert!(has_kind, "migration should have added 'kind' column");
+
+    let has_rri: bool = {
+        let conn = rusqlite::Connection::open(&path).expect("reopen");
+        conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('ensembles') WHERE name = 'round_robin_index'",
+            [],
+            |row| Ok(row.get::<_, i32>(0)? > 0),
+        )
+        .unwrap()
+    };
+    assert!(
+        has_rri,
+        "migration should have added 'round_robin_index' column"
+    );
+
+    drop(db);
+    let _db2 = Database::new(&path).expect("reopen after migration — idempotent");
+}
+
+#[test]
+fn insert_and_collect_subagent_run() {
+    let db = test_db();
+    let now = Utc::now().to_rfc3339();
+    let expires = (Utc::now() + Duration::hours(1)).to_rfc3339();
+    db.insert_subagent_run(
+        "run-1",
+        "opencode",
+        Some("model-x"),
+        "do stuff",
+        "/tmp",
+        &now,
+        &expires,
+    )
+    .unwrap();
+    db.complete_subagent_run("run-1", 0, "hello", "", Some("blind"), &now)
+        .unwrap();
+
+    let record = db.collect_subagent_run("run-1").unwrap();
+    assert!(record.is_some());
+    let r = record.unwrap();
+    assert_eq!(r.id, "run-1");
+    assert_eq!(r.status, "finished");
+    assert_eq!(r.stdout.as_deref(), Some("hello"));
+
+    let second = db.collect_subagent_run("run-1").unwrap();
+    assert!(second.is_none(), "row must be deleted after collection");
+}
+
+#[test]
+fn collect_while_running_does_not_discard_the_result() {
+    let db = test_db();
+    let now = Utc::now().to_rfc3339();
+    let expires = (Utc::now() + Duration::hours(1)).to_rfc3339();
+    db.insert_subagent_run("run-2", "opencode", None, "p", "/tmp", &now, &expires)
+        .unwrap();
+
+    // A poll before the subagent finishes reports "running" but must NOT
+    // delete the row — otherwise the eventual result is lost forever.
+    let early = db.collect_subagent_run("run-2").unwrap().unwrap();
+    assert_eq!(early.status, "running");
+
+    db.complete_subagent_run("run-2", 0, "the answer", "", Some("blind"), &now)
+        .unwrap();
+
+    let collected = db.collect_subagent_run("run-2").unwrap().unwrap();
+    assert_eq!(collected.status, "finished");
+    assert_eq!(collected.stdout.as_deref(), Some("the answer"));
+    assert!(
+        db.collect_subagent_run("run-2").unwrap().is_none(),
+        "row is discarded only after a terminal result is collected"
+    );
+}
+
+#[test]
+fn expire_subagent_runs_deletes_expired() {
+    let db = test_db();
+    let past = (Utc::now() - Duration::hours(1)).to_rfc3339();
+    let now = Utc::now().to_rfc3339();
+    db.insert_subagent_run("run-exp", "opencode", None, "p", "/tmp", &now, &past)
+        .unwrap();
+    let deleted = db.expire_subagent_runs().unwrap();
+    assert_eq!(deleted, 1);
+    assert!(db.get_subagent_run("run-exp").unwrap().is_none());
+}
+
+#[test]
+fn expire_subagent_runs_keeps_unexpired() {
+    let db = test_db();
+    let now = Utc::now().to_rfc3339();
+    let future = (Utc::now() + Duration::hours(1)).to_rfc3339();
+    db.insert_subagent_run("run-keep", "opencode", None, "p", "/tmp", &now, &future)
+        .unwrap();
+    let deleted = db.expire_subagent_runs().unwrap();
+    assert_eq!(deleted, 0);
+    assert!(db.get_subagent_run("run-keep").unwrap().is_some());
+}
+
+#[test]
+fn fail_subagent_run_sets_status() {
+    let db = test_db();
+    let now = Utc::now().to_rfc3339();
+    let expires = (Utc::now() + Duration::hours(1)).to_rfc3339();
+    db.insert_subagent_run("run-fail", "opencode", None, "p", "/tmp", &now, &expires)
+        .unwrap();
+    db.fail_subagent_run("run-fail", "oops", Some("blind"), &now)
+        .unwrap();
+    let record = db.get_subagent_run("run-fail").unwrap().unwrap();
+    assert_eq!(record.status, "failed");
+    assert_eq!(record.stderr.as_deref(), Some("oops"));
+    assert!(record.exit_code.is_none());
+}
+
+// ── CM18: blocking subagent delivery tombstones ─────────────────────────
+
+#[test]
+fn tombstone_distinguishes_delivered_from_missing() {
+    let db = test_db();
+    let now = Utc::now().to_rfc3339();
+    let future = (Utc::now() + Duration::hours(1)).to_rfc3339();
+
+    // An id that was never delivered has no tombstone.
+    assert!(
+        !db.is_delivered_tombstone("never-existed").unwrap(),
+        "unknown id must not look delivered"
+    );
+
+    db.insert_delivered_tombstone("done-1", &now, &future)
+        .unwrap();
+    assert!(
+        db.is_delivered_tombstone("done-1").unwrap(),
+        "blocking-delivered id must be distinguishable from missing"
+    );
+    // Recording a delivery must not create or disturb async rows.
+    assert!(db.get_subagent_run("done-1").unwrap().is_none());
+}
+
+#[test]
+fn expire_cleans_tombstones() {
+    let db = test_db();
+    let now = Utc::now().to_rfc3339();
+    let past = (Utc::now() - Duration::hours(1)).to_rfc3339();
+    let future = (Utc::now() + Duration::hours(1)).to_rfc3339();
+
+    db.insert_delivered_tombstone("old-1", &now, &past).unwrap();
+    db.insert_delivered_tombstone("fresh-1", &now, &future)
+        .unwrap();
+
+    db.expire_subagent_runs().unwrap();
+
+    assert!(
+        !db.is_delivered_tombstone("old-1").unwrap(),
+        "expired tombstone must be cleaned on the same schedule as rows"
+    );
+    assert!(
+        db.is_delivered_tombstone("fresh-1").unwrap(),
+        "unexpired tombstone must survive expiry"
+    );
+}
+
+#[test]
+fn blocking_delivery_sequence_collect_reports_delivered_not_missing() {
+    // Drives the exact tail `spawn_subagent_blocking` performs after its
+    // direct await: the terminal row is collected once (deleted, result
+    // returned inline) and a tombstone is left so the next `collect`
+    // reports "already delivered" instead of "not found" (FR4).
+    let db = test_db();
+    let now = Utc::now().to_rfc3339();
+    let expires = (Utc::now() + Duration::hours(1)).to_rfc3339();
+    db.insert_subagent_run("run-block", "opencode", None, "p", "/tmp", &now, &expires)
+        .unwrap();
+    db.complete_subagent_run("run-block", 0, "the answer", "", Some("blind"), &now)
+        .unwrap();
+
+    // Inline delivery: collect deletes the row and returns the result.
+    let delivered = db.collect_subagent_run("run-block").unwrap().unwrap();
+    assert_eq!(delivered.status, "finished");
+    assert_eq!(delivered.stdout.as_deref(), Some("the answer"));
+    db.insert_delivered_tombstone("run-block", &now, &delivered.expires_at)
+        .unwrap();
+
+    // No second delivery: the row is gone, but the tombstone says why.
+    assert!(db.collect_subagent_run("run-block").unwrap().is_none());
+    assert!(db.is_delivered_tombstone("run-block").unwrap());
+    // And a genuinely unknown id still has no tombstone.
+    assert!(!db.is_delivered_tombstone("run-never").unwrap());
+}
+
+// ── CM9: typed project graph ──────────────────────────────────────────
+
+/// Register a project row at an on-disk path (hash derived like production).
+fn cm9_register_at(db: &Database, path: &std::path::Path) -> String {
+    let s = path.to_string_lossy().to_string();
+    let hash = crate::domain::project::workdir_hash(&s);
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| s.clone());
+    db.upsert_project(&crate::domain::project::Project {
+        hash: hash.clone(),
+        path: s,
+        name,
+        description: None,
+        tags: None,
+        indexed_at: None,
+        created_at: chrono::Utc::now().timestamp(),
+    })
+    .unwrap();
+    hash
+}
+
+fn cm9_put_fact(db: &Database, id: &str, hash: &str, title: &str) {
+    db.upsert_intelligence_node(IntelligenceNodeInput {
+        id: Some(id.to_string()),
+        kind: Some("fact".to_string()),
+        status: None,
+        title: Some(title.to_string()),
+        body: Some(format!("{title} body")),
+        body_replace: None,
+        metadata: None,
+        project_hash: Some(Some(hash.to_string())),
+        session_id: None,
+        relations: None,
+    })
+    .unwrap();
+}
+
+#[test]
+fn cm9_link_rejects_unknown_relation() {
+    let db = test_db();
+    let dir = tempdir().unwrap();
+    let ha = cm9_register_at(&db, &dir.path().join("a"));
+    // create dirs so register works on real paths below; here direct upsert is enough
+    let _ = std::fs::create_dir_all(dir.path().join("a"));
+    let _ = std::fs::create_dir_all(dir.path().join("b"));
+    let hb = cm9_register_at(&db, &dir.path().join("b"));
+
+    let err = db.link_projects(&ha, &hb, "blocks", None).unwrap_err();
+    assert!(
+        err.to_string().contains("allowed:"),
+        "error must name allowed relations, got: {err}"
+    );
+    for rel in [
+        "depends_on",
+        "complements",
+        "extends",
+        "publishes",
+        "contains",
+        "relates_to",
+    ] {
+        // contains is rejected at the write path, not the validator; the rest succeed
+        if rel == "contains" {
+            continue;
+        }
+        db.link_projects(&ha, &hb, rel, None).unwrap();
+    }
+}
+
+#[test]
+fn cm9_link_rejects_contains() {
+    let db = test_db();
+    let dir = tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("a")).unwrap();
+    std::fs::create_dir_all(dir.path().join("b")).unwrap();
+    let ha = cm9_register_at(&db, &dir.path().join("a"));
+    let hb = cm9_register_at(&db, &dir.path().join("b"));
+    let err = db.link_projects(&ha, &hb, "contains", None).unwrap_err();
+    assert!(
+        err.to_string().contains("derived"),
+        "contains guard must mention derived, got: {err}"
+    );
+}
+
+#[test]
+fn cm9_containment_derived_parent_child() {
+    let db = test_db();
+    let root = tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join("parent")).unwrap();
+    std::fs::create_dir_all(root.path().join("parent/child")).unwrap();
+    std::fs::create_dir_all(root.path().join("other")).unwrap();
+    std::fs::create_dir_all(root.path().join("parent2")).unwrap();
+    let hp = cm9_register_at(&db, &root.path().join("parent"));
+    let hc = cm9_register_at(&db, &root.path().join("parent/child"));
+    let ho = cm9_register_at(&db, &root.path().join("other"));
+    let _hp2 = cm9_register_at(&db, &root.path().join("parent2"));
+
+    let n = db.rebuild_containment_edges().unwrap();
+    assert_eq!(n, 1, "exactly one contains edge expected");
+
+    let related = db.list_related_projects(&hp, 10).unwrap();
+    assert_eq!(related.len(), 1);
+    assert_eq!(related[0].0.project_hash.as_deref(), Some(hc.as_str()));
+    assert_eq!(related[0].1.relation, "contains");
+    // Parent → child direction: edge stored from container to contained.
+    assert_eq!(related[0].1.from_node_id, format!("project:{hp}"));
+    assert_eq!(related[0].1.to_node_id, format!("project:{hc}"));
+
+    // Sibling and string-prefix trap get no edges.
+    assert!(db.list_related_projects(&ho, 10).unwrap().is_empty());
+    let trap: Vec<_> = db
+        .list_related_projects(&_hp2, 10)
+        .unwrap()
+        .into_iter()
+        .filter(|(_, e)| e.relation == "contains")
+        .collect();
+    assert!(trap.is_empty(), "/parent must not contain /parent2");
+}
+
+#[test]
+fn cm9_containment_recomputed_on_delete_and_remap() {
+    let db = test_db();
+    let root = tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join("parent")).unwrap();
+    std::fs::create_dir_all(root.path().join("parent/child")).unwrap();
+    let hp = cm9_register_at(&db, &root.path().join("parent"));
+    let hc = cm9_register_at(&db, &root.path().join("parent/child"));
+    assert_eq!(db.rebuild_containment_edges().unwrap(), 1);
+
+    // Remap child outside the parent: edge must disappear.
+    std::fs::create_dir_all(root.path().join("elsewhere")).unwrap();
+    let new_path = root
+        .path()
+        .join("elsewhere")
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    db.remap_project(&hc, &new_path).unwrap();
+    let after_remap: Vec<_> = db
+        .list_related_projects(&hp, 10)
+        .unwrap()
+        .into_iter()
+        .filter(|(_, e)| e.relation == "contains")
+        .collect();
+    assert!(
+        after_remap.is_empty(),
+        "contains edge must be gone after remap"
+    );
+
+    // Delete parent: root node gone, no dangling contains edges.
+    db.delete_project(&hp).unwrap();
+    assert!(db.get_project(&hp).unwrap().is_none());
+    let conn = db.conn.lock().unwrap();
+    let dangling: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM intelligence_edges WHERE relation = 'contains'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(dangling, 0);
+}
+
+#[test]
+fn cm9_traversal_outbound_and_upward() {
+    let db = test_db();
+    let dir = tempdir().unwrap();
+    for sub in ["a", "a/b", "c"] {
+        std::fs::create_dir_all(dir.path().join(sub)).unwrap();
+    }
+    let ha = cm9_register_at(&db, &dir.path().join("a"));
+    let hb = cm9_register_at(&db, &dir.path().join("a/b"));
+    let hc = cm9_register_at(&db, &dir.path().join("c"));
+    db.rebuild_containment_edges().unwrap();
+    // A depends_on C.
+    db.link_projects(&ha, &hc, "depends_on", None).unwrap();
+
+    // Depth 1 from B: B direct + A via contains. C is two hops away.
+    let scope1 = db.traverse_project_scope(&hb, 1).unwrap();
+    let mut got: Vec<(&str, Option<&str>)> = scope1
+        .projects
+        .iter()
+        .map(|p| (p.hash.as_str(), p.via_relation.as_deref()))
+        .collect();
+    got.sort_by_key(|(hash, _)| *hash);
+    let mut expected = vec![(ha.as_str(), Some("contains")), (hb.as_str(), None)];
+    expected.sort_by_key(|(hash, _)| *hash);
+    assert_eq!(got, expected);
+
+    // Depth 2 also reaches C via depends_on.
+    let scope2 = db.traverse_project_scope(&hb, 2).unwrap();
+    let c_hop = scope2.projects.iter().find(|p| p.hash == hc).unwrap();
+    assert_eq!(c_hop.via_relation.as_deref(), Some("depends_on"));
+    assert_eq!(c_hop.depth, 2);
+}
+
+#[test]
+fn cm9_inbound_depends_warns_not_pulls() {
+    let db = test_db();
+    let dir = tempdir().unwrap();
+    for sub in ["a", "d"] {
+        std::fs::create_dir_all(dir.path().join(sub)).unwrap();
+    }
+    let ha = cm9_register_at(&db, &dir.path().join("a"));
+    let hd = cm9_register_at(&db, &dir.path().join("d"));
+    db.link_projects(&hd, &ha, "depends_on", None).unwrap();
+
+    // Traversal from A (even deep) never pulls D inbound.
+    let scope = db.traverse_project_scope(&ha, 5).unwrap();
+    assert!(
+        scope.projects.iter().all(|p| p.hash != hd),
+        "inbound dependent must not be traversed"
+    );
+    // But the impact warning source lists D.
+    let dependents = db.list_project_dependents(&ha).unwrap();
+    assert_eq!(dependents.len(), 1);
+    assert_eq!(
+        dependents[0].from_project_hash.as_deref(),
+        Some(hd.as_str())
+    );
+    assert_eq!(dependents[0].relation, "depends_on");
+}
+
+#[test]
+fn cm9_complements_bidirectional() {
+    let db = test_db();
+    let dir = tempdir().unwrap();
+    for sub in ["x", "y"] {
+        std::fs::create_dir_all(dir.path().join(sub)).unwrap();
+    }
+    let hx = cm9_register_at(&db, &dir.path().join("x"));
+    let hy = cm9_register_at(&db, &dir.path().join("y"));
+    db.link_projects(&hx, &hy, "complements", None).unwrap();
+
+    for (from, to) in [(&hx, &hy), (&hy, &hx)] {
+        let scope = db.traverse_project_scope(from, 1).unwrap();
+        let hop = scope.projects.iter().find(|p| &p.hash == to).unwrap();
+        assert_eq!(hop.via_relation.as_deref(), Some("complements"));
+    }
+}
+
+#[test]
+fn cm9_depth_bounded() {
+    let db = test_db();
+    let dir = tempdir().unwrap();
+    for sub in ["a", "b", "c"] {
+        std::fs::create_dir_all(dir.path().join(sub)).unwrap();
+    }
+    let ha = cm9_register_at(&db, &dir.path().join("a"));
+    let hb = cm9_register_at(&db, &dir.path().join("b"));
+    let hc = cm9_register_at(&db, &dir.path().join("c"));
+    db.link_projects(&ha, &hb, "depends_on", None).unwrap();
+    db.link_projects(&hb, &hc, "depends_on", None).unwrap();
+
+    let s1 = db.traverse_project_scope(&ha, 1).unwrap();
+    assert_eq!(s1.projects.len(), 2, "depth 1 reaches only B");
+    let s2 = db.traverse_project_scope(&ha, 2).unwrap();
+    assert_eq!(s2.projects.len(), 3, "depth 2 reaches B and C");
+    // Depth 99 clamps to MAX_TRAVERSAL_DEPTH (no unbounded walk).
+    let s99 = db.traverse_project_scope(&ha, 99).unwrap();
+    assert_eq!(s99.projects.len(), 3);
+    let s0 = db.traverse_project_scope(&ha, 0).unwrap();
+    assert_eq!(s0.projects.len(), 1);
+    assert_eq!(s0.reached, 0);
+}
+
+#[test]
+fn cm9_search_scoped_marks_origin() {
+    let db = test_db();
+    let dir = tempdir().unwrap();
+    for sub in ["a", "b", "c"] {
+        std::fs::create_dir_all(dir.path().join(sub)).unwrap();
+    }
+    let ha = cm9_register_at(&db, &dir.path().join("a"));
+    let hb = cm9_register_at(&db, &dir.path().join("b"));
+    let hc = cm9_register_at(&db, &dir.path().join("c"));
+    db.link_projects(&ha, &hb, "depends_on", None).unwrap();
+    cm9_put_fact(&db, "fact-a", &ha, "alpha convention");
+    cm9_put_fact(&db, "fact-b", &hb, "alpha convention");
+    cm9_put_fact(&db, "fact-c", &hc, "alpha convention");
+
+    let scope = db.traverse_project_scope(&ha, 1).unwrap();
+    let hashes: Vec<String> = scope.projects.iter().map(|p| p.hash.clone()).collect();
+    let result = db
+        .search_intelligence_nodes_scoped("alpha convention", Some("fact"), 10, &hashes)
+        .unwrap();
+    let mut found: Vec<(&str, &str)> = result
+        .results
+        .iter()
+        .map(|r| (r.id.as_str(), r.project_hash.as_deref().unwrap()))
+        .collect();
+    found.sort();
+    assert_eq!(
+        found,
+        vec![("fact-a", ha.as_str()), ("fact-b", hb.as_str())]
+    );
+
+    // Empty hash set yields empty results (never leaks unscoped rows).
+    let empty = db
+        .search_intelligence_nodes_scoped("alpha", None, 10, &[])
+        .unwrap();
+    assert!(empty.results.is_empty());
+}
+
+#[test]
+fn cm9_no_edges_behaves_as_today() {
+    let db = test_db();
+    let dir = tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("lone")).unwrap();
+    let hl = cm9_register_at(&db, &dir.path().join("lone"));
+    cm9_put_fact(&db, "fact-lone", &hl, "lone knowledge");
+
+    let scope = db.traverse_project_scope(&hl, 1).unwrap();
+    assert_eq!(scope.projects.len(), 1);
+    assert_eq!(scope.reached, 0);
+
+    let rows = db.list_project_knowledge(&hl, None, 50).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "fact-lone");
+}
+
+#[test]
+fn cm9_remap_renames_project_node() {
+    let db = test_db();
+    let root = tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join("old")).unwrap();
+    std::fs::create_dir_all(root.path().join("new")).unwrap();
+    let old_hash = cm9_register_at(&db, &root.path().join("old"));
+    cm9_put_fact(&db, "fact-move", &old_hash, "moving knowledge");
+
+    let new_path = root
+        .path()
+        .join("new")
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let outcome = db.remap_project(&old_hash, &new_path).unwrap();
+
+    // Old graph root gone, new root present with updated path metadata.
+    assert!(db
+        .get_intelligence_node(&format!("project:{old_hash}"))
+        .unwrap()
+        .is_none());
+    let node = db
+        .get_intelligence_node(&format!("project:{}", outcome.new_hash))
+        .unwrap()
+        .expect("renamed project node must exist");
+    assert_eq!(node.kind, "project");
+    assert!(node.metadata.as_deref().unwrap().contains(&new_path));
+    // Knowledge re-keyed to the new hash.
+    let rows = db
+        .list_project_knowledge(&outcome.new_hash, None, 10)
+        .unwrap();
+    assert!(rows.iter().any(|r| r.id == "fact-move"));
+}
+
+#[test]
+fn cm9_retype_backlog_nodes() {
+    let db = test_db();
+    // Exercise the UPDATE path with fixed ids carrying the real prefixes.
+    for (id, title) in [
+        ("d8c3230b-note", "backlog grooming notes"),
+        ("508e398c-note", "sprint backlog notes"),
+    ] {
+        db.upsert_intelligence_node(IntelligenceNodeInput {
+            id: Some(id.to_string()),
+            kind: Some("project".to_string()),
+            status: None,
+            title: Some(title.to_string()),
+            body: Some(format!("{title} body text")),
+            body_replace: None,
+            metadata: Some(Some(serde_json::json!({"origin": "backlog"}))),
+            project_hash: Some(Some("hash-backlog".to_string())),
+            session_id: None,
+            relations: None,
+        })
+        .unwrap();
+    }
+    let n = db.retype_backlog_project_nodes().unwrap();
+    assert_eq!(n, 2);
+    for id in ["d8c3230b-note", "508e398c-note"] {
+        let node = db.get_intelligence_node(id).unwrap().unwrap();
+        assert_eq!(node.kind, "fact", "retype must update, not delete");
+        assert!(node.title.contains("backlog"));
+    }
+
+    // Registry nodes are refused, never retyped.
+    db.upsert_intelligence_node(IntelligenceNodeInput {
+        id: Some("d8c3230b-real".to_string()),
+        kind: Some("project".to_string()),
+        status: None,
+        title: Some("Real Project".to_string()),
+        body: Some("real".to_string()),
+        body_replace: None,
+        metadata: Some(Some(
+            serde_json::json!({"source": "registry", "path": "/x"}),
+        )),
+        project_hash: Some(Some("hash-real".to_string())),
+        session_id: None,
+        relations: None,
+    })
+    .unwrap();
+    // Prefix d8c3230b is now ambiguous (two matches) → Err, and the real
+    // node must be untouched.
+    let err = db.retype_backlog_project_nodes().unwrap_err();
+    assert!(err.to_string().contains("Ambiguous"));
+    assert_eq!(
+        db.get_intelligence_node("d8c3230b-real")
+            .unwrap()
+            .unwrap()
+            .kind,
+        "project"
+    );
+}
+
+#[cfg(test)]
+mod hooks_tests {
+    use super::*;
+    use crate::domain::graphs::{
+        Graph, GraphCompletionHook, GraphCompletionHookRun, GraphHookEvent, GraphRunStatus,
+        GraphStatus,
+    };
+    use std::collections::BTreeMap;
+
+    fn hook_fixture(platform: &str, prompt: &str) -> GraphCompletionHook {
+        GraphCompletionHook {
+            platform: Some(platform.to_string()),
+            model: Some("test-model".to_string()),
+            effort: None,
+            prompt: Some(prompt.to_string()),
+            command: None,
+            target_session_id: None,
+            target_session_name: None,
+            timeout_minutes: Some(5),
+            target_graph_id: None,
+            queue_id: None,
+            workdir_override: None,
+            idea: None,
+        }
+    }
+
+    fn graph_with_hooks(
+        id: &str,
+        hooks: BTreeMap<GraphHookEvent, Vec<GraphCompletionHook>>,
+    ) -> Graph {
+        Graph {
+            archived: false,
+            paused_by_reconciliation: false,
+            allow_dirty_start: false,
+            infra_node_id: None,
+            id: id.to_string(),
+            name: format!("Graph {id}"),
+            description: None,
+            workdir: "/tmp/test".to_string(),
+            status: GraphStatus::Draft,
+            trigger: None,
+            created_at: Utc::now(),
+            started_at: None,
+            completed_at: None,
+            autorun_at: None,
+            auto_continue_at: None,
+            auto_continue_action: None,
+            active_run_queue_id: None,
+            hooks,
+        }
+    }
+
+    fn sample_hook_run(event: GraphHookEvent, hook_index: i64) -> GraphCompletionHookRun {
+        GraphCompletionHookRun {
+            id: uuid::Uuid::new_v4().to_string(),
+            graph_id: "test-graph".to_string(),
+            event,
+            hook_index,
+            status: GraphRunStatus::Running,
+            output: None,
+            summary: None,
+            started_at: Utc::now(),
+            completed_at: None,
+            pid: None,
+            boot_id: None,
+            executed_platform: None,
+            executed_model: None,
+        }
+    }
+
+    #[test]
+    fn insert_and_get_graph_with_hooks() {
+        let db = test_db();
+        let mut hooks = BTreeMap::new();
+        hooks.insert(
+            GraphHookEvent::OnCompleted,
+            vec![hook_fixture("claude", "done: {{graph_name}}")],
+        );
+        hooks.insert(
+            GraphHookEvent::OnFailed,
+            vec![hook_fixture("mimo", "failed: {{blocker}}")],
+        );
+        let lp = graph_with_hooks("graph1", hooks);
+        db.insert_graph(&lp).unwrap();
+
+        let retrieved = db.get_graph("graph1").unwrap().unwrap();
+        assert_eq!(retrieved.hooks.len(), 2);
+        assert_eq!(
+            retrieved
+                .hooks
+                .get(&GraphHookEvent::OnCompleted)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            retrieved
+                .hooks
+                .get(&GraphHookEvent::OnFailed)
+                .unwrap()
+                .first()
+                .unwrap()
+                .prompt,
+            Some("failed: {{blocker}}".to_string())
+        );
+    }
+
+    #[test]
+    fn empty_hooks_map_roundtrips() {
+        let db = test_db();
+        let lp = graph_with_hooks("graph1", BTreeMap::new());
+        db.insert_graph(&lp).unwrap();
+
+        let retrieved = db.get_graph("graph1").unwrap().unwrap();
+        assert!(retrieved.hooks.is_empty());
+    }
+
+    #[test]
+    fn update_graph_hooks_replaces_map() {
+        let db = test_db();
+        let lp = graph_with_hooks("graph1", BTreeMap::new());
+        db.insert_graph(&lp).unwrap();
+
+        let mut new_hooks = BTreeMap::new();
+        new_hooks.insert(
+            GraphHookEvent::OnBlocked,
+            vec![hook_fixture("opencode", "blocked: {{blocker}}")],
+        );
+        db.update_graph_hooks("graph1", &new_hooks).unwrap();
+
+        let retrieved = db.get_graph("graph1").unwrap().unwrap();
+        assert_eq!(retrieved.hooks.len(), 1);
+        assert!(retrieved.hooks.contains_key(&GraphHookEvent::OnBlocked));
+        assert!(!retrieved.hooks.contains_key(&GraphHookEvent::OnCompleted));
+    }
+
+    #[test]
+    fn update_graph_completion_hook_preserves_other_events() {
+        let db = test_db();
+        let mut hooks = BTreeMap::new();
+        hooks.insert(
+            GraphHookEvent::OnFailed,
+            vec![hook_fixture("mimo", "failed")],
+        );
+        let lp = graph_with_hooks("graph1", hooks);
+        db.insert_graph(&lp).unwrap();
+
+        // Update only on_completed via the legacy path
+        db.update_graph_completion_hook("graph1", Some(&hook_fixture("claude", "completed")))
+            .unwrap();
+
+        let retrieved = db.get_graph("graph1").unwrap().unwrap();
+        // on_completed should be set
+        assert!(retrieved.hooks.contains_key(&GraphHookEvent::OnCompleted));
+        // on_failed should still be there
+        assert!(retrieved.hooks.contains_key(&GraphHookEvent::OnFailed));
+    }
+
+    #[test]
+    fn hook_run_includes_event_and_index() {
+        let db = test_db();
+        let lp = graph_with_hooks("graph1", BTreeMap::new());
+        db.insert_graph(&lp).unwrap();
+
+        let mut run = sample_hook_run(GraphHookEvent::OnCompleted, 0);
+        run.graph_id = "graph1".to_string();
+        db.insert_graph_completion_hook_run(&run).unwrap();
+
+        let runs = db.list_graph_completion_hook_runs("graph1").unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].event, GraphHookEvent::OnCompleted);
+        assert_eq!(runs[0].hook_index, 0);
+    }
+
+    #[test]
+    fn multiple_hook_runs_ordered_by_started_at() {
+        let db = test_db();
+        let lp = graph_with_hooks("graph1", BTreeMap::new());
+        db.insert_graph(&lp).unwrap();
+
+        let mut run1 = sample_hook_run(GraphHookEvent::OnCompleted, 0);
+        run1.graph_id = "graph1".to_string();
+        run1.started_at = Utc::now() - chrono::Duration::seconds(10);
+        db.insert_graph_completion_hook_run(&run1).unwrap();
+
+        let mut run2 = sample_hook_run(GraphHookEvent::OnFailed, 0);
+        run2.graph_id = "graph1".to_string();
+        run2.started_at = Utc::now();
+        db.insert_graph_completion_hook_run(&run2).unwrap();
+
+        let runs = db.list_graph_completion_hook_runs("graph1").unwrap();
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].event, GraphHookEvent::OnCompleted);
+        assert_eq!(runs[1].event, GraphHookEvent::OnFailed);
+    }
+
+    #[test]
+    fn hook_run_update_records_result() {
+        let db = test_db();
+        let lp = graph_with_hooks("graph1", BTreeMap::new());
+        db.insert_graph(&lp).unwrap();
+
+        let mut run = sample_hook_run(GraphHookEvent::OnSpecCompleted, 2);
+        run.graph_id = "graph1".to_string();
+        db.insert_graph_completion_hook_run(&run).unwrap();
+
+        let output = serde_json::json!({"result": "ok"});
+        db.update_graph_completion_hook_run_result(
+            &run.id,
+            GraphRunStatus::Pass,
+            Some(&output),
+            Some("hook succeeded"),
+            Some(Utc::now()),
+        )
+        .unwrap();
+
+        let runs = db.list_graph_completion_hook_runs("graph1").unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].status, GraphRunStatus::Pass);
+        assert_eq!(runs[0].event, GraphHookEvent::OnSpecCompleted);
+        assert_eq!(runs[0].hook_index, 2);
+        assert_eq!(runs[0].summary.as_deref(), Some("hook succeeded"));
+    }
+
+    #[test]
+    fn legacy_on_completed_column_falls_back_to_hooks_map() {
+        let db = test_db();
+        let lp = graph_with_hooks("graph1", BTreeMap::new());
+        db.insert_graph(&lp).unwrap();
+        // Simulate a pre-CH1 row: hooks NULL, legacy on_completed set.
+        let legacy =
+            serde_json::to_string(&hook_fixture("claude", "done: {{graph_name}}")).unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE graphs SET hooks = NULL, on_completed = ?1 WHERE id = 'graph1'",
+                rusqlite::params![legacy],
+            )
+            .unwrap();
+        }
+
+        let retrieved = db.get_graph("graph1").unwrap().unwrap();
+        assert_eq!(retrieved.hooks.len(), 1);
+        let completed = retrieved
+            .hooks
+            .get(&GraphHookEvent::OnCompleted)
+            .expect("legacy hook must appear under on_completed");
+        assert_eq!(completed.len(), 1);
+        assert_eq!(completed[0].platform.as_deref(), Some("claude"));
+    }
+
+    #[test]
+    fn multiple_hooks_preserve_declaration_order() {
+        let db = test_db();
+        let lp = graph_with_hooks("graph1", BTreeMap::new());
+        db.insert_graph(&lp).unwrap();
+        let mut hooks = BTreeMap::new();
+        hooks.insert(
+            GraphHookEvent::OnCompleted,
+            vec![
+                hook_fixture("claude", "first"),
+                hook_fixture("mimo", "second"),
+            ],
+        );
+        db.update_graph_hooks("graph1", &hooks).unwrap();
+
+        let retrieved = db.get_graph("graph1").unwrap().unwrap();
+        let completed = retrieved.hooks.get(&GraphHookEvent::OnCompleted).unwrap();
+        assert_eq!(completed.len(), 2);
+        assert_eq!(completed[0].platform.as_deref(), Some("claude"));
+        assert_eq!(completed[1].platform.as_deref(), Some("mimo"));
+    }
+}
+
+// ── CB43: record which model actually ran ──────────────────────────────
+
+/// CB43 fixtures: a graph + spec + agent node plus one `Running` node run
+/// carrying `executed_platform`/`executed_model`. Returns the ids.
+fn cb43_setup(db: &Database, pair: (Option<&str>, Option<&str>)) -> (String, String, String) {
+    let lp = sample_graph("graph-cb43");
+    db.insert_graph(&lp).unwrap();
+    let spec = sample_graph_spec(&lp.id, "spec-cb43", 1);
+    db.insert_graph_spec(&spec).unwrap();
+    let node = sample_graph_node(&spec.id, "node-cb43", 1);
+    db.insert_graph_node(&node).unwrap();
+    let run = GraphNodeRun {
+        id: uuid::Uuid::new_v4().to_string(),
+        graph_id: lp.id.clone(),
+        spec_id: spec.id.clone(),
+        node_id: node.id,
+        status: GraphRunStatus::Pass,
+        input: None,
+        output: None,
+        started_at: Utc::now(),
+        completed_at: Some(Utc::now()),
+        iteration: 1,
+        pid: None,
+        boot_id: None,
+        session_id: None,
+        executed_platform: pair.0.map(str::to_string),
+        executed_model: pair.1.map(str::to_string),
+    };
+    db.insert_graph_run(&run).unwrap();
+    (lp.id, spec.id, run.id)
+}
+
+fn cb43_node_run(
+    graph_id: &str,
+    spec_id: &str,
+    node_id: &str,
+    platform: Option<&str>,
+    model: Option<&str>,
+    status: GraphRunStatus,
+    started_at: chrono::DateTime<Utc>,
+) -> GraphNodeRun {
+    GraphNodeRun {
+        id: uuid::Uuid::new_v4().to_string(),
+        graph_id: graph_id.to_string(),
+        spec_id: spec_id.to_string(),
+        node_id: node_id.to_string(),
+        status,
+        input: None,
+        output: None,
+        started_at,
+        completed_at: Some(started_at),
+        iteration: 1,
+        pid: None,
+        boot_id: None,
+        session_id: None,
+        executed_platform: platform.map(str::to_string),
+        executed_model: model.map(str::to_string),
+    }
+}
+
+/// T1: a run records the resolved pair, readable back from the row itself —
+/// no join to the node's config.
+#[test]
+fn cb43_run_records_resolved_pair() {
+    let db = test_db();
+    let (_, _, run_id) = cb43_setup(&db, (Some("opencode"), Some("opencode/big-pickle")));
+    let run = db.get_graph_run(&run_id).unwrap().unwrap();
+    assert_eq!(run.executed_platform.as_deref(), Some("opencode"));
+    assert_eq!(run.executed_model.as_deref(), Some("opencode/big-pickle"));
+}
+
+/// T2: when the platform cannot select a model the stored model is `None`,
+/// not the requested string (the `model_not_applied` path stores honestly).
+#[test]
+fn cb43_unapplied_model_records_none() {
+    let db = test_db();
+    let (_, _, run_id) = cb43_setup(&db, (Some("antigravity"), None));
+    let run = db.get_graph_run(&run_id).unwrap().unwrap();
+    assert_eq!(run.executed_platform.as_deref(), Some("antigravity"));
+    assert_eq!(run.executed_model, None);
+}
+
+/// T3/T9: `list_graph_node_runs` carries the pair; pre-migration rows (NULL)
+/// read back as `None`.
+#[test]
+fn cb43_list_returns_pair_and_null_stays_null() {
+    let db = test_db();
+    let (graph_id, spec_id, _) = cb43_setup(&db, (Some("opencode"), Some("m")));
+    let node = sample_graph_node(&spec_id, "node-cb43-b", 2);
+    db.insert_graph_node(&node).unwrap();
+    // Pre-migration row: both columns NULL.
+    db.insert_graph_run(&cb43_node_run(
+        &graph_id,
+        &spec_id,
+        &node.id,
+        None,
+        None,
+        GraphRunStatus::Pass,
+        Utc::now(),
+    ))
+    .unwrap();
+
+    let runs = db
+        .list_graph_node_runs(&graph_id, None, None, 20, 0)
+        .unwrap();
+    assert_eq!(runs.len(), 2);
+    let with_pair = runs
+        .iter()
+        .find(|r| r.executed_platform.is_some())
+        .expect("pair row present");
+    assert_eq!(with_pair.executed_model.as_deref(), Some("m"));
+    let legacy = runs
+        .iter()
+        .find(|r| r.executed_platform.is_none())
+        .expect("legacy row present");
+    assert_eq!(legacy.executed_model, None);
+}
+
+/// T5: the 30-day window excludes older pairs.
+#[test]
+fn cb43_recent_usage_honours_thirty_day_window() {
+    let db = test_db();
+    let (graph_id, spec_id, _) = cb43_setup(&db, (Some("opencode"), Some("fresh")));
+    let node = db
+        .get_graph_node("node-cb43")
+        .unwrap()
+        .expect("fixture node");
+    let now = Utc::now();
+    db.insert_graph_run(&cb43_node_run(
+        &graph_id,
+        &spec_id,
+        &node.id,
+        Some("opencode"),
+        Some("stale"),
+        GraphRunStatus::Pass,
+        now - Duration::days(31),
+    ))
+    .unwrap();
+
+    let rows = db
+        .list_recent_platform_model_usage(now - Duration::days(30), 15)
+        .unwrap();
+    let models: Vec<_> = rows
+        .iter()
+        .map(|r| r.model.clone().unwrap_or_default())
+        .collect();
+    assert!(models.contains(&"fresh".to_string()));
+    assert!(!models.contains(&"stale".to_string()));
+}
+
+/// T6: capped at fifteen, most-recent-first.
+#[test]
+fn cb43_recent_usage_caps_at_fifteen_ordered_by_recency() {
+    let db = test_db();
+    let (graph_id, spec_id, _) = cb43_setup(&db, (Some("opencode"), Some("model-00")));
+    let node = db
+        .get_graph_node("node-cb43")
+        .unwrap()
+        .expect("fixture node");
+    let now = Utc::now();
+    for i in 1..20 {
+        db.insert_graph_run(&cb43_node_run(
+            &graph_id,
+            &spec_id,
+            &node.id,
+            Some("opencode"),
+            Some(&format!("model-{i:02}")),
+            GraphRunStatus::Pass,
+            now - Duration::minutes(i as i64),
+        ))
+        .unwrap();
+    }
+    let rows = db
+        .list_recent_platform_model_usage(now - Duration::days(30), 15)
+        .unwrap();
+    assert_eq!(rows.len(), 15);
+    // Most recent first: model-00 (now) leads, then model-01, ...
+    assert_eq!(rows[0].model.as_deref(), Some("model-00"));
+    assert_eq!(rows[1].model.as_deref(), Some("model-01"));
+    for pair in rows.windows(2) {
+        assert!(pair[0].last_run >= pair[1].last_run);
+    }
+}
+
+/// T7: the section shows how the most recent run ended, not a frequency vote.
+#[test]
+fn cb43_recent_usage_reports_last_outcome() {
+    let db = test_db();
+    // NB: the setup row itself is the newest run in the DB, so it must carry
+    // a different pair than the one under test.
+    let (graph_id, spec_id, _) = cb43_setup(&db, (Some("opencode"), Some("setup-filler")));
+    let node = db
+        .get_graph_node("node-cb43")
+        .unwrap()
+        .expect("fixture node");
+    let now = Utc::now();
+    for (mins_ago, status) in [
+        (120, GraphRunStatus::Pass),
+        (60, GraphRunStatus::Fail),
+        (30, GraphRunStatus::Fail),
+    ] {
+        db.insert_graph_run(&cb43_node_run(
+            &graph_id,
+            &spec_id,
+            &node.id,
+            Some("opencode"),
+            Some("flaky"),
+            status,
+            now - Duration::minutes(mins_ago),
+        ))
+        .unwrap();
+    }
+    let rows = db
+        .list_recent_platform_model_usage(now - Duration::days(30), 15)
+        .unwrap();
+    let flaky = rows
+        .iter()
+        .find(|r| r.model.as_deref() == Some("flaky"))
+        .expect("flaky present");
+    assert!(flaky.count >= 3);
+    assert_eq!(flaky.last_outcome, "fail");
+
+    // A newer pass flips the outcome without changing the count's meaning.
+    db.insert_graph_run(&cb43_node_run(
+        &graph_id,
+        &spec_id,
+        &node.id,
+        Some("opencode"),
+        Some("flaky"),
+        GraphRunStatus::Pass,
+        now - Duration::minutes(5),
+    ))
+    .unwrap();
+    let rows = db
+        .list_recent_platform_model_usage(now - Duration::days(30), 15)
+        .unwrap();
+    let flaky = rows
+        .iter()
+        .find(|r| r.model.as_deref() == Some("flaky"))
+        .expect("flaky present");
+    assert_eq!(flaky.last_outcome, "pass");
+}
+
+/// T8: a pair never run here is absent.
+#[test]
+fn cb43_never_run_pair_is_absent() {
+    let db = test_db();
+    cb43_setup(&db, (Some("opencode"), Some("only-a")));
+    let rows = db
+        .list_recent_platform_model_usage(Utc::now() - Duration::days(30), 15)
+        .unwrap();
+    assert!(rows.iter().all(|r| r.model.as_deref() != Some("b")));
+    assert!(rows.iter().any(|r| r.model.as_deref() == Some("only-a")));
+}
+
+/// T9 (usage side): pre-migration rows are omitted, not invented.
+#[test]
+fn cb43_null_rows_omitted_from_recent_usage() {
+    let db = test_db();
+    let (graph_id, spec_id, _) = cb43_setup(&db, (Some("opencode"), Some("real")));
+    let node = db
+        .get_graph_node("node-cb43")
+        .unwrap()
+        .expect("fixture node");
+    db.insert_graph_run(&cb43_node_run(
+        &graph_id,
+        &spec_id,
+        &node.id,
+        None,
+        None,
+        GraphRunStatus::Pass,
+        Utc::now(),
+    ))
+    .unwrap();
+    let rows = db
+        .list_recent_platform_model_usage(Utc::now() - Duration::days(30), 15)
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].model.as_deref(), Some("real"));
+}
+
+/// T10: every run kind contributes to the section.
+#[test]
+fn cb43_all_run_kinds_contribute() {
+    let db = test_db();
+    let (graph_id, _, _) = cb43_setup(&db, (Some("p-graph"), Some("m-graph")));
+    let now = Utc::now();
+
+    // Hook run.
+    db.insert_graph_completion_hook_run(&crate::domain::graphs::GraphCompletionHookRun {
+        id: uuid::Uuid::new_v4().to_string(),
+        graph_id,
+        event: crate::domain::graphs::GraphHookEvent::OnCompleted,
+        hook_index: 0,
+        status: GraphRunStatus::Pass,
+        output: None,
+        summary: None,
+        started_at: now,
+        completed_at: Some(now),
+        pid: None,
+        boot_id: None,
+        executed_platform: Some("p-hook".to_string()),
+        executed_model: Some("m-hook".to_string()),
+    })
+    .unwrap();
+
+    // Background agent run.
+    db.upsert_agent(&sample_cron_agent("bg-cb43")).unwrap();
+    db.insert_run(&RunLog {
+        id: uuid::Uuid::new_v4().to_string(),
+        background_agent_id: "bg-cb43".to_string(),
+        status: RunStatus::Success,
+        trigger_type: TriggerType::Manual,
+        summary: None,
+        started_at: now,
+        finished_at: Some(now),
+        exit_code: Some(0),
+        timeout_at: None,
+        executed_platform: Some("p-bg".to_string()),
+        executed_model: Some("m-bg".to_string()),
+    })
+    .unwrap();
+
+    // Subagent run.
+    db.insert_subagent_run(
+        &uuid::Uuid::new_v4().to_string(),
+        "p-sub",
+        Some("m-sub"),
+        "prompt",
+        "/tmp",
+        &now.to_rfc3339(),
+        &(now + Duration::hours(1)).to_rfc3339(),
+    )
+    .unwrap();
+
+    let rows = db
+        .list_recent_platform_model_usage(now - Duration::days(30), 15)
+        .unwrap();
+    let platforms: Vec<_> = rows.iter().map(|r| r.platform.as_str()).collect();
+    for expected in ["p-graph", "p-hook", "p-bg", "p-sub"] {
+        assert!(
+            platforms.contains(&expected),
+            "missing {expected} in {platforms:?}"
+        );
+    }
+}
+
+#[test]
+fn cb46_sources_keep_every_run_kind_attribution() {
+    let db = test_db();
+    let (graph_id, _, _) = cb43_setup(&db, (Some("graph-platform"), Some("graph-model")));
+    let now = Utc::now();
+    db.insert_graph_completion_hook_run(&crate::domain::graphs::GraphCompletionHookRun {
+        id: uuid::Uuid::new_v4().to_string(),
+        graph_id: graph_id.clone(),
+        event: crate::domain::graphs::GraphHookEvent::OnCompleted,
+        hook_index: 0,
+        status: GraphRunStatus::Pass,
+        output: None,
+        summary: None,
+        started_at: now,
+        completed_at: Some(now),
+        pid: None,
+        boot_id: None,
+        executed_platform: Some("hook-platform".into()),
+        executed_model: Some("hook-model".into()),
+    })
+    .unwrap();
+    db.upsert_agent(&sample_cron_agent("cb46-agent")).unwrap();
+    db.insert_run(&RunLog {
+        id: uuid::Uuid::new_v4().to_string(),
+        background_agent_id: "cb46-agent".into(),
+        status: RunStatus::Success,
+        trigger_type: TriggerType::Manual,
+        summary: None,
+        started_at: now,
+        finished_at: Some(now),
+        exit_code: Some(0),
+        timeout_at: None,
+        executed_platform: Some("agent-platform".into()),
+        executed_model: Some("agent-model".into()),
+    })
+    .unwrap();
+    db.insert_subagent_run(
+        &uuid::Uuid::new_v4().to_string(),
+        "sub-platform",
+        Some("sub-model"),
+        "prompt",
+        "/tmp/cb46",
+        &now.to_rfc3339(),
+        &(now + Duration::hours(1)).to_rfc3339(),
+    )
+    .unwrap();
+
+    let rows = db
+        .list_recent_platform_model_usage_sources(now - Duration::days(30))
+        .unwrap();
+    assert!(rows.iter().any(|row| matches!(row.source,
+        crate::db::graphs::RecentPairSourceKind::GraphNode { graph_id: ref id, .. } if id == &graph_id)));
+    assert!(rows.iter().any(|row| matches!(row.source,
+        crate::db::graphs::RecentPairSourceKind::CompletionHook { graph_id: ref id, hook_index: 0, .. } if id == &graph_id)));
+    assert!(rows.iter().any(|row| matches!(row.source,
+        crate::db::graphs::RecentPairSourceKind::BackgroundAgent { ref agent_id, .. } if agent_id == "cb46-agent")));
+    assert!(rows.iter().any(|row| matches!(row.source,
+        crate::db::graphs::RecentPairSourceKind::SubagentSpawn { ref workdir } if workdir == "/tmp/cb46")));
+}
+
+/// Splits `s` on commas that are not inside parentheses — used to pull
+/// apart a `CREATE TABLE (...)` body into its column/constraint defs
+/// without being confused by a `CHECK (...)` clause's own nested parens.
+fn split_top_level_commas(s: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    for (i, c) in s.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' if depth == 0 => {
+                parts.push(&s[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&s[start..]);
+    parts
+}
+
+/// Returns the index (into `s`) of the `)` that matches the `(` at
+/// `open_pos`, scanning forward and tracking nesting depth.
+fn find_matching_paren(s: &str, open_pos: usize) -> usize {
+    let mut depth = 0i32;
+    for (i, c) in s[open_pos..].char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return open_pos + i;
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("unbalanced parens starting at byte {open_pos}");
+}
+
+/// CB56 regression guard: every `CREATE INDEX` in the base schema batch
+/// (the first `execute_batch` call in `Database::init`, covering `agents`
+/// through `sandbox_runs`) must reference only columns that batch's own
+/// `CREATE TABLE` for that table declares. CB56 shipped because an index
+/// referenced a column added by a *later* migration — on a pre-existing
+/// database, `CREATE TABLE IF NOT EXISTS` is a no-op, so the column didn't
+/// exist yet and the index creation failed with `no such column`. Every
+/// test started from an empty database, where `CREATE TABLE` always
+/// carries every column, so nothing caught it. This test parses the batch
+/// text itself (via `include_str!`, not a hand-copied mirror) so it can't
+/// drift from what `init()` actually executes.
+#[test]
+fn base_schema_batch_indexes_reference_only_columns_in_same_batch() {
+    let source = include_str!("mod.rs");
+    let batch_start = source.find("\"CREATE TABLE IF NOT EXISTS agents (").expect(
+        "base schema batch start marker not found in mod.rs — did the batch move or get reordered?",
+    );
+    let close_marker = "\n            );\",";
+    let close_rel = source[batch_start..]
+        .find(close_marker)
+        .expect("base schema batch end marker not found in mod.rs — did the batch move?");
+    let sql_close_offset = close_marker.find(");").unwrap() + 2;
+    let batch_end = batch_start + close_rel + sql_close_offset;
+    let batch = &source[batch_start..batch_end];
+
+    // table name -> declared column names
+    let table_re = regex::Regex::new(r"CREATE TABLE IF NOT EXISTS (\w+) \(").unwrap();
+    let mut table_columns: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for caps in table_re.captures_iter(batch) {
+        let table = caps[1].to_string();
+        let match_end = caps.get(0).unwrap().end(); // one past the '(' of this CREATE TABLE
+        let open_paren = match_end - 1;
+        let close_paren = find_matching_paren(batch, open_paren);
+        let body = &batch[open_paren + 1..close_paren];
+        let cols: Vec<String> = split_top_level_commas(body)
+            .into_iter()
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .filter(|item| {
+                let upper = item.to_uppercase();
+                !(upper.starts_with("CHECK")
+                    || upper.starts_with("FOREIGN KEY")
+                    || upper.starts_with("PRIMARY KEY")
+                    || upper.starts_with("UNIQUE ("))
+            })
+            .map(|item| item.split_whitespace().next().unwrap().to_string())
+            .collect();
+        table_columns.insert(table, cols);
+    }
+    assert!(
+        table_columns.len() > 10,
+        "expected dozens of CREATE TABLE statements in the base batch, found {} — the table_re regex may not be matching",
+        table_columns.len()
+    );
+
+    // (table, [columns]) for every CREATE INDEX / CREATE UNIQUE INDEX in the batch
+    let index_re =
+        regex::Regex::new(r"CREATE (?:UNIQUE )?INDEX IF NOT EXISTS \w+\s+ON (\w+)\(([^()]*)\)")
+            .unwrap();
+    let mut checked = 0;
+    for caps in index_re.captures_iter(batch) {
+        let table = &caps[1];
+        let table_cols = table_columns.get(table).unwrap_or_else(|| {
+            panic!(
+                "index references table `{table}` but no CREATE TABLE IF NOT EXISTS {table} found in the same base schema batch"
+            )
+        });
+        for raw_col in caps[2].split(',') {
+            let col = raw_col.trim();
+            let col = col
+                .strip_suffix("DESC")
+                .or_else(|| col.strip_suffix("ASC"))
+                .unwrap_or(col)
+                .trim();
+            assert!(
+                table_cols.iter().any(|c| c == col),
+                "CREATE INDEX on {table}({col}) but the batch's CREATE TABLE {table} declares only {table_cols:?} — \
+                 an index must never reference a column added by a later migration (CB56)"
+            );
+            checked += 1;
+        }
+    }
+    assert!(
+        checked > 15,
+        "expected to check many indexed columns across the batch, only checked {checked} — the index_re regex may not be matching"
+    );
+}
+
+#[test]
+fn pre_ct17_intelligence_nodes_without_content_touched_at_opens_and_migrates() {
+    // CB56: a database created before CT17 (2026-09-18) has this exact
+    // `intelligence_nodes` shape — no `content_touched_at` column. Opening
+    // it must succeed (the base batch must not reference a column this
+    // table doesn't have yet), and the CT17 migration further down in
+    // `init()` must then add the column and its index.
+    let tmp = NamedTempFile::new().expect("create temp file");
+    let path = tmp.path().to_path_buf();
+    std::mem::forget(tmp);
+
+    {
+        let conn = rusqlite::Connection::open(&path).expect("open raw pre-CT17 db");
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS intelligence_nodes (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'noted',
+                title TEXT NOT NULL,
+                body TEXT NOT NULL,
+                metadata TEXT,
+                project_hash TEXT,
+                session_id TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+             );
+             INSERT INTO intelligence_nodes
+                 (id, kind, status, title, body, metadata, project_hash, session_id, created_at, updated_at)
+                 VALUES ('node1', 'note', 'noted', 'Pre-CT17 title', 'Pre-CT17 body', NULL, 'ph1', 'sess1', 1000, 1000);",
+        )
+        .expect("seed pre-CT17 intelligence_nodes");
+    }
+
+    let db = Database::new(&path)
+        .expect("open pre-CT17 db — must not fail with 'no such column: content_touched_at'");
+
+    let conn = rusqlite::Connection::open(&path).expect("reopen raw db for assertions");
+    let has_column: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('intelligence_nodes') WHERE name = 'content_touched_at'",
+            [],
+            |row| Ok(row.get::<_, i32>(0)? > 0),
+        )
+        .unwrap();
+    assert!(
+        has_column,
+        "content_touched_at column must exist after opening"
+    );
+
+    let has_index: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_intelligence_nodes_project_hash_touched'",
+            [],
+            |row| Ok(row.get::<_, i32>(0)? > 0),
+        )
+        .unwrap();
+    assert!(
+        has_index,
+        "idx_intelligence_nodes_project_hash_touched index must exist after opening"
+    );
+
+    let title: String = conn
+        .query_row(
+            "SELECT title FROM intelligence_nodes WHERE id = 'node1'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("pre-existing row must still be readable");
+    assert_eq!(title, "Pre-CT17 title");
+
+    drop(db);
+}
+
+#[test]
+fn v3_close_schema_with_break_condition_migrates_loops_to_graphs() {
+    // The shape the machine actually had on 2026-09-21 (v3 close, 7cd92e1,
+    // 2026-09-15): loop_*/loops naming, a 'break' edge condition, no
+    // content_touched_at. Database::new must run migrate_loop_to_graph_schema
+    // (rename loops->graphs etc.) and every later guarded ALTER cleanly.
+    let tmp = NamedTempFile::new().expect("create temp file");
+    let path = tmp.path().to_path_buf();
+    std::mem::forget(tmp);
+
+    {
+        let conn = rusqlite::Connection::open(&path).expect("open raw v3-close db");
+        conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS agents (
+                id TEXT PRIMARY KEY,
+                prompt TEXT NOT NULL,
+                trigger_type TEXT,
+                trigger_config TEXT,
+                cli TEXT NOT NULL,
+                model TEXT,
+                effort TEXT,
+                working_dir TEXT,
+                enabled BOOLEAN NOT NULL DEFAULT 1,
+                enable_at TEXT,
+                created_at TEXT NOT NULL,
+                log_path TEXT NOT NULL,
+                timeout_minutes INTEGER NOT NULL DEFAULT 15,
+                expires_at TEXT,
+                last_run_at TEXT,
+                last_run_ok BOOLEAN,
+                last_triggered_at TEXT,
+                trigger_count INTEGER NOT NULL DEFAULT 0,
+                notify_on_success BOOLEAN NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS runs (
+                id TEXT PRIMARY KEY,
+                background_agent_id TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                trigger_type TEXT NOT NULL,
+                summary TEXT,
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                exit_code INTEGER,
+                timeout_at TEXT,
+                executed_platform TEXT,
+                executed_model TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS daemon_state (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS interactive_sessions (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                cli TEXT NOT NULL,
+                working_dir TEXT NOT NULL,
+                args TEXT,
+                started_at TEXT NOT NULL,
+                exited_at TEXT,
+                exit_code INTEGER,
+                status TEXT NOT NULL DEFAULT 'active',
+                session_type TEXT NOT NULL DEFAULT 'interactive',
+                pid INTEGER,
+                boot_id TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS terminal_sessions (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                shell TEXT NOT NULL,
+                working_dir TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                last_active TEXT,
+                status TEXT NOT NULL DEFAULT 'idle'
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_interactive_sessions_workdir
+                ON interactive_sessions(working_dir, started_at DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_terminal_sessions_workdir
+                ON terminal_sessions(working_dir, created_at DESC);
+
+            CREATE TABLE IF NOT EXISTS groups (
+                id TEXT PRIMARY KEY,
+                orientation TEXT NOT NULL DEFAULT 'horizontal',
+                session_a TEXT NOT NULL,
+                session_b TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS sync_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                workdir TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                agent_name TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                message TEXT NOT NULL,
+                payload TEXT,
+                created_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS activity_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                workdir TEXT NOT NULL,
+                source TEXT NOT NULL,
+                source_id TEXT,
+                kind TEXT NOT NULL,
+                message TEXT NOT NULL,
+                payload TEXT,
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_activity_log_workdir_created
+                ON activity_log(workdir, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_activity_log_kind
+                ON activity_log(kind);
+
+            CREATE TABLE IF NOT EXISTS sync_locks (
+                id TEXT PRIMARY KEY,
+                workdir TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                lock_type TEXT NOT NULL,
+                resource TEXT NOT NULL,
+                acquired_at INTEGER NOT NULL,
+                expires_at INTEGER,
+                released_at INTEGER
+            );
+
+            CREATE TABLE IF NOT EXISTS projects (
+                hash TEXT PRIMARY KEY,
+                path TEXT NOT NULL,
+                name TEXT NOT NULL,
+                description TEXT,
+                tags TEXT,
+                indexed_at INTEGER,
+                created_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS rag_queue (
+                source_path TEXT NOT NULL PRIMARY KEY,
+                status TEXT NOT NULL,
+                queued_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS rag_file_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_path TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                detail TEXT,
+                occurred_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_rag_file_events_path
+                ON rag_file_events(file_path);
+
+            CREATE TABLE IF NOT EXISTS intelligence_nodes (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'noted',
+                title TEXT NOT NULL,
+                body TEXT NOT NULL,
+                metadata TEXT,
+                project_hash TEXT,
+                session_id TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_intelligence_nodes_kind_updated
+                ON intelligence_nodes(kind, updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_intelligence_nodes_project_hash
+                ON intelligence_nodes(project_hash);
+            CREATE INDEX IF NOT EXISTS idx_intelligence_nodes_session_id
+                ON intelligence_nodes(session_id);
+
+            CREATE TABLE IF NOT EXISTS intelligence_edges (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                from_node_id TEXT NOT NULL,
+                to_node_id TEXT NOT NULL,
+                relation TEXT NOT NULL,
+                weight REAL NOT NULL DEFAULT 1.0,
+                created_at INTEGER NOT NULL,
+                FOREIGN KEY(from_node_id) REFERENCES intelligence_nodes(id) ON DELETE CASCADE,
+                FOREIGN KEY(to_node_id) REFERENCES intelligence_nodes(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_intelligence_edges_from
+                ON intelligence_edges(from_node_id);
+            CREATE INDEX IF NOT EXISTS idx_intelligence_edges_to
+                ON intelligence_edges(to_node_id);
+
+            CREATE TABLE IF NOT EXISTS operational_sessions (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                body TEXT NOT NULL,
+                metadata TEXT,
+                project_hash TEXT,
+                session_id TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_operational_sessions_project_hash
+                ON operational_sessions(project_hash);
+            CREATE INDEX IF NOT EXISTS idx_operational_sessions_updated
+                ON operational_sessions(updated_at DESC);
+
+            CREATE TABLE IF NOT EXISTS loops (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT,
+                workdir TEXT NOT NULL,
+                status TEXT NOT NULL,
+                trigger_type TEXT,
+                trigger_config TEXT,
+                created_at INTEGER NOT NULL,
+                started_at INTEGER,
+                completed_at INTEGER,
+                autorun_at INTEGER,
+                spec_queue TEXT,
+                active_run_queue_id TEXT,
+                on_completed TEXT,
+                auto_continue_at INTEGER,
+                auto_continue_action TEXT,
+                hooks TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_loops_workdir_created
+                ON loops(workdir, created_at DESC);
+
+            CREATE TABLE IF NOT EXISTS loop_specs (
+                id TEXT PRIMARY KEY,
+                loop_id TEXT REFERENCES loops(id) ON DELETE CASCADE,
+                name TEXT NOT NULL,
+                description TEXT,
+                position INTEGER NOT NULL,
+                parallelizable INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL,
+                started_at INTEGER,
+                completed_at INTEGER,
+                spec_start_head TEXT,
+                workdir TEXT,
+                completed_via TEXT,
+                completed_via_reason TEXT,
+                completed_via_at INTEGER,
+                spec_committed_head TEXT,
+                cross_run_attempts INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_loop_specs_position
+                ON loop_specs(loop_id, position);
+
+            CREATE TABLE IF NOT EXISTS loop_nodes (
+                id TEXT PRIMARY KEY,
+                spec_id TEXT REFERENCES loop_specs(id) ON DELETE CASCADE,
+                loop_id TEXT REFERENCES loops(id) ON DELETE CASCADE,
+                name TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                config TEXT NOT NULL,
+                position INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                CHECK ((spec_id IS NULL) <> (loop_id IS NULL))
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_loop_nodes_position
+                ON loop_nodes(spec_id, position);
+
+            CREATE TABLE IF NOT EXISTS loop_edges (
+                id TEXT PRIMARY KEY,
+                spec_id TEXT REFERENCES loop_specs(id) ON DELETE CASCADE,
+                loop_id TEXT REFERENCES loops(id) ON DELETE CASCADE,
+                from_node TEXT NOT NULL REFERENCES loop_nodes(id) ON DELETE CASCADE,
+                to_node TEXT NOT NULL REFERENCES loop_nodes(id) ON DELETE CASCADE,
+                condition TEXT NOT NULL,
+                route TEXT,
+                CHECK ((spec_id IS NULL) <> (loop_id IS NULL))
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_loop_edges_spec_from
+                ON loop_edges(spec_id, from_node);
+
+            CREATE TABLE IF NOT EXISTS loop_runs (
+                id TEXT PRIMARY KEY,
+                loop_id TEXT NOT NULL REFERENCES loops(id) ON DELETE CASCADE,
+                spec_id TEXT NOT NULL REFERENCES loop_specs(id) ON DELETE CASCADE,
+                node_id TEXT NOT NULL REFERENCES loop_nodes(id) ON DELETE CASCADE,
+                status TEXT NOT NULL,
+                input TEXT,
+                output TEXT,
+                started_at INTEGER NOT NULL,
+                completed_at INTEGER,
+                iteration INTEGER NOT NULL DEFAULT 1,
+                pid INTEGER,
+                boot_id TEXT,
+                session_id TEXT,
+                paused_through INTEGER NOT NULL DEFAULT 0,
+                executed_platform TEXT,
+                executed_model TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_loop_runs_spec_started
+                ON loop_runs(spec_id, started_at ASC);
+
+            CREATE INDEX IF NOT EXISTS idx_loop_runs_node_iteration
+                ON loop_runs(node_id, iteration DESC);
+
+            -- Speeds the sidebar's last-activity-per-loop aggregate
+            -- (MAX(started_at) GROUP BY loop_id) into a loose index scan
+            -- instead of a full table scan.
+            CREATE INDEX IF NOT EXISTS idx_loop_runs_loop_started
+                ON loop_runs(loop_id, started_at DESC);
+
+            -- N2: firings of a loop's `on_completed` hook. Deliberately not
+            -- `loop_runs` — that table's spec_id/node_id are NOT NULL FKs into
+            -- a spec's graph, which a completion hook (no spec, no graph node)
+            -- can never satisfy.
+            CREATE TABLE IF NOT EXISTS loop_completion_hook_runs (
+                id TEXT PRIMARY KEY,
+                loop_id TEXT NOT NULL REFERENCES loops(id) ON DELETE CASCADE,
+                status TEXT NOT NULL,
+                output TEXT,
+                summary TEXT,
+                started_at INTEGER NOT NULL,
+                completed_at INTEGER,
+                pid INTEGER,
+                boot_id TEXT,
+                event TEXT NOT NULL DEFAULT 'on_completed',
+                hook_index INTEGER NOT NULL DEFAULT 0,
+                executed_platform TEXT,
+                executed_model TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_loop_completion_hook_runs_loop_started
+                ON loop_completion_hook_runs(loop_id, started_at ASC);
+
+            -- F1: an ensemble unit -- the members and join are ordinary
+            -- loop_nodes/loop_edges rows (the engine's graph-walking code is
+            -- reused as-is); this row is what lets loop_get/loop_update_ensemble
+            -- address the whole ensemble as one thing instead of N+1 nodes.
+            CREATE TABLE IF NOT EXISTS ensembles (
+                id TEXT PRIMARY KEY,
+                spec_id TEXT REFERENCES loop_specs(id) ON DELETE CASCADE,
+                loop_id TEXT REFERENCES loops(id) ON DELETE CASCADE,
+                name TEXT NOT NULL,
+                prompt_template TEXT NOT NULL,
+                join_node_id TEXT NOT NULL REFERENCES loop_nodes(id) ON DELETE CASCADE,
+                entry_from_node TEXT NOT NULL REFERENCES loop_nodes(id) ON DELETE CASCADE,
+                entry_condition TEXT NOT NULL,
+                min_pass INTEGER NOT NULL,
+                straggler_timeout_minutes INTEGER,
+                timeout_minutes INTEGER NOT NULL,
+                on_pass_to TEXT NOT NULL REFERENCES loop_nodes(id) ON DELETE CASCADE,
+                on_fail_to TEXT REFERENCES loop_nodes(id) ON DELETE SET NULL,
+                created_at INTEGER NOT NULL,
+                CHECK ((spec_id IS NULL) <> (loop_id IS NULL))
+            );
+
+            CREATE TABLE IF NOT EXISTS ensemble_members (
+                ensemble_id TEXT NOT NULL REFERENCES ensembles(id) ON DELETE CASCADE,
+                node_id TEXT NOT NULL REFERENCES loop_nodes(id) ON DELETE CASCADE,
+                position INTEGER NOT NULL,
+                platform TEXT NOT NULL,
+                model TEXT,
+                prompt_override TEXT,
+                PRIMARY KEY (ensemble_id, node_id)
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_ensemble_members_position
+                ON ensemble_members(ensemble_id, position);
+
+            CREATE INDEX IF NOT EXISTS idx_ensemble_members_node
+                ON ensemble_members(node_id);
+
+            CREATE INDEX IF NOT EXISTS idx_ensembles_join_node
+                ON ensembles(join_node_id);
+
+            -- F1: ensemble blueprints -- a whole ensemble's shared prompt +
+            -- member list (unlike `blueprints`, which templates a single
+            -- node), seeded with the builtin ensemble-proposers pattern.
+            CREATE TABLE IF NOT EXISTS ensemble_blueprints (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE,
+                prompt_template TEXT NOT NULL,
+                members TEXT NOT NULL,
+                min_pass INTEGER,
+                builtin INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS queues (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS queue_members (
+                queue_id TEXT NOT NULL REFERENCES queues(id) ON DELETE CASCADE,
+                spec_id TEXT NOT NULL REFERENCES loop_specs(id) ON DELETE CASCADE,
+                position INTEGER NOT NULL,
+                group_name TEXT,
+                PRIMARY KEY (queue_id, spec_id)
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_queue_members_position
+                ON queue_members(queue_id, position);
+
+            CREATE TABLE IF NOT EXISTS seed_sessions (
+                session_id TEXT PRIMARY KEY,
+                seed_id TEXT NOT NULL,
+                bound_at TEXT NOT NULL,
+                FOREIGN KEY(session_id) REFERENCES interactive_sessions(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_seed_sessions_seed
+                ON seed_sessions(seed_id);
+
+            CREATE TABLE IF NOT EXISTS blueprints (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE,
+                kind TEXT NOT NULL,
+                config TEXT NOT NULL,
+                builtin INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS scheduled_sends (
+                id TEXT PRIMARY KEY,
+                prompt TEXT NOT NULL,
+                target_session_id TEXT NOT NULL,
+                fire_at INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                provenance TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS failed_scheduled_sends (
+                id TEXT PRIMARY KEY,
+                prompt TEXT NOT NULL,
+                target_session_id TEXT NOT NULL,
+                workdir TEXT,
+                failed_at INTEGER NOT NULL,
+                provenance TEXT
+            );
+
+            -- U8: the prompt builder's last-sent prompt per project, recalled
+            -- with Ctrl+L. Insert-only with a timestamp (rather than one row
+            -- per workdir) so this can grow into a browsable history later —
+            -- today's reads take the most recent row per workdir (LIMIT 1).
+            CREATE TABLE IF NOT EXISTS last_prompts (
+                id TEXT PRIMARY KEY,
+                workdir TEXT NOT NULL,
+                prompt_text TEXT NOT NULL,
+                builder_state TEXT,
+                created_at INTEGER NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_last_prompts_workdir_created
+                ON last_prompts(workdir, created_at DESC);
+
+            -- CM5: ephemeral subagent runs. Not `agents` (no trigger, no
+            -- schedule, no permanent state) and not `loop_runs` (no spec/graph).
+            -- A row lives only until it is collected or its TTL (`expires_at`)
+            -- passes; the health routine deletes both on its periodic tick.
+            -- CB43: `platform`/`model` below mean RESOLVED at dispatch (the
+            -- model actually handed to the CLI argv; NULL when the platform's
+            -- `model_flag` cannot select one) — never the requested value when
+            -- it was not applied.
+            CREATE TABLE IF NOT EXISTS subagent_runs (
+                id TEXT PRIMARY KEY,
+                platform TEXT NOT NULL,
+                model TEXT,
+                prompt TEXT NOT NULL,
+                workdir TEXT NOT NULL,
+                mcp_surface TEXT,
+                status TEXT NOT NULL DEFAULT 'running',
+                exit_code INTEGER,
+                stdout TEXT,
+                stderr TEXT,
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                collected_at TEXT,
+                expires_at TEXT NOT NULL,
+                pid INTEGER,
+                boot_id TEXT
+            );
+
+            -- CM18: tombstones for blocking `subagent_spawn` deliveries. A
+            -- blocking spawn returns its result inline and deletes the
+            -- `subagent_runs` row immediately, so a later `subagent_collect`
+            -- would otherwise be indistinguishable from never-existed.
+            -- A tombstone records the delivered id until the original
+            -- `expires_at`, letting `collect` answer already-delivered.
+            -- Async rows never touch this table (no change to async
+            -- storage or TTL).
+            CREATE TABLE IF NOT EXISTS subagent_delivered_tombstones (
+                id TEXT PRIMARY KEY,
+                delivered_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS sandbox_runs (
+                id TEXT PRIMARY KEY,
+                project_hash TEXT NOT NULL,
+                base_branch TEXT NOT NULL,
+                sandbox_branch TEXT NOT NULL,
+                worktree_path TEXT NOT NULL,
+                cli_name TEXT NOT NULL,
+                original_workdir TEXT NOT NULL,
+                owner_type TEXT NOT NULL,
+                owner_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                cleanup_error TEXT
+            );
+
+             INSERT INTO loops (id, name, workdir, status, created_at)
+                 VALUES ('g1', 'V3 Graph', '/tmp/v3close', 'running', 1000);
+             INSERT INTO loop_specs (id, loop_id, name, position, status)
+                 VALUES ('s1', 'g1', 'Spec 1', 0, 'pending');
+             INSERT INTO loop_nodes (id, spec_id, name, kind, config, position, created_at)
+                 VALUES ('n1', 's1', 'Node A', 'agent', '{}', 0, 1000);
+             INSERT INTO loop_nodes (id, spec_id, name, kind, config, position, created_at)
+                 VALUES ('n2', 's1', 'Node B', 'agent', '{}', 1, 1000);
+             INSERT INTO loop_edges (id, spec_id, from_node, to_node, condition)
+                 VALUES ('e1', 's1', 'n1', 'n2', 'break');",
+        )
+        .expect("seed v3-close schema");
+    }
+
+    let db = Database::new(&path).expect("open v3-close db — must migrate loops to graphs cleanly");
+
+    let conn = rusqlite::Connection::open(&path).expect("reopen raw db for assertions");
+    let graph_name: String = conn
+        .query_row("SELECT name FROM graphs WHERE id = 'g1'", [], |row| {
+            row.get(0)
+        })
+        .expect("loops row must have migrated into graphs");
+    assert_eq!(graph_name, "V3 Graph");
+
+    let edge_condition: String = conn
+        .query_row(
+            "SELECT condition FROM graph_edges WHERE id = 'e1'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("loop_edges row must have migrated into graph_edges");
+    assert_eq!(
+        edge_condition, "error",
+        "migrate_loop_to_graph_schema must rewrite 'break' to 'error'"
+    );
+
+    drop(db);
+}
+
+// RETIRED-VOCAB-BEGIN (CB63 migration test — seeds rows carrying the
+// retired prefix on purpose; exempt from the vocabulary guard below)
+#[test]
+fn activity_attribution_prefix_migration_renames_old_rows_and_is_idempotent() {
+    let tmp = NamedTempFile::new().expect("create temp file");
+    let path = tmp.path().to_path_buf();
+    std::mem::forget(tmp);
+
+    // Fresh database: `init()` runs the attribution migration before the
+    // `CREATE TABLE IF NOT EXISTS` batch, so on a brand-new file the
+    // guard must make it a no-op, not an error.
+    let db = Database::new(&path).expect("fresh db opens with the attribution migration");
+    drop(db);
+
+    // Seed one row carrying the retired prefix (as a pre-CB63 binary
+    // wrote it) plus rows that must survive untouched: a plain source,
+    // a source merely starting with the letters "loop", and a source
+    // containing the old prefix NOT at position 0 (anchoring check).
+    {
+        let conn = rusqlite::Connection::open(&path).expect("reopen raw db to seed rows");
+        conn.execute_batch(
+            "INSERT INTO activity_log (workdir, source, source_id, kind, message, created_at)
+             VALUES
+                ('/wd', 'loop:Graph', 'g1', 'info', 'old engine row', 1),
+                ('/wd', 'agent', 'a1', 'info', 'agent row', 2),
+                ('/wd', 'loopish', 'x', 'info', 'not a prefix', 3),
+                ('/wd', 'my-loop:thing', 'x', 'info', 'not anchored', 4);",
+        )
+        .expect("seed activity rows");
+    }
+
+    let sources = || -> Vec<String> {
+        let conn = rusqlite::Connection::open(&path).expect("read sources");
+        let mut stmt = conn
+            .prepare("SELECT source FROM activity_log ORDER BY created_at")
+            .expect("select sources");
+        stmt.query_map([], |r| r.get::<_, String>(0))
+            .expect("map sources")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("collect sources")
+    };
+
+    // Reopen: the migration rewrites the one anchored prefix row.
+    let db = Database::new(&path).expect("reopen applies attribution migration");
+    drop(db);
+    assert_eq!(
+        sources(),
+        vec!["graph:Graph", "agent", "loopish", "my-loop:thing"],
+        "migration must rewrite only rows anchored with the retired prefix"
+    );
+
+    // Re-run must be a no-op: same rows, no error (idempotent,
+    // re-runnable — the CC3 shape requirement 1 demands).
+    let db = Database::new(&path).expect("third open must be idempotent");
+    drop(db);
+    assert_eq!(
+        sources(),
+        vec!["graph:Graph", "agent", "loopish", "my-loop:thing"]
+    );
+}
+// RETIRED-VOCAB-END
+
+// RETIRED-VOCAB-BEGIN (this guard test is the third place — with the CB63
+// migration and its test above — that must name the retired forms
+// literally, so it exempts itself with the same markers it enforces)
+/// Guards the CB63 rename from regressing in the two surfaces a person
+/// actually reads: documentation and the engine's activity attribution.
+///
+/// Scans every `docs/**/*.md` plus `README.md` for the retired word
+/// "loop" in any form (`loop lifecycle`, `` `loop:<name>` ``,
+/// `loop_complete_node`), and every `src/**/*.rs` for the retired
+/// attribution prefix inside a Rust string literal — a `"` immediately
+/// followed by `loop:`. A hit fails the test naming its file and line.
+/// The only exempt places are between marker pairs (the `RETIRED-VOCAB-`
+/// prefix plus `BEGIN` / `END`), the established convention
+/// (same shape as the queue-schema guard
+/// `no_retired_schema_name_identifiers_remain_outside_its_migration`):
+/// the migration that rewrites old rows, its test, this guard, and the
+/// 2.x alias history in `docs/mcp-tools.md`.
+///
+/// What is deliberately NOT scanned, and why (Decision D3): the Rust
+/// `loop` keyword and identifiers like `loop_id`, and the word `break`.
+/// Those forms are indistinguishable from genuine unrelated uses by any
+/// mechanical rule, they are not attribution, and the CB63 constraint
+/// forbids renaming them anyway. A stale mention that WOULD be a defect
+/// — prose "loop" in docs, a `loop:` prefix in any string — cannot hide
+/// from the patterns above.
+#[test]
+fn no_retired_vocabulary_in_user_visible_surfaces() {
+    let docs_word = regex::Regex::new(r"(?i)\bloop").unwrap();
+    // Built with `concat!` so these definition lines do not contain the
+    // marker literals themselves: a literal here would toggle the
+    // exempt-region state machine while it scans this very function
+    // (a literal end marker here would close the exemption early and the
+    // retired-prefix needles below would fail the guard against itself).
+    let begin_marker = concat!("RETIRED-VOCAB-", "BEGIN");
+    let end_marker = concat!("RETIRED-VOCAB-", "END");
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+
+    // Collect: docs/**/*.md, README.md, src/**/*.rs.
+    let mut doc_files: Vec<std::path::PathBuf> = Vec::new();
+    for entry in walkdir::WalkDir::new(std::path::Path::new(manifest_dir).join("docs"))
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
+    {
+        doc_files.push(entry.path().to_path_buf());
+    }
+    doc_files.push(std::path::Path::new(manifest_dir).join("README.md"));
+    let mut src_files: Vec<std::path::PathBuf> = Vec::new();
+    for entry in walkdir::WalkDir::new(std::path::Path::new(manifest_dir).join("src"))
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "rs"))
+    {
+        src_files.push(entry.path().to_path_buf());
+    }
+
+    let mut violations = Vec::new();
+    for (is_src, path) in src_files
+        .iter()
+        .map(|p| (true, p))
+        .chain(doc_files.iter().map(|p| (false, p)))
+    {
+        let rel_path = path.strip_prefix(manifest_dir).unwrap_or(path.as_path());
+        let source = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {e}", rel_path.display()));
+        let mut exempt = false;
+        for (i, line) in source.lines().enumerate() {
+            if line.contains(end_marker) {
+                exempt = false;
+                continue;
+            }
+            if line.contains(begin_marker) {
+                exempt = true;
+                continue;
+            }
+            if exempt {
+                continue;
+            }
+            let hit = if is_src {
+                // The retired attribution appears in Rust source only
+                // inside a string literal: a double quote directly before
+                // `loop:`. Plain substring — no escaping ambiguity, and
+                // `format!("loop:{…}")` matches.
+                line.contains("\"loop:")
+                    .then(|| "\"loop: attribution prefix".to_string())
+            } else {
+                docs_word.find(line).map(|m| m.as_str()).map(Into::into)
+            };
+            if let Some(text) = hit {
+                violations.push(format!("{}:{} — {}", rel_path.display(), i + 1, text));
+            }
+        }
+        assert!(
+            !exempt,
+            "{} has an unclosed {begin_marker} region",
+            rel_path.display()
+        );
+    }
+
+    assert!(
+        violations.is_empty(),
+        "retired CB63 vocabulary found in a user-visible surface — the engine attributes activity as `graph:<name>` and the docs must say so; the only places naming the old term on purpose are wrapped in RETIRED-VOCAB-BEGIN/-END markers:\n{}",
+        violations.join("\n")
+    );
+}
+// RETIRED-VOCAB-END

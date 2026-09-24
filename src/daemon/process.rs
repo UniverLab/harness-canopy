@@ -2,7 +2,7 @@ use anyhow::Result;
 
 /// Grace period between `SIGTERM` and `SIGKILL` when terminating a node
 /// run's process group (B12): timeout, iteration-budget exhaustion,
-/// `loop_pause`, `loop_reset`, run failure elsewhere, and daemon shutdown
+/// `graph_pause`, `graph_reset`, run failure elsewhere, and daemon shutdown
 /// all go through [`terminate_process_group_async`] with this grace.
 pub(crate) const KILL_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -131,7 +131,7 @@ pub(crate) fn send_signal_to_group(pid: i32, signal: i32) -> std::io::Result<()>
 
 /// Best-effort termination (B12) of the process group led by `pid`: `SIGTERM`
 /// now, `SIGKILL` after `grace` if the group is still alive. The grace wait
-/// runs on a detached task so the caller (e.g. `loop_pause`, an iteration
+/// runs on a detached task so the caller (e.g. `graph_pause`, an iteration
 /// budget check) never blocks on it — the killed process's own
 /// `wait()`/`wait_with_output()` elsewhere unblocks as soon as it actually
 /// dies, whether that's from the `SIGTERM` or the follow-up `SIGKILL`.
@@ -201,6 +201,40 @@ pub(crate) fn read_pid(data_dir: &std::path::Path) -> Option<u32> {
 /// than skip it forever.
 pub(crate) fn other_instance_may_be_running(data_dir: &std::path::Path) -> bool {
     read_pid(data_dir).is_some_and(is_process_running)
+}
+
+/// Walk the process's ancestor chain via `/proc/<pid>/status` PPid lines.
+/// Returns the full chain of ancestor PIDs (parent, grandparent, etc.)
+/// up to but not including PID 1 (init) or PID 0.
+/// Empty vec on non-Linux or if `/proc` is unavailable.
+#[cfg(target_os = "linux")]
+pub(crate) fn ancestor_pids() -> Vec<u32> {
+    let mut pids = Vec::new();
+    let mut current = std::process::id();
+    for _ in 0..128 {
+        let status_path = format!("/proc/{current}/status");
+        let Ok(content) = std::fs::read_to_string(&status_path) else {
+            break;
+        };
+        let ppid = content.lines().find_map(|line| {
+            line.strip_prefix("PPid:")
+                .and_then(|rest| rest.trim().parse::<u32>().ok())
+        });
+        let Some(ppid) = ppid else {
+            break;
+        };
+        if ppid == 0 || ppid == 1 {
+            break;
+        }
+        pids.push(ppid);
+        current = ppid;
+    }
+    pids
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn ancestor_pids() -> Vec<u32> {
+    Vec::new()
 }
 
 #[cfg(target_os = "linux")]
@@ -322,7 +356,7 @@ pub(crate) fn resolve_port_pid(_port: u16) -> Option<u32> {
     None
 }
 
-const SYSTEMD_UNIT_NAME: &str = "canopy.service";
+pub(crate) const SYSTEMD_UNIT_NAME: &str = "canopy.service";
 #[cfg(target_os = "macos")]
 const LAUNCHD_LABEL: &str = "com.canopy";
 
@@ -376,7 +410,7 @@ fn is_unit_cgroup(cgroup_content: &str, unit_name: &str) -> bool {
 }
 
 #[cfg(target_os = "macos")]
-fn launchd_plist_path() -> Option<std::path::PathBuf> {
+pub(crate) fn launchd_plist_path() -> Option<std::path::PathBuf> {
     Some(
         dirs::home_dir()?
             .join("Library/LaunchAgents")
@@ -421,6 +455,83 @@ fn parse_launchctl_pid(text: &str) -> Option<u32> {
     })
 }
 
+/// Injected seam for every service-manager invocation (`systemctl` /
+/// `launchctl`): tests record the command through a fake instead of
+/// executing it, so "tests never call the real systemctl" holds
+/// structurally rather than by discipline. Defined here because
+/// `process.rs` owns every manager invocation.
+pub(crate) trait CommandRunner {
+    /// Run `prog` with `args`; `true` iff it exited successfully.
+    fn run(&self, prog: &str, args: &[&str]) -> bool;
+}
+
+/// The production [`CommandRunner`]: really executes the command.
+pub(crate) struct RealRunner;
+
+impl CommandRunner for RealRunner {
+    fn run(&self, prog: &str, args: &[&str]) -> bool {
+        std::process::Command::new(prog)
+            .args(args)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+}
+
+/// Restart the installed service through the same manager seam used by the
+/// explicit update path.  Linux has a single restart verb; launchd is
+/// restarted through its existing stop/load pair.
+#[cfg(target_os = "linux")]
+pub(crate) fn service_manager_restart_with(runner: &dyn CommandRunner) -> bool {
+    runner.run("systemctl", &["--user", "restart", SYSTEMD_UNIT_NAME])
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn service_manager_restart_with(runner: &dyn CommandRunner) -> bool {
+    service_manager_stop_with(runner) && service_manager_start_with(runner)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn service_manager_restart_with(_runner: &dyn CommandRunner) -> bool {
+    false
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn service_manager_stop_with(runner: &dyn CommandRunner) -> bool {
+    runner.run("systemctl", &["--user", "stop", SYSTEMD_UNIT_NAME])
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn service_manager_start_with(runner: &dyn CommandRunner) -> bool {
+    runner.run("systemctl", &["--user", "start", SYSTEMD_UNIT_NAME])
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn service_manager_stop_with(runner: &dyn CommandRunner) -> bool {
+    let Some(path) = launchd_plist_path() else {
+        return false;
+    };
+    runner.run("launchctl", &["unload", &path.display().to_string()])
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn service_manager_start_with(runner: &dyn CommandRunner) -> bool {
+    let Some(path) = launchd_plist_path() else {
+        return false;
+    };
+    runner.run("launchctl", &["load", &path.display().to_string()])
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn service_manager_stop_with(_runner: &dyn CommandRunner) -> bool {
+    false
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn service_manager_start_with(_runner: &dyn CommandRunner) -> bool {
+    false
+}
+
 /// Ask the platform service manager to stop the canopy unit/agent — used
 /// instead of signalling the managed PID directly when restoring the
 /// daemon after `canopy clean`'s reclaim window (B-decision 4/5): the
@@ -428,56 +539,17 @@ fn parse_launchctl_pid(text: &str) -> Option<u32> {
 /// systemd as an unclean exit and it respawns the process out from under
 /// the exclusive `VACUUM` this stop was for. Going through the manager's
 /// own stop verb is the only way to get a stop it won't immediately undo.
-#[cfg(target_os = "linux")]
 pub(crate) fn service_manager_stop() -> bool {
-    std::process::Command::new("systemctl")
-        .args(["--user", "stop", SYSTEMD_UNIT_NAME])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    service_manager_stop_with(&RealRunner)
 }
 
-#[cfg(target_os = "linux")]
 pub(crate) fn service_manager_start() -> bool {
-    std::process::Command::new("systemctl")
-        .args(["--user", "start", SYSTEMD_UNIT_NAME])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    service_manager_start_with(&RealRunner)
 }
 
-#[cfg(target_os = "macos")]
-pub(crate) fn service_manager_stop() -> bool {
-    let Some(path) = launchd_plist_path() else {
-        return false;
-    };
-    std::process::Command::new("launchctl")
-        .args(["unload", &path.display().to_string()])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-#[cfg(target_os = "macos")]
-pub(crate) fn service_manager_start() -> bool {
-    let Some(path) = launchd_plist_path() else {
-        return false;
-    };
-    std::process::Command::new("launchctl")
-        .args(["load", &path.display().to_string()])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub(crate) fn service_manager_stop() -> bool {
-    false
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub(crate) fn service_manager_start() -> bool {
-    false
+/// Ask the platform service manager to restart the canopy unit/agent.
+pub(crate) fn service_manager_restart() -> bool {
+    service_manager_restart_with(&RealRunner)
 }
 
 /// Is a service-manager unit/agent installed for canopy on this platform,
@@ -535,6 +607,31 @@ pub(crate) fn service_manager_facts() -> Option<ServiceManagerFacts> {
         }
     }
     None
+}
+
+/// CB72 kill rule for `canopy daemon start` (FR2): the port may be cleared
+/// only of a *proven orphan* — a unit is installed, something is listening,
+/// and that listener is not the unit's own MainPID. Never true when no unit
+/// is installed, so the Auto callers (TUI/setup) can never reach a kill
+/// through this rule.
+pub(crate) fn orphan_needs_kill(
+    unit_installed: bool,
+    manager_pid: Option<u32>,
+    occupant: Option<u32>,
+) -> bool {
+    unit_installed && occupant.is_some() && manager_pid != occupant
+}
+
+/// CB72 stop rule (FR3): go through the service manager only when the live
+/// port occupant IS the unit's MainPID — signalling that PID directly reads
+/// as an unclean exit under `Restart=on-failure` and systemd respawns it
+/// behind the user's back. An orphan (occupant ≠ MainPID) keeps the plain
+/// signal path; no manager, or no live MainPID, has nothing to manage-stop.
+pub(crate) fn should_stop_via_manager(
+    manager: Option<&ServiceManagerFacts>,
+    occupant: Option<u32>,
+) -> bool {
+    manager.is_some_and(|m| m.pid.is_some() && m.pid == occupant)
 }
 
 /// The result of comparing the PID-file, port-occupant, and (if any)
@@ -1119,5 +1216,27 @@ LISTEN  0       128     0.0.0.0:8080        0.0.0.0:*
         let joined = d.describe().join("\n");
         assert!(!joined.contains("unit owns"));
         assert!(!joined.contains("Orphan:"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ancestor_pids_returns_parent_chain() {
+        let ancestors = ancestor_pids();
+        assert!(
+            !ancestors.is_empty(),
+            "ancestor chain must not be empty on Linux"
+        );
+        let ppid: u32 = std::fs::read_to_string("/proc/self/status")
+            .expect("read /proc/self/status")
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("PPid:")
+                    .and_then(|rest| rest.trim().parse::<u32>().ok())
+            })
+            .expect("PPid line must be present");
+        assert_eq!(
+            ancestors[0], ppid,
+            "first ancestor must be the direct parent PID"
+        );
     }
 }
