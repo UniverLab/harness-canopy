@@ -18,7 +18,11 @@ pub(crate) fn format_uptime(secs: u64) -> String {
 
 pub(crate) fn format_agent_info(a: &Agent) -> String {
     let prompt_preview = if a.prompt.len() > 80 {
-        format!("{}...", &a.prompt[..80])
+        format!(
+            "{}… (agent_get {} for the full prompt)",
+            &a.prompt[..80],
+            a.id
+        )
     } else {
         a.prompt.clone()
     };
@@ -69,6 +73,37 @@ pub(crate) fn format_agent_info(a: &Agent) -> String {
     }
 
     info
+}
+
+/// The full stored definition of one agent as JSON — shared by the MCP
+/// `agent_get` tool and `canopy agent show --json` so both surfaces emit
+/// byte-identical output (both serialize with `serde_json::to_string_pretty`).
+/// `notify_on_success` lives outside `AGENT_COLUMNS` (owned solely by
+/// `set_agent_notify_on_success`), so callers fetch it separately and pass
+/// it in. `trigger_type`/`trigger_config` are null for a manual (trigger-less)
+/// agent — they mirror the stored columns, not the "manual" display label.
+pub(crate) fn agent_detail_json(a: &Agent, notify_on_success: bool) -> serde_json::Value {
+    serde_json::json!({
+        "id": &a.id,
+        "trigger_type": a.trigger.as_ref().map(|t| t.type_str()),
+        "trigger_config": &a.trigger,
+        "cli": a.cli.as_str(),
+        "model": &a.model,
+        "effort": &a.effort,
+        "working_dir": &a.working_dir,
+        "enabled": a.enabled,
+        "timeout_minutes": a.timeout_minutes,
+        "expires_at": a.expires_at.as_ref().map(|t| t.to_rfc3339()),
+        "enable_at": a.enable_at.as_ref().map(|t| t.to_rfc3339()),
+        "notify_on_success": notify_on_success,
+        "log_path": &a.log_path,
+        "created_at": a.created_at.to_rfc3339(),
+        "last_run_at": a.last_run_at.as_ref().map(|t| t.to_rfc3339()),
+        "last_run_ok": a.last_run_ok,
+        "last_triggered_at": a.last_triggered_at.as_ref().map(|t| t.to_rfc3339()),
+        "trigger_count": a.trigger_count,
+        "prompt": &a.prompt,
+    })
 }
 
 pub(crate) fn resolve_log_path(db: &Database, id: &str) -> Result<String, McpError> {
@@ -574,11 +609,56 @@ mod formatting_unit_tests {
         let mut a = make_agent("long-1");
         a.prompt = "x".repeat(120);
         let info = format_agent_info(&a);
-        assert!(info.contains("..."));
         let prompt_line = info.lines().find(|l| l.contains("Prompt:")).unwrap();
-        // The prompt value should be at most 80 chars + "..."
         let after_prompt = prompt_line.split("Prompt: ").nth(1).unwrap();
-        assert!(after_prompt.len() <= 84);
+        assert!(after_prompt.starts_with(&"x".repeat(80)));
+        assert!(after_prompt.ends_with("… (agent_get long-1 for the full prompt)"));
+    }
+
+    #[test]
+    fn agent_detail_json_carries_every_field_and_full_prompt() {
+        let mut a = make_agent("json-1");
+        a.prompt = "p".repeat(2000);
+        a.trigger = Some(Trigger::Cron {
+            schedule_expr: "0 9 * * *".to_string(),
+        });
+        let v = agent_detail_json(&a, true);
+        assert_eq!(v["prompt"].as_str().unwrap(), "p".repeat(2000));
+        assert_eq!(v["trigger_type"], serde_json::json!("cron"));
+        assert_eq!(
+            v["trigger_config"]["schedule_expr"],
+            serde_json::json!("0 9 * * *")
+        );
+        assert_eq!(v["notify_on_success"], serde_json::json!(true));
+        for field in [
+            "id",
+            "trigger_type",
+            "trigger_config",
+            "cli",
+            "model",
+            "effort",
+            "working_dir",
+            "enabled",
+            "timeout_minutes",
+            "expires_at",
+            "enable_at",
+            "notify_on_success",
+            "log_path",
+            "created_at",
+            "last_run_at",
+            "last_run_ok",
+            "last_triggered_at",
+            "trigger_count",
+            "prompt",
+        ] {
+            assert!(v.get(field).is_some(), "missing field {field}");
+        }
+        // Null-valued optional fields are present as null, not omitted.
+        assert!(v["model"].is_null());
+        // A trigger-less agent reports null trigger fields, not "manual".
+        let manual = agent_detail_json(&make_agent("json-2"), false);
+        assert!(manual["trigger_type"].is_null());
+        assert!(manual["trigger_config"].is_null());
     }
 
     #[test]

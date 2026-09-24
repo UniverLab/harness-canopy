@@ -73,6 +73,16 @@ missing.
 | `canopy graph autorun <id-or-name> --quota-reset-message <text>` | Schedule a resume from a raw CLI quota-limit message |
 | `canopy graph autorun <id-or-name> --cancel` | Cancel a pending autorun schedule |
 
+## Agents
+
+Read-only inspection of registered agents, served from the local database
+(like `canopy graph info` — no daemon required).
+
+| Command | Description |
+|---|---|
+| `canopy agent show <id>` | Show one agent's full stored definition, prompt last and untruncated |
+| `canopy agent show <id> --json` | Print the same definition as JSON (identical to the `agent_get` MCP tool's output) |
+
 ## Spec backlog
 
 | Command | Description |

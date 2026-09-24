@@ -34,9 +34,9 @@ where
 use crate::application::notification_service::NotificationService;
 use crate::application::ports::{AgentRepository, RunRepository, StateRepository};
 use crate::daemon::handler_formatting::{
-    format_agent_info, format_catalog_models, format_log_output, format_native_models,
-    format_platform_models, format_temporal_agents, format_uptime, internal_error, make_log_path,
-    recent_runs_output, resolve_log_path,
+    agent_detail_json, format_agent_info, format_catalog_models, format_log_output,
+    format_native_models, format_platform_models, format_temporal_agents, format_uptime,
+    internal_error, make_log_path, recent_runs_output, resolve_log_path,
 };
 use crate::daemon::handler_helpers::{
     apply_scalar_updates, apply_trigger_updates, handle_timed_out_run, load_bound_seed_identity,
@@ -3219,6 +3219,25 @@ impl TaskTriggerHandler {
         Ok(CallToolResult::success(vec![Content::text(
             lines.join("\n"),
         )]))
+    }
+
+    /// Get one agent's full stored definition.
+    #[tool(
+        name = "agent_get",
+        description = "Get one agent's complete stored definition as JSON — every field including the full, untruncated prompt. agent_list truncates the prompt to ~80 characters; call this with an agent's id when you need the exact prompt text (e.g. to fix a stale command reference before agent_update) or any other stored field: trigger_type, trigger_config (parsed), cli, model, effort, working_dir, enabled, timeout_minutes, expires_at, enable_at, notify_on_success, log_path, created_at, last_run_at, last_run_ok, last_triggered_at, trigger_count. Read-only."
+    )]
+    async fn agent_get(
+        &self,
+        Parameters(IdParam { id }): Parameters<IdParam>,
+    ) -> Result<CallToolResult, McpError> {
+        let Some(agent) = self.db.get_agent(&id).map_err(internal_error)? else {
+            return Ok(error_result(&format!("agent '{}' not found", id)));
+        };
+        let notify = self
+            .db
+            .agent_notify_on_success(&id)
+            .map_err(internal_error)?;
+        Ok(build_json_result(&agent_detail_json(&agent, notify)))
     }
 
     fn format_session_info(session: &InteractiveSession) -> String {
@@ -20528,6 +20547,86 @@ mod endpoint_tests {
         let (_dir, _db, handler) = endpoint_test_handler();
         let result = handler.task_list().await.unwrap();
         assert!(text(&result).contains("No agents registered"));
+    }
+
+    #[tokio::test]
+    async fn agent_get_returns_full_prompt_and_every_field() {
+        let (_dir, db, handler) = endpoint_test_handler();
+        let mut agent = sample_agent(
+            "long-prompt",
+            Some(Trigger::Cron {
+                schedule_expr: "0 9 * * *".to_string(),
+            }),
+        );
+        agent.prompt = "x".repeat(2000);
+        db.upsert_agent(&agent).unwrap();
+
+        let result = handler
+            .agent_get(Parameters(IdParam {
+                id: "long-prompt".to_string(),
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&result), "{}", text(&result));
+        let v: serde_json::Value = serde_json::from_str(&raw_text(&result))
+            .unwrap_or_else(|e| panic!("expected JSON body: {e}"));
+        // The 2,000-char prompt comes back byte-identical — no truncation.
+        assert_eq!(v["prompt"].as_str().unwrap(), "x".repeat(2000));
+        for field in [
+            "id",
+            "trigger_type",
+            "trigger_config",
+            "cli",
+            "model",
+            "effort",
+            "working_dir",
+            "enabled",
+            "timeout_minutes",
+            "expires_at",
+            "enable_at",
+            "notify_on_success",
+            "log_path",
+            "created_at",
+            "last_run_at",
+            "last_run_ok",
+            "last_triggered_at",
+            "trigger_count",
+            "prompt",
+        ] {
+            assert!(v.get(field).is_some(), "missing field {field}");
+        }
+        assert_eq!(v["id"], serde_json::json!("long-prompt"));
+        assert_eq!(v["trigger_type"], serde_json::json!("cron"));
+        assert_eq!(
+            v["trigger_config"]["schedule_expr"],
+            serde_json::json!("0 9 * * *")
+        );
+        assert_eq!(v["cli"], serde_json::json!("opencode"));
+        assert_eq!(v["timeout_minutes"], serde_json::json!(15));
+    }
+
+    #[tokio::test]
+    async fn agent_get_unknown_id_returns_exact_error() {
+        let (_dir, _db, handler) = endpoint_test_handler();
+        let result = handler
+            .agent_get(Parameters(IdParam {
+                id: "nope".to_string(),
+            }))
+            .await
+            .unwrap();
+        assert!(is_err(&result));
+        assert_eq!(raw_text(&result), "agent 'nope' not found");
+    }
+
+    #[tokio::test]
+    async fn task_list_long_prompt_points_to_agent_get() {
+        let (_dir, db, handler) = endpoint_test_handler();
+        let mut agent = sample_agent("loop-watchdog", None);
+        agent.prompt = "y".repeat(2000);
+        db.upsert_agent(&agent).unwrap();
+
+        let result = handler.task_list().await.unwrap();
+        assert!(text(&result).contains("agent_get loop-watchdog"));
     }
 
     #[tokio::test]

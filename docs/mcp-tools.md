@@ -1,21 +1,22 @@
 ---
 title: MCP Tools
-description: All 95 MCP tools exposed by the canopy daemon, by category.
+description: All 96 MCP tools exposed by the canopy daemon, by category.
 order: 11
 ---
 
 # MCP Tools
 
-The daemon exposes **95 MCP tools** over Streamable HTTP (port 7755) and
+The daemon exposes **96 MCP tools** over Streamable HTTP (port 7755) and
 stdio. Connect any MCP-capable AI CLI with `canopy mcp`.
 
-## Agent management (17)
+## Agent management (18)
 
 | Tool | Description |
 |---|---|
 | `agent_add` | Create a cron-scheduled background agent |
 | `agent_watch` | Create a file-watcher-triggered agent |
 | `agent_list` | List registered agents |
+| `agent_get` | Get one agent's full stored definition as JSON, including the untruncated prompt |
 | `agent_remove` | Remove an agent |
 | `agent_enable` | Enable an agent |
 | `agent_schedule_enable` | Schedule a one-shot enable at a future time |
@@ -117,7 +118,7 @@ See [Graphs](graphs.md).
 
 Kept callable for the whole 3.x line, but excluded from tool listings
 (`tools/list`) so nothing new adopts them — call the 3.x name instead. Not
-counted in the 95 tools above.
+counted in the 96 tools above.
 
 | Deprecated name | Renamed to (3.0.0) |
 |---|---|

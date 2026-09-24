@@ -30,6 +30,7 @@ mod watchers;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use daemon::agent_cli::{handle_agent_action, AgentAction};
 use daemon::bridge::run_bridge;
 use daemon::clean_cli::handle_clean_action;
 use daemon::cli::{handle_daemon_action, DaemonAction};
@@ -108,6 +109,11 @@ enum Commands {
     Graph {
         #[command(subcommand)]
         action: GraphAction,
+    },
+    /// Inspect registered agents (read-only, served from the local database).
+    Agent {
+        #[command(subcommand)]
+        action: AgentAction,
     },
     /// Manage standalone specs.
     Spec {
@@ -228,6 +234,7 @@ async fn main() -> Result<()> {
         }
         Some(Commands::Rag { action }) => handle_rag_action(action).await,
         Some(Commands::Graph { action }) => handle_graph_action(action, cli.port).await,
+        Some(Commands::Agent { action }) => handle_agent_action(action).await,
         Some(Commands::Spec { action }) => handle_spec_action(action, cli.port).await,
         Some(Commands::Models { action }) => handle_models_action(action).await,
         Some(Commands::Project { action }) => handle_project_action(action).await,
