@@ -1197,6 +1197,38 @@ impl Database {
         .map_err(Into::into)
     }
 
+    /// CB69: attribution for the dirty-start message — the spec whose most
+    /// recent recorded run in THIS graph left the workdir dirty. `graph_runs`
+    /// rows (including queue-drawn ones, which always carry the launched
+    /// graph's `graph_id`) ordered by run start; each joined to its
+    /// `graph_specs` row's `spec_end_dirty`. `spec_end_dirty > 0` implements
+    /// "a run of this graph recorded the dirt": NULL means never captured and
+    /// 0 means captured-clean, neither "recorded dirt". `ORDER BY ... ,
+    /// gr.iteration DESC, gr.id DESC` makes the pick deterministic when two
+    /// rows share `started_at` (run `started_at` is stored in seconds).
+    /// Returns `None` when no run of this graph recorded dirt — the caller
+    /// then says "dirty before this graph ran" and names no spec.
+    pub fn find_last_dirty_run_spec(&self, graph_id: &str) -> Result<Option<GraphSpec>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        conn.query_row(
+            "SELECT gs.id, gs.graph_id, gs.name, gs.description, gs.position, gs.parallelizable, gs.status, gs.started_at, gs.completed_at, gs.spec_start_head, gs.spec_start_dirty, gs.workdir, gs.completed_via, gs.completed_via_reason, gs.completed_via_at, gs.spec_committed_head, gs.spec_end_dirty, gs.spec_end_dirty_paths
+             FROM graph_runs gr
+             JOIN graph_specs gs ON gs.id = gr.spec_id
+             WHERE gr.graph_id = ?1
+               AND gs.spec_end_dirty IS NOT NULL
+               AND gs.spec_end_dirty > 0
+             ORDER BY gr.started_at DESC, gr.iteration DESC, gr.id DESC
+             LIMIT 1",
+            params![graph_id],
+            map_graph_spec_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     /// CM29: specs reconciliation just marked `Interrupted` that haven't had
     /// their end-dirty state captured yet — `spec_end_dirty IS NULL` is the
     /// idempotency guard (a spec resumed and re-ended later overwrites this

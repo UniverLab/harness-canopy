@@ -69,13 +69,19 @@ summary/blocker text and (for a plain `Failed` ending) onto the `on_failed`
 hook's `{{node}}` value.
 
 `graph_run` and the autorun scheduler refuse to launch the next spec when the
-workdir is currently dirty and the most recently touched spec on that same
-workdir ended `Failed`, `Interrupted`, or `Skipped` (never `Completed`) —
-naming that spec and the current dirty count. Set `allow_dirty_start: true` via
-`graph_update` to downgrade this from a refusal to a warning. `graph_preflight`
-separately reports a dirty workdir as a warning unconditionally, with no
-"previous spec" logic — call it before `graph_run` to see this regardless of
-history.
+workdir is currently dirty and a spec on that same workdir ended `Failed`,
+`Interrupted`, or `Skipped` (never `Completed`). The warning names the spec
+whose last recorded run in **this graph** left the workdir dirty
+(`graph_runs` joined to `spec_end_dirty > 0`); when no run of this graph
+recorded dirt the warning says `dirty before this graph ran` and names no
+spec. When the launch proceeds, the warning says why — `allow_dirty_start` is
+set on the graph, or the next spec is resuming the dirty work it left itself —
+instead of telling you to set a flag. When it blocks, the message says
+`not launched` before the `Set allow_dirty_start` hint. Set
+`allow_dirty_start: true` via `graph_update` to downgrade a refusal to a
+warning. `graph_preflight` separately reports a dirty workdir as a warning
+unconditionally, with no "previous spec" logic — call it before `graph_run` to
+see this regardless of history.
 
 ```bash
 test -z "$(git status --porcelain -- src/)" \

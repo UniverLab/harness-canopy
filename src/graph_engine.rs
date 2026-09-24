@@ -1704,43 +1704,69 @@ impl GraphEngine {
             .map(|s| s.id))
     }
 
-    /// CM29: whether launching the next spec in `workdir` should be refused
-    /// (or, with `allow_dirty_start`, merely warned about) because a
-    /// different, earlier spec on this same workdir ended without
-    /// completing and left the tree dirty. `next_spec_id` — from
-    /// `preview_next_spec_id` — is excluded from the search so a spec
-    /// resuming its own `Interrupted` self is never mistaken for its own
-    /// bad predecessor. Read-only: one live `git status --porcelain` call
-    /// (never persisted here — the per-spec boundary capture already owns
-    /// persistence) plus a DB lookup.
+    /// CM29/CB69: whether launching the next spec in `workdir` should be refused
+    /// because a different, earlier spec on this same workdir ended without
+    /// completing and left the tree dirty (`find_dirty_predecessor_spec` — the
+    /// BLOCKING predicate, unchanged) and which spec the message should name.
+    /// The named spec (CB69) comes from `find_last_dirty_run_spec`: the spec
+    /// whose recorded run in `graph_id` last left the workdir dirty; when this
+    /// graph never recorded dirt the message says "dirty before this graph ran"
+    /// and names no spec. Read-only: two DB lookups plus one live
+    /// `git status --porcelain` call (captured only when a notice can exist —
+    /// same short-circuit cost as before, plus the resume case).
+    /// When the launch proceeds the message says WHY: the graph's
+    /// `allow_dirty_start` flag, or — when no predecessor blocks and the next
+    /// spec is the one that left the dirt — the spec resuming its own dirty
+    /// work (that case previously produced no message at all).
     pub async fn dirty_start_check(
         &self,
+        graph_id: &str,
         workdir: &str,
         next_spec_id: Option<&str>,
         allow_dirty_start: bool,
     ) -> Result<Option<DirtyStartNotice>> {
-        let Some(prev) = self.db.find_dirty_predecessor_spec(workdir, next_spec_id)? else {
-            return Ok(None);
+        // Blocking predicate: unchanged from CM29. The result is used only as a
+        // boolean (plus its existing exclusion of next_spec_id) — the NAME in
+        // the message comes from the attribution query below, never from it.
+        let predecessor = self.db.find_dirty_predecessor_spec(workdir, next_spec_id)?;
+        let attributed = self.db.find_last_dirty_run_spec(graph_id)?;
+        let resuming = match (&attributed, next_spec_id) {
+            (Some(spec), Some(next)) => spec.id == *next,
+            _ => false,
         };
+        if predecessor.is_none() && !resuming {
+            return Ok(None);
+        }
         let (dirty, _paths) = capture_workdir_dirty_with_paths(workdir).await;
         let Some(count) = dirty.filter(|n| *n > 0) else {
             return Ok(None);
         };
-        let name = if prev.name.trim().is_empty() {
-            prev.id.clone()
-        } else {
-            prev.name.clone()
-        };
         let plural = if count == 1 { "y" } else { "ies" };
-        let message = format!(
-            "workdir '{workdir}' is dirty ({count} entr{plural}) — spec '{name}' ended {} \
-             without cleaning up. Set allow_dirty_start on the graph to launch anyway.",
-            prev.status.as_str(),
-        );
-        Ok(Some(DirtyStartNotice {
-            refuse: !allow_dirty_start,
-            message,
-        }))
+        let attribution = match &attributed {
+            Some(spec) => {
+                let name = if spec.name.trim().is_empty() {
+                    spec.id.clone()
+                } else {
+                    spec.name.clone()
+                };
+                format!("spec '{name}' left it dirty on its last run in this graph")
+            }
+            None => "dirty before this graph ran".to_string(),
+        };
+        let head = format!("workdir '{workdir}' is dirty ({count} entr{plural})");
+        let refuse = predecessor.is_some() && !allow_dirty_start;
+        let message = if refuse {
+            format!("{head} — {attribution} — not launched. Set allow_dirty_start on the graph to launch anyway.")
+        } else if predecessor.is_some() {
+            // A blocking predecessor existed; the flag is what let it through.
+            format!(
+                "{head} — {attribution} — launched because allow_dirty_start is set on the graph."
+            )
+        } else {
+            // No predecessor blocks; the only way here is `resuming == true`.
+            format!("{head} — {attribution} — launched: the next spec is the one that left the dirt, resuming its own work.")
+        };
+        Ok(Some(DirtyStartNotice { refuse, message }))
     }
 
     /// CM29: called once at daemon boot, right after
@@ -8243,10 +8269,12 @@ pub(crate) async fn capture_workdir_dirty_with_paths(workdir: &str) -> (Option<i
     (Some(count), all_paths.into_iter().take(20).collect())
 }
 
-/// CM29: the result of `GraphEngine::dirty_start_check` — `refuse == true`
-/// means the caller must not launch; `refuse == false` (an
-/// `allow_dirty_start` graph) means launch, but surface `message` to the
-/// operator.
+/// CM29/CB69: the result of `GraphEngine::dirty_start_check` — `refuse ==
+/// true` means the caller must not launch (the message then carries the
+/// `not launched` sentence and the `allow_dirty_start` hint);
+/// `refuse == false` means launch — the graph has `allow_dirty_start` set,
+/// or the next spec is resuming the dirt it left itself — but surface
+/// `message` to the operator.
 pub struct DirtyStartNotice {
     pub refuse: bool,
     pub message: String,
@@ -9244,12 +9272,69 @@ mod tests {
         }
     }
 
+    fn dirty_predecessor_spec_named(
+        id: &str,
+        name: &str,
+        workdir: &str,
+        status: GraphSpecStatus,
+    ) -> GraphSpec {
+        let mut spec = dirty_predecessor_spec(id, workdir, status);
+        spec.name = name.to_string();
+        spec
+    }
+
+    /// CB69: insert a top-level Check node under `graph_id` plus one finished
+    /// (`Pass`) `graph_runs` row for `spec_id` started at `started_secs`
+    /// (epoch seconds — `insert_graph_run` stores `started_at.timestamp()`). The
+    /// run row is what `find_last_dirty_run_spec` joins. `graph_nodes` has a
+    /// UNIQUE index on (graph_id, position) (`idx_graph_nodes_graph_position`
+    /// in `src/db/mod.rs`) — pass a distinct `position` per node in a test.
+    fn insert_run_row(
+        db: &Database,
+        graph_id: &str,
+        spec_id: &str,
+        node_id: &str,
+        position: i64,
+        started_secs: i64,
+    ) -> Result<()> {
+        db.insert_graph_node(&GraphNode {
+            id: node_id.to_string(),
+            spec_id: None,
+            graph_id: Some(graph_id.to_string()),
+            name: format!("Node {node_id}"),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({}),
+            position,
+            created_at: chrono::Utc::now(),
+        })?;
+        db.insert_graph_run(&GraphNodeRun {
+            id: format!("run-{spec_id}-{started_secs}"),
+            graph_id: graph_id.to_string(),
+            spec_id: spec_id.to_string(),
+            node_id: node_id.to_string(),
+            status: GraphRunStatus::Pass,
+            input: None,
+            output: None,
+            started_at: chrono::DateTime::from_timestamp(started_secs, 0).unwrap(),
+            completed_at: None,
+            iteration: 1,
+            pid: None,
+            boot_id: None,
+            session_id: None,
+            executed_platform: None,
+            executed_model: None,
+        })?;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn dirty_start_check_refuses_when_predecessor_failed_dirty() {
-        let (_dir, db, engine, _graph_id, _spec_id) = graph_fixture().unwrap();
+        let (_dir, db, engine, graph_id, _spec_id) = graph_fixture().unwrap();
         let dir = tempdir().unwrap();
         init_git_repo(dir.path());
         let workdir = dir.path().to_string_lossy().to_string();
+        // The dirty-leaving spec is not this graph's — no run of `graph_id`
+        // recorded the dirt — so the warning attributes it to no spec (FR1).
         db.insert_graph_spec(&dirty_predecessor_spec(
             "pred-a",
             &workdir,
@@ -9260,18 +9345,173 @@ mod tests {
         std::fs::write(dir.path().join("y.txt"), "y").unwrap();
 
         let notice = engine
-            .dirty_start_check(&workdir, None, false)
+            .dirty_start_check(&graph_id, &workdir, None, false)
             .await
             .unwrap()
             .expect("expected a dirty-start notice");
         assert!(notice.refuse);
-        assert!(notice.message.contains("Predecessor"));
+        assert!(notice.message.contains("dirty before this graph ran"));
+        assert!(notice.message.contains("not launched"));
+        assert!(notice.message.contains("Set allow_dirty_start"));
+        assert!(!notice.message.contains("Predecessor"));
         assert!(notice.message.contains('2'));
     }
 
     #[tokio::test]
+    async fn dirty_start_check_names_the_spec_whose_run_last_left_the_workdir_dirty() {
+        let (_dir, db, engine, graph_id, _spec_id) = graph_fixture().unwrap();
+        let dir = tempdir().unwrap();
+        init_git_repo(dir.path());
+        let workdir = dir.path().to_string_lossy().to_string();
+        db.insert_graph_spec(&dirty_predecessor_spec_named(
+            "spec-a-old",
+            "OldPredecessor",
+            &workdir,
+            GraphSpecStatus::Failed,
+        ))
+        .unwrap();
+        db.insert_graph_spec(&dirty_predecessor_spec_named(
+            "spec-b-new",
+            "RecentDirtier",
+            &workdir,
+            GraphSpecStatus::Pending,
+        ))
+        .unwrap();
+        db.set_graph_spec_end_state("spec-a-old", Some(5), &["a".to_string()])
+            .unwrap();
+        db.set_graph_spec_end_state("spec-b-new", Some(2), &["b".to_string()])
+            .unwrap();
+        let now = chrono::Utc::now().timestamp();
+        insert_run_row(&db, &graph_id, "spec-a-old", "node-a", 1, now - 3600).unwrap();
+        insert_run_row(&db, &graph_id, "spec-b-new", "node-b", 2, now - 60).unwrap();
+        std::fs::write(dir.path().join("x.txt"), "x").unwrap();
+        std::fs::write(dir.path().join("y.txt"), "y").unwrap();
+
+        let notice = engine
+            .dirty_start_check(&graph_id, &workdir, Some("spec-b-new"), false)
+            .await
+            .unwrap()
+            .expect("expected a dirty-start notice");
+        assert!(notice.refuse);
+        assert!(
+            notice.message.contains("RecentDirtier"),
+            "the spec whose run last left the dirt must be named: {}",
+            notice.message
+        );
+        assert!(
+            !notice.message.contains("OldPredecessor"),
+            "the older failure must not be blamed: {}",
+            notice.message
+        );
+    }
+
+    #[tokio::test]
+    async fn dirty_start_check_refusal_says_not_launched() {
+        let (_dir, db, engine, graph_id, _spec_id) = graph_fixture().unwrap();
+        let dir = tempdir().unwrap();
+        init_git_repo(dir.path());
+        let workdir = dir.path().to_string_lossy().to_string();
+        db.insert_graph_spec(&dirty_predecessor_spec_named(
+            "spec-a-old",
+            "OldPredecessor",
+            &workdir,
+            GraphSpecStatus::Failed,
+        ))
+        .unwrap();
+        db.insert_graph_spec(&dirty_predecessor_spec_named(
+            "spec-b-new",
+            "RecentDirtier",
+            &workdir,
+            GraphSpecStatus::Pending,
+        ))
+        .unwrap();
+        db.set_graph_spec_end_state("spec-a-old", Some(5), &["a".to_string()])
+            .unwrap();
+        db.set_graph_spec_end_state("spec-b-new", Some(2), &["b".to_string()])
+            .unwrap();
+        let now = chrono::Utc::now().timestamp();
+        insert_run_row(&db, &graph_id, "spec-a-old", "node-a", 1, now - 3600).unwrap();
+        insert_run_row(&db, &graph_id, "spec-b-new", "node-b", 2, now - 60).unwrap();
+        std::fs::write(dir.path().join("x.txt"), "x").unwrap();
+        std::fs::write(dir.path().join("y.txt"), "y").unwrap();
+
+        let notice = engine
+            .dirty_start_check(&graph_id, &workdir, Some("spec-b-new"), false)
+            .await
+            .unwrap()
+            .expect("expected a dirty-start notice");
+        assert!(notice.refuse);
+        assert!(
+            notice.message.contains("not launched"),
+            "refusal must say not launched: {}",
+            notice.message
+        );
+        assert!(
+            notice.message.contains("Set allow_dirty_start"),
+            "refusal must carry the flag hint: {}",
+            notice.message
+        );
+    }
+
+    #[tokio::test]
+    async fn dirty_start_check_allow_dirty_start_states_reason_without_flag_hint() {
+        let (_dir, db, engine, graph_id, _spec_id) = graph_fixture().unwrap();
+        let dir = tempdir().unwrap();
+        init_git_repo(dir.path());
+        let workdir = dir.path().to_string_lossy().to_string();
+        db.insert_graph_spec(&dirty_predecessor_spec_named(
+            "spec-a-old",
+            "OldPredecessor",
+            &workdir,
+            GraphSpecStatus::Failed,
+        ))
+        .unwrap();
+        db.insert_graph_spec(&dirty_predecessor_spec_named(
+            "spec-b-new",
+            "RecentDirtier",
+            &workdir,
+            GraphSpecStatus::Pending,
+        ))
+        .unwrap();
+        db.set_graph_spec_end_state("spec-a-old", Some(5), &["a".to_string()])
+            .unwrap();
+        db.set_graph_spec_end_state("spec-b-new", Some(2), &["b".to_string()])
+            .unwrap();
+        let now = chrono::Utc::now().timestamp();
+        insert_run_row(&db, &graph_id, "spec-a-old", "node-a", 1, now - 3600).unwrap();
+        insert_run_row(&db, &graph_id, "spec-b-new", "node-b", 2, now - 60).unwrap();
+        std::fs::write(dir.path().join("x.txt"), "x").unwrap();
+        std::fs::write(dir.path().join("y.txt"), "y").unwrap();
+
+        let notice = engine
+            .dirty_start_check(&graph_id, &workdir, Some("spec-b-new"), true)
+            .await
+            .unwrap()
+            .expect("expected a dirty-start notice");
+        assert!(!notice.refuse);
+        assert!(
+            notice.message.contains("allow_dirty_start is set"),
+            "proceeded launch must state the flag reason: {}",
+            notice.message
+        );
+        assert!(
+            !notice.message.contains("Set allow_dirty_start"),
+            "must not tell the user to set an already-set flag: {}",
+            notice.message
+        );
+        assert!(
+            notice.message.contains("RecentDirtier"),
+            "the spec whose run last left the dirt must be named: {}",
+            notice.message
+        );
+    }
+
+    /// CB69/FR2: when the launch proceeds because `allow_dirty_start` is
+    /// set, the message gives that reason and never tells the reader to
+    /// set the flag.
+    #[tokio::test]
     async fn dirty_start_check_warns_instead_of_refusing_with_allow_dirty_start() {
-        let (_dir, db, engine, _graph_id, _spec_id) = graph_fixture().unwrap();
+        let (_dir, db, engine, graph_id, _spec_id) = graph_fixture().unwrap();
         let dir = tempdir().unwrap();
         init_git_repo(dir.path());
         let workdir = dir.path().to_string_lossy().to_string();
@@ -9285,17 +9525,18 @@ mod tests {
         std::fs::write(dir.path().join("y.txt"), "y").unwrap();
 
         let notice = engine
-            .dirty_start_check(&workdir, None, true)
+            .dirty_start_check(&graph_id, &workdir, None, true)
             .await
             .unwrap()
             .expect("expected a dirty-start notice");
         assert!(!notice.refuse);
-        assert!(!notice.message.is_empty());
+        assert!(notice.message.contains("allow_dirty_start is set"));
+        assert!(!notice.message.contains("Set allow_dirty_start"));
     }
 
     #[tokio::test]
     async fn dirty_start_check_ignores_clean_workdir() {
-        let (_dir, db, engine, _graph_id, _spec_id) = graph_fixture().unwrap();
+        let (_dir, db, engine, graph_id, _spec_id) = graph_fixture().unwrap();
         let dir = tempdir().unwrap();
         init_git_repo(dir.path());
         let workdir = dir.path().to_string_lossy().to_string();
@@ -9307,7 +9548,7 @@ mod tests {
         .unwrap();
 
         let notice = engine
-            .dirty_start_check(&workdir, None, false)
+            .dirty_start_check(&graph_id, &workdir, None, false)
             .await
             .unwrap();
         assert!(notice.is_none());
@@ -9315,7 +9556,7 @@ mod tests {
 
     #[tokio::test]
     async fn dirty_start_check_ignores_non_git_workdir() {
-        let (_dir, db, engine, _graph_id, _spec_id) = graph_fixture().unwrap();
+        let (_dir, db, engine, graph_id, _spec_id) = graph_fixture().unwrap();
         let dir = tempdir().unwrap();
         let workdir = dir.path().to_string_lossy().to_string();
         db.insert_graph_spec(&dirty_predecessor_spec(
@@ -9326,15 +9567,19 @@ mod tests {
         .unwrap();
 
         let notice = engine
-            .dirty_start_check(&workdir, None, false)
+            .dirty_start_check(&graph_id, &workdir, None, false)
             .await
             .unwrap();
         assert!(notice.is_none());
     }
 
+    /// CB69: the next spec is excluded from the predecessor search so it is
+    /// never mistaken for its own bad predecessor (CM29 guideline). With no
+    /// run row and no recorded dirt, there is neither a predecessor nor an
+    /// attribution, so there is no notice at all — exactly the old behavior.
     #[tokio::test]
     async fn dirty_start_check_excludes_the_next_spec_itself() {
-        let (_dir, db, engine, _graph_id, _spec_id) = graph_fixture().unwrap();
+        let (_dir, db, engine, graph_id, _spec_id) = graph_fixture().unwrap();
         let dir = tempdir().unwrap();
         init_git_repo(dir.path());
         let workdir = dir.path().to_string_lossy().to_string();
@@ -9347,18 +9592,105 @@ mod tests {
         std::fs::write(dir.path().join("x.txt"), "x").unwrap();
 
         let notice = engine
-            .dirty_start_check(&workdir, Some("spec-b"), false)
+            .dirty_start_check(&graph_id, &workdir, Some("spec-b"), false)
             .await
             .unwrap();
         assert!(notice.is_none());
     }
 
     #[tokio::test]
-    async fn dirty_start_check_ignores_a_completed_predecessor() {
-        let (_dir, db, engine, _graph_id, _spec_id) = graph_fixture().unwrap();
+    async fn dirty_start_check_resume_of_own_dirt_states_resume_reason() {
+        let (_dir, db, engine, graph_id, _spec_id) = graph_fixture().unwrap();
         let dir = tempdir().unwrap();
         init_git_repo(dir.path());
         let workdir = dir.path().to_string_lossy().to_string();
+        db.insert_graph_spec(&dirty_predecessor_spec_named(
+            "spec-b-new",
+            "RecentDirtier",
+            &workdir,
+            GraphSpecStatus::Pending,
+        ))
+        .unwrap();
+        db.set_graph_spec_end_state("spec-b-new", Some(2), &["b".to_string()])
+            .unwrap();
+        insert_run_row(
+            &db,
+            &graph_id,
+            "spec-b-new",
+            "node-b",
+            1,
+            chrono::Utc::now().timestamp() - 60,
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("x.txt"), "x").unwrap();
+
+        let notice = engine
+            .dirty_start_check(&graph_id, &workdir, Some("spec-b-new"), false)
+            .await
+            .unwrap()
+            .expect("resuming its own dirt must produce a notice");
+        assert!(!notice.refuse);
+        assert!(
+            notice.message.contains("resuming its own work"),
+            "message must state the resume reason: {}",
+            notice.message
+        );
+        assert!(
+            notice.message.contains("RecentDirtier"),
+            "the resuming spec must be named: {}",
+            notice.message
+        );
+        assert!(
+            !notice.message.contains("Set allow_dirty_start"),
+            "must not tell the user to set a flag: {}",
+            notice.message
+        );
+        assert!(
+            !notice.message.contains("allow_dirty_start is set"),
+            "the flag reason must not appear: {}",
+            notice.message
+        );
+    }
+
+    #[tokio::test]
+    async fn dirty_start_check_attribution_empty_when_no_run_recorded_the_dirt() {
+        let (_dir, db, engine, graph_id, _spec_id) = graph_fixture().unwrap();
+        let dir = tempdir().unwrap();
+        init_git_repo(dir.path());
+        let workdir = dir.path().to_string_lossy().to_string();
+        db.insert_graph_spec(&dirty_predecessor_spec(
+            "pred-a",
+            &workdir,
+            GraphSpecStatus::Failed,
+        ))
+        .unwrap();
+        std::fs::write(dir.path().join("x.txt"), "x").unwrap();
+
+        let notice = engine
+            .dirty_start_check(&graph_id, &workdir, None, false)
+            .await
+            .unwrap()
+            .expect("expected a dirty-start notice");
+        assert!(notice.refuse);
+        assert!(
+            notice.message.contains("dirty before this graph ran"),
+            "no run recorded the dirt: {}",
+            notice.message
+        );
+        assert!(
+            !notice.message.contains("Predecessor"),
+            "must not name a spec that never recorded dirt: {}",
+            notice.message
+        );
+    }
+
+    #[tokio::test]
+    async fn dirty_start_check_ignores_a_completed_predecessor() {
+        let (_dir, db, engine, graph_id, _spec_id) = graph_fixture().unwrap();
+        let dir = tempdir().unwrap();
+        init_git_repo(dir.path());
+        let workdir = dir.path().to_string_lossy().to_string();
+        // Completed and never recorded end dirt → owns nothing.
         db.insert_graph_spec(&dirty_predecessor_spec(
             "pred-a",
             &workdir,
@@ -9368,7 +9700,7 @@ mod tests {
         std::fs::write(dir.path().join("x.txt"), "x").unwrap();
 
         let notice = engine
-            .dirty_start_check(&workdir, None, false)
+            .dirty_start_check(&graph_id, &workdir, None, false)
             .await
             .unwrap();
         assert!(notice.is_none());

@@ -474,6 +474,7 @@ impl CronScheduler {
                 .unwrap_or(None);
             match graph_engine
                 .dirty_start_check(
+                    &lp.id,
                     &lp.workdir,
                     next_spec_preview.as_deref(),
                     lp.allow_dirty_start,

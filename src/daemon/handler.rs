@@ -9237,6 +9237,7 @@ impl TaskTriggerHandler {
         match self
             .graph_engine
             .dirty_start_check(
+                &graph_id,
                 effective_workdir,
                 next_spec_preview.as_deref(),
                 lp.allow_dirty_start,
@@ -23490,6 +23491,9 @@ mod endpoint_tests {
         let git_dir = tempdir().unwrap();
         init_git_repo(git_dir.path());
 
+        // The failed spec belongs to *another* graph and never recorded
+        // `spec_end_dirty` — no run of `lp` recorded this dirt (CB69 FR1),
+        // so the refusal keeps the CM29 block but names no spec.
         let failed_lp = insert_test_graph(&db, git_dir.path());
         insert_named_spec(&db, &failed_lp.id, "Spec A", 1, GraphSpecStatus::Failed);
 
@@ -23513,8 +23517,20 @@ mod endpoint_tests {
         assert!(is_err(&result), "{}", text(&result));
         let msg = text(&result);
         assert!(
-            msg.contains("Spec A"),
-            "refusal should name the failed predecessor spec: {msg}"
+            msg.contains("dirty before this graph ran"),
+            "refusal should report unattributed dirt: {msg}"
+        );
+        assert!(
+            msg.contains("not launched"),
+            "refusal must say not launched: {msg}"
+        );
+        assert!(
+            msg.contains("Set allow_dirty_start"),
+            "flag hint kept: {msg}"
+        );
+        assert!(
+            !msg.contains("Spec A"),
+            "must not blame an unrelated spec: {msg}"
         );
     }
 
@@ -23548,8 +23564,16 @@ mod endpoint_tests {
         assert!(!is_err(&result), "{}", text(&result));
         let msg = text(&result);
         assert!(
-            msg.contains("WARNING") && msg.contains("Spec A"),
-            "launch should succeed with a warning naming the dirty predecessor: {msg}"
+            msg.contains("WARNING"),
+            "launch warning still surfaced: {msg}"
+        );
+        assert!(
+            msg.contains("allow_dirty_start is set"),
+            "warning must state the reason: {msg}"
+        );
+        assert!(
+            !msg.contains("Set allow_dirty_start"),
+            "must not tell the user to set an already-set flag: {msg}"
         );
     }
 
