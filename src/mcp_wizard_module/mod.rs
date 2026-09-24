@@ -3,15 +3,16 @@
 //! Provides three operations:
 //!  - **Sync**: scan all detected platforms and replicate MCPs found in any of
 //!    them across every other platform (format-converted).
-//!  - **Add**: prompt for Name / URL / Type and write the entry to every
-//!    detected platform simultaneously.
+//!  - **Add**: ask how the server is described (paste README JSON, local
+//!    stdio command, or remote http URL), preview the entries, then write
+//!    them to every detected platform simultaneously.
 //!  - **Remove**: show a unified server list and remove the chosen entry from
 //!    every platform it appears in.
 
 use anyhow::{Context, Result};
 use inquire::{Select, Text};
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{self, Write};
+use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 
 use crate::setup_module::{self as setup, Platform};
@@ -36,8 +37,130 @@ struct AddServerInput {
 }
 
 enum ServerTransport {
-    Url(String),
-    Command { command: String, args: Vec<String> },
+    Url {
+        url: String,
+        headers: BTreeMap<String, String>,
+    },
+    Command {
+        command: String,
+        args: Vec<String>,
+        env: BTreeMap<String, String>,
+    },
+    Pasted(serde_json::Value),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AddInputMode {
+    Paste,
+    LocalCommand,
+    RemoteUrl,
+}
+
+const WRAPPER_KEYS: [&str; 4] = ["mcpServers", "servers", "mcp_servers", "mcp"];
+
+/// Parse pasted README JSON into (name, entry) pairs.
+///
+/// Accepts, in order: (a) an object with a top-level wrapper key
+/// (`mcpServers`, `servers`, `mcp_servers`, `mcp`) mapping to name → entry;
+/// (b) an object that is itself name → entry; (c) a fragment without outer
+/// braces, wrapped in `{` `}` and re-processed as (a)/(b). Entries are kept
+/// verbatim. An entry is valid when it is an object with a string `command`
+/// or a string `url`.
+fn parse_pasted_servers(text: &str) -> Result<Vec<(String, serde_json::Value)>> {
+    match serde_json::from_str::<serde_json::Value>(text) {
+        Ok(value) => extract_servers_from_value(&value),
+        Err(first_error) => {
+            let trimmed = text.trim().trim_end_matches(',').trim();
+            let wrapped = format!("{{{trimmed}}}");
+            match serde_json::from_str::<serde_json::Value>(&wrapped) {
+                Ok(value) => extract_servers_from_value(&value),
+                Err(_) => Err(first_error.into()),
+            }
+        }
+    }
+}
+
+fn extract_servers_from_value(
+    value: &serde_json::Value,
+) -> Result<Vec<(String, serde_json::Value)>> {
+    let Some(obj) = value.as_object() else {
+        return Err(anyhow::anyhow!("no servers found: expected a JSON object"));
+    };
+
+    let mut candidate: Option<&serde_json::Map<String, serde_json::Value>> = None;
+    for key in WRAPPER_KEYS {
+        if let Some(map) = obj.get(key).and_then(|v| v.as_object()) {
+            candidate = Some(map);
+            break;
+        }
+    }
+    // serde_json::Map preserves insertion order but BTreeMap-style key order
+    // is what tests assert; collect via the map's own iteration which for
+    // serde_json (preserve_order feature) is insertion order — normalize by
+    // sorting keys so output is deterministic regardless of input order.
+    let pairs: Vec<(String, serde_json::Value)> = match candidate {
+        Some(map) => map.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+        None => obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+    };
+
+    let mut servers: Vec<(String, serde_json::Value)> = Vec::new();
+    for (name, entry) in pairs {
+        let valid = entry.as_object().is_some_and(|o| {
+            o.get("command").and_then(|c| c.as_str()).is_some()
+                || o.get("url").and_then(|u| u.as_str()).is_some()
+        });
+        if !valid {
+            return Err(anyhow::anyhow!(
+                "server '{name}' needs `command` or `url`: entry must be an object with a string `command` or `url`"
+            ));
+        }
+        servers.push((name, entry));
+    }
+
+    if servers.is_empty() {
+        return Err(anyhow::anyhow!("no servers found: no name → entry pairs"));
+    }
+
+    servers.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(servers)
+}
+
+/// Split a command line into (command, args), honoring shell quoting.
+fn split_command_line(line: &str) -> Result<(String, Vec<String>)> {
+    let parts = shell_words::split(line)?;
+    let mut parts = parts.into_iter();
+    match parts.next() {
+        Some(command) if !command.is_empty() => Ok((command, parts.collect())),
+        _ => Err(anyhow::anyhow!("Command is required.")),
+    }
+}
+
+/// Parse `KEY=VALUE` tokens (shell-quoted) into a map.
+fn parse_kv_map(text: &str) -> Result<BTreeMap<String, String>> {
+    if text.trim().is_empty() {
+        return Ok(BTreeMap::new());
+    }
+
+    let mut map = BTreeMap::new();
+    for token in shell_words::split(text)? {
+        let Some((key, value)) = token.split_once('=') else {
+            return Err(anyhow::anyhow!("'{token}' must be KEY=VALUE (missing '=')"));
+        };
+        if key.is_empty() {
+            return Err(anyhow::anyhow!("'{token}' must be KEY=VALUE (empty key)"));
+        }
+        map.insert(key.to_string(), value.to_string());
+    }
+    Ok(map)
+}
+
+/// Display-only type for a pasted entry: `stdio` when it has `command`, else `http`.
+fn infer_display_type(entry: &serde_json::Value) -> &'static str {
+    if entry.get("command").and_then(|c| c.as_str()).is_some() {
+        "stdio"
+    } else {
+        "http"
+    }
 }
 
 /// Run the interactive `canopy mcp` wizard.
@@ -196,37 +319,78 @@ fn print_sync_summary(applied: usize, errors: usize) {
 
 // ── Add ────────────────────────────────────────────────────────────────────
 
-/// Interactively collect Name / URL / Type and inject into every detected platform.
+/// Ask how the server is described, collect its entries, preview them,
+/// then inject each into every detected platform.
 fn run_add(home: &Path, detected: &[&Platform]) -> Result<()> {
     println!();
     println!("  \x1b[1mAdd MCP Server\x1b[0m");
     println!("  ─────────────────────────────────────────────");
 
-    let Some(input) = prompt_add_server_input()? else {
+    let mode = prompt_add_input_mode()?;
+
+    let mut pending: Vec<(AddServerInput, serde_json::Value)> = Vec::new();
+    match mode {
+        AddInputMode::Paste => {
+            let Some(pasted) = prompt_paste_servers()? else {
+                return Ok(());
+            };
+            for (name, entry) in pasted {
+                let input = AddServerInput {
+                    server_type: infer_display_type(&entry).to_string(),
+                    name,
+                    transport: ServerTransport::Pasted(entry),
+                };
+                let config = build_server_config(&input);
+                pending.push((input, config));
+            }
+        }
+        AddInputMode::LocalCommand => {
+            let Some(input) = prompt_stdio_input()? else {
+                return Ok(());
+            };
+            let config = build_server_config(&input);
+            pending.push((input, config));
+        }
+        AddInputMode::RemoteUrl => {
+            let Some(input) = prompt_url_input()? else {
+                return Ok(());
+            };
+            let config = build_server_config(&input);
+            pending.push((input, config));
+        }
+    }
+
+    let all_configs = collect_all_platform_configs(home, detected);
+    let existing = collect_all_server_names(&all_configs);
+
+    for (input, config) in &pending {
+        let name = &input.name;
+        if existing.contains(name) {
+            println!("  \x1b[1m{name}\x1b[0m \x1b[33m(replaces existing)\x1b[0m");
+        } else {
+            println!("  \x1b[1m{name}\x1b[0m");
+        }
+        println!("{}", serde_json::to_string_pretty(config)?);
+    }
+
+    if !confirm(&format!("Install on {} platform(s)?", detected.len()))? {
+        println!("  Cancelled.");
         return Ok(());
-    };
+    }
 
-    let config = build_server_config(&input);
-
-    println!();
-    println!(
-        "  Installing \x1b[1m{}\x1b[0m ({}) on all platforms…",
-        input.name, input.server_type
-    );
-
-    let (ok, fail) = add_server_to_platforms(home, detected, &input.name, &config);
-
-    println!();
-    if fail == 0 {
+    for (input, config) in &pending {
+        let name = &input.name;
+        println!();
         println!(
-            "  \x1b[32m✓\x1b[0m '{}' added to {ok} platform(s).",
-            input.name
+            "  Installing \x1b[1m{name}\x1b[0m ({}) …",
+            input.server_type
         );
-    } else {
-        println!(
-            "  \x1b[33m⚠\x1b[0m '{}' added to {ok}, failed on {fail} platform(s).",
-            input.name
-        );
+        let (ok, fail) = add_server_to_platforms(home, detected, name, config);
+        if fail == 0 {
+            println!("  \x1b[32m✓\x1b[0m '{name}' added to {ok} platform(s).");
+        } else {
+            println!("  \x1b[33m⚠\x1b[0m '{name}' added to {ok}, failed on {fail} platform(s).");
+        }
     }
 
     println!();
@@ -234,57 +398,143 @@ fn run_add(home: &Path, detected: &[&Platform]) -> Result<()> {
     Ok(())
 }
 
-fn prompt_add_server_input() -> Result<Option<AddServerInput>> {
+fn prompt_add_input_mode() -> Result<AddInputMode> {
+    let choice = Select::new(
+        "How do you want to describe the server?",
+        vec![
+            "Paste JSON — the snippet from the server's README",
+            "Local command (stdio)",
+            "Remote URL (http)",
+        ],
+    )
+    .with_help_message("↑↓ navigate | Enter select | Esc cancel")
+    .prompt()
+    .map_err(cancelled_prompt)?;
+
+    Ok(match choice {
+        c if c.starts_with("Paste") => AddInputMode::Paste,
+        c if c.starts_with("Local") => AddInputMode::LocalCommand,
+        c if c.starts_with("Remote") => AddInputMode::RemoteUrl,
+        _ => AddInputMode::Paste,
+    })
+}
+
+fn read_pasted_text() -> Result<String> {
+    println!("Paste the JSON, then press Enter on an empty line (Ctrl-D also ends):");
+    let stdin = io::stdin();
+    let mut lines = Vec::new();
+    for line in stdin.lock().lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            break;
+        }
+        lines.push(line);
+    }
+    Ok(lines.join("\n"))
+}
+
+fn prompt_paste_servers() -> Result<Option<Vec<(String, serde_json::Value)>>> {
+    let text = read_pasted_text()?;
+    match parse_pasted_servers(&text) {
+        Ok(servers) => Ok(Some(servers)),
+        Err(error) => {
+            println!("  \x1b[31m✗\x1b[0m {error}");
+            Ok(None)
+        }
+    }
+}
+
+fn prompt_stdio_input() -> Result<Option<AddServerInput>> {
     let name = prompt_trimmed_text("Server name (e.g. \"github\"):")?;
     if !validate_required_input(&name, "Server name is required.") {
         return Ok(None);
     }
 
-    let server_type = prompt_server_type()?;
-    let Some(transport) = prompt_server_transport(&server_type)? else {
+    let line = prompt_trimmed_text(
+        "Command with its arguments (e.g. \"uvx git+https://github.com/org/server\"):",
+    )?;
+    if !validate_required_input(&line, "Command is required.") {
         return Ok(None);
+    }
+    let (command, args) = match split_command_line(&line) {
+        Ok(parts) => parts,
+        Err(error) => {
+            println!("  \x1b[31m✗\x1b[0m {error}");
+            return Ok(None);
+        }
+    };
+
+    let env_text = prompt_trimmed_text(
+        "Environment variables (KEY=VALUE separated by spaces, empty for none):",
+    )?;
+    let env = match parse_kv_map(&env_text) {
+        Ok(map) => map,
+        Err(error) => {
+            println!("  \x1b[31m✗\x1b[0m {error}");
+            return Ok(None);
+        }
     };
 
     Ok(Some(AddServerInput {
         name,
-        server_type,
-        transport,
+        server_type: "stdio".to_string(),
+        transport: ServerTransport::Command { command, args, env },
     }))
 }
 
-fn prompt_server_transport(server_type: &str) -> Result<Option<ServerTransport>> {
-    if server_type != "stdio" {
-        let url = prompt_trimmed_text("Server URL (e.g. \"https://example.com/mcp\"):")?;
-        if !validate_required_input(&url, "Server URL is required.") {
-            return Ok(None);
-        }
-        return Ok(Some(ServerTransport::Url(url)));
-    }
-
-    let command_line = prompt_trimmed_text("Command (e.g. \"npx -y @scope/server\"):")?;
-    if !validate_required_input(&command_line, "Command is required.") {
+fn prompt_url_input() -> Result<Option<AddServerInput>> {
+    let name = prompt_trimmed_text("Server name (e.g. \"github\"):")?;
+    if !validate_required_input(&name, "Server name is required.") {
         return Ok(None);
     }
 
-    let mut parts = command_line.split_whitespace().map(str::to_owned);
-    let command = parts.next().unwrap_or_default();
-    Ok(Some(ServerTransport::Command {
-        command,
-        args: parts.collect(),
+    let url = prompt_trimmed_text("Server URL (e.g. \"https://example.com/mcp\"):")?;
+    if !validate_required_input(&url, "Server URL is required.") {
+        return Ok(None);
+    }
+
+    let headers_text = prompt_trimmed_text(
+        "HTTP headers (Name=Value separated by spaces, quote values with spaces, empty for none):",
+    )?;
+    let headers = match parse_kv_map(&headers_text) {
+        Ok(map) => map,
+        Err(error) => {
+            println!("  \x1b[31m✗\x1b[0m {error}");
+            return Ok(None);
+        }
+    };
+
+    Ok(Some(AddServerInput {
+        name,
+        server_type: "http".to_string(),
+        transport: ServerTransport::Url { url, headers },
     }))
 }
 
 fn build_server_config(input: &AddServerInput) -> serde_json::Value {
     match &input.transport {
-        ServerTransport::Url(url) => serde_json::json!({
-            "type": input.server_type,
-            "url": url,
-        }),
-        ServerTransport::Command { command, args } => serde_json::json!({
-            "type": input.server_type,
-            "command": command,
-            "args": args,
-        }),
+        ServerTransport::Url { url, headers } => {
+            let mut config = serde_json::json!({
+                "type": "http",
+                "url": url,
+            });
+            if !headers.is_empty() {
+                config["headers"] = serde_json::json!(headers);
+            }
+            config
+        }
+        ServerTransport::Command { command, args, env } => {
+            let mut config = serde_json::json!({
+                "type": "stdio",
+                "command": command,
+                "args": args,
+            });
+            if !env.is_empty() {
+                config["env"] = serde_json::json!(env);
+            }
+            config
+        }
+        ServerTransport::Pasted(entry) => entry.clone(),
     }
 }
 
@@ -500,13 +750,6 @@ fn prompt_trimmed_text(prompt: &str) -> Result<String> {
     Text::new(prompt)
         .prompt()
         .map(|value| value.trim().to_string())
-        .map_err(cancelled_prompt)
-}
-
-fn prompt_server_type() -> Result<String> {
-    Select::new("Server type:", vec!["http", "remote", "stdio"])
-        .prompt()
-        .map(str::to_owned)
         .map_err(cancelled_prompt)
 }
 
@@ -1332,7 +1575,10 @@ mod tests {
         let input = AddServerInput {
             name: "test".to_string(),
             server_type: "http".to_string(),
-            transport: ServerTransport::Url("https://example.com/mcp".to_string()),
+            transport: ServerTransport::Url {
+                url: "https://example.com/mcp".to_string(),
+                headers: BTreeMap::new(),
+            },
         };
 
         let config = build_server_config(&input);
@@ -1349,6 +1595,7 @@ mod tests {
             transport: ServerTransport::Command {
                 command: "npx".to_string(),
                 args: vec!["-y".to_string(), "@scope/server".to_string()],
+                env: BTreeMap::new(),
             },
         };
 
@@ -1367,6 +1614,7 @@ mod tests {
             transport: ServerTransport::Command {
                 command: "node".to_string(),
                 args: vec![],
+                env: BTreeMap::new(),
             },
         };
 
@@ -1650,9 +1898,12 @@ mod tests {
 
     #[test]
     fn server_transport_url_variants() {
-        let t = ServerTransport::Url("https://x.com".to_string());
+        let t = ServerTransport::Url {
+            url: "https://x.com".to_string(),
+            headers: BTreeMap::new(),
+        };
         match t {
-            ServerTransport::Url(u) => assert_eq!(u, "https://x.com"),
+            ServerTransport::Url { url, .. } => assert_eq!(url, "https://x.com"),
             _ => panic!("Expected Url variant"),
         }
     }
@@ -1662,9 +1913,10 @@ mod tests {
         let t = ServerTransport::Command {
             command: "npx".to_string(),
             args: vec!["-y".to_string()],
+            env: BTreeMap::new(),
         };
         match t {
-            ServerTransport::Command { command, args } => {
+            ServerTransport::Command { command, args, .. } => {
                 assert_eq!(command, "npx");
                 assert_eq!(args, vec!["-y"]);
             }
@@ -1672,15 +1924,11 @@ mod tests {
         }
     }
 
-    // ── prompt_server_transport command parsing (logic test) ───────────────
+    // ── split_command_line ────────────────────────────────────────────────
 
     #[test]
     fn command_line_splitting_logic() {
-        // Replicate the splitting logic from prompt_server_transport
-        let command_line = "npx -y @scope/server --verbose";
-        let mut parts = command_line.split_whitespace().map(str::to_owned);
-        let command = parts.next().unwrap_or_default();
-        let args: Vec<String> = parts.collect();
+        let (command, args) = split_command_line("npx -y @scope/server --verbose").unwrap();
 
         assert_eq!(command, "npx");
         assert_eq!(args, vec!["-y", "@scope/server", "--verbose"]);
@@ -1688,10 +1936,7 @@ mod tests {
 
     #[test]
     fn command_line_single_word() {
-        let command_line = "node";
-        let mut parts = command_line.split_whitespace().map(str::to_owned);
-        let command = parts.next().unwrap_or_default();
-        let args: Vec<String> = parts.collect();
+        let (command, args) = split_command_line("node").unwrap();
 
         assert_eq!(command, "node");
         assert!(args.is_empty());
@@ -1699,32 +1944,17 @@ mod tests {
 
     #[test]
     fn command_line_empty_string() {
-        let command_line = "";
-        let mut parts = command_line.split_whitespace().map(str::to_owned);
-        let command = parts.next().unwrap_or_default();
-        let args: Vec<String> = parts.collect();
-
-        assert_eq!(command, "");
-        assert!(args.is_empty());
+        assert!(split_command_line("").is_err());
     }
 
     #[test]
     fn command_line_only_whitespace() {
-        let command_line = "   ";
-        let mut parts = command_line.split_whitespace().map(str::to_owned);
-        let command = parts.next().unwrap_or_default();
-        let args: Vec<String> = parts.collect();
-
-        assert_eq!(command, "");
-        assert!(args.is_empty());
+        assert!(split_command_line("   ").is_err());
     }
 
     #[test]
     fn command_line_extra_whitespace() {
-        let command_line = "  npx   -y   @scope/server  ";
-        let mut parts = command_line.split_whitespace().map(str::to_owned);
-        let command = parts.next().unwrap_or_default();
-        let args: Vec<String> = parts.collect();
+        let (command, args) = split_command_line("  npx   -y   @scope/server  ").unwrap();
 
         assert_eq!(command, "npx");
         assert_eq!(args, vec!["-y", "@scope/server"]);
@@ -1746,7 +1976,10 @@ mod tests {
         let input = AddServerInput {
             name: "github".to_string(),
             server_type: "http".to_string(),
-            transport: ServerTransport::Url("https://x.com".to_string()),
+            transport: ServerTransport::Url {
+                url: "https://x.com".to_string(),
+                headers: BTreeMap::new(),
+            },
         };
         assert_eq!(input.name, "github");
         assert_eq!(input.server_type, "http");
@@ -1852,5 +2085,188 @@ mod tests {
     #[test]
     fn server_presence_icon_false_exact() {
         assert_eq!(server_presence_icon(false), "\x1b[31m ✗\x1b[0m");
+    }
+
+    // ── parse_pasted_servers ──────────────────────────────────────────────
+
+    #[test]
+    fn parse_pasted_colab_fragment() {
+        // The exact snippet from the colab-mcp README, without outer braces,
+        // as pasted line-by-line (read_pasted_text joins lines with '\n').
+        let text = r#""mcpServers": {
+  "colab-mcp": {
+    "command": "uvx",
+    "args": ["git+https://github.com/googlecolab/colab-mcp"],
+    "timeout": 30000
+  }
+}"#;
+        let servers = parse_pasted_servers(text).unwrap();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].0, "colab-mcp");
+        assert_eq!(servers[0].1["command"], "uvx");
+        assert_eq!(
+            servers[0].1["args"],
+            serde_json::json!(["git+https://github.com/googlecolab/colab-mcp"])
+        );
+        assert_eq!(servers[0].1["timeout"], 30000);
+    }
+
+    #[test]
+    fn parse_pasted_colab_wrapped() {
+        let text = r#"{ "mcpServers": { "colab-mcp": { "command": "uvx", "args": ["git+https://github.com/googlecolab/colab-mcp"], "timeout": 30000 } } }"#;
+        let servers = parse_pasted_servers(text).unwrap();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].0, "colab-mcp");
+        assert_eq!(servers[0].1["command"], "uvx");
+        assert_eq!(
+            servers[0].1["args"],
+            serde_json::json!(["git+https://github.com/googlecolab/colab-mcp"])
+        );
+        assert_eq!(servers[0].1["timeout"], 30000);
+    }
+
+    #[test]
+    fn parse_pasted_fragment_with_trailing_comma() {
+        // Requirement 2c: trailing comma removed before wrapping.
+        let text = r#""mcpServers": { "colab-mcp": { "command": "uvx" } },"#;
+        let servers = parse_pasted_servers(text).unwrap();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].0, "colab-mcp");
+        assert_eq!(servers[0].1["command"], "uvx");
+    }
+
+    #[test]
+    fn parse_pasted_bare_name_map_two_servers() {
+        let text =
+            r#"{"a": {"url": "https://x/mcp"}, "b": {"command": "npx", "args": ["-y","b"]}}"#;
+        let servers = parse_pasted_servers(text).unwrap();
+        assert_eq!(servers.len(), 2);
+        assert_eq!(servers[0].0, "a");
+        assert_eq!(servers[1].0, "b");
+        assert_eq!(servers[0].1["url"], "https://x/mcp");
+        assert_eq!(servers[1].1["command"], "npx");
+    }
+
+    #[test]
+    fn parse_pasted_invalid_entry_names_server() {
+        let err = parse_pasted_servers(r#"{"mcpServers": {"bad": {"foo": 1}}}"#).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("bad"), "error was: {err}");
+        assert!(
+            message.contains("command") && message.contains("url"),
+            "error was: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_pasted_empty_is_no_servers_found() {
+        let err = parse_pasted_servers("{}").unwrap_err();
+        assert!(
+            err.to_string().contains("no servers found"),
+            "error was: {err}"
+        );
+    }
+
+    #[test]
+    fn split_command_line_keeps_quotes() {
+        let (command, args) = split_command_line(r#"uvx "my server" --flag"#).unwrap();
+        assert_eq!(command, "uvx");
+        assert_eq!(args, vec!["my server", "--flag"]);
+    }
+
+    #[test]
+    fn parse_kv_map_two_entries() {
+        let map = parse_kv_map(r#"A=1 B="two words""#).unwrap();
+        assert_eq!(map.get("A").map(String::as_str), Some("1"));
+        assert_eq!(map.get("B").map(String::as_str), Some("two words"));
+        assert_eq!(map.len(), 2);
+    }
+
+    #[test]
+    fn parse_kv_map_rejects_missing_equals() {
+        assert!(parse_kv_map("NOEQUALS").is_err());
+    }
+
+    #[test]
+    fn parse_kv_map_rejects_empty_key() {
+        assert!(parse_kv_map("=v").is_err());
+    }
+
+    #[test]
+    fn build_server_config_stdio_omits_empty_env() {
+        let input = AddServerInput {
+            name: "test".to_string(),
+            server_type: "stdio".to_string(),
+            transport: ServerTransport::Command {
+                command: "npx".to_string(),
+                args: vec!["-y".to_string()],
+                env: BTreeMap::new(),
+            },
+        };
+        let config = build_server_config(&input);
+        assert!(config.get("env").is_none());
+    }
+
+    #[test]
+    fn build_server_config_stdio_emits_env() {
+        let mut env = BTreeMap::new();
+        env.insert("K".to_string(), "V".to_string());
+        let input = AddServerInput {
+            name: "test".to_string(),
+            server_type: "stdio".to_string(),
+            transport: ServerTransport::Command {
+                command: "npx".to_string(),
+                args: vec![],
+                env,
+            },
+        };
+        let config = build_server_config(&input);
+        assert_eq!(config["env"], serde_json::json!({"K": "V"}));
+    }
+
+    #[test]
+    fn build_server_config_http_omits_empty_headers() {
+        let input = AddServerInput {
+            name: "test".to_string(),
+            server_type: "http".to_string(),
+            transport: ServerTransport::Url {
+                url: "https://example.com/mcp".to_string(),
+                headers: BTreeMap::new(),
+            },
+        };
+        let config = build_server_config(&input);
+        assert_eq!(config["type"], "http");
+        assert!(config.get("headers").is_none());
+    }
+
+    #[test]
+    fn build_server_config_http_emits_headers() {
+        let mut headers = BTreeMap::new();
+        headers.insert("Authorization".to_string(), "Bearer x".to_string());
+        let input = AddServerInput {
+            name: "test".to_string(),
+            server_type: "http".to_string(),
+            transport: ServerTransport::Url {
+                url: "https://example.com/mcp".to_string(),
+                headers,
+            },
+        };
+        let config = build_server_config(&input);
+        assert_eq!(
+            config["headers"],
+            serde_json::json!({"Authorization": "Bearer x"})
+        );
+    }
+
+    #[test]
+    fn build_server_config_pasted_is_verbatim() {
+        let entry = serde_json::json!({"command": "uvx", "timeout": 30000});
+        let input = AddServerInput {
+            name: "colab-mcp".to_string(),
+            server_type: "stdio".to_string(),
+            transport: ServerTransport::Pasted(entry.clone()),
+        };
+        let config = build_server_config(&input);
+        assert_eq!(config, entry);
     }
 }
