@@ -414,6 +414,7 @@ pub(crate) async fn run_doctor() -> Result<()> {
         issues.push("Run 'canopy setup' to detect and configure harnesses".to_string());
     } else {
         for cli_config in &config.clis {
+            let label = doctor_cli_label(cli_config);
             match cli_config.resolve() {
                 // declaration, partially: `resolve()`'s PATH-search step
                 // (`which`) does confirm a real file, but its absolute-path
@@ -426,7 +427,7 @@ pub(crate) async fn run_doctor() -> Result<()> {
                 Ok((resolved, step)) if !binary_is_executable(&resolved) => {
                     println!(
                         " \x1b[31m✗\x1b[0m {} → {} (via {} — file missing or not executable)",
-                        cli_config.name,
+                        label,
                         resolved.display(),
                         step.label()
                     );
@@ -450,7 +451,7 @@ pub(crate) async fn run_doctor() -> Result<()> {
                             .map_or("", |c| c.contains.as_str());
                         println!(
                             " \x1b[31m✗\x1b[0m {} → {} (via {} — wrong binary: expected '{}' in output; saw: {})",
-                            cli_config.name,
+                            label,
                             resolved.display(),
                             step.label(),
                             check,
@@ -473,14 +474,14 @@ pub(crate) async fn run_doctor() -> Result<()> {
                     if daemon_reachable {
                         success(format!(
                             "{} → {} (via {})",
-                            cli_config.name,
+                            label,
                             resolved.display(),
                             step.label()
                         ));
                     } else {
                         println!(
                             " \x1b[33m⚠\x1b[0m {} → {} (via {} — reachable now but NOT from the daemon)",
-                            cli_config.name,
+                            label,
                             resolved.display(),
                             step.label()
                         );
@@ -493,7 +494,7 @@ pub(crate) async fn run_doctor() -> Result<()> {
                     }
                 }
                 Err(e) => {
-                    println!(" \x1b[31m✗\x1b[0m {} — not found ({})", cli_config.name, e);
+                    println!(" \x1b[31m✗\x1b[0m {} — not found ({})", label, e);
                     issues.push(format!(
                         "'{}' binary '{}' not found. {}",
                         cli_config.name, e.binary, e.path
@@ -985,6 +986,21 @@ fn binary_is_executable(path: &Path) -> bool {
 #[cfg(not(unix))]
 fn binary_is_executable(path: &Path) -> bool {
     path.is_file()
+}
+
+/// Human label for a platform in doctor output: the product display name
+/// ("Provider · Tool" when the registry knows both), with the slug in
+/// brackets when it differs so the user still knows what to type in
+/// config.toml and flags. A platform with no provider/tool_name renders
+/// the legacy exact slug string. Delegates to `CliConfig::display_name`;
+/// never used for matching.
+fn doctor_cli_label(cli_config: &crate::domain::cli_config::CliConfig) -> String {
+    let display = cli_config.display_name();
+    if display == cli_config.name {
+        display
+    } else {
+        format!("{} [{}]", display, cli_config.name)
+    }
 }
 
 /// CB44: run the platform's registry-declared identity check against the
@@ -1485,6 +1501,21 @@ mod tests {
         // Nothing to compare against — the unit's binary existing is enough.
         let status = diagnose_service_unit_binary(Path::new("/usr/bin/canopy"), true, None);
         assert_eq!(status, ServiceUnitBinaryStatus::Consistent);
+    }
+
+    #[test]
+    fn doctor_renders_display_with_slug_suffix() {
+        let mut cli = crate::domain::cli_config::CliConfig {
+            name: "mistral".to_string(),
+            provider: Some("Mistral AI".to_string()),
+            tool_name: Some("Vibe".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(super::doctor_cli_label(&cli), "Mistral AI · Vibe [mistral]");
+        cli.provider = None;
+        cli.tool_name = None;
+        assert_eq!(cli.display_name(), "mistral");
+        assert_eq!(super::doctor_cli_label(&cli), "mistral");
     }
 
     #[test]

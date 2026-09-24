@@ -56,6 +56,13 @@ pub struct Platform {
     pub skills_dir: Option<String>,
     #[serde(default)]
     pub instruction_file: Option<String>,
+    /// Human product identity from the registry (canopy-registry PR #2),
+    /// top-level platform keys (siblings of `name`). Copied onto the
+    /// `CliConfig` in `to_platform_with_cli`; display-only, never identity.
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub tool_name: Option<String>,
     #[serde(default)]
     pub cli: Option<serde_json::Value>,
 }
@@ -80,6 +87,16 @@ impl Platform {
                 .map(|mut c| {
                     c.name = self.name.clone();
                     c.instruction_file = self.instruction_file.clone();
+                    // Registry PR #2 publishes provider/tool_name as
+                    // top-level platform keys; the [cli] table does not
+                    // carry them, so copy explicitly (still stored on
+                    // CliConfig, still rendered via platform_display_name).
+                    if c.provider.is_none() {
+                        c.provider = self.provider.clone();
+                    }
+                    if c.tool_name.is_none() {
+                        c.tool_name = self.tool_name.clone();
+                    }
                     c
                 })
                 .ok()
@@ -244,6 +261,9 @@ mod tests {
                 "binary": "test-cli",
                 "install": {"type": "none"}
             })),
+
+            provider: None,
+            tool_name: None,
         };
 
         let result = platform.to_platform_with_cli();
@@ -275,6 +295,9 @@ mod tests {
             skills_dir: None,
             instruction_file: None,
             cli: None,
+
+            provider: None,
+            tool_name: None,
         };
 
         let result = platform.to_platform_with_cli();
@@ -299,11 +322,43 @@ mod tests {
             skills_dir: None,
             instruction_file: None,
             cli: Some(serde_json::json!("not an object")),
+
+            provider: None,
+            tool_name: None,
         };
 
         let result = platform.to_platform_with_cli();
         assert_eq!(result.name, "bad-cli");
         assert!(result.cli.is_none());
+    }
+
+    #[test]
+    fn to_platform_with_cli_carries_provider_tool() {
+        let platform = Platform {
+            name: "mistral".to_string(),
+            config_path: ".vibe/config.toml".to_string(),
+            config_format: None,
+            toml_array_format: false,
+            command_format: "separate".to_string(),
+            mcp_servers_key: vec![],
+            deprecated_keys: vec![],
+            unsupported_keys: vec![],
+            fields_mapping: std::collections::HashMap::new(),
+            required_fields: std::collections::HashMap::new(),
+            server_extras: std::collections::HashMap::new(),
+            skills_dir: None,
+            instruction_file: None,
+            provider: Some("Mistral AI".to_string()),
+            tool_name: Some("Vibe".to_string()),
+            cli: Some(serde_json::json!({"binary": "vibe"})),
+        };
+
+        let result = platform.to_platform_with_cli();
+        let cli = result.cli.expect("cli must parse");
+        assert_eq!(cli.name, "mistral");
+        assert_eq!(cli.provider.as_deref(), Some("Mistral AI"));
+        assert_eq!(cli.tool_name.as_deref(), Some("Vibe"));
+        assert_eq!(cli.display_name(), "Mistral AI · Vibe");
     }
 
     #[test]
@@ -323,6 +378,9 @@ mod tests {
             skills_dir: None,
             instruction_file: None,
             cli: Some(serde_json::json!({"binary": "ls"})),
+
+            provider: None,
+            tool_name: None,
         };
         assert!(is_platform_available(&platform));
     }
@@ -344,6 +402,9 @@ mod tests {
             skills_dir: None,
             instruction_file: None,
             cli: Some(serde_json::json!({"binary": "definitely_not_a_real_binary_xyz123"})),
+
+            provider: None,
+            tool_name: None,
         };
         assert!(!is_platform_available(&platform));
     }
@@ -365,6 +426,9 @@ mod tests {
             skills_dir: None,
             instruction_file: None,
             cli: None,
+
+            provider: None,
+            tool_name: None,
         };
         assert!(!is_platform_available(&platform));
     }
@@ -474,6 +538,9 @@ mod tests {
             skills_dir: None,
             instruction_file: None,
             cli: None,
+
+            provider: None,
+            tool_name: None,
         };
         let registry = RegistryRaw {
             platforms: vec![platform],

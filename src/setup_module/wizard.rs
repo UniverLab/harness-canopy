@@ -11,6 +11,24 @@ use anyhow::{Context, Result};
 use inquire::{Confirm, CustomType, MultiSelect, Select};
 use std::io::{self, Write};
 
+/// Human label for a registry platform in wizard output: the product
+/// display string with the slug in parentheses when it differs, so the
+/// user still knows which registry name they are selecting. Formatting
+/// itself lives in `platform_display_name`; this only adds the slug
+/// suffix. Slugs are the only thing ever stored.
+fn format_platform_label(p: &Platform) -> String {
+    let display = crate::domain::cli_config::platform_display_name(
+        &p.name,
+        p.provider.as_deref(),
+        p.tool_name.as_deref(),
+    );
+    if display == p.name {
+        display
+    } else {
+        format!("{display} ({})", p.name)
+    }
+}
+
 pub fn run_setup(force_skills: bool) -> Result<()> {
     let mut wiz = WizardState::new();
     let home = dirs::home_dir().context("No home directory")?;
@@ -34,7 +52,11 @@ pub fn run_setup(force_skills: bool) -> Result<()> {
         .filter(|p| is_platform_available(p))
         .collect();
 
-    let detected_names: Vec<&str> = detected.iter().map(|p| p.name.as_str()).collect();
+    let detected_names: Vec<String> = detected
+        .iter()
+        .copied()
+        .map(format_platform_label)
+        .collect();
     wiz.add(format!(
         "\x1b[32m✓\x1b[0m Fetched registry — {} detected: {}",
         detected.len(),
@@ -71,8 +93,9 @@ pub fn run_setup(force_skills: bool) -> Result<()> {
                 .and_then(|v| v.get("binary").and_then(|b| b.as_str()))
                 .unwrap_or("(unknown)");
             println!(
-                "    \x1b[90m{:<14}\x1b[0m  binary: \x1b[1m{}\x1b[0m",
-                p.name, binary
+                "    \x1b[90m{:<28}\x1b[0m  binary: \x1b[1m{}\x1b[0m",
+                format_platform_label(p),
+                binary
             );
         }
         println!();
@@ -83,7 +106,11 @@ pub fn run_setup(force_skills: bool) -> Result<()> {
     }
 
     let selected = select_platforms(&detected)?;
-    let selected_names: Vec<&str> = selected.iter().map(|p| p.name.as_str()).collect();
+    let selected_names: Vec<String> = selected
+        .iter()
+        .copied()
+        .map(format_platform_label)
+        .collect();
     wiz.add(format!(
         "\x1b[32m✓\x1b[0m Platforms: {}",
         if selected_names.is_empty() {
@@ -607,19 +634,31 @@ fn select_platforms<'a>(detected: &[&'a Platform]) -> Result<Vec<&'a Platform>> 
         return Ok(vec![]);
     }
 
-    let platform_names: Vec<&str> = detected.iter().map(|p| p.name.as_str()).collect();
+    let labels: Vec<String> = detected
+        .iter()
+        .copied()
+        .map(format_platform_label)
+        .collect();
     let all_indices: Vec<usize> = (0..detected.len()).collect();
 
-    let selected = MultiSelect::new("Select platforms to configure:", platform_names)
+    let selected = MultiSelect::new("Select platforms to configure:", labels.clone())
         .with_default(&all_indices)
         .with_help_message("space: toggle | enter: confirm | ↑↓: navigate")
         .prompt()
         .map_err(|e| anyhow::anyhow!("Selection cancelled: {}", e))?;
 
-    Ok(selected
-        .iter()
-        .filter_map(|name| detected.iter().find(|p| p.name == *name).copied())
-        .collect())
+    // Map selections back by position, not by string equality: two
+    // platforms can share one display string (e.g. two Google harnesses),
+    // so each matched label consumes its index exactly once.
+    let mut remaining: Vec<(usize, &String)> = labels.iter().enumerate().collect();
+    let mut out = Vec::with_capacity(selected.len());
+    for name in &selected {
+        if let Some(pos) = remaining.iter().position(|(_, l)| *l == name) {
+            let (idx, _) = remaining.remove(pos);
+            out.push(detected[idx]);
+        }
+    }
+    Ok(out)
 }
 
 fn select_temperature_unit() -> Result<crate::domain::canopy_config::TemperatureUnit> {
@@ -1110,6 +1149,81 @@ mod tests {
             config_path: format!("{name}.marker"),
             cli: Some(cli),
         }
+    }
+
+    fn test_platform_with_identity(
+        name: &str,
+        provider: Option<&str>,
+        tool: Option<&str>,
+    ) -> Platform {
+        Platform {
+            name: name.to_string(),
+            config_path: format!("{name}.marker"),
+            config_format: None,
+            toml_array_format: false,
+            command_format: "separate".to_string(),
+            mcp_servers_key: vec![],
+            deprecated_keys: vec![],
+            unsupported_keys: vec![],
+            fields_mapping: std::collections::HashMap::new(),
+            required_fields: std::collections::HashMap::new(),
+            server_extras: std::collections::HashMap::new(),
+            skills_dir: None,
+            instruction_file: None,
+            provider: provider.map(str::to_string),
+            tool_name: tool.map(str::to_string),
+            cli: None,
+        }
+    }
+
+    #[test]
+    fn wizard_summary_uses_display() {
+        let p = test_platform_with_identity("mistral", Some("Mistral AI"), Some("Vibe"));
+        assert_eq!(format_platform_label(&p), "Mistral AI · Vibe (mistral)");
+        let bare = test_platform_with_identity("mistral", None, None);
+        assert_eq!(format_platform_label(&bare), "mistral");
+        let tool_only = test_platform_with_identity("mimo", None, Some("MiMo Code CLI"));
+        assert_eq!(format_platform_label(&tool_only), "MiMo Code CLI (mimo)");
+    }
+
+    #[test]
+    fn merge_carries_provider_tool_without_infra_restore() {
+        use crate::domain::canopy_config::CanopyConfig;
+        use crate::domain::cli_config::CliConfig;
+        use crate::domain::registry_baseline::RegistryBaseline;
+
+        let local = CliConfig {
+            ..cb58_cli("mistral", "ls")
+        };
+        let registry = CliConfig {
+            provider: Some("Mistral AI".to_string()),
+            tool_name: Some("Vibe".to_string()),
+            ..cb58_cli("mistral", "ls")
+        };
+        let mut config = CanopyConfig {
+            clis: vec![local.clone()],
+            ..Default::default()
+        };
+        let cli_registry = crate::domain::cli_config::CliRegistry {
+            version: 2,
+            available_clis: vec![registry.clone()],
+        };
+        let platforms_with_cli = vec![cb58_platform_with_cli("mistral", registry)];
+        let baseline = RegistryBaseline {
+            clis: vec![local],
+            platforms: vec![],
+        };
+        let changed = merge_cli_registry_into_config(
+            &mut config,
+            &cli_registry,
+            &platforms_with_cli,
+            Some(&baseline),
+        );
+        let mistral = config.get_cli("mistral").unwrap();
+        assert_eq!(mistral.provider.as_deref(), Some("Mistral AI"));
+        assert_eq!(mistral.tool_name.as_deref(), Some("Vibe"));
+        assert!(changed.contains(&"mistral.provider".to_string()));
+        assert!(changed.contains(&"mistral.tool_name".to_string()));
     }
 
     /// The literal line CB58 is about must never come back: the wizard's

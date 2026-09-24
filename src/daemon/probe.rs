@@ -788,6 +788,25 @@ mod tests {
         assert!(report.error.unwrap().contains("ghost-cli"));
     }
 
+    #[tokio::test]
+    async fn agent_probe_rejects_display_string_as_platform() {
+        // FR3: the display string is never accepted as input. A platform
+        // configured under its slug must NOT match its own display name.
+        let dir = tempfile::tempdir().unwrap();
+        let script = write_script(&dir, "vibe", "echo ok\n");
+        let mut config = config_with_cli("mistral", &script);
+        config.clis[0].provider = Some("Mistral AI".to_string());
+        config.clis[0].tool_name = Some("Vibe".to_string());
+        let target = ProbeTarget {
+            platform: "Mistral AI · Vibe".to_string(),
+            model: None,
+            effort: None,
+        };
+        let report = probe_target(&config, &target, None, Duration::from_secs(5)).await;
+        assert_eq!(report.outcome, ProbeOutcome::NotConfigured);
+        assert_eq!(report.platform, "Mistral AI · Vibe");
+    }
+
     /// Real failure shape #1: exit 0, the error goes to stderr, stdout is
     /// empty. Must be reported broken — this is the "Invalid API Key"
     /// shape from the mimocode incident when nothing reaches stdout at all.

@@ -93,6 +93,26 @@ mod tests {
     }
 
     #[test]
+    fn round_trip_carries_provider_and_tool_name() {
+        let dir = TempDir::new().unwrap();
+        let mut cli = sample_cli("mistral");
+        cli.provider = Some("Mistral AI".to_string());
+        cli.tool_name = Some("Vibe".to_string());
+        RegistryBaseline {
+            clis: vec![cli],
+            ..Default::default()
+        }
+        .save(dir.path())
+        .unwrap();
+
+        let loaded = RegistryBaseline::load(dir.path()).unwrap();
+        let mistral = loaded.get("mistral").unwrap();
+        assert_eq!(mistral.provider.as_deref(), Some("Mistral AI"));
+        assert_eq!(mistral.tool_name.as_deref(), Some("Vibe"));
+        assert_eq!(mistral.display_name(), "Mistral AI · Vibe");
+    }
+
+    #[test]
     fn save_overwrites_previous_contents() {
         let dir = TempDir::new().unwrap();
         RegistryBaseline {

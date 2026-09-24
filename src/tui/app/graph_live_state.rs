@@ -95,7 +95,8 @@ pub(crate) struct EnsembleLiveInfo {
 #[allow(dead_code)]
 pub(crate) struct EnsembleMemberLiveInfo {
     pub node_id: String,
-    /// `"platform"` or `"platform/model"`.
+    /// `"display-platform"` or `"display-platform/model"` (display via
+    /// `platform_display_name`; the slug when unknown).
     pub label: String,
     pub status: Option<GraphRunStatus>,
 }
@@ -137,7 +138,28 @@ pub(crate) fn assemble_graph_live_state(
     // ── Effective graph ─────────────────────────────────────────
     let (effective_nodes, effective_edges) =
         resolve_effective_graph(db, details, current_spec_id.as_deref());
-    let ensembles = resolve_ensembles_live_info(db, &effective_nodes, current_spec_id.as_deref());
+    // Product display names for platform slugs, from ~/.canopy/config.toml.
+    // Missing home/config/entry degrades to the slug with no warning.
+    let display_names: HashMap<String, (Option<String>, Option<String>)> = dirs::home_dir()
+        .map(|h| crate::domain::canopy_config::CanopyConfig::load(&h.join(".canopy")))
+        .map(|c| {
+            c.clis
+                .iter()
+                .map(|cli| {
+                    (
+                        cli.name.clone(),
+                        (cli.provider.clone(), cli.tool_name.clone()),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let ensembles = resolve_ensembles_live_info(
+        db,
+        &effective_nodes,
+        current_spec_id.as_deref(),
+        &display_names,
+    );
     let router_taken_routes =
         resolve_router_taken_routes(db, &effective_nodes, current_spec_id.as_deref());
 
@@ -175,6 +197,7 @@ fn resolve_ensembles_live_info(
     db: &Database,
     effective_nodes: &[GraphNode],
     current_spec_id: Option<&str>,
+    display_names: &HashMap<String, (Option<String>, Option<String>)>,
 ) -> Vec<EnsembleLiveInfo> {
     effective_nodes
         .iter()
@@ -185,11 +208,20 @@ fn resolve_ensembles_live_info(
                 .members
                 .iter()
                 .map(|member| {
+                    let (provider, tool_name) = display_names
+                        .get(&member.platform)
+                        .map(|(p, t)| (p.as_deref(), t.as_deref()))
+                        .unwrap_or((None, None));
+                    let display = crate::domain::cli_config::platform_display_name(
+                        &member.platform,
+                        provider,
+                        tool_name,
+                    );
                     let label = match member.model.as_deref().map(str::trim) {
                         Some(model) if !model.is_empty() => {
-                            format!("{}/{}", member.platform, model)
+                            format!("{display}/{model}")
                         }
-                        _ => member.platform.clone(),
+                        _ => display,
                     };
                     let status = current_spec_id
                         .map(|spec_id| resolve_node_run_info(db, spec_id, &member.node_id))
@@ -1463,5 +1495,41 @@ mod tests {
         assert_eq!(ensemble.members[0].status, Some(GraphRunStatus::Pass));
         assert_eq!(ensemble.members[1].status, Some(GraphRunStatus::Running));
         assert_eq!(ensemble.members[2].status, None);
+    }
+
+    #[test]
+    fn live_member_label_uses_display() {
+        use std::collections::HashMap;
+        let db = test_db();
+        let lp = make_graph("lp1", GraphStatus::Running);
+        db.insert_graph(&lp).unwrap();
+        db.insert_graph_spec(&make_spec("s1", "lp1", GraphSpecStatus::Running, 1))
+            .unwrap();
+        db.insert_graph_node(&make_node("n1", "s1", GraphNodeKind::Agent, 0))
+            .unwrap();
+        db.insert_graph_node(&make_node("n2", "s1", GraphNodeKind::Agent, 5))
+            .unwrap();
+        insert_ensemble_fixture(&db, "s1");
+
+        let join = make_node("join1", "s1", GraphNodeKind::Join, 4);
+        let mut map: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
+        map.insert(
+            "openrouter".to_string(),
+            (
+                Some("OpenRouter".to_string()),
+                Some("OpenRouter Hub".to_string()),
+            ),
+        );
+        let infos = super::resolve_ensembles_live_info(&db, &[join], Some("s1"), &map);
+        assert_eq!(infos.len(), 1);
+        assert_eq!(
+            infos[0].members[0].label,
+            "OpenRouter · OpenRouter Hub/model-0"
+        );
+
+        let empty: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
+        let join = make_node("join1", "s1", GraphNodeKind::Join, 4);
+        let infos = super::resolve_ensembles_live_info(&db, &[join], Some("s1"), &empty);
+        assert_eq!(infos[0].members[0].label, "openrouter/model-0");
     }
 }

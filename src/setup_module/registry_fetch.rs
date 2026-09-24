@@ -607,6 +607,9 @@ mod tests {
             skills_dir: None,
             instruction_file: None,
             cli: Some(cli_json),
+
+            provider: None,
+            tool_name: None,
         }
     }
 
@@ -789,6 +792,70 @@ mod tests {
             cli.identity_check.as_ref().map(|c| c.contains.as_str()),
             Some("custom")
         );
+    }
+
+    #[test]
+    fn provider_tool_never_touched_adopts_registry() {
+        let home = TempDir::new().unwrap();
+        let canopy_dir = home.path().join(".canopy");
+
+        let local = CliConfig {
+            name: "testcli".to_string(),
+            binary: "ls".to_string(),
+            headless_mode: "--headless".to_string(),
+            ..Default::default()
+        };
+        write_config(&canopy_dir, vec![local.clone()]);
+        write_baseline(&canopy_dir, vec![local]);
+
+        let mut platform = detected_platform(
+            home.path(),
+            "testcli",
+            serde_json::json!({"binary": "ls", "headless_mode": "--headless"}),
+        );
+        platform.provider = Some("Mistral AI".to_string());
+        platform.tool_name = Some("Vibe".to_string());
+        apply_registry_refresh(home.path(), &registry_of(vec![platform])).unwrap();
+
+        let config = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir);
+        let cli = config.get_cli("testcli").unwrap();
+        assert_eq!(cli.provider.as_deref(), Some("Mistral AI"));
+        assert_eq!(cli.tool_name.as_deref(), Some("Vibe"));
+        assert_eq!(cli.display_name(), "Mistral AI · Vibe");
+    }
+
+    #[test]
+    fn provider_tool_customised_survives() {
+        let home = TempDir::new().unwrap();
+        let canopy_dir = home.path().join(".canopy");
+
+        let baseline_cli = CliConfig {
+            name: "testcli".to_string(),
+            binary: "ls".to_string(),
+            headless_mode: "--headless".to_string(),
+            provider: Some("Anthropic".to_string()),
+            tool_name: Some("Claude Code".to_string()),
+            ..Default::default()
+        };
+        let local_cli = CliConfig {
+            provider: Some("Custom".to_string()),
+            ..baseline_cli.clone()
+        };
+        write_config(&canopy_dir, vec![local_cli]);
+        write_baseline(&canopy_dir, vec![baseline_cli]);
+
+        let mut platform = detected_platform(
+            home.path(),
+            "testcli",
+            serde_json::json!({"binary": "ls", "headless_mode": "--headless"}),
+        );
+        platform.provider = Some("New".to_string());
+        platform.tool_name = Some("New Tool".to_string());
+        apply_registry_refresh(home.path(), &registry_of(vec![platform])).unwrap();
+
+        let config = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir);
+        let cli = config.get_cli("testcli").unwrap();
+        assert_eq!(cli.provider.as_deref(), Some("Custom"));
     }
 
     #[test]
@@ -990,6 +1057,9 @@ mod tests {
             skills_dir: None,
             instruction_file: None,
             cli: Some(serde_json::json!({"binary": "ls", "headless_mode": "--headless"})),
+
+            provider: None,
+            tool_name: None,
         };
 
         std::fs::write(home.path().join(&old_platform.config_path), "").unwrap();
@@ -1016,6 +1086,9 @@ mod tests {
             skills_dir: None,
             instruction_file: None,
             cli: Some(serde_json::json!({"binary": "ls", "headless_mode": "--headless"})),
+
+            provider: None,
+            tool_name: None,
         };
         let registry = registry_of(vec![new_platform]);
 
@@ -1054,6 +1127,9 @@ mod tests {
             skills_dir: None,
             instruction_file: None,
             cli: Some(serde_json::json!({"binary": "ls", "headless_mode": "--headless"})),
+
+            provider: None,
+            tool_name: None,
         };
         std::fs::write(home.path().join(&platform.config_path), "").unwrap();
 
@@ -1105,6 +1181,9 @@ mod tests {
             skills_dir: None,
             instruction_file: None,
             cli: Some(serde_json::json!({"binary": "ls", "headless_mode": "--headless"})),
+
+            provider: None,
+            tool_name: None,
         };
         std::fs::write(home.path().join(&platform.config_path), "").unwrap();
 
@@ -1136,6 +1215,9 @@ mod tests {
             skills_dir: None,
             instruction_file: None,
             cli: Some(serde_json::json!({"binary": "ls"})),
+
+            provider: None,
+            tool_name: None,
         };
         std::fs::write(home.path().join(&platform.config_path), "").unwrap();
 
@@ -1174,6 +1256,9 @@ mod tests {
             skills_dir: None,
             instruction_file: None,
             cli: Some(serde_json::json!({"binary": "ls"})),
+
+            provider: None,
+            tool_name: None,
         };
         std::fs::write(home.path().join(&old_platform.config_path), "").unwrap();
 
@@ -1200,6 +1285,9 @@ mod tests {
             skills_dir: None,
             instruction_file: None,
             cli: Some(serde_json::json!({"binary": "ls"})),
+
+            provider: None,
+            tool_name: None,
         };
         let registry = registry_of(vec![new_platform]);
 

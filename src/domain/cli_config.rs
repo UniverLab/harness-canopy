@@ -189,6 +189,35 @@ pub struct CliConfig {
     /// `DEFAULT_INFRA_BACKOFF_SECONDS` (30).
     #[serde(default)]
     pub infra_backoff_seconds: Option<u64>,
+    /// Human product identity from the registry (canopy-registry PR #2).
+    /// Optional: hand-added or pre-PR#2 entries lack them and render as slug.
+    /// Identity/matching/storage always use `name`; these are display-only.
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub tool_name: Option<String>,
+}
+
+/// Display string for a platform slug: "Provider · Tool" when both known,
+/// "Tool" when only tool known, slug otherwise. Pure; never used for matching.
+pub fn platform_display_name(
+    slug: &str,
+    provider: Option<&str>,
+    tool_name: Option<&str>,
+) -> String {
+    let provider = provider.map(str::trim).filter(|s| !s.is_empty());
+    let tool_name = tool_name.map(str::trim).filter(|s| !s.is_empty());
+    match (provider, tool_name) {
+        (Some(p), Some(t)) => format!("{p} · {t}"),
+        (None, Some(t)) => t.to_string(),
+        _ => {
+            if slug.is_empty() {
+                tool_name.or(provider).unwrap_or("unknown").to_string()
+            } else {
+                slug.to_string()
+            }
+        }
+    }
 }
 
 /// Identity check proving the resolved binary is the intended AI CLI.
@@ -338,6 +367,15 @@ pub struct CliRegistry {
 }
 
 impl CliConfig {
+    /// Display string for this platform; see [`platform_display_name`].
+    pub fn display_name(&self) -> String {
+        platform_display_name(
+            &self.name,
+            self.provider.as_deref(),
+            self.tool_name.as_deref(),
+        )
+    }
+
     /// Check if this CLI is available in the given PATH.
     ///
     /// Uses the shared resolver (`resolve_binary_in`) so detection can never
@@ -478,6 +516,8 @@ mod tests {
             infra_retry_limit: None,
             infra_crash_max_seconds: None,
             infra_backoff_seconds: None,
+            provider: None,
+            tool_name: None,
         }
     }
 
@@ -923,5 +963,57 @@ mod tests {
             .expect("absent model_flag must produce a reason");
         assert!(r.contains("mistral"));
         assert!(r.contains("mistral-medium-latest"));
+    }
+
+    #[test]
+    fn display_both_known_uses_middle_dot() {
+        assert_eq!(
+            platform_display_name("mistral", Some("Mistral AI"), Some("Vibe")),
+            "Mistral AI · Vibe"
+        );
+    }
+
+    #[test]
+    fn display_tool_only() {
+        assert_eq!(
+            platform_display_name("mimo", None, Some("MiMo Code CLI")),
+            "MiMo Code CLI"
+        );
+    }
+
+    #[test]
+    fn display_none_falls_back_to_slug() {
+        assert_eq!(platform_display_name("mistral", None, None), "mistral");
+    }
+
+    #[test]
+    fn display_provider_only_falls_back_to_slug() {
+        assert_eq!(platform_display_name("x", Some("Google"), None), "x");
+    }
+
+    #[test]
+    fn display_trims_and_treats_blank_as_absent() {
+        assert_eq!(
+            platform_display_name("x", Some("  "), Some(" Vibe ")),
+            "Vibe"
+        );
+    }
+
+    #[test]
+    fn serde_absent_fields_default_to_none() {
+        let config: CliConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(config.provider, None);
+        assert_eq!(config.tool_name, None);
+    }
+
+    #[test]
+    fn serde_roundtrip_carries_new_fields() {
+        let mut config = sample_cli_config();
+        config.provider = Some("Mistral AI".to_string());
+        config.tool_name = Some("Vibe".to_string());
+        let json = serde_json::to_string(&config).unwrap();
+        let back: CliConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.provider.as_deref(), Some("Mistral AI"));
+        assert_eq!(back.tool_name.as_deref(), Some("Vibe"));
     }
 }

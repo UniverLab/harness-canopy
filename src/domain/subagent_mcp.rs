@@ -286,6 +286,9 @@ mod tests {
             skills_dir: None,
             instruction_file: None,
             cli: None,
+
+            provider: None,
+            tool_name: None,
         }
     }
 
@@ -305,6 +308,9 @@ mod tests {
             skills_dir: None,
             instruction_file: None,
             cli: None,
+
+            provider: None,
+            tool_name: None,
         }
     }
 

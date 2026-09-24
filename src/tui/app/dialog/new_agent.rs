@@ -265,6 +265,29 @@ impl NewAgentDialog {
         self.available_clis[self.cli_index].clone()
     }
 
+    /// Human label for the harness at `idx`: the product display string
+    /// with the slug in parentheses when it differs, so the user still
+    /// knows what gets stored. Storage and matching always use the slug
+    /// from [`selected_cli`](Self::selected_cli).
+    pub fn cli_display_label(&self, idx: usize) -> String {
+        let slug = self
+            .available_clis
+            .get(idx)
+            .map(|c| c.as_str())
+            .unwrap_or("");
+        let display = self
+            .cli_configs
+            .get(idx)
+            .and_then(|c| c.as_ref())
+            .map(|c| c.display_name())
+            .unwrap_or_else(|| slug.to_string());
+        if display == slug {
+            display
+        } else {
+            format!("{display} ({slug})")
+        }
+    }
+
     pub fn selected_args(&self) -> Option<String> {
         let config = self
             .cli_configs
@@ -494,7 +517,11 @@ impl NewAgentDialog {
         self.available_clis
             .iter()
             .enumerate()
-            .filter(|(_, cli)| query.is_empty() || cli.as_str().to_lowercase().contains(&query))
+            .filter(|(idx, cli)| {
+                query.is_empty()
+                    || cli.as_str().to_lowercase().contains(&query)
+                    || self.cli_display_label(*idx).to_lowercase().contains(&query)
+            })
             .map(|(idx, _)| idx)
             .collect()
     }
@@ -1021,6 +1048,9 @@ mod tests {
             infra_retry_limit: None,
             infra_crash_max_seconds: None,
             infra_backoff_seconds: None,
+
+            provider: None,
+            tool_name: None,
         }
     }
 
@@ -1105,6 +1135,42 @@ mod tests {
         assert_eq!(dialog.selected_cli().as_str(), "claude");
     }
 
+    #[test]
+    fn new_agent_selection_stores_slug_not_display() {
+        fn config_for(
+            slug: &str,
+            provider: Option<&str>,
+            tool: Option<&str>,
+        ) -> crate::domain::cli_config::CliConfig {
+            crate::domain::cli_config::CliConfig {
+                name: slug.into(),
+                provider: provider.map(str::to_string),
+                tool_name: tool.map(str::to_string),
+                ..Default::default()
+            }
+        }
+        let mut dialog = NewAgentDialog::new(None);
+        dialog.available_clis = vec![Cli::new("claude"), Cli::new("mistral")];
+        dialog.cli_configs = vec![
+            Some(config_for("claude", Some("Anthropic"), Some("Claude Code"))),
+            Some(config_for("mistral", Some("Mistral AI"), Some("Vibe"))),
+        ];
+        assert_eq!(
+            dialog.cli_display_label(0),
+            "Anthropic · Claude Code (claude)"
+        );
+        assert_eq!(dialog.cli_display_label(1), "Mistral AI · Vibe (mistral)");
+        dialog.cli_index = 0;
+        assert_eq!(dialog.selected_cli().as_str(), "claude");
+        dialog.cli_index = 1;
+        assert_eq!(dialog.selected_cli().as_str(), "mistral");
+        // Filtering by product name finds the slug, and vice versa.
+        dialog.cli_picker_filter = "vibe".to_string();
+        assert_eq!(dialog.filtered_cli_indices(), vec![1]);
+        dialog.cli_picker_filter = "mist".to_string();
+        assert_eq!(dialog.filtered_cli_indices(), vec![1]);
+    }
+
     // ── selected_args ────────────────────────────────────────────
 
     #[test]
@@ -1149,6 +1215,9 @@ mod tests {
             infra_retry_limit: None,
             infra_crash_max_seconds: None,
             infra_backoff_seconds: None,
+
+            provider: None,
+            tool_name: None,
         })];
         dialog.cli_index = 0;
         dialog.task_mode = NewTaskMode::Interactive;
@@ -1200,6 +1269,9 @@ mod tests {
             infra_retry_limit: None,
             infra_crash_max_seconds: None,
             infra_backoff_seconds: None,
+
+            provider: None,
+            tool_name: None,
         })];
         dialog.cli_index = 0;
         assert_eq!(
@@ -1252,6 +1324,9 @@ mod tests {
             infra_retry_limit: None,
             infra_crash_max_seconds: None,
             infra_backoff_seconds: None,
+
+            provider: None,
+            tool_name: None,
         })];
         dialog.cli_index = 0;
         assert_eq!(dialog.selected_yolo_flag().as_deref(), Some("--yolo"));
@@ -1323,6 +1398,9 @@ mod tests {
             infra_retry_limit: None,
             infra_crash_max_seconds: None,
             infra_backoff_seconds: None,
+
+            provider: None,
+            tool_name: None,
         })];
         dialog.cli_index = 0;
         assert!(!dialog.resume_unconfigured());
@@ -1535,6 +1613,9 @@ mod tests {
             infra_retry_limit: None,
             infra_crash_max_seconds: None,
             infra_backoff_seconds: None,
+
+            provider: None,
+            tool_name: None,
         };
         let result = dialog.build_resume_args(&config, Some("--tui".to_string()));
         assert_eq!(result.as_deref(), Some("--tui"));
@@ -1575,6 +1656,9 @@ mod tests {
             infra_retry_limit: None,
             infra_crash_max_seconds: None,
             infra_backoff_seconds: None,
+
+            provider: None,
+            tool_name: None,
         };
         let result = dialog.build_resume_args(&config, Some("--tui".to_string()));
         assert_eq!(result.as_deref(), Some("--tui --resume"));
@@ -1615,6 +1699,9 @@ mod tests {
             infra_retry_limit: None,
             infra_crash_max_seconds: None,
             infra_backoff_seconds: None,
+
+            provider: None,
+            tool_name: None,
         };
         let result = dialog.build_resume_args(&config, Some("--tui".to_string()));
         assert_eq!(result.as_deref(), Some("--tui"));
@@ -1655,6 +1742,9 @@ mod tests {
             infra_retry_limit: None,
             infra_crash_max_seconds: None,
             infra_backoff_seconds: None,
+
+            provider: None,
+            tool_name: None,
         };
         let result = dialog.build_resume_args(&config, None);
         assert_eq!(result.as_deref(), Some("--resume"));
@@ -1695,6 +1785,9 @@ mod tests {
             infra_retry_limit: None,
             infra_crash_max_seconds: None,
             infra_backoff_seconds: None,
+
+            provider: None,
+            tool_name: None,
         };
         let result = dialog.build_resume_args(&config, None);
         assert!(result.is_none());
@@ -1736,6 +1829,9 @@ mod tests {
             infra_retry_limit: None,
             infra_crash_max_seconds: None,
             infra_backoff_seconds: None,
+
+            provider: None,
+            tool_name: None,
         };
         let result = dialog.build_resume_args(&config, Some("--tui".to_string()));
         assert_eq!(result.as_deref(), Some("--tui --conversation ses_abc123"));
@@ -1810,6 +1906,9 @@ mod tests {
             infra_retry_limit: None,
             infra_crash_max_seconds: None,
             infra_backoff_seconds: None,
+
+            provider: None,
+            tool_name: None,
         })];
         dialog.cli_index = 0;
         let theme = Theme::classic();
@@ -1854,6 +1953,9 @@ mod tests {
             infra_retry_limit: None,
             infra_crash_max_seconds: None,
             infra_backoff_seconds: None,
+
+            provider: None,
+            tool_name: None,
         };
         // With session but no resume_cmd, falls back to generic resume
         let result = dialog.build_resume_args(&config, Some("--tui".to_string()));
@@ -1925,6 +2027,9 @@ mod tests {
             infra_retry_limit: None,
             infra_crash_max_seconds: None,
             infra_backoff_seconds: None,
+
+            provider: None,
+            tool_name: None,
         })];
         dialog.cli_index = 0;
         dialog.apply_resume_choice(resumable_session("opencode", "/proj", Some("--tui --yolo")));
@@ -1973,6 +2078,9 @@ mod tests {
             infra_retry_limit: None,
             infra_crash_max_seconds: None,
             infra_backoff_seconds: None,
+
+            provider: None,
+            tool_name: None,
         })];
         dialog.cli_index = 0;
         // The recorded session's own args already carry the resume flag.

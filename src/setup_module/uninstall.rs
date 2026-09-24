@@ -254,6 +254,9 @@ pub fn execute_uninstall(plan: &UninstallPlan, purge_data: bool) -> Result<()> {
             skills_dir: None,
             instruction_file: None,
             cli: None,
+
+            provider: None,
+            tool_name: None,
         };
         let removed =
             revert_platform_config(&platform, &edit.config_path, &edit.servers_to_remove)?;
@@ -406,6 +409,9 @@ mod tests {
             skills_dir: None,
             instruction_file: None,
             cli: None,
+
+            provider: None,
+            tool_name: None,
         }
     }
 
@@ -425,6 +431,9 @@ mod tests {
             skills_dir: None,
             instruction_file: None,
             cli: None,
+
+            provider: None,
+            tool_name: None,
         }
     }
 
@@ -444,6 +453,9 @@ mod tests {
             skills_dir: None,
             instruction_file: None,
             cli: None,
+
+            provider: None,
+            tool_name: None,
         }
     }
 

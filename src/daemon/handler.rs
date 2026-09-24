@@ -8414,7 +8414,11 @@ impl TaskTriggerHandler {
                 "timeout_seconds": timeout_secs,
                 "would_fail": crate::daemon::probe::would_fail_count(&reports),
                 "unknown": crate::daemon::probe::unknown_count(&reports),
-                "probes": reports.iter().map(|r| r.to_json()).collect::<Vec<_>>(),
+                "probes": reports.iter().map(|r| {
+                    let mut v = r.to_json();
+                    v["platform_display"] = serde_json::json!(display_for_slug(&config, &r.platform));
+                    v
+                }).collect::<Vec<_>>(),
             }))
             .unwrap_or_default(),
         )]))
@@ -8476,6 +8480,10 @@ impl TaskTriggerHandler {
                 let mut value = report.to_json();
                 if let serde_json::Value::Object(map) = &mut value {
                     map.insert("used_by".into(), serde_json::json!(pair.used_by));
+                    map.insert(
+                        "platform_display".into(),
+                        serde_json::json!(display_for_slug(&config, &report.platform)),
+                    );
                     map.insert(
                         "last_run".into(),
                         serde_json::json!(pair.last_run.to_rfc3339()),
@@ -9024,6 +9032,10 @@ impl TaskTriggerHandler {
                     map.insert(
                         "used_by".to_string(),
                         serde_json::json!(graph_target.used_by),
+                    );
+                    map.insert(
+                        "platform_display".to_string(),
+                        serde_json::json!(display_for_slug(&config, &report.platform)),
                     );
                     if let Some(effort) = graph_target.target.effort.as_deref() {
                         if let Some(reason) = crate::domain::cli_config::effort_rejection_reason(
@@ -10487,6 +10499,17 @@ fn clamp_probe_timeout(requested: Option<u64>) -> u64 {
 
 fn clamp_max_recent_pairs(requested: Option<u32>) -> usize {
     requested.unwrap_or(15).clamp(1, 50) as usize
+}
+
+/// Human display string for a platform slug ("Provider · Tool" when the
+/// registry knows both, slug otherwise). Probe JSON keeps `"platform"` as
+/// the slug and carries this as the sibling `"platform_display"` key —
+/// display is never matched on or accepted as input.
+fn display_for_slug(config: &crate::domain::canopy_config::CanopyConfig, slug: &str) -> String {
+    config
+        .get_cli(slug)
+        .map(|c| c.display_name())
+        .unwrap_or_else(|| slug.to_string())
 }
 
 /// Validate a requested `agent_models` platform against the CLIs actually
@@ -12137,6 +12160,43 @@ mod tests {
         assert_eq!(super::clamp_max_recent_pairs(Some(0)), 1);
         assert_eq!(super::clamp_max_recent_pairs(Some(999)), 50);
         assert_eq!(super::clamp_max_recent_pairs(Some(20)), 20);
+    }
+
+    #[test]
+    fn probe_json_keeps_slug_and_adds_display() {
+        use crate::domain::canopy_config::CanopyConfig;
+        use crate::domain::cli_config::CliConfig;
+        let mut config = CanopyConfig::default();
+        config.clis.push(CliConfig {
+            name: "mistral".to_string(),
+            provider: Some("Mistral AI".to_string()),
+            tool_name: Some("Vibe".to_string()),
+            ..Default::default()
+        });
+        assert_eq!(
+            super::display_for_slug(&config, "mistral"),
+            "Mistral AI · Vibe"
+        );
+        // Unknown slug and field-less config both render the slug.
+        assert_eq!(super::display_for_slug(&config, "ghost"), "ghost");
+        let mut bare = CanopyConfig::default();
+        bare.clis.push(CliConfig {
+            name: "mistral".to_string(),
+            ..Default::default()
+        });
+        assert_eq!(super::display_for_slug(&bare, "mistral"), "mistral");
+        // to_json itself keeps the slug identity key byte-identical.
+        let report = crate::daemon::probe::ProbeReport {
+            platform: "mistral".to_string(),
+            model: None,
+            outcome: crate::daemon::probe::ProbeOutcome::NotConfigured,
+            duration_ms: 0,
+            error: None,
+            argv: None,
+        };
+        let v = report.to_json();
+        assert_eq!(v["platform"], serde_json::json!("mistral"));
+        assert!(v.get("platform_display").is_none());
     }
 
     use super::{
@@ -22510,6 +22570,11 @@ mod endpoint_tests {
             .unwrap();
         let first_doc: serde_json::Value = serde_json::from_str(&raw_text(&first_export)).unwrap();
         assert_eq!(first_doc["ensembles"].as_array().unwrap().len(), 1);
+        // CM32: the export document carries slugs only — no display string
+        // is ever written to it.
+        let first_raw = raw_text(&first_export);
+        assert!(!first_raw.contains("platform_display"));
+        assert!(!first_raw.contains("tool_name"));
         // The plain node list must exclude the ensemble's member/join nodes.
         assert_eq!(first_doc["nodes"].as_array().unwrap().len(), 2);
 
@@ -33069,6 +33134,106 @@ mod endpoint_tests {
             .unwrap_or_else(|| panic!("preflight must include spec_warnings: {body}"));
         assert_eq!(warnings.len(), 1, "expected one warning: {body}");
         assert_eq!(warnings[0]["spec_id"], blank_id);
+    }
+
+    /// Write a canopy config at `<home>/.canopy/config.toml` declaring one
+    /// `mistral` CLI carrying the CM32 registry identity. The binary is a
+    /// name that cannot exist anywhere, so every probe against it fails at
+    /// spawn — immediately, without launching a process or spending quota.
+    fn write_cm32_config(home: &std::path::Path) {
+        std::fs::create_dir_all(home.join(".canopy")).unwrap();
+        std::fs::write(
+            home.join(".canopy/config.toml"),
+            "[[clis]]\nname = \"mistral\"\nbinary = \"cm32-no-such-binary-xyz\"\nprovider = \"Mistral AI\"\ntool_name = \"Vibe\"\n",
+        )
+        .unwrap();
+    }
+
+    /// (CM32) `agent_probe` accepts the slug and its result names the
+    /// product: `platform` stays `mistral` while a sibling
+    /// `platform_display` carries `Mistral AI · Vibe`. This pins the
+    /// handler-level enrichment — the helper's unit tests would survive
+    /// deleting the `platform_display` insertions, this would not.
+    #[tokio::test]
+    async fn agent_probe_result_names_the_product_beside_the_slug() {
+        let home = tempdir().unwrap();
+        write_cm32_config(home.path());
+        let _home_guard = HomeVar::set(home.path());
+        let (_dir, _db, handler) = endpoint_test_handler();
+
+        let result = handler
+            .agent_probe(Parameters(AgentProbeParams {
+                platform: Some("mistral".to_string()),
+                model: None,
+                timeout_seconds: Some(5),
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&result), "{}", text(&result));
+        let body: serde_json::Value = serde_json::from_str(&raw_text(&result)).unwrap();
+        let probes = body["probes"].as_array().unwrap();
+        assert_eq!(probes.len(), 1, "{body}");
+        assert_eq!(
+            probes[0]["platform"],
+            serde_json::json!("mistral"),
+            "the identity key stays the slug"
+        );
+        assert_eq!(
+            probes[0]["platform_display"],
+            serde_json::json!("Mistral AI \u{b7} Vibe"),
+            "the sibling names the product the registry publishes"
+        );
+        assert_ne!(
+            probes[0]["outcome"],
+            serde_json::json!("not_configured"),
+            "the slug must be accepted as a configured platform"
+        );
+    }
+
+    /// (CM32) `graph_preflight` probe entries carry the same
+    /// `platform_display` sibling, keyed beside the slug. A node stores
+    /// `platform: "mistral"` — the slug — and preflight's result names
+    /// Vibe. Binary unresolvable → fails fast without spawning.
+    #[tokio::test]
+    async fn graph_preflight_probe_entries_name_the_product() {
+        let home = tempdir().unwrap();
+        write_cm32_config(home.path());
+        let _home_guard = HomeVar::set(home.path());
+        let (dir, db, handler) = endpoint_test_handler();
+        let lp = insert_test_graph(&db, dir.path());
+        db.insert_graph_node(&GraphNode {
+            id: uuid::Uuid::new_v4().to_string(),
+            spec_id: None,
+            graph_id: Some(lp.id.clone()),
+            name: "impl".to_string(),
+            kind: GraphNodeKind::Agent,
+            config: serde_json::json!({"platform": "mistral"}),
+            position: 1,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+
+        let result = handler
+            .graph_preflight(Parameters(GraphPreflightParams {
+                graph_id: lp.id.clone(),
+                timeout_seconds: Some(5),
+                reviewer: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&result), "{}", text(&result));
+        let body: serde_json::Value = serde_json::from_str(&raw_text(&result)).unwrap();
+        let probes = body["probes"]
+            .as_array()
+            .unwrap_or_else(|| panic!("expected probe results: {body}"));
+        let mistral = probes
+            .iter()
+            .find(|p| p["platform"] == serde_json::json!("mistral"))
+            .unwrap_or_else(|| panic!("expected a mistral probe entry: {body}"));
+        assert_eq!(
+            mistral["platform_display"],
+            serde_json::json!("Mistral AI \u{b7} Vibe")
+        );
     }
 
     /// (CB25) Without a `reviewer`, preflight returns `"review": null` and

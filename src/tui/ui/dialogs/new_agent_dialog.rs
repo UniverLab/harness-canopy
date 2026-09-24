@@ -575,7 +575,7 @@ fn append_cli_section(
     lines.push(Line::from(vec![
         Span::styled("  Harness: ", Style::default().fg(theme.dim_text)),
         Span::styled(
-            format!(" {} ", dialog.selected_cli()),
+            format!(" {} ", dialog.cli_display_label(dialog.cli_index)),
             focus_style(dialog.field, cli_field, accent),
         ),
         Span::styled(
@@ -632,7 +632,7 @@ fn append_cli_picker_rows(
                     format!("    {} ", if is_selected { "›" } else { " " }),
                     style,
                 ),
-                Span::styled(dialog.available_clis[*cli_idx].as_str().to_string(), style),
+                Span::styled(dialog.cli_display_label(*cli_idx), style),
             ]));
         }
     }
@@ -1832,6 +1832,48 @@ mod tests {
         assert!(
             !text.contains("Effort"),
             "background dialog must not show effort field"
+        );
+    }
+
+    /// (CM32) The dialog renders the product to the person: both the
+    /// selected-harness line and the picker rows show
+    /// `provider · tool_name (slug)`, never the bare slug for a platform
+    /// the registry describes. Storage stays the slug (`selected_cli`),
+    /// proven in the state-level test.
+    #[test]
+    fn cli_section_renders_product_labels() {
+        use crate::domain::cli_config::CliConfig;
+        use crate::domain::models::Cli;
+        let mut d = NewAgentDialog::new(Some("."));
+        d.available_clis = vec![Cli::new("claude"), Cli::new("mistral")];
+        d.cli_configs = vec![
+            Some(CliConfig {
+                name: "claude".to_string(),
+                provider: Some("Anthropic".to_string()),
+                tool_name: Some("Claude Code".to_string()),
+                ..Default::default()
+            }),
+            Some(CliConfig {
+                name: "mistral".to_string(),
+                provider: Some("Mistral AI".to_string()),
+                tool_name: Some("Vibe".to_string()),
+                ..Default::default()
+            }),
+        ];
+        d.cli_picker_open = true;
+        let lines = build_dialog_lines(&d, Color::White, &[0, 1], 40, &Theme::classic());
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(
+            text.contains("Anthropic \u{b7} Claude Code (claude)"),
+            "picker must name the product: {text}"
+        );
+        assert!(
+            text.contains("Mistral AI \u{b7} Vibe (mistral)"),
+            "picker must name the product: {text}"
         );
     }
 }
