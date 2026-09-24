@@ -941,6 +941,23 @@ fn parse_unit_binary(manager: &str, unit_content: &str) -> Option<PathBuf> {
     }
 }
 
+/// CB70: does this systemd unit's content define a non-empty Environment=BROWSER= ?
+/// Pure over &str so tests drive it without real unit files.
+fn unit_defines_browser(unit_content: &str) -> bool {
+    unit_content.lines().any(|line| {
+        line.strip_prefix("Environment=BROWSER=").is_some_and(|v| {
+            // Mirror parse_existing_browser_env: one layer of surrounding
+            // quotes is not a value — `Environment=BROWSER=""` is empty.
+            let unquoted = if v.len() >= 2 && v.starts_with('"') && v.ends_with('"') {
+                &v[1..v.len() - 1]
+            } else {
+                v
+            };
+            !unquoted.is_empty()
+        })
+    })
+}
+
 /// What doctor should report about a service unit's binary, given facts a
 /// caller has already gathered by touching the filesystem/PATH. Pure
 /// comparison — no I/O — so every branch is reachable from synthetic inputs.
@@ -1145,6 +1162,18 @@ fn report_service_unit(home: &Path, issues: &mut Vec<String>) {
         // the file on disk, not just that the unit names some path.
         ServiceUnitBinaryStatus::Consistent => {
             success_nested(format!("Binary: {}", unit_binary.display()));
+        }
+    }
+
+    if manager == "systemd" {
+        if unit_defines_browser(&unit_content) {
+            success_nested(
+                "Browser env: BROWSER is set (login/connection pages can open)".to_string(),
+            );
+        } else {
+            println!("     \x1b[33m⚠\x1b[0m Unit defines no Environment=BROWSER= — harnesses and MCP servers started by the daemon cannot open login or connection pages");
+            println!("     Fix: mkdir -p ~/.config/systemd/user/canopy.service.d && printf '[Service]\\nEnvironment=BROWSER=<your-browser-cmd>\\n' > ~/.config/systemd/user/canopy.service.d/browser.conf && systemctl --user daemon-reload && systemctl --user restart canopy.service");
+            issues.push("Daemon unit has no BROWSER — harnesses/MCP servers cannot open login or connection pages. Re-run `canopy daemon install` with BROWSER set, or add the drop-in shown above.".to_string());
         }
     }
 }
@@ -1501,6 +1530,30 @@ mod tests {
         // Nothing to compare against — the unit's binary existing is enough.
         let status = diagnose_service_unit_binary(Path::new("/usr/bin/canopy"), true, None);
         assert_eq!(status, ServiceUnitBinaryStatus::Consistent);
+    }
+
+    #[test]
+    fn unit_defines_browser_true_when_present() {
+        let content = "[Service]\nEnvironment=PATH=/usr/bin\nEnvironment=BROWSER=/x/wsl-browser\n";
+        assert!(unit_defines_browser(content));
+    }
+
+    #[test]
+    fn unit_defines_browser_false_when_absent() {
+        let content = "[Service]\nEnvironment=PATH=/usr/bin\nEnvironment=RUST_LOG=info\n";
+        assert!(!unit_defines_browser(content));
+    }
+
+    #[test]
+    fn unit_defines_browser_false_when_empty_value() {
+        let content = "[Service]\nEnvironment=BROWSER=\n";
+        assert!(!unit_defines_browser(content));
+    }
+
+    #[test]
+    fn unit_defines_browser_false_when_quoted_empty_value() {
+        let content = "[Service]\nEnvironment=BROWSER=\"\"\n";
+        assert!(!unit_defines_browser(content));
     }
 
     #[test]

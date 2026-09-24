@@ -72,6 +72,14 @@ canopy daemon install-service     # register with systemd/launchd
 canopy daemon uninstall-service
 ```
 
+`canopy daemon install-service` (and first-time `canopy setup` when it
+installs the unit) copies `BROWSER`, `DISPLAY` and `WAYLAND_DISPLAY` —
+only when set in the installing shell, verbatim, with whitespace quoted —
+into the systemd unit. Re-running preserves previously stored values for
+keys missing from the current environment. Hand drop-ins under
+`~/.config/systemd/user/canopy.service.d/` are never touched. `canopy
+doctor` warns when the unit lacks `BROWSER`.
+
 ## Data directory
 
 All state lives under `~/.canopy/`:

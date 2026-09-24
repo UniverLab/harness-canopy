@@ -38,6 +38,10 @@ pub fn uninstall_service() -> Result<()> {
 
 const SYSTEMD_SERVICE_NAME: &str = "canopy.service";
 
+/// CB70: the only extra variables ever copied into the systemd unit.
+/// Nothing else from the process environment may be added here (constraint).
+const BROWSER_ENV_KEYS: [&str; 3] = ["BROWSER", "DISPLAY", "WAYLAND_DISPLAY"];
+
 fn systemd_unit_dir() -> Result<std::path::PathBuf> {
     let home =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
@@ -61,7 +65,10 @@ fn install_systemd_service(exe: &std::path::Path, port: u16) -> Result<()> {
     let current_path = std::env::var("PATH").unwrap_or_default();
     let path_value = reconcile_path(unit_path.as_path(), &current_path);
 
-    let unit_content = render_unit_content(&exe_str, port, &path_value);
+    let current_browser_env = collect_browser_env_from_process();
+    let extra_env = reconcile_browser_env(unit_path.as_path(), &current_browser_env);
+
+    let unit_content = render_unit_content(&exe_str, port, &path_value, &extra_env);
 
     std::fs::write(&unit_path, unit_content)?;
     println!("Created {}", unit_path.display());
@@ -77,7 +84,21 @@ fn install_systemd_service(exe: &std::path::Path, port: u16) -> Result<()> {
 /// Includes `Environment=PATH=` so CLI binaries installed under a user's
 /// home directory (e.g. `~/.opencode/bin`) resolve under the daemon's
 /// minimal systemd PATH, not just when the daemon inherits a shell's PATH.
-fn render_unit_content(exe_str: &str, port: u16, path_value: &str) -> String {
+fn render_unit_content(
+    exe_str: &str,
+    port: u16,
+    path_value: &str,
+    extra_env: &std::collections::BTreeMap<String, String>,
+) -> String {
+    let mut extra_lines = String::new();
+    for key in BROWSER_ENV_KEYS {
+        if let Some(val) = extra_env.get(key) {
+            if val.is_empty() {
+                continue;
+            }
+            extra_lines.push_str(&format!("Environment={key}={}\n", systemd_quote_value(val)));
+        }
+    }
     format!(
         r#"[Unit]
 Description=canopy daemon
@@ -92,7 +113,7 @@ StartLimitIntervalSec=60
 StartLimitBurst=5
 Environment=RUST_LOG=info
 Environment=PATH={path_value}
-
+{extra_lines}
 [Install]
 WantedBy=default.target
 "#
@@ -146,6 +167,97 @@ fn reconcile_path(unit_path: &std::path::Path, new_path: &str) -> String {
         merged.push_str(entry);
     }
     merged
+}
+
+/// CB70: quote a value for systemd's `Environment=` directive. Verbatim
+/// unless it contains ASCII whitespace or a double-quote, in which case
+/// wrap in `"..."` after escaping `\` then `"`.
+fn systemd_quote_value(value: &str) -> String {
+    if !value.contains(' ') && !value.contains('\t') && !value.contains('"') {
+        return value.to_string();
+    }
+    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
+}
+
+/// CB70: parse previously stored BROWSER/DISPLAY/WAYLAND_DISPLAY values
+/// from an existing unit's contents. Pure over `&str` so tests drive it
+/// without real unit files. Strips one layer of surrounding double quotes
+/// so a quoted old value round-trips to exactly one layer on re-render.
+fn parse_existing_browser_env(unit_content: &str) -> std::collections::BTreeMap<String, String> {
+    let mut map = std::collections::BTreeMap::new();
+    for line in unit_content.lines() {
+        let Some(rest) = line.strip_prefix("Environment=") else {
+            continue;
+        };
+        let Some((key, val)) = rest.split_once('=') else {
+            continue;
+        };
+        if !BROWSER_ENV_KEYS.contains(&key) || val.is_empty() {
+            continue;
+        }
+        let stored = if val.len() >= 2 && val.starts_with('"') && val.ends_with('"') {
+            val[1..val.len() - 1].to_string()
+        } else {
+            val.to_string()
+        };
+        if stored.is_empty() {
+            continue;
+        }
+        map.insert(key.to_string(), stored);
+    }
+    map
+}
+
+/// CB70: reconcile the current environment's browser/display values with
+/// any previously stored in the existing unit file. For each key, the
+/// current env wins when non-empty; otherwise a non-empty old value is
+/// kept and reported. Never touches `canopy.service.d/` (FR3).
+fn reconcile_browser_env(
+    unit_path: &std::path::Path,
+    current: &std::collections::BTreeMap<String, String>,
+) -> std::collections::BTreeMap<String, String> {
+    let mut result = std::collections::BTreeMap::new();
+    for key in BROWSER_ENV_KEYS {
+        if let Some(val) = current.get(key) {
+            if !val.is_empty() {
+                result.insert(key.to_string(), val.clone());
+            }
+        }
+    }
+    let Ok(existing) = std::fs::read_to_string(unit_path) else {
+        return result;
+    };
+    let old = parse_existing_browser_env(&existing);
+    for key in BROWSER_ENV_KEYS {
+        let missing = result.get(key).is_none_or(|v| v.is_empty());
+        if missing {
+            if let Some(old_val) = old.get(key) {
+                if !old_val.is_empty() {
+                    println!(
+                        "  Keeping existing Environment={key}={old_val} (not set in current environment)"
+                    );
+                    result.insert(key.to_string(), old_val.clone());
+                }
+            }
+        }
+    }
+    result
+}
+
+/// CB70: read only the allow-listed keys from the process environment.
+/// Only caller is `install_systemd_service`. No other variable may be
+/// read here (constraint).
+fn collect_browser_env_from_process() -> std::collections::BTreeMap<String, String> {
+    let mut map = std::collections::BTreeMap::new();
+    for key in BROWSER_ENV_KEYS {
+        if let Ok(v) = std::env::var(key) {
+            if !v.is_empty() {
+                map.insert(key.to_string(), v);
+            }
+        }
+    }
+    map
 }
 
 fn ensure_linger_enabled() {
@@ -350,7 +462,12 @@ mod tests {
     /// — exercises the pure content-generation function directly.
     #[test]
     fn unit_template_includes_nonempty_path_environment() {
-        let content = render_unit_content("/usr/bin/canopy", 4177, "/usr/bin:/bin");
+        let content = render_unit_content(
+            "/usr/bin/canopy",
+            4177,
+            "/usr/bin:/bin",
+            &std::collections::BTreeMap::new(),
+        );
 
         let path_line = content
             .lines()
@@ -390,7 +507,12 @@ mod tests {
 
     #[test]
     fn render_unit_content_includes_exe_and_port() {
-        let content = render_unit_content("/usr/bin/canopy", 7755, "/usr/bin:/bin");
+        let content = render_unit_content(
+            "/usr/bin/canopy",
+            7755,
+            "/usr/bin:/bin",
+            &std::collections::BTreeMap::new(),
+        );
         assert!(content.contains("/usr/bin/canopy"));
         assert!(content.contains("7755"));
         assert!(content.contains("[Unit]"));
@@ -402,14 +524,77 @@ mod tests {
 
     #[test]
     fn render_unit_content_uses_custom_port() {
-        let content = render_unit_content("/usr/bin/canopy", 9999, "/usr/bin");
+        let content = render_unit_content(
+            "/usr/bin/canopy",
+            9999,
+            "/usr/bin",
+            &std::collections::BTreeMap::new(),
+        );
         assert!(content.contains("9999"));
         assert!(!content.contains("7755"));
     }
 
     #[test]
     fn render_unit_content_uses_custom_path() {
-        let content = render_unit_content("/usr/bin/canopy", 7755, "/custom/path:/another/path");
+        let content = render_unit_content(
+            "/usr/bin/canopy",
+            7755,
+            "/custom/path:/another/path",
+            &std::collections::BTreeMap::new(),
+        );
         assert!(content.contains("/custom/path:/another/path"));
+    }
+
+    #[test]
+    fn render_unit_includes_browser_and_display_but_no_wayland() {
+        let map = std::collections::BTreeMap::from([
+            ("BROWSER".to_string(), "/x/wsl-browser".to_string()),
+            ("DISPLAY".to_string(), ":0".to_string()),
+        ]);
+        let content = render_unit_content("/usr/bin/canopy", 7755, "/usr/bin:/bin", &map);
+        assert!(content.contains("Environment=BROWSER=/x/wsl-browser"));
+        assert!(content.contains("Environment=DISPLAY=:0"));
+        assert!(!content.contains("WAYLAND_DISPLAY"));
+    }
+
+    #[test]
+    fn reconcile_browser_env_keeps_old_browser_when_current_env_lacks_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let unit_path = tmp.path().join("canopy.service");
+        std::fs::write(&unit_path, "[Service]\nEnvironment=BROWSER=/old\n").unwrap();
+
+        let result = reconcile_browser_env(&unit_path, &std::collections::BTreeMap::new());
+
+        assert_eq!(result.get("BROWSER"), Some(&"/old".to_string()));
+    }
+
+    #[test]
+    fn render_unit_quotes_value_with_space() {
+        let map = std::collections::BTreeMap::from([(
+            "BROWSER".to_string(),
+            "/x/my browser".to_string(),
+        )]);
+        let content = render_unit_content("/usr/bin/canopy", 7755, "/usr/bin:/bin", &map);
+        assert!(content.contains("Environment=BROWSER=\"/x/my browser\""));
+    }
+
+    #[test]
+    fn systemd_quote_value_plain_vs_space_vs_embedded_quote() {
+        assert_eq!(systemd_quote_value("/x/wsl-browser"), "/x/wsl-browser");
+        assert_eq!(systemd_quote_value("/x/my browser"), "\"/x/my browser\"");
+        assert_eq!(
+            systemd_quote_value("/x/say\"hi browser"),
+            "\"/x/say\\\"hi browser\""
+        );
+    }
+
+    #[test]
+    fn parse_existing_browser_env_ignores_path_and_empty_values() {
+        let content = "[Service]\nEnvironment=PATH=/usr/bin:/bin\nEnvironment=BROWSER=\nEnvironment=DISPLAY=:0\nEnvironment=RUST_LOG=info\n";
+        let parsed = parse_existing_browser_env(content);
+        assert_eq!(parsed.get("DISPLAY"), Some(&":0".to_string()));
+        assert!(!parsed.contains_key("PATH"));
+        assert!(!parsed.contains_key("BROWSER"));
+        assert!(!parsed.contains_key("RUST_LOG"));
     }
 }
