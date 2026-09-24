@@ -589,9 +589,9 @@ impl NewAgentDialog {
             && self.background_trigger == BackgroundTrigger::Watch;
 
         let all: Vec<_> = entries.filter_map(|e| e.ok()).collect();
-        let mut dirs = collect_dir_names(&all, "📁 ");
+        let mut dirs = collect_dir_names(&all);
         let mut files = if include_files {
-            collect_file_names(&all, "  ")
+            collect_file_names(&all)
         } else {
             Vec::new()
         };
@@ -653,7 +653,7 @@ impl NewAgentDialog {
         self.refresh_dir_entries();
         // Position cursor on the directory we came from
         if let Some(name) = leaving_name {
-            let target = format!("📁 {name}");
+            let target = format!("{name}/");
             if let Some(idx) = self.dir_entries.iter().position(|e| e == &target) {
                 self.dir_selected = idx;
             }
@@ -671,7 +671,7 @@ impl NewAgentDialog {
         }
 
         let selected = filtered[self.dir_selected].clone();
-        let name = selected.trim_start_matches("📁 ").trim_start_matches("  ");
+        let name = selected.strip_suffix('/').unwrap_or(selected.as_str());
         let full_path = format!("{}/{}", self.current_path.trim_end_matches('/'), name);
         self.working_dir = full_path;
     }
@@ -684,7 +684,7 @@ impl NewAgentDialog {
         }
 
         let selected = filtered[self.dir_selected].clone();
-        let name = selected.trim_start_matches("📁 ").trim_start_matches("  ");
+        let name = selected.strip_suffix('/').unwrap_or(selected.as_str());
         let full_path = format!("{}/{}", self.current_path.trim_end_matches('/'), name);
         let is_dir = std::fs::metadata(&full_path)
             .map(|m| m.is_dir())
@@ -789,7 +789,7 @@ pub fn detect_available_shells() -> Vec<String> {
     found
 }
 
-fn collect_dir_names(entries: &[std::fs::DirEntry], prefix: &str) -> Vec<String> {
+fn collect_dir_names(entries: &[std::fs::DirEntry]) -> Vec<String> {
     entries
         .iter()
         .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
@@ -798,13 +798,13 @@ fn collect_dir_names(entries: &[std::fs::DirEntry], prefix: &str) -> Vec<String>
             if name.starts_with('.') {
                 None
             } else {
-                Some(format!("{prefix}{name}"))
+                Some(format!("{name}/"))
             }
         })
         .collect()
 }
 
-fn collect_file_names(entries: &[std::fs::DirEntry], prefix: &str) -> Vec<String> {
+fn collect_file_names(entries: &[std::fs::DirEntry]) -> Vec<String> {
     entries
         .iter()
         .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
@@ -813,7 +813,7 @@ fn collect_file_names(entries: &[std::fs::DirEntry], prefix: &str) -> Vec<String
             if name.starts_with('.') {
                 None
             } else {
-                Some(format!("{prefix}{name}"))
+                Some(name)
             }
         })
         .collect()
@@ -2157,7 +2157,7 @@ mod tests {
     fn update_dir_preview_valid_selection() {
         let mut dialog = NewAgentDialog::new(None);
         dialog.current_path = "/tmp".to_string();
-        dialog.dir_entries = vec!["📁 sub".to_string(), "  file.txt".to_string()];
+        dialog.dir_entries = vec!["sub/".to_string(), "file.txt".to_string()];
         dialog.dir_selected = 0;
         dialog.update_dir_preview();
         assert_eq!(dialog.working_dir, "/tmp/sub");
