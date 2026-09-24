@@ -136,32 +136,22 @@ pub fn run_tui() -> Result<()> {
 }
 
 /// Try to start the daemon process automatically.
+///
+/// CB72: never kills — if anything (managed daemon or orphan alike) already
+/// holds the port, there is nothing to start; otherwise the shared start
+/// prefers the installed unit and only detaches a raw `canopy serve` when
+/// no unit/manager exists to own it.
 fn auto_start_daemon(data_dir: &std::path::Path) -> Result<()> {
-    let exe = std::env::current_exe()?;
-    let log_path = data_dir.join("daemon.log");
-    let log_file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)?;
-    let log_err = log_file.try_clone()?;
-
-    let mut cmd = std::process::Command::new(&exe);
-    cmd.arg("serve")
-        .stdout(log_file)
-        .stderr(log_err)
-        .stdin(std::process::Stdio::null());
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        unsafe {
-            cmd.pre_exec(|| {
-                libc::setsid();
-                Ok(())
-            });
-        }
+    let port = crate::resolve_port(None);
+    if crate::daemon::process::resolve_port_pid(port).is_some() {
+        return Ok(());
     }
-
-    cmd.spawn().context("Failed to spawn daemon process")?;
-    Ok(())
+    let exe = std::env::current_exe()?;
+    crate::daemon::daemon_start::start_daemon_live(
+        port,
+        crate::daemon::daemon_start::StartIntent::Auto,
+        &exe,
+        None,
+        data_dir,
+    )
 }

@@ -356,7 +356,7 @@ pub(crate) fn resolve_port_pid(_port: u16) -> Option<u32> {
     None
 }
 
-const SYSTEMD_UNIT_NAME: &str = "canopy.service";
+pub(crate) const SYSTEMD_UNIT_NAME: &str = "canopy.service";
 #[cfg(target_os = "macos")]
 const LAUNCHD_LABEL: &str = "com.canopy";
 
@@ -410,7 +410,7 @@ fn is_unit_cgroup(cgroup_content: &str, unit_name: &str) -> bool {
 }
 
 #[cfg(target_os = "macos")]
-fn launchd_plist_path() -> Option<std::path::PathBuf> {
+pub(crate) fn launchd_plist_path() -> Option<std::path::PathBuf> {
     Some(
         dirs::home_dir()?
             .join("Library/LaunchAgents")
@@ -455,6 +455,65 @@ fn parse_launchctl_pid(text: &str) -> Option<u32> {
     })
 }
 
+/// Injected seam for every service-manager invocation (`systemctl` /
+/// `launchctl`): tests record the command through a fake instead of
+/// executing it, so "tests never call the real systemctl" holds
+/// structurally rather than by discipline. Defined here because
+/// `process.rs` owns every manager invocation.
+pub(crate) trait CommandRunner {
+    /// Run `prog` with `args`; `true` iff it exited successfully.
+    fn run(&self, prog: &str, args: &[&str]) -> bool;
+}
+
+/// The production [`CommandRunner`]: really executes the command.
+pub(crate) struct RealRunner;
+
+impl CommandRunner for RealRunner {
+    fn run(&self, prog: &str, args: &[&str]) -> bool {
+        std::process::Command::new(prog)
+            .args(args)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn service_manager_stop_with(runner: &dyn CommandRunner) -> bool {
+    runner.run("systemctl", &["--user", "stop", SYSTEMD_UNIT_NAME])
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn service_manager_start_with(runner: &dyn CommandRunner) -> bool {
+    runner.run("systemctl", &["--user", "start", SYSTEMD_UNIT_NAME])
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn service_manager_stop_with(runner: &dyn CommandRunner) -> bool {
+    let Some(path) = launchd_plist_path() else {
+        return false;
+    };
+    runner.run("launchctl", &["unload", &path.display().to_string()])
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn service_manager_start_with(runner: &dyn CommandRunner) -> bool {
+    let Some(path) = launchd_plist_path() else {
+        return false;
+    };
+    runner.run("launchctl", &["load", &path.display().to_string()])
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn service_manager_stop_with(_runner: &dyn CommandRunner) -> bool {
+    false
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn service_manager_start_with(_runner: &dyn CommandRunner) -> bool {
+    false
+}
+
 /// Ask the platform service manager to stop the canopy unit/agent — used
 /// instead of signalling the managed PID directly when restoring the
 /// daemon after `canopy clean`'s reclaim window (B-decision 4/5): the
@@ -462,56 +521,12 @@ fn parse_launchctl_pid(text: &str) -> Option<u32> {
 /// systemd as an unclean exit and it respawns the process out from under
 /// the exclusive `VACUUM` this stop was for. Going through the manager's
 /// own stop verb is the only way to get a stop it won't immediately undo.
-#[cfg(target_os = "linux")]
 pub(crate) fn service_manager_stop() -> bool {
-    std::process::Command::new("systemctl")
-        .args(["--user", "stop", SYSTEMD_UNIT_NAME])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    service_manager_stop_with(&RealRunner)
 }
 
-#[cfg(target_os = "linux")]
 pub(crate) fn service_manager_start() -> bool {
-    std::process::Command::new("systemctl")
-        .args(["--user", "start", SYSTEMD_UNIT_NAME])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-#[cfg(target_os = "macos")]
-pub(crate) fn service_manager_stop() -> bool {
-    let Some(path) = launchd_plist_path() else {
-        return false;
-    };
-    std::process::Command::new("launchctl")
-        .args(["unload", &path.display().to_string()])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-#[cfg(target_os = "macos")]
-pub(crate) fn service_manager_start() -> bool {
-    let Some(path) = launchd_plist_path() else {
-        return false;
-    };
-    std::process::Command::new("launchctl")
-        .args(["load", &path.display().to_string()])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub(crate) fn service_manager_stop() -> bool {
-    false
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub(crate) fn service_manager_start() -> bool {
-    false
+    service_manager_start_with(&RealRunner)
 }
 
 /// Is a service-manager unit/agent installed for canopy on this platform,
@@ -569,6 +584,31 @@ pub(crate) fn service_manager_facts() -> Option<ServiceManagerFacts> {
         }
     }
     None
+}
+
+/// CB72 kill rule for `canopy daemon start` (FR2): the port may be cleared
+/// only of a *proven orphan* — a unit is installed, something is listening,
+/// and that listener is not the unit's own MainPID. Never true when no unit
+/// is installed, so the Auto callers (TUI/setup) can never reach a kill
+/// through this rule.
+pub(crate) fn orphan_needs_kill(
+    unit_installed: bool,
+    manager_pid: Option<u32>,
+    occupant: Option<u32>,
+) -> bool {
+    unit_installed && occupant.is_some() && manager_pid != occupant
+}
+
+/// CB72 stop rule (FR3): go through the service manager only when the live
+/// port occupant IS the unit's MainPID — signalling that PID directly reads
+/// as an unclean exit under `Restart=on-failure` and systemd respawns it
+/// behind the user's back. An orphan (occupant ≠ MainPID) keeps the plain
+/// signal path; no manager, or no live MainPID, has nothing to manage-stop.
+pub(crate) fn should_stop_via_manager(
+    manager: Option<&ServiceManagerFacts>,
+    occupant: Option<u32>,
+) -> bool {
+    manager.is_some_and(|m| m.pid.is_some() && m.pid == occupant)
 }
 
 /// The result of comparing the PID-file, port-occupant, and (if any)

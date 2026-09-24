@@ -7,6 +7,20 @@ use anyhow::{Context, Result};
 /// Stop the daemon if it is running.
 pub(crate) fn stop_daemon() -> Result<()> {
     let data_dir = crate::ensure_data_dir()?;
+
+    // FR3: if a unit is installed and it owns a live process, stop through
+    // the manager first — the wizard's stop→start sequence would otherwise
+    // SIGTERM the managed PID, which reads as an unclean exit under
+    // `Restart=on-failure` and lets systemd resurrect the daemon mid-install
+    // (the CB72 orphan race, from inside setup).
+    if crate::daemon::process::service_unit_installed()
+        && crate::daemon::process::service_manager_facts().is_some_and(|m| m.pid.is_some())
+        && crate::daemon::process::service_manager_stop()
+    {
+        let _ = std::fs::remove_file(data_dir.join("daemon.pid"));
+        return Ok(());
+    }
+
     let pid_path = data_dir.join("daemon.pid");
     if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
         if let Ok(pid) = pid_str.trim().parse::<i32>() {
@@ -29,49 +43,25 @@ pub(crate) fn stop_daemon() -> Result<()> {
 
 pub(crate) fn start_daemon_if_needed() -> Result<bool> {
     let data_dir = crate::ensure_data_dir()?;
-    let pid_path = data_dir.join("daemon.pid");
 
-    if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
-        if let Ok(pid) = pid_str.trim().parse::<u32>() {
-            if is_process_running(pid) {
-                return Ok(false);
-            }
-        }
+    // CB72: same shape as the TUI auto-start — if anything (managed daemon
+    // or orphan) already holds the port, start nothing and never kill:
+    // setup runs non-interactively and must not SIGTERM a user's process
+    // mid-wizard.
+    let port = crate::resolve_port(None);
+    if crate::daemon::process::resolve_port_pid(port).is_some() {
+        return Ok(false);
     }
 
     let exe = std::env::current_exe()?;
-    let log_path = data_dir.join("daemon.log");
-    let log_file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)?;
-    let log_err = log_file.try_clone()?;
-
-    let mut cmd = std::process::Command::new(&exe);
-    cmd.arg("serve")
-        .stdout(log_file)
-        .stderr(log_err)
-        .stdin(std::process::Stdio::null());
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        unsafe {
-            cmd.pre_exec(|| {
-                libc::setsid();
-                Ok(())
-            });
-        }
-    }
-
-    let child = cmd.spawn()?;
-    std::thread::sleep(std::time::Duration::from_millis(500));
-
-    if is_process_running(child.id()) {
-        Ok(true)
-    } else {
-        anyhow::bail!("Daemon failed to start")
-    }
+    crate::daemon::daemon_start::start_daemon_live(
+        port,
+        crate::daemon::daemon_start::StartIntent::Auto,
+        &exe,
+        None,
+        &data_dir,
+    )?;
+    Ok(true)
 }
 
 pub(crate) fn install_service_if_needed() -> Result<bool> {
