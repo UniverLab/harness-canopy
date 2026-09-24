@@ -683,11 +683,25 @@ fn clear_screen() -> Result<()> {
     Ok(())
 }
 
+/// Human-readable source the registry fetch used: `local: <path>` when a
+/// local registry directory is set (`--local-registry`), `github` otherwise.
+/// Pure so it can be unit-tested without global state.
+fn registry_source_label(local: Option<&Path>) -> String {
+    match local {
+        Some(path) => format!("local: {}", path.display()),
+        None => "github".to_string(),
+    }
+}
+
 fn fetch_registry() -> Result<crate::setup_module::models::RegistryRaw> {
     print!("  Fetching platform registry… ");
     io::stdout().flush()?;
     let registry = setup::fetch_registry_raw().context("Failed to fetch registry")?;
-    println!("\x1b[32m✓\x1b[0m");
+    // CB65: show which registry the wizard actually used — a silent GitHub
+    // fetch after `--local-registry` was once indistinguishable from success.
+    let label =
+        registry_source_label(setup::registry_fetch::local_registry_path().map(|p| p.as_path()));
+    println!("\x1b[32m✓\x1b[0m ({})", label);
     Ok(registry)
 }
 
@@ -1091,6 +1105,19 @@ fn server_presence_icon(has_server: bool) -> &'static str {
 mod tests {
     use super::*;
     use crate::setup_module::Platform;
+
+    #[test]
+    fn registry_source_label_shows_local_path_when_set() {
+        assert_eq!(
+            registry_source_label(Some(Path::new("/tmp/r"))),
+            "local: /tmp/r"
+        );
+    }
+
+    #[test]
+    fn registry_source_label_shows_github_when_unset() {
+        assert_eq!(registry_source_label(None), "github");
+    }
 
     fn test_platform(name: &str) -> Platform {
         Platform {

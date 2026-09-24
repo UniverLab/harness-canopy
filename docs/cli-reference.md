@@ -32,6 +32,7 @@ first if needed, and checking for updates).
 | `canopy setup` | Interactive setup wizard — detects AI CLIs, generates `~/.canopy/config.toml` |
 | `canopy setup --local-registry <path>` | Use a local registry directory (for registry development) |
 | `canopy mcp` | MCP wizard — sync/add/remove canopy's MCP entry across platforms |
+| `canopy mcp --local-registry <path>` | Run the MCP wizard against a local registry directory instead of GitHub (same flag as `canopy setup --local-registry`) |
 | `canopy mcp` → Add | Add a server via pasted README JSON, local stdio command (with args + env), or remote URL (with headers); previews entries, marks `(replaces existing)` overwrites, then asks `Install on N platform(s)?` |
 | `canopy doctor` | Full health diagnostics |
 

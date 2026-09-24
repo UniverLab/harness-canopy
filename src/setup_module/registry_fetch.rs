@@ -22,7 +22,8 @@ pub fn set_local_registry(path: PathBuf) {
 }
 
 /// Get the currently configured local registry path, if any.
-fn get_local_registry() -> Option<&'static PathBuf> {
+/// `pub` so the `canopy mcp` wizard can label which registry source it used.
+pub fn local_registry_path() -> Option<&'static PathBuf> {
     LOCAL_REGISTRY_PATH.get()
 }
 
@@ -65,7 +66,7 @@ pub fn fetch_registry_raw() -> Result<RegistryRaw> {
 
 pub(crate) fn fetch_registry() -> Result<RegistryRaw> {
     // Development mode: read from local filesystem if configured
-    if let Some(local_path) = get_local_registry() {
+    if let Some(local_path) = local_registry_path() {
         if let Some(reg) = try_fetch_local(local_path) {
             return Ok(reg);
         }

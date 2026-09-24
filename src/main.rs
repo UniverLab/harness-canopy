@@ -92,7 +92,12 @@ enum Commands {
         yes: bool,
     },
     /// Interactive wizard to configure MCP in your AI client.
-    Mcp,
+    Mcp {
+        /// Use a local registry directory instead of fetching from GitHub.
+        /// Useful for development and testing registry changes before publishing.
+        #[arg(long = "local-registry", value_name = "PATH")]
+        local_registry: Option<PathBuf>,
+    },
     /// RAG indexing management.
     Rag {
         #[command(subcommand)]
@@ -206,7 +211,10 @@ async fn main() -> Result<()> {
             tokio::task::block_in_place(|| setup_module::run_setup(force_skills))?;
             Ok(())
         }
-        Some(Commands::Mcp) => {
+        Some(Commands::Mcp { local_registry }) => {
+            if let Some(path) = local_registry {
+                setup_module::registry_fetch::set_local_registry(path);
+            }
             tokio::task::block_in_place(mcp_wizard_module::run_mcp_wizard)?;
             Ok(())
         }
@@ -316,7 +324,7 @@ pub(crate) fn ensure_data_dir() -> Result<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::CommandFactory;
+    use clap::{CommandFactory, Parser};
 
     fn assert_all_subcommands_have_about(cmd: &clap::Command, prefix: &str) {
         for sub in cmd.get_subcommands() {
@@ -339,5 +347,18 @@ mod tests {
     fn all_subcommands_have_help_text() {
         let cmd = <Cli as CommandFactory>::command();
         assert_all_subcommands_have_about(&cmd, "");
+    }
+
+    #[test]
+    fn mcp_subcommand_accepts_local_registry_flag() {
+        // CB65: `canopy mcp` must accept the same --local-registry flag as setup.
+        let cli = Cli::try_parse_from(["canopy", "mcp", "--local-registry", "/tmp/r"])
+            .expect("`canopy mcp --local-registry /tmp/r` must parse");
+        match cli.command {
+            Some(Commands::Mcp { local_registry }) => {
+                assert_eq!(local_registry, Some(PathBuf::from("/tmp/r")));
+            }
+            _ => panic!("expected Commands::Mcp with local_registry"),
+        }
     }
 }
