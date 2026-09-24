@@ -1,6 +1,6 @@
 [package]
 name = "harness-canopy"
-version = "3.0.0"
+version = "3.0.1"
 edition = "2021"
 rust-version = "1.91"
 description = "A self-contained MCP server for AI agent task scheduling and file watching"
@@ -160,9 +160,27 @@ hf-hub = { version = "0.5", optional = true, default-features = false, features 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
-# macOS/iOS: ort downloads prebuilt ONNX Runtime for Apple targets and
-# bundles it into the binary at compile time. No runtime download needed.
-[target.'cfg(not(target_os = "linux"))'.dependencies]
+# Apple Silicon macOS: ort downloads a prebuilt ONNX Runtime for
+# aarch64-apple-darwin and bundles it into the binary at compile time.
+# No runtime download needed.
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
+fastembed = { version = "5", optional = true }
+
+# Intel macOS: ort ships no prebuilt ONNX Runtime for x86_64-apple-darwin,
+# so download-binaries fails the build (v3.0.0 CD). Same treatment as
+# Linux below: compile ort in `load-dynamic` mode. The Intel artifact
+# builds and runs, but local RAG stays explicitly unavailable there —
+# `ensure_ort_present` only downloads the runtime on Linux, so
+# `provider_available` refuses with a clear message instead of
+# silently going green (same story as the musl artifact).
+[target.'cfg(all(target_os = "macos", target_arch = "x86_64"))'.dependencies]
+fastembed = { version = "5", optional = true, default-features = false, features = [
+    "ort-load-dynamic",
+    "hf-hub-native-tls",
+] }
+
+# Any other non-Linux OS keeps the previous behaviour (bundled runtime).
+[target.'cfg(all(not(target_os = "linux"), not(target_os = "macos")))'.dependencies]
 fastembed = { version = "5", optional = true }
 
 # Linux: ort's prebuilt ONNX Runtime targets glibc, not musl. We compile
@@ -184,12 +202,13 @@ tempfile = "3.8"
 
 [features]
 default = []
-# Enabled in release builds for macOS (bundled ONNX Runtime via
-# ort-download-binaries) and Linux glibc (runtime-loaded via
-# ort-load-dynamic + on-demand download to ~/.canopy). The Linux musl
-# target cannot use either approach — ort ships no musl prebuilt, and a
-# static musl binary cannot dlopen a glibc .so — so the musl release
-# artifact is built without this feature and cannot serve local RAG.
+# Enabled in release builds for Apple Silicon macOS (bundled ONNX Runtime
+# via ort-download-binaries) and Linux glibc (runtime-loaded via
+# ort-load-dynamic + on-demand download to ~/.canopy). Intel macOS and the
+# Linux musl target cannot use either approach — ort ships no prebuilt for
+# x86_64-apple-darwin or musl, and a static musl binary cannot dlopen a
+# glibc .so — so those artifacts are built with this feature's deps in
+# load-dynamic / off shape and cannot serve local RAG.
 # doctor/setup/rag-status all check capability
 # (`embedding_client::provider_available`) and refuse/warn explicitly when
 # this feature is off, so the absence is visible rather than silently green.
