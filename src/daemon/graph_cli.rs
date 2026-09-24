@@ -2120,7 +2120,7 @@ mod tests {
 
         let raw = std::fs::read_to_string(&out_path).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(doc["format_version"], 3);
+        assert_eq!(doc["format_version"], 4);
         assert_eq!(doc["name"], "my-graph");
         assert_eq!(doc["nodes"][0]["config"]["platform"], "claude");
         // No model stored (platform default): exported as explicit null.

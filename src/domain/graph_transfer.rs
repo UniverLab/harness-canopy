@@ -17,9 +17,10 @@
 //! divergent write path.
 //!
 //! Import restores each ensemble's `kind` and every other field the document
-//! carries; a document field it does not know how to restore — including an
+//! carries, including every entry source rather than only the ensemble row's
+//! primary; a document field it does not know how to restore — including an
 //! unknown `kind` value — is a refusal naming the field, never a silent
-//! default (CB62).
+//! default (CB62, CB71).
 
 use std::collections::HashMap;
 
@@ -36,11 +37,11 @@ use crate::domain::validation::{
 };
 
 /// The latest `format_version` this build writes. `graph_import` accepts `1`
-/// (members with no binding), `2` (bindings included), and `3` (current:
-/// graph/error vocabulary, `break` still read as `error` on import). An
-/// unrecognized or missing version is a refusal, never a best-effort parse
-/// (decision 6).
-pub const GRAPH_EXPORT_FORMAT_VERSION: i64 = 3;
+/// (members with no binding), `2` (bindings included), `3` (graph/error
+/// vocabulary, `break` still read as `error` on import), and `4` (current:
+/// every ensemble entry source). An unrecognized or missing version is a
+/// refusal, never a best-effort parse (decision 6).
+pub const GRAPH_EXPORT_FORMAT_VERSION: i64 = 4;
 
 /// Ensemble member count bounds — mirrors `daemon::handler`'s
 /// `ENSEMBLE_MIN_MEMBERS`/`ENSEMBLE_MAX_MEMBERS` (`graph_add_ensemble`'s own
@@ -102,6 +103,17 @@ pub struct GraphExportEnsembleMember {
     pub timeout_minutes: Option<i64>,
 }
 
+/// One extra entry source of an ensemble — a plain node that enters *every*
+/// member on its own condition, added at authoring time with
+/// `graph_update_ensemble`'s `add_entry_from`. The primary entry stays in the
+/// ensemble's `entry_from_node`/`entry_condition` fields (CB71).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GraphExportEntrySource {
+    pub from_node: String,
+    pub condition: GraphEdgeCondition,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum GraphExportEnsembleTarget {
@@ -135,6 +147,12 @@ pub struct GraphExportEnsemble {
     pub prompt_template: String,
     pub entry_from_node: GraphExportEnsembleTarget,
     pub entry_condition: GraphEdgeCondition,
+    /// Every entry source beyond the primary (`entry_from_node` +
+    /// `entry_condition`). Export omits it when the ensemble has only its
+    /// primary; import re-creates one edge per source per member, exactly as
+    /// `graph_update_ensemble`'s `add_entry_from` wires it (CB71).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_entry_sources: Vec<GraphExportEntrySource>,
     pub on_pass_to: GraphExportEnsembleTarget,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_fail_to: Option<GraphExportEnsembleTarget>,
@@ -318,6 +336,42 @@ pub fn build_export_document(
             })
             .collect();
 
+        // CB71: every entry source beyond the primary lives only in the
+        // member-fan-out edges, which the export `edges` list skips. Derive
+        // them here. Edges from ANY ensemble-owned node (this unit's
+        // members/join and other units' joins — chained exits, already
+        // carried by the upstream ensemble's on_pass_to/on_fail_to) are not
+        // entry sources.
+        let member_ids: std::collections::HashSet<&str> = details
+            .members
+            .iter()
+            .map(|member| member.node_id.as_str())
+            .collect();
+        let mut seen_sources: std::collections::HashSet<(&str, &GraphEdgeCondition)> =
+            std::collections::HashSet::new();
+        seen_sources.insert((ensemble.entry_from_node.as_str(), &ensemble.entry_condition));
+        let mut extra_entry_sources: Vec<GraphExportEntrySource> = Vec::new();
+        for edge in graph_edges {
+            if !member_ids.contains(edge.to_node.as_str())
+                || owned_ids.contains(edge.from_node.as_str())
+                || !seen_sources.insert((edge.from_node.as_str(), &edge.condition))
+            {
+                continue;
+            }
+            extra_entry_sources.push(GraphExportEntrySource {
+                from_node: resolve_name(&edge.from_node)?,
+                condition: edge.condition.clone(),
+            });
+        }
+        extra_entry_sources.sort_by_key(|source| {
+            format!(
+                "{}\u{0}{}\u{0}{}",
+                source.from_node,
+                source.condition.as_str(),
+                source.condition.route_label().unwrap_or("")
+            )
+        });
+
         export_ensembles.push(GraphExportEnsemble {
             name: ensemble.name.clone(),
             kind: if ensemble.kind == EnsembleKind::Parallel {
@@ -329,6 +383,7 @@ pub fn build_export_document(
             prompt_template: ensemble.prompt_template.clone(),
             entry_from_node: resolve_target(&ensemble.entry_from_node)?,
             entry_condition: ensemble.entry_condition.clone(),
+            extra_entry_sources,
             on_pass_to: resolve_target(&ensemble.on_pass_to)?,
             on_fail_to,
             min_pass: ensemble.min_pass,
@@ -404,17 +459,16 @@ fn edge_sort_key(edge: &GraphExportEdge) -> String {
 /// (decision 6).
 pub fn parse_export_document_value(value: &Value) -> Result<GraphExportDocument, String> {
     match value.get("format_version").and_then(Value::as_i64) {
-        Some(1) | Some(2) | Some(3) => {}
+        Some(1) | Some(2) | Some(3) | Some(4) => {}
         Some(other) => {
             return Err(format!(
-                "Graph export document has format_version {other}, but this build only supports 1, 2 and {GRAPH_EXPORT_FORMAT_VERSION}."
+                "Graph export document has format_version {other}, but this build only supports 1 through {GRAPH_EXPORT_FORMAT_VERSION}."
             ))
         }
         None => {
-            return Err(
-                "Graph export document is missing format_version; refusing to guess. Expected format_version: 3."
-                    .to_string(),
-            )
+            return Err(format!(
+                "Graph export document is missing format_version; refusing to guess. Expected format_version: {GRAPH_EXPORT_FORMAT_VERSION}."
+            ))
         }
     }
     serde_json::from_value(value.clone())
@@ -475,9 +529,9 @@ pub fn build_import_plan(
     document: &GraphExportDocument,
     graph_id: &str,
 ) -> Result<GraphImportPlan, String> {
-    if !matches!(document.format_version, 1..=3) {
+    if !matches!(document.format_version, 1..=4) {
         return Err(format!(
-            "Graph export document has format_version {}, but this build only supports 1, 2 and {}.",
+            "Graph export document has format_version {}, but this build only supports 1 through {}.",
             document.format_version, GRAPH_EXPORT_FORMAT_VERSION
         ));
     }
@@ -782,6 +836,39 @@ pub fn build_import_plan(
                 infra_backoff_seconds: None,
             });
             next_position += 1;
+        }
+
+        // CB71: restore every extra entry source as one edge per member,
+        // exactly the shape `Database::add_ensemble_entry_source` writes at
+        // authoring time. A source duplicating the primary (same node AND
+        // condition) or another extra is refused, never silently doubled.
+        let mut entry_source_keys: std::collections::HashSet<(String, GraphEdgeCondition)> =
+            std::collections::HashSet::new();
+        entry_source_keys.insert((
+            entry_from_node.clone(),
+            doc_ensemble.entry_condition.clone(),
+        ));
+        for source in &doc_ensemble.extra_entry_sources {
+            let from_id = resolve(&source.from_node)
+                .map_err(|e| format!("Ensemble '{}' extra entry source {e}.", doc_ensemble.name))?;
+            if !entry_source_keys.insert((from_id.clone(), source.condition.clone())) {
+                return Err(format!(
+                    "Ensemble '{}' lists entry source '{}' with condition '{}' more than once — the primary entry already uses it; remove the duplicate from extra_entry_sources.",
+                    doc_ensemble.name,
+                    source.from_node,
+                    source.condition.as_str(),
+                ));
+            }
+            for member_node_id in member_node_ids {
+                edges.push(GraphEdge {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    spec_id: None,
+                    graph_id: Some(graph_id.to_string()),
+                    from_node: from_id.clone(),
+                    to_node: member_node_id.clone(),
+                    condition: source.condition.clone(),
+                });
+            }
         }
 
         let join_node = GraphNode {
@@ -1265,7 +1352,7 @@ mod tests {
         let doc = build_export_document(&lp, &nodes, &edges, &[]).unwrap();
         let raw = serde_json::to_string(&doc).unwrap();
         // struct field order drives serde_json's key order.
-        assert!(raw.starts_with("{\"format_version\":3"));
+        assert!(raw.starts_with("{\"format_version\":4"));
     }
 
     #[test]
@@ -1287,8 +1374,8 @@ mod tests {
     }
 
     #[test]
-    fn import_accepts_format_versions_1_2_and_3() {
-        for version in [1, 2, 3] {
+    fn import_accepts_format_versions_1_through_4() {
+        for version in [1, 2, 3, 4] {
             let value = serde_json::json!({
                 "format_version": version, "name": "x", "nodes": [], "edges": [], "ensembles": []
             });
@@ -1353,7 +1440,7 @@ mod tests {
             ..document
         })
         .unwrap();
-        assert_eq!(exported["format_version"], 3);
+        assert_eq!(exported["format_version"], 4);
         assert_eq!(exported["edges"][0]["condition"], "error");
     }
 
@@ -1646,6 +1733,332 @@ mod tests {
     }
 
     #[test]
+    fn entry_sources_round_trip_through_export_import_export() {
+        let lp = make_graph("committer-loop");
+        let nodes = vec![
+            make_node(
+                "unlock",
+                "unlock",
+                GraphNodeKind::Check,
+                serde_json::json!({"command": "true"}),
+                1,
+            ),
+            make_node(
+                "check_committed",
+                "check_committed",
+                GraphNodeKind::Check,
+                serde_json::json!({"command": "true"}),
+                2,
+            ),
+            make_node(
+                "final",
+                "final",
+                GraphNodeKind::Check,
+                serde_json::json!({"command": "true"}),
+                10,
+            ),
+            make_node(
+                "m1",
+                "Committer [1]",
+                GraphNodeKind::Agent,
+                serde_json::json!({"platform": "claude"}),
+                3,
+            ),
+            make_node(
+                "m2",
+                "Committer [2]",
+                GraphNodeKind::Agent,
+                serde_json::json!({"platform": "copilot"}),
+                4,
+            ),
+            make_node(
+                "join1",
+                "Committer (quorum)",
+                GraphNodeKind::Join,
+                serde_json::json!({"ensemble_id": "ens1"}),
+                5,
+            ),
+        ];
+        let edges = vec![
+            make_edge("e1", "unlock", "m1", GraphEdgeCondition::Pass),
+            make_edge("e2", "unlock", "m2", GraphEdgeCondition::Pass),
+            make_edge("e3", "m1", "join1", GraphEdgeCondition::Always),
+            make_edge("e4", "m2", "join1", GraphEdgeCondition::Always),
+            make_edge("e5", "join1", "final", GraphEdgeCondition::Pass),
+            make_edge("e6", "join1", "check_committed", GraphEdgeCondition::Fail),
+            make_edge("e7", "check_committed", "m1", GraphEdgeCondition::Fail),
+            make_edge("e8", "check_committed", "m2", GraphEdgeCondition::Fail),
+        ];
+        let mut details = make_ensemble_details("ens1", "join1", "unlock", "final", &["m1", "m2"]);
+        details.ensemble.name = "Committer".to_string();
+        details.ensemble.entry_condition = GraphEdgeCondition::Pass;
+        details.ensemble.kind = EnsembleKind::Cascade;
+        details.ensemble.on_fail_to = Some("check_committed".to_string());
+
+        let first = build_export_document(&lp, &nodes, &edges, &[details]).unwrap();
+        assert_eq!(
+            first.ensembles[0].extra_entry_sources,
+            vec![GraphExportEntrySource {
+                from_node: "check_committed".to_string(),
+                condition: GraphEdgeCondition::Fail,
+            }]
+        );
+
+        let plan = build_import_plan(&first, "graph-2").unwrap();
+        let unlock_id = plan
+            .nodes
+            .iter()
+            .find(|node| node.name == "unlock")
+            .expect("unlock in import plan")
+            .id
+            .clone();
+        let check_committed_id = plan
+            .nodes
+            .iter()
+            .find(|node| node.name == "check_committed")
+            .expect("check_committed in import plan")
+            .id
+            .clone();
+        let member_ids: std::collections::HashSet<&str> = plan.ensembles[0]
+            .member_nodes
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect();
+        let unlock_targets: std::collections::HashSet<&str> = plan
+            .edges
+            .iter()
+            .filter(|edge| {
+                edge.from_node == unlock_id && edge.condition == GraphEdgeCondition::Pass
+            })
+            .map(|edge| edge.to_node.as_str())
+            .collect();
+        let check_committed_targets: std::collections::HashSet<&str> = plan
+            .edges
+            .iter()
+            .filter(|edge| {
+                edge.from_node == check_committed_id && edge.condition == GraphEdgeCondition::Fail
+            })
+            .map(|edge| edge.to_node.as_str())
+            .collect();
+        assert_eq!(unlock_targets, member_ids);
+        assert_eq!(check_committed_targets, member_ids);
+        assert_eq!(unlock_targets.len(), 2);
+        assert_eq!(check_committed_targets.len(), 2);
+
+        let mut imported_all_nodes = plan.nodes.clone();
+        let mut imported_ensemble_details = Vec::new();
+        for ensemble in &plan.ensembles {
+            imported_all_nodes.push(ensemble.join_node.clone());
+            imported_all_nodes.extend(ensemble.member_nodes.iter().cloned());
+            imported_ensemble_details.push(EnsembleDetails {
+                ensemble: ensemble.ensemble.clone(),
+                members: ensemble.members.clone(),
+            });
+        }
+        let mut imported_graph = make_graph("committer-loop");
+        imported_graph.id = "graph-2".to_string();
+        let second = build_export_document(
+            &imported_graph,
+            &imported_all_nodes,
+            &plan.edges,
+            &imported_ensemble_details,
+        )
+        .unwrap();
+        assert_eq!(first.ensembles, second.ensembles);
+        assert_eq!(
+            serde_json::to_value(&first.ensembles).unwrap(),
+            serde_json::to_value(&second.ensembles).unwrap()
+        );
+    }
+
+    #[test]
+    fn export_omits_extra_entry_sources_when_there_are_none() {
+        let lp = make_graph("ensemble-graph");
+        let kickoff = make_node(
+            "kickoff",
+            "kickoff",
+            GraphNodeKind::Check,
+            serde_json::json!({"command": "true"}),
+            1,
+        );
+        let downstream = make_node(
+            "downstream",
+            "downstream",
+            GraphNodeKind::Agent,
+            serde_json::json!({"platform": "claude", "prompt_template": "wrap up"}),
+            10,
+        );
+        let member1 = make_node(
+            "m1",
+            "Proposers [1]",
+            GraphNodeKind::Agent,
+            serde_json::json!({"platform": "openrouter", "model": "model-0", "prompt_template": "draft it", "timeout_minutes": 30}),
+            2,
+        );
+        let member2 = make_node(
+            "m2",
+            "Proposers [2]",
+            GraphNodeKind::Agent,
+            serde_json::json!({"platform": "openrouter", "model": "model-1", "prompt_template": "draft it", "timeout_minutes": 30}),
+            3,
+        );
+        let join = make_node(
+            "join1",
+            "Proposers (quorum)",
+            GraphNodeKind::Join,
+            serde_json::json!({"ensemble_id": "ens1"}),
+            4,
+        );
+        let nodes = vec![kickoff, downstream, member1, member2, join];
+        let edges = vec![
+            make_edge("e1", "kickoff", "m1", GraphEdgeCondition::Always),
+            make_edge("e2", "kickoff", "m2", GraphEdgeCondition::Always),
+            make_edge("e3", "m1", "join1", GraphEdgeCondition::Always),
+            make_edge("e4", "m2", "join1", GraphEdgeCondition::Always),
+            make_edge("e5", "join1", "downstream", GraphEdgeCondition::Pass),
+        ];
+        let ensembles = vec![make_ensemble_details(
+            "ens1",
+            "join1",
+            "kickoff",
+            "downstream",
+            &["m1", "m2"],
+        )];
+
+        let document = build_export_document(&lp, &nodes, &edges, &ensembles).unwrap();
+        assert!(document.ensembles[0].extra_entry_sources.is_empty());
+        let raw = serde_json::to_string(&document).unwrap();
+        assert!(!raw.contains("extra_entry_sources"));
+    }
+
+    #[test]
+    fn import_refuses_duplicate_extra_entry_source() {
+        let document = GraphExportDocument {
+            format_version: GRAPH_EXPORT_FORMAT_VERSION,
+            name: "duplicate-entry-source".to_string(),
+            description: None,
+            nodes: vec![
+                GraphExportNode {
+                    name: "kickoff".to_string(),
+                    kind: GraphNodeKind::Check,
+                    position: 1,
+                    config: serde_json::json!({}),
+                },
+                GraphExportNode {
+                    name: "final".to_string(),
+                    kind: GraphNodeKind::Check,
+                    position: 2,
+                    config: serde_json::json!({}),
+                },
+            ],
+            edges: vec![],
+            ensembles: vec![GraphExportEnsemble {
+                commit_rights: false,
+                name: "Committer".to_string(),
+                kind: None,
+                prompt_template: "review".to_string(),
+                entry_from_node: GraphExportEnsembleTarget::Node("kickoff".to_string()),
+                entry_condition: GraphEdgeCondition::Always,
+                extra_entry_sources: vec![GraphExportEntrySource {
+                    from_node: "kickoff".to_string(),
+                    condition: GraphEdgeCondition::Always,
+                }],
+                on_pass_to: GraphExportEnsembleTarget::Node("final".to_string()),
+                on_fail_to: Some(GraphExportEnsembleTarget::Node("final".to_string())),
+                min_pass: 2,
+                timeout_minutes: 10,
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
+                members: vec![
+                    GraphExportEnsembleMember {
+                        platform: Some("x".to_string()),
+                        model: None,
+                        prompt_override: None,
+                        timeout_minutes: None,
+                    },
+                    GraphExportEnsembleMember {
+                        platform: Some("x".to_string()),
+                        model: None,
+                        prompt_override: None,
+                        timeout_minutes: None,
+                    },
+                ],
+            }],
+            infra_node: None,
+        };
+
+        let error = build_import_plan(&document, "graph-1").unwrap_err();
+        assert!(error.contains("Committer"), "unexpected error: {error}");
+        assert!(
+            error.contains("more than once"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn import_refuses_extra_entry_source_naming_unknown_node() {
+        let document = GraphExportDocument {
+            format_version: GRAPH_EXPORT_FORMAT_VERSION,
+            name: "unknown-entry-source".to_string(),
+            description: None,
+            nodes: vec![
+                GraphExportNode {
+                    name: "kickoff".to_string(),
+                    kind: GraphNodeKind::Check,
+                    position: 1,
+                    config: serde_json::json!({}),
+                },
+                GraphExportNode {
+                    name: "final".to_string(),
+                    kind: GraphNodeKind::Check,
+                    position: 2,
+                    config: serde_json::json!({}),
+                },
+            ],
+            edges: vec![],
+            ensembles: vec![GraphExportEnsemble {
+                commit_rights: false,
+                name: "Committer".to_string(),
+                kind: None,
+                prompt_template: "review".to_string(),
+                entry_from_node: GraphExportEnsembleTarget::Node("kickoff".to_string()),
+                entry_condition: GraphEdgeCondition::Always,
+                extra_entry_sources: vec![GraphExportEntrySource {
+                    from_node: "ghost".to_string(),
+                    condition: GraphEdgeCondition::Always,
+                }],
+                on_pass_to: GraphExportEnsembleTarget::Node("final".to_string()),
+                on_fail_to: Some(GraphExportEnsembleTarget::Node("final".to_string())),
+                min_pass: 2,
+                timeout_minutes: 10,
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
+                members: vec![
+                    GraphExportEnsembleMember {
+                        platform: Some("x".to_string()),
+                        model: None,
+                        prompt_override: None,
+                        timeout_minutes: None,
+                    },
+                    GraphExportEnsembleMember {
+                        platform: Some("x".to_string()),
+                        model: None,
+                        prompt_override: None,
+                        timeout_minutes: None,
+                    },
+                ],
+            }],
+            infra_node: None,
+        };
+
+        let error = build_import_plan(&document, "graph-1").unwrap_err();
+        assert!(
+            error.contains("references unknown node 'ghost'"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
     fn chained_ensembles_export_as_tables_and_import_to_join_fanout() {
         let lp = make_graph("canopy-v4");
         let nodes = vec![
@@ -1803,6 +2216,7 @@ mod tests {
                 prompt_template: "review".to_string(),
                 entry_from_node: GraphExportEnsembleTarget::Node("kickoff".to_string()),
                 entry_condition: GraphEdgeCondition::Always,
+                extra_entry_sources: vec![],
                 on_pass_to: GraphExportEnsembleTarget::Ensemble {
                     ensemble: "Ghost".to_string(),
                 },
@@ -2137,6 +2551,7 @@ mod tests {
                 prompt_template: "go".to_string(),
                 entry_from_node: GraphExportEnsembleTarget::Node("kickoff".to_string()),
                 entry_condition: GraphEdgeCondition::Always,
+                extra_entry_sources: vec![],
                 on_pass_to: GraphExportEnsembleTarget::Node("next".to_string()),
                 on_fail_to: None,
                 min_pass: 1,
@@ -2187,6 +2602,7 @@ mod tests {
                 prompt_template: "go".to_string(),
                 entry_from_node: GraphExportEnsembleTarget::Node("kickoff".to_string()),
                 entry_condition: GraphEdgeCondition::Always,
+                extra_entry_sources: vec![],
                 on_pass_to: GraphExportEnsembleTarget::Node("next".to_string()),
                 on_fail_to: None,
                 min_pass: 1,
@@ -2248,6 +2664,7 @@ mod tests {
                 prompt_template: "go".to_string(),
                 entry_from_node: GraphExportEnsembleTarget::Node("kickoff".to_string()),
                 entry_condition: GraphEdgeCondition::Always,
+                extra_entry_sources: vec![],
                 on_pass_to: GraphExportEnsembleTarget::Node("next".to_string()),
                 on_fail_to: None,
                 min_pass: 1,
@@ -2307,6 +2724,7 @@ mod tests {
                 prompt_template: "go".to_string(),
                 entry_from_node: GraphExportEnsembleTarget::Node("kickoff".to_string()),
                 entry_condition: GraphEdgeCondition::Always,
+                extra_entry_sources: vec![],
                 on_pass_to: GraphExportEnsembleTarget::Node("next".to_string()),
                 on_fail_to: None,
                 min_pass: 1,
@@ -2760,6 +3178,7 @@ mod tests {
                 prompt_template: "go".to_string(),
                 entry_from_node: GraphExportEnsembleTarget::Node("kickoff".to_string()),
                 entry_condition: GraphEdgeCondition::Always,
+                extra_entry_sources: vec![],
                 on_pass_to: GraphExportEnsembleTarget::Node("next".to_string()),
                 on_fail_to: None,
                 min_pass: 1,
@@ -2827,6 +3246,7 @@ mod tests {
                 prompt_template: "go".to_string(),
                 entry_from_node: GraphExportEnsembleTarget::Node("kickoff".to_string()),
                 entry_condition: GraphEdgeCondition::Always,
+                extra_entry_sources: vec![],
                 on_pass_to: GraphExportEnsembleTarget::Node("next".to_string()),
                 on_fail_to: None,
                 min_pass: 1,

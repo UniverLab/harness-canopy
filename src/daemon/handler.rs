@@ -7941,7 +7941,7 @@ impl TaskTriggerHandler {
 
     #[tool(
         name = "graph_export",
-        description = "Export a graph's design — name, description, nodes, edges, and ensembles — as a portable JSON document, so it can be shared as a file and recreated elsewhere with graph_import. Never includes ids, workdir, specs, or run/status state. Includes platform/model for every agent node and ensemble member, and each ensemble's kind ('cascade'/'round_robin'; omitted for the 'parallel' default); format_version 3."
+        description = "Export a graph's design — name, description, nodes, edges, and ensembles — as a portable JSON document, so it can be shared as a file and recreated elsewhere with graph_import. Never includes ids, workdir, specs, or run/status state. Includes platform/model for every agent node and ensemble member, and each ensemble's kind ('cascade'/'round_robin'; omitted for the 'parallel' default); format_version 4. Ensembles carry every entry source: the primary in 'entry_from_node'/'entry_condition' plus 'extra_entry_sources' (node + condition) for sources added with 'add_entry_from' (omitted when there are none)."
     )]
     async fn graph_export(
         &self,
@@ -7989,7 +7989,7 @@ impl TaskTriggerHandler {
 
     #[tool(
         name = "graph_import",
-        description = "Create a new graph from an exported document (the object graph_export returns). Always creates a new graph — never updates or overwrites an existing one; if the name is already taken in workdir, a numeric suffix is applied and the response says which name was used. Validates the document exactly as graph_add_node/graph_add_edge/graph_add_ensemble would, all-or-nothing: nothing is written if any part is rejected. Accepts format_version 1 (members with no binding, reported as missing a platform), 2 (bindings restored), and 3 (graph/error vocabulary). Restores each ensemble's kind, commit_rights, timeouts, member overrides, and entry/exit wiring exactly; a document field this build does not know how to restore — including an unknown 'kind' value — is a refusal naming the field, never a silent default. The response lists every agent node left without a platform so the caller knows what to fill in before running the graph."
+        description = "Create a new graph from an exported document (the object graph_export returns). Always creates a new graph — never updates or overwrites an existing one; if the name is already taken in workdir, a numeric suffix is applied and the response says which name was used. Validates the document exactly as graph_add_node/graph_add_edge/graph_add_ensemble would, all-or-nothing: nothing is written if any part is rejected. Accepts format_version 1 (members with no binding, reported as missing a platform), 2 (bindings restored), 3 (graph/error vocabulary), and 4 (every ensemble entry source: 'extra_entry_sources' restores each 'add_entry_from' source with its own condition). Restores each ensemble's kind, commit_rights, timeouts, member overrides, and entry/exit wiring exactly; a document field this build does not know how to restore — including an unknown 'kind' value — is a refusal naming the field, never a silent default. The response lists every agent node left without a platform so the caller knows what to fill in before running the graph."
     )]
     async fn graph_import(
         &self,
@@ -22333,7 +22333,7 @@ mod endpoint_tests {
             .unwrap();
         assert!(!is_err(&exported), "{}", text(&exported));
         let doc: serde_json::Value = serde_json::from_str(&raw_text(&exported)).unwrap();
-        assert_eq!(doc["format_version"], 3);
+        assert_eq!(doc["format_version"], 4);
         let implementer = doc["nodes"]
             .as_array()
             .unwrap()
@@ -22715,10 +22715,9 @@ mod endpoint_tests {
         // CB62 end-to-end: cascade + round_robin ensembles survive export ->
         // import -> export identical (modulo the collision-rename), so
         // `graph_get` on the imported graph shows cascade/round_robin, not
-        // parallel. Authoring also gives the cascade a second entry source
-        // and infra budgets, neither of which the export document carries
-        // (out of scope for CB62); the round trip stays identical because
-        // both exports consistently omit them.
+        // parallel. CB71 carries the cascade's second entry source in the
+        // document. Infra budgets remain absent, and the round trip stays
+        // identical for them because both exports omit them.
         let (dir, _db, handler) = endpoint_test_handler();
         let workdir = dir.path().to_string_lossy().to_string();
 
@@ -22945,6 +22944,22 @@ mod endpoint_tests {
             .collect();
         assert!(kinds.contains(&"cascade"), "kinds: {kinds:?}");
         assert!(kinds.contains(&"round_robin"), "kinds: {kinds:?}");
+
+        // CB71: the cascade's second entry source (`alt`, added with
+        // add_entry_from, default condition always) is carried by the document
+        // and restored — the round-trip equality above already pins that it
+        // survives import; this pins that the FIRST export wrote it.
+        let cascade_entry = first_doc["ensembles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["name"] == "CascadeTeam")
+            .expect("CascadeTeam in export");
+        assert_eq!(
+            cascade_entry["extra_entry_sources"],
+            serde_json::json!([{"from_node": "alt", "condition": "always"}]),
+            "CB71: the second entry source must appear in the export document"
+        );
     }
 
     #[tokio::test]

@@ -558,9 +558,9 @@ An ensemble's `kind` is carried in the document for `cascade` and
 absent `kind` means on import. Import refuses a `kind` value it does
 not know — naming the ensemble and the value — and refuses a document
 that carries any field it does not know how to restore, as part of
-its all-or-nothing contract. `format_version` 3 remains the newest
-accepted version; 1 and 2 documents import unchanged (they carry
-fewer fields, never more).
+its all-or-nothing contract. `format_version` 4 remains the newest
+accepted version; 1, 2 and 3 documents import unchanged (they carry fewer fields,
+never more).
 
 An [ensemble](#ensembles) round-trips as one ensemble — not as its
 expanded member/quorum nodes — via its own `ensembles` array entry.
@@ -570,12 +570,21 @@ uses `{ "ensemble": "<name>" }` so an ensemble target is distinct from a
 plain node with the same name; import resolves that table to the target
 ensemble's join node and restores its member fan-out edges.
 
+An ensemble may be entered from more than one node
+(`graph_update_ensemble`'s `add_entry_from`). Export writes every such
+source in `extra_entry_sources`, an array of
+`{"from_node": "<node name>", "condition": "<pass|fail|always|error>"}` entries
+beyond the primary (`entry_from_node` + `entry_condition`). Import restores each as
+an edge to every member, so multi-source entry — e.g. a committer entered on
+`pass` by an unlock check and on `fail` by a commit-verification check — survives
+the round trip. The field is omitted when an ensemble has only its primary source.
+
 Here is a complete, hand-writable example: an implementer, a 2-model
 ensemble of reviewers, and a committer the quorum routes to on pass.
 
 ```json
 {
-  "format_version": 3,
+  "format_version": 4,
   "name": "implement-and-review",
   "description": "Implement a spec, get two model opinions, then commit.",
   "nodes": [
@@ -630,7 +639,9 @@ member/quorum nodes never appear in `nodes` — only its
 hence the explicit `"model": null`; a `format_version: 1` document
 with `{}` members still imports, with every unbound node reported as
 `nodes_missing_platform`. `reviewers` runs as a cascade: one member at
-a time, first usable verdict wins.
+a time, first usable verdict wins. `reviewers` has a single entry source, so
+`extra_entry_sources` is omitted; an ensemble entered from several nodes carries
+each additional one there.
 
 ## Archive and restore
 

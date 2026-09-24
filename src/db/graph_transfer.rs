@@ -302,6 +302,7 @@ mod tests {
                 prompt_template: "draft it".to_string(),
                 entry_from_node: GraphExportEnsembleTarget::Node("kickoff".to_string()),
                 entry_condition: GraphEdgeCondition::Always,
+                extra_entry_sources: vec![],
                 on_pass_to: GraphExportEnsembleTarget::Node("downstream".to_string()),
                 on_fail_to: None,
                 min_pass: 2,
@@ -443,6 +444,7 @@ mod tests {
                     prompt_template: "go".to_string(),
                     entry_from_node: GraphExportEnsembleTarget::Node("kickoff".to_string()),
                     entry_condition: GraphEdgeCondition::Always,
+                    extra_entry_sources: vec![],
                     on_pass_to: GraphExportEnsembleTarget::Node("final".to_string()),
                     on_fail_to: None,
                     min_pass: 1,
@@ -458,6 +460,7 @@ mod tests {
                     prompt_template: "go".to_string(),
                     entry_from_node: GraphExportEnsembleTarget::Node("kickoff".to_string()),
                     entry_condition: GraphEdgeCondition::Always,
+                    extra_entry_sources: vec![],
                     on_pass_to: GraphExportEnsembleTarget::Node("final".to_string()),
                     on_fail_to: None,
                     min_pass: 1,
@@ -486,6 +489,146 @@ mod tests {
         assert_eq!(cascade.ensemble.kind, EnsembleKind::Cascade);
         assert_eq!(rr.ensemble.kind, EnsembleKind::RoundRobin);
         assert_eq!(rr.ensemble.round_robin_index, Some(0));
+    }
+
+    /// CB71: a cascade entered from `unlock` on pass AND from
+    /// `check_committed` on fail (the canopy-v4.1 committer loop: "Unlock for
+    /// committer"/"Check committed") must survive export -> import -> DB ->
+    /// re-export with both sources and the full fan-out, and the ensemble
+    /// section must re-export byte-identically.
+    #[test]
+    fn import_graph_persists_every_entry_source() {
+        use crate::domain::graph_transfer::{
+            GraphExportEnsemble, GraphExportEnsembleMember, GraphExportEnsembleTarget,
+            GraphExportEntrySource, GraphExportNode, GRAPH_EXPORT_FORMAT_VERSION,
+        };
+        let db = test_db();
+        let document = GraphExportDocument {
+            format_version: GRAPH_EXPORT_FORMAT_VERSION,
+            name: "cb71-committer".to_string(),
+            description: None,
+            nodes: vec![
+                GraphExportNode {
+                    name: "unlock".to_string(),
+                    kind: GraphNodeKind::Check,
+                    position: 1,
+                    config: serde_json::json!({"command": "true"}),
+                },
+                GraphExportNode {
+                    name: "check_committed".to_string(),
+                    kind: GraphNodeKind::Check,
+                    position: 2,
+                    config: serde_json::json!({"command": "true"}),
+                },
+                GraphExportNode {
+                    name: "final".to_string(),
+                    kind: GraphNodeKind::Check,
+                    position: 3,
+                    config: serde_json::json!({"command": "true"}),
+                },
+            ],
+            edges: vec![],
+            ensembles: vec![GraphExportEnsemble {
+                commit_rights: true,
+                name: "Committer".to_string(),
+                kind: Some("cascade".to_string()),
+                prompt_template: "commit".to_string(),
+                entry_from_node: GraphExportEnsembleTarget::Node("unlock".to_string()),
+                entry_condition: GraphEdgeCondition::Pass,
+                extra_entry_sources: vec![GraphExportEntrySource {
+                    from_node: "check_committed".to_string(),
+                    condition: GraphEdgeCondition::Fail,
+                }],
+                on_pass_to: GraphExportEnsembleTarget::Node("final".to_string()),
+                on_fail_to: Some(GraphExportEnsembleTarget::Node(
+                    "check_committed".to_string(),
+                )),
+                min_pass: 1,
+                timeout_minutes: 30,
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
+                members: vec![
+                    GraphExportEnsembleMember {
+                        platform: Some("claude".to_string()),
+                        model: None,
+                        prompt_override: None,
+                        timeout_minutes: None,
+                    },
+                    GraphExportEnsembleMember {
+                        platform: Some("copilot".to_string()),
+                        model: None,
+                        prompt_override: None,
+                        timeout_minutes: None,
+                    },
+                ],
+            }],
+            infra_node: None,
+        };
+        let lp = draft_graph("graph-1", "cb71-committer", "/tmp/project");
+        let plan = build_import_plan(&document, &lp.id).unwrap();
+        db.import_graph(&lp, &plan).unwrap();
+
+        let nodes = db.list_graph_nodes_for_graph("graph-1").unwrap();
+        let node_ids: std::collections::HashMap<&str, &str> = nodes
+            .iter()
+            .map(|node| (node.name.as_str(), node.id.as_str()))
+            .collect();
+        let member_ids: std::collections::HashSet<&str> = ["Committer [1]", "Committer [2]"]
+            .into_iter()
+            .map(|name| *node_ids.get(name).expect("imported ensemble member"))
+            .collect();
+        let edges = db.list_graph_edges_for_graph("graph-1").unwrap();
+        let mut unlock_targets: Vec<&str> = edges
+            .iter()
+            .filter(|edge| {
+                edge.from_node == *node_ids.get("unlock").expect("unlock node")
+                    && edge.condition == GraphEdgeCondition::Pass
+            })
+            .map(|edge| edge.to_node.as_str())
+            .filter(|target| member_ids.contains(target))
+            .collect();
+        let mut check_committed_targets: Vec<&str> = edges
+            .iter()
+            .filter(|edge| {
+                edge.from_node
+                    == *node_ids
+                        .get("check_committed")
+                        .expect("check_committed node")
+                    && edge.condition == GraphEdgeCondition::Fail
+            })
+            .map(|edge| edge.to_node.as_str())
+            .filter(|target| member_ids.contains(target))
+            .collect();
+        unlock_targets.sort_unstable();
+        check_committed_targets.sort_unstable();
+        assert_eq!(
+            unlock_targets.len(),
+            2,
+            "unlock/pass must fan out to both members"
+        );
+        assert_eq!(
+            check_committed_targets.len(),
+            2,
+            "check_committed/fail must fan out to both members"
+        );
+        assert_eq!(
+            unlock_targets, check_committed_targets,
+            "both sources must reach the same two members"
+        );
+        assert_eq!(unlock_targets.len(), member_ids.len());
+        assert_eq!(check_committed_targets.len(), member_ids.len());
+
+        let ensembles = db.list_ensembles_for_graph("graph-1").unwrap();
+        let stored_graph = db.get_graph("graph-1").unwrap().unwrap();
+        let redone = build_export_document(&stored_graph, &nodes, &edges, &ensembles).unwrap();
+        assert_eq!(
+            serde_json::to_value(&redone.ensembles).unwrap(),
+            serde_json::to_value(&document.ensembles).unwrap()
+        );
+        assert_eq!(
+            redone.ensembles[0].extra_entry_sources,
+            document.ensembles[0].extra_entry_sources
+        );
     }
 
     /// CB62 FR4 (DB half): the persisted round trip compared as whole
@@ -531,6 +674,12 @@ mod tests {
                     prompt_template: "go".to_string(),
                     entry_from_node: GraphExportEnsembleTarget::Node("kickoff".to_string()),
                     entry_condition: GraphEdgeCondition::Always,
+                    extra_entry_sources: vec![
+                        crate::domain::graph_transfer::GraphExportEntrySource {
+                            from_node: "kickoff".to_string(),
+                            condition: GraphEdgeCondition::Error,
+                        },
+                    ],
                     on_pass_to: GraphExportEnsembleTarget::Ensemble {
                         ensemble: "Beta".to_string(),
                     },
@@ -561,6 +710,7 @@ mod tests {
                     prompt_template: "review".to_string(),
                     entry_from_node: GraphExportEnsembleTarget::Node("kickoff".to_string()),
                     entry_condition: GraphEdgeCondition::Always,
+                    extra_entry_sources: vec![],
                     on_pass_to: GraphExportEnsembleTarget::Node("final".to_string()),
                     on_fail_to: None,
                     min_pass: 1,
