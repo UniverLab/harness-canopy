@@ -352,6 +352,22 @@ mod tests {
         app
     }
 
+    /// Pin every signal timestamp the panel reads to a fixed ancient value so
+    /// the baseline a tick seeds is deterministically older than any later
+    /// write. `tick_panel_face` only fires on a *strictly* newer mark, and
+    /// wall clocks are not monotonic: backward NTP/VM steps of hundreds of
+    /// ms make "write, tick, write, tick" flaky (PR #51 CI failure), and no
+    /// sleep can cover a backward jump. Call this before seeding a baseline,
+    /// and again (followed by a tick) before each subsequent write that must
+    /// read as newer.
+    fn pin_panel_clocks(db: &Database) {
+        db.exec_test_sql(
+            "UPDATE intelligence_nodes SET content_touched_at = 1 WHERE project_hash = 'panel-project';
+             UPDATE graph_specs SET updated_at = 1;",
+        )
+        .unwrap();
+    }
+
     #[test]
     fn app_new_honors_pinned_panel_face_from_config_parameter() {
         let db = test_db();
@@ -390,6 +406,7 @@ mod tests {
             db.upsert_intelligence_node(knowledge_input(&format!("knowledge-{index}"), "initial"))
                 .unwrap();
         }
+        pin_panel_clocks(&db);
 
         let data_dir = tempdir().unwrap();
         let mut app = App::new(
@@ -419,6 +436,11 @@ mod tests {
         assert_eq!(app.panel_dwell_reason.as_deref(), Some("new knowledge"));
 
         app.panel_dwell_until = None;
+        // Re-anchor the baseline: the add above stamped wall-clock time, so
+        // the edit below must not depend on the clock moving forward.
+        pin_panel_clocks(&db);
+        app.refresh_project_knowledge().unwrap();
+        app.tick_panel_face();
         db.upsert_intelligence_node(knowledge_input("knowledge-0", "edited"))
             .unwrap();
         app.refresh_project_knowledge().unwrap();
@@ -467,6 +489,7 @@ mod tests {
             db.upsert_intelligence_node(knowledge_input(&format!("knowledge-{index}"), "initial"))
                 .unwrap();
         }
+        pin_panel_clocks(&db);
         let data_dir = tempdir().unwrap();
         let mut app = App::new(
             Arc::clone(&db),
@@ -548,6 +571,10 @@ mod tests {
         assert_eq!(app.panel_dwell_reason.as_deref(), Some("backlog changed"));
         app.clear_panel_dwell();
 
+        // Re-anchor the baseline: the add above stamped wall-clock time, so
+        // the edit below must not depend on the clock moving forward.
+        pin_panel_clocks(&db);
+        app.tick_panel_face();
         db.update_spec_tag_details("backlog-1", Some("Renamed"), None, None)
             .unwrap();
         app.tick_panel_face();

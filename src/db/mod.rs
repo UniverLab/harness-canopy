@@ -61,6 +61,21 @@ impl Database {
         Ok(db)
     }
 
+    /// Test-only escape hatch: run raw SQL against the handle. Lets UI tests
+    /// pin signal timestamps to deterministic values instead of depending on
+    /// wall-clock monotonicity — backward NTP/VM steps of hundreds of ms make
+    /// "write, tick, write, tick" sequences flaky (PR #51 CI failure), and no
+    /// sleep can cover a backward jump.
+    #[cfg(test)]
+    pub(crate) fn exec_test_sql(&self, sql: &str) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
+        conn.execute_batch(sql)?;
+        Ok(())
+    }
+
     /// Open the database, running migrations only if no foreign daemon is live.
     /// If a daemon is running, opens the file without running migrations or
     /// seeding (reads and ordinary writes against the existing schema still
