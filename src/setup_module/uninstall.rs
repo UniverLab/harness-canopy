@@ -6,7 +6,8 @@ use crate::setup_module::registry_fetch::fetch_registry;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
-const CANONICAL_SERVER_NAMES: &[&str] = &["canopy", "fetch", "filesystem"];
+const OWN_SERVER_NAMES: &[&str] = &["canopy"];
+const SHARED_SERVER_NAMES: &[&str] = &["fetch", "filesystem"];
 
 pub struct UninstallPlan {
     pub service: ServicePlan,
@@ -15,11 +16,17 @@ pub struct UninstallPlan {
     pub skills_symlinks: Vec<PathBuf>,
     pub daemon_running: bool,
     pub agents_skills_dir: PathBuf,
+    pub keep_shared_servers: bool,
+    pub orphan_pid: Option<u32>,
+    pub port_pid: Option<u32>,
 }
 
 pub struct ServicePlan {
     pub unit_path: PathBuf,
     pub exists: bool,
+    pub dropin_dir: PathBuf,
+    pub dropin_exists: bool,
+    pub dropin_files: Vec<PathBuf>,
 }
 
 pub struct PlatformEdit {
@@ -29,10 +36,19 @@ pub struct PlatformEdit {
     pub is_toml: bool,
     pub toml_array_format: bool,
     pub mcp_servers_key: Vec<String>,
+    pub own_servers: Vec<String>,
+    pub shared_servers: Vec<String>,
 }
 
-pub fn build_uninstall_plan() -> Result<UninstallPlan> {
+pub fn build_uninstall_plan(keep_shared_servers: bool) -> Result<UninstallPlan> {
     let home = dirs::home_dir().context("No home directory")?;
+    build_uninstall_plan_with_home(&home, keep_shared_servers)
+}
+
+pub fn build_uninstall_plan_with_home(
+    home: &Path,
+    keep_shared_servers: bool,
+) -> Result<UninstallPlan> {
     let canopy_dir = home.join(".canopy");
     let agents_skills_dir = home.join(".agents").join("skills");
 
@@ -72,28 +88,39 @@ pub fn build_uninstall_plan() -> Result<UninstallPlan> {
 
     let mut platform_edits = Vec::new();
     for platform in &registry.platforms {
-        let config_path = resolve_config_path(&home, &platform.config_path);
+        let config_path = resolve_config_path(home, &platform.config_path);
         if !config_path.exists() {
             continue;
+        }
+        let own_servers: Vec<String> = OWN_SERVER_NAMES
+            .iter()
+            .map(|server| server.to_string())
+            .collect();
+        let shared_servers: Vec<String> = SHARED_SERVER_NAMES
+            .iter()
+            .map(|server| server.to_string())
+            .collect();
+        let mut servers_to_remove = own_servers.clone();
+        if !keep_shared_servers {
+            servers_to_remove.extend(shared_servers.clone());
         }
         platform_edits.push(PlatformEdit {
             platform_name: platform.name.clone(),
             config_path,
-            servers_to_remove: CANONICAL_SERVER_NAMES
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
+            servers_to_remove,
             is_toml: platform.config_format.as_deref() == Some("toml"),
             toml_array_format: platform.toml_array_format,
             mcp_servers_key: platform.mcp_servers_key.clone(),
+            own_servers,
+            shared_servers,
         });
     }
 
-    let service = build_service_plan(&home);
-
-    let daemon_running = check_daemon_running(&canopy_dir);
-
-    let skills_symlinks = collect_skills_symlinks(&registry.platforms, &home, &agents_skills_dir);
+    let service = build_service_plan(home);
+    let (port_pid, orphan_pid) = detect_uninstall_orphan();
+    let daemon_running = check_daemon_running(&canopy_dir)
+        || port_pid.is_some_and(crate::daemon::process::is_process_running);
+    let skills_symlinks = collect_skills_symlinks(&registry.platforms, home, &agents_skills_dir);
 
     Ok(UninstallPlan {
         service,
@@ -102,6 +129,9 @@ pub fn build_uninstall_plan() -> Result<UninstallPlan> {
         skills_symlinks,
         daemon_running,
         agents_skills_dir,
+        keep_shared_servers,
+        orphan_pid,
+        port_pid,
     })
 }
 
@@ -111,10 +141,61 @@ fn build_service_plan(home: &Path) -> ServicePlan {
     #[cfg(not(target_os = "macos"))]
     let unit_path = home.join(".config/systemd/user/canopy.service");
 
+    #[cfg(target_os = "macos")]
+    let (dropin_dir, dropin_files, dropin_exists) = (PathBuf::new(), Vec::new(), false);
+    #[cfg(not(target_os = "macos"))]
+    let (dropin_dir, dropin_files, dropin_exists) = {
+        let dropin_dir = unit_path.parent().map_or_else(
+            || home.join(".config/systemd/user/canopy.service.d"),
+            |parent| parent.join("canopy.service.d"),
+        );
+        let mut dropin_files: Vec<PathBuf> = std::fs::read_dir(&dropin_dir)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .map(|entry| entry.path())
+                    .filter(|path| path.extension() == Some(std::ffi::OsStr::new("conf")))
+                    .collect()
+            })
+            .unwrap_or_default();
+        dropin_files.sort();
+        let dropin_exists = dropin_dir.is_dir();
+        (dropin_dir, dropin_files, dropin_exists)
+    };
+
     ServicePlan {
         exists: unit_path.exists(),
         unit_path,
+        dropin_dir,
+        dropin_exists,
+        dropin_files,
     }
+}
+
+/// Pure rule: Some(orphan_pid) iff a port occupant exists AND a unit is installed
+/// AND occupant != manager MainPID. Mirrors process::orphan_needs_kill but returns the pid.
+pub(crate) fn diagnose_uninstall_orphan(
+    unit_installed: bool,
+    manager_pid: Option<u32>,
+    port_pid: Option<u32>,
+) -> Option<u32> {
+    if unit_installed && port_pid.is_some() && manager_pid != port_pid {
+        port_pid
+    } else {
+        None
+    }
+}
+
+fn detect_uninstall_orphan() -> (Option<u32>, Option<u32>) {
+    let port = crate::resolve_port(None);
+    let port_pid = crate::daemon::process::resolve_port_pid(port);
+    let manager = crate::daemon::process::service_manager_facts();
+    let orphan_pid = diagnose_uninstall_orphan(
+        manager.is_some(),
+        manager.and_then(|facts| facts.pid),
+        port_pid,
+    );
+    (port_pid, orphan_pid)
 }
 
 fn check_daemon_running(canopy_dir: &Path) -> bool {
@@ -173,6 +254,13 @@ pub fn print_dry_run(plan: &UninstallPlan) {
     if plan.daemon_running {
         println!("  [stop]  Running daemon (PID file found)");
     }
+    if let Some(port_pid) = plan.port_pid {
+        if plan.orphan_pid == Some(port_pid) {
+            println!(
+                "  [stop]  Orphan daemon holds the port (PID {port_pid}, not the unit's MainPID) — will be stopped too"
+            );
+        }
+    }
 
     if plan.service.exists {
         println!(
@@ -182,16 +270,20 @@ pub fn print_dry_run(plan: &UninstallPlan) {
     } else {
         println!("  [skip]  Service unit not found");
     }
+    if let Some(line) = format_dropin_line(&plan.service) {
+        println!("{line}");
+        for file in &plan.service.dropin_files {
+            println!("    - {}", file.display());
+        }
+    }
 
     if plan.platform_edits.is_empty() {
         println!("  [skip]  No platform configs to revert");
     } else {
         for edit in &plan.platform_edits {
             println!(
-                "  [edit]  {} — remove servers [{}] from {}",
-                edit.platform_name,
-                edit.servers_to_remove.join(", "),
-                edit.config_path.display()
+                "{}",
+                format_platform_edit_line(edit, plan.keep_shared_servers)
             );
         }
     }
@@ -220,10 +312,49 @@ pub fn print_dry_run(plan: &UninstallPlan) {
     }
 }
 
+fn format_dropin_line(service: &ServicePlan) -> Option<String> {
+    service.dropin_exists.then(|| {
+        format!(
+            "  [remove] Service drop-ins: {}/",
+            service.dropin_dir.display()
+        )
+    })
+}
+
+pub(crate) fn format_platform_edit_line(edit: &PlatformEdit, keep_shared: bool) -> String {
+    let own = edit.own_servers.join(", ");
+    let shared = edit.shared_servers.join(", ");
+    if keep_shared {
+        format!(
+            "  [edit]  {} — remove servers [{own}] (shared [{shared}] kept) from {}",
+            edit.platform_name,
+            edit.config_path.display()
+        )
+    } else {
+        format!(
+            "  [edit]  {} — remove servers [{own}] + shared [{shared}] (keep with --keep-shared-servers) from {}",
+            edit.platform_name,
+            edit.config_path.display()
+        )
+    }
+}
+
 pub fn execute_uninstall(plan: &UninstallPlan, purge_data: bool) -> Result<()> {
     if plan.daemon_running {
         println!("  Stopping daemon...");
         let _ = crate::setup_module::daemon_service::stop_daemon();
+        if let Some(pid) = plan.orphan_pid {
+            #[cfg(unix)]
+            unsafe {
+                libc::kill(pid as i32, libc::SIGTERM);
+            }
+            for _ in 0..12 {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+                if !crate::daemon::process::is_process_running(pid) {
+                    break;
+                }
+            }
+        }
     }
 
     if plan.service.exists {
@@ -232,6 +363,16 @@ pub fn execute_uninstall(plan: &UninstallPlan, purge_data: bool) -> Result<()> {
             plan.service.unit_path.display()
         );
         let _ = crate::daemon::service_install::uninstall_service();
+    }
+    if plan.service.dropin_exists {
+        println!(
+            "  Removing service drop-ins: {}",
+            plan.service.dropin_dir.display()
+        );
+        let _ = remove_service_dropins(&plan.service);
+        let _ = std::process::Command::new("systemctl")
+            .args(["--user", "daemon-reload"])
+            .status();
     }
 
     for edit in &plan.platform_edits {
@@ -292,6 +433,13 @@ pub fn execute_uninstall(plan: &UninstallPlan, purge_data: bool) -> Result<()> {
         );
     }
 
+    Ok(())
+}
+
+fn remove_service_dropins(service: &ServicePlan) -> std::io::Result<()> {
+    if service.dropin_exists {
+        std::fs::remove_dir_all(&service.dropin_dir)?;
+    }
     Ok(())
 }
 
@@ -644,6 +792,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let service = build_service_plan(dir.path());
         assert!(service.unit_path.to_string_lossy().contains("canopy"));
+        #[cfg(not(target_os = "macos"))]
+        assert!(service.dropin_dir.ends_with("canopy.service.d"));
     }
 
     #[test]
@@ -673,17 +823,157 @@ mod tests {
         assert!(root["mcpServers"]["servers"].get("other").is_some());
     }
 
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn uninstall_plan_includes_dropin_dir_when_browser_conf_present() {
+        let home = tempfile::tempdir().unwrap();
+        let service_dir = home.path().join(".config/systemd/user");
+        let unit_path = service_dir.join("canopy.service");
+        let dropin_dir = service_dir.join("canopy.service.d");
+        std::fs::create_dir_all(&dropin_dir).unwrap();
+        std::fs::write(&unit_path, "[Service]\n").unwrap();
+        let browser_conf = dropin_dir.join("browser.conf");
+        std::fs::write(&browser_conf, "[Service]\nEnvironment=BROWSER=/x\n").unwrap();
+
+        let registry = tempfile::tempdir().unwrap();
+        crate::setup_module::registry_fetch::set_local_registry(registry.path().to_path_buf());
+        let plan = build_uninstall_plan_with_home(home.path(), false).unwrap();
+
+        assert!(plan.service.dropin_exists);
+        assert!(plan.service.dropin_dir.ends_with("canopy.service.d"));
+        assert_eq!(plan.service.dropin_files, vec![browser_conf]);
+        let line = format_dropin_line(&plan.service).unwrap();
+        assert!(line.contains("[remove] Service drop-ins: "));
+        assert!(line.contains("canopy.service.d/"));
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn uninstall_apply_removes_dropin_dir() {
+        let home = tempfile::tempdir().unwrap();
+        let service_dir = home.path().join(".config/systemd/user");
+        let unit_path = service_dir.join("canopy.service");
+        let dropin_dir = service_dir.join("canopy.service.d");
+        std::fs::create_dir_all(&dropin_dir).unwrap();
+        std::fs::write(&unit_path, "[Service]\n").unwrap();
+        std::fs::write(dropin_dir.join("browser.conf"), "[Service]\n").unwrap();
+
+        let mut plan = empty_plan(
+            home.path().join(".canopy"),
+            home.path().join(".agents/skills"),
+        );
+        plan.service = ServicePlan {
+            unit_path,
+            exists: true,
+            dropin_dir: dropin_dir.clone(),
+            dropin_exists: true,
+            dropin_files: vec![dropin_dir.join("browser.conf")],
+        };
+
+        remove_service_dropins(&plan.service).unwrap();
+
+        assert!(!dropin_dir.exists());
+        assert!(plan.service.unit_path.exists());
+    }
+
+    #[test]
+    fn keep_shared_removes_only_canopy() {
+        let home = tempfile::tempdir().unwrap();
+        let config_path = home.path().join(".config/test/config.json");
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &config_path,
+            r#"{"mcpServers":{"canopy":{},"fetch":{},"mine":{}}}"#,
+        )
+        .unwrap();
+
+        let registry = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(registry.path().join("platforms")).unwrap();
+        std::fs::write(
+            registry.path().join("index.toml"),
+            "version = 6\n[[platforms]]\nname = \"test\"\nbinary = \"test\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            registry.path().join("platforms/test.toml"),
+            "name = \"test\"\nconfig_path = \".config/test/config.json\"\nmcp_servers_key = [\"mcpServers\"]\n",
+        )
+        .unwrap();
+        crate::setup_module::registry_fetch::set_local_registry(registry.path().to_path_buf());
+
+        let plan = build_uninstall_plan_with_home(home.path(), true).unwrap();
+        let edit = plan.platform_edits.first().unwrap();
+        assert!(plan.keep_shared_servers);
+        assert_eq!(edit.servers_to_remove, vec!["canopy".to_string()]);
+
+        let removed = revert_platform_config(
+            &json_platform(vec!["mcpServers".to_string()]),
+            &config_path,
+            &edit.servers_to_remove,
+        )
+        .unwrap();
+        assert_eq!(removed, vec!["canopy".to_string()]);
+        let root: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert!(root["mcpServers"].get("canopy").is_none());
+        assert!(root["mcpServers"].get("fetch").is_some());
+        assert!(root["mcpServers"].get("mine").is_some());
+    }
+
+    #[test]
+    fn dry_run_line_names_own_and_shared_separately() {
+        let edit = PlatformEdit {
+            platform_name: "test".to_string(),
+            config_path: PathBuf::from("/tmp/config.json"),
+            servers_to_remove: vec![
+                "canopy".to_string(),
+                "fetch".to_string(),
+                "filesystem".to_string(),
+            ],
+            is_toml: false,
+            toml_array_format: false,
+            mcp_servers_key: vec!["mcpServers".to_string()],
+            own_servers: vec!["canopy".to_string()],
+            shared_servers: vec!["fetch".to_string(), "filesystem".to_string()],
+        };
+
+        let default_line = format_platform_edit_line(&edit, false);
+        assert!(default_line.contains(
+            "remove servers [canopy] + shared [fetch, filesystem] (keep with --keep-shared-servers)"
+        ));
+        assert!(default_line.contains("from /tmp/config.json"));
+
+        let keep_line = format_platform_edit_line(&edit, true);
+        assert!(keep_line.contains("remove servers [canopy] (shared [fetch, filesystem] kept)"));
+        assert!(!keep_line.contains("remove servers [canopy, fetch"));
+    }
+
+    #[test]
+    fn diagnose_uninstall_orphan_truth_table() {
+        assert_eq!(diagnose_uninstall_orphan(true, Some(7), Some(9)), Some(9));
+        assert_eq!(diagnose_uninstall_orphan(true, None, Some(9)), Some(9));
+        assert_eq!(diagnose_uninstall_orphan(true, Some(9), Some(9)), None);
+        assert_eq!(diagnose_uninstall_orphan(false, None, Some(9)), None);
+        assert_eq!(diagnose_uninstall_orphan(true, None, None), None);
+    }
+
     fn empty_plan(canopy_dir: PathBuf, agents_skills_dir: PathBuf) -> UninstallPlan {
         UninstallPlan {
             service: ServicePlan {
                 unit_path: canopy_dir.join("nonexistent.service"),
                 exists: false,
+                dropin_dir: PathBuf::new(),
+                dropin_exists: false,
+                dropin_files: vec![],
             },
             canopy_dir,
             platform_edits: vec![],
             skills_symlinks: vec![],
             daemon_running: false,
             agents_skills_dir,
+            keep_shared_servers: false,
+            orphan_pid: None,
+            port_pid: None,
         }
     }
 

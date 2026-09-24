@@ -100,6 +100,10 @@ enum Commands {
         /// Skip the interactive confirmation prompt for --purge.
         #[arg(long)]
         yes: bool,
+        /// Only remove canopy's own `canopy` server entry from each platform config;
+        /// leave shared registry servers (`fetch`, `filesystem`) in place.
+        #[arg(long = "keep-shared-servers")]
+        keep_shared_servers: bool,
     },
     /// Interactive wizard to configure MCP in your AI client.
     Mcp {
@@ -241,8 +245,11 @@ async fn main() -> Result<()> {
             dry_run,
             purge,
             yes,
+            keep_shared_servers,
         }) => {
-            tokio::task::block_in_place(|| handle_uninstall(dry_run, purge, yes))?;
+            tokio::task::block_in_place(|| {
+                handle_uninstall(dry_run, purge, yes, keep_shared_servers)
+            })?;
             Ok(())
         }
         Some(Commands::Rag { action }) => handle_rag_action(action).await,
@@ -284,8 +291,13 @@ async fn main() -> Result<()> {
     }
 }
 
-fn handle_uninstall(dry_run: bool, purge: bool, yes: bool) -> Result<()> {
-    let plan = setup_module::uninstall::build_uninstall_plan()?;
+fn handle_uninstall(
+    dry_run: bool,
+    purge: bool,
+    yes: bool,
+    keep_shared_servers: bool,
+) -> Result<()> {
+    let plan = setup_module::uninstall::build_uninstall_plan(keep_shared_servers)?;
 
     if dry_run {
         setup_module::uninstall::print_dry_run(&plan);
@@ -379,6 +391,29 @@ mod tests {
                 assert_eq!(local_registry, Some(PathBuf::from("/tmp/r")));
             }
             _ => panic!("expected Commands::Mcp with local_registry"),
+        }
+    }
+
+    #[test]
+    fn uninstall_accepts_keep_shared_servers_flag() {
+        let cli = Cli::try_parse_from(["canopy", "uninstall", "--keep-shared-servers"])
+            .expect("`canopy uninstall --keep-shared-servers` must parse");
+        match cli.command {
+            Some(Commands::Uninstall {
+                keep_shared_servers,
+                ..
+            }) => assert!(keep_shared_servers),
+            _ => panic!("expected Commands::Uninstall with keep_shared_servers"),
+        }
+
+        let cli = Cli::try_parse_from(["canopy", "uninstall"])
+            .expect("`canopy uninstall` must parse without the shared-server flag");
+        match cli.command {
+            Some(Commands::Uninstall {
+                keep_shared_servers,
+                ..
+            }) => assert!(!keep_shared_servers),
+            _ => panic!("expected Commands::Uninstall with keep_shared_servers"),
         }
     }
 }
