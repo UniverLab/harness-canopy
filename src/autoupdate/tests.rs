@@ -397,18 +397,37 @@ fn replace_binary_replaces_the_target_atomically() {
     assert_eq!(std::fs::read(&target).unwrap(), b"new");
 }
 
+/// A fake release tag guaranteed newer than this binary, whatever the
+/// current version is. Hardcoding "the next version" here re-traps on
+/// every version bump (v3.0.1 broke this test the moment Cargo.toml
+/// caught up with it).
+fn fake_newer_tag() -> String {
+    let mut parts = env!("CARGO_PKG_VERSION").split('.');
+    let (major, minor, patch) = (
+        parts.next().expect("semver major"),
+        parts.next().expect("semver minor"),
+        parts
+            .next()
+            .expect("semver patch")
+            .parse::<u64>()
+            .expect("numeric patch"),
+    );
+    format!("v{major}.{minor}.{}", patch + 1)
+}
+
 #[test]
 fn tui_path_never_calls_replace() {
     crate::autoupdate::notice::clear_update_tag_for_tests();
+    let fake = fake_newer_tag();
     let fetcher = FakeFetcher {
-        body: r#"[{"tag_name":"v3.0.1","prerelease":false,"draft":false}]"#.to_string(),
+        body: format!(r#"[{{"tag_name":"{fake}","prerelease":false,"draft":false}}]"#),
     };
     let downloader = RecordingDownloader {
         called: Cell::new(false),
         bytes: Vec::new(),
     };
     let notice = super::check_and_update_notice_with(&fetcher, &downloader);
-    assert_eq!(notice.as_deref(), Some("v3.0.1"));
+    assert_eq!(notice.as_deref(), Some(fake.as_str()));
     assert!(!downloader.called.get());
     crate::autoupdate::notice::clear_update_tag_for_tests();
 }
