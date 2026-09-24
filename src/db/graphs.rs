@@ -61,6 +61,21 @@ pub enum RecentPairSourceKind {
 }
 
 impl Database {
+    /// Whether any graph is currently running.  The update restart guard
+    /// uses the same exact status predicate as the cleanup busy check.
+    pub fn has_running_graphs(&self) -> Result<bool> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM graphs WHERE status = 'running'",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
     pub fn delete_graph(&self, graph_id: &str) -> Result<()> {
         let conn = self
             .conn

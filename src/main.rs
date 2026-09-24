@@ -63,6 +63,15 @@ enum Commands {
         #[command(subcommand)]
         action: DaemonAction,
     },
+    /// Check for a newer stable release and install it (asks first; refuses cargo installs).
+    Update {
+        /// Only print whether an update exists; exit 1 when one does, 0 otherwise. Changes nothing.
+        #[arg(long)]
+        check: bool,
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Run a health check diagnosing common issues.
     Doctor,
     /// Run the MCP server over stdio transport.
@@ -204,6 +213,10 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Some(Commands::Daemon { action }) => handle_daemon_action(action, cli.port).await,
+        Some(Commands::Update { check, yes }) => {
+            let code = autoupdate::run_update(check, yes)?;
+            std::process::exit(code);
+        }
         Some(Commands::Doctor) => run_doctor().await,
         Some(Commands::Stdio) => run_stdio_server().await,
         Some(Commands::Serve) => run_http_server(cli.port).await,
@@ -263,7 +276,7 @@ async fn main() -> Result<()> {
                     setup_module::run_setup(false)?;
                 }
                 setup_module::maybe_refresh_registry();
-                let _ = autoupdate::check_and_update_if_needed();
+                autoupdate::maybe_spawn_update_notice();
                 tui::run_tui()
             })?;
             Ok(())

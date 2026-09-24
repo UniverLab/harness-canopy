@@ -75,6 +75,7 @@ impl App {
             daemon_running: false,
             daemon_pid: None,
             daemon_version: String::new(),
+            update_available: crate::autoupdate::update_available_tag(),
             selected: 0,
             focus: Focus::Home,
             sidebar_layer: SidebarLayer::Live,
@@ -254,6 +255,9 @@ impl App {
     /// Reload all data from the database and filesystem.
     pub fn refresh(&mut self) -> Result<()> {
         self.animation_tick = self.animation_tick.wrapping_add(1);
+        if self.update_available.is_none() {
+            self.update_available = crate::autoupdate::update_available_tag();
+        }
         self.refresh_daemon_status();
         self.refresh_agents()?;
         self.refresh_projects()?;

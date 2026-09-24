@@ -478,6 +478,24 @@ impl CommandRunner for RealRunner {
     }
 }
 
+/// Restart the installed service through the same manager seam used by the
+/// explicit update path.  Linux has a single restart verb; launchd is
+/// restarted through its existing stop/load pair.
+#[cfg(target_os = "linux")]
+pub(crate) fn service_manager_restart_with(runner: &dyn CommandRunner) -> bool {
+    runner.run("systemctl", &["--user", "restart", SYSTEMD_UNIT_NAME])
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn service_manager_restart_with(runner: &dyn CommandRunner) -> bool {
+    service_manager_stop_with(runner) && service_manager_start_with(runner)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn service_manager_restart_with(_runner: &dyn CommandRunner) -> bool {
+    false
+}
+
 #[cfg(target_os = "linux")]
 pub(crate) fn service_manager_stop_with(runner: &dyn CommandRunner) -> bool {
     runner.run("systemctl", &["--user", "stop", SYSTEMD_UNIT_NAME])
@@ -527,6 +545,11 @@ pub(crate) fn service_manager_stop() -> bool {
 
 pub(crate) fn service_manager_start() -> bool {
     service_manager_start_with(&RealRunner)
+}
+
+/// Ask the platform service manager to restart the canopy unit/agent.
+pub(crate) fn service_manager_restart() -> bool {
+    service_manager_restart_with(&RealRunner)
 }
 
 /// Is a service-manager unit/agent installed for canopy on this platform,

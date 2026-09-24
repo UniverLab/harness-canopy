@@ -291,17 +291,20 @@ pub(super) fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Them
     } else {
         format!(" v{} ", app.daemon_version)
     };
+    let update_notice = app
+        .update_available
+        .as_deref()
+        .map(|tag| format!(" canopy {tag} available — run canopy update"))
+        .unwrap_or_default();
 
     let hints_line = Line::from(spans);
     let hints_p = Paragraph::new(hints_line);
     frame.render_widget(hints_p, area);
 
-    // Render split label + version on the right side
-    let right_text = match (&split_label, version.is_empty()) {
-        (Some(sl), false) => format!("{sl}{version}"),
-        (Some(sl), true) => sl.clone(),
-        (None, false) => version.clone(),
-        (None, true) => String::new(),
+    // Render split label + version + update notice on the right side.
+    let right_text = match &split_label {
+        Some(sl) => format!("{sl}{version}{update_notice}"),
+        None => format!("{version}{update_notice}"),
     };
     let right_w = right_text.len() as u16;
 
@@ -322,6 +325,14 @@ pub(super) fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Them
                 &version,
                 Style::default()
                     .fg(theme.dim_text)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        if !update_notice.is_empty() {
+            right_spans.push(Span::styled(
+                &update_notice,
+                Style::default()
+                    .fg(theme.header_color)
                     .add_modifier(Modifier::BOLD),
             ));
         }
@@ -371,22 +382,37 @@ fn draw_footer_playground(
     } else {
         format!(" v{} ", app.daemon_version)
     };
+    let update_notice = app
+        .update_available
+        .as_deref()
+        .map(|tag| format!(" canopy {tag} available — run canopy update"))
+        .unwrap_or_default();
 
     let hints_line = Line::from(spans);
     frame.render_widget(Paragraph::new(hints_line), area);
 
-    if !version.is_empty() && area.width > version.len() as u16 {
-        let right_w = version.len() as u16;
+    let right_text = format!("{version}{update_notice}");
+    if !right_text.is_empty() && area.width > right_text.len() as u16 {
+        let right_w = right_text.len() as u16;
         let right_area = Rect::new(area.x + area.width - right_w, area.y, right_w, 1);
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
+        let mut right_spans = Vec::new();
+        if !version.is_empty() {
+            right_spans.push(Span::styled(
                 version,
                 Style::default()
                     .fg(theme.dim_text)
                     .add_modifier(Modifier::BOLD),
-            ))),
-            right_area,
-        );
+            ));
+        }
+        if !update_notice.is_empty() {
+            right_spans.push(Span::styled(
+                update_notice,
+                Style::default()
+                    .fg(theme.header_color)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        frame.render_widget(Paragraph::new(Line::from(right_spans)), right_area);
     }
 }
 
@@ -435,6 +461,20 @@ mod tests {
             text.push('\n');
         }
         text
+    }
+
+    #[test]
+    fn footer_renders_update_notice() {
+        let mut app = make_app();
+        app.update_available = Some("v3.0.1".to_string());
+        let theme = Theme::classic();
+        let text = render_footer_to_text(120, 1, |frame, area| {
+            draw_footer(frame, area, &app, &theme);
+        });
+        assert!(
+            text.contains("run canopy update"),
+            "footer notice missing: {text}"
+        );
     }
 
     #[test]

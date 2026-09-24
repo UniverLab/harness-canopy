@@ -446,6 +446,24 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn service_manager_restart_routes_through_the_injected_runner() {
+        let runner = FakeRunner::new(true);
+        assert!(super::super::process::service_manager_restart_with(&runner));
+        assert_eq!(
+            runner.calls(),
+            vec![(
+                "systemctl".to_string(),
+                vec![
+                    "--user".to_string(),
+                    "restart".to_string(),
+                    "canopy.service".to_string()
+                ]
+            )]
+        );
+    }
+
     /// (f) FR3's stop predicate: manager-stop only when the port occupant
     /// IS the unit's MainPID — every other combination keeps the plain
     /// signal path (orphan) or has nothing to stop at all.

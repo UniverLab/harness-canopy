@@ -715,6 +715,8 @@ pub struct App {
     pub(crate) daemon_running: bool,
     pub(crate) daemon_pid: Option<u32>,
     pub(crate) daemon_version: String,
+    /// Latest stable release found by the background notice check.
+    pub(crate) update_available: Option<String>,
 
     // UI state
     pub(crate) selected: usize,

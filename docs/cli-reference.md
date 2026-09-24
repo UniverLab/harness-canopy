@@ -11,7 +11,8 @@ canopy [command] [options]
 ```
 
 Running `canopy` with no command opens the [TUI](tui.md) (running setup
-first if needed, and checking for updates).
+first if needed, and checking for updates (notice only — run `canopy update`
+to install)).
 
 ## Daemon
 
@@ -24,6 +25,22 @@ first if needed, and checking for updates).
 | `canopy daemon logs` | Show the daemon log |
 | `canopy daemon install-service` | Register as a system service |
 | `canopy daemon uninstall-service` | Remove the system service |
+
+## Updates
+
+| Command | Description |
+|---|---|
+| `canopy update` | Check the latest stable release, ask `Update to <tag>? [y/N]` (default no), and install it atomically; prints `canopy <current> → <latest>` or `canopy <current> is up to date` |
+| `canopy update --check` | Print the update status without changing anything; exits 1 when an update exists and 0 when up to date |
+| `canopy update --yes` | Install without the confirmation prompt |
+
+A cargo-installed binary is never overwritten: `canopy update` prints
+`installed with cargo — run: cargo install harness-canopy --force`.
+After a successful replacement, a running systemd-managed daemon is restarted
+with `systemctl --user restart canopy.service`; an unmanaged daemon uses the
+normal `canopy daemon stop/start` path. If a graph is running, update asks
+before restarting and otherwise leaves the daemon untouched and prints the
+command to run later.
 
 ## Setup & diagnostics
 

@@ -114,7 +114,7 @@ pipeline, all 83 MCP tools, and the complete CLI reference.
 - **🚀 High-Performance Scheduler** — Event-driven cron scheduler using Tokio with zero polling overhead. Computes precise wake-up times and sleeps until needed; CPU usage drops to near-zero when idle.
 - **📊 Real-time File Watcher** — Instantly reacts to file system events (create, modify, delete, move) using the `notify` crate with configurable debouncing, recursive directory monitoring, and macOS FSEvents compatibility.
 - **💾 Persistent State** — All tasks, watchers, execution logs, agent state, sync messages, intelligence nodes, graphs, and projects are stored in an embedded SQLite database with WAL mode and automatic schema migration.
-- **🔄 Auto-Update** — Checks GitHub releases daily for new stable versions, downloads the platform-specific binary (linux-musl, macos-darwin; x86_64/aarch64), and atomically replaces the running executable.
+- **🔄 Auto-Update** — `canopy update` checks GitHub releases for a newer stable version, asks first (default no), refuses cargo installs, and restarts the daemon.
 - **🔔 Cross-Platform Notifications** — Native desktop notifications for task completions, failures, and watcher triggers. Auto-detects platform: WSL (PowerShell toasts with AUMID), macOS (`osascript`), Linux (`notify-send`).
 
 ### 🤖 Agent Management
@@ -297,7 +297,7 @@ pipeline, all 83 MCP tools, and the complete CLI reference.
    canopy rag report             # Per-file indexing report
    ```
 
-All state persists in `~/.canopy/`. The daemon auto-updates to stable releases every 24 hours.
+All state persists in `~/.canopy/`. The TUI shows an update notice at most every 24 hours — `canopy update` installs it.
 
 ---
 
