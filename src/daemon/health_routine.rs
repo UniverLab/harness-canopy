@@ -148,42 +148,72 @@ impl HealthRoutine {
             }
         };
         if !busy.is_empty() {
-            let skipped = DbHealthStatus {
-                last_skip_at: Some(now),
-                last_skip_reason: Some(busy.join(", ")),
-                ..status
-            };
-            tracing::info!("db health routine: deferred — busy: {}", busy.join(", "));
-            if let Err(e) = save_status(&self.db, &skipped) {
-                tracing::error!("db health routine: failed to record skip: {e}");
-            }
+            Self::record_busy_health_skip(&self.db, status, now, &busy);
             return;
         }
 
         let db = Arc::clone(&self.db);
         let db_path = database_path(&self.data_dir);
         let backup_path = backup_path(&self.data_dir);
-        let new_status = match tokio::task::spawn_blocking(move || {
-            run_health_check(&db, &db_path, &backup_path)
-        })
-        .await
+        let Some(new_status) = Self::run_health_check_blocking(db, db_path, backup_path).await
+        else {
+            return;
+        };
+        Self::record_health_outcome(&self.db, &new_status);
+    }
+
+    /// Records the skip (so a routine that never finds an idle moment stays
+    /// visible) and leaves the routine due for the next poll rather than
+    /// resetting the cadence.
+    fn record_busy_health_skip(
+        db: &Database,
+        status: DbHealthStatus,
+        now: DateTime<Utc>,
+        busy: &[String],
+    ) {
+        let skipped = DbHealthStatus {
+            last_skip_at: Some(now),
+            last_skip_reason: Some(busy.join(", ")),
+            ..status
+        };
+        tracing::info!("db health routine: deferred — busy: {}", busy.join(", "));
+        if let Err(e) = save_status(db, &skipped) {
+            tracing::error!("db health routine: failed to record skip: {e}");
+        }
+    }
+
+    /// Runs the whole check-and-backup off the async runtime (a long
+    /// `integrity_check` on a large database must not stall graph execution
+    /// or MCP requests). `None` when the blocking task panicked — logged.
+    async fn run_health_check_blocking(
+        db: Arc<Database>,
+        db_path: PathBuf,
+        backup_path: PathBuf,
+    ) -> Option<DbHealthStatus> {
+        match tokio::task::spawn_blocking(move || run_health_check(&db, &db_path, &backup_path))
+            .await
         {
-            Ok(status) => status,
+            Ok(status) => Some(status),
             Err(e) => {
                 tracing::error!("db health routine: task panicked: {e}");
-                return;
+                None
             }
-        };
+        }
+    }
 
-        match new_status.outcome {
+    /// Logs the outcome, then persists the status — in that order, so a
+    /// failed save is always visible right next to the outcome it failed to
+    /// store.
+    fn record_health_outcome(db: &Database, new_status: &DbHealthStatus) {
+        match &new_status.outcome {
             Some(DbHealthOutcome::Passed) => {
                 tracing::info!("db health routine: passed — backup written and verified");
             }
-            ref other => {
+            other => {
                 tracing::warn!("db health routine: finished with outcome {:?}", other);
             }
         }
-        if let Err(e) = save_status(&self.db, &new_status) {
+        if let Err(e) = save_status(db, new_status) {
             tracing::error!("db health routine: failed to persist status: {e}");
         }
     }
@@ -229,17 +259,9 @@ pub fn run_health_check(db: &Database, db_path: &Path, backup_path: &Path) -> Db
         .foreign_key_check()
         .unwrap_or_else(|e| vec![format!("foreign_key_check errored: {e}")]);
 
-    if integrity_result != "ok" {
-        // A backup taken from a corrupt source would overwrite the last
-        // good one — report and stop, no backup attempt.
-        tracing::error!("db health routine: integrity_check found problems: {integrity_result}");
-        return DbHealthStatus {
-            last_run_at: Some(now),
-            outcome: Some(DbHealthOutcome::IntegrityFailed),
-            integrity_result: Some(integrity_result),
-            foreign_key_violations,
-            ..Default::default()
-        };
+    if let Some(status) = integrity_failure_status(now, &integrity_result, &foreign_key_violations)
+    {
+        return status;
     }
 
     let temp_path = temp_backup_path(backup_path);
@@ -251,23 +273,14 @@ pub fn run_health_check(db: &Database, db_path: &Path, backup_path: &Path) -> Db
     // step.
     let _ = std::fs::remove_file(&temp_path);
 
-    if let Some(required) = required_backup_space(db_path) {
-        if let Some(available) = available_space(backup_path) {
-            if available < required {
-                tracing::warn!(
-                    "db health routine: skipping backup — {available} byte(s) free, \
-                     {required} required"
-                );
-                return DbHealthStatus {
-                    last_run_at: Some(now),
-                    outcome: Some(DbHealthOutcome::BackupSkippedInsufficientDiskSpace),
-                    integrity_result: Some(integrity_result),
-                    foreign_key_violations,
-                    backup_path: existing_backup_path(backup_path),
-                    ..Default::default()
-                };
-            }
-        }
+    if let Some(status) = insufficient_backup_space_status(
+        now,
+        db_path,
+        backup_path,
+        &integrity_result,
+        &foreign_key_violations,
+    ) {
+        return status;
     }
 
     if let Err(e) = db.backup_into(&temp_path) {
@@ -292,6 +305,58 @@ pub fn run_health_check(db: &Database, db_path: &Path, backup_path: &Path) -> Db
     )
 }
 
+/// The status for a source database that failed (or couldn't finish) its
+/// integrity check: `Some` means stop here — a backup taken from a corrupt
+/// source would overwrite the last good one — `None` means the source is
+/// healthy and the backup may proceed.
+fn integrity_failure_status(
+    now: DateTime<Utc>,
+    integrity_result: &str,
+    foreign_key_violations: &[String],
+) -> Option<DbHealthStatus> {
+    if integrity_result == "ok" {
+        return None;
+    }
+    tracing::error!("db health routine: integrity_check found problems: {integrity_result}");
+    Some(DbHealthStatus {
+        last_run_at: Some(now),
+        outcome: Some(DbHealthOutcome::IntegrityFailed),
+        integrity_result: Some(integrity_result.to_string()),
+        foreign_key_violations: foreign_key_violations.to_vec(),
+        ..Default::default()
+    })
+}
+
+/// `Some` (skip the backup) when the filesystem holding `backup_path`
+/// can't offer the margin `required_backup_space` demands, `None` when
+/// there's room — or when either size can't be read at all: callers fail
+/// open rather than perpetually skipping backups.
+fn insufficient_backup_space_status(
+    now: DateTime<Utc>,
+    db_path: &Path,
+    backup_path: &Path,
+    integrity_result: &str,
+    foreign_key_violations: &[String],
+) -> Option<DbHealthStatus> {
+    let required = required_backup_space(db_path)?;
+    let available = available_space(backup_path)?;
+    if available >= required {
+        return None;
+    }
+    tracing::warn!(
+        "db health routine: skipping backup — {available} byte(s) free, \
+         {required} required"
+    );
+    Some(DbHealthStatus {
+        last_run_at: Some(now),
+        outcome: Some(DbHealthOutcome::BackupSkippedInsufficientDiskSpace),
+        integrity_result: Some(integrity_result.to_string()),
+        foreign_key_violations: foreign_key_violations.to_vec(),
+        backup_path: existing_backup_path(backup_path),
+        ..Default::default()
+    })
+}
+
 /// Verifies a freshly written backup at `temp_path` and, only if it passes
 /// its own `integrity_check`, atomically replaces `backup_path` with it
 /// (decision 5). On any failure the temp file is discarded and
@@ -308,21 +373,62 @@ fn finalize_backup(
     let verified_ok = matches!(&verdict, Ok(v) if v == "ok");
 
     if !verified_ok {
-        match &verdict {
-            Ok(v) => tracing::error!("db health routine: new backup failed integrity_check: {v}"),
-            Err(e) => tracing::error!("db health routine: new backup verification errored: {e}"),
-        }
-        let _ = std::fs::remove_file(temp_path);
-        return DbHealthStatus {
-            last_run_at: Some(now),
-            outcome: Some(DbHealthOutcome::BackupVerificationFailed),
-            integrity_result: Some(integrity_result),
+        return backup_verification_failure(
+            temp_path,
+            backup_path,
+            integrity_result,
             foreign_key_violations,
-            backup_path: existing_backup_path(backup_path),
-            ..Default::default()
-        };
+            now,
+            &verdict,
+        );
     }
 
+    replace_verified_backup(
+        temp_path,
+        backup_path,
+        integrity_result,
+        foreign_key_violations,
+        now,
+    )
+}
+
+/// The failed-verification verdict: log *why* verification failed (a backup
+/// whose own `integrity_check` failed and a verification that errored out
+/// are different faults and must read differently), discard the temp file,
+/// and report the previous backup as still in place.
+fn backup_verification_failure(
+    temp_path: &Path,
+    backup_path: &Path,
+    integrity_result: String,
+    foreign_key_violations: Vec<String>,
+    now: DateTime<Utc>,
+    verdict: &anyhow::Result<String>,
+) -> DbHealthStatus {
+    match verdict {
+        Ok(v) => tracing::error!("db health routine: new backup failed integrity_check: {v}"),
+        Err(e) => tracing::error!("db health routine: new backup verification errored: {e}"),
+    }
+    let _ = std::fs::remove_file(temp_path);
+    DbHealthStatus {
+        last_run_at: Some(now),
+        outcome: Some(DbHealthOutcome::BackupVerificationFailed),
+        integrity_result: Some(integrity_result),
+        foreign_key_violations,
+        backup_path: existing_backup_path(backup_path),
+        ..Default::default()
+    }
+}
+
+/// Swaps the verified temp file into place. Any rename failure discards the
+/// temp file and leaves `backup_path` — the previous verified backup —
+/// exactly as it was.
+fn replace_verified_backup(
+    temp_path: &Path,
+    backup_path: &Path,
+    integrity_result: String,
+    foreign_key_violations: Vec<String>,
+    now: DateTime<Utc>,
+) -> DbHealthStatus {
     if let Err(e) = std::fs::rename(temp_path, backup_path) {
         tracing::error!("db health routine: could not replace backup: {e}");
         let _ = std::fs::remove_file(temp_path);
@@ -628,5 +734,123 @@ mod tests {
             !backup_path(dir.path()).exists(),
             "must not run again immediately after a fresh pass"
         );
+    }
+
+    // ── extracted helper branches the fixtures above don't reach ───────
+
+    #[test]
+    fn finalize_backup_discards_a_temp_file_that_is_not_a_database() {
+        let dir = tempdir().unwrap();
+        let db_path = database_path(dir.path());
+        let db = Database::new(&db_path).unwrap();
+        db.backup_into(&backup_path(dir.path())).unwrap();
+        drop(db);
+
+        let backup_path = backup_path(dir.path());
+        let previous_backup_bytes = std::fs::read(&backup_path).unwrap();
+
+        // Not a SQLite file at all: verification itself *errors* (rather
+        // than reporting a failed integrity_check) and must take the same
+        // discard-and-keep-the-old-backup path, with its own log line.
+        let temp_path = temp_backup_path(&backup_path);
+        std::fs::write(&temp_path, b"not a sqlite database at all").unwrap();
+
+        let status = finalize_backup(
+            &temp_path,
+            &backup_path,
+            "ok".to_string(),
+            vec![],
+            Utc::now(),
+        );
+
+        assert_eq!(
+            status.outcome,
+            Some(DbHealthOutcome::BackupVerificationFailed)
+        );
+        assert!(
+            !temp_path.exists(),
+            "the unverifiable temp file must be discarded"
+        );
+        assert_eq!(
+            std::fs::read(&backup_path).unwrap(),
+            previous_backup_bytes,
+            "the previous backup must be left byte-for-byte untouched"
+        );
+    }
+
+    #[test]
+    fn replace_verified_backup_keeps_everything_when_the_swap_fails() {
+        let dir = tempdir().unwrap();
+        let backup_path = backup_path(dir.path());
+        // A directory where the backup file must go: `rename` refuses, so
+        // the temp file is discarded and the previous backup is untouched.
+        std::fs::create_dir(&backup_path).unwrap();
+        std::fs::write(backup_path.join("marker"), b"previous backup").unwrap();
+
+        let temp_path = temp_backup_path(&backup_path);
+        std::fs::write(&temp_path, b"freshly verified backup bytes").unwrap();
+
+        let status = replace_verified_backup(
+            &temp_path,
+            &backup_path,
+            "ok".to_string(),
+            vec![],
+            Utc::now(),
+        );
+
+        assert_eq!(
+            status.outcome,
+            Some(DbHealthOutcome::BackupVerificationFailed)
+        );
+        assert!(
+            !temp_path.exists(),
+            "the failed swap must not leave the temp file behind"
+        );
+        assert!(
+            backup_path.join("marker").exists(),
+            "the previous backup must be left exactly as it was"
+        );
+    }
+
+    #[test]
+    fn insufficient_backup_space_status_is_none_when_the_disk_has_room() {
+        let dir = tempdir().unwrap();
+        let db_path = database_path(dir.path());
+        let db = Database::new(&db_path).unwrap();
+        db.insert_terminal_session("t1", "t1", "bash", "/tmp")
+            .unwrap();
+
+        assert!(
+            insufficient_backup_space_status(
+                Utc::now(),
+                &db_path,
+                &backup_path(dir.path()),
+                "ok",
+                &[],
+            )
+            .is_none(),
+            "an ordinary tempdir has more than 110% of a tiny database free"
+        );
+    }
+
+    #[test]
+    fn record_health_outcome_persists_a_non_passing_outcome() {
+        let dir = tempdir().unwrap();
+        let db_path = database_path(dir.path());
+        let db = Database::new(&db_path).unwrap();
+
+        HealthRoutine::record_health_outcome(
+            &db,
+            &DbHealthStatus {
+                last_run_at: Some(Utc::now()),
+                outcome: Some(DbHealthOutcome::IntegrityFailed),
+                integrity_result: Some("page 3 failed".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let status = load_status(&db);
+        assert_eq!(status.outcome, Some(DbHealthOutcome::IntegrityFailed));
+        assert_eq!(status.integrity_result.as_deref(), Some("page 3 failed"));
     }
 }

@@ -799,34 +799,8 @@ struct RealDaemonOps {
 impl DaemonOps for RealDaemonOps {
     fn stop(&self, owner: DaemonOwnerKind) -> Result<()> {
         match owner {
-            // Never a bare SIGTERM here: the installed unit has
-            // `Restart=on-failure`, so signalling the PID directly reads to
-            // the manager as an unclean exit and it respawns the daemon out
-            // from under the exclusive VACUUM this stop is for. Going
-            // through the manager's own stop verb is a stop it won't
-            // immediately undo.
-            DaemonOwnerKind::Managed(name) => {
-                if !process::service_manager_stop() {
-                    anyhow::bail!("failed to stop the {name}-managed daemon");
-                }
-                Ok(())
-            }
-            DaemonOwnerKind::Detached => {
-                let pid = process::read_pid(&self.data_dir)
-                    .or_else(|| process::resolve_port_pid(self.port))
-                    .filter(|&p| process::is_process_running(p));
-                if let Some(pid) = pid {
-                    process::send_signal(pid);
-                    for _ in 0..20 {
-                        std::thread::sleep(std::time::Duration::from_millis(250));
-                        if !process::is_process_running(pid) {
-                            break;
-                        }
-                    }
-                }
-                process::remove_pid_file(&self.data_dir);
-                Ok(())
-            }
+            DaemonOwnerKind::Managed(name) => stop_managed_daemon(name),
+            DaemonOwnerKind::Detached => stop_detached_daemon(&self.data_dir, self.port),
         }
     }
 
@@ -841,6 +815,38 @@ impl DaemonOps for RealDaemonOps {
             DaemonOwnerKind::Detached => spawn_detached_daemon(&self.data_dir, self.port),
         }
     }
+}
+
+/// Stops a service-manager-owned daemon through the manager's own stop
+/// verb. Never a bare SIGTERM here: the installed unit has
+/// `Restart=on-failure`, so signalling the PID directly reads to the
+/// manager as an unclean exit and it respawns the daemon out from under
+/// the exclusive VACUUM this stop is for. Going through the manager is a
+/// stop it won't immediately undo.
+fn stop_managed_daemon(name: &'static str) -> Result<()> {
+    if !process::service_manager_stop() {
+        anyhow::bail!("failed to stop the {name}-managed daemon");
+    }
+    Ok(())
+}
+
+/// Stops a detached daemon by PID (PID file first, then the port), waits
+/// for it to actually exit, and always clears the PID file afterwards.
+fn stop_detached_daemon(data_dir: &Path, port: u16) -> Result<()> {
+    let pid = process::read_pid(data_dir)
+        .or_else(|| process::resolve_port_pid(port))
+        .filter(|&p| process::is_process_running(p));
+    if let Some(pid) = pid {
+        process::send_signal(pid);
+        for _ in 0..20 {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            if !process::is_process_running(pid) {
+                break;
+            }
+        }
+    }
+    process::remove_pid_file(data_dir);
+    Ok(())
 }
 
 /// Relaunch a detached `canopy serve`, mirroring `canopy daemon start`'s

@@ -74,33 +74,50 @@ impl AnnouncementsClient {
                 break;
             }
 
-            match &result {
-                Ok(()) => {
-                    // A session that delivered at least one message counts as
-                    // healthy: drop back to the initial delay. We still wait it
-                    // out rather than reconnecting instantly, so a server that
-                    // closes the socket right after each message cannot push us
-                    // into a tight reconnect graph.
-                    backoff = INITIAL_BACKOFF;
-                    tracing::info!(
-                        "Announcements client disconnected, reconnecting in {backoff:?}"
-                    );
-                }
-                Err(reason) => {
-                    tracing::info!(
-                        "Announcements client disconnected ({reason}), reconnecting in {backoff:?}"
-                    );
-                }
-            }
+            backoff = Self::log_disconnect_result(&result, backoff);
 
-            tokio::select! {
-                _ = cancel.cancelled() => break,
-                _ = tokio::time::sleep(backoff) => {}
+            if !Self::wait_before_reconnect(&cancel, backoff).await {
+                break;
             }
 
             if result.is_err() {
                 backoff = next_backoff_delay(backoff);
             }
+        }
+    }
+
+    /// Logs why the session ended and returns the backoff to wait out: a
+    /// session that delivered at least one message counts as healthy and
+    /// drops back to the initial delay, a failed one keeps the current
+    /// delay so retries keep spreading out.
+    fn log_disconnect_result(result: &Result<(), String>, backoff: Duration) -> Duration {
+        match result {
+            Ok(()) => {
+                // We still wait the initial delay out rather than
+                // reconnecting instantly, so a server that closes the socket
+                // right after each message cannot push us into a tight
+                // reconnect graph.
+                tracing::info!(
+                    "Announcements client disconnected, reconnecting in {:?}",
+                    INITIAL_BACKOFF
+                );
+                INITIAL_BACKOFF
+            }
+            Err(reason) => {
+                tracing::info!(
+                    "Announcements client disconnected ({reason}), reconnecting in {backoff:?}"
+                );
+                backoff
+            }
+        }
+    }
+
+    /// Waits out the backoff delay. Returns `false` when the client was
+    /// cancelled first, `true` once the sleep completed.
+    async fn wait_before_reconnect(cancel: &CancellationToken, backoff: Duration) -> bool {
+        tokio::select! {
+            _ = cancel.cancelled() => false,
+            _ = tokio::time::sleep(backoff) => true,
         }
     }
 
@@ -318,6 +335,33 @@ mod tests {
         );
         client.mark_seen("new-id");
         assert!(client.is_already_seen("new-id"));
+    }
+
+    #[test]
+    fn log_disconnect_result_resets_backoff_only_after_a_healthy_session() {
+        let healthy = Ok(());
+        assert_eq!(
+            AnnouncementsClient::log_disconnect_result(&healthy, Duration::from_secs(60)),
+            INITIAL_BACKOFF
+        );
+
+        let failed: Result<(), String> = Err("connect failed: boom".to_string());
+        assert_eq!(
+            AnnouncementsClient::log_disconnect_result(&failed, Duration::from_secs(60)),
+            Duration::from_secs(60)
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_before_reconnect_reports_cancellation_and_sleep_completion() {
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        assert!(
+            !AnnouncementsClient::wait_before_reconnect(&cancelled, Duration::from_secs(300)).await
+        );
+
+        let live = CancellationToken::new();
+        assert!(AnnouncementsClient::wait_before_reconnect(&live, Duration::ZERO).await);
     }
 
     #[test]

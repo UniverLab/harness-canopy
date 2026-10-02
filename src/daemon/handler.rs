@@ -291,88 +291,10 @@ fn build_graph_completion_hook(
     params: &GraphCompletionHookParams,
 ) -> Result<crate::domain::graphs::GraphCompletionHook, String> {
     validate_graph_hook_templates(params)?;
+    let modes = graph_hook_modes(params);
 
-    let has_platform = params
-        .platform
-        .as_deref()
-        .is_some_and(|s| !s.trim().is_empty());
-    let has_command = params
-        .command
-        .as_deref()
-        .is_some_and(|s| !s.trim().is_empty());
-    let has_target = params
-        .target_session_id
-        .as_deref()
-        .is_some_and(|s| !s.trim().is_empty());
-    let has_target_name = params
-        .target_session_name
-        .as_deref()
-        .is_some_and(|s| !s.trim().is_empty());
-    let has_model = params
-        .model
-        .as_deref()
-        .is_some_and(|s| !s.trim().is_empty());
-    let has_effort = params
-        .effort
-        .as_deref()
-        .is_some_and(|s| !s.trim().is_empty());
-    let has_prompt = params
-        .prompt
-        .as_deref()
-        .is_some_and(|s| !s.trim().is_empty());
-    let has_target_graph = params
-        .target_graph_id
-        .as_deref()
-        .is_some_and(|s| !s.trim().is_empty());
-
-    if has_target_graph {
-        if has_platform || has_command || has_target || has_target_name || has_model || has_effort {
-            return Err(
-                "Graph hook ('target_graph_id') must not set 'platform', 'command', \
-                 'target_session_id', 'target_session_name', 'model', or 'effort'. Configure exactly one hook mode."
-                    .to_string(),
-            );
-        }
-        let queue_id = params
-            .queue_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string);
-        let idea = params
-            .idea
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string);
-        if queue_id.is_some() && idea.is_some() {
-            return Err("Graph hook: 'queue_id' and 'idea' are mutually exclusive.".to_string());
-        }
-        let target_graph_id = params
-            .target_graph_id
-            .as_deref()
-            .unwrap()
-            .trim()
-            .to_string();
-        return Ok(crate::domain::graphs::GraphCompletionHook {
-            platform: None,
-            model: None,
-            effort: None,
-            prompt: None,
-            command: None,
-            target_session_id: None,
-            target_session_name: None,
-            timeout_minutes: None,
-            target_graph_id: Some(target_graph_id),
-            queue_id,
-            workdir_override: params
-                .workdir_override
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string),
-            idea,
-        });
+    if modes.target_graph {
+        return build_graph_hook_target(params, &modes);
     }
 
     // CM27: 'target_session_id' and 'target_session_name' are alternative
@@ -381,16 +303,16 @@ fn build_graph_completion_hook(
     // `prompt` but no other mode), never neither either. One message covers
     // both misconfigurations because "set exactly one of X or Y" is true
     // whether zero or two of them are set.
-    if has_target && has_target_name {
+    if modes.target && modes.target_name {
         return Err(
             "Interactive hook requires exactly one of 'target_session_id' \
              or 'target_session_name', not both."
                 .to_string(),
         );
     }
-    if has_prompt
-        && !has_target
-        && !has_target_name
+    if modes.prompt
+        && !modes.target
+        && !modes.target_name
         && params.platform.is_none()
         && params.command.is_none()
     {
@@ -401,65 +323,16 @@ fn build_graph_completion_hook(
         );
     }
 
-    if has_target || has_target_name {
-        if has_platform || has_command || has_model || has_effort {
-            return Err(
-                "Interactive hook ('target_session_id'/'target_session_name' + 'prompt') must not \
-                 set 'platform', 'model', 'effort', or 'command'. Configure exactly one hook mode."
-                    .to_string(),
-            );
-        }
-        if !has_prompt {
-            return Err("Interactive hook 'prompt' must not be empty.".to_string());
-        }
-        let (target_session_id, target_session_name) = if has_target {
-            (
-                Some(
-                    params
-                        .target_session_id
-                        .as_deref()
-                        .unwrap()
-                        .trim()
-                        .to_string(),
-                ),
-                None,
-            )
-        } else {
-            (
-                None,
-                Some(
-                    params
-                        .target_session_name
-                        .as_deref()
-                        .unwrap()
-                        .trim()
-                        .to_string(),
-                ),
-            )
-        };
-        let prompt = params.prompt.as_deref().unwrap().trim().to_string();
-        return Ok(crate::domain::graphs::GraphCompletionHook {
-            platform: None,
-            model: None,
-            effort: None,
-            prompt: Some(prompt),
-            command: None,
-            target_session_id,
-            timeout_minutes: params.timeout_minutes,
-            target_graph_id: None,
-            queue_id: None,
-            workdir_override: None,
-            idea: None,
-            target_session_name,
-        });
+    if modes.target || modes.target_name {
+        return build_interactive_graph_hook(params, &modes);
     }
 
-    if has_platform && has_command {
+    if modes.platform && modes.command {
         return Err("Hook cannot have both a 'command' and an agent payload \
              ('platform'/'prompt'). Configure exactly one."
             .to_string());
     }
-    if !has_platform && !has_command {
+    if !modes.platform && !modes.command {
         return Err("Hook must have either a 'command', an agent payload \
              ('platform' + 'prompt'), an interactive payload \
              ('target_session_id' + 'prompt'), or a graph payload \
@@ -467,45 +340,224 @@ fn build_graph_completion_hook(
             .to_string());
     }
 
-    if has_platform {
-        let platform = params.platform.as_deref().unwrap().trim().to_string();
-        let prompt = params
-            .prompt
+    if modes.platform {
+        return build_agent_graph_hook(params);
+    }
+
+    build_command_graph_hook(params)
+}
+
+/// Which hook mode the params select. Computed once from trimmed non-empty
+/// presence, so every validation and builder below reads the same
+/// booleans — at most one mode may be configured.
+#[derive(Debug, Clone, Copy)]
+struct GraphHookModes {
+    /// `target_graph_id` set — the graph-launch mode.
+    target_graph: bool,
+    /// `target_session_id` set — interactive mode, by id.
+    target: bool,
+    /// `target_session_name` set — interactive mode, by name.
+    target_name: bool,
+    /// `platform` set — agent payload mode.
+    platform: bool,
+    /// `command` set — shell command mode.
+    command: bool,
+    /// `prompt` set — the payload text.
+    prompt: bool,
+    /// `model` set — agent payload model override.
+    model: bool,
+    /// `effort` set — agent payload effort override.
+    effort: bool,
+}
+
+/// Trimmed non-empty presence — the same test every hook field is judged by.
+fn non_blank(value: Option<&str>) -> bool {
+    value.is_some_and(|s| !s.trim().is_empty())
+}
+
+fn graph_hook_modes(params: &GraphCompletionHookParams) -> GraphHookModes {
+    GraphHookModes {
+        target_graph: non_blank(params.target_graph_id.as_deref()),
+        target: non_blank(params.target_session_id.as_deref()),
+        target_name: non_blank(params.target_session_name.as_deref()),
+        platform: non_blank(params.platform.as_deref()),
+        command: non_blank(params.command.as_deref()),
+        prompt: non_blank(params.prompt.as_deref()),
+        model: non_blank(params.model.as_deref()),
+        effort: non_blank(params.effort.as_deref()),
+    }
+}
+
+/// The graph-launch hook: `target_graph_id`, optionally paired with exactly
+/// one of `queue_id`/`idea`. Exclusivity against every other mode's fields
+/// is checked before anything else, exactly as the planner has always done.
+fn build_graph_hook_target(
+    params: &GraphCompletionHookParams,
+    modes: &GraphHookModes,
+) -> Result<crate::domain::graphs::GraphCompletionHook, String> {
+    if modes.platform
+        || modes.command
+        || modes.target
+        || modes.target_name
+        || modes.model
+        || modes.effort
+    {
+        return Err(
+            "Graph hook ('target_graph_id') must not set 'platform', 'command', \
+             'target_session_id', 'target_session_name', 'model', or 'effort'. Configure exactly one hook mode."
+                .to_string(),
+        );
+    }
+    let queue_id = params
+        .queue_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let idea = params
+        .idea
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    if queue_id.is_some() && idea.is_some() {
+        return Err("Graph hook: 'queue_id' and 'idea' are mutually exclusive.".to_string());
+    }
+    let target_graph_id = params
+        .target_graph_id
+        .as_deref()
+        .unwrap()
+        .trim()
+        .to_string();
+
+    Ok(crate::domain::graphs::GraphCompletionHook {
+        platform: None,
+        model: None,
+        effort: None,
+        prompt: None,
+        command: None,
+        target_session_id: None,
+        target_session_name: None,
+        timeout_minutes: None,
+        target_graph_id: Some(target_graph_id),
+        queue_id,
+        workdir_override: params
+            .workdir_override
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
-            .ok_or_else(|| "Agent hook 'prompt' must not be empty.".to_string())?
-            .to_string();
-        let model = params
-            .model
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string);
-        let effort = params
-            .effort
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string);
+            .map(str::to_string),
+        idea,
+    })
+}
 
-        return Ok(crate::domain::graphs::GraphCompletionHook {
-            platform: Some(platform),
-            model,
-            effort,
-            prompt: Some(prompt),
-            command: None,
-            target_session_id: None,
-            target_session_name: None,
-            timeout_minutes: params.timeout_minutes,
-            target_graph_id: None,
-            queue_id: None,
-            workdir_override: None,
-            idea: None,
-        });
+/// The interactive hook: a prompt plus exactly one of `target_session_id`/
+/// `target_session_name`, and no agent/command fields (the caller has
+/// already rejected both-or-neither targets and a targetless prompt).
+fn build_interactive_graph_hook(
+    params: &GraphCompletionHookParams,
+    modes: &GraphHookModes,
+) -> Result<crate::domain::graphs::GraphCompletionHook, String> {
+    if modes.platform || modes.command || modes.model || modes.effort {
+        return Err(
+            "Interactive hook ('target_session_id'/'target_session_name' + 'prompt') must not \
+             set 'platform', 'model', 'effort', or 'command'. Configure exactly one hook mode."
+                .to_string(),
+        );
     }
+    if !modes.prompt {
+        return Err("Interactive hook 'prompt' must not be empty.".to_string());
+    }
+    let (target_session_id, target_session_name) = if modes.target {
+        (
+            Some(
+                params
+                    .target_session_id
+                    .as_deref()
+                    .unwrap()
+                    .trim()
+                    .to_string(),
+            ),
+            None,
+        )
+    } else {
+        (
+            None,
+            Some(
+                params
+                    .target_session_name
+                    .as_deref()
+                    .unwrap()
+                    .trim()
+                    .to_string(),
+            ),
+        )
+    };
+    let prompt = params.prompt.as_deref().unwrap().trim().to_string();
 
-    // Command mode
+    Ok(crate::domain::graphs::GraphCompletionHook {
+        platform: None,
+        model: None,
+        effort: None,
+        prompt: Some(prompt),
+        command: None,
+        target_session_id,
+        timeout_minutes: params.timeout_minutes,
+        target_graph_id: None,
+        queue_id: None,
+        workdir_override: None,
+        idea: None,
+        target_session_name,
+    })
+}
+
+/// The agent hook: platform + prompt (+ optional model/effort). A prompt
+/// that is empty once trimmed is rejected, not silently dropped.
+fn build_agent_graph_hook(
+    params: &GraphCompletionHookParams,
+) -> Result<crate::domain::graphs::GraphCompletionHook, String> {
+    let platform = params.platform.as_deref().unwrap().trim().to_string();
+    let prompt = params
+        .prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "Agent hook 'prompt' must not be empty.".to_string())?
+        .to_string();
+    let model = params
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let effort = params
+        .effort
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+
+    Ok(crate::domain::graphs::GraphCompletionHook {
+        platform: Some(platform),
+        model,
+        effort,
+        prompt: Some(prompt),
+        command: None,
+        target_session_id: None,
+        target_session_name: None,
+        timeout_minutes: params.timeout_minutes,
+        target_graph_id: None,
+        queue_id: None,
+        workdir_override: None,
+        idea: None,
+    })
+}
+
+/// The command hook — the last mode standing once every other one has been
+/// rejected: a non-blank command, nothing else set.
+fn build_command_graph_hook(
+    params: &GraphCompletionHookParams,
+) -> Result<crate::domain::graphs::GraphCompletionHook, String> {
     let command = params.command.as_deref().unwrap().trim().to_string();
     Ok(crate::domain::graphs::GraphCompletionHook {
         platform: None,
@@ -680,6 +732,18 @@ struct BuiltEnsembleUnit {
 /// how members, the join, and the wiring are laid out. Purely constructs
 /// in-memory values (fresh ids, no runtime state) — persistence is the
 /// caller's `insert_ensemble_unit`.
+/// One member's contribution to an ensemble unit: its agent node, its
+/// member row, and the two edges that wire it (entry fan-out in, fan-in to
+/// the join). Built as one unit so the id-generation order inside
+/// [`build_ensemble_unit`] stays node → incoming edge → fan-in edge, per
+/// member.
+#[derive(Debug)]
+struct BuiltEnsembleMember {
+    node: GraphNode,
+    member: EnsembleMember,
+    edges: Vec<GraphEdge>,
+}
+
 fn build_ensemble_unit(spec: &EnsembleUnitSpec) -> BuiltEnsembleUnit {
     let ensemble_id = uuid::Uuid::new_v4().to_string();
     let join_node_id = uuid::Uuid::new_v4().to_string();
@@ -690,74 +754,19 @@ fn build_ensemble_unit(spec: &EnsembleUnitSpec) -> BuiltEnsembleUnit {
     let mut ensemble_members = Vec::with_capacity(spec.members.len());
     let mut edges = Vec::new();
 
-    for (
-        index,
-        (
-            platform,
-            model,
-            prompt_override,
-            member_timeout_minutes,
-            member_infra_retry_limit,
-            member_infra_crash_max_seconds,
-            member_infra_backoff_seconds,
-        ),
-    ) in spec.members.iter().enumerate()
-    {
-        let node_id = uuid::Uuid::new_v4().to_string();
-        let effective_prompt =
-            effective_member_prompt(prompt_override.as_deref(), spec.prompt_template);
-        let effective_timeout_minutes = member_timeout_minutes.unwrap_or(spec.timeout_minutes);
-        let effective_infra_retry_limit = member_infra_retry_limit.or(spec.infra_retry_limit);
-        let effective_infra_crash_max_seconds =
-            member_infra_crash_max_seconds.or(spec.infra_crash_max_seconds);
-        let effective_infra_backoff_seconds =
-            member_infra_backoff_seconds.or(spec.infra_backoff_seconds);
-        member_nodes.push(GraphNode {
-            id: node_id.clone(),
-            spec_id: spec.spec_id.clone(),
-            graph_id: spec.graph_id.clone(),
-            name: format!("{} [{}]", spec.name, index + 1),
-            kind: GraphNodeKind::Agent,
-            config: member_node_config(
-                platform,
-                model.as_deref(),
-                effective_prompt,
-                effective_timeout_minutes,
-                effective_infra_retry_limit,
-                effective_infra_crash_max_seconds,
-                effective_infra_backoff_seconds,
-            ),
-            position: next_position,
-            created_at: now,
-        });
-        edges.push(GraphEdge {
-            id: uuid::Uuid::new_v4().to_string(),
-            spec_id: spec.spec_id.clone(),
-            graph_id: spec.graph_id.clone(),
-            from_node: spec.entry_from_node.to_string(),
-            to_node: node_id.clone(),
-            condition: spec.entry_condition.clone(),
-        });
-        edges.push(GraphEdge {
-            id: uuid::Uuid::new_v4().to_string(),
-            spec_id: spec.spec_id.clone(),
-            graph_id: spec.graph_id.clone(),
-            from_node: node_id.clone(),
-            to_node: join_node_id.clone(),
-            condition: GraphEdgeCondition::Always,
-        });
-        ensemble_members.push(EnsembleMember {
-            ensemble_id: ensemble_id.clone(),
-            node_id,
-            position: index as i64,
-            platform: platform.clone(),
-            model: model.clone(),
-            prompt_override: prompt_override.clone(),
-            timeout_minutes: *member_timeout_minutes,
-            infra_retry_limit: *member_infra_retry_limit,
-            infra_crash_max_seconds: *member_infra_crash_max_seconds,
-            infra_backoff_seconds: *member_infra_backoff_seconds,
-        });
+    for (index, member_spec) in spec.members.iter().enumerate() {
+        let built = build_ensemble_member_unit(
+            spec,
+            &ensemble_id,
+            &join_node_id,
+            now,
+            index,
+            next_position,
+            member_spec,
+        );
+        member_nodes.push(built.node);
+        ensemble_members.push(built.member);
+        edges.extend(built.edges);
         next_position += 1;
     }
 
@@ -772,40 +781,7 @@ fn build_ensemble_unit(spec: &EnsembleUnitSpec) -> BuiltEnsembleUnit {
         created_at: now,
     };
 
-    // Quorum exits: one edge to the target node — or, when chained into
-    // another ensemble, one edge per member of that ensemble (no intermediate
-    // node). The `ensembles` row still holds the single `on_pass_to`/
-    // `on_fail_to` value (the node id, or the target's quorum id).
-    let pass_targets = spec
-        .on_pass_fan_out
-        .clone()
-        .unwrap_or_else(|| vec![spec.on_pass_to.to_string()]);
-    for to_node in &pass_targets {
-        edges.push(GraphEdge {
-            id: uuid::Uuid::new_v4().to_string(),
-            spec_id: spec.spec_id.clone(),
-            graph_id: spec.graph_id.clone(),
-            from_node: join_node_id.clone(),
-            to_node: to_node.clone(),
-            condition: GraphEdgeCondition::Pass,
-        });
-    }
-    if let Some(on_fail_to) = spec.on_fail_to {
-        let fail_targets = spec
-            .on_fail_fan_out
-            .clone()
-            .unwrap_or_else(|| vec![on_fail_to.to_string()]);
-        for to_node in &fail_targets {
-            edges.push(GraphEdge {
-                id: uuid::Uuid::new_v4().to_string(),
-                spec_id: spec.spec_id.clone(),
-                graph_id: spec.graph_id.clone(),
-                from_node: join_node_id.clone(),
-                to_node: to_node.clone(),
-                condition: GraphEdgeCondition::Fail,
-            });
-        }
-    }
+    edges.extend(build_ensemble_exit_edges(spec, &join_node_id));
 
     let ensemble = Ensemble {
         id: ensemble_id,
@@ -842,6 +818,140 @@ fn build_ensemble_unit(spec: &EnsembleUnitSpec) -> BuiltEnsembleUnit {
         join_node,
         edges,
     }
+}
+
+/// One member unit: the agent node (named `{ensemble} [{index}]` and placed
+/// at `position`), the entry fan-out edge from `entry_from_node`, the fan-in
+/// edge to the join, and the member row — with the member's own
+/// prompt/timeout/infra overrides falling back to the ensemble's shared
+/// values exactly as before.
+fn build_ensemble_member_unit(
+    spec: &EnsembleUnitSpec,
+    ensemble_id: &str,
+    join_node_id: &str,
+    now: chrono::DateTime<chrono::Utc>,
+    index: usize,
+    position: i64,
+    member_spec: &EnsembleMemberSpec,
+) -> BuiltEnsembleMember {
+    let (
+        platform,
+        model,
+        prompt_override,
+        member_timeout_minutes,
+        member_infra_retry_limit,
+        member_infra_crash_max_seconds,
+        member_infra_backoff_seconds,
+    ) = member_spec;
+    let node_id = uuid::Uuid::new_v4().to_string();
+    let effective_prompt =
+        effective_member_prompt(prompt_override.as_deref(), spec.prompt_template);
+    let effective_timeout_minutes = member_timeout_minutes.unwrap_or(spec.timeout_minutes);
+    let effective_infra_retry_limit = member_infra_retry_limit.or(spec.infra_retry_limit);
+    let effective_infra_crash_max_seconds =
+        member_infra_crash_max_seconds.or(spec.infra_crash_max_seconds);
+    let effective_infra_backoff_seconds =
+        member_infra_backoff_seconds.or(spec.infra_backoff_seconds);
+
+    let node = GraphNode {
+        id: node_id.clone(),
+        spec_id: spec.spec_id.clone(),
+        graph_id: spec.graph_id.clone(),
+        name: format!("{} [{}]", spec.name, index + 1),
+        kind: GraphNodeKind::Agent,
+        config: member_node_config(
+            platform,
+            model.as_deref(),
+            effective_prompt,
+            effective_timeout_minutes,
+            effective_infra_retry_limit,
+            effective_infra_crash_max_seconds,
+            effective_infra_backoff_seconds,
+        ),
+        position,
+        created_at: now,
+    };
+
+    let edges = vec![
+        GraphEdge {
+            id: uuid::Uuid::new_v4().to_string(),
+            spec_id: spec.spec_id.clone(),
+            graph_id: spec.graph_id.clone(),
+            from_node: spec.entry_from_node.to_string(),
+            to_node: node_id.clone(),
+            condition: spec.entry_condition.clone(),
+        },
+        GraphEdge {
+            id: uuid::Uuid::new_v4().to_string(),
+            spec_id: spec.spec_id.clone(),
+            graph_id: spec.graph_id.clone(),
+            from_node: node_id.clone(),
+            to_node: join_node_id.to_string(),
+            condition: GraphEdgeCondition::Always,
+        },
+    ];
+
+    let member = EnsembleMember {
+        ensemble_id: ensemble_id.to_string(),
+        node_id,
+        position: index as i64,
+        platform: platform.clone(),
+        model: model.clone(),
+        prompt_override: prompt_override.clone(),
+        timeout_minutes: *member_timeout_minutes,
+        infra_retry_limit: *member_infra_retry_limit,
+        infra_crash_max_seconds: *member_infra_crash_max_seconds,
+        infra_backoff_seconds: *member_infra_backoff_seconds,
+    };
+
+    BuiltEnsembleMember {
+        node,
+        member,
+        edges,
+    }
+}
+
+/// The join's outgoing edges: one `Pass` edge per pass target (the single
+/// `on_pass_to`, or one per member of the ensemble it chains into), then —
+/// only when the unit declares a failure destination — one `Fail` edge per
+/// fail target. The `ensembles` row still holds the single `on_pass_to`/
+/// `on_fail_to` value (the node id, or the target's quorum id).
+fn build_ensemble_exit_edges(spec: &EnsembleUnitSpec, join_node_id: &str) -> Vec<GraphEdge> {
+    let mut edges = Vec::new();
+
+    let pass_targets = spec
+        .on_pass_fan_out
+        .clone()
+        .unwrap_or_else(|| vec![spec.on_pass_to.to_string()]);
+    for to_node in &pass_targets {
+        edges.push(GraphEdge {
+            id: uuid::Uuid::new_v4().to_string(),
+            spec_id: spec.spec_id.clone(),
+            graph_id: spec.graph_id.clone(),
+            from_node: join_node_id.to_string(),
+            to_node: to_node.clone(),
+            condition: GraphEdgeCondition::Pass,
+        });
+    }
+
+    if let Some(on_fail_to) = &spec.on_fail_to {
+        let fail_targets = spec
+            .on_fail_fan_out
+            .clone()
+            .unwrap_or_else(|| vec![on_fail_to.to_string()]);
+        for to_node in &fail_targets {
+            edges.push(GraphEdge {
+                id: uuid::Uuid::new_v4().to_string(),
+                spec_id: spec.spec_id.clone(),
+                graph_id: spec.graph_id.clone(),
+                from_node: join_node_id.to_string(),
+                to_node: to_node.clone(),
+                condition: GraphEdgeCondition::Fail,
+            });
+        }
+    }
+
+    edges
 }
 
 fn validate_graph_exists(db: &Database, graph_id: &str) -> Result<(), String> {
@@ -2214,22 +2324,7 @@ struct NodeCopyPlan {
 }
 
 fn plan_node_copy(db: &Database, params: &GraphCopyNodeParams) -> Result<NodeCopyPlan, String> {
-    let source_id = db
-        .resolve_graph_node_id_by_prefix(params.source_node_id.trim())
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Node '{}' not found.", params.source_node_id.trim()))?;
-    let source = validate_node_exists(db, &source_id)?;
-    if source.kind == GraphNodeKind::Join {
-        return Err(
-            "Cannot copy a quorum node directly; copy its ensemble with graph_copy_ensemble."
-                .to_string(),
-        );
-    }
-    if let Err(e) = validate_node_not_ensemble_owned(db, &source_id) {
-        return Err(format!(
-            "Cannot copy an ensemble-owned node directly; copy the whole ensemble with graph_copy_ensemble instead. {e}"
-        ));
-    }
+    let (source_id, source) = resolve_node_copy_source(db, params.source_node_id.trim())?;
 
     let target = resolve_copy_target(
         db,
@@ -2240,19 +2335,7 @@ fn plan_node_copy(db: &Database, params: &GraphCopyNodeParams) -> Result<NodeCop
     )?;
     let (spec_id, graph_id, existing_nodes) = graph_target_parts(db, &target)?;
 
-    // Copy the source config, then shallow-merge any override keys over it.
-    let mut config = source.config.clone();
-    if let Some(overrides) = &params.config_overrides {
-        match config.as_object_mut() {
-            Some(map) => {
-                for (key, value) in overrides {
-                    map.insert(key.clone(), value.clone());
-                }
-            }
-            None => config = serde_json::Value::Object(overrides.clone()),
-        }
-    }
-    validate_node_config(source.kind, &config)?;
+    let config = merge_node_copy_config(&source, params)?;
 
     let name = params
         .name
@@ -2278,6 +2361,80 @@ fn plan_node_copy(db: &Database, params: &GraphCopyNodeParams) -> Result<NodeCop
         created_at: chrono::Utc::now(),
     };
 
+    let wiring = plan_node_copy_wiring(params, &spec_id, &graph_id, &new_id, &existing_nodes)?;
+
+    Ok(NodeCopyPlan {
+        source_id,
+        node,
+        edges: wiring.edges,
+        wiring: wiring.wiring,
+    })
+}
+
+/// Resolves the copy's source node by id prefix, refusing quorum nodes and
+/// ensemble-owned nodes before any target lookup — the same order the
+/// planner has always enforced.
+fn resolve_node_copy_source(
+    db: &Database,
+    raw_source_id: &str,
+) -> Result<(String, GraphNode), String> {
+    let source_id = db
+        .resolve_graph_node_id_by_prefix(raw_source_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Node '{raw_source_id}' not found."))?;
+    let source = validate_node_exists(db, &source_id)?;
+    if source.kind == GraphNodeKind::Join {
+        return Err(
+            "Cannot copy a quorum node directly; copy its ensemble with graph_copy_ensemble."
+                .to_string(),
+        );
+    }
+    if let Err(e) = validate_node_not_ensemble_owned(db, &source_id) {
+        return Err(format!(
+            "Cannot copy an ensemble-owned node directly; copy the whole ensemble with graph_copy_ensemble instead. {e}"
+        ));
+    }
+    Ok((source_id, source))
+}
+
+/// Copies the source config, shallow-merging any override keys over it
+/// (including the non-object source case), then validates the result for
+/// the source kind. Called after target resolution, as before.
+fn merge_node_copy_config(
+    source: &GraphNode,
+    params: &GraphCopyNodeParams,
+) -> Result<serde_json::Value, String> {
+    let mut config = source.config.clone();
+    if let Some(overrides) = &params.config_overrides {
+        match config.as_object_mut() {
+            Some(map) => {
+                for (key, value) in overrides {
+                    map.insert(key.clone(), value.clone());
+                }
+            }
+            None => config = serde_json::Value::Object(overrides.clone()),
+        }
+    }
+    validate_node_config(source.kind, &config)?;
+    Ok(config)
+}
+
+/// The copy's edges plus the wiring report the response carries. Built and
+/// validated against the target graph in the order the planner has always
+/// used: incoming entry edge first, then outgoing pass, then outgoing fail.
+#[derive(Debug)]
+struct NodeCopyWiring {
+    edges: Vec<GraphEdge>,
+    wiring: serde_json::Map<String, serde_json::Value>,
+}
+
+fn plan_node_copy_wiring(
+    params: &GraphCopyNodeParams,
+    spec_id: &Option<String>,
+    graph_id: &Option<String>,
+    new_id: &str,
+    existing_nodes: &[GraphNode],
+) -> Result<NodeCopyWiring, String> {
     let node_exists = |id: &str| existing_nodes.iter().any(|n| n.id == id);
     let mut edges = Vec::new();
     let mut wiring = serde_json::Map::new();
@@ -2307,7 +2464,7 @@ fn plan_node_copy(db: &Database, params: &GraphCopyNodeParams) -> Result<NodeCop
             spec_id: spec_id.clone(),
             graph_id: graph_id.clone(),
             from_node: from.to_string(),
-            to_node: new_id.clone(),
+            to_node: new_id.to_string(),
             condition,
         });
     }
@@ -2327,7 +2484,7 @@ fn plan_node_copy(db: &Database, params: &GraphCopyNodeParams) -> Result<NodeCop
                 id: uuid::Uuid::new_v4().to_string(),
                 spec_id: spec_id.clone(),
                 graph_id: graph_id.clone(),
-                from_node: new_id.clone(),
+                from_node: new_id.to_string(),
                 to_node: to.to_string(),
                 condition: cond,
             });
@@ -2335,12 +2492,7 @@ fn plan_node_copy(db: &Database, params: &GraphCopyNodeParams) -> Result<NodeCop
         }
     }
 
-    Ok(NodeCopyPlan {
-        source_id,
-        node,
-        edges,
-        wiring,
-    })
+    Ok(NodeCopyWiring { edges, wiring })
 }
 
 /// The `note` line a `graph_copy_node` response carries. An unwired copy is a
@@ -2376,10 +2528,76 @@ struct EnsembleCopyPlan {
     on_fail_to: Option<String>,
 }
 
+/// Everything the ensemble-copy planner resolves from the source unit and
+/// the params before wiring and quorum validation: the source details, the
+/// target placement, and the copy's own name/prompt/member list.
+struct EnsembleCopyInputs {
+    details: crate::domain::graphs::EnsembleDetails,
+    spec_id: Option<String>,
+    graph_id: Option<String>,
+    existing_nodes: Vec<GraphNode>,
+    name: String,
+    prompt_template: String,
+    members_replaced: bool,
+    copy_kind: EnsembleKind,
+    members: Vec<EnsembleMemberSpec>,
+}
+
+/// The copy's exit wiring — resolved from params over the source's own
+/// routing, with both nodes validated against the target graph first.
+struct EnsembleCopyWiring {
+    entry_from_node: String,
+    entry_condition: GraphEdgeCondition,
+    on_pass_to: String,
+    on_fail_to: Option<String>,
+}
+
+/// The quorum knobs the copy ends up with, each validated (bounds and
+/// non-negativity) before the unit is built.
+struct EnsembleQuorumOptions {
+    min_pass: i64,
+    timeout_minutes: i64,
+    straggler_timeout_minutes: Option<i64>,
+    quorum_grace_minutes: Option<i64>,
+}
+
 fn plan_ensemble_copy(
     db: &Database,
     params: &GraphCopyEnsembleParams,
 ) -> Result<EnsembleCopyPlan, String> {
+    let inputs = resolve_ensemble_copy_inputs(db, params)?;
+    let source = &inputs.details.ensemble;
+
+    let wiring = resolve_ensemble_copy_wiring(db, params, source, &inputs.existing_nodes)?;
+    let quorum = resolve_ensemble_quorum_options(params, source, inputs.members.len())?;
+
+    let built = build_ensemble_copy_unit(&inputs, &wiring, &quorum);
+
+    Ok(EnsembleCopyPlan {
+        source_ensemble_id: source.id.clone(),
+        source_join_node_id: source.join_node_id.clone(),
+        source_member_node_ids: inputs
+            .details
+            .members
+            .iter()
+            .map(|m| m.node_id.clone())
+            .collect(),
+        members_replaced: inputs.members_replaced,
+        built,
+        entry_from_node: wiring.entry_from_node,
+        entry_condition: wiring.entry_condition,
+        on_pass_to: wiring.on_pass_to,
+        on_fail_to: wiring.on_fail_to,
+    })
+}
+
+/// Source unit + target placement + the copy's own name, prompt and member
+/// list (either the params' explicit members, or the source's own members
+/// mapped through unchanged).
+fn resolve_ensemble_copy_inputs(
+    db: &Database,
+    params: &GraphCopyEnsembleParams,
+) -> Result<EnsembleCopyInputs, String> {
     let source_id = db
         .resolve_ensemble_id_by_prefix(params.source_ensemble_id.trim())
         .map_err(|e| e.to_string())?
@@ -2398,7 +2616,6 @@ fn plan_ensemble_copy(
         &source.graph_id,
     )?;
     let (spec_id, graph_id, existing_nodes) = graph_target_parts(db, &target)?;
-    let node_exists = |id: &str| existing_nodes.iter().any(|n| n.id == id);
 
     let name = params
         .name
@@ -2415,8 +2632,31 @@ fn plan_ensemble_copy(
         .unwrap_or(source.prompt_template.as_str())
         .to_string();
 
-    let members_replaced = params.members.is_some();
     let copy_kind = source.kind;
+    let (members, members_replaced) = copy_ensemble_members(&details, params, copy_kind)?;
+
+    Ok(EnsembleCopyInputs {
+        details,
+        spec_id,
+        graph_id,
+        existing_nodes,
+        name,
+        prompt_template,
+        members_replaced,
+        copy_kind,
+        members,
+    })
+}
+
+/// The copy's member list: explicit params validated for the copy kind, or
+/// the source's own members mapped through unchanged. Returns the members
+/// plus whether they were replaced.
+fn copy_ensemble_members(
+    details: &crate::domain::graphs::EnsembleDetails,
+    params: &GraphCopyEnsembleParams,
+    copy_kind: EnsembleKind,
+) -> Result<(Vec<EnsembleMemberSpec>, bool), String> {
+    let members_replaced = params.members.is_some();
     let members: Vec<EnsembleMemberSpec> = match &params.members {
         Some(explicit) => validate_ensemble_members(explicit, copy_kind)?,
         None => details
@@ -2435,7 +2675,19 @@ fn plan_ensemble_copy(
             })
             .collect(),
     };
+    Ok((members, members_replaced))
+}
 
+/// Entry/pass/fail routing for the copy: params win over the source's own
+/// routing, and every target node must exist in the *target* graph
+/// (respecting that graph's own validation for a cross-graph copy) and must
+/// not be ensemble-owned — the same rules graph_add_ensemble enforces.
+fn resolve_ensemble_copy_wiring(
+    db: &Database,
+    params: &GraphCopyEnsembleParams,
+    source: &Ensemble,
+    existing_nodes: &[GraphNode],
+) -> Result<EnsembleCopyWiring, String> {
     let entry_from_node = params
         .from_node
         .as_deref()
@@ -2469,49 +2721,109 @@ fn plan_ensemble_copy(
         None => source.on_fail_to.clone(),
     };
 
-    // Wiring targets must exist in the TARGET graph (respecting the target
-    // graph's own validation for a cross-graph copy) and must not be
-    // ensemble-owned — the same rules graph_add_ensemble enforces.
     for (label, id) in [("from_node", &entry_from_node), ("on_pass_to", &on_pass_to)] {
-        if !node_exists(id) {
-            return Err(format!(
-                "Wiring node '{id}' ({label}) not found in the target graph. Pass {label} \
-                 that exists there (required for a cross-graph copy)."
-            ));
-        }
-        if let Err(e) = validate_node_not_ensemble_owned(db, id) {
-            return Err(format!(
-                "Cannot wire an ensemble to an ensemble-owned node ({label}): {e}"
-            ));
-        }
+        validate_ensemble_copy_wiring(db, existing_nodes, label, id)?;
     }
     if let Some(fail) = &on_fail_to {
-        if !node_exists(fail) {
-            return Err(format!(
-                "Wiring node '{fail}' (on_fail_to) not found in the target graph."
-            ));
-        }
-        if let Err(e) = validate_node_not_ensemble_owned(db, fail) {
-            return Err(format!(
-                "Cannot wire an ensemble to an ensemble-owned node (on_fail_to): {e}"
-            ));
-        }
+        validate_ensemble_copy_wiring(db, existing_nodes, "on_fail_to", fail)?;
     }
 
+    Ok(EnsembleCopyWiring {
+        entry_from_node,
+        entry_condition,
+        on_pass_to,
+        on_fail_to,
+    })
+}
+
+/// Validates one quorum exit target against the target graph: it must exist
+/// there and must not be ensemble-owned — the same rules
+/// graph_add_ensemble enforces.
+fn validate_ensemble_copy_wiring(
+    db: &Database,
+    existing_nodes: &[GraphNode],
+    label: &str,
+    id: &str,
+) -> Result<(), String> {
+    if !existing_nodes.iter().any(|n| n.id == id) {
+        if label == "on_fail_to" {
+            return Err(format!(
+                "Wiring node '{id}' (on_fail_to) not found in the target graph."
+            ));
+        }
+        return Err(format!(
+            "Wiring node '{id}' ({label}) not found in the target graph. Pass {label} \
+             that exists there (required for a cross-graph copy)."
+        ));
+    }
+    if let Err(e) = validate_node_not_ensemble_owned(db, id) {
+        return Err(format!(
+            "Cannot wire an ensemble to an ensemble-owned node ({label}): {e}"
+        ));
+    }
+    Ok(())
+}
+
+/// Assembles the copy's new ensemble unit from resolved inputs, wiring and
+/// quorum options. `commit_rights` is never copied (see CM28 note inline).
+fn build_ensemble_copy_unit(
+    inputs: &EnsembleCopyInputs,
+    wiring: &EnsembleCopyWiring,
+    quorum: &EnsembleQuorumOptions,
+) -> BuiltEnsembleUnit {
+    let source = &inputs.details.ensemble;
+    let start_position = inputs
+        .existing_nodes
+        .last()
+        .map(|node| node.position + 1)
+        .unwrap_or(1);
+    build_ensemble_unit(&EnsembleUnitSpec {
+        spec_id: inputs.spec_id.clone(),
+        graph_id: inputs.graph_id.clone(),
+        name: &inputs.name,
+        prompt_template: &inputs.prompt_template,
+        members: &inputs.members,
+        entry_from_node: &wiring.entry_from_node,
+        entry_condition: wiring.entry_condition.clone(),
+        on_pass_to: &wiring.on_pass_to,
+        on_pass_fan_out: None,
+        on_fail_to: wiring.on_fail_to.as_deref(),
+        on_fail_fan_out: None,
+        min_pass: quorum.min_pass,
+        timeout_minutes: quorum.timeout_minutes,
+        straggler_timeout_minutes: quorum.straggler_timeout_minutes,
+        quorum_grace_minutes: quorum.quorum_grace_minutes,
+        infra_retry_limit: source.infra_retry_limit,
+        infra_crash_max_seconds: source.infra_crash_max_seconds,
+        infra_backoff_seconds: source.infra_backoff_seconds,
+        start_position,
+        kind: inputs.copy_kind,
+        // CM28: never copied from the source — graph_copy_ensemble is out of
+        // scope for commit rights, and silently duplicating the designation
+        // would create two committers by accident. Set explicitly afterward
+        // via graph_update_ensemble if the copy should also commit.
+        commit_rights: false,
+    })
+}
+
+/// Quorum limits for the copy — `min_pass` within the member count, and no
+/// negative timeout/straggler/grace values, in that order.
+fn resolve_ensemble_quorum_options(
+    params: &GraphCopyEnsembleParams,
+    source: &Ensemble,
+    member_count: usize,
+) -> Result<EnsembleQuorumOptions, String> {
     let min_pass = params.min_pass.unwrap_or(source.min_pass);
-    if min_pass < 1 || min_pass > members.len() as i64 {
+    if min_pass < 1 || min_pass > member_count as i64 {
         return Err(format!(
             "min_pass must be between 1 and {} (the member count), got {min_pass}.",
-            members.len()
+            member_count
         ));
     }
     let timeout_minutes = params.timeout_minutes.unwrap_or(source.timeout_minutes);
     if timeout_minutes < 0 {
         return Err("timeout_minutes must not be negative.".to_string());
     }
-    let infra_retry_limit = source.infra_retry_limit;
-    let infra_crash_max_seconds = source.infra_crash_max_seconds;
-    let infra_backoff_seconds = source.infra_backoff_seconds;
     let straggler_timeout_minutes = params
         .straggler_timeout_minutes
         .or(source.straggler_timeout_minutes);
@@ -2527,48 +2839,11 @@ fn plan_ensemble_copy(
         }
     }
 
-    let start_position = existing_nodes
-        .last()
-        .map(|node| node.position + 1)
-        .unwrap_or(1);
-    let built = build_ensemble_unit(&EnsembleUnitSpec {
-        spec_id,
-        graph_id,
-        name: &name,
-        prompt_template: &prompt_template,
-        members: &members,
-        entry_from_node: &entry_from_node,
-        entry_condition: entry_condition.clone(),
-        on_pass_to: &on_pass_to,
-        on_pass_fan_out: None,
-        on_fail_to: on_fail_to.as_deref(),
-        on_fail_fan_out: None,
+    Ok(EnsembleQuorumOptions {
         min_pass,
         timeout_minutes,
         straggler_timeout_minutes,
         quorum_grace_minutes,
-        infra_retry_limit,
-        infra_crash_max_seconds,
-        infra_backoff_seconds,
-        start_position,
-        kind: copy_kind,
-        // CM28: never copied from the source — graph_copy_ensemble is out of
-        // scope for commit rights, and silently duplicating the designation
-        // would create two committers by accident. Set explicitly afterward
-        // via graph_update_ensemble if the copy should also commit.
-        commit_rights: false,
-    });
-
-    Ok(EnsembleCopyPlan {
-        source_ensemble_id: source.id.clone(),
-        source_join_node_id: source.join_node_id.clone(),
-        source_member_node_ids: details.members.iter().map(|m| m.node_id.clone()).collect(),
-        members_replaced,
-        built,
-        entry_from_node,
-        entry_condition,
-        on_pass_to,
-        on_fail_to,
     })
 }
 
@@ -2948,7 +3223,7 @@ impl TaskTriggerHandler {
     }
 
     /// Fetch knowledge for the context endpoint, traversing the project graph.
-    /// Returns (generic session nodes, tagged project knowledge, traversal info).
+    /// Returns project-scoped plus generic knowledge with traversal info.
     /// Each tagged row is (record, via_project_hash, via_relation): root rows
     /// carry `via_relation: None` (direct); reached rows carry the edge
     /// relation that reached them. Bounded: per-project cap + total cap of 60.
@@ -2959,64 +3234,105 @@ impl TaskTriggerHandler {
         project_hash: Option<&str>,
         scope: &str,
         depth: usize,
-    ) -> Result<
-        (
-            Vec<crate::db::intelligence::IntelligenceNodeRecord>,
-            TaggedProjectKnowledge,
-            serde_json::Value,
-        ),
-        String,
-    > {
+    ) -> Result<ContextKnowledge, String> {
+        if let Some(ph) = project_hash {
+            self.fetch_project_context_knowledge(ph, scope, depth)
+        } else {
+            self.fetch_generic_context_knowledge(scope)
+        }
+    }
+
+    /// Scoped fetch: traversed project knowledge plus generic sessions.
+    /// Preserves traversal order, root vs related per-project limits, the
+    /// 60-item total cap, depth-cap metadata and database call order.
+    fn fetch_project_context_knowledge(
+        &self,
+        project_hash: &str,
+        scope: &str,
+        depth: usize,
+    ) -> Result<ContextKnowledge, String> {
         const TOTAL_CAP: usize = 60;
         let root_limit = if scope == "full" { 50 } else { 20 };
         let per_project_limit = if scope == "full" { 20 } else { 8 };
-        if let Some(ph) = project_hash {
-            let traversal = self
-                .db
-                .traverse_project_scope(ph, depth)
-                .map_err(|e| e.to_string())?;
-            let mut tagged = Vec::new();
-            for tp in &traversal.projects {
-                let limit = if tp.via_relation.is_none() {
-                    root_limit
-                } else {
-                    per_project_limit
-                };
-                let rows = self
-                    .db
-                    .list_project_knowledge(&tp.hash, None, limit)
-                    .map_err(|e| e.to_string())?;
-                for row in rows {
-                    if tagged.len() >= TOTAL_CAP {
-                        break;
-                    }
-                    tagged.push((row, tp.hash.clone(), tp.via_relation.clone()));
-                }
-                if tagged.len() >= TOTAL_CAP {
-                    break;
-                }
+        let traversal = self
+            .db
+            .traverse_project_scope(project_hash, depth)
+            .map_err(|e| e.to_string())?;
+        let mut tagged = Vec::new();
+        for tp in &traversal.projects {
+            let limit = if tp.via_relation.is_none() {
+                root_limit
+            } else {
+                per_project_limit
+            };
+            if !Self::append_traversed_project_knowledge(
+                &self.db,
+                &mut tagged,
+                &tp.hash,
+                tp.via_relation.as_deref(),
+                limit,
+                TOTAL_CAP,
+            )? {
+                break;
             }
-            let info = serde_json::json!({
-                "depth": depth.min(crate::db::intelligence::MAX_TRAVERSAL_DEPTH),
-                "projects_reached": traversal.projects.len(),
-                "total_cap": TOTAL_CAP,
-            });
-            let generic: Vec<crate::db::intelligence::IntelligenceNodeRecord> = self
-                .db
-                .list_operational_sessions(if scope == "full" { 20 } else { 5 })
-                .map_err(|e| e.to_string())?
-                .into_iter()
-                .map(|r| r.into_intelligence_node_record())
-                .collect();
-            Ok((generic, tagged, info))
-        } else {
-            let knowledge_limit = if scope == "full" { 20 } else { 5 };
-            let generic = self
-                .db
-                .list_intelligence_nodes(None, knowledge_limit)
-                .map_err(|e| e.to_string())?;
-            Ok((generic, Vec::new(), serde_json::json!({})))
         }
+        let traversal_info = serde_json::json!({
+            "depth": depth.min(crate::db::intelligence::MAX_TRAVERSAL_DEPTH),
+            "projects_reached": traversal.projects.len(),
+            "total_cap": TOTAL_CAP,
+        });
+        let generic: Vec<crate::db::intelligence::IntelligenceNodeRecord> = self
+            .db
+            .list_operational_sessions(if scope == "full" { 20 } else { 5 })
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|r| r.into_intelligence_node_record())
+            .collect();
+        Ok(ContextKnowledge {
+            generic,
+            project: tagged,
+            traversal: traversal_info,
+        })
+    }
+
+    /// Unscoped fallback: generic knowledge only, with empty project rows
+    /// and traversal info — the same shape the scoped path returns.
+    fn fetch_generic_context_knowledge(&self, scope: &str) -> Result<ContextKnowledge, String> {
+        let knowledge_limit = if scope == "full" { 20 } else { 5 };
+        let generic = self
+            .db
+            .list_intelligence_nodes(None, knowledge_limit)
+            .map_err(|e| e.to_string())?;
+        Ok(ContextKnowledge {
+            generic,
+            project: Vec::new(),
+            traversal: serde_json::json!({}),
+        })
+    }
+
+    /// Appends one traversed project's knowledge rows to `tagged` in
+    /// traversal order, honoring the per-project limit, and reports whether
+    /// the total cap still has room — `false` stops the caller's traversal.
+    /// The list query runs even at the cap (exactly as it always has), so
+    /// the number of database calls per traversal is unchanged.
+    fn append_traversed_project_knowledge(
+        db: &Database,
+        tagged: &mut TaggedProjectKnowledge,
+        via_hash: &str,
+        via_relation: Option<&str>,
+        limit: usize,
+        total_cap: usize,
+    ) -> Result<bool, String> {
+        let rows = db
+            .list_project_knowledge(via_hash, None, limit)
+            .map_err(|e| e.to_string())?;
+        for row in rows {
+            if tagged.len() >= total_cap {
+                return Ok(false);
+            }
+            tagged.push((row, via_hash.to_string(), via_relation.map(str::to_string)));
+        }
+        Ok(tagged.len() < total_cap)
     }
 
     pub fn new(
@@ -4132,9 +4448,11 @@ impl TaskTriggerHandler {
             .map(|r| r.into_intelligence_node_record())
             .collect();
 
-        let (knowledge, project_knowledge, traversal) = self
+        let knowledge = self
             .fetch_context_knowledge(effective_project_hash.as_deref(), &scope, depth)
             .map_err(|e| McpError::internal_error(e, None))?;
+        let (knowledge, project_knowledge, traversal) =
+            (knowledge.generic, knowledge.project, knowledge.traversal);
 
         let sync_messages = self
             .db
@@ -11095,38 +11413,8 @@ pub(crate) fn active_graph_spec_context(
 ) -> anyhow::Result<ActiveGraphSpec> {
     if let Some(queue_id) = lp.active_run_queue_id.as_deref() {
         if let Some(queue_name) = db.get_queue(queue_id)?.map(|queue| queue.name) {
-            let mut running: Option<GraphSpec> = None;
-            let mut pending: Option<GraphSpec> = None;
-            for spec_id in db.list_queue_member_spec_ids(queue_id)? {
-                if let Some(spec) = db.get_graph_spec(&spec_id)? {
-                    if spec.status == GraphSpecStatus::Running {
-                        if running.is_none() {
-                            running = Some(spec);
-                        }
-                    // Same fallback shape as `build_graph_summary_json`'s
-                    // bound-spec search: the next runnable (or stalled)
-                    // member in queue order when nothing is `Running`.
-                    } else if pending.is_none()
-                        && matches!(
-                            spec.status,
-                            GraphSpecStatus::Pending
-                                | GraphSpecStatus::Interrupted
-                                | GraphSpecStatus::Failed
-                        )
-                    {
-                        pending = Some(spec);
-                    }
-                }
-            }
-            // A `Running` member anywhere beats an earlier pending one:
-            // dispatch is sequential, so a running member means everything
-            // before it already completed.
-            if let Some(spec) = running.or(pending) {
-                return Ok(ActiveGraphSpec::QueueMember {
-                    spec,
-                    queue_id: queue_id.to_string(),
-                    queue_name,
-                });
+            if let Some(active) = queue_active_graph_spec(db, queue_id, &queue_name)? {
+                return Ok(active);
             }
             // Queue drained (or empty): fall through to the bound/idea
             // logic so a finished queue graph reports `None` rather than a
@@ -11134,12 +11422,64 @@ pub(crate) fn active_graph_spec_context(
             // `active_run_queue_id`.
         }
     }
+    bound_active_graph_spec(db, &lp.id, lp.active_run_queue_id.is_some())
+}
+
+/// The spec dispatch is on inside `queue_id`, or `None` when the queue holds
+/// nothing runnable: a `Running` member anywhere beats an earlier pending one
+/// (dispatch is sequential, so a running member means everything before it
+/// already completed); with nothing running, the first runnable — or stalled —
+/// member in queue order is the one to report.
+fn queue_active_graph_spec(
+    db: &Database,
+    queue_id: &str,
+    queue_name: &str,
+) -> anyhow::Result<Option<ActiveGraphSpec>> {
+    let mut running: Option<GraphSpec> = None;
+    let mut pending: Option<GraphSpec> = None;
+    for spec_id in db.list_queue_member_spec_ids(queue_id)? {
+        let Some(spec) = db.get_graph_spec(&spec_id)? else {
+            continue;
+        };
+        if spec.status == GraphSpecStatus::Running {
+            if running.is_none() {
+                running = Some(spec);
+            }
+        // Same fallback shape as `build_graph_summary_json`'s
+        // bound-spec search: the next runnable (or stalled)
+        // member in queue order when nothing is `Running`.
+        } else if pending.is_none()
+            && matches!(
+                spec.status,
+                GraphSpecStatus::Pending | GraphSpecStatus::Interrupted | GraphSpecStatus::Failed
+            )
+        {
+            pending = Some(spec);
+        }
+    }
+    let Some(spec) = running.or(pending) else {
+        return Ok(None);
+    };
+    Ok(Some(ActiveGraphSpec::QueueMember {
+        spec,
+        queue_id: queue_id.to_string(),
+        queue_name: queue_name.to_string(),
+    }))
+}
+
+/// The bound spec dispatch is on — the first non-terminal real spec in
+/// position order, the same pick `build_graph_summary_json` historically
+/// made — or the idea placeholder when that's all the graph has. The
+/// placeholder is hidden, never relabelled: a fabricated name would
+/// replace a confusing answer with a false one.
+fn bound_active_graph_spec(
+    db: &Database,
+    graph_id: &str,
+    has_active_queue: bool,
+) -> anyhow::Result<ActiveGraphSpec> {
     let mut placeholder_id: Option<String> = None;
     let mut current: Option<GraphSpec> = None;
-    // `list_graph_specs` returns position order, so the first non-terminal
-    // real spec is the one dispatch is on — the same pick
-    // `build_graph_summary_json` historically made, minus the placeholder.
-    for spec in db.list_graph_specs(&lp.id)? {
+    for spec in db.list_graph_specs(graph_id)? {
         if crate::graph_engine::is_no_spec_placeholder(&spec) {
             if placeholder_id.is_none() {
                 placeholder_id = Some(spec.id.clone());
@@ -11166,7 +11506,7 @@ pub(crate) fn active_graph_spec_context(
         // set (B31 keeps it as last-run context) and only the placeholder in
         // its bound specs. Without this guard, we'd report `Idea` for a
         // finished queue — replacing one false answer with another.
-        if lp.active_run_queue_id.is_some() {
+        if has_active_queue {
             return Ok(ActiveGraphSpec::None);
         }
         return Ok(ActiveGraphSpec::Idea { placeholder_id });
@@ -11232,6 +11572,14 @@ type TaggedProjectKnowledge = Vec<(
     String,
     Option<String>,
 )>;
+
+/// The context endpoint's knowledge bundle: generic session nodes, tagged
+/// project knowledge, and traversal metadata.
+struct ContextKnowledge {
+    generic: Vec<crate::db::intelligence::IntelligenceNodeRecord>,
+    project: TaggedProjectKnowledge,
+    traversal: serde_json::Value,
+}
 
 fn intelligence_node_json(
     node: &crate::db::intelligence::IntelligenceNodeRecord,
@@ -33641,5 +33989,70 @@ mod endpoint_tests {
                 && note.contains("Could not resolve pinned skill"),
             "missing skill must degrade to the unresolved note: {note}"
         );
+    }
+
+    #[test]
+    fn append_traversed_project_knowledge_reports_cap_full() {
+        use crate::db::intelligence::IntelligenceNodeInput;
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::new(&dir.path().join("t.db")).unwrap();
+        db.upsert_intelligence_node(IntelligenceNodeInput {
+            id: Some("fact-cap".to_string()),
+            kind: Some("fact".to_string()),
+            status: None,
+            title: Some("cap fact".to_string()),
+            body: Some("body".to_string()),
+            body_replace: None,
+            metadata: None,
+            project_hash: Some(Some("cap-hash".to_string())),
+            session_id: None,
+            relations: None,
+        })
+        .unwrap();
+        let mut tagged: super::TaggedProjectKnowledge = Vec::new();
+        let done = super::TaskTriggerHandler::append_traversed_project_knowledge(
+            &db,
+            &mut tagged,
+            "cap-hash",
+            None,
+            20,
+            0,
+        )
+        .unwrap();
+        assert!(!done, "total cap of zero stops traversal");
+        assert!(tagged.is_empty());
+    }
+
+    #[test]
+    fn append_traversed_project_knowledge_appends_within_cap() {
+        use crate::db::intelligence::IntelligenceNodeInput;
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::new(&dir.path().join("t.db")).unwrap();
+        db.upsert_intelligence_node(IntelligenceNodeInput {
+            id: Some("fact-ok".to_string()),
+            kind: Some("fact".to_string()),
+            status: None,
+            title: Some("ok fact".to_string()),
+            body: Some("body".to_string()),
+            body_replace: None,
+            metadata: None,
+            project_hash: Some(Some("ok-hash".to_string())),
+            session_id: None,
+            relations: None,
+        })
+        .unwrap();
+        let mut tagged: super::TaggedProjectKnowledge = Vec::new();
+        let more = super::TaskTriggerHandler::append_traversed_project_knowledge(
+            &db,
+            &mut tagged,
+            "ok-hash",
+            None,
+            20,
+            60,
+        )
+        .unwrap();
+        assert!(more, "room remains under the total cap");
+        assert_eq!(tagged.len(), 1);
+        assert_eq!(tagged[0].1, "ok-hash");
     }
 }

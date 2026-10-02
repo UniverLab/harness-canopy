@@ -517,6 +517,23 @@ fn handle_graph_info(db: &Database, id_or_name: &str) -> Result<()> {
     let graphs = db.list_graphs(None, true)?;
     let lp = resolve_graph(&graphs, id_or_name)?;
 
+    print_graph_info_header(lp);
+    print_graph_info_legacy_completion_hook(lp);
+    print_graph_info_event_hooks(lp);
+
+    let all_runs = db.list_graph_runs_for_graph(&lp.id)?;
+    let hook_runs = db.list_graph_completion_hook_runs(&lp.id)?;
+
+    print_graph_info_specs(db, lp, &all_runs)?;
+    print_graph_info_current_node(db, lp, &all_runs)?;
+    print_graph_info_recent_runs(db, lp, &all_runs)?;
+    print_graph_info_hook_runs(&hook_runs);
+    println!();
+    Ok(())
+}
+
+/// Section: identity, status, workdir, trigger (schedule/watch) and autorun.
+fn print_graph_info_header(lp: &Graph) {
     println!("\n\x1b[1m── Graph: {} ──\x1b[0m", lp.name);
     println!(" id:      {}", lp.id);
     println!(
@@ -540,8 +557,11 @@ fn handle_graph_info(db: &Database, id_or_name: &str) -> Result<()> {
             format_relative_duration(at - Utc::now())
         );
     }
-    // Event-keyed hooks: the legacy singular display stays for old users,
-    // with the full event-keyed listing as the authoritative detail.
+}
+
+/// Section: the legacy singular `on_completed:` line. Event-keyed hooks are
+/// the authoritative detail, but the legacy display stays for old users.
+fn print_graph_info_legacy_completion_hook(lp: &Graph) {
     if let Some(hooks) = lp
         .hooks
         .get(&crate::domain::graphs::GraphHookEvent::OnCompleted)
@@ -561,9 +581,13 @@ fn handle_graph_info(db: &Database, id_or_name: &str) -> Result<()> {
             }
         }
     }
+}
+
+/// Section: the full event-keyed hook listing — every event's hooks, so
+/// non-completion events are visible. The legacy line above already showed
+/// the first `on_completed` hook, so that one is skipped here.
+fn print_graph_info_event_hooks(lp: &Graph) {
     for (event, hooks) in &lp.hooks {
-        // The legacy line above already showed the first on_completed hook;
-        // list every event's hooks here so non-completion events are visible.
         if *event == crate::domain::graphs::GraphHookEvent::OnCompleted {
             for (idx, hook) in hooks.iter().enumerate().skip(1) {
                 if hook.is_command() {
@@ -604,101 +628,146 @@ fn handle_graph_info(db: &Database, id_or_name: &str) -> Result<()> {
             }
         }
     }
+}
 
-    let all_runs = db.list_graph_runs_for_graph(&lp.id)?;
-    let hook_runs = db.list_graph_completion_hook_runs(&lp.id)?;
-
+/// Section: which spec the graph is on. CB30: one helper decides what the
+/// graph is on — the raw bound list reads as a nameless placeholder for
+/// queue/idea runs.
+fn print_graph_info_specs(db: &Database, lp: &Graph, all_runs: &[GraphNodeRun]) -> Result<()> {
     println!("\n\x1b[1m── Specs ──────────────────────────────────────────────────────\x1b[0m");
-    // CB30: one helper decides what the graph is on — the raw bound list
-    // reads as a nameless placeholder for queue/idea runs.
     match active_graph_spec_context(db, lp)? {
         ActiveGraphSpec::Bound(_) | ActiveGraphSpec::None => {
-            let visible: Vec<GraphSpec> = db
-                .list_graph_specs(&lp.id)?
-                .into_iter()
-                .filter(|spec| !spec.name.trim().is_empty())
-                .collect();
-            if !visible.is_empty() {
-                for spec in &visible {
-                    print_graph_info_spec_line(spec);
-                }
-            } else if !all_runs.is_empty() {
-                // Nothing bound and nothing in flight — e.g. a drained
-                // queue-driven graph. Reconstruct what ran so far from
-                // `graph_runs`, which always records the real `graph_id`
-                // regardless of queue membership. Placeholders are engine
-                // bookkeeping, never work: skip them.
-                print_graph_info_queue_history_header(db, lp)?;
-                for spec_id in distinct_spec_ids_in_order(&all_runs) {
-                    if let Some(spec) = db.get_graph_spec(spec_id)? {
-                        if spec.name.trim().is_empty() {
-                            continue;
-                        }
-                        print_graph_info_spec_line(&spec);
-                    }
-                }
-            } else {
-                println!(" (no specs queued)");
-            }
+            print_graph_info_bound_specs(db, lp, all_runs)?;
         }
         ActiveGraphSpec::QueueMember {
             spec, queue_name, ..
         } => {
-            println!(" (queue-driven: \"{queue_name}\" — showing current spec)");
-            print_graph_info_spec_line(&spec);
-            for spec_id in distinct_spec_ids_in_order(&all_runs) {
-                if *spec_id == spec.id {
-                    continue;
-                }
-                if let Some(prior) = db.get_graph_spec(spec_id)? {
-                    if prior.name.trim().is_empty() {
-                        continue;
-                    }
-                    print_graph_info_spec_line(&prior);
-                }
-            }
+            print_graph_info_queue_member_specs(db, &spec, &queue_name, all_runs)?;
         }
         ActiveGraphSpec::Idea { .. } => {
             println!(" (idea-driven — no bound specs)");
         }
     }
+    Ok(())
+}
 
-    // A `running`-status run row can outlive its graph (e.g. a run left over
-    // from before `reconcile_orphaned_graphs` existed to clean these up), so
-    // only trust it as "current" while the graph itself is actually running —
-    // otherwise a completed/failed graph could misreport an old node as still
-    // in flight.
-    if lp.status == GraphStatus::Running {
-        if let Some(run) = current_running_run(&all_runs) {
-            let node = db.get_graph_node(&run.node_id)?;
-            let node_name = node.as_ref().map_or(run.node_id.as_str(), |n| &n.name);
-            let node_kind = node.as_ref().map_or("?", |n| n.kind.display_str());
-            let elapsed = format_elapsed(Utc::now() - run.started_at);
-            println!(
-                "\n\x1b[1m── Current Node ───────────────────────────────────────────────\x1b[0m"
-            );
-            println!(
-                " {} ({})  running {}  iteration {}",
-                node_name, node_kind, elapsed, run.iteration
-            );
-            // Surfaces the exact baseline `{{spec_start_head}}` resolved to
-            // for this spec's current attempt (B10) — the one number every
-            // "why did this check pass/fail" debugging session needs.
-            if let Some(spec) = db.get_graph_spec(&run.spec_id)? {
-                match spec.spec_start_head {
-                    Some(head) => println!(" spec_start_head: {head}"),
-                    None => println!(" spec_start_head: (not a git workdir)"),
-                }
-                // C15: the HEAD this attempt's own committer last left
-                // behind, if any — `{{spec_committed_head}}` in a check node.
-                match spec.spec_committed_head {
-                    Some(head) => println!(" spec_committed_head: {head}"),
-                    None => println!(" spec_committed_head: (nothing committed by this run yet)"),
-                }
-            }
+/// The Specs section for a graph with nothing in flight: the bound specs
+/// when it has any, otherwise the queue history reconstructed from
+/// `graph_runs`, otherwise a bare "nothing queued" line.
+fn print_graph_info_bound_specs(
+    db: &Database,
+    lp: &Graph,
+    all_runs: &[GraphNodeRun],
+) -> Result<()> {
+    let visible: Vec<GraphSpec> = db
+        .list_graph_specs(&lp.id)?
+        .into_iter()
+        .filter(|spec| !spec.name.trim().is_empty())
+        .collect();
+    if !visible.is_empty() {
+        for spec in &visible {
+            print_graph_info_spec_line(spec);
+        }
+        return Ok(());
+    }
+    if all_runs.is_empty() {
+        println!(" (no specs queued)");
+        return Ok(());
+    }
+    // Nothing bound and nothing in flight — e.g. a drained queue-driven
+    // graph. Reconstruct what ran so far from `graph_runs`, which always
+    // records the real `graph_id` regardless of queue membership.
+    // Placeholders are engine bookkeeping, never work: skip them.
+    print_graph_info_queue_history_header(db, lp)?;
+    for spec_id in distinct_spec_ids_in_order(all_runs) {
+        let Some(spec) = db.get_graph_spec(spec_id)? else {
+            continue;
+        };
+        if spec.name.trim().is_empty() {
+            continue;
+        }
+        print_graph_info_spec_line(&spec);
+    }
+    Ok(())
+}
+
+/// The Specs section while a queue member is in flight: name the current
+/// spec first, then every prior spec of the run in order (skipping the
+/// current one and any placeholder).
+fn print_graph_info_queue_member_specs(
+    db: &Database,
+    spec: &GraphSpec,
+    queue_name: &str,
+    all_runs: &[GraphNodeRun],
+) -> Result<()> {
+    println!(" (queue-driven: \"{queue_name}\" — showing current spec)");
+    print_graph_info_spec_line(spec);
+    for spec_id in distinct_spec_ids_in_order(all_runs) {
+        if *spec_id == spec.id {
+            continue;
+        }
+        let Some(prior) = db.get_graph_spec(spec_id)? else {
+            continue;
+        };
+        if prior.name.trim().is_empty() {
+            continue;
+        }
+        print_graph_info_spec_line(&prior);
+    }
+    Ok(())
+}
+
+/// Section: the run the engine is on right now.
+///
+/// A `running`-status run row can outlive its graph (e.g. a run left over
+/// from before `reconcile_orphaned_graphs` existed to clean these up), so
+/// only trust it as "current" while the graph itself is actually running —
+/// otherwise a completed/failed graph could misreport an old node as still
+/// in flight.
+fn print_graph_info_current_node(
+    db: &Database,
+    lp: &Graph,
+    all_runs: &[GraphNodeRun],
+) -> Result<()> {
+    if lp.status != GraphStatus::Running {
+        return Ok(());
+    }
+    let Some(run) = current_running_run(all_runs) else {
+        return Ok(());
+    };
+    let node = db.get_graph_node(&run.node_id)?;
+    let node_name = node.as_ref().map_or(run.node_id.as_str(), |n| &n.name);
+    let node_kind = node.as_ref().map_or("?", |n| n.kind.display_str());
+    let elapsed = format_elapsed(Utc::now() - run.started_at);
+    println!("\n\x1b[1m── Current Node ───────────────────────────────────────────────\x1b[0m");
+    println!(
+        " {} ({})  running {}  iteration {}",
+        node_name, node_kind, elapsed, run.iteration
+    );
+    // Surfaces the exact baseline `{{spec_start_head}}` resolved to
+    // for this spec's current attempt (B10) — the one number every
+    // "why did this check pass/fail" debugging session needs.
+    if let Some(spec) = db.get_graph_spec(&run.spec_id)? {
+        match spec.spec_start_head {
+            Some(head) => println!(" spec_start_head: {head}"),
+            None => println!(" spec_start_head: (not a git workdir)"),
+        }
+        // C15: the HEAD this attempt's own committer last left
+        // behind, if any — `{{spec_committed_head}}` in a check node.
+        match spec.spec_committed_head {
+            Some(head) => println!(" spec_committed_head: {head}"),
+            None => println!(" spec_committed_head: (nothing committed by this run yet)"),
         }
     }
+    Ok(())
+}
 
+/// Section: the five most recent node runs, newest first.
+fn print_graph_info_recent_runs(
+    db: &Database,
+    lp: &Graph,
+    all_runs: &[GraphNodeRun],
+) -> Result<()> {
     println!("\n\x1b[1m── Recent Node Runs ───────────────────────────────────────────\x1b[0m");
     if all_runs.is_empty() {
         println!(" (no runs yet)");
@@ -743,21 +812,25 @@ fn handle_graph_info(db: &Database, id_or_name: &str) -> Result<()> {
             no_verdict
         );
     }
-
-    if !hook_runs.is_empty() {
-        println!("\n\x1b[1m── Hook Runs ────────────────────────────────────────────────\x1b[0m");
-        for run in hook_runs.iter().rev().take(5) {
-            println!(
-                " {} {}[{}] {}",
-                run_status_icon(run.status, run.output.as_ref()),
-                run.event.as_str(),
-                run.hook_index,
-                format_dt(run.started_at)
-            );
-        }
-    }
-    println!();
     Ok(())
+}
+
+/// Section: the five most recent hook firings, newest first, only when the
+/// graph has fired at least one.
+fn print_graph_info_hook_runs(hook_runs: &[crate::domain::graphs::GraphCompletionHookRun]) {
+    if hook_runs.is_empty() {
+        return;
+    }
+    println!("\n\x1b[1m── Hook Runs ────────────────────────────────────────────────\x1b[0m");
+    for run in hook_runs.iter().rev().take(5) {
+        println!(
+            " {} {}[{}] {}",
+            run_status_icon(run.status, run.output.as_ref()),
+            run.event.as_str(),
+            run.hook_index,
+            format_dt(run.started_at)
+        );
+    }
 }
 
 /// The `graph info` annotation for a run the engine failed on a commit-rights
@@ -1061,6 +1134,59 @@ fn format_elapsed(d: chrono::Duration) -> String {
 mod tests {
     use super::*;
     use clap::Parser;
+    use std::io::{Read, Write};
+    use std::os::unix::io::FromRawFd;
+
+    /// Redirects fd 1 into a pipe for the lifetime of the guard, so a
+    /// section printer that writes straight to stdout can be asserted on.
+    /// `cargo nextest` runs one test per process, so the process-wide fd
+    /// swap is isolated; this crate's protocol mandates nextest.
+    struct StdoutCapture {
+        saved_fd: i32,
+        read_end: std::fs::File,
+    }
+
+    impl StdoutCapture {
+        fn start() -> Self {
+            let mut fds = [0i32; 2];
+            let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
+            assert_eq!(rc, 0, "pipe() failed");
+            let (read_fd, write_fd) = (fds[0], fds[1]);
+            let saved_fd = unsafe { libc::dup(1) };
+            assert!(saved_fd >= 0, "dup(1) failed");
+            std::io::stdout().flush().unwrap();
+            let rc = unsafe { libc::dup2(write_fd, 1) };
+            assert_eq!(rc, 1, "dup2 failed");
+            unsafe { libc::close(write_fd) };
+            StdoutCapture {
+                saved_fd,
+                read_end: unsafe { std::fs::File::from_raw_fd(read_fd) },
+            }
+        }
+
+        fn stop(mut self) -> String {
+            std::io::stdout().flush().unwrap();
+            unsafe {
+                libc::dup2(self.saved_fd, 1);
+                libc::close(self.saved_fd);
+            }
+            let mut buf = String::new();
+            self.read_end.read_to_string(&mut buf).unwrap();
+            buf
+        }
+    }
+
+    /// Byte index of `needle`'s first occurrence, for asserting section
+    /// order without depending on the exact surrounding bytes.
+    fn assert_ordered(haystack: &str, needles: &[&str]) {
+        let mut cursor = 0usize;
+        for needle in needles {
+            let at = haystack[cursor..]
+                .find(needle)
+                .unwrap_or_else(|| panic!("missing {needle:?} after byte {cursor}"));
+            cursor += at + needle.len();
+        }
+    }
 
     #[derive(Parser)]
     struct TestCli {
@@ -2285,5 +2411,160 @@ mod tests {
             }
         }
         panic!("port kept getting claimed by another test after 5 attempts");
+    }
+
+    #[test]
+    fn handle_graph_info_covers_bound_specs_branch() {
+        let (_dir, db) = db_with_graph("graph-1", "bound-graph", GraphStatus::Draft);
+        let mut spec = make_spec("graph-1", "spec-a", 0, GraphSpecStatus::Pending);
+        spec.id = "graph-1-0".to_string();
+        db.insert_graph_spec(&spec).unwrap();
+        handle_graph_info(&db, "bound-graph").expect("bound info must print");
+    }
+
+    #[test]
+    fn handle_graph_info_covers_idea_branch() {
+        let (_dir, db) = db_with_graph("graph-2", "idea-graph", GraphStatus::Draft);
+        let mut placeholder = make_spec("graph-2", "", 0, GraphSpecStatus::Pending);
+        placeholder.id = "graph-2-0".to_string();
+        db.insert_graph_spec(&placeholder).unwrap();
+        handle_graph_info(&db, "idea-graph").expect("idea info must print");
+    }
+
+    #[test]
+    fn handle_graph_info_covers_queue_member_branch() {
+        use crate::domain::queues::Queue;
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::new(&dir.path().join("t.db")).unwrap();
+        let mut lp = make_graph("graph-3", "queue-graph", GraphStatus::Running);
+        lp.active_run_queue_id = Some("queue-1".to_string());
+        db.insert_graph(&lp).unwrap();
+        db.insert_queue(&Queue {
+            id: "queue-1".to_string(),
+            name: "Q".to_string(),
+            created_at: Utc::now(),
+        })
+        .unwrap();
+        let mut member = make_spec("queue", "real work", 0, GraphSpecStatus::Running);
+        member.id = "spec-a".to_string();
+        member.graph_id = None;
+        db.insert_graph_spec(&member).unwrap();
+        db.append_queue_member("queue-1", "spec-a", None).unwrap();
+        handle_graph_info(&db, "queue-graph").expect("queue info must print");
+    }
+
+    /// Plan §5: a section-level capture for `handle_graph_info`, asserting
+    /// exact section order and the key lines of each mode it routes to.
+    #[test]
+    fn handle_graph_info_output_captures_bound_mode_sections_in_order() {
+        let (_dir, db) = db_with_graph("graph-c1", "cap-bound", GraphStatus::Draft);
+        let mut spec = make_spec("graph-c1", "spec-a", 0, GraphSpecStatus::Pending);
+        spec.id = "graph-c1-0".to_string();
+        db.insert_graph_spec(&spec).unwrap();
+
+        let cap = StdoutCapture::start();
+        handle_graph_info(&db, "cap-bound").expect("bound info must print");
+        let out = cap.stop();
+
+        assert_ordered(
+            &out,
+            &[
+                "── Graph: cap-bound ──",
+                " id:      graph-c1",
+                "── Specs ──",
+                "spec-a",
+                "\n",
+            ],
+        );
+        assert!(
+            !out.contains("── Current Node ──"),
+            "draft graph has no current node"
+        );
+        assert!(!out.contains("── Recent Runs ──"), "no runs recorded yet");
+    }
+
+    /// Plan §5: the idea mode's single placeholder line, plus the
+    /// "no specs queued" queue-history fallback for a drained queue.
+    #[test]
+    fn handle_graph_info_output_captures_idea_and_queue_history_modes() {
+        let (_dir, db) = db_with_graph("graph-c2", "cap-idea", GraphStatus::Draft);
+        let mut placeholder = make_spec("graph-c2", "", 0, GraphSpecStatus::Pending);
+        placeholder.id = "graph-c2-0".to_string();
+        db.insert_graph_spec(&placeholder).unwrap();
+
+        let cap = StdoutCapture::start();
+        handle_graph_info(&db, "cap-idea").expect("idea info must print");
+        let idea_out = cap.stop();
+        assert!(idea_out.contains("── Specs ──"));
+        assert!(
+            idea_out.contains("(idea-driven — no bound specs)"),
+            "idea mode prints its placeholder line, got {idea_out:?}"
+        );
+
+        // Queue history: a graph with nothing bound but a recorded run.
+        let mut lp = make_graph("graph-c3", "cap-history", GraphStatus::Completed);
+        lp.id = "graph-c3".to_string();
+        let dir = tempfile::tempdir().unwrap();
+        let db2 = Database::new(&dir.path().join("h.db")).unwrap();
+        db2.insert_graph(&lp).unwrap();
+        let mut ran = make_spec("graph-c3", "earlier work", 0, GraphSpecStatus::Pending);
+        ran.id = "spec-hist".to_string();
+        db2.insert_graph_spec(&ran).unwrap();
+        let node = crate::domain::graphs::GraphNode {
+            id: "node-hist".to_string(),
+            spec_id: None,
+            graph_id: Some("graph-c3".to_string()),
+            name: "check".to_string(),
+            kind: crate::domain::graphs::GraphNodeKind::Check,
+            config: serde_json::json!({}),
+            position: 0,
+            created_at: Utc::now(),
+        };
+        db2.insert_graph_node(&node).unwrap();
+        let mut hist_run = make_run(
+            "spec-hist",
+            "node-hist",
+            GraphRunStatus::Pass,
+            1_700_000_000,
+        );
+        hist_run.id = "run-hist".to_string();
+        hist_run.graph_id = "graph-c3".to_string();
+        hist_run.completed_at = Some(Utc::now());
+        db2.insert_graph_run(&hist_run).unwrap();
+
+        let cap = StdoutCapture::start();
+        handle_graph_info(&db2, "cap-history").expect("queue-history info must print");
+        let hist_out = cap.stop();
+        assert_ordered(&hist_out, &["── Specs ──", "earlier work"]);
+    }
+
+    #[test]
+    fn print_graph_info_hook_runs_covers_empty_and_populated() {
+        print_graph_info_hook_runs(&[]);
+        let run = crate::domain::graphs::GraphCompletionHookRun {
+            id: "run-1".to_string(),
+            graph_id: "graph-1".to_string(),
+            event: crate::domain::graphs::GraphHookEvent::OnCompleted,
+            hook_index: 0,
+            status: GraphRunStatus::Pass,
+            output: None,
+            summary: None,
+            started_at: Utc::now(),
+            completed_at: None,
+            pid: None,
+            boot_id: None,
+            executed_platform: None,
+            executed_model: None,
+        };
+        print_graph_info_hook_runs(std::slice::from_ref(&run));
+    }
+
+    #[test]
+    fn print_graph_info_current_node_covers_idle_and_recent_runs_empty() {
+        let lp = make_graph("graph-9", "idle-graph", GraphStatus::Draft);
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::new(&dir.path().join("t.db")).unwrap();
+        print_graph_info_current_node(&db, &lp, &[]).expect("idle current node");
+        print_graph_info_recent_runs(&db, &lp, &[]).expect("empty recent runs");
     }
 }

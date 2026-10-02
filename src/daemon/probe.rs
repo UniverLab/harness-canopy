@@ -315,17 +315,7 @@ pub(crate) async fn probe_target(
     let start = Instant::now();
 
     let Some(cli_config) = config.get_cli(&target.platform) else {
-        return ProbeReport {
-            platform: target.platform.clone(),
-            model: target.model.clone(),
-            outcome: ProbeOutcome::NotConfigured,
-            duration_ms: start.elapsed().as_millis(),
-            argv: None,
-            error: Some(format!(
-                "Platform '{}' is not configured in canopy (~/.canopy/config.toml).",
-                target.platform
-            )),
-        };
+        return probe_not_configured(target, start);
     };
 
     let strategy = CliStrategy::from_cli_config(cli_config);
@@ -339,196 +329,295 @@ pub(crate) async fn probe_target(
     // exercised.
     if let Some(model) = target.model.as_deref() {
         if !crate::domain::cli_config::model_flag_selects_model(strategy.model_flag.as_deref()) {
-            return ProbeReport {
-                platform: target.platform.clone(),
-                model: target.model.clone(),
-                outcome: ProbeOutcome::Unknown,
-                duration_ms: start.elapsed().as_millis(),
-                argv: None,
-                error: Some(format!(
-                    "Platform '{}' has no configured way to select a model explicitly \
-                     (no usable model_flag) — cannot validate model '{}' end-to-end. Omit \
-                     `model` to probe the platform's own default instead.",
-                    target.platform, model
-                )),
-            };
+            return probe_unknown_model(target, model, start);
         }
     }
 
-    // CB44: identity check before the probe prompt. When the resolved
-    // binary is a different program answering to the same bare name (e.g.
-    // the Blackbox window manager), report WrongBinary with the resolved
-    // absolute path — never a quota, model, or network problem — and do not
-    // run the probe prompt at all. Platforms with no declared check behave
-    // exactly as today. Dispatch never runs this (probe/doctor only).
-    if cli_config.identity_check.is_some() {
-        let resolved_path = match cli_config.resolve() {
-            Ok((p, _step)) => p,
-            Err(error) => {
-                return ProbeReport {
-                    platform: target.platform.clone(),
-                    model: target.model.clone(),
-                    outcome: ProbeOutcome::SpawnFailed,
-                    duration_ms: start.elapsed().as_millis(),
-                    argv: None,
-                    error: Some(redact_secrets(&error.to_string())),
-                };
-            }
-        };
-        if let Err(wb) =
-            crate::domain::cli_strategy::verify_identity_async(cli_config, &resolved_path).await
-        {
-            let check_cmd = cli_config
-                .identity_check
-                .as_ref()
-                .map(|c| c.cmd.as_str())
-                .unwrap_or("");
-            return ProbeReport {
-                platform: target.platform.clone(),
-                model: target.model.clone(),
-                outcome: ProbeOutcome::WrongBinary,
-                duration_ms: start.elapsed().as_millis(),
-                argv: None,
-                error: Some(redact_secrets(&wb.report(&cli_config.binary, check_cmd))),
-            };
-        }
+    // CB44: identity check before the probe prompt — dispatch never runs
+    // this (probe/doctor only).
+    if let Some(report) = probe_target_identity(target, cli_config, start).await {
+        return report;
     }
 
     let token = probe_token();
     let prompt = probe_prompt(&token);
 
-    let mut command = match strategy.build_command(&prompt, target.model.as_deref(), workdir) {
-        Ok(command) => command,
-        Err(error) => {
-            return ProbeReport {
-                platform: target.platform.clone(),
-                model: target.model.clone(),
-                outcome: ProbeOutcome::SpawnFailed,
-                duration_ms: start.elapsed().as_millis(),
-                argv: None,
-                error: Some(redact_secrets(&error.to_string())),
+    let (mut command, argv) =
+        match build_probe_command(&strategy, &prompt, target.model.as_deref(), workdir) {
+            Ok(built) => built,
+            Err(message) => {
+                return probe_failure(target, ProbeOutcome::SpawnFailed, start, None, &message);
             }
-        }
-    };
-    let argv = command_argv(&command);
-    command.stdout(std::process::Stdio::piped());
-    command.stderr(std::process::Stdio::piped());
+        };
 
     let child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
+            return probe_failure(
+                target,
+                ProbeOutcome::SpawnFailed,
+                start,
+                Some(argv),
+                &error.to_string(),
+            );
+        }
+    };
+    // Captured before `wait_with_output` takes ownership of `child`.
+    let pid = child.id();
+
+    run_and_classify_probe(target, child, timeout, start, argv, pid, token).await
+}
+
+/// Builds the platform's real headless command for the probe prompt and
+/// captures its redacted argv, with piped stdout/stderr ready to spawn.
+/// `Err(message)` means the command could not be built at all — the caller
+/// reports `SpawnFailed` with no argv, exactly as before.
+fn build_probe_command(
+    strategy: &CliStrategy,
+    prompt: &str,
+    model: Option<&str>,
+    workdir: Option<&str>,
+) -> Result<(tokio::process::Command, String), String> {
+    let mut command = strategy
+        .build_command(prompt, model, workdir)
+        .map_err(|e| e.to_string())?;
+    let argv = command_argv(&command);
+    command.stdout(std::process::Stdio::piped());
+    command.stderr(std::process::Stdio::piped());
+    Ok((command, argv))
+}
+
+/// The "nothing to probe" report: the platform isn't in config.toml at all.
+/// Built directly rather than through [`probe_failure`] because this text
+/// is canopy's own guidance, not captured harness output — there is nothing
+/// in it to redact.
+fn probe_not_configured(target: &ProbeTarget, start: Instant) -> ProbeReport {
+    ProbeReport {
+        platform: target.platform.clone(),
+        model: target.model.clone(),
+        outcome: ProbeOutcome::NotConfigured,
+        duration_ms: start.elapsed().as_millis(),
+        argv: None,
+        error: Some(format!(
+            "Platform '{}' is not configured in canopy (~/.canopy/config.toml).",
+            target.platform
+        )),
+    }
+}
+
+/// The report for a requested model the platform has no usable way to
+/// select — see the check in [`probe_target`] for why `Unknown` (and not
+/// `Reachable`) is the only honest verdict here.
+fn probe_unknown_model(target: &ProbeTarget, model: &str, start: Instant) -> ProbeReport {
+    ProbeReport {
+        platform: target.platform.clone(),
+        model: target.model.clone(),
+        outcome: ProbeOutcome::Unknown,
+        duration_ms: start.elapsed().as_millis(),
+        argv: None,
+        error: Some(format!(
+            "Platform '{}' has no configured way to select a model explicitly \
+             (no usable model_flag) — cannot validate model '{}' end-to-end. Omit \
+             `model` to probe the platform's own default instead.",
+            target.platform, model
+        )),
+    }
+}
+
+/// Every report whose message is captured harness/CLI output: secrets are
+/// redacted here so no caller can ever see them, and `argv` carries the
+/// command only once one was actually built (see [`ProbeReport::argv`]).
+fn probe_failure(
+    target: &ProbeTarget,
+    outcome: ProbeOutcome,
+    start: Instant,
+    argv: Option<String>,
+    message: &str,
+) -> ProbeReport {
+    ProbeReport {
+        platform: target.platform.clone(),
+        model: target.model.clone(),
+        outcome,
+        duration_ms: start.elapsed().as_millis(),
+        argv,
+        error: Some(redact_secrets(message)),
+    }
+}
+
+/// CB44: identity check before the probe prompt. When the resolved binary
+/// is a different program answering to the same bare name (e.g. the
+/// Blackbox window manager), report WrongBinary with the resolved absolute
+/// path — never a quota, model, or network problem — and do not run the
+/// probe prompt at all. Platforms with no declared check behave exactly as
+/// today. `None` means the identity check passed (or none is declared) and
+/// the probe may proceed.
+async fn probe_target_identity(
+    target: &ProbeTarget,
+    cli_config: &crate::domain::cli_config::CliConfig,
+    start: Instant,
+) -> Option<ProbeReport> {
+    cli_config.identity_check.as_ref()?;
+    let resolved_path = match cli_config.resolve() {
+        Ok((p, _step)) => p,
+        Err(error) => {
+            return Some(probe_failure(
+                target,
+                ProbeOutcome::SpawnFailed,
+                start,
+                None,
+                &error.to_string(),
+            ));
+        }
+    };
+    if let Err(wb) =
+        crate::domain::cli_strategy::verify_identity_async(cli_config, &resolved_path).await
+    {
+        let check_cmd = cli_config
+            .identity_check
+            .as_ref()
+            .map(|c| c.cmd.as_str())
+            .unwrap_or("");
+        return Some(probe_failure(
+            target,
+            ProbeOutcome::WrongBinary,
+            start,
+            None,
+            &wb.report(&cli_config.binary, check_cmd),
+        ));
+    }
+    None
+}
+
+/// Waits for the spawned probe (bounded by `timeout`) and judges how it
+/// ended: it never answered, the wait itself failed, or it answered and
+/// [`classify_probe_output`] reads the answer.
+async fn run_and_classify_probe(
+    target: &ProbeTarget,
+    child: tokio::process::Child,
+    timeout: Duration,
+    start: Instant,
+    argv: String,
+    pid: Option<u32>,
+    token: String,
+) -> ProbeReport {
+    match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        Err(_elapsed) => probe_timeout_report(target, start, argv, pid),
+        Ok(Err(error)) => probe_failure(
+            target,
+            ProbeOutcome::SpawnFailed,
+            start,
+            Some(argv),
+            &error.to_string(),
+        ),
+        Ok(Ok(output)) => classify_probe_output(target, &output, start, argv, &token),
+    }
+}
+
+/// The timeout verdict: kill the child with the same B12 process-group kill
+/// every other detached spawn in the engine uses on timeout — a probe must
+/// not leak a running child any more than a real node run does.
+fn probe_timeout_report(
+    target: &ProbeTarget,
+    start: Instant,
+    argv: String,
+    pid: Option<u32>,
+) -> ProbeReport {
+    if let Some(pid) = pid {
+        terminate_process_group_async(pid as i64, KILL_GRACE);
+    }
+    ProbeReport {
+        platform: target.platform.clone(),
+        model: target.model.clone(),
+        outcome: ProbeOutcome::TimedOut,
+        duration_ms: start.elapsed().as_millis(),
+        argv: Some(argv),
+        error: None,
+    }
+}
+
+/// Judges a probe that actually answered, in the fixed order: substituted
+/// model, then rejected model, then the probe token, then the platform's
+/// own argument-parser text — each earlier verdict wins, because a
+/// substituted-model response can still contain the token (the fallback
+/// model answered it).
+fn classify_probe_output(
+    target: &ProbeTarget,
+    output: &std::process::Output,
+    start: Instant,
+    argv: String,
+    token: &str,
+) -> ProbeReport {
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let duration_ms = start.elapsed().as_millis();
+
+    // Checked before the token match: a substituted-model response
+    // can still contain the probe token (the fallback model
+    // answered it), which would otherwise be reported `Reachable`
+    // for a model nobody actually validated — the 2026-08-13
+    // `gpt-5.6` case.
+    if target.model.is_some() {
+        if let Some(warning) = detect_model_substitution(&stdout, &stderr) {
             return ProbeReport {
                 platform: target.platform.clone(),
                 model: target.model.clone(),
-                outcome: ProbeOutcome::SpawnFailed,
-                duration_ms: start.elapsed().as_millis(),
-                argv: Some(argv.clone()),
-                error: Some(redact_secrets(&error.to_string())),
-            }
+                outcome: ProbeOutcome::Substituted,
+                duration_ms,
+                argv: Some(argv),
+                error: Some(redact_secrets(&warning)),
+            };
         }
-    };
-    // Captured before `wait_with_output` below takes ownership of `child`.
-    let pid = child.id();
-
-    match tokio::time::timeout(timeout, child.wait_with_output()).await {
-        Err(_elapsed) => {
-            // Same B12 process-group kill every other detached spawn in the
-            // engine uses on timeout — a probe must not leak a running child
-            // any more than a real node run does.
-            if let Some(pid) = pid {
-                terminate_process_group_async(pid as i64, KILL_GRACE);
-            }
-            ProbeReport {
+        if let Some(rejection) = detect_model_rejection(&stdout, &stderr) {
+            return ProbeReport {
                 platform: target.platform.clone(),
                 model: target.model.clone(),
-                outcome: ProbeOutcome::TimedOut,
-                duration_ms: start.elapsed().as_millis(),
-                argv: Some(argv.clone()),
-                error: None,
-            }
+                outcome: ProbeOutcome::Broken,
+                duration_ms,
+                argv: Some(argv),
+                error: Some(redact_secrets(&rejection)),
+            };
         }
-        Ok(Err(error)) => ProbeReport {
+    }
+
+    if stdout.contains(token) || stderr.contains(token) {
+        ProbeReport {
             platform: target.platform.clone(),
             model: target.model.clone(),
-            outcome: ProbeOutcome::SpawnFailed,
-            duration_ms: start.elapsed().as_millis(),
-            argv: Some(argv.clone()),
-            error: Some(redact_secrets(&error.to_string())),
-        },
-        Ok(Ok(output)) => {
-            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            let duration_ms = start.elapsed().as_millis();
-
-            // Checked before the token match: a substituted-model response
-            // can still contain the probe token (the fallback model
-            // answered it), which would otherwise be reported `Reachable`
-            // for a model nobody actually validated — the 2026-08-13
-            // `gpt-5.6` case.
-            if target.model.is_some() {
-                if let Some(warning) = detect_model_substitution(&stdout, &stderr) {
-                    return ProbeReport {
-                        platform: target.platform.clone(),
-                        model: target.model.clone(),
-                        outcome: ProbeOutcome::Substituted,
-                        duration_ms,
-                        argv: Some(argv.clone()),
-                        error: Some(redact_secrets(&warning)),
-                    };
-                }
-                if let Some(rejection) = detect_model_rejection(&stdout, &stderr) {
-                    return ProbeReport {
-                        platform: target.platform.clone(),
-                        model: target.model.clone(),
-                        outcome: ProbeOutcome::Broken,
-                        duration_ms,
-                        argv: Some(argv.clone()),
-                        error: Some(redact_secrets(&rejection)),
-                    };
-                }
-            }
-
-            if stdout.contains(&token) || stderr.contains(&token) {
-                ProbeReport {
-                    platform: target.platform.clone(),
-                    model: target.model.clone(),
-                    outcome: ProbeOutcome::Reachable,
-                    duration_ms,
-                    argv: None,
-                    error: None,
-                }
-            } else {
-                // CB61: the platform answered with its own argument-parser
-                // usage/error text — canopy called it wrong, not a
-                // credentials/network/quota failure on the platform's side.
-                // Checked before `raw_error` below moves stdout/stderr.
-                let outcome = if detect_misconfigured_invocation(&stdout, &stderr).is_some() {
-                    ProbeOutcome::Misconfigured
-                } else {
-                    ProbeOutcome::Broken
-                };
-                // Prefer stderr (where an error is conventionally printed)
-                // but fall back to stdout — the mimocode incident printed
-                // its error to stdout with an empty stderr, exit code 0.
-                let raw_error = if !stderr.is_empty() {
-                    stderr
-                } else if !stdout.is_empty() {
-                    stdout
-                } else {
-                    format!(
-                        "exited {} with no output and no probe token in the response",
-                        output.status.code().unwrap_or(-1)
-                    )
-                };
-                ProbeReport {
-                    platform: target.platform.clone(),
-                    model: target.model.clone(),
-                    outcome,
-                    duration_ms,
-                    argv: Some(argv.clone()),
-                    error: Some(redact_secrets(&raw_error)),
-                }
-            }
+            outcome: ProbeOutcome::Reachable,
+            duration_ms,
+            argv: None,
+            error: None,
+        }
+    } else {
+        // CB61: the platform answered with its own argument-parser
+        // usage/error text — canopy called it wrong, not a
+        // credentials/network/quota failure on the platform's side.
+        // Checked before `raw_error` below moves stdout/stderr.
+        let outcome = if detect_misconfigured_invocation(&stdout, &stderr).is_some() {
+            ProbeOutcome::Misconfigured
+        } else {
+            ProbeOutcome::Broken
+        };
+        // Prefer stderr (where an error is conventionally printed)
+        // but fall back to stdout — the mimocode incident printed
+        // its error to stdout with an empty stderr, exit code 0.
+        let raw_error = if !stderr.is_empty() {
+            stderr
+        } else if !stdout.is_empty() {
+            stdout
+        } else {
+            format!(
+                "exited {} with no output and no probe token in the response",
+                output.status.code().unwrap_or(-1)
+            )
+        };
+        ProbeReport {
+            platform: target.platform.clone(),
+            model: target.model.clone(),
+            outcome,
+            duration_ms,
+            argv: Some(argv),
+            error: Some(redact_secrets(&raw_error)),
         }
     }
 }
