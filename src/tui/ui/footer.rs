@@ -12,7 +12,14 @@ use crate::tui::event::focused_child_claimed_keyboard;
 
 pub(super) fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let activity_available = app.activity_panel_available();
-    if matches!(app.focus, Focus::Agent) && app.playground_active {
+    // The Knowledge arm of `footer_hints` wins over the playground check, so
+    // hoisting the check here must keep the same precedence: an agent-face
+    // playground footer only replaces the normal hints when the sidebar is
+    // not on the Knowledge layer.
+    if matches!(app.focus, Focus::Agent)
+        && app.sidebar_layer != SidebarLayer::Knowledge
+        && app.playground_active
+    {
         return draw_footer_playground(frame, area, app, activity_available, theme);
     }
     let hints = footer_hints(app, activity_available);
@@ -1000,6 +1007,31 @@ mod tests {
         assert!(
             text.contains("search"),
             "Agent playground footer should show 'search': {text}"
+        );
+    }
+
+    #[test]
+    fn footer_knowledge_layer_wins_over_playground_in_agent_focus() {
+        // The Knowledge match arm precedes the playground check inside the
+        // `Focus::Agent` arm, so with both the Knowledge layer and the
+        // playground active the knowledge hints must be drawn — not the
+        // playground footer. The refactor hoisted the playground check above
+        // the match, which would have inverted this precedence.
+        let mut app = make_app();
+        app.focus = Focus::Agent;
+        app.sidebar_layer = SidebarLayer::Knowledge;
+        app.playground_active = true;
+        let theme = Theme::classic();
+        let text = render_footer_to_text(120, 1, |frame, area| {
+            draw_footer(frame, area, &app, &theme);
+        });
+        assert!(
+            text.contains("jump tab"),
+            "Knowledge layer must keep its own hints: {text}"
+        );
+        assert!(
+            !text.contains("search"),
+            "the playground footer must not replace the Knowledge hints: {text}"
         );
     }
 

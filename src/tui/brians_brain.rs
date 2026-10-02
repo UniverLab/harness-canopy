@@ -235,3 +235,62 @@ impl BriansBrain {
         count
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A brain with every cell off, so every edge cell is a candidate and a
+    /// probability of `1.0` injects deterministically.
+    fn all_off_brain() -> BriansBrain {
+        let mut brain = BriansBrain::new(8, 8, 100);
+        for row in brain.grid.iter_mut() {
+            for cell in row.iter_mut() {
+                *cell = CellState::Off;
+            }
+        }
+        brain
+    }
+
+    fn count_on(brain: &BriansBrain) -> usize {
+        brain
+            .grid
+            .iter()
+            .flatten()
+            .filter(|c| **c == CellState::On)
+            .count()
+    }
+
+    #[test]
+    fn inject_edge_noise_until_stops_exactly_at_the_cap() {
+        // The refactor turned the in-loop `return injected` into
+        // `break 'outer` with a trailing `injected`; this locks the cap: the
+        // scan must stop after `max_injections` cells, not visit the rest of
+        // the grid.
+        let mut brain = all_off_brain();
+        let injected = brain.inject_edge_noise_until(1.0, 3);
+        assert_eq!(injected, 3);
+        assert_eq!(
+            count_on(&brain),
+            3,
+            "exactly max_injections edge cells must flip to On"
+        );
+    }
+
+    #[test]
+    fn inject_edge_noise_until_zero_probability_is_a_noop() {
+        let mut brain = all_off_brain();
+        let injected = brain.inject_edge_noise_until(0.0, usize::MAX);
+        assert_eq!(injected, 0);
+        assert_eq!(count_on(&brain), 0);
+    }
+
+    #[test]
+    fn inject_edge_noise_until_cap_above_edge_cells_injects_once_per_edge_cell() {
+        // 8x8 torus: the perimeter holds 8 * 4 - 4 = 28 edge cells.
+        let mut brain = all_off_brain();
+        let injected = brain.inject_edge_noise_until(1.0, usize::MAX);
+        assert_eq!(injected, 28);
+        assert_eq!(count_on(&brain), 28);
+    }
+}
