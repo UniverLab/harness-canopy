@@ -544,86 +544,9 @@ impl Database {
 
         for (index, (member, node)) in members.iter().zip(member_nodes).enumerate() {
             if index < old_member_ids.len() {
-                tx.execute(
-                    "UPDATE graph_nodes
-                     SET spec_id = ?1, graph_id = ?2, name = ?3, kind = ?4,
-                         config = ?5, position = ?6, created_at = ?7
-                     WHERE id = ?8",
-                    params![
-                        &node.spec_id,
-                        &node.graph_id,
-                        &node.name,
-                        node.kind.as_str(),
-                        serde_json::to_string(&node.config)?,
-                        node.position,
-                        node.created_at.timestamp(),
-                        &member.node_id,
-                    ],
-                )?;
-                tx.execute(
-                    "UPDATE ensemble_members
-                     SET node_id = ?1, position = ?2, platform = ?3, model = ?4,
-                         prompt_override = ?5, timeout_minutes = ?6, infra_retry_limit = ?7, infra_crash_max_seconds = ?8, infra_backoff_seconds = ?9
-                     WHERE ensemble_id = ?10 AND position = ?11",
-                    params![
-                        &member.node_id,
-                        member.position,
-                        &member.platform,
-                        &member.model,
-                        &member.prompt_override,
-                        &member.timeout_minutes,
-                        &member.infra_retry_limit,
-                        &member.infra_crash_max_seconds,
-                        &member.infra_backoff_seconds,
-                        ensemble_id,
-                        member.position,
-                    ],
-                )?;
+                tx_update_existing_member(&tx, ensemble_id, member, node)?;
             } else {
-                tx.execute(
-                    "INSERT INTO graph_nodes (id, spec_id, graph_id, name, kind, config, position, created_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                    params![
-                        &node.id,
-                        &node.spec_id,
-                        &node.graph_id,
-                        &node.name,
-                        node.kind.as_str(),
-                        serde_json::to_string(&node.config)?,
-                        node.position,
-                        node.created_at.timestamp(),
-                    ],
-                )?;
-                tx.execute(
-                    "INSERT INTO ensemble_members
-                     (ensemble_id, node_id, position, platform, model, prompt_override, timeout_minutes, infra_retry_limit, infra_crash_max_seconds, infra_backoff_seconds)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                    params![
-                        &member.ensemble_id,
-                        &member.node_id,
-                        member.position,
-                        &member.platform,
-                        &member.model,
-                        &member.prompt_override,
-                        &member.timeout_minutes,
-                        &member.infra_retry_limit,
-                        &member.infra_crash_max_seconds,
-                        &member.infra_backoff_seconds,
-                    ],
-                )?;
-                tx.execute(
-                    "INSERT INTO graph_edges
-                     (id, spec_id, graph_id, from_node, to_node, condition)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    params![
-                        uuid::Uuid::new_v4().to_string(),
-                        &node.spec_id,
-                        &node.graph_id,
-                        &node.id,
-                        &join_node_id,
-                        GraphEdgeCondition::Always.as_str(),
-                    ],
-                )?;
+                tx_insert_new_member(&tx, member, node, &join_node_id)?;
             }
         }
 
@@ -1493,6 +1416,107 @@ fn insert_missing_entry_fan_out(
     Ok(())
 }
 
+/// Update the `graph_nodes` and `ensemble_members` rows of an existing member
+/// that keeps its slot in the new list.
+fn tx_update_existing_member(
+    tx: &rusqlite::Transaction<'_>,
+    ensemble_id: &str,
+    member: &EnsembleMember,
+    node: &GraphNode,
+) -> Result<()> {
+    tx.execute(
+        "UPDATE graph_nodes
+         SET spec_id = ?1, graph_id = ?2, name = ?3, kind = ?4,
+             config = ?5, position = ?6, created_at = ?7
+         WHERE id = ?8",
+        params![
+            &node.spec_id,
+            &node.graph_id,
+            &node.name,
+            node.kind.as_str(),
+            serde_json::to_string(&node.config)?,
+            node.position,
+            node.created_at.timestamp(),
+            &member.node_id,
+        ],
+    )?;
+    tx.execute(
+        "UPDATE ensemble_members
+         SET node_id = ?1, position = ?2, platform = ?3, model = ?4,
+             prompt_override = ?5, timeout_minutes = ?6, infra_retry_limit = ?7, infra_crash_max_seconds = ?8, infra_backoff_seconds = ?9
+         WHERE ensemble_id = ?10 AND position = ?11",
+        params![
+            &member.node_id,
+            member.position,
+            &member.platform,
+            &member.model,
+            &member.prompt_override,
+            &member.timeout_minutes,
+            &member.infra_retry_limit,
+            &member.infra_crash_max_seconds,
+            &member.infra_backoff_seconds,
+            ensemble_id,
+            member.position,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Insert a brand-new member: its `graph_nodes` row, its `ensemble_members`
+/// row, and its entry edge from the ensemble's join node.
+fn tx_insert_new_member(
+    tx: &rusqlite::Transaction<'_>,
+    member: &EnsembleMember,
+    node: &GraphNode,
+    join_node_id: &str,
+) -> Result<()> {
+    tx.execute(
+        "INSERT INTO graph_nodes (id, spec_id, graph_id, name, kind, config, position, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            &node.id,
+            &node.spec_id,
+            &node.graph_id,
+            &node.name,
+            node.kind.as_str(),
+            serde_json::to_string(&node.config)?,
+            node.position,
+            node.created_at.timestamp(),
+        ],
+    )?;
+    tx.execute(
+        "INSERT INTO ensemble_members
+         (ensemble_id, node_id, position, platform, model, prompt_override, timeout_minutes, infra_retry_limit, infra_crash_max_seconds, infra_backoff_seconds)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![
+            &member.ensemble_id,
+            &member.node_id,
+            member.position,
+            &member.platform,
+            &member.model,
+            &member.prompt_override,
+            &member.timeout_minutes,
+            &member.infra_retry_limit,
+            &member.infra_crash_max_seconds,
+            &member.infra_backoff_seconds,
+        ],
+    )?;
+    tx.execute(
+        "INSERT INTO graph_edges
+         (id, spec_id, graph_id, from_node, to_node, condition)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            uuid::Uuid::new_v4().to_string(),
+            &node.spec_id,
+            &node.graph_id,
+            &node.id,
+            join_node_id,
+            GraphEdgeCondition::Always.as_str(),
+        ],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1956,6 +1980,88 @@ mod tests {
         assert_eq!(
             edge_ids(db.list_graph_edges("spec-1").unwrap()),
             edge_ids(before_edges)
+        );
+    }
+
+    #[test]
+    fn replace_ensemble_members_grows_entry_fan_out_for_new_members() {
+        let db = test_db();
+        insert_cb52_ensemble(&db);
+        let now = Utc::now();
+        let mut members = db.list_ensemble_members("ens1").unwrap();
+        let mut nodes: Vec<GraphNode> = members
+            .iter()
+            .map(|member| db.get_graph_node(&member.node_id).unwrap().unwrap())
+            .collect();
+        members.push(EnsembleMember {
+            ensemble_id: "ens1".to_string(),
+            node_id: "m3".to_string(),
+            position: 2,
+            platform: "openrouter".to_string(),
+            model: Some("model-2".to_string()),
+            prompt_override: None,
+            timeout_minutes: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
+        });
+        nodes.push(GraphNode {
+            id: "m3".to_string(),
+            spec_id: Some("spec-1".to_string()),
+            graph_id: None,
+            name: "member-3".to_string(),
+            kind: GraphNodeKind::Agent,
+            config: serde_json::json!({
+                "platform": "openrouter",
+                "prompt_template": "draft it",
+            }),
+            position: 11,
+            created_at: now,
+        });
+
+        db.replace_ensemble_members("ens1", &members, &nodes)
+            .unwrap();
+
+        assert!(
+            db.get_graph_node("m3").unwrap().is_some(),
+            "the new member's graph_nodes row must be inserted"
+        );
+        let edges = db.list_graph_edges("spec-1").unwrap();
+        let edge_exists =
+            |from: &str, to: &str| edges.iter().any(|e| e.from_node == from && e.to_node == to);
+        assert!(
+            edge_exists("kickoff", "m3"),
+            "kickoff must fan out to the new member"
+        );
+        assert!(
+            edge_exists("alt_entry", "m3"),
+            "alt_entry must fan out to the new member"
+        );
+        assert!(
+            edge_exists("m3", "join1"),
+            "the new member must wire to the join node"
+        );
+
+        let grown: Vec<(String, i64)> = db
+            .list_ensemble_members("ens1")
+            .unwrap()
+            .into_iter()
+            .map(|member| (member.node_id, member.position))
+            .collect();
+        assert_eq!(
+            grown,
+            vec![
+                ("m1".to_string(), 0),
+                ("m2".to_string(), 1),
+                ("m3".to_string(), 2),
+            ]
+        );
+        assert!(edge_exists("m1", "join1"), "existing member wiring is kept");
+        assert!(edge_exists("m2", "join1"), "existing member wiring is kept");
+        assert!(edge_exists("join1", "arbiter"), "join exit routing is kept");
+        assert!(
+            edge_exists("join1", "fallback"),
+            "join exit routing is kept"
         );
     }
 

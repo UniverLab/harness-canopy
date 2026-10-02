@@ -6844,6 +6844,36 @@ fn cm9_retype_backlog_nodes() {
     );
 }
 
+/// The refusal bail: a node the `d8c3230b` prefix resolves to exactly that
+/// carries registry metadata is refused (Err), never retyped.
+#[test]
+fn cm9_retype_backlog_nodes_refuses_a_registry_project_node() {
+    let db = test_db();
+    db.upsert_intelligence_node(IntelligenceNodeInput {
+        id: Some("d8c3230b".to_string()),
+        kind: Some("project".to_string()),
+        status: None,
+        title: Some("Real Project".to_string()),
+        body: Some("real project body".to_string()),
+        body_replace: None,
+        metadata: Some(Some(
+            serde_json::json!({"source": "registry", "path": "/x"}),
+        )),
+        project_hash: Some(Some("hash-real".to_string())),
+        session_id: None,
+        relations: None,
+    })
+    .unwrap();
+    // Exact id matches without a LIKE scan, so resolution succeeds and the
+    // registry guard itself fires.
+    let err = db.retype_backlog_project_nodes().unwrap_err();
+    assert!(err.to_string().contains("refusing to retype"));
+    assert_eq!(
+        db.get_intelligence_node("d8c3230b").unwrap().unwrap().kind,
+        "project"
+    );
+}
+
 #[cfg(test)]
 mod hooks_tests {
     use super::*;
@@ -7523,6 +7553,30 @@ fn cb46_sources_keep_every_run_kind_attribution() {
         crate::db::graphs::RecentPairSourceKind::BackgroundAgent { ref agent_id, .. } if agent_id == "cb46-agent")));
     assert!(rows.iter().any(|row| matches!(row.source,
         crate::db::graphs::RecentPairSourceKind::SubagentSpawn { ref workdir } if workdir == "/tmp/cb46")));
+}
+
+/// Rows whose RFC3339 `started_at` cannot be parsed are dropped, never fatal.
+#[test]
+fn cb43_rfc3339_usage_rows_with_unparseable_started_at_are_dropped() {
+    let db = test_db();
+    let now = Utc::now();
+    db.upsert_agent(&sample_cron_agent("bg-cb43-bad-ts"))
+        .unwrap();
+    let good_ts = now.to_rfc3339();
+    db.exec_test_sql(&format!(
+        "INSERT INTO runs (id, background_agent_id, status, trigger_type, summary, started_at, finished_at, exit_code, timeout_at, executed_platform, executed_model) VALUES \
+         ('run-bad-ts', 'bg-cb43-bad-ts', 'success', 'manual', NULL, 'not-a-timestamp', NULL, 0, NULL, 'p-bg', 'm-bg'), \
+         ('run-good-ts', 'bg-cb43-bad-ts', 'success', 'manual', NULL, '{good_ts}', NULL, 0, NULL, 'p-bg', 'm-bg');"
+    ))
+    .unwrap();
+    let rows = db
+        .list_recent_platform_model_usage(now - Duration::days(30), 15)
+        .unwrap();
+    let pair = rows
+        .iter()
+        .find(|r| r.platform == "p-bg" && r.model.as_deref() == Some("m-bg"))
+        .expect("well-formed row present");
+    assert_eq!(pair.count, 1);
 }
 
 /// Splits `s` on commas that are not inside parentheses — used to pull

@@ -368,7 +368,38 @@ fn count_hard_cascade(
     hash: &str,
     workdir: &str,
 ) -> Result<HardCascadeCounts> {
-    // Direct targets — rows whose own column references the project.
+    let direct = count_direct_cascade_targets(tx, hash, workdir)?;
+    let follow_on = count_follow_on_cascade_targets(tx, hash, workdir)?;
+    Ok(HardCascadeCounts {
+        graphs: direct.graphs,
+        interactive_sessions: direct.interactive_sessions,
+        terminal_sessions: direct.terminal_sessions,
+        last_prompts: direct.last_prompts,
+        scheduled_sends: direct.scheduled_sends,
+        failed_scheduled_sends: direct.failed_scheduled_sends,
+        sync_messages: direct.sync_messages,
+        sync_locks: direct.sync_locks,
+        intelligence_nodes: direct.intelligence_nodes,
+        operational_sessions: direct.operational_sessions,
+        graph_specs: follow_on.graph_specs,
+        graph_nodes: follow_on.graph_nodes,
+        graph_edges: follow_on.graph_edges,
+        graph_runs: follow_on.graph_runs,
+        graph_completion_hook_runs: follow_on.graph_completion_hook_runs,
+        ensembles: follow_on.ensembles,
+        ensemble_members: follow_on.ensemble_members,
+        queue_members: follow_on.queue_members,
+        seed_sessions: follow_on.seed_sessions,
+        intelligence_edges: follow_on.intelligence_edges,
+    })
+}
+
+/// Direct targets — rows whose own column references the project.
+fn count_direct_cascade_targets(
+    tx: &rusqlite::Transaction,
+    hash: &str,
+    workdir: &str,
+) -> Result<DirectCascadeTargets> {
     let graphs: i64 = tx.query_row(
         "SELECT COUNT(*) FROM graphs WHERE workdir = ?1",
         params![workdir],
@@ -420,6 +451,25 @@ fn count_hard_cascade(
         |row| row.get(0),
     )?;
 
+    Ok(DirectCascadeTargets {
+        graphs,
+        interactive_sessions,
+        terminal_sessions,
+        last_prompts,
+        scheduled_sends,
+        failed_scheduled_sends,
+        sync_messages,
+        sync_locks,
+        intelligence_nodes,
+        operational_sessions,
+    })
+}
+
+fn count_follow_on_cascade_targets(
+    tx: &rusqlite::Transaction,
+    hash: &str,
+    workdir: &str,
+) -> Result<FollowOnCascadeTargets> {
     // Follow-on (FK CASCADE) targets: only count rows attached to *this*
     // project's graphs / interactive_sessions / intelligence_nodes.
     // Counting everything in the table would over-report by
@@ -515,17 +565,7 @@ fn count_hard_cascade(
         |row| row.get(0),
     )?;
 
-    Ok(HardCascadeCounts {
-        graphs,
-        interactive_sessions,
-        terminal_sessions,
-        last_prompts,
-        scheduled_sends,
-        failed_scheduled_sends,
-        sync_messages,
-        sync_locks,
-        intelligence_nodes,
-        operational_sessions,
+    Ok(FollowOnCascadeTargets {
         graph_specs,
         graph_nodes,
         graph_edges,
@@ -537,6 +577,32 @@ fn count_hard_cascade(
         seed_sessions,
         intelligence_edges,
     })
+}
+
+struct DirectCascadeTargets {
+    graphs: i64,
+    interactive_sessions: i64,
+    terminal_sessions: i64,
+    last_prompts: i64,
+    scheduled_sends: i64,
+    failed_scheduled_sends: i64,
+    sync_messages: i64,
+    sync_locks: i64,
+    intelligence_nodes: i64,
+    operational_sessions: i64,
+}
+
+struct FollowOnCascadeTargets {
+    graph_specs: i64,
+    graph_nodes: i64,
+    graph_edges: i64,
+    graph_runs: i64,
+    graph_completion_hook_runs: i64,
+    ensembles: i64,
+    ensemble_members: i64,
+    queue_members: i64,
+    seed_sessions: i64,
+    intelligence_edges: i64,
 }
 
 #[cfg(test)]

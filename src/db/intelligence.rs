@@ -141,6 +141,19 @@ pub struct UpsertResult {
     pub changed_fields: Vec<String>,
 }
 
+/// Resolved field values for the update path of
+/// [`Database::upsert_intelligence_node`], plus the fields that changed.
+struct IntelligenceNodeFinals {
+    kind: String,
+    status: String,
+    title: String,
+    body: String,
+    metadata: Option<String>,
+    project_hash: Option<String>,
+    session_id: Option<String>,
+    changed_fields: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IntelligenceSearchResult {
     pub results: Vec<IntelligenceNodeRecord>,
@@ -383,56 +396,16 @@ impl Database {
         }
     }
 
-    pub fn upsert_intelligence_node(&self, input: IntelligenceNodeInput) -> Result<UpsertResult> {
-        // Destructure by value: every field is consumed below, so the
-        // input stays pass-by-value without tripping needless_pass_by_value.
-        let IntelligenceNodeInput {
-            id,
-            kind,
-            status: input_status,
-            title,
-            body,
-            body_replace,
-            metadata,
-            project_hash,
-            session_id,
-            relations,
-        } = input;
-        // 1. Provided values are validated first: cheapest checks, most
-        // likely mistakes. `None` means "not mentioned" and skips validation.
-        if let Some(ref k) = kind {
-            validate_knowledge_kind(k)?;
-        }
+    pub fn upsert_intelligence_node(
+        &self,
+        mut input: IntelligenceNodeInput,
+    ) -> Result<UpsertResult> {
+        Self::validate_intelligence_node_input(&input)?;
 
-        // 2. A provided status must be a known value. `None` resolves below
-        // (create → "noted", update → preserve existing).
-        if let Some(ref s) = input_status {
-            validate_node_status(s)?;
-        }
-
-        // 3. New edges must use the knowledge-edge vocabulary. Existing
-        // stored edges are NOT validated retroactively: rejecting them on
-        // read would break every graph walk over the old corpus.
-        if let Some(ref rels) = relations {
-            for rel in rels {
-                validate_knowledge_edge_relation(&rel.relation)?;
-            }
-        }
-
-        // 4. `body` and `body_replace` are mutually exclusive: one names the
-        // whole new text, the other names a fragment of the old text.
-        if body.is_some() && body_replace.is_some() {
-            anyhow::bail!(
-                "body and body_replace are mutually exclusive: send either the full new body or a fragment replacement, not both"
-            );
-        }
-        if let Some(ref br) = body_replace {
-            if br.fragment.is_empty() {
-                anyhow::bail!("body_replace fragment must not be empty");
-            }
-        }
-
-        let node_id = id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let node_id = input
+            .id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let now = Utc::now().timestamp();
         let content_touched_at = Utc::now().timestamp_millis();
         let conn = self
@@ -458,155 +431,131 @@ impl Database {
         };
         let was_created = existing.is_none();
 
-        if was_created {
-            // ── Create path: kind, title and body are required. ──
-            let kind = kind.ok_or_else(|| {
-                anyhow!("create requires kind, title and body: no node with this id exists and one of them was omitted")
-            })?;
-            let title = title.ok_or_else(|| {
-                anyhow!("create requires kind, title and body: no node with this id exists and one of them was omitted")
-            })?;
-            let body = body.ok_or_else(|| {
-                anyhow!("create requires kind, title and body: no node with this id exists and one of them was omitted")
-            })?;
-            // A create cannot carry a fragment replacement: there is no
-            // existing body to match against.
-            if let Some(br) = body_replace {
-                anyhow::bail!(
-                    "body_replace needs an existing node: no node with id '{node_id}' exists (fragment '{}')",
-                    br.fragment
-                );
+        let mut changed_fields = match existing {
+            None => {
+                Self::create_intelligence_node(&conn, &node_id, input, now, content_touched_at)?
             }
-            let status = input_status.unwrap_or_else(|| "noted".to_string());
-            let metadata_str = metadata.flatten().map(|value| value.to_string());
-            let project_hash = project_hash.flatten();
-            let session_id = session_id.flatten();
-
-            // `superseded` is meaningless without the pointer to what holds
-            // instead: it requires a `supersedes` edge in the same write.
-            if status == "superseded" {
-                let has_supersedes = relations
-                    .as_ref()
-                    .map(|rels| rels.iter().any(|r| r.relation == "supersedes"))
-                    .unwrap_or(false);
-                if !has_supersedes {
-                    anyhow::bail!(
-                        "status 'superseded' requires a 'supersedes' edge pointing to the replacing node"
-                    );
-                }
-            }
-
-            conn.execute(
-                "INSERT INTO intelligence_nodes (
-                    id, kind, status, title, body, metadata, project_hash, session_id, created_at, updated_at, content_touched_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                rusqlite::params![
-                    node_id,
-                    kind,
-                    status,
-                    title,
-                    body,
-                    metadata_str,
-                    project_hash,
-                    session_id,
-                    now,
-                    now,
-                    content_touched_at
-                ],
-            )?;
-
-            let mut changed_fields = vec![
-                "kind".to_string(),
-                "status".to_string(),
-                "title".to_string(),
-                "body".to_string(),
-            ];
-            if metadata_str.is_some() {
-                changed_fields.push("metadata".to_string());
-            }
-            if project_hash.is_some() {
-                changed_fields.push("project_hash".to_string());
-            }
-            if session_id.is_some() {
-                changed_fields.push("session_id".to_string());
-            }
-            let relations_changed = relations.is_some();
-            if let Some(rels) = relations {
-                for relation in rels {
+            Some(prev) => {
+                let finals = Self::resolve_updated_fields(prev, &input, &node_id)?;
+                Self::ensure_supersedes_available(
+                    &conn,
+                    &node_id,
+                    &finals.status,
+                    input.relations.as_deref(),
+                )?;
+                Self::apply_node_update(&conn, &node_id, &finals, now, content_touched_at)?;
+                let mut changed_fields = finals.changed_fields;
+                if let Some(rels) = input.relations.take() {
+                    changed_fields.push("relations".to_string());
                     conn.execute(
-                        "INSERT INTO intelligence_edges (
-                            from_node_id, to_node_id, relation, weight, created_at
-                        ) VALUES (?1, ?2, ?3, ?4, ?5)",
-                        rusqlite::params![
-                            &node_id,
-                            relation.to_node_id,
-                            relation.relation,
-                            relation.weight.unwrap_or(1.0_f64),
-                            now
-                        ],
+                        "DELETE FROM intelligence_edges WHERE from_node_id = ?1",
+                        rusqlite::params![&node_id],
                     )?;
+                    Self::insert_intelligence_relations(&conn, &node_id, rels, now)?;
                 }
+                changed_fields
             }
-            if relations_changed {
-                changed_fields.push("relations".to_string());
-            }
-            changed_fields.push("updated_at".to_string());
+        };
+        changed_fields.push("updated_at".to_string());
 
-            drop(conn);
-            let record = self
-                .get_intelligence_node(&node_id)?
-                .ok_or_else(|| anyhow!("Failed to load intelligence node '{node_id}'"))?;
-            // Write-time signals, computed after the write lands: duplicate
-            // candidates (shared citations, then lexical ranking) and references
-            // to existing nodes that were mentioned but not declared as edges.
-            let duplicates = self.detect_duplicate_candidates(&record);
-            let undeclared_references = self.extract_undeclared_references(&record)?;
-            return Ok(UpsertResult {
-                record,
-                created: true,
-                duplicates,
-                undeclared_references,
-                changed_fields,
-            });
+        drop(conn);
+        let record = self
+            .get_intelligence_node(&node_id)?
+            .ok_or_else(|| anyhow!("Failed to load intelligence node '{node_id}'"))?;
+        // Write-time signals, computed after the write lands: duplicate
+        // candidates (shared citations, then lexical ranking) and references
+        // to existing nodes that were mentioned but not declared as edges.
+        let duplicates = self.detect_duplicate_candidates(&record);
+        let undeclared_references = self.extract_undeclared_references(&record)?;
+        Ok(UpsertResult {
+            record,
+            created: was_created,
+            duplicates,
+            undeclared_references,
+            changed_fields,
+        })
+    }
+
+    /// Validate the cheap, caller-facing invariants before any write.
+    fn validate_intelligence_node_input(input: &IntelligenceNodeInput) -> Result<()> {
+        // 1. Provided values are validated first: cheapest checks, most
+        // likely mistakes. `None` means "not mentioned" and skips validation.
+        if let Some(ref k) = input.kind {
+            validate_knowledge_kind(k)?;
         }
 
-        // ── Update path: omitted fields keep their stored values. ──
-        let prev = existing.expect("creation branch returned above");
+        // 2. A provided status must be a known value. `None` resolves below
+        // (create → "noted", update → preserve existing).
+        if let Some(ref s) = input.status {
+            validate_node_status(s)?;
+        }
+
+        // 3. New edges must use the knowledge-edge vocabulary. Existing
+        // stored edges are NOT validated retroactively: rejecting them on
+        // read would break every graph walk over the old corpus.
+        if let Some(ref rels) = input.relations {
+            for rel in rels {
+                validate_knowledge_edge_relation(&rel.relation)?;
+            }
+        }
+
+        // 4. `body` and `body_replace` are mutually exclusive: one names the
+        // whole new text, the other names a fragment of the old text.
+        if input.body.is_some() && input.body_replace.is_some() {
+            anyhow::bail!(
+                "body and body_replace are mutually exclusive: send either the full new body or a fragment replacement, not both"
+            );
+        }
+        if let Some(ref br) = input.body_replace {
+            if br.fragment.is_empty() {
+                anyhow::bail!("body_replace fragment must not be empty");
+            }
+        }
+        Ok(())
+    }
+
+    /// Resolve the stored values an update keeps or replaces, and record which
+    /// fields changed.
+    fn resolve_updated_fields(
+        prev: IntelligenceNodeRecord,
+        input: &IntelligenceNodeInput,
+        node_id: &str,
+    ) -> Result<IntelligenceNodeFinals> {
         let mut changed_fields: Vec<String> = Vec::new();
 
-        let final_kind = match kind {
+        let final_kind = match input.kind.as_ref() {
             Some(k) => {
-                if k != prev.kind {
+                if k != &prev.kind {
                     changed_fields.push("kind".to_string());
                 }
-                k
+                k.clone()
             }
             None => prev.kind,
         };
-        let final_status = match input_status {
+        let final_status = match input.status.as_ref() {
             Some(s) => {
-                if s != prev.status {
+                if s != &prev.status {
                     changed_fields.push("status".to_string());
                 }
-                s
+                s.clone()
             }
             None => prev.status,
         };
-        let final_title = match title {
+        let final_title = match input.title.as_ref() {
             Some(t) => {
-                if t != prev.title {
+                if t != &prev.title {
                     changed_fields.push("title".to_string());
                 }
-                t
+                t.clone()
             }
             None => prev.title,
         };
-        let final_body = match (body, body_replace) {
+        let final_body = match (input.body.as_ref(), input.body_replace.as_ref()) {
             (Some(b), None) => {
-                if b != prev.body {
+                if b != &prev.body {
                     changed_fields.push("body".to_string());
                 }
-                b
+                b.clone()
             }
             (None, Some(br)) => {
                 // Literal match only — never a regular expression. Zero
@@ -641,9 +590,9 @@ impl Database {
         };
         // Doubly-optional: `None` = not mentioned (keep), `Some(None)` =
         // clear, `Some(Some(v))` = set.
-        let final_metadata = match metadata {
+        let final_metadata = match input.metadata.as_ref() {
             Some(inner) => {
-                let as_str = inner.map(|value| value.to_string());
+                let as_str = inner.as_ref().map(|value| value.to_string());
                 if as_str != prev.metadata {
                     changed_fields.push("metadata".to_string());
                 }
@@ -651,80 +600,108 @@ impl Database {
             }
             None => prev.metadata,
         };
-        let final_project_hash = match project_hash {
+        let final_project_hash = match input.project_hash.as_ref() {
             Some(inner) => {
-                if inner != prev.project_hash {
+                if inner != &prev.project_hash {
                     changed_fields.push("project_hash".to_string());
                 }
-                inner
+                inner.clone()
             }
             None => prev.project_hash,
         };
-        let final_session_id = match session_id {
+        let final_session_id = match input.session_id.as_ref() {
             Some(inner) => {
-                if inner != prev.session_id {
+                if inner != &prev.session_id {
                     changed_fields.push("session_id".to_string());
                 }
-                inner
+                inner.clone()
             }
             None => prev.session_id,
         };
 
-        // `superseded` requires a `supersedes` edge. On update the edge may
-        // already be stored: only a write that replaces the edge list must
-        // carry the edge itself; a write that leaves relations untouched is
-        // checked against the stored edges.
-        if final_status == "superseded" {
-            let has_supersedes = match relations {
-                Some(ref rels) => rels.iter().any(|r| r.relation == "supersedes"),
-                None => {
-                    let mut stmt = conn.prepare(
-                        "SELECT COUNT(*) FROM intelligence_edges WHERE from_node_id = ?1 AND relation = 'supersedes'",
-                    )?;
-                    let count: i64 =
-                        stmt.query_row(rusqlite::params![&node_id], |row| row.get(0))?;
-                    count > 0
-                }
-            };
-            if !has_supersedes {
-                anyhow::bail!(
-                    "status 'superseded' requires a 'supersedes' edge pointing to the replacing node"
-                );
-            }
-        }
+        Ok(IntelligenceNodeFinals {
+            kind: final_kind,
+            status: final_status,
+            title: final_title,
+            body: final_body,
+            metadata: final_metadata,
+            project_hash: final_project_hash,
+            session_id: final_session_id,
+            changed_fields,
+        })
+    }
 
-        // Dynamic UPDATE: only SET columns that changed (plus updated_at).
+    /// `superseded` requires a `supersedes` edge. On update the edge may
+    /// already be stored: only a write that replaces the edge list must carry
+    /// the edge itself; a write that leaves relations untouched is checked
+    /// against the stored edges.
+    fn ensure_supersedes_available(
+        conn: &rusqlite::Connection,
+        node_id: &str,
+        final_status: &str,
+        relations: Option<&[IntelligenceRelationInput]>,
+    ) -> Result<()> {
+        if final_status != "superseded" {
+            return Ok(());
+        }
+        let has_supersedes = match relations {
+            Some(rels) => rels.iter().any(|r| r.relation == "supersedes"),
+            None => {
+                let mut stmt = conn.prepare(
+                    "SELECT COUNT(*) FROM intelligence_edges WHERE from_node_id = ?1 AND relation = 'supersedes'",
+                )?;
+                let count: i64 = stmt.query_row(rusqlite::params![node_id], |row| row.get(0))?;
+                count > 0
+            }
+        };
+        if !has_supersedes {
+            anyhow::bail!(
+                "status 'superseded' requires a 'supersedes' edge pointing to the replacing node"
+            );
+        }
+        Ok(())
+    }
+
+    /// Execute the dynamic `UPDATE intelligence_nodes` for an update, setting
+    /// only the columns that changed plus `updated_at` / `content_touched_at`.
+    fn apply_node_update(
+        conn: &rusqlite::Connection,
+        node_id: &str,
+        finals: &IntelligenceNodeFinals,
+        now: i64,
+        content_touched_at: i64,
+    ) -> Result<()> {
         // Each entry is (SET clause, boxed value) so the statement text and
         // the parameter list are built together.
         let mut set_clauses: Vec<&str> = Vec::new();
         let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-        if changed_fields.iter().any(|f| f == "kind") {
+        if finals.changed_fields.iter().any(|f| f == "kind") {
             set_clauses.push("kind = ?");
-            values.push(Box::new(final_kind));
+            values.push(Box::new(finals.kind.clone()));
         }
-        if changed_fields.iter().any(|f| f == "status") {
+        if finals.changed_fields.iter().any(|f| f == "status") {
             set_clauses.push("status = ?");
-            values.push(Box::new(final_status));
+            values.push(Box::new(finals.status.clone()));
         }
-        if changed_fields.iter().any(|f| f == "title") {
+        if finals.changed_fields.iter().any(|f| f == "title") {
             set_clauses.push("title = ?");
-            values.push(Box::new(final_title));
+            values.push(Box::new(finals.title.clone()));
         }
-        if changed_fields.iter().any(|f| f == "body") {
+        if finals.changed_fields.iter().any(|f| f == "body") {
             set_clauses.push("body = ?");
-            values.push(Box::new(final_body));
+            values.push(Box::new(finals.body.clone()));
         }
-        if changed_fields.iter().any(|f| f == "metadata") {
+        if finals.changed_fields.iter().any(|f| f == "metadata") {
             set_clauses.push("metadata = ?");
-            values.push(Box::new(final_metadata));
+            values.push(Box::new(finals.metadata.clone()));
         }
-        if changed_fields.iter().any(|f| f == "project_hash") {
+        if finals.changed_fields.iter().any(|f| f == "project_hash") {
             set_clauses.push("project_hash = ?");
-            values.push(Box::new(final_project_hash));
+            values.push(Box::new(finals.project_hash.clone()));
         }
-        if changed_fields.iter().any(|f| f == "session_id") {
+        if finals.changed_fields.iter().any(|f| f == "session_id") {
             set_clauses.push("session_id = ?");
-            values.push(Box::new(final_session_id));
+            values.push(Box::new(finals.session_id.clone()));
         }
         set_clauses.push("updated_at = ?");
         values.push(Box::new(now));
@@ -734,57 +711,140 @@ impl Database {
             "UPDATE intelligence_nodes SET {} WHERE id = ?",
             set_clauses.join(", ")
         );
-        {
-            let params: Vec<&dyn rusqlite::types::ToSql> =
-                values.iter().map(|v| v.as_ref()).collect();
-            // The WHERE id is the trailing parameter after every SET value.
-            let mut all: Vec<&dyn rusqlite::types::ToSql> = params;
-            all.push(&node_id);
-            conn.execute(&sql, all.as_slice())?;
-        }
+        let params: Vec<&dyn rusqlite::types::ToSql> = values.iter().map(|v| v.as_ref()).collect();
+        // The WHERE id is the trailing parameter after every SET value.
+        let mut all: Vec<&dyn rusqlite::types::ToSql> = params;
+        all.push(&node_id);
+        conn.execute(&sql, all.as_slice())?;
+        Ok(())
+    }
 
-        // Relations follow the same rule: not mentioning them leaves the
-        // node's relations alone; sending a list (even an empty one)
-        // replaces them.
-        if let Some(rels) = relations {
-            changed_fields.push("relations".to_string());
+    /// Insert the edges of a node's relation list.
+    fn insert_intelligence_relations(
+        conn: &rusqlite::Connection,
+        node_id: &str,
+        relations: Vec<IntelligenceRelationInput>,
+        now: i64,
+    ) -> Result<()> {
+        for relation in relations {
             conn.execute(
-                "DELETE FROM intelligence_edges WHERE from_node_id = ?1",
-                rusqlite::params![&node_id],
+                "INSERT INTO intelligence_edges (
+                    from_node_id, to_node_id, relation, weight, created_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    node_id,
+                    relation.to_node_id,
+                    relation.relation,
+                    relation.weight.unwrap_or(1.0_f64),
+                    now
+                ],
             )?;
-            for relation in rels {
-                conn.execute(
-                    "INSERT INTO intelligence_edges (
-                        from_node_id, to_node_id, relation, weight, created_at
-                    ) VALUES (?1, ?2, ?3, ?4, ?5)",
-                    rusqlite::params![
-                        &node_id,
-                        relation.to_node_id,
-                        relation.relation,
-                        relation.weight.unwrap_or(1.0_f64),
-                        now
-                    ],
-                )?;
+        }
+        Ok(())
+    }
+
+    /// Create a brand-new intelligence node and its edges. Returns the fields
+    /// the create reported as changed (without `updated_at`, which the caller
+    /// appends for both paths).
+    fn create_intelligence_node(
+        conn: &rusqlite::Connection,
+        node_id: &str,
+        input: IntelligenceNodeInput,
+        now: i64,
+        content_touched_at: i64,
+    ) -> Result<Vec<String>> {
+        let IntelligenceNodeInput {
+            kind,
+            status: input_status,
+            title,
+            body,
+            body_replace,
+            metadata,
+            project_hash,
+            session_id,
+            relations,
+            id: _,
+        } = input;
+
+        // ── Create path: kind, title and body are required. ──
+        let kind = kind.ok_or_else(|| {
+            anyhow!("create requires kind, title and body: no node with this id exists and one of them was omitted")
+        })?;
+        let title = title.ok_or_else(|| {
+            anyhow!("create requires kind, title and body: no node with this id exists and one of them was omitted")
+        })?;
+        let body = body.ok_or_else(|| {
+            anyhow!("create requires kind, title and body: no node with this id exists and one of them was omitted")
+        })?;
+        // A create cannot carry a fragment replacement: there is no
+        // existing body to match against.
+        if let Some(br) = body_replace {
+            anyhow::bail!(
+                "body_replace needs an existing node: no node with id '{node_id}' exists (fragment '{}')",
+                br.fragment
+            );
+        }
+        let status = input_status.unwrap_or_else(|| "noted".to_string());
+        let metadata_str = metadata.flatten().map(|value| value.to_string());
+        let project_hash = project_hash.flatten();
+        let session_id = session_id.flatten();
+
+        // `superseded` is meaningless without the pointer to what holds
+        // instead: it requires a `supersedes` edge in the same write.
+        if status == "superseded" {
+            let has_supersedes = relations
+                .as_ref()
+                .map(|rels| rels.iter().any(|r| r.relation == "supersedes"))
+                .unwrap_or(false);
+            if !has_supersedes {
+                anyhow::bail!(
+                    "status 'superseded' requires a 'supersedes' edge pointing to the replacing node"
+                );
             }
         }
-        changed_fields.push("updated_at".to_string());
 
-        drop(conn);
-        let record = self
-            .get_intelligence_node(&node_id)?
-            .ok_or_else(|| anyhow!("Failed to load intelligence node '{node_id}'"))?;
-        // Write-time signals, computed after the write lands: duplicate
-        // candidates (shared citations, then lexical ranking) and references
-        // to existing nodes that were mentioned but not declared as edges.
-        let duplicates = self.detect_duplicate_candidates(&record);
-        let undeclared_references = self.extract_undeclared_references(&record)?;
-        Ok(UpsertResult {
-            record,
-            created: false,
-            duplicates,
-            undeclared_references,
-            changed_fields,
-        })
+        conn.execute(
+            "INSERT INTO intelligence_nodes (
+                id, kind, status, title, body, metadata, project_hash, session_id, created_at, updated_at, content_touched_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            rusqlite::params![
+                node_id,
+                kind,
+                status,
+                title,
+                body,
+                metadata_str,
+                project_hash,
+                session_id,
+                now,
+                now,
+                content_touched_at
+            ],
+        )?;
+
+        let mut changed_fields = vec![
+            "kind".to_string(),
+            "status".to_string(),
+            "title".to_string(),
+            "body".to_string(),
+        ];
+        if metadata_str.is_some() {
+            changed_fields.push("metadata".to_string());
+        }
+        if project_hash.is_some() {
+            changed_fields.push("project_hash".to_string());
+        }
+        if session_id.is_some() {
+            changed_fields.push("session_id".to_string());
+        }
+        let relations_changed = relations.is_some();
+        if let Some(rels) = relations {
+            Self::insert_intelligence_relations(conn, node_id, rels, now)?;
+        }
+        if relations_changed {
+            changed_fields.push("relations".to_string());
+        }
+        Ok(changed_fields)
     }
 
     /// Write-time duplicate candidates for `node`, strongest signal first.
@@ -812,13 +872,7 @@ impl Database {
         let mut shared_references = extract_citations(&node.body);
         shared_references.extend(extract_node_id_references(&node.body));
         for citation in shared_references {
-            if let Ok(neighbours) = self.list_nodes_citing(&citation, &node.kind, &node.id) {
-                for neighbour in neighbours {
-                    if seen.insert(neighbour.id.clone()) {
-                        candidates.push(neighbour);
-                    }
-                }
-            }
+            self.push_citation_duplicates(&citation, node, &mut seen, &mut candidates);
         }
 
         // Signal 2: lexical ranking over title + body head, same kind only.
@@ -848,6 +902,25 @@ impl Database {
         }
 
         candidates
+    }
+
+    /// Add the same-kind nodes citing `citation` to `candidates`, skipping any
+    /// already seen. Best-effort: a lookup failure adds nothing.
+    fn push_citation_duplicates(
+        &self,
+        citation: &str,
+        node: &IntelligenceNodeRecord,
+        seen: &mut HashSet<String>,
+        candidates: &mut Vec<DuplicateCandidate>,
+    ) {
+        let Ok(neighbours) = self.list_nodes_citing(citation, &node.kind, &node.id) else {
+            return;
+        };
+        for neighbour in neighbours {
+            if seen.insert(neighbour.id.clone()) {
+                candidates.push(neighbour);
+            }
+        }
     }
 
     /// Same-kind nodes (excluding `exclude_id`) whose body mentions
@@ -1261,23 +1334,13 @@ impl Database {
 
             let mut next_frontier = VecDeque::new();
             for current in current_level {
-                for edge in self.list_recent_intelligence_edges(&current)? {
-                    if collected_edges
-                        .iter()
-                        .all(|existing| existing.id != edge.id)
-                    {
-                        collected_edges.push(edge.clone());
-                    }
-
-                    for neighbor in [edge.from_node_id.clone(), edge.to_node_id.clone()] {
-                        if visited_nodes.insert(neighbor.clone()) {
-                            if let Some(node) = self.get_intelligence_node(&neighbor)? {
-                                collected_nodes.insert(neighbor.clone(), node);
-                                next_frontier.push_back(neighbor);
-                            }
-                        }
-                    }
-                }
+                self.visit_intelligence_neighbors(
+                    &current,
+                    &mut collected_edges,
+                    &mut collected_nodes,
+                    &mut visited_nodes,
+                    &mut next_frontier,
+                )?;
             }
             frontier = next_frontier;
         }
@@ -1287,6 +1350,38 @@ impl Database {
             nodes: collected_nodes.into_values().collect(),
             edges: collected_edges,
         }))
+    }
+
+    /// Collect the edges and unvisited neighbours of `current` for one step of
+    /// [`Database::walk_intelligence_graph`].
+    fn visit_intelligence_neighbors(
+        &self,
+        current: &str,
+        collected_edges: &mut Vec<IntelligenceEdgeRecord>,
+        collected_nodes: &mut HashMap<String, IntelligenceNodeRecord>,
+        visited_nodes: &mut HashSet<String>,
+        next_frontier: &mut VecDeque<String>,
+    ) -> Result<()> {
+        for edge in self.list_recent_intelligence_edges(current)? {
+            if collected_edges
+                .iter()
+                .all(|existing| existing.id != edge.id)
+            {
+                collected_edges.push(edge.clone());
+            }
+
+            for neighbor in [edge.from_node_id.clone(), edge.to_node_id.clone()] {
+                if !visited_nodes.insert(neighbor.clone()) {
+                    continue;
+                }
+                let Some(node) = self.get_intelligence_node(&neighbor)? else {
+                    continue;
+                };
+                collected_nodes.insert(neighbor.clone(), node);
+                next_frontier.push_back(neighbor);
+            }
+        }
+        Ok(())
     }
 
     pub fn list_cross_project_dependencies(
@@ -1569,23 +1664,7 @@ impl Database {
         let projects = self.list_projects()?;
         let mut pairs: Vec<(String, String)> = Vec::new();
         for child in &projects {
-            let child_path = std::path::Path::new(&child.path);
-            let mut best: Option<&crate::domain::project::Project> = None;
-            let mut best_depth = 0usize;
-            for parent in &projects {
-                if parent.hash == child.hash {
-                    continue;
-                }
-                let parent_path = std::path::Path::new(&parent.path);
-                if child_path.starts_with(parent_path) {
-                    let depth = parent_path.components().count();
-                    if depth > best_depth {
-                        best_depth = depth;
-                        best = Some(parent);
-                    }
-                }
-            }
-            if let Some(parent) = best {
+            if let Some(parent) = Self::deepest_containing_parent(child, &projects) {
                 pairs.push((parent.hash.clone(), child.hash.clone()));
             }
         }
@@ -1618,6 +1697,33 @@ impl Database {
             inserted += 1;
         }
         Ok(inserted)
+    }
+
+    /// The deepest registered project whose path is a component-wise ancestor
+    /// of `child` (`Path::starts_with` — never a string prefix), or `None`.
+    /// The strict `>` keeps the first-deepest tie-break.
+    fn deepest_containing_parent<'a>(
+        child: &crate::domain::project::Project,
+        projects: &'a [crate::domain::project::Project],
+    ) -> Option<&'a crate::domain::project::Project> {
+        let child_path = std::path::Path::new(&child.path);
+        let mut best: Option<&crate::domain::project::Project> = None;
+        let mut best_depth = 0usize;
+        for parent in projects {
+            if parent.hash == child.hash {
+                continue;
+            }
+            let parent_path = std::path::Path::new(&parent.path);
+            if !child_path.starts_with(parent_path) {
+                continue;
+            }
+            let depth = parent_path.components().count();
+            if depth > best_depth {
+                best_depth = depth;
+                best = Some(parent);
+            }
+        }
+        best
     }
 
     /// BFS project-scope traversal from `root_hash` up to `depth` hops.
@@ -1693,31 +1799,14 @@ impl Database {
         for _ in 0..depth {
             let mut next_frontier: Vec<(String, usize)> = Vec::new();
             for (current, cur_depth) in &frontier {
-                for edge in &edges {
-                    let neighbor: Option<(&str, &str)> = if edge.from_node_id == *current {
-                        // Outbound: all relations followed.
-                        Some((edge.to_node_id.as_str(), edge.relation.as_str()))
-                    } else if edge.to_node_id == *current
-                        && (edge.relation == "complements" || edge.relation == "contains")
-                    {
-                        // Reverse: only symmetric complements + upward contains.
-                        Some((edge.from_node_id.as_str(), edge.relation.as_str()))
-                    } else {
-                        None
-                    };
-                    if let Some((neighbor_id, relation)) = neighbor {
-                        if visited.insert(neighbor_id.to_string()) {
-                            if let Some(hash) = node_hash.get(neighbor_id) {
-                                projects.push(TraversedProject {
-                                    hash: hash.clone(),
-                                    via_relation: Some(relation.to_string()),
-                                    depth: cur_depth + 1,
-                                });
-                            }
-                            next_frontier.push((neighbor_id.to_string(), cur_depth + 1));
-                        }
-                    }
-                }
+                next_frontier.extend(Self::expand_scope_frontier(
+                    current,
+                    *cur_depth,
+                    &edges,
+                    &node_hash,
+                    &mut visited,
+                    &mut projects,
+                ));
             }
             if next_frontier.is_empty() {
                 break;
@@ -1726,6 +1815,56 @@ impl Database {
         }
         let reached = projects.len().saturating_sub(1);
         Ok(TraversalScope { projects, reached })
+    }
+
+    /// The neighbour `current` reaches through `edge`, when the relation is
+    /// followed from that direction: outbound for every relation, reverse only
+    /// for symmetric `complements` and upward `contains`.
+    fn scope_neighbor<'a>(
+        edge: &'a IntelligenceEdgeRecord,
+        current: &str,
+    ) -> Option<(&'a str, &'a str)> {
+        if edge.from_node_id == current {
+            // Outbound: all relations followed.
+            Some((edge.to_node_id.as_str(), edge.relation.as_str()))
+        } else if edge.to_node_id == current
+            && (edge.relation == "complements" || edge.relation == "contains")
+        {
+            // Reverse: only symmetric complements + upward contains.
+            Some((edge.from_node_id.as_str(), edge.relation.as_str()))
+        } else {
+            None
+        }
+    }
+
+    /// One BFS expansion step: visit every edge of `current`, recording newly
+    /// reached projects and returning the next frontier.
+    fn expand_scope_frontier(
+        current: &str,
+        cur_depth: usize,
+        edges: &[IntelligenceEdgeRecord],
+        node_hash: &HashMap<String, String>,
+        visited: &mut HashSet<String>,
+        projects: &mut Vec<TraversedProject>,
+    ) -> Vec<(String, usize)> {
+        let mut next_frontier: Vec<(String, usize)> = Vec::new();
+        for edge in edges {
+            let Some((neighbor_id, relation)) = Self::scope_neighbor(edge, current) else {
+                continue;
+            };
+            if !visited.insert(neighbor_id.to_string()) {
+                continue;
+            }
+            if let Some(hash) = node_hash.get(neighbor_id) {
+                projects.push(TraversedProject {
+                    hash: hash.clone(),
+                    via_relation: Some(relation.to_string()),
+                    depth: cur_depth + 1,
+                });
+            }
+            next_frontier.push((neighbor_id.to_string(), cur_depth + 1));
+        }
+        next_frontier
     }
 
     /// Impact warning source: projects that declare `depends_on` ON `hash`.
@@ -1925,14 +2064,10 @@ impl Database {
             if node.kind != "project" {
                 continue;
             }
-            if let Some(meta) = node.metadata.as_deref() {
-                if let Ok(value) = serde_json::from_str::<serde_json::Value>(meta) {
-                    if value.get("source").and_then(|s| s.as_str()) == Some("registry") {
-                        anyhow::bail!(
-                            "refusing to retype node '{id}': it is a registry project node, not a backlog note"
-                        );
-                    }
-                }
+            if Self::node_is_registry_project(&node) {
+                anyhow::bail!(
+                    "refusing to retype node '{id}': it is a registry project node, not a backlog note"
+                );
             }
             let conn = self
                 .conn
@@ -1945,6 +2080,17 @@ impl Database {
             retyped += 1;
         }
         Ok(retyped)
+    }
+
+    /// Whether a node's `metadata` marks it as a registry-sourced project node.
+    fn node_is_registry_project(node: &IntelligenceNodeRecord) -> bool {
+        let Some(meta) = node.metadata.as_deref() else {
+            return false;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(meta) else {
+            return false;
+        };
+        value.get("source").and_then(|s| s.as_str()) == Some("registry")
     }
 
     /// Seed the four known cross-project `depends_on` edges (best-effort).
@@ -3272,6 +3418,34 @@ mod tests {
         assert!(
             result.duplicates.iter().any(|n| n.id == "cite-a"),
             "expected cite-a among duplicates, got: {:?}",
+            result.duplicates.iter().map(|n| &n.id).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn duplicate_detection_dedupes_a_neighbour_cited_twice() {
+        let db = test_db();
+        db.upsert_intelligence_node(IntelligenceNodeInput {
+            body: Some("see src/foo.rs:10 and src/bar.rs:20".to_string()),
+            body_replace: None,
+            ..sample_node_input("dedupe-a")
+        })
+        .unwrap();
+        let result = db
+            .upsert_intelligence_node(IntelligenceNodeInput {
+                body: Some("also see src/foo.rs:10 and src/bar.rs:20".to_string()),
+                body_replace: None,
+                ..sample_node_input("dedupe-b")
+            })
+            .unwrap();
+        assert_eq!(
+            result
+                .duplicates
+                .iter()
+                .filter(|n| n.id == "dedupe-a")
+                .count(),
+            1,
+            "a neighbour reaching both citations must be reported once, got: {:?}",
             result.duplicates.iter().map(|n| &n.id).collect::<Vec<_>>()
         );
     }

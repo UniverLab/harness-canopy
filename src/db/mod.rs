@@ -28,512 +28,11 @@ pub struct Database {
     conn: Arc<Mutex<Connection>>,
 }
 
-impl Database {
-    pub fn new(db_path: &PathBuf) -> Result<Self> {
-        let conn = Connection::open(db_path)?;
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
-        let db = Database {
-            conn: Arc::new(Mutex::new(conn)),
-        };
-        db.init()?;
-        if let Err(e) = db.backfill_project_nodes() {
-            tracing::warn!("Could not backfill project intelligence nodes: {e}");
-        }
-        // CM9 typed project graph: retype backlog notes, derive containment,
-        // seed known cross-project dependencies. All best-effort: open must
-        // never fail because a seed path isn't registered.
-        if let Err(e) = db.retype_backlog_project_nodes() {
-            tracing::warn!("Could not retype backlog project nodes: {e}");
-        }
-        match db.rebuild_containment_edges() {
-            Ok(count) => tracing::debug!("Rebuilt {count} derived containment edge(s)"),
-            Err(e) => tracing::warn!("Could not rebuild containment edges: {e}"),
-        }
-        if let Err(e) = db.seed_cm9_project_dependencies() {
-            tracing::warn!("Could not seed CM9 project dependencies: {e}");
-        }
-        if let Err(e) = db.seed_builtin_blueprints() {
-            tracing::warn!("Could not seed builtin blueprints: {e}");
-        }
-        if let Err(e) = db.seed_builtin_ensemble_blueprints() {
-            tracing::warn!("Could not seed builtin ensemble blueprints: {e}");
-        }
-        Ok(db)
-    }
-
-    /// Test-only escape hatch: run raw SQL against the handle. Lets UI tests
-    /// pin signal timestamps to deterministic values instead of depending on
-    /// wall-clock monotonicity — backward NTP/VM steps of hundreds of ms make
-    /// "write, tick, write, tick" sequences flaky (PR #51 CI failure), and no
-    /// sleep can cover a backward jump.
-    #[cfg(test)]
-    pub(crate) fn exec_test_sql(&self, sql: &str) -> Result<()> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
-        conn.execute_batch(sql)?;
-        Ok(())
-    }
-
-    /// Open the database, running migrations only if no foreign daemon is live.
-    /// If a daemon is running, opens the file without running migrations or
-    /// seeding (reads and ordinary writes against the existing schema still
-    /// work) so a newer binary's migrations don't rename columns under a live
-    /// older daemon. Every non-daemon path that opens the real `~/.canopy`
-    /// database must use this instead of `new` — `run_http_server` is the one
-    /// exception, because it holds the daemon lock and therefore *is* the
-    /// daemon.
-    pub fn new_safe(db_path: &PathBuf, data_dir: &std::path::Path) -> Result<Self> {
-        if crate::daemon::process::other_instance_may_be_running(data_dir) {
-            let conn = Connection::open(db_path)?;
-            conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
-            return Ok(Database {
-                conn: Arc::new(Mutex::new(conn)),
-            });
-        }
-        Database::new(db_path)
-    }
-
-    /// Refuses to open a database stamped with a schema version newer than
-    /// this binary knows about. Without this, an older binary meeting a
-    /// renamed/restructured schema would pass every `IF NOT EXISTS` guard
-    /// (the old names it looks for are simply gone) and start up believing
-    /// every table is empty — silent data loss from its perspective. A
-    /// missing `schema_version` row (pre-dates this check, or a brand new
-    /// database) is not a mismatch; every migration below is still
-    /// self-guarding for that case.
-    fn check_schema_version(conn: &Connection) -> Result<()> {
-        let daemon_state_exists: bool = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'daemon_state'",
-                [],
-                |row| Ok(row.get::<_, i32>(0)? > 0),
-            )
-            .unwrap_or(false);
-        if !daemon_state_exists {
-            return Ok(());
-        }
-
-        let stored: Option<i64> = conn
-            .query_row(
-                "SELECT value FROM daemon_state WHERE key = 'schema_version'",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?
-            .and_then(|v| v.parse::<i64>().ok());
-
-        if let Some(stored) = stored {
-            if stored > SCHEMA_VERSION {
-                anyhow::bail!(
-                    "Database schema version {stored} is newer than this build of canopy (v{}) supports (schema version {SCHEMA_VERSION}). Upgrade canopy before opening this database.",
-                    env!("CARGO_PKG_VERSION")
-                );
-            }
-        }
-        Ok(())
-    }
-
-    fn set_schema_version(conn: &Connection) -> Result<()> {
-        conn.execute(
-            "INSERT INTO daemon_state (key, value) VALUES ('schema_version', ?1)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            [SCHEMA_VERSION.to_string()],
-        )?;
-        Ok(())
-    }
-
-    /// Renames the previous-generation queue tables and columns (retired
-    /// names recorded only as literal SQL below, since renaming requires
-    /// naming what's being renamed) to their current equivalents. Guarded on
-    /// the old primary table's existence, so it's a no-op on both a fresh
-    /// database (never had it) and an already-migrated one (already renamed
-    /// away) — safe to run on every startup. Must run before the `CREATE
-    /// TABLE IF NOT EXISTS` batch below, which would otherwise create empty
-    /// `queues`/`queue_members` tables first and make the rename fail with
-    /// "table already exists".
-    // RETIRED-SCHEMA-NAME-BEGIN (see `no_retired_schema_name_identifiers_remain_outside_its_migration`)
-    fn migrate_legacy_queue_schema(conn: &Connection) -> Result<()> {
-        let legacy_schema_present: bool = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'pools'",
-                [],
-                |row| Ok(row.get::<_, i32>(0)? > 0),
-            )
-            .unwrap_or(false);
-        if !legacy_schema_present {
-            return Ok(());
-        }
-
-        let legacy_active_run_alias_present: bool = conn
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('graphs') WHERE name = 'active_run_pool_id'",
-                [],
-                |row| Ok(row.get::<_, i32>(0)? > 0),
-            )
-            .unwrap_or(false);
-        let legacy_template_column_present: bool = conn
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('graphs') WHERE name = 'spec_pool'",
-                [],
-                |row| Ok(row.get::<_, i32>(0)? > 0),
-            )
-            .unwrap_or(false);
-
-        let mut migration_sql = String::from(
-            "PRAGMA legacy_alter_table = OFF;
-             BEGIN TRANSACTION;
-             ALTER TABLE pools RENAME TO queues;
-             ALTER TABLE pool_members RENAME TO queue_members;
-             ALTER TABLE queue_members RENAME COLUMN pool_id TO queue_id;
-             DROP INDEX IF EXISTS idx_pool_members_position;
-             CREATE UNIQUE INDEX IF NOT EXISTS idx_queue_members_position
-                 ON queue_members(queue_id, position);
-            ",
-        );
-        if legacy_active_run_alias_present {
-            migration_sql.push_str(
-                "ALTER TABLE graphs RENAME COLUMN active_run_pool_id TO active_run_queue_id;\n",
-            );
-        }
-        if legacy_template_column_present {
-            migration_sql.push_str("ALTER TABLE graphs RENAME COLUMN spec_pool TO spec_queue;\n");
-        }
-        migration_sql.push_str("COMMIT;");
-
-        conn.execute_batch(&migration_sql)
-            .map_err(|e| anyhow::anyhow!("legacy queue schema migration failed: {e}"))?;
-
-        let fk_violations: i64 = conn
-            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
-                row.get(0)
-            })
-            .map_err(|e| anyhow::anyhow!("legacy queue schema migration failed: {e}"))?;
-        if fk_violations > 0 {
-            anyhow::bail!(
-                "legacy queue schema migration failed: {fk_violations} foreign key violation(s) detected after migration"
-            );
-        }
-
-        Ok(())
-    }
-    // RETIRED-SCHEMA-NAME-END
-
-    // RETIRED-SCHEMA-NAME-BEGIN (CC3 loop → graph migration)
-    fn migrate_loop_to_graph_schema(conn: &Connection) -> Result<()> {
-        let has_loops: bool = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'loops'",
-                [],
-                |row| Ok(row.get::<_, i32>(0)? > 0),
-            )
-            .unwrap_or(false);
-        if !has_loops {
-            return Ok(());
-        }
-        let has_graphs: bool = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'graphs'",
-                [],
-                |row| Ok(row.get::<_, i32>(0)? > 0),
-            )
-            .unwrap_or(false);
-        if has_graphs {
-            return Ok(());
-        }
-
-        conn.execute_batch(
-            "PRAGMA legacy_alter_table = OFF;
-             BEGIN TRANSACTION;
-             ALTER TABLE loops RENAME TO graphs;
-             ALTER TABLE loop_specs RENAME TO graph_specs;
-             ALTER TABLE loop_nodes RENAME TO graph_nodes;
-             ALTER TABLE loop_edges RENAME TO graph_edges;
-             ALTER TABLE loop_runs RENAME TO graph_runs;
-             ALTER TABLE loop_completion_hook_runs RENAME TO graph_completion_hook_runs;
-             ",
-        )
-        .map_err(|e| anyhow::anyhow!("graph to graph schema migration failed: {e}"))?;
-
-        // Column renames — each guarded by `pragma_table_info` (older
-        // databases may lack `loop_id` on tables that gained top-level
-        // targeting later, and a re-run must never fail on an already
-        // renamed column). The `graphs.active_run_pool_id` / `spec_pool`
-        // guards cover the ordering edge: `migrate_legacy_queue_schema`
-        // runs first but looks for `graphs`, so a database that still has
-        // both `pools` and `graphs` reaches this function with its
-        // queue-era columns untouched — renamed here instead of orphaned.
-        for (table, old, new_) in [
-            ("graph_specs", "loop_id", "graph_id"),
-            ("graph_nodes", "loop_id", "graph_id"),
-            ("graph_edges", "loop_id", "graph_id"),
-            ("graph_runs", "loop_id", "graph_id"),
-            ("graph_completion_hook_runs", "loop_id", "graph_id"),
-            ("ensembles", "loop_id", "graph_id"),
-            ("graphs", "active_run_pool_id", "active_run_queue_id"),
-            ("graphs", "spec_pool", "spec_queue"),
-        ] {
-            let has: bool = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
-                    [table, old],
-                    |row| Ok(row.get::<_, i32>(0)? > 0),
-                )
-                .unwrap_or(false);
-            if has {
-                conn.execute(
-                    &format!("ALTER TABLE {table} RENAME COLUMN {old} TO {new_}"),
-                    [],
-                )
-                .map_err(|e| anyhow::anyhow!("graph to graph schema migration failed: {e}"))?;
-            }
-        }
-
-        conn.execute(
-            "UPDATE graph_edges SET condition = 'error' WHERE condition = 'break'",
-            [],
-        )
-        .map_err(|e| anyhow::anyhow!("graph to graph schema migration failed: {e}"))?;
-        // `ensembles.entry_condition` only exists on databases new enough
-        // for ensembles — guard so very old databases don't fail here.
-        let has_entry_condition: bool = conn
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('ensembles') WHERE name = 'entry_condition'",
-                [],
-                |row| Ok(row.get::<_, i32>(0)? > 0),
-            )
-            .unwrap_or(false);
-        if has_entry_condition {
-            conn.execute(
-                "UPDATE ensembles SET entry_condition = 'error' WHERE entry_condition = 'break'",
-                [],
-            )
-            .map_err(|e| anyhow::anyhow!("graph to graph schema migration failed: {e}"))?;
-        }
-        conn.execute(
-            "UPDATE graph_nodes SET config = REPLACE(config, '{{loop_name}}', '{{graph_name}}')
-                WHERE config LIKE '%{{loop_name}}%'",
-            [],
-        )
-        .map_err(|e| anyhow::anyhow!("graph to graph schema migration failed: {e}"))?;
-        conn.execute_batch(
-            "DROP INDEX IF EXISTS idx_loop_specs_position;
-             DROP INDEX IF EXISTS idx_loop_nodes_position;
-             DROP INDEX IF EXISTS idx_loop_edges_spec_from;
-             DROP INDEX IF EXISTS idx_loop_runs_spec_started;
-             DROP INDEX IF EXISTS idx_loop_runs_node_iteration;
-             DROP INDEX IF EXISTS idx_loop_runs_loop_started;
-             DROP INDEX IF EXISTS idx_loop_completion_hook_runs_loop_started;
-             CREATE UNIQUE INDEX IF NOT EXISTS idx_graph_specs_position
-                 ON graph_specs(graph_id, position);
-             CREATE INDEX IF NOT EXISTS idx_graph_edges_spec_from
-                 ON graph_edges(spec_id, from_node);
-             CREATE INDEX IF NOT EXISTS idx_graph_runs_spec_started
-                 ON graph_runs(spec_id, started_at ASC);
-             CREATE INDEX IF NOT EXISTS idx_graph_runs_node_iteration
-                 ON graph_runs(node_id, iteration DESC);
-             CREATE INDEX IF NOT EXISTS idx_graph_runs_graph_started
-                 ON graph_runs(graph_id, started_at DESC);
-             CREATE INDEX IF NOT EXISTS idx_graph_completion_hook_runs_graph_started
-                 ON graph_completion_hook_runs(graph_id, started_at ASC);
-             COMMIT;",
-        )
-        .map_err(|e| anyhow::anyhow!("graph to graph schema migration failed: {e}"))?;
-
-        let fk_violations: i64 = conn
-            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
-                row.get(0)
-            })
-            .map_err(|e| anyhow::anyhow!("graph to graph schema migration failed: {e}"))?;
-        if fk_violations > 0 {
-            anyhow::bail!("graph to graph schema migration failed: {fk_violations} foreign key violation(s) detected after migration");
-        }
-        Ok(())
-    }
-    // RETIRED-SCHEMA-NAME-END
-
-    // RETIRED-VOCAB-BEGIN (CB63: this migration rewrites stored rows and
-    // must name the retired prefix to do it; exempt from
-    // `no_retired_vocabulary_in_user_visible_surfaces`)
-    /// CB63: the engine's activity attribution was `loop:<name>` until the
-    /// loop→graph rename reached it (CC3 moved everything else). Rows written
-    /// by pre-CB63 binaries still carry the old prefix in
-    /// `activity_log.source`; rewrite the anchored prefix to `graph:`.
-    /// Idempotent by construction — the `LIKE 'loop:%'` predicate matches no
-    /// row once rewritten — so safe on every startup, the same
-    /// guarded-and-re-runnable shape as `migrate_loop_to_graph_schema` (CC3).
-    fn migrate_activity_attribution_prefix(conn: &Connection) -> Result<()> {
-        let has_activity_log: bool = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'activity_log'",
-                [],
-                |row| Ok(row.get::<_, i32>(0)? > 0),
-            )
-            .unwrap_or(false);
-        if !has_activity_log {
-            return Ok(());
-        }
-        // Anchored prefix rewrite, deliberately not
-        // `REPLACE(source, 'loop:', 'graph:')`: REPLACE would also rewrite a
-        // graph *name* that contains "loop:" (e.g. a graph named
-        // "loop:keeper"), corrupting the attribution. `substr(source, 6)`
-        // drops the 5-byte `loop:` prefix (SQLite substr is 1-based).
-        conn.execute(
-            "UPDATE activity_log
-                SET source = 'graph:' || substr(source, 6)
-              WHERE source LIKE 'loop:%'",
-            [],
-        )
-        .map_err(|e| anyhow::anyhow!("activity attribution migration failed: {e}"))?;
-        Ok(())
-    }
-    // RETIRED-VOCAB-END
-
-    /// CB52: the `ensembles` entry/exit FKs (`entry_from_node`, `on_pass_to`,
-    /// `on_fail_to`) used to be `ON DELETE CASCADE` / `ON DELETE SET NULL`,
-    /// so deleting a plain node silently deleted every ensemble referencing
-    /// it and orphaned its members/join. Fresh databases get `ON DELETE
-    /// RESTRICT` from the `CREATE TABLE` batch below; this rebuilds the table
-    /// on existing databases. SQLite cannot `ALTER` FK actions, so the table
-    /// is copied and renamed — the documented procedure (foreign keys off
-    /// during the rebuild, `foreign_key_check` after). The replacement table
-    /// is derived from the stored DDL by swapping exactly the three FK
-    /// actions, so later columns (`kind`, `round_robin_index`,
-    /// `quorum_grace_minutes`, `commit_rights`, ...) survive untouched.
-    /// Never auto-repairs orphans (C1): pre-existing orphan joins are
-    /// reported by `canopy doctor` instead.
-    fn migrate_cb52_ensemble_fk(conn: &Connection) -> Result<()> {
-        let sql: Option<String> = conn
-            .query_row(
-                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'ensembles'",
-                [],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let Some(sql) = sql else {
-            return Ok(());
-        };
-        const ENTRY_CASCADE: &str =
-            "entry_from_node TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE";
-        const PASS_CASCADE: &str =
-            "on_pass_to TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE";
-        const FAIL_SET_NULL: &str = "on_fail_to TEXT REFERENCES graph_nodes(id) ON DELETE SET NULL";
-        if !sql.contains(ENTRY_CASCADE)
-            && !sql.contains(PASS_CASCADE)
-            && !sql.contains(FAIL_SET_NULL)
-        {
-            return Ok(());
-        }
-        // The first `ensembles` in the stored DDL is the table name itself.
-        let new_sql = sql
-            .replacen("ensembles", "ensembles_new", 1)
-            .replace(
-                ENTRY_CASCADE,
-                "entry_from_node TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE RESTRICT",
-            )
-            .replace(
-                PASS_CASCADE,
-                "on_pass_to TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE RESTRICT",
-            )
-            .replace(
-                FAIL_SET_NULL,
-                "on_fail_to TEXT REFERENCES graph_nodes(id) ON DELETE RESTRICT",
-            );
-        if !new_sql.contains("ensembles_new")
-            || !new_sql.contains("ON DELETE RESTRICT")
-            || new_sql.contains(ENTRY_CASCADE)
-            || new_sql.contains(PASS_CASCADE)
-            || new_sql.contains(FAIL_SET_NULL)
-        {
-            anyhow::bail!("CB52 ensemble FK migration failed: unexpected stored ensembles DDL");
-        }
-        let mut stmt = conn.prepare("SELECT name FROM pragma_table_info('ensembles')")?;
-        let cols: Vec<String> = stmt
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        if cols.is_empty() {
-            anyhow::bail!("CB52 ensemble FK migration failed: ensembles table has no columns");
-        }
-        let collist = cols.join(", ");
-
-        conn.execute_batch("PRAGMA foreign_keys=OFF;")?;
-        let rebuild = (|| -> Result<()> {
-            conn.execute_batch("BEGIN TRANSACTION;")?;
-            let steps = [
-                new_sql.clone(),
-                format!("INSERT INTO ensembles_new ({collist}) SELECT {collist} FROM ensembles;"),
-                "DROP TABLE ensembles;".to_string(),
-                "ALTER TABLE ensembles_new RENAME TO ensembles;".to_string(),
-                "CREATE INDEX IF NOT EXISTS idx_ensembles_join_node ON ensembles(join_node_id);"
-                    .to_string(),
-            ];
-            for step in &steps {
-                if let Err(e) = conn.execute_batch(step) {
-                    let _ = conn.execute_batch("ROLLBACK;");
-                    anyhow::bail!("CB52 ensemble FK migration failed: {e}");
-                }
-            }
-            if let Err(e) = conn.execute_batch("COMMIT;") {
-                let _ = conn.execute_batch("ROLLBACK;");
-                anyhow::bail!("CB52 ensemble FK migration failed: {e}");
-            }
-            Ok(())
-        })();
-        conn.execute_batch("PRAGMA foreign_keys=ON;")?;
-        rebuild?;
-
-        let fk_violations: i64 = conn
-            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
-                row.get(0)
-            })
-            .map_err(|e| anyhow::anyhow!("CB52 ensemble FK migration failed: {e}"))?;
-        if fk_violations > 0 {
-            anyhow::bail!(
-                "CB52 ensemble FK migration failed: {fk_violations} foreign key violation(s) detected after migration"
-            );
-        }
-        Ok(())
-    }
-
-    /// Shortens a `rusqlite` batch/statement failure to the SQLite error
-    /// reason plus just the failing statement's first line. Without this,
-    /// `rusqlite::Error::SqlInputError`'s `Display` embeds the *entire
-    /// remaining* SQL text passed to the failing `prepare()` call — for a
-    /// failure early in the base schema batch that's hundreds of lines
-    /// (this is what `canopy doctor` dumped for CB56). Because
-    /// `execute_batch` re-slices its input to start at the next
-    /// unconsumed statement each iteration, the remaining SQL always
-    /// *starts* with the statement that just failed, so its first line is
-    /// exactly the right thing to show.
-    fn describe_sql_failure(step: &str, e: &rusqlite::Error) -> anyhow::Error {
-        match e {
-            rusqlite::Error::SqlInputError { msg, sql, .. } => {
-                let first_line = sql
-                    .lines()
-                    .map(str::trim)
-                    .find(|line| !line.is_empty())
-                    .unwrap_or("");
-                anyhow::anyhow!("{step}: {msg} (statement: {first_line})")
-            }
-            other => anyhow::anyhow!("{step}: {other}"),
-        }
-    }
-
-    fn init(&self) -> Result<()> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
-
-        Self::check_schema_version(&conn)?;
-        Self::migrate_legacy_queue_schema(&conn)?;
-        Self::migrate_loop_to_graph_schema(&conn)?;
-        Self::migrate_cb52_ensemble_fk(&conn)?;
-        Self::migrate_activity_attribution_prefix(&conn)?;
-
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS agents (
+/// Base schema: every table and index created on a fresh database. Kept out of
+/// the function body (clippy fn-length) and split into ordered `execute_batch`
+/// chunks; concatenated, the chunks are the original single batch.
+const BASE_SCHEMA_BATCHES: &[&str] = &[
+    "CREATE TABLE IF NOT EXISTS agents (
                 id TEXT PRIMARY KEY,
                 prompt TEXT NOT NULL,
                 trigger_type TEXT,
@@ -1027,7 +526,8 @@ impl Database {
                 expires_at TEXT NOT NULL,
                 pid INTEGER,
                 boot_id TEXT
-            );
+            );",
+    "
 
             -- CM18: tombstones for blocking `subagent_spawn` deliveries. A
             -- blocking spawn returns its result inline and deletes the
@@ -1057,9 +557,620 @@ impl Database {
                 status TEXT NOT NULL DEFAULT 'active',
                 cleanup_error TEXT
             );",
-        )
-        .map_err(|e| Self::describe_sql_failure("base schema batch", &e))?;
+];
 
+impl Database {
+    pub fn new(db_path: &PathBuf) -> Result<Self> {
+        let conn = Self::open_connection_with_pragmas(db_path)?;
+        let db = Database {
+            conn: Arc::new(Mutex::new(conn)),
+        };
+        db.init()?;
+        db.seed_startup_intelligence();
+        Ok(db)
+    }
+
+    /// Open the database file and set the pragmas every fresh connection needs.
+    fn open_connection_with_pragmas(db_path: &PathBuf) -> Result<Connection> {
+        let conn = Connection::open(db_path)?;
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+        Ok(conn)
+    }
+
+    /// Best-effort log for a startup step that failed; open must never fail
+    /// because a seed or backfill path isn't registered.
+    fn log_startup_step_failure(&self, step: &str, e: &anyhow::Error) {
+        tracing::warn!("Could not {step}: {e}");
+    }
+
+    /// Best-effort log for a successful containment rebuild.
+    fn log_rebuilt_containment(&self, count: usize) {
+        tracing::debug!("Rebuilt {count} derived containment edge(s)");
+    }
+
+    /// Seed and backfill the intelligence graph on startup, in order. All
+    /// best-effort: a failure is logged, never propagated.
+    fn seed_startup_intelligence(&self) {
+        if let Err(e) = self.backfill_project_nodes() {
+            self.log_startup_step_failure("backfill project intelligence nodes", &e);
+        }
+        // CM9 typed project graph: retype backlog notes, derive containment,
+        // seed known cross-project dependencies. All best-effort: open must
+        // never fail because a seed path isn't registered.
+        if let Err(e) = self.retype_backlog_project_nodes() {
+            self.log_startup_step_failure("retype backlog project nodes", &e);
+        }
+        match self.rebuild_containment_edges() {
+            Ok(count) => self.log_rebuilt_containment(count),
+            Err(e) => self.log_startup_step_failure("rebuild containment edges", &e),
+        }
+        if let Err(e) = self.seed_cm9_project_dependencies() {
+            self.log_startup_step_failure("seed CM9 project dependencies", &e);
+        }
+        if let Err(e) = self.seed_builtin_blueprints() {
+            self.log_startup_step_failure("seed builtin blueprints", &e);
+        }
+        if let Err(e) = self.seed_builtin_ensemble_blueprints() {
+            self.log_startup_step_failure("seed builtin ensemble blueprints", &e);
+        }
+    }
+
+    /// Test-only escape hatch: run raw SQL against the handle. Lets UI tests
+    /// pin signal timestamps to deterministic values instead of depending on
+    /// wall-clock monotonicity — backward NTP/VM steps of hundreds of ms make
+    /// "write, tick, write, tick" sequences flaky (PR #51 CI failure), and no
+    /// sleep can cover a backward jump.
+    #[cfg(test)]
+    pub(crate) fn exec_test_sql(&self, sql: &str) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
+        conn.execute_batch(sql)?;
+        Ok(())
+    }
+
+    /// Open the database, running migrations only if no foreign daemon is live.
+    /// If a daemon is running, opens the file without running migrations or
+    /// seeding (reads and ordinary writes against the existing schema still
+    /// work) so a newer binary's migrations don't rename columns under a live
+    /// older daemon. Every non-daemon path that opens the real `~/.canopy`
+    /// database must use this instead of `new` — `run_http_server` is the one
+    /// exception, because it holds the daemon lock and therefore *is* the
+    /// daemon.
+    pub fn new_safe(db_path: &PathBuf, data_dir: &std::path::Path) -> Result<Self> {
+        if crate::daemon::process::other_instance_may_be_running(data_dir) {
+            let conn = Connection::open(db_path)?;
+            conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+            return Ok(Database {
+                conn: Arc::new(Mutex::new(conn)),
+            });
+        }
+        Database::new(db_path)
+    }
+
+    /// Refuses to open a database stamped with a schema version newer than
+    /// this binary knows about. Without this, an older binary meeting a
+    /// renamed/restructured schema would pass every `IF NOT EXISTS` guard
+    /// (the old names it looks for are simply gone) and start up believing
+    /// every table is empty — silent data loss from its perspective. A
+    /// missing `schema_version` row (pre-dates this check, or a brand new
+    /// database) is not a mismatch; every migration below is still
+    /// self-guarding for that case.
+    fn check_schema_version(conn: &Connection) -> Result<()> {
+        let daemon_state_exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'daemon_state'",
+                [],
+                |row| Ok(row.get::<_, i32>(0)? > 0),
+            )
+            .unwrap_or(false);
+        if !daemon_state_exists {
+            return Ok(());
+        }
+
+        let stored: Option<i64> = conn
+            .query_row(
+                "SELECT value FROM daemon_state WHERE key = 'schema_version'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .and_then(|v| v.parse::<i64>().ok());
+
+        if let Some(stored) = stored {
+            if stored > SCHEMA_VERSION {
+                anyhow::bail!(
+                    "Database schema version {stored} is newer than this build of canopy (v{}) supports (schema version {SCHEMA_VERSION}). Upgrade canopy before opening this database.",
+                    env!("CARGO_PKG_VERSION")
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn set_schema_version(conn: &Connection) -> Result<()> {
+        conn.execute(
+            "INSERT INTO daemon_state (key, value) VALUES ('schema_version', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [SCHEMA_VERSION.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// Renames the previous-generation queue tables and columns (retired
+    /// names recorded only as literal SQL below, since renaming requires
+    /// naming what's being renamed) to their current equivalents. Guarded on
+    /// the old primary table's existence, so it's a no-op on both a fresh
+    /// database (never had it) and an already-migrated one (already renamed
+    /// away) — safe to run on every startup. Must run before the `CREATE
+    /// TABLE IF NOT EXISTS` batch below, which would otherwise create empty
+    /// `queues`/`queue_members` tables first and make the rename fail with
+    /// "table already exists".
+    // RETIRED-SCHEMA-NAME-BEGIN (see `no_retired_schema_name_identifiers_remain_outside_its_migration`)
+    fn migrate_legacy_queue_schema(conn: &Connection) -> Result<()> {
+        let legacy_schema_present: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'pools'",
+                [],
+                |row| Ok(row.get::<_, i32>(0)? > 0),
+            )
+            .unwrap_or(false);
+        if !legacy_schema_present {
+            return Ok(());
+        }
+
+        let legacy_active_run_alias_present: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('graphs') WHERE name = 'active_run_pool_id'",
+                [],
+                |row| Ok(row.get::<_, i32>(0)? > 0),
+            )
+            .unwrap_or(false);
+        let legacy_template_column_present: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('graphs') WHERE name = 'spec_pool'",
+                [],
+                |row| Ok(row.get::<_, i32>(0)? > 0),
+            )
+            .unwrap_or(false);
+
+        let mut migration_sql = String::from(
+            "PRAGMA legacy_alter_table = OFF;
+             BEGIN TRANSACTION;
+             ALTER TABLE pools RENAME TO queues;
+             ALTER TABLE pool_members RENAME TO queue_members;
+             ALTER TABLE queue_members RENAME COLUMN pool_id TO queue_id;
+             DROP INDEX IF EXISTS idx_pool_members_position;
+             CREATE UNIQUE INDEX IF NOT EXISTS idx_queue_members_position
+                 ON queue_members(queue_id, position);
+            ",
+        );
+        if legacy_active_run_alias_present {
+            migration_sql.push_str(
+                "ALTER TABLE graphs RENAME COLUMN active_run_pool_id TO active_run_queue_id;\n",
+            );
+        }
+        if legacy_template_column_present {
+            migration_sql.push_str("ALTER TABLE graphs RENAME COLUMN spec_pool TO spec_queue;\n");
+        }
+        migration_sql.push_str("COMMIT;");
+
+        conn.execute_batch(&migration_sql)
+            .map_err(|e| anyhow::anyhow!("legacy queue schema migration failed: {e}"))?;
+
+        let fk_violations: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
+            .map_err(|e| anyhow::anyhow!("legacy queue schema migration failed: {e}"))?;
+        if fk_violations > 0 {
+            anyhow::bail!(
+                "legacy queue schema migration failed: {fk_violations} foreign key violation(s) detected after migration"
+            );
+        }
+
+        Ok(())
+    }
+    // RETIRED-SCHEMA-NAME-END
+
+    // RETIRED-SCHEMA-NAME-BEGIN (CC3 loop → graph migration)
+    fn migrate_loop_to_graph_schema(conn: &Connection) -> Result<()> {
+        let has_loops: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'loops'",
+                [],
+                |row| Ok(row.get::<_, i32>(0)? > 0),
+            )
+            .unwrap_or(false);
+        if !has_loops {
+            return Ok(());
+        }
+        let has_graphs: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'graphs'",
+                [],
+                |row| Ok(row.get::<_, i32>(0)? > 0),
+            )
+            .unwrap_or(false);
+        if has_graphs {
+            return Ok(());
+        }
+
+        Self::rename_loop_tables(conn)?;
+        Self::rename_loop_columns(conn)?;
+        Self::migrate_loop_edge_conditions(conn)?;
+        Self::replace_loop_template_markers(conn)?;
+        Self::rebuild_loop_indexes(conn)?;
+        Self::assert_no_foreign_key_violations(conn, "graph to graph schema migration failed")?;
+        Ok(())
+    }
+
+    /// Rename the six retired `loop*` tables to their `graph*` names.
+    fn rename_loop_tables(conn: &Connection) -> Result<()> {
+        conn.execute_batch(
+            "PRAGMA legacy_alter_table = OFF;
+             BEGIN TRANSACTION;
+             ALTER TABLE loops RENAME TO graphs;
+             ALTER TABLE loop_specs RENAME TO graph_specs;
+             ALTER TABLE loop_nodes RENAME TO graph_nodes;
+             ALTER TABLE loop_edges RENAME TO graph_edges;
+             ALTER TABLE loop_runs RENAME TO graph_runs;
+             ALTER TABLE loop_completion_hook_runs RENAME TO graph_completion_hook_runs;
+             ",
+        )
+        .map_err(|e| anyhow::anyhow!("graph to graph schema migration failed: {e}"))?;
+        Ok(())
+    }
+
+    /// Rename the retired `loop_id` / queue-era columns, each guarded by
+    /// `pragma_table_info` (older databases may lack `loop_id` on tables that
+    /// gained top-level targeting later, and a re-run must never fail on an
+    /// already renamed column). The `graphs.active_run_pool_id` / `spec_pool`
+    /// guards cover the ordering edge: `migrate_legacy_queue_schema`
+    /// runs first but looks for `graphs`, so a database that still has
+    /// both `pools` and `graphs` reaches this function with its
+    /// queue-era columns untouched — renamed here instead of orphaned.
+    fn rename_loop_columns(conn: &Connection) -> Result<()> {
+        for (table, old, new_) in [
+            ("graph_specs", "loop_id", "graph_id"),
+            ("graph_nodes", "loop_id", "graph_id"),
+            ("graph_edges", "loop_id", "graph_id"),
+            ("graph_runs", "loop_id", "graph_id"),
+            ("graph_completion_hook_runs", "loop_id", "graph_id"),
+            ("ensembles", "loop_id", "graph_id"),
+            ("graphs", "active_run_pool_id", "active_run_queue_id"),
+            ("graphs", "spec_pool", "spec_queue"),
+        ] {
+            let has: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
+                    [table, old],
+                    |row| Ok(row.get::<_, i32>(0)? > 0),
+                )
+                .unwrap_or(false);
+            if has {
+                conn.execute(
+                    &format!("ALTER TABLE {table} RENAME COLUMN {old} TO {new_}"),
+                    [],
+                )
+                .map_err(|e| anyhow::anyhow!("graph to graph schema migration failed: {e}"))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Rewrite the retired `break` edge condition to `error`, on both edges
+    /// and (when the column exists) ensembles' entry condition.
+    fn migrate_loop_edge_conditions(conn: &Connection) -> Result<()> {
+        conn.execute(
+            "UPDATE graph_edges SET condition = 'error' WHERE condition = 'break'",
+            [],
+        )
+        .map_err(|e| anyhow::anyhow!("graph to graph schema migration failed: {e}"))?;
+        // `ensembles.entry_condition` only exists on databases new enough
+        // for ensembles — guard so very old databases don't fail here.
+        let has_entry_condition: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('ensembles') WHERE name = 'entry_condition'",
+                [],
+                |row| Ok(row.get::<_, i32>(0)? > 0),
+            )
+            .unwrap_or(false);
+        if has_entry_condition {
+            conn.execute(
+                "UPDATE ensembles SET entry_condition = 'error' WHERE entry_condition = 'break'",
+                [],
+            )
+            .map_err(|e| anyhow::anyhow!("graph to graph schema migration failed: {e}"))?;
+        }
+        Ok(())
+    }
+
+    /// Replace the retired `{{loop_name}}` template marker in stored node
+    /// config with `{{graph_name}}`.
+    fn replace_loop_template_markers(conn: &Connection) -> Result<()> {
+        conn.execute(
+            "UPDATE graph_nodes SET config = REPLACE(config, '{{loop_name}}', '{{graph_name}}')
+                WHERE config LIKE '%{{loop_name}}%'",
+            [],
+        )
+        .map_err(|e| anyhow::anyhow!("graph to graph schema migration failed: {e}"))?;
+        Ok(())
+    }
+
+    /// Drop the retired `idx_loop_*` indexes and create their `idx_graph_*`
+    /// replacements.
+    fn rebuild_loop_indexes(conn: &Connection) -> Result<()> {
+        conn.execute_batch(
+            "DROP INDEX IF EXISTS idx_loop_specs_position;
+             DROP INDEX IF EXISTS idx_loop_nodes_position;
+             DROP INDEX IF EXISTS idx_loop_edges_spec_from;
+             DROP INDEX IF EXISTS idx_loop_runs_spec_started;
+             DROP INDEX IF EXISTS idx_loop_runs_node_iteration;
+             DROP INDEX IF EXISTS idx_loop_runs_loop_started;
+             DROP INDEX IF EXISTS idx_loop_completion_hook_runs_loop_started;
+             CREATE UNIQUE INDEX IF NOT EXISTS idx_graph_specs_position
+                 ON graph_specs(graph_id, position);
+             CREATE INDEX IF NOT EXISTS idx_graph_edges_spec_from
+                 ON graph_edges(spec_id, from_node);
+             CREATE INDEX IF NOT EXISTS idx_graph_runs_spec_started
+                 ON graph_runs(spec_id, started_at ASC);
+             CREATE INDEX IF NOT EXISTS idx_graph_runs_node_iteration
+                 ON graph_runs(node_id, iteration DESC);
+             CREATE INDEX IF NOT EXISTS idx_graph_runs_graph_started
+                 ON graph_runs(graph_id, started_at DESC);
+             CREATE INDEX IF NOT EXISTS idx_graph_completion_hook_runs_graph_started
+                 ON graph_completion_hook_runs(graph_id, started_at ASC);
+             COMMIT;",
+        )
+        .map_err(|e| anyhow::anyhow!("graph to graph schema migration failed: {e}"))?;
+        Ok(())
+    }
+
+    /// Fail the migration when any foreign-key violation remains, naming the
+    /// step in the message (observable via `canopy doctor`).
+    fn assert_no_foreign_key_violations(conn: &Connection, migration_label: &str) -> Result<()> {
+        let fk_violations: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
+            .map_err(|e| anyhow::anyhow!("{migration_label}: {e}"))?;
+        if fk_violations > 0 {
+            anyhow::bail!("{migration_label}: {fk_violations} foreign key violation(s) detected after migration");
+        }
+        Ok(())
+    }
+    // RETIRED-SCHEMA-NAME-END
+
+    // RETIRED-VOCAB-BEGIN (CB63: this migration rewrites stored rows and
+    // must name the retired prefix to do it; exempt from
+    // `no_retired_vocabulary_in_user_visible_surfaces`)
+    /// CB63: the engine's activity attribution was `loop:<name>` until the
+    /// loop→graph rename reached it (CC3 moved everything else). Rows written
+    /// by pre-CB63 binaries still carry the old prefix in
+    /// `activity_log.source`; rewrite the anchored prefix to `graph:`.
+    /// Idempotent by construction — the `LIKE 'loop:%'` predicate matches no
+    /// row once rewritten — so safe on every startup, the same
+    /// guarded-and-re-runnable shape as `migrate_loop_to_graph_schema` (CC3).
+    fn migrate_activity_attribution_prefix(conn: &Connection) -> Result<()> {
+        let has_activity_log: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'activity_log'",
+                [],
+                |row| Ok(row.get::<_, i32>(0)? > 0),
+            )
+            .unwrap_or(false);
+        if !has_activity_log {
+            return Ok(());
+        }
+        // Anchored prefix rewrite, deliberately not
+        // `REPLACE(source, 'loop:', 'graph:')`: REPLACE would also rewrite a
+        // graph *name* that contains "loop:" (e.g. a graph named
+        // "loop:keeper"), corrupting the attribution. `substr(source, 6)`
+        // drops the 5-byte `loop:` prefix (SQLite substr is 1-based).
+        conn.execute(
+            "UPDATE activity_log
+                SET source = 'graph:' || substr(source, 6)
+              WHERE source LIKE 'loop:%'",
+            [],
+        )
+        .map_err(|e| anyhow::anyhow!("activity attribution migration failed: {e}"))?;
+        Ok(())
+    }
+    // RETIRED-VOCAB-END
+
+    /// CB52: the `ensembles` entry/exit FKs (`entry_from_node`, `on_pass_to`,
+    /// `on_fail_to`) used to be `ON DELETE CASCADE` / `ON DELETE SET NULL`,
+    /// so deleting a plain node silently deleted every ensemble referencing
+    /// it and orphaned its members/join. Fresh databases get `ON DELETE
+    /// RESTRICT` from the `CREATE TABLE` batch below; this rebuilds the table
+    /// on existing databases. SQLite cannot `ALTER` FK actions, so the table
+    /// is copied and renamed — the documented procedure (foreign keys off
+    /// during the rebuild, `foreign_key_check` after). The replacement table
+    /// is derived from the stored DDL by swapping exactly the three FK
+    /// actions, so later columns (`kind`, `round_robin_index`,
+    /// `quorum_grace_minutes`, `commit_rights`, ...) survive untouched.
+    /// Never auto-repairs orphans (C1): pre-existing orphan joins are
+    /// reported by `canopy doctor` instead.
+    fn migrate_cb52_ensemble_fk(conn: &Connection) -> Result<()> {
+        let sql: Option<String> = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'ensembles'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(sql) = sql else {
+            return Ok(());
+        };
+        const ENTRY_CASCADE: &str =
+            "entry_from_node TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE";
+        const PASS_CASCADE: &str =
+            "on_pass_to TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE";
+        const FAIL_SET_NULL: &str = "on_fail_to TEXT REFERENCES graph_nodes(id) ON DELETE SET NULL";
+        if !sql.contains(ENTRY_CASCADE)
+            && !sql.contains(PASS_CASCADE)
+            && !sql.contains(FAIL_SET_NULL)
+        {
+            return Ok(());
+        }
+        // The first `ensembles` in the stored DDL is the table name itself.
+        let new_sql = sql
+            .replacen("ensembles", "ensembles_new", 1)
+            .replace(
+                ENTRY_CASCADE,
+                "entry_from_node TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE RESTRICT",
+            )
+            .replace(
+                PASS_CASCADE,
+                "on_pass_to TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE RESTRICT",
+            )
+            .replace(
+                FAIL_SET_NULL,
+                "on_fail_to TEXT REFERENCES graph_nodes(id) ON DELETE RESTRICT",
+            );
+        if !new_sql.contains("ensembles_new")
+            || !new_sql.contains("ON DELETE RESTRICT")
+            || new_sql.contains(ENTRY_CASCADE)
+            || new_sql.contains(PASS_CASCADE)
+            || new_sql.contains(FAIL_SET_NULL)
+        {
+            anyhow::bail!("CB52 ensemble FK migration failed: unexpected stored ensembles DDL");
+        }
+        let mut stmt = conn.prepare("SELECT name FROM pragma_table_info('ensembles')")?;
+        let cols: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if cols.is_empty() {
+            anyhow::bail!("CB52 ensemble FK migration failed: ensembles table has no columns");
+        }
+        let collist = cols.join(", ");
+
+        conn.execute_batch("PRAGMA foreign_keys=OFF;")?;
+        let rebuild = (|| -> Result<()> {
+            conn.execute_batch("BEGIN TRANSACTION;")?;
+            let steps = [
+                new_sql.clone(),
+                format!("INSERT INTO ensembles_new ({collist}) SELECT {collist} FROM ensembles;"),
+                "DROP TABLE ensembles;".to_string(),
+                "ALTER TABLE ensembles_new RENAME TO ensembles;".to_string(),
+                "CREATE INDEX IF NOT EXISTS idx_ensembles_join_node ON ensembles(join_node_id);"
+                    .to_string(),
+            ];
+            for step in &steps {
+                if let Err(e) = conn.execute_batch(step) {
+                    let _ = conn.execute_batch("ROLLBACK;");
+                    anyhow::bail!("CB52 ensemble FK migration failed: {e}");
+                }
+            }
+            if let Err(e) = conn.execute_batch("COMMIT;") {
+                let _ = conn.execute_batch("ROLLBACK;");
+                anyhow::bail!("CB52 ensemble FK migration failed: {e}");
+            }
+            Ok(())
+        })();
+        conn.execute_batch("PRAGMA foreign_keys=ON;")?;
+        rebuild?;
+
+        let fk_violations: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
+            .map_err(|e| anyhow::anyhow!("CB52 ensemble FK migration failed: {e}"))?;
+        if fk_violations > 0 {
+            anyhow::bail!(
+                "CB52 ensemble FK migration failed: {fk_violations} foreign key violation(s) detected after migration"
+            );
+        }
+        Ok(())
+    }
+
+    /// Shortens a `rusqlite` batch/statement failure to the SQLite error
+    /// reason plus just the failing statement's first line. Without this,
+    /// `rusqlite::Error::SqlInputError`'s `Display` embeds the *entire
+    /// remaining* SQL text passed to the failing `prepare()` call — for a
+    /// failure early in the base schema batch that's hundreds of lines
+    /// (this is what `canopy doctor` dumped for CB56). Because
+    /// `execute_batch` re-slices its input to start at the next
+    /// unconsumed statement each iteration, the remaining SQL always
+    /// *starts* with the statement that just failed, so its first line is
+    /// exactly the right thing to show.
+    fn describe_sql_failure(step: &str, e: &rusqlite::Error) -> anyhow::Error {
+        match e {
+            rusqlite::Error::SqlInputError { msg, sql, .. } => {
+                let first_line = sql
+                    .lines()
+                    .map(str::trim)
+                    .find(|line| !line.is_empty())
+                    .unwrap_or("");
+                anyhow::anyhow!("{step}: {msg} (statement: {first_line})")
+            }
+            other => anyhow::anyhow!("{step}: {other}"),
+        }
+    }
+
+    fn init(&self) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
+
+        Self::check_schema_version(&conn)?;
+        Self::migrate_legacy_queue_schema(&conn)?;
+        Self::migrate_loop_to_graph_schema(&conn)?;
+        Self::migrate_cb52_ensemble_fk(&conn)?;
+        Self::migrate_activity_attribution_prefix(&conn)?;
+
+        Self::create_base_schema(&conn)?;
+        Self::migrate_sandbox_cleanup_error_column(&conn)?;
+        Self::migrate_operational_sessions_from_intelligence(&conn)?;
+        Self::migrate_intelligence_nodes_status_column(&conn)?;
+        Self::migrate_scheduled_send_columns(&conn)?;
+        Self::migrate_interactive_session_columns(&conn)?;
+        Self::migrate_agent_optin_columns(&conn)?;
+        Self::migrate_graph_trigger_columns(&conn)?;
+        Self::migrate_graph_schedule_columns(&conn)?;
+        Self::migrate_spec_start_columns(&conn)?;
+        Self::migrate_graph_specs_nullable_graph_id(&conn)?;
+        Self::migrate_spec_workdir_column(&conn)?;
+        Self::migrate_graph_targeting_rebuild(&conn)?;
+        Self::migrate_graph_targeting_indexes(&conn)?;
+        Self::migrate_graphs_registry_columns(&conn)?;
+        Self::migrate_graph_runs_identity_columns(&conn)?;
+        Self::migrate_spec_completed_via_columns(&conn)?;
+        Self::migrate_queue_member_group_name_column(&conn)?;
+        Self::migrate_edge_route_column(&conn)?;
+        Self::migrate_ensemble_member_columns(&conn)?;
+        Self::migrate_graph_roster_columns(&conn)?;
+        Self::migrate_spec_commit_evidence_columns(&conn)?;
+        Self::migrate_spec_cross_run_attempts_column(&conn)?;
+        Self::migrate_intelligence_touch_columns(&conn)?;
+        Self::migrate_ensemble_execution_columns(&conn)?;
+        Self::migrate_graph_run_output_tails(&conn)?;
+        Self::migrate_run_paused_through_column(&conn)?;
+        Self::migrate_graph_hook_event_columns(&conn)?;
+        Self::migrate_hook_launch_tracking(&conn)?;
+        Self::migrate_executed_platform_columns(&conn)?;
+        Self::migrate_ensemble_infra_columns(&conn)?;
+
+        Self::set_schema_version(&conn)?;
+
+        Ok(())
+    }
+
+    /// Create every base table and index (fresh databases); idempotent via
+    /// `IF NOT EXISTS`.
+    fn create_base_schema(conn: &Connection) -> Result<()> {
+        for batch in BASE_SCHEMA_BATCHES {
+            conn.execute_batch(batch)
+                .map_err(|e| Self::describe_sql_failure("base schema batch", &e))?;
+        }
+        Ok(())
+    }
+
+    /// CB42: add `sandbox_runs.cleanup_error` if missing.
+    fn migrate_sandbox_cleanup_error_column(conn: &Connection) -> Result<()> {
         // CB42: record cleanup failures on the sandbox run (req 6). A fresh DB
         // gets the column above; an existing one is migrated idempotently here
         // using the same pragma-guard pattern as every other ALTER in this file.
@@ -1070,7 +1181,11 @@ impl Database {
             conn.execute("ALTER TABLE sandbox_runs ADD COLUMN cleanup_error TEXT", [])
                 .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         }
+        Ok(())
+    }
 
+    /// CM8: move `run:`/`sync:`/`launchpad:` rows out of `intelligence_nodes`.
+    fn migrate_operational_sessions_from_intelligence(conn: &Connection) -> Result<()> {
         // CM8: separate operational telemetry from knowledge. The three
         // writers (run, sync, launchpad) used to write `kind='session'`
         // rows into `intelligence_nodes` with ids `run:`, `sync:`,
@@ -1092,7 +1207,11 @@ impl Database {
                 WHERE id LIKE 'run:%' OR id LIKE 'sync:%' OR id LIKE 'launchpad:%';",
         )
         .map_err(|e| anyhow::anyhow!("operational_sessions migration failed: {e}"))?;
+        Ok(())
+    }
 
+    /// CM10: add `intelligence_nodes.status` if missing.
+    fn migrate_intelligence_nodes_status_column(conn: &Connection) -> Result<()> {
         // CM10: knowledge-node status. All pre-existing nodes backfill to
         // 'noted' via the column default. Idempotent pragma guard, same
         // pattern as the scheduled_sends.workdir migration below.
@@ -1110,7 +1229,11 @@ impl Database {
             )
             .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         }
+        Ok(())
+    }
 
+    /// Add `scheduled_sends.workdir`/`builder_state` and `provenance` on both send tables.
+    fn migrate_scheduled_send_columns(conn: &Connection) -> Result<()> {
         // `workdir` records which project a scheduled send targeted so a
         // dead-target failure can be preserved per-project for U8's recall.
         let has_scheduled_send_workdir: bool = conn
@@ -1162,7 +1285,11 @@ impl Database {
                 .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
             }
         }
+        Ok(())
+    }
 
+    /// Add interactive-session `session_type`/`pid`/`boot_id`, then reclassify bridge rows.
+    fn migrate_interactive_session_columns(conn: &Connection) -> Result<()> {
         let has_session_type: bool = conn
             .query_row(
                 "SELECT COUNT(*) FROM pragma_table_info('interactive_sessions') WHERE name = 'session_type'",
@@ -1225,7 +1352,11 @@ impl Database {
             [],
         )
         .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
+        Ok(())
+    }
 
+    /// Add agent `enable_at`/`notify_on_success`/`effort` columns.
+    fn migrate_agent_optin_columns(conn: &Connection) -> Result<()> {
         let has_enable_at: bool = conn
             .query_row(
                 "SELECT COUNT(*) FROM pragma_table_info('agents') WHERE name = 'enable_at'",
@@ -1269,7 +1400,11 @@ impl Database {
             conn.execute("ALTER TABLE agents ADD COLUMN effort TEXT", [])
                 .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         }
+        Ok(())
+    }
 
+    /// Add graph `trigger_type`/`trigger_config` columns.
+    fn migrate_graph_trigger_columns(conn: &Connection) -> Result<()> {
         // Graphs gained optional cron/watch triggers; older databases predate the
         // columns. Add them if missing (both nullable, so existing rows stay
         // manual-only).
@@ -1286,7 +1421,11 @@ impl Database {
                     .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
             }
         }
+        Ok(())
+    }
 
+    /// Add graph `autorun_at`/`auto_continue_*`/`spec_queue` columns.
+    fn migrate_graph_schedule_columns(conn: &Connection) -> Result<()> {
         // One-shot resume schedule for graphs (mirrors agents' `enable_at`);
         // older databases predate the column.
         let has_autorun_at: bool = conn
@@ -1340,7 +1479,11 @@ impl Database {
             conn.execute("ALTER TABLE graphs ADD COLUMN spec_queue TEXT", [])
                 .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         }
+        Ok(())
+    }
 
+    /// Add graph-spec `spec_start_head`/`spec_start_dirty` columns.
+    fn migrate_spec_start_columns(conn: &Connection) -> Result<()> {
         // `spec_start_head` records the workdir's git HEAD when a spec starts
         // running, so `check` nodes can verify a spec actually committed
         // without relying on a file marker outside the spec row. Older
@@ -1373,7 +1516,11 @@ impl Database {
             )
             .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         }
+        Ok(())
+    }
 
+    /// R3: rebuild `graph_specs` so `graph_id` may be NULL.
+    fn migrate_graph_specs_nullable_graph_id(conn: &Connection) -> Result<()> {
         // Standalone specs (R3): a spec no longer must belong to a graph — it
         // can exist as a backlog item (optionally tagged to a workdir)
         // before being assigned. Older databases have `graph_id NOT NULL`,
@@ -1419,7 +1566,11 @@ impl Database {
             )
             .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         }
+        Ok(())
+    }
 
+    /// R3: add the optional graph-spec `workdir` tag.
+    fn migrate_spec_workdir_column(conn: &Connection) -> Result<()> {
         // Optional workdir tag on specs (R3), for backlog filtering only —
         // it never drives execution. Nullable, so existing (graph-bound)
         // specs are unaffected; older databases predate the column.
@@ -1434,7 +1585,11 @@ impl Database {
             conn.execute("ALTER TABLE graph_specs ADD COLUMN workdir TEXT", [])
                 .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         }
+        Ok(())
+    }
 
+    /// R1: rebuild `graph_nodes`/`graph_edges` to allow graph-level targeting.
+    fn migrate_graph_targeting_rebuild(conn: &Connection) -> Result<()> {
         // Graph-level graphs (R1): a node/edge may now target a graph directly
         // (`graph_id`) instead of a spec, so it can be defined once per graph
         // instead of being repeated across every spec. Older databases have
@@ -1500,7 +1655,11 @@ impl Database {
             )
             .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         }
+        Ok(())
+    }
 
+    /// R1: create the graph-targeting indexes once the column exists.
+    fn migrate_graph_targeting_indexes(conn: &Connection) -> Result<()> {
         // These reference `graph_id`, so they can only be created once the
         // column is guaranteed to exist — either from the fresh CREATE TABLE
         // above (new databases) or the rebuild just above (migrated ones).
@@ -1511,7 +1670,11 @@ impl Database {
                  ON graph_edges(graph_id, from_node);",
         )
         .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
+        Ok(())
+    }
 
+    /// Add graph `active_run_queue_id`/`on_completed` columns.
+    fn migrate_graphs_registry_columns(conn: &Connection) -> Result<()> {
         // `active_run_queue_id` persists which queue (if any) a graph's current/
         // last run drew from, so an interrupted run (quota failure, daemon
         // crash) can be resumed against the same queue by every resume path
@@ -1545,7 +1708,11 @@ impl Database {
             conn.execute("ALTER TABLE graphs ADD COLUMN on_completed TEXT", [])
                 .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         }
+        Ok(())
+    }
 
+    /// Add graph-run `pid`/`boot_id`/`session_id` columns.
+    fn migrate_graph_runs_identity_columns(conn: &Connection) -> Result<()> {
         // `pid`/`boot_id` (B12): the OS process-group leader spawned for a
         // node run, and the boot it was spawned under. Lets the engine
         // `killpg` an active run's process on every abnormal end (timeout,
@@ -1590,7 +1757,11 @@ impl Database {
             conn.execute("ALTER TABLE graph_runs ADD COLUMN session_id TEXT", [])
                 .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         }
+        Ok(())
+    }
 
+    /// B25: add graph-spec `completed_via*` columns.
+    fn migrate_spec_completed_via_columns(conn: &Connection) -> Result<()> {
         // `completed_via`/`completed_via_reason`/`completed_via_at` (B25):
         // administrative spec status transitions, recorded with provenance
         // and reason. Older databases predate these columns; NULL on existing
@@ -1620,7 +1791,11 @@ impl Database {
                 }
             }
         }
+        Ok(())
+    }
 
+    /// RS3: add `queue_members.group_name`.
+    fn migrate_queue_member_group_name_column(conn: &Connection) -> Result<()> {
         // `group_name` (RS3): the optional context group a queue member belongs
         // to. Grouped members share a warm harness session — the first agent
         // node of a grouped spec resumes the session captured by the previous
@@ -1638,7 +1813,11 @@ impl Database {
             conn.execute("ALTER TABLE queue_members ADD COLUMN group_name TEXT", [])
                 .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         }
+        Ok(())
+    }
 
+    /// Add `graph_edges.route` for router nodes.
+    fn migrate_edge_route_column(conn: &Connection) -> Result<()> {
         // `route` (router nodes): the label a `route`-conditioned edge names,
         // alongside `condition = 'route'` — see
         // `domain::graphs::GraphEdgeCondition::{as_str, route_label, from_parts}`.
@@ -1655,7 +1834,11 @@ impl Database {
             conn.execute("ALTER TABLE graph_edges ADD COLUMN route TEXT", [])
                 .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         }
+        Ok(())
+    }
 
+    /// Add ensemble-member `prompt_override`/`timeout_minutes`.
+    fn migrate_ensemble_member_columns(conn: &Connection) -> Result<()> {
         // Per-member prompt override: a member can now render its own prompt
         // instead of the ensemble's shared `prompt_template` — see
         // `EnsembleMember::prompt_override`. NULL for every pre-existing
@@ -1696,7 +1879,11 @@ impl Database {
             )
             .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         }
+        Ok(())
+    }
 
+    /// Add graph `archived`/`paused_by_reconciliation`/`infra_node_id`/`allow_dirty_start`.
+    fn migrate_graph_roster_columns(conn: &Connection) -> Result<()> {
         // Archiving (F4): a graph can leave the sidebar's browsing list
         // without losing its row, specs, or run history — the reversible
         // alternative to `delete_graph`. A constant `DEFAULT 0` means every
@@ -1771,7 +1958,11 @@ impl Database {
             )
             .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         }
+        Ok(())
+    }
 
+    /// Add graph-spec `spec_committed_head`/`spec_end_dirty*` columns.
+    fn migrate_spec_commit_evidence_columns(conn: &Connection) -> Result<()> {
         // `spec_committed_head` (C15): the workdir's git HEAD immediately
         // after a `commit_rights: true` node's own execution actually moved
         // it — as opposed to `spec_start_head`, which only proves *some*
@@ -1828,7 +2019,11 @@ impl Database {
             )
             .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         }
+        Ok(())
+    }
 
+    /// C19: add `graph_specs.cross_run_attempts`.
+    fn migrate_spec_cross_run_attempts_column(conn: &Connection) -> Result<()> {
         // `cross_run_attempts` (C19): how many separate graph executions this
         // spec has failed with a genuine (non-infrastructure) verdict.
         // Unlike the per-node iteration budget `run_spec` tracks in memory
@@ -1855,7 +2050,11 @@ impl Database {
             )
             .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         }
+        Ok(())
+    }
 
+    /// CT17: add graph-spec `updated_at`/`content_touched_at` and their indexes.
+    fn migrate_intelligence_touch_columns(conn: &Connection) -> Result<()> {
         // CT17: dedicated change signal for project knowledge, independent of the
         // public `updated_at` (seconds, exposed via MCP in daemon/handler.rs) so
         // this migration cannot change that column's unit or meaning.
@@ -1905,7 +2104,11 @@ impl Database {
             [],
         )
         .map_err(|e| Self::describe_sql_failure("CT17 content_touched_at migration", &e))?;
+        Ok(())
+    }
 
+    /// Add ensemble `kind`/`round_robin_index`/`quorum_grace_minutes` columns.
+    fn migrate_ensemble_execution_columns(conn: &Connection) -> Result<()> {
         let has_ensemble_kind: bool = conn
             .query_row(
                 "SELECT COUNT(*) FROM pragma_table_info('ensembles') WHERE name = 'kind'",
@@ -1965,7 +2168,11 @@ impl Database {
             )
             .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         }
+        Ok(())
+    }
 
+    /// CT3: add the `graph_run_output` table and run `stdout_tail`/`stderr_tail`.
+    fn migrate_graph_run_output_tails(conn: &Connection) -> Result<()> {
         // CT3: live tailing of check-node output. Chunks of stdout/stderr are
         // appended while the node runs so the TUI can poll them; the final
         // truncated tails are cached on `graph_runs` at completion for an
@@ -1998,7 +2205,11 @@ impl Database {
                     .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
             }
         }
+        Ok(())
+    }
 
+    /// CB31: add `graph_runs.paused_through`.
+    fn migrate_run_paused_through_column(conn: &Connection) -> Result<()> {
         // CB31: a node run finalized with its own verdict while a
         // wait-for-completion `graph_pause` was pending is flagged here so
         // `graph_continue` re-executing that node does not spend one of its
@@ -2019,7 +2230,11 @@ impl Database {
             )
             .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         }
+        Ok(())
+    }
 
+    /// CH1: add graph `hooks`, backfill it, and add hook-run `event`/`hook_index`.
+    fn migrate_graph_hook_event_columns(conn: &Connection) -> Result<()> {
         // Event-keyed hooks (CH1): the graph's hooks stored as a JSON map
         // from event name to an ordered array of agent payloads, while
         // retaining `on_completed` for rollback/old fixtures. On database
@@ -2070,7 +2285,11 @@ impl Database {
                     .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
             }
         }
+        Ok(())
+    }
 
+    /// CH4: add graph `hook_launched` and the `graph_hook_launches` table.
+    fn migrate_hook_launch_tracking(conn: &Connection) -> Result<()> {
         // CH4: hook-launched depth tracking and provenance.
         // `hook_launched` on `graphs`: whether this graph was launched by a hook
         // (depth cap enforcement). Defaults to 0 so existing graphs are unaffected.
@@ -2100,7 +2319,11 @@ impl Database {
             );",
         )
         .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
+        Ok(())
+    }
 
+    /// CB43: add executed platform/model columns and their indexes.
+    fn migrate_executed_platform_columns(conn: &Connection) -> Result<()> {
         // CB43: record which platform+model actually executed a run. Two
         // nullable TEXT columns on the row already written — no new table, no
         // second write. Pre-migration rows keep NULL (omitted, never guessed).
@@ -2137,7 +2360,11 @@ impl Database {
                 ON subagent_runs(platform, started_at DESC);",
         )
         .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
+        Ok(())
+    }
 
+    /// Add ensemble and ensemble-member infra-retry columns.
+    fn migrate_ensemble_infra_columns(conn: &Connection) -> Result<()> {
         let has_ensemble_commit_rights: bool = conn
             .query_row(
                 "SELECT COUNT(*) FROM pragma_table_info('ensembles') WHERE name = 'commit_rights'",
@@ -2204,9 +2431,6 @@ impl Database {
                 .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
             }
         }
-
-        Self::set_schema_version(&conn)?;
-
         Ok(())
     }
 

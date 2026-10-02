@@ -392,53 +392,12 @@ impl Database {
             let kind = RemapKind::decide(target_exists);
             let counts = count_remap_targets(&tx, &old_path, old_hash)?;
 
-            tx.execute(
-                "UPDATE interactive_sessions SET working_dir = ?2 WHERE working_dir = ?1",
-                params![old_path, new_canonical_path],
-            )?;
-            tx.execute(
-                "UPDATE terminal_sessions SET working_dir = ?2 WHERE working_dir = ?1",
-                params![old_path, new_canonical_path],
-            )?;
-            tx.execute(
-                "UPDATE graphs SET workdir = ?2 WHERE workdir = ?1",
-                params![old_path, new_canonical_path],
-            )?;
-            tx.execute(
-                "UPDATE graph_specs SET workdir = ?2, updated_at = ?3 WHERE workdir = ?1",
-                params![
-                    old_path,
-                    new_canonical_path,
-                    chrono::Utc::now().timestamp_millis()
-                ],
-            )?;
-            tx.execute(
-                "UPDATE sync_messages SET workdir = ?2 WHERE workdir = ?1",
-                params![old_path, new_canonical_path],
-            )?;
-            tx.execute(
-                "UPDATE sync_locks SET workdir = ?2 WHERE workdir = ?1",
-                params![old_path, new_canonical_path],
-            )?;
-            tx.execute(
-                "UPDATE last_prompts SET workdir = ?2 WHERE workdir = ?1",
-                params![old_path, new_canonical_path],
-            )?;
-            tx.execute(
-                "UPDATE scheduled_sends SET workdir = ?2 WHERE workdir = ?1",
-                params![old_path, new_canonical_path],
-            )?;
-            tx.execute(
-                "UPDATE failed_scheduled_sends SET workdir = ?2 WHERE workdir = ?1",
-                params![old_path, new_canonical_path],
-            )?;
-            tx.execute(
-                "UPDATE agents SET working_dir = ?2 WHERE working_dir = ?1",
-                params![old_path, new_canonical_path],
-            )?;
-            tx.execute(
-                "UPDATE intelligence_nodes SET project_hash = ?2 WHERE project_hash = ?1",
-                params![old_hash, new_hash],
+            Self::rekey_project_dependents(
+                &tx,
+                &old_path,
+                old_hash,
+                new_canonical_path,
+                &new_hash,
             )?;
 
             // Keep the `project:{hash}` graph root in sync with the hash re-key:
@@ -457,44 +416,14 @@ impl Database {
             };
             match kind {
                 RemapKind::Move => {
-                    if let Some((title, body, metadata)) = old_node {
-                        let new_metadata = match metadata
-                            .as_deref()
-                            .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
-                        {
-                            Some(mut value) => {
-                                if let Some(obj) = value.as_object_mut() {
-                                    obj.insert(
-                                        "path".to_string(),
-                                        serde_json::Value::String(new_canonical_path.to_string()),
-                                    );
-                                }
-                                value.to_string()
-                            }
-                            None => serde_json::json!({
-                                "source": "registry",
-                                "path": new_canonical_path,
-                            })
-                            .to_string(),
-                        };
-                        tx.execute(
-                            "DELETE FROM intelligence_nodes WHERE id = ?1",
-                            params![old_node_id],
-                        )?;
-                        tx.execute(
-                        "INSERT INTO intelligence_nodes (id, kind, title, body, metadata, project_hash, session_id, created_at, updated_at)
-                         VALUES (?1, 'project', ?2, ?3, ?4, ?5, NULL, strftime('%s','now'), strftime('%s','now'))",
-                        params![new_node_id, title, body, new_metadata, new_hash],
+                    Self::move_project_node_root(
+                        &tx,
+                        &old_node_id,
+                        &new_node_id,
+                        &new_hash,
+                        old_node,
+                        new_canonical_path,
                     )?;
-                        tx.execute(
-                        "UPDATE intelligence_edges SET from_node_id = ?2 WHERE from_node_id = ?1",
-                        params![old_node_id, new_node_id],
-                    )?;
-                        tx.execute(
-                            "UPDATE intelligence_edges SET to_node_id = ?2 WHERE to_node_id = ?1",
-                            params![old_node_id, new_node_id],
-                        )?;
-                    }
                 }
                 RemapKind::Merge => {
                     tx.execute(
@@ -532,6 +461,125 @@ impl Database {
         }
 
         Ok(outcome)
+    }
+
+    /// Re-key every dependent row of a remapped project from `old_path`/`old_hash`
+    /// to the new path/hash. Statement order is integrity — never reorder.
+    fn rekey_project_dependents(
+        tx: &rusqlite::Transaction,
+        old_path: &str,
+        old_hash: &str,
+        new_canonical_path: &str,
+        new_hash: &str,
+    ) -> Result<()> {
+        tx.execute(
+            "UPDATE interactive_sessions SET working_dir = ?2 WHERE working_dir = ?1",
+            params![old_path, new_canonical_path],
+        )?;
+        tx.execute(
+            "UPDATE terminal_sessions SET working_dir = ?2 WHERE working_dir = ?1",
+            params![old_path, new_canonical_path],
+        )?;
+        tx.execute(
+            "UPDATE graphs SET workdir = ?2 WHERE workdir = ?1",
+            params![old_path, new_canonical_path],
+        )?;
+        tx.execute(
+            "UPDATE graph_specs SET workdir = ?2, updated_at = ?3 WHERE workdir = ?1",
+            params![
+                old_path,
+                new_canonical_path,
+                chrono::Utc::now().timestamp_millis()
+            ],
+        )?;
+        tx.execute(
+            "UPDATE sync_messages SET workdir = ?2 WHERE workdir = ?1",
+            params![old_path, new_canonical_path],
+        )?;
+        tx.execute(
+            "UPDATE sync_locks SET workdir = ?2 WHERE workdir = ?1",
+            params![old_path, new_canonical_path],
+        )?;
+        tx.execute(
+            "UPDATE last_prompts SET workdir = ?2 WHERE workdir = ?1",
+            params![old_path, new_canonical_path],
+        )?;
+        tx.execute(
+            "UPDATE scheduled_sends SET workdir = ?2 WHERE workdir = ?1",
+            params![old_path, new_canonical_path],
+        )?;
+        tx.execute(
+            "UPDATE failed_scheduled_sends SET workdir = ?2 WHERE workdir = ?1",
+            params![old_path, new_canonical_path],
+        )?;
+        tx.execute(
+            "UPDATE agents SET working_dir = ?2 WHERE working_dir = ?1",
+            params![old_path, new_canonical_path],
+        )?;
+        tx.execute(
+            "UPDATE intelligence_nodes SET project_hash = ?2 WHERE project_hash = ?1",
+            params![old_hash, new_hash],
+        )?;
+        Ok(())
+    }
+
+    /// Metadata for the `project:{hash}` root when the project moves: the old
+    /// metadata with its `path` rewritten, or a fresh registry blob.
+    fn rekeyed_project_node_metadata(
+        old_metadata: Option<&str>,
+        new_canonical_path: &str,
+    ) -> String {
+        let Some(mut value) =
+            old_metadata.and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
+        else {
+            return serde_json::json!({
+                "source": "registry",
+                "path": new_canonical_path,
+            })
+            .to_string();
+        };
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert(
+                "path".to_string(),
+                serde_json::Value::String(new_canonical_path.to_string()),
+            );
+        }
+        value.to_string()
+    }
+
+    /// Move a project's `project:{hash}` root node to the new hash: rewrite its
+    /// metadata path, re-insert under the new id, and re-point its edges.
+    fn move_project_node_root(
+        tx: &rusqlite::Transaction,
+        old_node_id: &str,
+        new_node_id: &str,
+        new_hash: &str,
+        node: Option<(String, String, Option<String>)>,
+        new_canonical_path: &str,
+    ) -> Result<()> {
+        let Some((title, body, metadata)) = node else {
+            return Ok(());
+        };
+        let new_metadata =
+            Self::rekeyed_project_node_metadata(metadata.as_deref(), new_canonical_path);
+        tx.execute(
+            "DELETE FROM intelligence_nodes WHERE id = ?1",
+            params![old_node_id],
+        )?;
+        tx.execute(
+            "INSERT INTO intelligence_nodes (id, kind, title, body, metadata, project_hash, session_id, created_at, updated_at)
+             VALUES (?1, 'project', ?2, ?3, ?4, ?5, NULL, strftime('%s','now'), strftime('%s','now'))",
+            params![new_node_id, title, body, new_metadata, new_hash],
+        )?;
+        tx.execute(
+            "UPDATE intelligence_edges SET from_node_id = ?2 WHERE from_node_id = ?1",
+            params![old_node_id, new_node_id],
+        )?;
+        tx.execute(
+            "UPDATE intelligence_edges SET to_node_id = ?2 WHERE to_node_id = ?1",
+            params![old_node_id, new_node_id],
+        )?;
+        Ok(())
     }
 
     // ── RAG queue (SQLite) ──────────────────────────────────────────────
@@ -1518,6 +1566,25 @@ mod tests {
 
         let err = db.remap_project(&hash, path).unwrap_err();
         assert!(err.to_string().contains("same project"));
+    }
+
+    #[test]
+    fn remap_project_move_tolerates_a_missing_project_root_node() {
+        let db = test_db();
+        let old_hash = "hash-no-root";
+        let old_path = "/proj/no-root";
+        let new_path = "/proj/no-root-moved";
+
+        db.upsert_project(&sample_project_at(old_hash, old_path))
+            .unwrap();
+        db.delete_intelligence_node(&format!("project:{old_hash}"))
+            .unwrap();
+
+        let outcome = db.remap_project(old_hash, new_path).unwrap();
+
+        assert_eq!(outcome.kind, RemapKind::Move);
+        assert!(db.get_project(old_hash).unwrap().is_none());
+        assert!(db.get_project(&workdir_hash(new_path)).unwrap().is_some());
     }
 
     #[test]

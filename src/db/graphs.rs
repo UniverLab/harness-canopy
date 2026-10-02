@@ -60,6 +60,13 @@ pub enum RecentPairSourceKind {
     },
 }
 
+/// One run sample during [`Database::list_recent_platform_model_usage`]:
+/// when it started and how it ended.
+struct RecentUsageSample {
+    started_at: DateTime<Utc>,
+    status: String,
+}
+
 impl Database {
     /// Whether any graph is currently running.  The update restart guard
     /// uses the same exact status predicate as the cleanup busy check.
@@ -1900,20 +1907,13 @@ impl Database {
         since: DateTime<Utc>,
         limit: i64,
     ) -> Result<Vec<RecentModelUsage>> {
-        use std::collections::HashMap;
-
-        struct Sample {
-            started_at: DateTime<Utc>,
-            status: String,
-        }
-
         let conn = self
             .conn
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
 
         let since_epoch = since.timestamp();
-        let mut grouped: HashMap<(String, Option<String>), Vec<Sample>> = HashMap::new();
+        let mut grouped: HashMap<(String, Option<String>), Vec<RecentUsageSample>> = HashMap::new();
 
         // graph_runs + graph_completion_hook_runs store epoch INTEGERs.
         for table in ["graph_runs", "graph_completion_hook_runs"] {
@@ -1936,81 +1936,28 @@ impl Database {
                 grouped
                     .entry((platform, model))
                     .or_default()
-                    .push(Sample { started_at, status });
+                    .push(RecentUsageSample { started_at, status });
             }
         }
 
         // runs + subagent_runs store RFC3339 TEXT timestamps.
-        {
-            let mut stmt = conn.prepare(
-                "SELECT executed_platform, executed_model, status, started_at FROM runs \
-                 WHERE executed_platform IS NOT NULL",
-            )?;
-            let rows = stmt.query_map(params![], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                ))
-            })?;
-            for row in rows {
-                let (platform, model, status, started_at): (
-                    String,
-                    Option<String>,
-                    String,
-                    String,
-                ) = row?;
-                let Ok(started_at) = chrono::DateTime::parse_from_rfc3339(&started_at)
-                    .map(|dt| dt.with_timezone(&Utc))
-                else {
-                    continue;
-                };
-                if started_at < since {
-                    continue;
-                }
-                grouped
-                    .entry((platform, model))
-                    .or_default()
-                    .push(Sample { started_at, status });
-            }
-        }
+        Self::collect_rfc3339_usage_samples(
+            &conn,
+            "SELECT executed_platform, executed_model, status, started_at FROM runs \
+             WHERE executed_platform IS NOT NULL",
+            since,
+            &mut grouped,
+        )?;
 
         // CB43: `subagent_runs.platform`/`model` are the pair resolved at
         // dispatch (see schema comment); `platform` is NOT NULL by schema so
         // every row in the window counts. NULL model = the CLI's default.
-        {
-            let mut stmt =
-                conn.prepare("SELECT platform, model, status, started_at FROM subagent_runs")?;
-            let rows = stmt.query_map(params![], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                ))
-            })?;
-            for row in rows {
-                let (platform, model, status, started_at): (
-                    String,
-                    Option<String>,
-                    String,
-                    String,
-                ) = row?;
-                let Ok(started_at) = chrono::DateTime::parse_from_rfc3339(&started_at)
-                    .map(|dt| dt.with_timezone(&Utc))
-                else {
-                    continue;
-                };
-                if started_at < since {
-                    continue;
-                }
-                grouped
-                    .entry((platform, model))
-                    .or_default()
-                    .push(Sample { started_at, status });
-            }
-        }
+        Self::collect_rfc3339_usage_samples(
+            &conn,
+            "SELECT platform, model, status, started_at FROM subagent_runs",
+            since,
+            &mut grouped,
+        )?;
 
         let mut out: Vec<RecentModelUsage> = grouped
             .into_iter()
@@ -2031,6 +1978,42 @@ impl Database {
         Ok(out)
     }
 
+    /// Collect RFC3339-timestamped rows (the `runs` / `subagent_runs` shape)
+    /// into `grouped`, dropping unparseable rows and rows older than `since`.
+    fn collect_rfc3339_usage_samples(
+        conn: &rusqlite::Connection,
+        sql: &str,
+        since: DateTime<Utc>,
+        grouped: &mut HashMap<(String, Option<String>), Vec<RecentUsageSample>>,
+    ) -> Result<()> {
+        let mut stmt = conn.prepare(sql)?;
+        let rows = stmt.query_map(params![], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+        for row in rows {
+            let (platform, model, status, started_at): (String, Option<String>, String, String) =
+                row?;
+            let Ok(started_at) =
+                chrono::DateTime::parse_from_rfc3339(&started_at).map(|dt| dt.with_timezone(&Utc))
+            else {
+                continue;
+            };
+            if started_at < since {
+                continue;
+            }
+            grouped
+                .entry((platform, model))
+                .or_default()
+                .push(RecentUsageSample { started_at, status });
+        }
+        Ok(())
+    }
+
     /// Return every recent run event with the identity that produced it.
     /// This is the installation-wide source data for `agent_probe_recent`;
     /// callers group it by platform and model while retaining attribution.
@@ -2044,7 +2027,19 @@ impl Database {
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let since_epoch = since.timestamp();
         let mut out = Vec::new();
+        Self::collect_graph_node_usage_sources(&conn, since_epoch, &mut out)?;
+        Self::collect_completion_hook_usage_sources(&conn, since_epoch, &mut out)?;
+        Self::collect_background_agent_usage_sources(&conn, since, &mut out)?;
+        Self::collect_subagent_usage_sources(&conn, since, &mut out)?;
+        Ok(out)
+    }
 
+    /// `graph_runs` joined to its graph/node identity (epoch timestamps).
+    fn collect_graph_node_usage_sources(
+        conn: &rusqlite::Connection,
+        since_epoch: i64,
+        out: &mut Vec<RecentPairSource>,
+    ) -> Result<()> {
         let mut stmt = conn.prepare(
             "SELECT gr.executed_platform, gr.executed_model, gr.status, gr.started_at,
                     g.id, g.name, gn.id, gn.name
@@ -2081,7 +2076,15 @@ impl Database {
                 },
             });
         }
+        Ok(())
+    }
 
+    /// `graph_completion_hook_runs` joined to its graph identity.
+    fn collect_completion_hook_usage_sources(
+        conn: &rusqlite::Connection,
+        since_epoch: i64,
+        out: &mut Vec<RecentPairSource>,
+    ) -> Result<()> {
         let mut stmt = conn.prepare(
             "SELECT h.executed_platform, h.executed_model, h.status, h.started_at,
                     g.id, g.name, h.event, h.hook_index
@@ -2117,7 +2120,16 @@ impl Database {
                 },
             });
         }
+        Ok(())
+    }
 
+    /// `runs` joined to the background agent that produced the prompt
+    /// (RFC3339 timestamps).
+    fn collect_background_agent_usage_sources(
+        conn: &rusqlite::Connection,
+        since: DateTime<Utc>,
+        out: &mut Vec<RecentPairSource>,
+    ) -> Result<()> {
         let mut stmt = conn.prepare(
             "SELECT r.executed_platform, r.executed_model, r.status, r.started_at,
                     r.background_agent_id, a.prompt
@@ -2152,7 +2164,15 @@ impl Database {
                 source: RecentPairSourceKind::BackgroundAgent { agent_id, prompt },
             });
         }
+        Ok(())
+    }
 
+    /// `subagent_runs` (RFC3339 timestamps).
+    fn collect_subagent_usage_sources(
+        conn: &rusqlite::Connection,
+        since: DateTime<Utc>,
+        out: &mut Vec<RecentPairSource>,
+    ) -> Result<()> {
         let mut stmt =
             conn.prepare("SELECT platform, model, status, started_at, workdir FROM subagent_runs")?;
         let rows = stmt.query_map([], |row| {
@@ -2182,7 +2202,7 @@ impl Database {
                 source: RecentPairSourceKind::SubagentSpawn { workdir },
             });
         }
-        Ok(out)
+        Ok(())
     }
 
     /// Most recent `graph_runs.started_at` per graph, across every graph in a
@@ -2704,10 +2724,10 @@ impl Database {
         // keeping `run_stdio_server` from calling this at all: that removes
         // the caller, this makes the function itself safe to call by
         // mistake.
-        if let Some(pid) = crate::daemon::process::read_pid(data_dir) {
-            if pid != std::process::id() && crate::daemon::process::is_process_running(pid) {
-                return Ok(0);
-            }
+        if crate::daemon::process::read_pid(data_dir).is_some_and(|pid| {
+            pid != std::process::id() && crate::daemon::process::is_process_running(pid)
+        }) {
+            return Ok(0);
         }
 
         let conn = self
@@ -2750,87 +2770,7 @@ impl Database {
                 );
             }
             for run in &dangling_runs {
-                tracing::warn!(
-                    "Reconciling orphaned graph '{}': was running node '{}' (spec '{}') when the daemon last stopped; pausing graph, marking its run as interrupted, and marking the spec interrupted.",
-                    lp.id,
-                    run.node_id,
-                    run.spec_id
-                );
-                // B12: this new daemon process never held a `Child` for
-                // `run` — it may not even share the previous process's
-                // memory — so a persisted pid is all reconciliation has to
-                // go on, and a pid alone can't tell a genuine survivor from
-                // an unrelated process that reused the same pid after a
-                // reboot recycled the pid space. Only attempt the kill when
-                // the run's recorded boot id still matches the machine's
-                // current one (same boot, i.e. the *daemon* crashed/restarted
-                // without the OS rebooting) — otherwise the pid is
-                // meaningless and killing it could hit an unrelated process.
-                if let (Some(pid), Some(run_boot_id)) = (run.pid, run.boot_id.as_deref()) {
-                    if crate::system::boot_id().as_deref() == Some(run_boot_id) {
-                        let ancestors = crate::daemon::process::ancestor_pids();
-                        if ancestors.contains(&(pid as u32)) {
-                            tracing::warn!(
-                                "Reconciling orphaned graph '{}': skipping kill of pid {} — it is an ancestor of this process",
-                                lp.id,
-                                pid
-                            );
-                        } else {
-                            tracing::warn!(
-                                "Reconciling orphaned graph '{}': attempting best-effort kill of survivor pid {} from the same boot.",
-                                lp.id,
-                                pid
-                            );
-                            crate::daemon::process::terminate_process_group_async(
-                                pid,
-                                crate::daemon::process::KILL_GRACE,
-                            );
-                        }
-                    }
-                }
-                let output = serde_json::json!({
-                    "interrupted": true,
-                    "reason": "daemon restarted while this node was running"
-                });
-
-                let now = Utc::now();
-                tx.execute(
-                    "UPDATE graph_runs
-                     SET status = ?1, output = ?2, completed_at = ?3, pid = NULL
-                     WHERE id = ?4",
-                    params![
-                        GraphRunStatus::Fail.as_str(),
-                        serde_json::to_string(&output)?,
-                        now.timestamp(),
-                        run.id,
-                    ],
-                )?;
-                // The engine never touches git (no more `git stash`): the
-                // partial work an interrupted run left in the workdir stays
-                // exactly where it is. Marking the spec `Interrupted` (not
-                // reset to `Pending`) is what used to be the stash's job —
-                // it's what tells the next pickup's rendered prompt to say
-                // "a previous attempt exists, continue it" instead of
-                // silently starting fresh. `spec_start_head` and
-                // `spec_committed_head` (C15) are still cleared: the next
-                // attempt captures its own fresh baseline and starts with no
-                // committed-head evidence of its own (`run_spec` only reuses
-                // a persisted baseline for a same-attempt resume of a
-                // `Running` spec, which an `Interrupted` pickup is not) — a
-                // restart must never let a *stale* `spec_committed_head` from
-                // the interrupted attempt pass a check for an attempt that
-                // hasn't committed anything itself yet.
-                tx.execute(
-                    "UPDATE graph_specs
-                     SET status = ?1, started_at = NULL, completed_at = NULL, spec_start_head = NULL, spec_committed_head = NULL,
-                         updated_at = ?3
-                     WHERE id = ?2",
-                    params![
-                        GraphSpecStatus::Interrupted.as_str(),
-                        run.spec_id,
-                        Utc::now().timestamp_millis()
-                    ],
-                )?;
+                Self::reconcile_orphan_run(&tx, lp, run)?;
             }
             // C1: flag this pause as reconciliation's own, distinct from an
             // operator's `graph_pause`/`graph_report_blocker` (both go through
@@ -2844,6 +2784,105 @@ impl Database {
 
         tx.commit()?;
         Ok(orphaned.len())
+    }
+
+    /// Attempt a best-effort kill of a same-boot orphan's process group,
+    /// skipping the kill when the recorded pid is an ancestor of this process.
+    fn terminate_same_boot_orphan(lp: &Graph, run: &GraphNodeRun) {
+        // B12: this new daemon process never held a `Child` for
+        // `run` — it may not even share the previous process's
+        // memory — so a persisted pid is all reconciliation has to
+        // go on, and a pid alone can't tell a genuine survivor from
+        // an unrelated process that reused the same pid after a
+        // reboot recycled the pid space. Only attempt the kill when
+        // the run's recorded boot id still matches the machine's
+        // current one (same boot, i.e. the *daemon* crashed/restarted
+        // without the OS rebooting) — otherwise the pid is
+        // meaningless and killing it could hit an unrelated process.
+        let (Some(pid), Some(run_boot_id)) = (run.pid, run.boot_id.as_deref()) else {
+            return;
+        };
+        if crate::system::boot_id().as_deref() != Some(run_boot_id) {
+            return;
+        }
+        let ancestors = crate::daemon::process::ancestor_pids();
+        if ancestors.contains(&(pid as u32)) {
+            tracing::warn!(
+                "Reconciling orphaned graph '{}': skipping kill of pid {} — it is an ancestor of this process",
+                lp.id,
+                pid
+            );
+        } else {
+            tracing::warn!(
+                "Reconciling orphaned graph '{}': attempting best-effort kill of survivor pid {} from the same boot.",
+                lp.id,
+                pid
+            );
+            crate::daemon::process::terminate_process_group_async(
+                pid,
+                crate::daemon::process::KILL_GRACE,
+            );
+        }
+    }
+
+    /// Reconcile a single dangling run: log it, best-effort kill any same-boot
+    /// survivor, fail the run, and mark its spec interrupted.
+    fn reconcile_orphan_run(
+        tx: &rusqlite::Transaction<'_>,
+        lp: &Graph,
+        run: &GraphNodeRun,
+    ) -> Result<()> {
+        tracing::warn!(
+            "Reconciling orphaned graph '{}': was running node '{}' (spec '{}') when the daemon last stopped; pausing graph, marking its run as interrupted, and marking the spec interrupted.",
+            lp.id,
+            run.node_id,
+            run.spec_id
+        );
+        Self::terminate_same_boot_orphan(lp, run);
+        let output = serde_json::json!({
+            "interrupted": true,
+            "reason": "daemon restarted while this node was running"
+        });
+
+        let now = Utc::now();
+        tx.execute(
+            "UPDATE graph_runs
+             SET status = ?1, output = ?2, completed_at = ?3, pid = NULL
+             WHERE id = ?4",
+            params![
+                GraphRunStatus::Fail.as_str(),
+                serde_json::to_string(&output)?,
+                now.timestamp(),
+                run.id,
+            ],
+        )?;
+        // The engine never touches git (no more `git stash`): the
+        // partial work an interrupted run left in the workdir stays
+        // exactly where it is. Marking the spec `Interrupted` (not
+        // reset to `Pending`) is what used to be the stash's job —
+        // it's what tells the next pickup's rendered prompt to say
+        // "a previous attempt exists, continue it" instead of
+        // silently starting fresh. `spec_start_head` and
+        // `spec_committed_head` (C15) are still cleared: the next
+        // attempt captures its own fresh baseline and starts with no
+        // committed-head evidence of its own (`run_spec` only reuses
+        // a persisted baseline for a same-attempt resume of a
+        // `Running` spec, which an `Interrupted` pickup is not) — a
+        // restart must never let a *stale* `spec_committed_head` from
+        // the interrupted attempt pass a check for an attempt that
+        // hasn't committed anything itself yet.
+        tx.execute(
+            "UPDATE graph_specs
+             SET status = ?1, started_at = NULL, completed_at = NULL, spec_start_head = NULL, spec_committed_head = NULL,
+                 updated_at = ?3
+             WHERE id = ?2",
+            params![
+                GraphSpecStatus::Interrupted.as_str(),
+                run.spec_id,
+                Utc::now().timestamp_millis()
+            ],
+        )?;
+        Ok(())
     }
 
     /// Reset queue-member specs stuck `running` with no active node run in
@@ -2897,71 +2936,8 @@ impl Database {
             };
 
             for spec_id in &stranded_specs {
-                tracing::warn!(
-                    "Reconciling stranded queue spec '{}' in graph '{}': \
-                     was 'running' with no active node run in this daemon's \
-                     lifetime; checking for evidence it was genuinely interrupted.",
-                    spec_id,
-                    graph_id
-                );
-
-                // B36: the `NOT EXISTS` above only proves no run for this
-                // spec claims the *current* boot — a `graph_runs` row can
-                // still be sitting at `status = 'running'` from a previous
-                // boot (e.g. the daemon died before a graceful path like
-                // `graph_report_blocker` could finalize it). Identify it from
-                // recorded facts only — a boot id that isn't this one, or a
-                // pid that's no longer alive — and mark it distinctly as
-                // interrupted (never as a plain node failure). The engine
-                // never touches git: no quarantine, no `git stash` — the
-                // interrupted run's worktree changes are left exactly as
-                // they were.
-                let stale_run: Option<(String, Option<i64>, Option<String>)> = tx
-                    .query_row(
-                        "SELECT id, pid, boot_id FROM graph_runs
-                         WHERE spec_id = ?1 AND status = 'running'
-                         ORDER BY started_at DESC LIMIT 1",
-                        params![spec_id],
-                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                    )
-                    .optional()?;
-
-                // Only evidence of a genuinely interrupted run (a stale-boot
-                // or dead-pid `graph_runs` row) earns `Interrupted` instead of
-                // a plain reset to `Pending` — a spec stuck `running` with no
-                // run row behind it at all has no such evidence, so it's
-                // reset exactly as before.
-                let mut interrupted = false;
-                if let Some((run_id, pid, run_boot_id)) = stale_run {
-                    let boot_mismatch = match (run_boot_id.as_deref(), current_boot_id) {
-                        (Some(a), Some(b)) => a != b,
-                        _ => false,
-                    };
-                    let pid_dead = pid
-                        .and_then(|p| u32::try_from(p).ok())
-                        .map(|p| !crate::daemon::process::is_process_running(p))
-                        .unwrap_or(false);
-
-                    if boot_mismatch || pid_dead {
-                        interrupted = true;
-                        let output = serde_json::json!({
-                            "interrupted": true,
-                            "reason": "daemon restarted or its process died while this node was running"
-                        });
-
-                        tx.execute(
-                            "UPDATE graph_runs
-                             SET status = ?1, output = ?2, completed_at = ?3, pid = NULL
-                             WHERE id = ?4",
-                            params![
-                                GraphRunStatus::Fail.as_str(),
-                                serde_json::to_string(&output)?,
-                                Utc::now().timestamp(),
-                                run_id,
-                            ],
-                        )?;
-                    }
-                }
+                let interrupted =
+                    Self::reconcile_stranded_spec(&tx, graph_id, spec_id, current_boot_id)?;
 
                 let new_status = if interrupted {
                     GraphSpecStatus::Interrupted
@@ -2982,6 +2958,84 @@ impl Database {
 
         tx.commit()?;
         Ok(reset_count)
+    }
+
+    /// Inspect the most recent `graph_runs` row for a stranded spec and fail it
+    /// if it is evidence of a genuinely interrupted run (stale boot or dead
+    /// pid). Returns whether that interrupted evidence was found.
+    fn reconcile_stranded_spec(
+        tx: &rusqlite::Transaction<'_>,
+        graph_id: &str,
+        spec_id: &str,
+        current_boot_id: Option<&str>,
+    ) -> Result<bool> {
+        tracing::warn!(
+            "Reconciling stranded queue spec '{}' in graph '{}': \
+             was 'running' with no active node run in this daemon's \
+             lifetime; checking for evidence it was genuinely interrupted.",
+            spec_id,
+            graph_id
+        );
+
+        // B36: the `NOT EXISTS` above only proves no run for this
+        // spec claims the *current* boot — a `graph_runs` row can
+        // still be sitting at `status = 'running'` from a previous
+        // boot (e.g. the daemon died before a graceful path like
+        // `graph_report_blocker` could finalize it). Identify it from
+        // recorded facts only — a boot id that isn't this one, or a
+        // pid that's no longer alive — and mark it distinctly as
+        // interrupted (never as a plain node failure). The engine
+        // never touches git: no quarantine, no `git stash` — the
+        // interrupted run's worktree changes are left exactly as
+        // they were.
+        let stale_run: Option<(String, Option<i64>, Option<String>)> = tx
+            .query_row(
+                "SELECT id, pid, boot_id FROM graph_runs
+                 WHERE spec_id = ?1 AND status = 'running'
+                 ORDER BY started_at DESC LIMIT 1",
+                params![spec_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+
+        // Only evidence of a genuinely interrupted run (a stale-boot
+        // or dead-pid `graph_runs` row) earns `Interrupted` instead of
+        // a plain reset to `Pending` — a spec stuck `running` with no
+        // run row behind it at all has no such evidence, so it's
+        // reset exactly as before.
+        let mut interrupted = false;
+        if let Some((run_id, pid, run_boot_id)) = stale_run {
+            let boot_mismatch = match (run_boot_id.as_deref(), current_boot_id) {
+                (Some(a), Some(b)) => a != b,
+                _ => false,
+            };
+            let pid_dead = pid
+                .and_then(|p| u32::try_from(p).ok())
+                .map(|p| !crate::daemon::process::is_process_running(p))
+                .unwrap_or(false);
+
+            if boot_mismatch || pid_dead {
+                interrupted = true;
+                let output = serde_json::json!({
+                    "interrupted": true,
+                    "reason": "daemon restarted or its process died while this node was running"
+                });
+
+                tx.execute(
+                    "UPDATE graph_runs
+                     SET status = ?1, output = ?2, completed_at = ?3, pid = NULL
+                     WHERE id = ?4",
+                    params![
+                        GraphRunStatus::Fail.as_str(),
+                        serde_json::to_string(&output)?,
+                        Utc::now().timestamp(),
+                        run_id,
+                    ],
+                )?;
+            }
+        }
+
+        Ok(interrupted)
     }
 
     pub fn get_graph_details(&self, graph_id: &str) -> Result<Option<GraphDetails>> {
