@@ -111,10 +111,37 @@ fn create_system_dashboard_lines(
     max_lines: usize,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
+    let mut lines = vec![cpu_line(system_info, temperature_unit, theme)];
+
+    if let Some(gpu) = gpu_line(system_info, temperature_unit, theme) {
+        lines.push(gpu);
+    }
+
+    lines.push(mem_line(system_info, theme));
+
+    if let Some(pwr) = power_line(system_info, theme) {
+        lines.push(pwr);
+    }
+
+    if let Some(swap) = swap_line(system_info) {
+        lines.push(swap);
+    }
+
+    lines.push(load_or_procs_line(system_info, theme));
+
+    lines.truncate(max_lines);
+    lines
+}
+
+/// `cpu:` row — usage (alert) + temp (alert) + freq (dim) + cores (dim).
+fn cpu_line(
+    system_info: &SystemInfo,
+    temperature_unit: TemperatureUnit,
+    theme: &Theme,
+) -> Line<'static> {
     let cpu_usage = system_info.cpu_usage_percent();
     let cpu_color = alert_color(cpu_usage, 70.0, 90.0, theme);
 
-    // Build CPU line: usage (alert) + temp (alert) + freq (dim) + cores (dim)
     let mut cpu_spans = vec![
         Span::styled("cpu: ", Style::default().fg(Color::White)),
         Span::styled(format!("{cpu_usage:.0}%"), Style::default().fg(cpu_color)),
@@ -138,91 +165,99 @@ fn create_system_dashboard_lines(
             Style::default().fg(theme.dim_text),
         ));
     }
-    let mut lines = vec![Line::from(cpu_spans)];
+    Line::from(cpu_spans)
+}
 
-    // GPU line right after CPU if available. The power draw is folded
-    // into the same row when both are present — splitting "gpu usage" and
-    // "gpu watts" into two lines made the sysinfo taller than it needs to
-    // be, and the two values are conceptually one (the energy the chip is
-    // drawing right now).
-    if let Some(gpu) = &system_info.gpu_info {
-        let usage_pct = gpu.usage.unwrap_or(0.0);
-        let gpu_usage_color = alert_color(usage_pct, 70.0, 90.0, theme);
+/// `gpu:` row, or `None` when there is no GPU data worth showing. The power
+/// draw is folded into the same row when both are present — splitting "gpu usage"
+/// and "gpu watts" into two lines made the sysinfo taller than it needs to be,
+/// and the two values are conceptually one (the energy the chip is drawing).
+fn gpu_line(
+    system_info: &SystemInfo,
+    temperature_unit: TemperatureUnit,
+    theme: &Theme,
+) -> Option<Line<'static>> {
+    let gpu = system_info.gpu_info.as_ref()?;
+    let usage_pct = gpu.usage.unwrap_or(0.0);
+    let gpu_usage_color = alert_color(usage_pct, 70.0, 90.0, theme);
 
-        // Show VRAM as a single size figure ("1.25GB"). The percentage
-        // version (`16% 1.25GB`) is dropped because the same info is
-        // already implicit in the size, and the percentage competes with
-        // the colored GPU usage percentage for attention at a glance.
-        let vram_size_text = match (gpu.vram_used, gpu.vram_total) {
-            (Some(used), Some(total)) if total > 0 => Some(format_megabytes_smart(used)),
-            _ => None,
-        };
+    // Show VRAM as a single size figure ("1.25GB"). The percentage
+    // version (`16% 1.25GB`) is dropped because the same info is
+    // already implicit in the size, and the percentage competes with
+    // the colored GPU usage percentage for attention at a glance.
+    let vram_size_text = match (gpu.vram_used, gpu.vram_total) {
+        (Some(used), Some(total)) if total > 0 => Some(format_megabytes_smart(used)),
+        _ => None,
+    };
 
-        // Power draw (watts), folded into this row only when the GPU
-        // itself is the source. Battery discharge is a system-wide number,
-        // not the GPU's, so it gets its own `pwr:` row below instead.
-        let power_watts = match system_info.power_source {
-            Some(PowerSource::Gpu) => system_info.power_watts,
-            _ => None,
-        };
+    // Power draw (watts), folded into this row only when the GPU
+    // itself is the source. Battery discharge is a system-wide number,
+    // not the GPU's, so it gets its own `pwr:` row below instead.
+    let power_watts = match system_info.power_source {
+        Some(PowerSource::Gpu) => system_info.power_watts,
+        _ => None,
+    };
 
-        // Only show GPU line if we have at least one piece of information
-        if gpu.usage.is_some()
-            || gpu.temperature.is_some()
-            || vram_size_text.is_some()
-            || power_watts.is_some()
-        {
-            let mut spans = vec![Span::styled("gpu: ", Style::default().fg(Color::White))];
-
-            if let Some(usage) = gpu.usage {
-                spans.push(Span::styled(
-                    format!("{usage:.0}%"),
-                    Style::default().fg(gpu_usage_color),
-                ));
-            }
-            if let Some(temp) = gpu.temperature {
-                let sep = if gpu.usage.is_some() { " " } else { "" };
-                spans.push(Span::styled(
-                    format!("{sep}{}", format_temperature(temp, temperature_unit)),
-                    Style::default().fg(gpu_temp_alert_color(temp, theme)),
-                ));
-            }
-            // Layout: <usage>% <temp> · <vram> · <watts>W
-            // The " · " separator is only emitted when at least one of
-            // usage/temp has already been printed, so an empty start
-            // (rare, only watt data) doesn't show a leading separator.
-            let has_left = gpu.usage.is_some() || gpu.temperature.is_some();
-            if let Some(ref vram) = vram_size_text {
-                if has_left {
-                    spans.push(Span::styled(" · ", Style::default().fg(Color::White)));
-                }
-                spans.push(Span::styled(
-                    vram.clone(),
-                    Style::default().fg(theme.dim_text),
-                ));
-            }
-            if let Some(watts) = power_watts {
-                let any_left = has_left || vram_size_text.is_some();
-                if any_left {
-                    spans.push(Span::styled(" · ", Style::default().fg(Color::White)));
-                }
-                spans.push(Span::styled(
-                    format!("{watts:.0}W"),
-                    Style::default().fg(theme.dim_text),
-                ));
-            }
-
-            lines.push(Line::from(spans));
-        }
+    // Only show GPU line if we have at least one piece of information
+    if gpu.usage.is_none()
+        && gpu.temperature.is_none()
+        && vram_size_text.is_none()
+        && power_watts.is_none()
+    {
+        return None;
     }
 
-    // Memory line
+    let mut spans = vec![Span::styled("gpu: ", Style::default().fg(Color::White))];
+
+    if let Some(usage) = gpu.usage {
+        spans.push(Span::styled(
+            format!("{usage:.0}%"),
+            Style::default().fg(gpu_usage_color),
+        ));
+    }
+    if let Some(temp) = gpu.temperature {
+        let sep = if gpu.usage.is_some() { " " } else { "" };
+        spans.push(Span::styled(
+            format!("{sep}{}", format_temperature(temp, temperature_unit)),
+            Style::default().fg(gpu_temp_alert_color(temp, theme)),
+        ));
+    }
+    // Layout: <usage>% <temp> · <vram> · <watts>W
+    // The " · " separator is only emitted when at least one of
+    // usage/temp has already been printed, so an empty start
+    // (rare, only watt data) doesn't show a leading separator.
+    let has_left = gpu.usage.is_some() || gpu.temperature.is_some();
+    if let Some(ref vram) = vram_size_text {
+        if has_left {
+            spans.push(Span::styled(" · ", Style::default().fg(Color::White)));
+        }
+        spans.push(Span::styled(
+            vram.clone(),
+            Style::default().fg(theme.dim_text),
+        ));
+    }
+    if let Some(watts) = power_watts {
+        let any_left = has_left || vram_size_text.is_some();
+        if any_left {
+            spans.push(Span::styled(" · ", Style::default().fg(Color::White)));
+        }
+        spans.push(Span::styled(
+            format!("{watts:.0}W"),
+            Style::default().fg(theme.dim_text),
+        ));
+    }
+
+    Some(Line::from(spans))
+}
+
+/// `mem:` row — usage percentage (alert) plus the used size (dim).
+fn mem_line(system_info: &SystemInfo, theme: &Theme) -> Line<'static> {
     let mem_pct = if system_info.memory_total > 0 {
         (system_info.memory_used as f32 / system_info.memory_total as f32) * 100.0
     } else {
         0.0
     };
-    lines.push(Line::from(vec![
+    Line::from(vec![
         Span::styled("mem: ", Style::default().fg(Color::White)),
         Span::styled(
             format!("{mem_pct:.0}%"),
@@ -232,83 +267,86 @@ fn create_system_dashboard_lines(
             format!(" {}", format_bytes_smart(system_info.memory_used)),
             Style::default().fg(theme.dim_text),
         ),
-    ]));
+    ])
+}
 
-    // Battery discharge gets its own `pwr:` line — it's a system-wide
-    // number, not the GPU's, so it doesn't belong folded into the GPU row
-    // above (that row only folds in GPU-sourced power).
-    if system_info.power_source == Some(PowerSource::Battery) {
-        if let Some(watts) = system_info.power_watts {
-            let pct = system_info
-                .power_limit_watts
-                .filter(|l| *l > 0.0)
-                .map(|l| (watts / l) * 100.0);
-            let mut spans = vec![Span::styled("pwr: ", Style::default().fg(Color::White))];
-            if let Some(p) = pct {
-                spans.push(Span::styled(
-                    format!("{p:.0}%"),
-                    Style::default().fg(alert_color(p, 70.0, 90.0, theme)),
-                ));
-                spans.push(Span::styled(
-                    format!(" {watts:.0}W"),
-                    Style::default().fg(theme.dim_text),
-                ));
-            } else {
-                spans.push(Span::styled(
-                    format!("{watts:.0}W"),
-                    Style::default().fg(theme.dim_text),
-                ));
-            }
-            lines.push(Line::from(spans));
-        }
+/// `pwr:` row — battery discharge gets its own line because it is a
+/// system-wide number, not the GPU's, so it doesn't belong folded into the
+/// GPU row above (that row only folds in GPU-sourced power).
+fn power_line(system_info: &SystemInfo, theme: &Theme) -> Option<Line<'static>> {
+    if system_info.power_source != Some(PowerSource::Battery) {
+        return None;
     }
-
-    // Swap line only if actually being used — always yellow, no percentage
-    if system_info.swap_used > 0 {
-        lines.push(Line::from(vec![
-            Span::styled("swap: ", Style::default().fg(Color::White)),
-            Span::styled(
-                format_bytes_smart(system_info.swap_used),
-                Style::default().fg(WARN),
-            ),
-        ]));
-    }
-
-    // Load average + process count merged into one line
-    // Color is based on load per core: <0.7 green, <1.0 yellow, >=1.0 red
-    if let Some(load) = system_info.load_average {
-        let cores = system_info.cpu_cores.max(1) as f64;
-        let load_per_core = load / cores;
-        let load_color = if load_per_core >= 1.0 {
-            DANGER
-        } else if load_per_core >= 0.7 {
-            WARN
-        } else {
-            theme.dim_text
-        };
-        let load_pct = (load_per_core * 100.0) as u32;
-        lines.push(Line::from(vec![
-            Span::styled("load: ", Style::default().fg(Color::White)),
-            Span::styled(format!("{load_pct}%"), Style::default().fg(load_color)),
-            Span::styled(format!(" {load:.2}"), Style::default().fg(theme.dim_text)),
-            Span::styled(" · ", Style::default().fg(Color::White)),
-            Span::styled(
-                format!("{} procs", system_info.process_count),
-                Style::default().fg(theme.dim_text),
-            ),
-        ]));
+    let watts = system_info.power_watts?;
+    let pct = system_info
+        .power_limit_watts
+        .filter(|l| *l > 0.0)
+        .map(|l| (watts / l) * 100.0);
+    let mut spans = vec![Span::styled("pwr: ", Style::default().fg(Color::White))];
+    if let Some(p) = pct {
+        spans.push(Span::styled(
+            format!("{p:.0}%"),
+            Style::default().fg(alert_color(p, 70.0, 90.0, theme)),
+        ));
+        spans.push(Span::styled(
+            format!(" {watts:.0}W"),
+            Style::default().fg(theme.dim_text),
+        ));
     } else {
-        lines.push(Line::from(vec![
+        spans.push(Span::styled(
+            format!("{watts:.0}W"),
+            Style::default().fg(theme.dim_text),
+        ));
+    }
+    Some(Line::from(spans))
+}
+
+/// `swap:` row, only when swap is actually being used — always yellow, no percentage.
+fn swap_line(system_info: &SystemInfo) -> Option<Line<'static>> {
+    if system_info.swap_used == 0 {
+        return None;
+    }
+    Some(Line::from(vec![
+        Span::styled("swap: ", Style::default().fg(Color::White)),
+        Span::styled(
+            format_bytes_smart(system_info.swap_used),
+            Style::default().fg(WARN),
+        ),
+    ]))
+}
+
+/// Load average + process count merged into one line, or a plain process count.
+/// Color is based on load per core: <0.7 green, <1.0 yellow, >=1.0 red
+fn load_or_procs_line(system_info: &SystemInfo, theme: &Theme) -> Line<'static> {
+    let Some(load) = system_info.load_average else {
+        return Line::from(vec![
             Span::styled("procs: ", Style::default().fg(Color::White)),
             Span::styled(
                 format!("{}", system_info.process_count),
                 Style::default().fg(theme.dim_text),
             ),
-        ]));
-    }
-
-    lines.truncate(max_lines);
-    lines
+        ]);
+    };
+    let cores = system_info.cpu_cores.max(1) as f64;
+    let load_per_core = load / cores;
+    let load_color = if load_per_core >= 1.0 {
+        DANGER
+    } else if load_per_core >= 0.7 {
+        WARN
+    } else {
+        theme.dim_text
+    };
+    let load_pct = (load_per_core * 100.0) as u32;
+    Line::from(vec![
+        Span::styled("load: ", Style::default().fg(Color::White)),
+        Span::styled(format!("{load_pct}%"), Style::default().fg(load_color)),
+        Span::styled(format!(" {load:.2}"), Style::default().fg(theme.dim_text)),
+        Span::styled(" · ", Style::default().fg(Color::White)),
+        Span::styled(
+            format!("{} procs", system_info.process_count),
+            Style::default().fg(theme.dim_text),
+        ),
+    ])
 }
 
 /// Number of content rows the dashboard will actually render for

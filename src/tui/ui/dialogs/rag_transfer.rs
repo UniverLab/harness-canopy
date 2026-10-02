@@ -4,7 +4,7 @@ use ratatui::widgets::{Block, Clear, Paragraph};
 use ratatui::Frame;
 
 use super::{centered_rect, draw_dialog_left_wave, truncate_str};
-use crate::tui::app::types::App;
+use crate::tui::app::types::{App, RagTransferModal};
 use crate::tui::ui::theme::Theme;
 
 pub fn draw_rag_transfer_modal(frame: &mut Frame, app: &App, theme: &Theme) {
@@ -34,95 +34,119 @@ pub fn draw_rag_transfer_modal(frame: &mut Frame, app: &App, theme: &Theme) {
     frame.render_widget(block, area);
     draw_dialog_left_wave(frame, area, app.animation_tick.into());
 
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled("  Query: ", Style::default().fg(theme.dim_text)),
-            Span::styled(
-                truncate_str(&modal.query, inner.width.saturating_sub(10) as usize),
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        Line::from(""),
-        Line::from(Span::styled(
-            "  Selected chunk preview:",
-            Style::default().fg(theme.dim_text),
-        )),
-    ];
+    let mut lines = Vec::new();
+    push_rag_preview(&mut lines, modal, inner.width, theme);
+    push_agent_cards(&mut lines, app, modal, inner.width, theme);
+    push_rag_footer(&mut lines, theme);
+
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Append the query row plus the first few lines of the selected chunk preview.
+fn push_rag_preview<'a>(
+    lines: &mut Vec<Line<'a>>,
+    modal: &'a RagTransferModal,
+    inner_width: u16,
+    theme: &Theme,
+) {
+    lines.push(Line::from(vec![
+        Span::styled("  Query: ", Style::default().fg(theme.dim_text)),
+        Span::styled(
+            truncate_str(&modal.query, inner_width.saturating_sub(10) as usize),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  Selected chunk preview:",
+        Style::default().fg(theme.dim_text),
+    )));
 
     for line in modal.context_payload.lines().skip(5).take(4) {
         lines.push(Line::from(Span::styled(
             format!(
                 "  {}",
-                truncate_str(line, inner.width.saturating_sub(4) as usize)
+                truncate_str(line, inner_width.saturating_sub(4) as usize)
             ),
             Style::default().fg(Color::Rgb(170, 200, 170)),
         )));
     }
 
     lines.push(Line::from(""));
+}
 
+/// Append one three-line card per interactive agent, or an empty-state message.
+fn push_agent_cards<'a>(
+    lines: &mut Vec<Line<'a>>,
+    app: &'a App,
+    modal: &'a RagTransferModal,
+    inner_width: u16,
+    theme: &Theme,
+) {
     // Full-width trailing filler so a selected row reads as a card spanning the
     // whole dialog (like the sidebar), not just the background behind the text.
     let row_fill =
-        |bg: Color| Span::styled(" ".repeat(inner.width as usize), Style::default().bg(bg));
+        |bg: Color| Span::styled(" ".repeat(inner_width as usize), Style::default().bg(bg));
 
+    let agents = &app.interactive_agents;
     if agents.is_empty() {
         lines.push(Line::from(Span::styled(
             "  No interactive agents running.",
             Style::default().fg(theme.dim_text),
         )));
-    } else {
-        for (i, agent) in agents.iter().enumerate() {
-            if i > 0 {
-                lines.push(Line::from(""));
-            }
-            let is_sel = i == modal.picker_selected;
-            let accent = agent.accent_color;
-            // Subtle selection (matches the sidebar): dark-gray background with
-            // the agent name in its accent color, instead of a full accent fill.
-            let bg = if is_sel {
-                theme.selected_bg
-            } else {
-                theme.dialog_bg
-            };
-            let fg = if is_sel { accent } else { Color::White };
-            let cursor = if is_sel { "›" } else { " " };
-            lines.push(Line::from(vec![
-                Span::styled(format!("  {} ", cursor), Style::default().fg(accent).bg(bg)),
-                Span::styled(
-                    &agent.name,
-                    Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
-                ),
-                row_fill(bg),
-            ]));
-            lines.push(Line::from(vec![
-                Span::styled("    ", Style::default().bg(bg)),
-                Span::styled(
-                    format!("pty · {}", agent.cli.as_str()),
-                    Style::default().fg(theme.dim_text).bg(bg),
-                ),
-                row_fill(bg),
-            ]));
-            lines.push(Line::from(vec![
-                Span::styled("    ", Style::default().bg(bg)),
-                Span::styled(
-                    truncate_path(&agent.working_dir, inner.width.saturating_sub(6) as usize),
-                    Style::default().fg(Color::Cyan).bg(bg),
-                ),
-                row_fill(bg),
-            ]));
-        }
+        return;
     }
+    for (i, agent) in agents.iter().enumerate() {
+        if i > 0 {
+            lines.push(Line::from(""));
+        }
+        let is_sel = i == modal.picker_selected;
+        let accent = agent.accent_color;
+        // Subtle selection (matches the sidebar): dark-gray background with
+        // the agent name in its accent color, instead of a full accent fill.
+        let bg = if is_sel {
+            theme.selected_bg
+        } else {
+            theme.dialog_bg
+        };
+        let fg = if is_sel { accent } else { Color::White };
+        let cursor = if is_sel { "›" } else { " " };
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {} ", cursor), Style::default().fg(accent).bg(bg)),
+            Span::styled(
+                &agent.name,
+                Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
+            ),
+            row_fill(bg),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("    ", Style::default().bg(bg)),
+            Span::styled(
+                format!("pty · {}", agent.cli.as_str()),
+                Style::default().fg(theme.dim_text).bg(bg),
+            ),
+            row_fill(bg),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("    ", Style::default().bg(bg)),
+            Span::styled(
+                truncate_path(&agent.working_dir, inner_width.saturating_sub(6) as usize),
+                Style::default().fg(Color::Cyan).bg(bg),
+            ),
+            row_fill(bg),
+        ]));
+    }
+}
 
+/// Append the blank separator and the navigation hint.
+fn push_rag_footer<'a>(lines: &mut Vec<Line<'a>>, theme: &Theme) {
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "  ↑↓ navigate · Enter open prompt builder · Esc cancel",
         Style::default().fg(theme.dim_text),
     )));
-
-    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 fn truncate_path(path: &str, max_chars: usize) -> String {

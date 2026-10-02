@@ -374,58 +374,7 @@ fn draw_sync_section(
         )),
     ];
 
-    if state.active_intents.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "  none",
-            Style::default().fg(theme.dim_text),
-        )));
-    } else {
-        for intent in &state.active_intents {
-            // Card header: agent · impact · status
-            lines.push(Line::from(vec![
-                Span::styled(
-                    "┌ ",
-                    Style::default().fg(intent_color(intent.impact, theme)),
-                ),
-                Span::styled(
-                    &intent.agent_name,
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!(" [{}]", intent.impact.as_str()),
-                    Style::default().fg(intent_color(intent.impact, theme)),
-                ),
-            ]));
-            // Mission text — wrap manually
-            for chunk in wrap_text(&intent.mission, w.saturating_sub(2)) {
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        "│ ",
-                        Style::default().fg(intent_color(intent.impact, theme)),
-                    ),
-                    Span::styled(chunk, Style::default().fg(Color::White)),
-                ]));
-            }
-            // Description — wrap
-            if !intent.description.is_empty() {
-                for chunk in wrap_text(&intent.description, w.saturating_sub(2)) {
-                    lines.push(Line::from(vec![
-                        Span::styled(
-                            "│ ",
-                            Style::default().fg(intent_color(intent.impact, theme)),
-                        ),
-                        Span::styled(chunk, Style::default().fg(theme.dim_text)),
-                    ]));
-                }
-            }
-            lines.push(Line::from(Span::styled(
-                "└─",
-                Style::default().fg(intent_color(intent.impact, theme)),
-            )));
-        }
-    }
+    push_sync_intent_lines(&mut lines, state, w, theme);
 
     lines.push(Line::raw(""));
     lines.push(Line::from(Span::styled(
@@ -435,6 +384,84 @@ fn draw_sync_section(
             .add_modifier(Modifier::BOLD),
     )));
 
+    push_sync_message_lines(&mut lines, state, w, theme);
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(Style::default())
+            .scroll((scroll_offset, 0)),
+        area,
+    );
+}
+
+/// Append one card per active intent, or a `none` placeholder when there are none.
+fn push_sync_intent_lines<'a>(
+    lines: &mut Vec<Line<'a>>,
+    state: &'a SyncPanelState,
+    w: usize,
+    theme: &Theme,
+) {
+    if state.active_intents.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  none",
+            Style::default().fg(theme.dim_text),
+        )));
+        return;
+    }
+    for intent in &state.active_intents {
+        // Card header: agent · impact · status
+        lines.push(Line::from(vec![
+            Span::styled(
+                "┌ ",
+                Style::default().fg(intent_color(intent.impact, theme)),
+            ),
+            Span::styled(
+                &intent.agent_name,
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" [{}]", intent.impact.as_str()),
+                Style::default().fg(intent_color(intent.impact, theme)),
+            ),
+        ]));
+        // Mission text — wrap manually
+        for chunk in wrap_text(&intent.mission, w.saturating_sub(2)) {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    "│ ",
+                    Style::default().fg(intent_color(intent.impact, theme)),
+                ),
+                Span::styled(chunk, Style::default().fg(Color::White)),
+            ]));
+        }
+        // Description — wrap
+        if !intent.description.is_empty() {
+            for chunk in wrap_text(&intent.description, w.saturating_sub(2)) {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        "│ ",
+                        Style::default().fg(intent_color(intent.impact, theme)),
+                    ),
+                    Span::styled(chunk, Style::default().fg(theme.dim_text)),
+                ]));
+            }
+        }
+        lines.push(Line::from(Span::styled(
+            "└─",
+            Style::default().fg(intent_color(intent.impact, theme)),
+        )));
+    }
+}
+
+/// Append one card per recent message, or a placeholder when both sections are empty.
+fn push_sync_message_lines<'a>(
+    lines: &mut Vec<Line<'a>>,
+    state: &'a SyncPanelState,
+    w: usize,
+    theme: &Theme,
+) {
     let recent_msgs = recent_messages_for_display(&state.recent_messages);
     if state.active_intents.is_empty() && recent_msgs.is_empty() {
         lines.push(Line::from(Span::styled(
@@ -475,13 +502,6 @@ fn draw_sync_section(
         }
         lines.push(Line::from(Span::styled("└─", Style::default().fg(color))));
     }
-
-    frame.render_widget(
-        Paragraph::new(lines)
-            .style(Style::default())
-            .scroll((scroll_offset, 0)),
-        area,
-    );
 }
 
 /// Split `text` into chunks of at most `max_width` chars, breaking on whitespace.

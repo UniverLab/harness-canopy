@@ -521,30 +521,38 @@ impl SuggestionPicker {
         let current = self.cd_current_dir.as_ref()?;
         // Remember the directory name we're leaving
         let leaving_name = current.file_name().map(|n| n.to_string_lossy().to_string());
-        if let Some(parent) = current.parent() {
-            if parent.to_string_lossy().is_empty() {
-                return None;
-            }
-            let parent_path = parent.to_path_buf();
-            let result = parent_path.to_string_lossy().to_string();
-            self.cd_current_dir = Some(parent_path);
-            self.refresh_items(base_cwd);
-            // Position cursor on the directory we came from
-            if let Some(name) = leaving_name {
-                let target = format!("./{name}");
-                if let Some(idx) = self.items.iter().position(|i| i.text == target) {
-                    self.selected = idx;
-                    // Adjust scroll to keep selection visible
-                    if self.selected >= self.scroll_offset + Self::MAX_VISIBLE {
-                        self.scroll_offset = self.selected + 1 - Self::MAX_VISIBLE;
-                    } else if self.selected < self.scroll_offset {
-                        self.scroll_offset = self.selected;
-                    }
-                }
-            }
-            return Some(result);
+        let parent = current.parent()?;
+        if parent.to_string_lossy().is_empty() {
+            return None;
         }
-        None
+        let parent_path = parent.to_path_buf();
+        let result = parent_path.to_string_lossy().to_string();
+        self.cd_current_dir = Some(parent_path);
+        self.refresh_items(base_cwd);
+        self.select_entered_dir(leaving_name);
+        Some(result)
+    }
+
+    /// Position the cursor on the directory we came from, when it is listed.
+    fn select_entered_dir(&mut self, leaving_name: Option<String>) {
+        let Some(name) = leaving_name else {
+            return;
+        };
+        let target = format!("./{name}");
+        let Some(idx) = self.items.iter().position(|i| i.text == target) else {
+            return;
+        };
+        self.selected = idx;
+        self.ensure_selection_visible();
+    }
+
+    /// Adjust scroll to keep the selection visible.
+    fn ensure_selection_visible(&mut self) {
+        if self.selected >= self.scroll_offset + Self::MAX_VISIBLE {
+            self.scroll_offset = self.selected + 1 - Self::MAX_VISIBLE;
+        } else if self.selected < self.scroll_offset {
+            self.scroll_offset = self.selected;
+        }
     }
 
     /// Refresh the items list based on current cd_current_dir.

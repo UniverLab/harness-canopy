@@ -1,3 +1,4 @@
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
@@ -5,6 +6,7 @@ use ratatui::Frame;
 
 use super::centered_rect;
 use super::ERROR_COLOR;
+use crate::tui::app::dialog::{ProjectPickerEntry, SimplePromptDialog};
 use crate::tui::app::types::App;
 use crate::tui::ui::theme::Theme;
 
@@ -24,181 +26,13 @@ pub(crate) fn draw_section_picker_modal(
 
     match mode {
         SectionPickerMode::AddSection { selected } => {
-            let addable = dialog.get_addable_sections();
-            let height = (addable.len() as u16 + 4).min(15);
-            let area = centered_rect(50, height, frame.area());
-            frame.render_widget(Clear, area);
-
-            let title = " Add Section ";
-            let block = Block::default()
-                .title(title)
-                .borders(crate::tui::ui::dialog_borders_for(theme))
-                .border_style(Style::default().fg(accent))
-                .style(Style::default().bg(theme.dialog_bg));
-
-            let inner = block.inner(area);
-            frame.render_widget(block, area);
-
-            for (y_pos, (i, (_, label))) in (inner.y..).zip(addable.iter().enumerate()) {
-                if y_pos >= inner.y + inner.height.saturating_sub(1) {
-                    break;
-                }
-                let is_selected = i == *selected;
-                let style = if is_selected {
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(accent)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(Color::White)
-                };
-                let line = Line::from(vec![Span::styled(format!("  {} ", label), style)]);
-                let line_area = ratatui::layout::Rect {
-                    x: inner.x,
-                    y: y_pos,
-                    width: inner.width,
-                    height: 1,
-                };
-                frame.render_widget(Paragraph::new(line), line_area);
-            }
-
-            let hint = Line::from(vec![
-                Span::styled("↑↓ ", Style::default().fg(theme.dim_text)),
-                Span::styled("select  ", Style::default().fg(Color::White)),
-                Span::styled("c ", Style::default().fg(theme.dim_text)),
-                Span::styled("custom  ", Style::default().fg(Color::White)),
-                Span::styled("Enter ", Style::default().fg(theme.dim_text)),
-                Span::styled("add  ", Style::default().fg(Color::White)),
-                Span::styled("Esc ", Style::default().fg(theme.dim_text)),
-                Span::styled("cancel", Style::default().fg(Color::White)),
-            ]);
-            let hint_area = ratatui::layout::Rect {
-                x: inner.x,
-                y: inner.y + inner.height.saturating_sub(1),
-                width: inner.width,
-                height: 1,
-            };
-            frame.render_widget(Paragraph::new(hint), hint_area);
+            draw_add_section(frame, dialog, accent, *selected, theme);
         }
         SectionPickerMode::AddCustom { input } => {
-            let area = centered_rect(50, 6, frame.area());
-            frame.render_widget(Clear, area);
-
-            let title = " Custom Section ";
-            let block = Block::default()
-                .title(title)
-                .borders(crate::tui::ui::dialog_borders_for(theme))
-                .border_style(Style::default().fg(accent))
-                .style(Style::default().bg(theme.dialog_bg));
-
-            let inner = block.inner(area);
-            frame.render_widget(block, area);
-
-            let label_line = Line::from(vec![Span::styled("Name: ", Style::default().fg(accent))]);
-            let label_area = ratatui::layout::Rect {
-                x: inner.x,
-                y: inner.y,
-                width: inner.width,
-                height: 1,
-            };
-            frame.render_widget(Paragraph::new(label_line), label_area);
-
-            let mut display = input.clone();
-            display.push('│');
-            let input_line = Line::from(vec![Span::styled(
-                display,
-                Style::default()
-                    .fg(theme.header_color)
-                    .bg(Color::Rgb(20, 35, 20)),
-            )]);
-            let input_area = ratatui::layout::Rect {
-                x: inner.x + 1,
-                y: inner.y + 1,
-                width: inner.width.saturating_sub(2),
-                height: 1,
-            };
-            frame.render_widget(Paragraph::new(input_line), input_area);
-
-            let hint = Line::from(vec![
-                Span::styled("Enter ", Style::default().fg(theme.dim_text)),
-                Span::styled("add  ", Style::default().fg(Color::White)),
-                Span::styled("Esc ", Style::default().fg(theme.dim_text)),
-                Span::styled("cancel", Style::default().fg(Color::White)),
-            ]);
-            let hint_area = ratatui::layout::Rect {
-                x: inner.x,
-                y: inner.y + 3,
-                width: inner.width,
-                height: 1,
-            };
-            frame.render_widget(Paragraph::new(hint), hint_area);
+            draw_add_custom(frame, input, accent, theme);
         }
         SectionPickerMode::RemoveSection { selected, scroll } => {
-            let removable = dialog.get_removable_sections();
-            let height = crate::tui::app::dialog::SimplePromptDialog::remove_section_box_height(
-                removable.len(),
-            );
-            let visible_rows =
-                crate::tui::app::dialog::SimplePromptDialog::remove_section_visible_rows(
-                    removable.len(),
-                );
-            let area = centered_rect(50, height, frame.area());
-            frame.render_widget(Clear, area);
-
-            let title = " Remove Section ";
-            let block = Block::default()
-                .title(title)
-                .borders(crate::tui::ui::dialog_borders_for(theme))
-                .border_style(Style::default().fg(accent))
-                .style(Style::default().bg(theme.dialog_bg));
-
-            let inner = block.inner(area);
-            frame.render_widget(block, area);
-
-            let visible = removable
-                .iter()
-                .enumerate()
-                .skip(*scroll)
-                .take(visible_rows);
-            for (y_pos, (i, (_, display_label))) in (inner.y..).zip(visible) {
-                if y_pos >= inner.y + inner.height.saturating_sub(1) {
-                    break;
-                }
-                let is_selected = i == *selected;
-
-                let style = if is_selected {
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(ERROR_COLOR)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(Color::White)
-                };
-                let line = Line::from(vec![Span::styled(format!("  {} ", display_label), style)]);
-                let line_area = ratatui::layout::Rect {
-                    x: inner.x,
-                    y: y_pos,
-                    width: inner.width,
-                    height: 1,
-                };
-                frame.render_widget(Paragraph::new(line), line_area);
-            }
-
-            let hint = Line::from(vec![
-                Span::styled("↑↓ ", Style::default().fg(theme.dim_text)),
-                Span::styled("select  ", Style::default().fg(Color::White)),
-                Span::styled("Enter ", Style::default().fg(theme.dim_text)),
-                Span::styled("remove  ", Style::default().fg(Color::White)),
-                Span::styled("Esc ", Style::default().fg(theme.dim_text)),
-                Span::styled("cancel", Style::default().fg(Color::White)),
-            ]);
-            let hint_area = ratatui::layout::Rect {
-                x: inner.x,
-                y: inner.y + inner.height.saturating_sub(1),
-                width: inner.width,
-                height: 1,
-            };
-            frame.render_widget(Paragraph::new(hint), hint_area);
+            draw_remove_section(frame, dialog, accent, *selected, *scroll, theme);
         }
         SectionPickerMode::SkillsPicker {
             selected,
@@ -206,86 +40,7 @@ pub(crate) fn draw_section_picker_modal(
             entries,
             ..
         } => {
-            let height = crate::tui::app::dialog::SimplePromptDialog::skills_picker_box_height(
-                entries.len(),
-            );
-            let visible_rows =
-                crate::tui::app::dialog::SimplePromptDialog::skills_picker_visible_rows(
-                    entries.len(),
-                );
-            let area = centered_rect(55, height, frame.area());
-            frame.render_widget(Clear, area);
-
-            let block = Block::default()
-                .title(" Tools — Pick a Skill ")
-                .borders(crate::tui::ui::dialog_borders_for(theme))
-                .border_style(Style::default().fg(accent))
-                .style(Style::default().bg(Color::Rgb(10, 20, 30)));
-
-            let inner = block.inner(area);
-            frame.render_widget(block, area);
-
-            if entries.is_empty() {
-                let msg = Line::from(vec![Span::styled(
-                    "  No skills found",
-                    Style::default().fg(Color::DarkGray),
-                )]);
-                frame.render_widget(
-                    Paragraph::new(msg),
-                    ratatui::layout::Rect {
-                        x: inner.x,
-                        y: inner.y,
-                        width: inner.width,
-                        height: 1,
-                    },
-                );
-            } else {
-                let visible = entries.iter().enumerate().skip(*scroll).take(visible_rows);
-                for (y_pos, (i, (_label, raw_name, prefix))) in (inner.y..).zip(visible) {
-                    if y_pos >= inner.y + inner.height.saturating_sub(1) {
-                        break;
-                    }
-                    let is_selected = i == *selected;
-                    let style = if is_selected {
-                        Style::default()
-                            .fg(Color::Black)
-                            .bg(accent)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(Color::White)
-                    };
-                    // Picker shows [prefix]:name for clarity (skill vs global)
-                    let display = format!("  [{prefix}]:{raw_name} ");
-                    let line = Line::from(vec![Span::styled(display, style)]);
-                    frame.render_widget(
-                        Paragraph::new(line),
-                        ratatui::layout::Rect {
-                            x: inner.x,
-                            y: y_pos,
-                            width: inner.width,
-                            height: 1,
-                        },
-                    );
-                }
-            }
-
-            let hint = Line::from(vec![
-                Span::styled("↑↓ ", Style::default().fg(theme.dim_text)),
-                Span::styled("select  ", Style::default().fg(Color::White)),
-                Span::styled("Enter ", Style::default().fg(theme.dim_text)),
-                Span::styled("add  ", Style::default().fg(Color::White)),
-                Span::styled("Esc ", Style::default().fg(theme.dim_text)),
-                Span::styled("cancel", Style::default().fg(Color::White)),
-            ]);
-            frame.render_widget(
-                Paragraph::new(hint),
-                ratatui::layout::Rect {
-                    x: inner.x,
-                    y: inner.y + inner.height.saturating_sub(1),
-                    width: inner.width,
-                    height: 1,
-                },
-            );
+            draw_skills_picker(frame, accent, *selected, *scroll, entries, theme);
         }
         SectionPickerMode::ProjectPicker {
             selected,
@@ -293,254 +48,516 @@ pub(crate) fn draw_section_picker_modal(
             filter,
             scroll,
         } => {
-            let filtered = crate::tui::app::dialog::SimplePromptDialog::filtered_project_indices(
-                entries, filter,
-            );
-            let visible_rows =
-                crate::tui::app::dialog::SimplePromptDialog::project_picker_visible_rows(
-                    filtered.len(),
-                );
-            let height = crate::tui::app::dialog::SimplePromptDialog::project_picker_box_height(
-                filtered.len(),
-            );
-            let area = centered_rect(60, height, frame.area());
-            frame.render_widget(Clear, area);
-
-            let title = if filtered.len() > visible_rows {
-                format!(
-                    " Project Context ({}/{}) ",
-                    selected.saturating_add(1),
-                    filtered.len()
-                )
-            } else {
-                " Project Context ".to_string()
-            };
-
-            let block = Block::default()
-                .title(title)
-                .borders(crate::tui::ui::dialog_borders_for(theme))
-                .border_style(Style::default().fg(accent))
-                .style(Style::default().bg(Color::Rgb(10, 20, 30)));
-
-            let inner = block.inner(area);
-            frame.render_widget(block, area);
-
-            let mut filter_display = filter.clone();
-            filter_display.push('│');
-            let filter_line = Line::from(vec![
-                Span::styled("  🔍 ", Style::default().fg(theme.dim_text)),
-                Span::styled(filter_display, Style::default().fg(theme.header_color)),
-            ]);
-            frame.render_widget(
-                Paragraph::new(filter_line),
-                ratatui::layout::Rect {
-                    x: inner.x,
-                    y: inner.y,
-                    width: inner.width,
-                    height: 1,
-                },
-            );
-
-            let list_y = inner.y + 1;
-            if entries.is_empty() {
-                let msg = Line::from(vec![Span::styled(
-                    "  No registered projects found",
-                    Style::default().fg(Color::DarkGray),
-                )]);
-                frame.render_widget(
-                    Paragraph::new(msg),
-                    ratatui::layout::Rect {
-                        x: inner.x,
-                        y: list_y,
-                        width: inner.width,
-                        height: 1,
-                    },
-                );
-            } else if filtered.is_empty() {
-                let msg = Line::from(vec![Span::styled(
-                    "  no projects match",
-                    Style::default().fg(Color::DarkGray),
-                )]);
-                frame.render_widget(
-                    Paragraph::new(msg),
-                    ratatui::layout::Rect {
-                        x: inner.x,
-                        y: list_y,
-                        width: inner.width,
-                        height: 1,
-                    },
-                );
-            } else {
-                let visible = filtered.iter().enumerate().skip(*scroll).take(visible_rows);
-                for (y_pos, (i, &idx)) in (list_y..).zip(visible) {
-                    if y_pos >= inner.y + inner.height.saturating_sub(1) {
-                        break;
-                    }
-                    let Some(entry) = entries.get(idx) else {
-                        continue;
-                    };
-                    let is_selected = i == *selected;
-                    let style = if is_selected {
-                        Style::default()
-                            .fg(Color::Black)
-                            .bg(accent)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(Color::White)
-                    };
-                    let display = format!("  {} [{}] ", entry.name, entry.hash);
-                    let line = Line::from(vec![Span::styled(display, style)]);
-                    frame.render_widget(
-                        Paragraph::new(line),
-                        ratatui::layout::Rect {
-                            x: inner.x,
-                            y: y_pos,
-                            width: inner.width,
-                            height: 1,
-                        },
-                    );
-                }
-            }
-
-            let hint = Line::from(vec![
-                Span::styled("↑↓ ", Style::default().fg(theme.dim_text)),
-                Span::styled("select  ", Style::default().fg(Color::White)),
-                Span::styled("type ", Style::default().fg(theme.dim_text)),
-                Span::styled("filter  ", Style::default().fg(Color::White)),
-                Span::styled("Enter ", Style::default().fg(theme.dim_text)),
-                Span::styled("add  ", Style::default().fg(Color::White)),
-                Span::styled("Esc ", Style::default().fg(theme.dim_text)),
-                Span::styled("cancel", Style::default().fg(Color::White)),
-            ]);
-            frame.render_widget(
-                Paragraph::new(hint),
-                ratatui::layout::Rect {
-                    x: inner.x,
-                    y: inner.y + inner.height.saturating_sub(1),
-                    width: inner.width,
-                    height: 1,
-                },
-            );
+            draw_project_picker(frame, accent, *selected, entries, filter, *scroll, theme);
         }
         SectionPickerMode::PresetPicker {
             selected,
             entries,
             filter,
         } => {
-            let filtered = crate::tui::app::dialog::SimplePromptDialog::filtered_preset_indices(
-                entries, filter,
-            );
-            let height = (filtered.len() as u16 + 6).min(17);
-            let area = centered_rect(60, height.max(7), frame.area());
-            frame.render_widget(Clear, area);
+            draw_preset_picker(frame, accent, *selected, entries, filter, theme);
+        }
+        SectionPickerMode::None => {}
+    }
+}
 
-            let block = Block::default()
-                .title(" Preset ")
-                .borders(crate::tui::ui::dialog_borders_for(theme))
-                .border_style(Style::default().fg(accent))
-                .style(Style::default().bg(Color::Rgb(10, 20, 30)));
+/// Selection state shared by the project list body.
+#[derive(Clone, Copy)]
+struct PickerView {
+    selected: usize,
+    scroll: usize,
+    visible_rows: usize,
+}
 
-            let inner = block.inner(area);
-            frame.render_widget(block, area);
+/// Render the `🔍 <filter>│` line at the top of a picker body.
+fn draw_filter_line(frame: &mut Frame, inner: Rect, filter: &str, theme: &Theme) {
+    let mut filter_display = filter.to_string();
+    filter_display.push('│');
+    let filter_line = Line::from(vec![
+        Span::styled("  🔍 ", Style::default().fg(theme.dim_text)),
+        Span::styled(filter_display, Style::default().fg(theme.header_color)),
+    ]);
+    frame.render_widget(
+        Paragraph::new(filter_line),
+        Rect {
+            x: inner.x,
+            y: inner.y,
+            width: inner.width,
+            height: 1,
+        },
+    );
+}
 
-            let mut filter_display = filter.clone();
-            filter_display.push('│');
-            let filter_line = Line::from(vec![
-                Span::styled("  🔍 ", Style::default().fg(theme.dim_text)),
-                Span::styled(filter_display, Style::default().fg(theme.header_color)),
-            ]);
-            frame.render_widget(
-                Paragraph::new(filter_line),
-                ratatui::layout::Rect {
-                    x: inner.x,
-                    y: inner.y,
-                    width: inner.width,
-                    height: 1,
-                },
-            );
+/// Render a single hint line on the last row of a picker body.
+fn draw_hint_line(frame: &mut Frame, inner: Rect, hint: Line) {
+    frame.render_widget(
+        Paragraph::new(hint),
+        Rect {
+            x: inner.x,
+            y: inner.y + inner.height.saturating_sub(1),
+            width: inner.width,
+            height: 1,
+        },
+    );
+}
 
-            let list_y = inner.y + 1;
-            if entries.is_empty() {
-                let msg = Line::from(vec![Span::styled(
-                    "  no presets in ~/.canopy/prompts",
-                    Style::default().fg(Color::DarkGray),
-                )]);
-                frame.render_widget(
-                    Paragraph::new(msg),
-                    ratatui::layout::Rect {
-                        x: inner.x,
-                        y: list_y,
-                        width: inner.width,
-                        height: 1,
-                    },
-                );
-            } else if filtered.is_empty() {
-                let msg = Line::from(vec![Span::styled(
-                    "  no presets match",
-                    Style::default().fg(Color::DarkGray),
-                )]);
-                frame.render_widget(
-                    Paragraph::new(msg),
-                    ratatui::layout::Rect {
-                        x: inner.x,
-                        y: list_y,
-                        width: inner.width,
-                        height: 1,
-                    },
-                );
-            } else {
-                for (y_pos, (i, &idx)) in (list_y..).zip(filtered.iter().enumerate()) {
-                    if y_pos >= inner.y + inner.height.saturating_sub(1) {
-                        break;
-                    }
-                    let (name, preview, _) = &entries[idx];
-                    let is_selected = i == *selected;
-                    let style = if is_selected {
-                        Style::default()
-                            .fg(Color::Black)
-                            .bg(accent)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(Color::White)
-                    };
-                    let display = if preview.is_empty() {
-                        format!("  {name} ")
-                    } else {
-                        format!("  {name} — {preview} ")
-                    };
-                    frame.render_widget(
-                        Paragraph::new(Line::from(vec![Span::styled(display, style)])),
-                        ratatui::layout::Rect {
-                            x: inner.x,
-                            y: y_pos,
-                            width: inner.width,
-                            height: 1,
-                        },
-                    );
-                }
+/// Render a single dim gray message line at `y`.
+fn draw_picker_message(frame: &mut Frame, inner: Rect, y: u16, msg: &str) {
+    let line = Line::from(vec![Span::styled(
+        msg,
+        Style::default().fg(Color::DarkGray),
+    )]);
+    frame.render_widget(
+        Paragraph::new(line),
+        Rect {
+            x: inner.x,
+            y,
+            width: inner.width,
+            height: 1,
+        },
+    );
+}
+
+/// `Add Section` picker — the sections that can still be added.
+fn draw_add_section(
+    frame: &mut Frame,
+    dialog: &SimplePromptDialog,
+    accent: Color,
+    selected: usize,
+    theme: &Theme,
+) {
+    let addable = dialog.get_addable_sections();
+    let height = (addable.len() as u16 + 4).min(15);
+    let area = centered_rect(50, height, frame.area());
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(" Add Section ")
+        .borders(crate::tui::ui::dialog_borders_for(theme))
+        .border_style(Style::default().fg(accent))
+        .style(Style::default().bg(theme.dialog_bg));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    for (y_pos, (i, (_, label))) in (inner.y..).zip(addable.iter().enumerate()) {
+        if y_pos >= inner.y + inner.height.saturating_sub(1) {
+            break;
+        }
+        let is_selected = i == selected;
+        let style = if is_selected {
+            Style::default()
+                .fg(Color::Black)
+                .bg(accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        let line = Line::from(vec![Span::styled(format!("  {} ", label), style)]);
+        frame.render_widget(
+            Paragraph::new(line),
+            Rect {
+                x: inner.x,
+                y: y_pos,
+                width: inner.width,
+                height: 1,
+            },
+        );
+    }
+
+    let hint = Line::from(vec![
+        Span::styled("↑↓ ", Style::default().fg(theme.dim_text)),
+        Span::styled("select  ", Style::default().fg(Color::White)),
+        Span::styled("c ", Style::default().fg(theme.dim_text)),
+        Span::styled("custom  ", Style::default().fg(Color::White)),
+        Span::styled("Enter ", Style::default().fg(theme.dim_text)),
+        Span::styled("add  ", Style::default().fg(Color::White)),
+        Span::styled("Esc ", Style::default().fg(theme.dim_text)),
+        Span::styled("cancel", Style::default().fg(Color::White)),
+    ]);
+    draw_hint_line(frame, inner, hint);
+}
+
+/// `Custom Section` prompt — a single free-text name field.
+fn draw_add_custom(frame: &mut Frame, input: &str, accent: Color, theme: &Theme) {
+    let area = centered_rect(50, 6, frame.area());
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(" Custom Section ")
+        .borders(crate::tui::ui::dialog_borders_for(theme))
+        .border_style(Style::default().fg(accent))
+        .style(Style::default().bg(theme.dialog_bg));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let label_line = Line::from(vec![Span::styled("Name: ", Style::default().fg(accent))]);
+    frame.render_widget(
+        Paragraph::new(label_line),
+        Rect {
+            x: inner.x,
+            y: inner.y,
+            width: inner.width,
+            height: 1,
+        },
+    );
+
+    let mut display = input.to_string();
+    display.push('│');
+    let input_line = Line::from(vec![Span::styled(
+        display,
+        Style::default()
+            .fg(theme.header_color)
+            .bg(Color::Rgb(20, 35, 20)),
+    )]);
+    frame.render_widget(
+        Paragraph::new(input_line),
+        Rect {
+            x: inner.x + 1,
+            y: inner.y + 1,
+            width: inner.width.saturating_sub(2),
+            height: 1,
+        },
+    );
+
+    let hint = Line::from(vec![
+        Span::styled("Enter ", Style::default().fg(theme.dim_text)),
+        Span::styled("add  ", Style::default().fg(Color::White)),
+        Span::styled("Esc ", Style::default().fg(theme.dim_text)),
+        Span::styled("cancel", Style::default().fg(Color::White)),
+    ]);
+    frame.render_widget(
+        Paragraph::new(hint),
+        Rect {
+            x: inner.x,
+            y: inner.y + 3,
+            width: inner.width,
+            height: 1,
+        },
+    );
+}
+
+/// `Remove Section` picker — the sections already present.
+fn draw_remove_section(
+    frame: &mut Frame,
+    dialog: &SimplePromptDialog,
+    accent: Color,
+    selected: usize,
+    scroll: usize,
+    theme: &Theme,
+) {
+    let removable = dialog.get_removable_sections();
+    let height = SimplePromptDialog::remove_section_box_height(removable.len());
+    let visible_rows = SimplePromptDialog::remove_section_visible_rows(removable.len());
+    let area = centered_rect(50, height, frame.area());
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(" Remove Section ")
+        .borders(crate::tui::ui::dialog_borders_for(theme))
+        .border_style(Style::default().fg(accent))
+        .style(Style::default().bg(theme.dialog_bg));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let visible = removable.iter().enumerate().skip(scroll).take(visible_rows);
+    for (y_pos, (i, (_, display_label))) in (inner.y..).zip(visible) {
+        if y_pos >= inner.y + inner.height.saturating_sub(1) {
+            break;
+        }
+        let is_selected = i == selected;
+
+        let style = if is_selected {
+            Style::default()
+                .fg(Color::Black)
+                .bg(ERROR_COLOR)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        let line = Line::from(vec![Span::styled(format!("  {} ", display_label), style)]);
+        frame.render_widget(
+            Paragraph::new(line),
+            Rect {
+                x: inner.x,
+                y: y_pos,
+                width: inner.width,
+                height: 1,
+            },
+        );
+    }
+
+    let hint = Line::from(vec![
+        Span::styled("↑↓ ", Style::default().fg(theme.dim_text)),
+        Span::styled("select  ", Style::default().fg(Color::White)),
+        Span::styled("Enter ", Style::default().fg(theme.dim_text)),
+        Span::styled("remove  ", Style::default().fg(Color::White)),
+        Span::styled("Esc ", Style::default().fg(theme.dim_text)),
+        Span::styled("cancel", Style::default().fg(Color::White)),
+    ]);
+    draw_hint_line(frame, inner, hint);
+}
+
+/// `Tools — Pick a Skill` picker — shows `[prefix]:name` per entry.
+fn draw_skills_picker(
+    frame: &mut Frame,
+    accent: Color,
+    selected: usize,
+    scroll: usize,
+    entries: &[(String, String, String)],
+    theme: &Theme,
+) {
+    let height = SimplePromptDialog::skills_picker_box_height(entries.len());
+    let visible_rows = SimplePromptDialog::skills_picker_visible_rows(entries.len());
+    let area = centered_rect(55, height, frame.area());
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(" Tools — Pick a Skill ")
+        .borders(crate::tui::ui::dialog_borders_for(theme))
+        .border_style(Style::default().fg(accent))
+        .style(Style::default().bg(Color::Rgb(10, 20, 30)));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if entries.is_empty() {
+        draw_picker_message(frame, inner, inner.y, "  No skills found");
+    } else {
+        let visible = entries.iter().enumerate().skip(scroll).take(visible_rows);
+        for (y_pos, (i, (_label, raw_name, prefix))) in (inner.y..).zip(visible) {
+            if y_pos >= inner.y + inner.height.saturating_sub(1) {
+                break;
             }
-
-            let hint = Line::from(vec![
-                Span::styled("↑↓ ", Style::default().fg(theme.dim_text)),
-                Span::styled("select  ", Style::default().fg(Color::White)),
-                Span::styled("type ", Style::default().fg(theme.dim_text)),
-                Span::styled("filter  ", Style::default().fg(Color::White)),
-                Span::styled("Enter ", Style::default().fg(theme.dim_text)),
-                Span::styled("insert  ", Style::default().fg(Color::White)),
-                Span::styled("Esc ", Style::default().fg(theme.dim_text)),
-                Span::styled("cancel", Style::default().fg(Color::White)),
-            ]);
+            let is_selected = i == selected;
+            let style = if is_selected {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(accent)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            // Picker shows [prefix]:name for clarity (skill vs global)
+            let display = format!("  [{prefix}]:{raw_name} ");
             frame.render_widget(
-                Paragraph::new(hint),
-                ratatui::layout::Rect {
+                Paragraph::new(Line::from(vec![Span::styled(display, style)])),
+                Rect {
                     x: inner.x,
-                    y: inner.y + inner.height.saturating_sub(1),
+                    y: y_pos,
                     width: inner.width,
                     height: 1,
                 },
             );
         }
-        SectionPickerMode::None => {}
+    }
+
+    let hint = Line::from(vec![
+        Span::styled("↑↓ ", Style::default().fg(theme.dim_text)),
+        Span::styled("select  ", Style::default().fg(Color::White)),
+        Span::styled("Enter ", Style::default().fg(theme.dim_text)),
+        Span::styled("add  ", Style::default().fg(Color::White)),
+        Span::styled("Esc ", Style::default().fg(theme.dim_text)),
+        Span::styled("cancel", Style::default().fg(Color::White)),
+    ]);
+    draw_hint_line(frame, inner, hint);
+}
+
+/// `Project Context` picker — registered projects filtered by a substring.
+fn draw_project_picker(
+    frame: &mut Frame,
+    accent: Color,
+    selected: usize,
+    entries: &[ProjectPickerEntry],
+    filter: &str,
+    scroll: usize,
+    theme: &Theme,
+) {
+    let filtered = SimplePromptDialog::filtered_project_indices(entries, filter);
+    let visible_rows = SimplePromptDialog::project_picker_visible_rows(filtered.len());
+    let height = SimplePromptDialog::project_picker_box_height(filtered.len());
+    let area = centered_rect(60, height, frame.area());
+    frame.render_widget(Clear, area);
+
+    let title = if filtered.len() > visible_rows {
+        format!(
+            " Project Context ({}/{}) ",
+            selected.saturating_add(1),
+            filtered.len()
+        )
+    } else {
+        " Project Context ".to_string()
+    };
+
+    let block = Block::default()
+        .title(title)
+        .borders(crate::tui::ui::dialog_borders_for(theme))
+        .border_style(Style::default().fg(accent))
+        .style(Style::default().bg(Color::Rgb(10, 20, 30)));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    draw_filter_line(frame, inner, filter, theme);
+
+    let list_y = inner.y + 1;
+    if entries.is_empty() {
+        draw_picker_message(frame, inner, list_y, "  No registered projects found");
+    } else if filtered.is_empty() {
+        draw_picker_message(frame, inner, list_y, "  no projects match");
+    } else {
+        let view = PickerView {
+            selected,
+            scroll,
+            visible_rows,
+        };
+        draw_project_list(frame, inner, entries, &filtered, list_y, view, accent);
+    }
+
+    let hint = Line::from(vec![
+        Span::styled("↑↓ ", Style::default().fg(theme.dim_text)),
+        Span::styled("select  ", Style::default().fg(Color::White)),
+        Span::styled("type ", Style::default().fg(theme.dim_text)),
+        Span::styled("filter  ", Style::default().fg(Color::White)),
+        Span::styled("Enter ", Style::default().fg(theme.dim_text)),
+        Span::styled("add  ", Style::default().fg(Color::White)),
+        Span::styled("Esc ", Style::default().fg(theme.dim_text)),
+        Span::styled("cancel", Style::default().fg(Color::White)),
+    ]);
+    draw_hint_line(frame, inner, hint);
+}
+
+/// Scrolled body of the project list.
+fn draw_project_list(
+    frame: &mut Frame,
+    inner: Rect,
+    entries: &[ProjectPickerEntry],
+    filtered: &[usize],
+    list_y: u16,
+    view: PickerView,
+    accent: Color,
+) {
+    let visible = filtered
+        .iter()
+        .enumerate()
+        .skip(view.scroll)
+        .take(view.visible_rows);
+    for (y_pos, (i, &idx)) in (list_y..).zip(visible) {
+        if y_pos >= inner.y + inner.height.saturating_sub(1) {
+            break;
+        }
+        let Some(entry) = entries.get(idx) else {
+            continue;
+        };
+        let is_selected = i == view.selected;
+        let style = if is_selected {
+            Style::default()
+                .fg(Color::Black)
+                .bg(accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        let display = format!("  {} [{}] ", entry.name, entry.hash);
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![Span::styled(display, style)])),
+            Rect {
+                x: inner.x,
+                y: y_pos,
+                width: inner.width,
+                height: 1,
+            },
+        );
+    }
+}
+
+/// `Preset` picker — saved prompt presets filtered by a substring.
+fn draw_preset_picker(
+    frame: &mut Frame,
+    accent: Color,
+    selected: usize,
+    entries: &[(String, String, String)],
+    filter: &str,
+    theme: &Theme,
+) {
+    let filtered = SimplePromptDialog::filtered_preset_indices(entries, filter);
+    let height = (filtered.len() as u16 + 6).min(17);
+    let area = centered_rect(60, height.max(7), frame.area());
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(" Preset ")
+        .borders(crate::tui::ui::dialog_borders_for(theme))
+        .border_style(Style::default().fg(accent))
+        .style(Style::default().bg(Color::Rgb(10, 20, 30)));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    draw_filter_line(frame, inner, filter, theme);
+
+    let list_y = inner.y + 1;
+    if entries.is_empty() {
+        draw_picker_message(frame, inner, list_y, "  no presets in ~/.canopy/prompts");
+    } else if filtered.is_empty() {
+        draw_picker_message(frame, inner, list_y, "  no presets match");
+    } else {
+        draw_preset_list(frame, inner, list_y, entries, &filtered, selected, accent);
+    }
+
+    let hint = Line::from(vec![
+        Span::styled("↑↓ ", Style::default().fg(theme.dim_text)),
+        Span::styled("select  ", Style::default().fg(Color::White)),
+        Span::styled("type ", Style::default().fg(theme.dim_text)),
+        Span::styled("filter  ", Style::default().fg(Color::White)),
+        Span::styled("Enter ", Style::default().fg(theme.dim_text)),
+        Span::styled("insert  ", Style::default().fg(Color::White)),
+        Span::styled("Esc ", Style::default().fg(theme.dim_text)),
+        Span::styled("cancel", Style::default().fg(Color::White)),
+    ]);
+    draw_hint_line(frame, inner, hint);
+}
+
+/// Body of the preset list — one row per filtered preset.
+fn draw_preset_list(
+    frame: &mut Frame,
+    inner: Rect,
+    list_y: u16,
+    entries: &[(String, String, String)],
+    filtered: &[usize],
+    selected: usize,
+    accent: Color,
+) {
+    for (y_pos, (i, &idx)) in (list_y..).zip(filtered.iter().enumerate()) {
+        if y_pos >= inner.y + inner.height.saturating_sub(1) {
+            break;
+        }
+        let (name, preview, _) = &entries[idx];
+        let is_selected = i == selected;
+        let style = if is_selected {
+            Style::default()
+                .fg(Color::Black)
+                .bg(accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        let display = if preview.is_empty() {
+            format!("  {name} ")
+        } else {
+            format!("  {name} — {preview} ")
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![Span::styled(display, style)])),
+            Rect {
+                x: inner.x,
+                y: y_pos,
+                width: inner.width,
+                height: 1,
+            },
+        );
     }
 }
 

@@ -1,10 +1,12 @@
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 use ratatui::Frame;
 
 use super::{draw_dialog_left_wave, truncate_str};
-use crate::tui::app::dialog::PromptTab;
+use crate::db::scheduled_sends::ScheduledSend;
+use crate::tui::app::dialog::{PromptTab, SimplePromptDialog};
 use crate::tui::app::types::{AgentEntry, App};
 use crate::tui::ui::dialogs::at_picker::draw_at_picker_dropdown;
 use crate::tui::ui::dialogs::section_picker::draw_section_picker_modal;
@@ -322,58 +324,63 @@ fn select_shortcut_hints(
 /// Draw the prompt builder. Returns the tab bar's origin `(x, y)` so the caller
 /// can store it for mouse hit-testing the clickable Normal/Raw tabs, or `None`
 /// when the dialog is not open.
-pub fn draw_simple_prompt_dialog(
-    frame: &mut Frame,
-    app: &App,
-    theme: &Theme,
-) -> Option<((u16, u16), Option<ratatui::layout::Rect>)> {
-    let dialog = app.simple_prompt_dialog.as_ref()?;
+/// Layout values the dialog needs before it can draw anything.
+struct PromptGeometry {
+    dialog_width: u16,
+    height: u16,
+    field_width: usize,
+    section_heights: Vec<u16>,
+}
 
-    // Get agent accent color
-    let accent = app
-        .selected_agent()
+/// Borrowed values the Normal-tab section renderer needs.
+struct NormalContentCtx<'a> {
+    dialog: &'a SimplePromptDialog,
+    inner: Rect,
+    field_width: usize,
+    section_heights: &'a [u16],
+    list_panel_height: u16,
+    accent: Color,
+    theme: &'a Theme,
+}
+
+/// Accent color of the selected agent, falling back to the theme header color.
+fn prompt_accent(app: &App, theme: &Theme) -> Color {
+    app.selected_agent()
         .and_then(|a| match a {
             AgentEntry::Interactive(idx) => {
                 app.interactive_agents.get(*idx).map(|ia| ia.accent_color)
             }
             _ => None,
         })
-        .unwrap_or(theme.header_color);
+        .unwrap_or(theme.header_color)
+}
 
-    // Pending scheduled sends targeting the currently selected session —
-    // shown next to the Schedule field and cancelable with Ctrl+K there.
+/// Pending scheduled sends targeting the currently selected session —
+/// shown next to the Schedule field and cancelable with Ctrl+K there.
+fn pending_scheduled_for_selection(app: &App) -> Vec<ScheduledSend> {
     let selected_session_id = app.selected_agent().and_then(|a| match a {
         AgentEntry::Interactive(idx) => app.interactive_agents.get(*idx).map(|ia| ia.id.clone()),
         _ => None,
     });
-    let pending_scheduled = selected_session_id
+    selected_session_id
         .as_deref()
         .and_then(|id| app.db.list_pending_scheduled_sends_for_session(id).ok())
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
 
-    // Scheduled-sends list panel geometry (B33). The panel sits just above the
-    // bottom send control, one row per pending send, and only exists when the
-    // selected session actually has pending sends. A selection is only honored
-    // (highlighted, scrolled into view) while there is a list to browse.
-    let list_selected = dialog
-        .scheduled_list_selected
-        .filter(|_| !pending_scheduled.is_empty());
-    let (list_visible_rows, list_scroll) =
-        crate::tui::app::dialog::SimplePromptDialog::scheduled_list_view(
-            pending_scheduled.len(),
-            SCHEDULED_LIST_MAX_ROWS,
-            list_selected,
-        );
-    // Panel height: a label/top-border row plus one row per visible entry.
-    let list_panel_height: u16 = if pending_scheduled.is_empty() {
-        0
-    } else {
-        1 + list_visible_rows as u16
-    };
-
+/// Compute the dialog width, per-section heights and the scheduled-list view.
+///
+/// `pending_len` drives the list panel height: a label/top-border row plus one
+/// row per visible entry, present only when the selected session actually has
+/// pending sends. A selection is only honored (highlighted, scrolled into view)
+/// while there is a list to browse.
+fn compute_prompt_geometry(
+    frame_area: Rect,
+    dialog: &SimplePromptDialog,
+    list_panel_height: u16,
+) -> PromptGeometry {
     // Use 65% of terminal width (responsive, not edge-to-edge)
     let percent_x = 65u16;
-    let frame_area = frame.area();
     let max_dialog_w = frame_area.width.saturating_sub(2).max(1);
     let preferred_dialog_w = frame_area.width.saturating_mul(percent_x) / 100;
     let min_dialog_w = 40u16.min(max_dialog_w);
@@ -392,12 +399,8 @@ pub fn draw_simple_prompt_dialog(
             let is_focused = dialog.focused_section == i + section_focus_offset;
             let content_h = if is_focused {
                 let content = dialog.section_content_for_build(section_name).unwrap_or("");
-                let vis = crate::tui::app::dialog::SimplePromptDialog::visual_line_count(
-                    content,
-                    field_width,
-                );
-                let max_h =
-                    crate::tui::app::dialog::SimplePromptDialog::max_visible_lines(section_name);
+                let vis = SimplePromptDialog::visual_line_count(content, field_width);
+                let max_h = SimplePromptDialog::max_visible_lines(section_name);
                 (vis as u16).clamp(1, max_h as u16)
             } else {
                 1u16
@@ -416,7 +419,7 @@ pub fn draw_simple_prompt_dialog(
         } else {
             dialog.raw_text()
         };
-        let vis = crate::tui::app::dialog::SimplePromptDialog::visual_line_count(text, field_width);
+        let vis = SimplePromptDialog::visual_line_count(text, field_width);
         (vis as u16).clamp(3, 18)
     } else {
         0
@@ -433,28 +436,44 @@ pub fn draw_simple_prompt_dialog(
     // Cap dialog height — leave at least 4 rows margin, minimum 10 rows.
     let max_dialog_h = frame_area.height.saturating_sub(2).max(1);
     let min_dialog_h = 10u16.min(max_dialog_h);
-    let height = total_height.min(max_dialog_h);
-    let height = height.max(min_dialog_h);
+    let height = total_height.min(max_dialog_h).max(min_dialog_h);
 
-    let area = centered_rect_fixed(dialog_width, height, frame_area);
-    frame.render_widget(Clear, area);
-    draw_dialog_left_wave(frame, area, app.animation_tick.into());
+    PromptGeometry {
+        dialog_width,
+        height,
+        field_width,
+        section_heights,
+    }
+}
 
-    let title = " Prompt Builder ";
-    let block = Block::default()
-        .title(title)
-        .borders(crate::tui::ui::dialog_borders_for(theme))
-        .border_style(Style::default().fg(accent))
-        .style(Style::default().bg(theme.dialog_bg));
+/// Render the ▲/▼ scroll indicator, right-aligned on row `y`.
+fn draw_scroll_arrow(frame: &mut Frame, inner: Rect, y: u16, arrow: &'static str, accent: Color) {
+    let arrow = Span::styled(arrow, Style::default().fg(accent));
+    let a = Rect {
+        x: inner.x,
+        y,
+        width: inner.width,
+        height: 1,
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(arrow)).alignment(ratatui::layout::Alignment::Right),
+        a,
+    );
+}
 
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    // ── Tab bar (row 0) — clickable Normal / Raw windows ─────────────────
-    // The active tab is drawn in accent (reversed for a clear "selected"
-    // block); the inactive one is dim. Hit-boxes come from the same pure
-    // geometry the mouse handler uses, so clicks land exactly on the labels.
-    let tab_boxes = crate::tui::app::dialog::SimplePromptDialog::tab_hitboxes(inner.x, inner.y);
+/// Render the clickable Normal / Raw tab bar.
+///
+/// The active tab is drawn in accent (reversed for a clear "selected"
+/// block); the inactive one is dim. Hit-boxes come from the same pure
+/// geometry the mouse handler uses, so clicks land exactly on the labels.
+fn draw_prompt_tab_bar(
+    frame: &mut Frame,
+    inner: Rect,
+    dialog: &SimplePromptDialog,
+    accent: Color,
+    theme: &Theme,
+) {
+    let tab_boxes = SimplePromptDialog::tab_hitboxes(inner.x, inner.y);
     let tab_spans: Vec<Span> = tab_boxes
         .iter()
         .map(|(tab, _)| {
@@ -474,46 +493,49 @@ pub fn draw_simple_prompt_dialog(
             }
         })
         .collect();
-    let tab_area = ratatui::layout::Rect {
+    let tab_area = Rect {
         x: inner.x,
         y: inner.y,
         width: inner.width,
         height: 1,
     };
     frame.render_widget(Paragraph::new(Line::from(tab_spans)), tab_area);
+}
 
-    // Draw hint line (row 1) — rendered by priority so the most important
-    // shortcuts (Ctrl+S send, Esc hide) survive on narrow windows instead of
-    // scrolling off the end.
-    let (send_label, send_hint) = active_send_shortcut_label(app.keyboard_enhancement_active);
-    let hint_spans: Vec<Span> = select_shortcut_hints(
-        inner.width as usize,
-        send_label,
-        send_hint,
-        !pending_scheduled.is_empty(),
-    )
-    .into_iter()
-    .flat_map(|hint| {
-        [
-            Span::styled(hint.key, Style::default().fg(theme.dim_text)),
-            Span::styled(hint.desc, Style::default().fg(theme.text_primary)),
-        ]
-    })
-    .collect();
-    let instructions = Line::from(hint_spans);
+/// Build the hint line — rendered by priority so the most important shortcuts
+/// (Ctrl+S send, Esc hide) survive on narrow windows instead of scrolling off
+/// the end.
+fn prompt_hint_line(
+    width: u16,
+    keyboard_enhancement_active: bool,
+    has_pending: bool,
+    theme: &Theme,
+) -> Line<'static> {
+    let (send_label, send_hint) = active_send_shortcut_label(keyboard_enhancement_active);
+    let hint_spans: Vec<Span> =
+        select_shortcut_hints(width as usize, send_label, send_hint, has_pending)
+            .into_iter()
+            .flat_map(|hint| {
+                [
+                    Span::styled(hint.key, Style::default().fg(theme.dim_text)),
+                    Span::styled(hint.desc, Style::default().fg(theme.text_primary)),
+                ]
+            })
+            .collect();
+    Line::from(hint_spans)
+}
 
-    let instructions_area = ratatui::layout::Rect {
-        x: inner.x,
-        y: inner.y + 1,
-        width: inner.width,
-        height: 1,
-    };
-    frame.render_widget(Paragraph::new(instructions), instructions_area);
-
-    // ── Send control (virtual focus index 0, U11) ───────────────────────
-    // A single ghost line centered at the BOTTOM of the dialog — no box.
-    // States: `send: now` / `send: date` selector (←→ toggles), inline
-    // date-time picker while editing, `send: 2026-07-16 08:30` once picked.
+/// ── Send control (virtual focus index 0, U11) ───────────────────────
+/// A single ghost line centered at the BOTTOM of the dialog — no box.
+/// States: `send: now` / `send: date` selector (←→ toggles), inline
+/// date-time picker while editing, `send: 2026-07-16 08:30` once picked.
+fn draw_send_control(
+    frame: &mut Frame,
+    inner: Rect,
+    dialog: &SimplePromptDialog,
+    accent: Color,
+    theme: &Theme,
+) {
     let send_is_focused = dialog.focused_section == 0 && !dialog.enabled_sections.is_empty();
     let send_y = inner.y + inner.height.saturating_sub(1);
 
@@ -586,276 +608,400 @@ pub fn draw_simple_prompt_dialog(
             .width
             .saturating_sub(send_text_width as u16)
             .saturating_div(2);
-    let send_area = ratatui::layout::Rect {
+    let send_area = Rect {
         x: send_x,
         y: send_y,
         width: inner.width.saturating_sub(send_x - inner.x),
         height: 1,
     };
     frame.render_widget(Paragraph::new(Line::from(send_spans)), send_area);
+}
+
+/// Work backwards from `focused_section` to find the first section that fits.
+fn normal_start_idx(
+    dialog: &SimplePromptDialog,
+    section_heights: &[u16],
+    sections_available_h: u16,
+) -> usize {
+    // focused_section 0 = send_at (handled above), sections start at index 1.
+    let section_focus_offset = 1;
+    let focused = dialog.focused_section.saturating_sub(section_focus_offset);
+    let focused = focused.min(dialog.enabled_sections.len().saturating_sub(1));
+    let focused_h = section_heights.get(focused).copied().unwrap_or(4);
+    let mut remaining = sections_available_h.saturating_sub(focused_h);
+    let mut start = focused;
+    while start > 0 {
+        let prev_h = section_heights.get(start - 1).copied().unwrap_or(4);
+        if prev_h > remaining {
+            break;
+        }
+        remaining -= prev_h;
+        start -= 1;
+    }
+    start
+}
+
+/// The last section index still visible above `inner_bottom`.
+fn last_visible_section(
+    dialog: &SimplePromptDialog,
+    section_heights: &[u16],
+    start_idx: usize,
+    sections_top: u16,
+    inner_bottom: u16,
+) -> usize {
+    let mut last = start_idx;
+    let mut yy = sections_top;
+    for (i, _) in dialog.enabled_sections.iter().enumerate() {
+        if i < start_idx {
+            continue;
+        }
+        let sh = section_heights.get(i).copied().unwrap_or(4);
+        if yy + sh >= inner_bottom {
+            break;
+        }
+        yy += sh;
+        last = i;
+    }
+    last
+}
+
+/// The label to draw for a section, plus whether it is the read-only Tools one.
+fn section_display_label(dialog: &SimplePromptDialog, section_name: &str) -> (String, bool) {
+    let section_type = {
+        let known = [
+            "tools",
+            "instruction",
+            "context",
+            "project_context",
+            "resources",
+            "rag_search",
+            "constraints",
+        ];
+        known
+            .iter()
+            .find(|k| section_name.starts_with(*k))
+            .copied()
+            .unwrap_or(section_name)
+    };
+
+    let label = SimplePromptDialog::get_available_sections()
+        .into_iter()
+        .find(|(name, _)| *name == section_type)
+        .map(|(_, label)| label)
+        .unwrap_or(section_type);
+
+    let suffix = section_name.strip_prefix(section_type).unwrap_or("");
+    let is_tools = section_type == "tools";
+    let display_label = if is_tools && suffix.is_empty() {
+        "Tools".to_string()
+    } else if is_tools {
+        format!("Tools {}", suffix.trim_start_matches('_'))
+    } else if suffix.is_empty() {
+        label.to_string()
+    } else {
+        format!("{} {}", label, suffix.trim_start_matches('_'))
+    };
+
+    let is_locked = dialog.is_locked(section_name);
+    let display_label = if is_locked {
+        format!("{display_label} [locked]")
+    } else {
+        display_label
+    };
+    (display_label, is_tools)
+}
+
+/// Resolve the text, cursor index, content height and scroll offset to render
+/// for a section, given whether it is the Tools section or currently focused.
+fn section_render_text(
+    dialog: &SimplePromptDialog,
+    section_name: &str,
+    is_tools: bool,
+    is_focused: bool,
+    field_width: usize,
+    inner_bottom: u16,
+    y_pos: u16,
+) -> (String, Option<usize>, u16, u16) {
+    let content_raw = dialog
+        .sections
+        .get(section_name)
+        .map(|s| s.as_str())
+        .unwrap_or("");
+    let content_real = dialog
+        .collapsed_pastes
+        .get(section_name)
+        .map(|s| s.as_str())
+        .unwrap_or(content_raw);
+
+    if is_tools {
+        // Tools section: read-only, always 1 line — shows skill label or placeholder
+        let display = if content_raw.trim().is_empty() {
+            "  (empty — Ctrl+A to pick a skill)".to_string()
+        } else {
+            content_raw.trim().to_string()
+        };
+        return (display, None, 1u16, 0u16);
+    }
+    if is_focused {
+        let cursor_idx = dialog
+            .cursor(section_name)
+            .min(content_real.chars().count());
+        let max_h = SimplePromptDialog::max_visible_lines(section_name);
+        let vis = SimplePromptDialog::visual_line_count(content_real, field_width);
+        // Clamp content height to available space
+        let max_avail = inner_bottom.saturating_sub(y_pos).saturating_sub(2);
+        return (
+            content_real.to_string(),
+            Some(cursor_idx),
+            (vis as u16).clamp(1, max_h as u16).min(max_avail),
+            dialog.scroll(section_name) as u16,
+        );
+    }
+    let first_line = content_raw.lines().next().unwrap_or(content_raw);
+    let text = if first_line.chars().count() > field_width {
+        format!(
+            "{}…",
+            first_line
+                .chars()
+                .take(field_width.saturating_sub(1))
+                .collect::<String>()
+        )
+    } else {
+        first_line.to_string()
+    };
+    (text, None, 1u16, 0u16)
+}
+
+/// Draw one section (label, content block, bottom border).
+/// Returns the next free `y_pos` and the picker anchor when focused.
+fn draw_normal_section(
+    frame: &mut Frame,
+    ctx: &NormalContentCtx,
+    section_name: &str,
+    i: usize,
+    inner_bottom: u16,
+    y_pos: u16,
+) -> (u16, Option<Rect>) {
+    let section_focus_offset = 1; // send_at occupies focus index 0
+    let is_focused = ctx.dialog.focused_section == i + section_focus_offset;
+    let (display_label, is_tools) = section_display_label(ctx.dialog, section_name);
+
+    let label_style = if is_focused {
+        Style::default().fg(ctx.accent).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(ctx.accent)
+    };
+
+    let label_line = generate_top_border(&display_label, ctx.inner.width, label_style);
+    let label_area = Rect {
+        x: ctx.inner.x,
+        y: y_pos,
+        width: ctx.inner.width,
+        height: 1,
+    };
+    frame.render_widget(Paragraph::new(label_line), label_area);
+    let mut y_pos = y_pos + 1;
+
+    let section_bg = if is_focused {
+        ctx.theme.field_bg_focused
+    } else {
+        ctx.theme.field_bg
+    };
+
+    let (render_text, cursor_idx_opt, content_height, scroll_offset) = section_render_text(
+        ctx.dialog,
+        section_name,
+        is_tools,
+        is_focused,
+        ctx.field_width,
+        inner_bottom,
+        y_pos,
+    );
+
+    let styled_content = if ctx.dialog.has_collapsed_paste(section_name) {
+        // Use special styling for collapsed pastes to highlight with accent color
+        style_collapsed_paste_blocks(&render_text, ctx.accent, section_bg)
+    } else {
+        // Use default file reference styling
+        ctx.dialog
+            .get_file_reference_with_styling(&render_text, ctx.accent)
+    };
+    let wrapped_lines = wrap_styled_content(
+        styled_content,
+        cursor_idx_opt,
+        ctx.field_width,
+        section_bg,
+        ctx.theme.text_primary,
+    );
+    let content_paragraph =
+        Paragraph::new(ratatui::text::Text::from(wrapped_lines)).scroll((scroll_offset, 0));
+
+    let content_area = Rect {
+        x: ctx.inner.x + 1,
+        y: y_pos,
+        width: ctx.inner.width.saturating_sub(2),
+        height: content_height,
+    };
+    let anchor = is_focused.then_some(content_area);
+    frame.render_widget(content_paragraph, content_area);
+    y_pos += content_height;
+
+    let bottom_border = generate_bottom_border(ctx.inner.width, label_style);
+    let border_area = Rect {
+        x: ctx.inner.x,
+        y: y_pos,
+        width: ctx.inner.width,
+        height: 1,
+    };
+    frame.render_widget(Paragraph::new(bottom_border), border_area);
+    (y_pos + 2, anchor)
+}
+
+/// Draw the scrolling section stack of the Normal tab, returning the anchor
+/// area the @ file picker dropdown should hang off.
+fn draw_prompt_normal_content(frame: &mut Frame, ctx: &NormalContentCtx) -> Option<Rect> {
+    // sections_available_h = inner height minus tab(1) + hint(1) + gap(1) at the
+    // top and gap(1) + send line(1) at the bottom, and the scheduled-list
+    // panel (B33) reserved just above the send line.
+    let sections_top = ctx.inner.y + 3;
+    let sections_available_h = ctx.inner.height.saturating_sub(5 + ctx.list_panel_height);
+
+    let start_idx = normal_start_idx(ctx.dialog, ctx.section_heights, sections_available_h);
+
+    // Scroll indicators. The effective bottom excludes the scheduled-list
+    // panel (B33) so sections never draw over it.
+    let inner_bottom = ctx.inner.y + ctx.inner.height.saturating_sub(ctx.list_panel_height);
+    if start_idx > 0 {
+        draw_scroll_arrow(frame, ctx.inner, sections_top, " ▲ ", ctx.accent);
+    }
+
+    let mut y_pos = sections_top;
+    let mut picker_anchor = None;
+
+    // ── Draw all sections uniformly ─────────────────────────────────────────
+    for (i, section_name) in ctx.dialog.enabled_sections.iter().enumerate() {
+        // Skip sections before start_idx
+        if i < start_idx {
+            continue;
+        }
+        // Stop if we've run out of vertical space (leave 1 row for ▼ indicator)
+        if y_pos + 3 >= inner_bottom {
+            break;
+        }
+        let (next_y, anchor) =
+            draw_normal_section(frame, ctx, section_name, i, inner_bottom, y_pos);
+        y_pos = next_y;
+        if anchor.is_some() {
+            picker_anchor = anchor;
+        }
+    }
+
+    // ▼ indicator when there are more sections below
+    let last_visible = last_visible_section(
+        ctx.dialog,
+        ctx.section_heights,
+        start_idx,
+        sections_top,
+        inner_bottom,
+    );
+    if last_visible < ctx.dialog.enabled_sections.len().saturating_sub(1) {
+        draw_scroll_arrow(
+            frame,
+            ctx.inner,
+            inner_bottom.saturating_sub(1),
+            " ▼ ",
+            ctx.accent,
+        );
+    }
+    picker_anchor
+}
+
+pub fn draw_simple_prompt_dialog(
+    frame: &mut Frame,
+    app: &App,
+    theme: &Theme,
+) -> Option<((u16, u16), Option<ratatui::layout::Rect>)> {
+    let dialog = app.simple_prompt_dialog.as_ref()?;
+
+    let accent = prompt_accent(app, theme);
+    let pending_scheduled = pending_scheduled_for_selection(app);
+
+    // Scheduled-sends list panel geometry (B33).
+    let list_selected = dialog
+        .scheduled_list_selected
+        .filter(|_| !pending_scheduled.is_empty());
+    let (list_visible_rows, list_scroll) = SimplePromptDialog::scheduled_list_view(
+        pending_scheduled.len(),
+        SCHEDULED_LIST_MAX_ROWS,
+        list_selected,
+    );
+    // Panel height: a label/top-border row plus one row per visible entry.
+    let list_panel_height: u16 = if pending_scheduled.is_empty() {
+        0
+    } else {
+        1 + list_visible_rows as u16
+    };
+    let geo = compute_prompt_geometry(frame.area(), dialog, list_panel_height);
+
+    let area = centered_rect_fixed(geo.dialog_width, geo.height, frame.area());
+    frame.render_widget(Clear, area);
+    draw_dialog_left_wave(frame, area, app.animation_tick.into());
+
+    let block = Block::default()
+        .title(" Prompt Builder ")
+        .borders(crate::tui::ui::dialog_borders_for(theme))
+        .border_style(Style::default().fg(accent))
+        .style(Style::default().bg(theme.dialog_bg));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    // ── Tab bar (row 0) ───────────────────────────────────────────────────
+    draw_prompt_tab_bar(frame, inner, dialog, accent, theme);
+
+    // Draw hint line (row 1).
+    let instructions = prompt_hint_line(
+        inner.width,
+        app.keyboard_enhancement_active,
+        !pending_scheduled.is_empty(),
+        theme,
+    );
+    let instructions_area = Rect {
+        x: inner.x,
+        y: inner.y + 1,
+        width: inner.width,
+        height: 1,
+    };
+    frame.render_widget(Paragraph::new(instructions), instructions_area);
+
+    draw_send_control(frame, inner, dialog, accent, theme);
 
     // ── Content region ──────────────────────────────────────────────────
     // The Raw tab draws a single free-text field (or the composed-prompt
     // preview when empty); the Normal tab draws its scrolling section stack.
-    let mut picker_anchor_area: Option<ratatui::layout::Rect> = None;
-    if dialog.active_tab == PromptTab::Raw {
+    let picker_anchor_area = if dialog.active_tab == PromptTab::Raw {
         draw_raw_tab_content(
             frame,
             dialog,
             accent,
             inner,
-            field_width,
+            geo.field_width,
             list_panel_height,
             theme,
         );
+        None
     } else {
-        // sections_available_h = inner height minus tab(1) + hint(1) + gap(1) at the
-        // top and gap(1) + send line(1) at the bottom, and the scheduled-list
-        // panel (B33) reserved just above the send line.
-        let sections_top = inner.y + 3;
-        let sections_available_h = inner.height.saturating_sub(5 + list_panel_height);
-
-        // Work backwards from focused_section to find the first section that fits.
-        // focused_section 0 = send_at (handled above), sections start at index 1.
-        let section_focus_offset = 1; // send_at occupies focus index 0
-        let start_idx = {
-            let focused = dialog.focused_section.saturating_sub(section_focus_offset);
-            let focused = focused.min(dialog.enabled_sections.len().saturating_sub(1));
-            let focused_h = section_heights.get(focused).copied().unwrap_or(4);
-            let mut remaining = sections_available_h.saturating_sub(focused_h);
-            let mut start = focused;
-            while start > 0 {
-                let prev_h = section_heights.get(start - 1).copied().unwrap_or(4);
-                if prev_h > remaining {
-                    break;
-                }
-                remaining -= prev_h;
-                start -= 1;
-            }
-            start
+        let ctx = NormalContentCtx {
+            dialog,
+            inner,
+            field_width: geo.field_width,
+            section_heights: &geo.section_heights,
+            list_panel_height,
+            accent,
+            theme,
         };
-
-        // Scroll indicators. The effective bottom excludes the scheduled-list
-        // panel (B33) so sections never draw over it.
-        let inner_bottom = inner.y + inner.height.saturating_sub(list_panel_height);
-        if start_idx > 0 {
-            let arrow = Span::styled(" ▲ ", Style::default().fg(accent));
-            let a = ratatui::layout::Rect {
-                x: inner.x,
-                y: sections_top,
-                width: inner.width,
-                height: 1,
-            };
-            frame.render_widget(
-                Paragraph::new(Line::from(arrow)).alignment(ratatui::layout::Alignment::Right),
-                a,
-            );
-        }
-
-        let mut y_pos = sections_top;
-
-        // ── Draw all sections uniformly ─────────────────────────────────────────
-        for (i, section_name) in dialog.enabled_sections.iter().enumerate() {
-            // Skip sections before start_idx
-            if i < start_idx {
-                continue;
-            }
-            // Stop if we've run out of vertical space (leave 1 row for ▼ indicator)
-            if y_pos + 3 >= inner_bottom {
-                break;
-            }
-
-            let is_focused = dialog.focused_section == i + section_focus_offset;
-
-            let section_type = {
-                let known = [
-                    "tools",
-                    "instruction",
-                    "context",
-                    "project_context",
-                    "resources",
-                    "rag_search",
-                    "constraints",
-                ];
-                known
-                    .iter()
-                    .find(|k| section_name.starts_with(*k))
-                    .copied()
-                    .unwrap_or(section_name.as_str())
-            };
-
-            let label = crate::tui::app::dialog::SimplePromptDialog::get_available_sections()
-                .into_iter()
-                .find(|(name, _)| *name == section_type)
-                .map(|(_, label)| label)
-                .unwrap_or(section_type);
-
-            let suffix = section_name.strip_prefix(section_type).unwrap_or("");
-            let is_tools = section_type == "tools";
-            let display_label = if is_tools && suffix.is_empty() {
-                "Tools".to_string()
-            } else if is_tools {
-                format!("Tools {}", suffix.trim_start_matches('_'))
-            } else if suffix.is_empty() {
-                label.to_string()
-            } else {
-                format!("{} {}", label, suffix.trim_start_matches('_'))
-            };
-
-            let is_locked = dialog.is_locked(section_name);
-
-            let display_label = if is_locked {
-                format!("{display_label} [locked]")
-            } else {
-                display_label
-            };
-
-            let label_style = if is_focused {
-                Style::default().fg(accent).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(accent)
-            };
-
-            let label_line = generate_top_border(&display_label, inner.width, label_style);
-            let label_area = ratatui::layout::Rect {
-                x: inner.x,
-                y: y_pos,
-                width: inner.width,
-                height: 1,
-            };
-            frame.render_widget(Paragraph::new(label_line), label_area);
-            y_pos += 1;
-
-            let section_bg = if is_focused {
-                theme.field_bg_focused
-            } else {
-                theme.field_bg
-            };
-
-            let content_raw = dialog
-                .sections
-                .get(section_name)
-                .map(|s| s.as_str())
-                .unwrap_or("");
-            let content_real = dialog
-                .collapsed_pastes
-                .get(section_name)
-                .map(|s| s.as_str())
-                .unwrap_or(content_raw);
-
-            let (render_text, cursor_idx_opt, content_height, scroll_offset) = if is_tools {
-                // Tools section: read-only, always 1 line — shows skill label or placeholder
-                let display = if content_raw.trim().is_empty() {
-                    "  (empty — Ctrl+A to pick a skill)".to_string()
-                } else {
-                    content_raw.trim().to_string()
-                };
-                (display, None, 1u16, 0u16)
-            } else if is_focused {
-                let cursor_idx = dialog
-                    .cursor(section_name)
-                    .min(content_real.chars().count());
-                let max_h =
-                    crate::tui::app::dialog::SimplePromptDialog::max_visible_lines(section_name);
-                let vis = crate::tui::app::dialog::SimplePromptDialog::visual_line_count(
-                    content_real,
-                    field_width,
-                );
-                // Clamp content height to available space
-                let max_avail = inner_bottom.saturating_sub(y_pos).saturating_sub(2);
-                (
-                    content_real.to_string(),
-                    Some(cursor_idx),
-                    (vis as u16).clamp(1, max_h as u16).min(max_avail),
-                    dialog.scroll(section_name) as u16,
-                )
-            } else {
-                let first_line = content_raw.lines().next().unwrap_or(content_raw);
-                let text = if first_line.chars().count() > field_width {
-                    format!(
-                        "{}…",
-                        first_line
-                            .chars()
-                            .take(field_width.saturating_sub(1))
-                            .collect::<String>()
-                    )
-                } else {
-                    first_line.to_string()
-                };
-                (text, None, 1u16, 0u16)
-            };
-
-            let styled_content = if dialog.has_collapsed_paste(section_name) {
-                // Use special styling for collapsed pastes to highlight with accent color
-                style_collapsed_paste_blocks(&render_text, accent, section_bg)
-            } else {
-                // Use default file reference styling
-                dialog.get_file_reference_with_styling(&render_text, accent)
-            };
-            let wrapped_lines = wrap_styled_content(
-                styled_content,
-                cursor_idx_opt,
-                field_width,
-                section_bg,
-                theme.text_primary,
-            );
-            let content_paragraph =
-                Paragraph::new(ratatui::text::Text::from(wrapped_lines)).scroll((scroll_offset, 0));
-
-            let content_area = ratatui::layout::Rect {
-                x: inner.x + 1,
-                y: y_pos,
-                width: inner.width.saturating_sub(2),
-                height: content_height,
-            };
-            if is_focused {
-                picker_anchor_area = Some(content_area);
-            }
-            frame.render_widget(content_paragraph, content_area);
-            y_pos += content_height;
-
-            let bottom_border = generate_bottom_border(inner.width, label_style);
-            let border_area = ratatui::layout::Rect {
-                x: inner.x,
-                y: y_pos,
-                width: inner.width,
-                height: 1,
-            };
-            frame.render_widget(Paragraph::new(bottom_border), border_area);
-            y_pos += 2;
-        }
-
-        // ▼ indicator when there are more sections below
-        let last_visible_section = {
-            let mut last = start_idx;
-            let mut yy = sections_top;
-            for (i, _) in dialog.enabled_sections.iter().enumerate() {
-                if i < start_idx {
-                    continue;
-                }
-                let sh = section_heights.get(i).copied().unwrap_or(4);
-                if yy + sh >= inner_bottom {
-                    break;
-                }
-                yy += sh;
-                last = i;
-            }
-            last
-        };
-        if last_visible_section < dialog.enabled_sections.len().saturating_sub(1) {
-            let arrow = Span::styled(" ▼ ", Style::default().fg(accent));
-            let a = ratatui::layout::Rect {
-                x: inner.x,
-                y: inner_bottom.saturating_sub(1),
-                width: inner.width,
-                height: 1,
-            };
-            frame.render_widget(
-                Paragraph::new(Line::from(arrow)).alignment(ratatui::layout::Alignment::Right),
-                a,
-            );
-        }
-    } // end Normal-tab content region
+        draw_prompt_normal_content(frame, &ctx)
+    };
 
     // ── Scheduled-sends list panel (B33) ─────────────────────────────────
     // A compact list of pending scheduled sends, one row each, docked just
@@ -886,9 +1032,10 @@ pub fn draw_simple_prompt_dialog(
     draw_section_picker_modal(frame, app, accent, &dialog.picker_mode, theme);
 
     let content_rect = if dialog.active_tab == PromptTab::Raw {
-        Some(
-            crate::tui::app::dialog::SimplePromptDialog::raw_content_rect(inner, list_panel_height),
-        )
+        Some(SimplePromptDialog::raw_content_rect(
+            inner,
+            list_panel_height,
+        ))
     } else {
         None
     };

@@ -1,10 +1,11 @@
-use ratatui::layout::{Alignment, Constraint, Layout};
+use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 use ratatui::Frame;
 
 use super::{centered_rect, draw_dialog_left_wave};
+use crate::domain::gamification::{MissionCategory, MISSIONS};
 use crate::tui::app::types::App;
 use crate::tui::ui::theme::Theme;
 
@@ -524,30 +525,20 @@ mod tests {
 }
 
 pub fn draw_legend(frame: &mut Frame, app: &mut App, theme: &Theme) {
-    use crate::domain::gamification::{MissionCategory, MISSIONS};
-
     let label_style = Style::default().fg(theme.dim_text);
     let value_style = Style::default()
         .fg(Color::White)
         .add_modifier(Modifier::BOLD);
     let accent_style = Style::default().fg(theme.header_color);
 
-    let session_uptime = format_uptime_precise(app.process_start_time.elapsed().as_secs());
-    let canopy_uptime = format_uptime_precise(app.accumulated_uptime_secs());
-    let interactive_count = app.db.count_interactive_sessions().unwrap_or(0);
-    let terminal_count = app.db.count_terminal_sessions().unwrap_or(0);
-    let bg_count = app.db.count_background_agents().unwrap_or(0);
-    let runs_count = app.db.count_runs().unwrap_or(0);
-
-    let total = MISSIONS.len();
-    let unlocked_n = app.mission_manager.unlocked_count();
-
-    let unlocked_missions: Vec<_> = MISSIONS
+    let unlocked_indices: Vec<usize> = MISSIONS
         .iter()
-        .filter(|def| app.mission_manager.is_unlocked(def.id))
+        .enumerate()
+        .filter(|(_, def)| app.mission_manager.is_unlocked(def.id))
+        .map(|(i, _)| i)
         .collect();
 
-    let max_selected = unlocked_missions.len().saturating_sub(1);
+    let max_selected = unlocked_indices.len().saturating_sub(1);
     if app.legend_selected > max_selected {
         app.legend_selected = max_selected;
     }
@@ -555,10 +546,10 @@ pub fn draw_legend(frame: &mut Frame, app: &mut App, theme: &Theme) {
     let selected = app.legend_selected;
 
     let base_height = 2 + 4 + 1; // summary + usage + instructions
-    let extra_height = if unlocked_missions.is_empty() {
+    let extra_height = if unlocked_indices.is_empty() {
         0
     } else {
-        1 + unlocked_missions.len().min(15) as u16 + 1 + 3 // spacers + missions + spacer + detail
+        1 + unlocked_indices.len().min(15) as u16 + 1 + 3 // spacers + missions + spacer + detail
     };
     let percent_x = 52u16;
     let height =
@@ -575,52 +566,87 @@ pub fn draw_legend(frame: &mut Frame, app: &mut App, theme: &Theme) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let category_color = |cat: &MissionCategory| -> Color {
-        match cat {
-            MissionCategory::Environment => Color::Rgb(100, 220, 100),
-            MissionCategory::Intelligence => Color::Rgb(100, 180, 255),
-            MissionCategory::Projects => Color::Rgb(255, 200, 80),
-            MissionCategory::Graph => Color::Rgb(220, 120, 255),
-            MissionCategory::Seeds => Color::Rgb(80, 220, 180),
-            MissionCategory::SysInfo => Color::Rgb(255, 130, 80),
-        }
-    };
-
-    let now_ms = chrono::Utc::now().timestamp_millis() as f64;
-    let twinkle = |offset: usize| -> f64 {
-        let phase = (now_ms / 1500.0) + (offset as f64 * 0.7);
-        (phase.sin() + 1.0) / 2.0
-    };
-
-    let dim_color = |base: Color, factor: f64| -> Color {
-        match base {
-            Color::Rgb(r, g, b) => {
-                let min_brightness = 0.35;
-                let f = min_brightness + (1.0 - min_brightness) * factor;
-                Color::Rgb(
-                    (r as f64 * f) as u8,
-                    (g as f64 * f) as u8,
-                    (b as f64 * f) as u8,
-                )
-            }
-            _ => base,
-        }
-    };
-
+    let has_missions = !unlocked_indices.is_empty();
     let sections = Layout::vertical([
         Constraint::Length(2),
-        Constraint::Length(if unlocked_missions.is_empty() { 0 } else { 1 }),
-        Constraint::Length(if unlocked_missions.is_empty() {
-            0
+        Constraint::Length(if has_missions { 1 } else { 0 }),
+        Constraint::Length(if has_missions {
+            unlocked_indices.len().min(15) as u16
         } else {
-            unlocked_missions.len().min(15) as u16
+            0
         }),
-        Constraint::Length(if unlocked_missions.is_empty() { 0 } else { 1 }),
-        Constraint::Length(if unlocked_missions.is_empty() { 0 } else { 3 }),
+        Constraint::Length(if has_missions { 1 } else { 0 }),
+        Constraint::Length(if has_missions { 3 } else { 0 }),
         Constraint::Length(4),
         Constraint::Length(1),
     ])
     .split(inner);
+
+    draw_legend_summary(
+        frame,
+        app,
+        sections[0],
+        label_style,
+        value_style,
+        accent_style,
+    );
+    draw_legend_missions(frame, &unlocked_indices, selected, theme, sections[2]);
+    draw_legend_detail(frame, app, &unlocked_indices, selected, sections[4]);
+    draw_legend_usage(frame, app, sections[5]);
+    draw_legend_footer(frame, sections[6], label_style);
+}
+
+/// Distinct accent color per mission category.
+fn category_color(cat: &MissionCategory) -> Color {
+    match cat {
+        MissionCategory::Environment => Color::Rgb(100, 220, 100),
+        MissionCategory::Intelligence => Color::Rgb(100, 180, 255),
+        MissionCategory::Projects => Color::Rgb(255, 200, 80),
+        MissionCategory::Graph => Color::Rgb(220, 120, 255),
+        MissionCategory::Seeds => Color::Rgb(80, 220, 180),
+        MissionCategory::SysInfo => Color::Rgb(255, 130, 80),
+    }
+}
+
+/// Sine-based pulse in `0..=1` used to twinkle the mission icons.
+fn twinkle(now_ms: f64, offset: usize) -> f64 {
+    let phase = (now_ms / 1500.0) + (offset as f64 * 0.7);
+    (phase.sin() + 1.0) / 2.0
+}
+
+/// Scale an RGB color toward black, keeping a minimum brightness floor.
+fn dim_color(base: Color, factor: f64) -> Color {
+    match base {
+        Color::Rgb(r, g, b) => {
+            let min_brightness = 0.35;
+            let f = min_brightness + (1.0 - min_brightness) * factor;
+            Color::Rgb(
+                (r as f64 * f) as u8,
+                (g as f64 * f) as u8,
+                (b as f64 * f) as u8,
+            )
+        }
+        _ => base,
+    }
+}
+
+/// Render the uptimes and session counters summary block.
+fn draw_legend_summary(
+    frame: &mut Frame,
+    app: &App,
+    area: Rect,
+    label_style: Style,
+    value_style: Style,
+    accent_style: Style,
+) {
+    let session_uptime = format_uptime_precise(app.process_start_time.elapsed().as_secs());
+    let canopy_uptime = format_uptime_precise(app.accumulated_uptime_secs());
+    let interactive_count = app.db.count_interactive_sessions().unwrap_or(0);
+    let terminal_count = app.db.count_terminal_sessions().unwrap_or(0);
+    let bg_count = app.db.count_background_agents().unwrap_or(0);
+    let runs_count = app.db.count_runs().unwrap_or(0);
+    let total = MISSIONS.len();
+    let unlocked_n = app.mission_manager.unlocked_count();
 
     let summary_lines = vec![
         Line::from(vec![
@@ -649,25 +675,36 @@ pub fn draw_legend(frame: &mut Frame, app: &mut App, theme: &Theme) {
     ];
     frame.render_widget(
         Paragraph::new(summary_lines).alignment(Alignment::Center),
-        sections[0],
+        area,
     );
+}
 
+/// Render the scrollable list of unlocked missions.
+fn draw_legend_missions(
+    frame: &mut Frame,
+    unlocked_indices: &[usize],
+    selected: usize,
+    theme: &Theme,
+    area: Rect,
+) {
     let mut mission_lines: Vec<Line> = Vec::new();
-    if !unlocked_missions.is_empty() {
-        let visible_rows = sections[2].height as usize;
+    if !unlocked_indices.is_empty() {
+        let visible_rows = area.height as usize;
         let start = selected.saturating_sub(visible_rows.saturating_sub(1) / 2);
         let start = crate::tui::selection::clamp_scroll(
             selected,
             start,
-            unlocked_missions.len(),
+            unlocked_indices.len(),
             visible_rows,
         );
-        let end = (start + visible_rows).min(unlocked_missions.len());
-        for (i, def) in unlocked_missions[start..end].iter().enumerate() {
+        let end = (start + visible_rows).min(unlocked_indices.len());
+        let now_ms = chrono::Utc::now().timestamp_millis() as f64;
+        for (i, idx) in unlocked_indices[start..end].iter().enumerate() {
+            let def = &MISSIONS[*idx];
             let mission_index = start + i;
             let is_selected = mission_index == selected;
             let base_color = category_color(&def.category);
-            let icon_color = dim_color(base_color, twinkle(i));
+            let icon_color = dim_color(base_color, twinkle(now_ms, i));
             let marker = if is_selected { "▶" } else { "·" };
             let title_style = if is_selected {
                 Style::default()
@@ -690,10 +727,20 @@ pub fn draw_legend(frame: &mut Frame, app: &mut App, theme: &Theme) {
     }
     frame.render_widget(
         Paragraph::new(mission_lines).alignment(Alignment::Center),
-        sections[2],
+        area,
     );
+}
 
-    let selected_detail_lines = if let Some(selected_def) = unlocked_missions.get(selected) {
+/// Render the challenge, unlock text and completion date of the selected mission.
+fn draw_legend_detail(
+    frame: &mut Frame,
+    app: &App,
+    unlocked_indices: &[usize],
+    selected: usize,
+    area: Rect,
+) {
+    let selected_detail_lines = if let Some(idx) = unlocked_indices.get(selected) {
+        let selected_def = &MISSIONS[*idx];
         let date_str = app
             .mission_manager
             .unlock_timestamp(selected_def.id)
@@ -724,9 +771,12 @@ pub fn draw_legend(frame: &mut Frame, app: &mut App, theme: &Theme) {
     };
     frame.render_widget(
         Paragraph::new(selected_detail_lines).alignment(Alignment::Center),
-        sections[4],
+        area,
     );
+}
 
+/// Render the per-harness invocation counts panel.
+fn draw_legend_usage(frame: &mut Frame, app: &App, area: Rect) {
     let mut usage_pairs: Vec<_> = app.cli_usage.counts.iter().collect();
     usage_pairs.sort_by(|(name_a, count_a), (name_b, count_b)| {
         count_b.cmp(count_a).then_with(|| name_a.cmp(name_b))
@@ -738,7 +788,7 @@ pub fn draw_legend(frame: &mut Frame, app: &mut App, theme: &Theme) {
             Style::default().fg(Color::White),
         ))]
     } else {
-        let visible_rows = sections[5].height.saturating_sub(1) as usize;
+        let visible_rows = area.height.saturating_sub(1) as usize;
         usage_pairs
             .iter()
             .take(visible_rows.max(1))
@@ -757,9 +807,12 @@ pub fn draw_legend(frame: &mut Frame, app: &mut App, theme: &Theme) {
     usage_panel_lines.extend(usage_lines);
     frame.render_widget(
         Paragraph::new(usage_panel_lines).alignment(Alignment::Center),
-        sections[5],
+        area,
     );
+}
 
+/// Render the F1/Esc and ↑↓/jk hint line.
+fn draw_legend_footer(frame: &mut Frame, area: Rect, label_style: Style) {
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("F1/Esc ", label_style),
@@ -768,6 +821,6 @@ pub fn draw_legend(frame: &mut Frame, app: &mut App, theme: &Theme) {
             Span::styled("select", Style::default().fg(Color::White)),
         ]))
         .alignment(Alignment::Center),
-        sections[6],
+        area,
     );
 }

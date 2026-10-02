@@ -199,18 +199,19 @@ impl BriansBrain {
 
     fn inject_edge_noise_until(&mut self, probability: f64, max_injections: usize) -> usize {
         let mut injected = 0usize;
-        for r in 0..self.rows {
+        'outer: for r in 0..self.rows {
             for c in 0..self.cols {
-                if self.is_edge_cell(r, c)
-                    && self.grid[r][c] == CellState::Off
-                    && rand::random::<f64>() < probability
-                {
-                    self.grid[r][c] = CellState::On;
-                    self.green_grid[r][c] = BANNER_GRADIENT[NOISE_GREEN_IDX].1;
-                    injected += 1;
-                    if injected >= max_injections {
-                        return injected;
-                    }
+                if !self.is_edge_cell(r, c) || self.grid[r][c] != CellState::Off {
+                    continue;
+                }
+                if rand::random::<f64>() >= probability {
+                    continue;
+                }
+                self.grid[r][c] = CellState::On;
+                self.green_grid[r][c] = BANNER_GRADIENT[NOISE_GREEN_IDX].1;
+                injected += 1;
+                if injected >= max_injections {
+                    break 'outer;
                 }
             }
         }

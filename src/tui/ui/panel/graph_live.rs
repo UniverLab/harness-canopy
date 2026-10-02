@@ -147,24 +147,7 @@ fn render_graph_live_view(
         Style::default().fg(ctx.theme.dim_text),
     )));
     let graph_start_line = lines.len() as u16;
-    let graph_result = if state.effective_nodes.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "  (no nodes yet)",
-            Style::default().fg(ctx.theme.dim_text),
-        )));
-        None
-    } else {
-        let result = graph_lines(
-            state,
-            ctx.highlighted_node_id,
-            ctx.follow,
-            area.width,
-            ctx.theme,
-        );
-        let offset = result.highlighted_offset;
-        lines.extend(result.lines);
-        Some(offset)
-    };
+    let graph_offset = push_graph_lines(&mut lines, state, ctx, area.width).flatten();
     lines.push(Line::from(""));
     lines.extend(footer_lines(
         state,
@@ -179,47 +162,13 @@ fn render_graph_live_view(
     let max_scroll = total_lines.saturating_sub(area.height);
     let clamped_from_input = ctx.scroll.min(max_scroll);
 
-    // CT8: who owns the scroll.
-    //
-    // Auto-follow: re-derive the scroll from the highlighted node ONLY on the
-    // frame where the current node's identity changed since the last
-    // re-centre (`ctx.follow_anchor`). While `follow` is true,
-    // `highlighted_node_id` == the engine's current node id, so this fires on
-    // a real node-to-node transition and on nothing else — not a status
-    // change, not elapsed time, not the user scrolling. Every other redraw
-    // keeps `clamped_from_input`, the user's own scroll, so the whole graph
-    // of a running graph can be read.
-    //
-    // Manual navigation: the scroll always chases the selection with the same
-    // margin `ensure_visible` uses, so the highlight can never leave the panel.
-    let (scroll, next_follow_anchor) = if ctx.follow {
-        let node_changed = ctx.highlighted_node_id != ctx.follow_anchor;
-        let scroll = if node_changed {
-            match graph_result.flatten() {
-                Some(offset) => ensure_visible(
-                    graph_start_line + offset,
-                    3,
-                    clamped_from_input,
-                    area.height,
-                ),
-                None => clamped_from_input,
-            }
-        } else {
-            clamped_from_input
-        };
-        (scroll, ctx.highlighted_node_id.map(str::to_string))
-    } else {
-        let scroll = match graph_result.flatten() {
-            Some(offset) => ensure_visible(
-                graph_start_line + offset,
-                3,
-                clamped_from_input,
-                area.height,
-            ),
-            None => clamped_from_input,
-        };
-        (scroll, ctx.follow_anchor.map(str::to_string))
-    };
+    let (scroll, next_follow_anchor) = live_view_scroll(
+        ctx,
+        graph_offset,
+        graph_start_line,
+        clamped_from_input,
+        area.height,
+    );
     let clamped_scroll = scroll.min(max_scroll);
 
     frame.render_widget(
@@ -253,6 +202,76 @@ fn render_graph_live_view(
         clamped_scroll,
         follow_anchor: next_follow_anchor,
     }
+}
+
+/// Append the graph body — either the `no nodes yet` note or the node boxes.
+fn push_graph_lines(
+    lines: &mut Vec<Line<'static>>,
+    state: &GraphLiveState,
+    ctx: &LiveViewContext,
+    area_width: u16,
+) -> Option<Option<u16>> {
+    if state.effective_nodes.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  (no nodes yet)",
+            Style::default().fg(ctx.theme.dim_text),
+        )));
+        return None;
+    }
+    let result = graph_lines(
+        state,
+        ctx.highlighted_node_id,
+        ctx.follow,
+        area_width,
+        ctx.theme,
+    );
+    let offset = result.highlighted_offset;
+    lines.extend(result.lines);
+    Some(offset)
+}
+
+/// CT8: who owns the scroll.
+///
+/// Auto-follow: re-derive the scroll from the highlighted node ONLY on the
+/// frame where the current node's identity changed since the last
+/// re-centre (`ctx.follow_anchor`). While `follow` is true,
+/// `highlighted_node_id` == the engine's current node id, so this fires on
+/// a real node-to-node transition and on nothing else — not a status
+/// change, not elapsed time, not the user scrolling. Every other redraw
+/// keeps `clamped_from_input`, the user's own scroll, so the whole graph
+/// of a running graph can be read.
+///
+/// Manual navigation: the scroll always chases the selection with the same
+/// margin `ensure_visible` uses, so the highlight can never leave the panel.
+fn live_view_scroll(
+    ctx: &LiveViewContext,
+    graph_offset: Option<u16>,
+    graph_start_line: u16,
+    clamped_from_input: u16,
+    area_height: u16,
+) -> (u16, Option<String>) {
+    let recenter = |offset: Option<u16>| match offset {
+        Some(offset) => ensure_visible(
+            graph_start_line + offset,
+            3,
+            clamped_from_input,
+            area_height,
+        ),
+        None => clamped_from_input,
+    };
+    if ctx.follow {
+        let node_changed = ctx.highlighted_node_id != ctx.follow_anchor;
+        let scroll = if node_changed {
+            recenter(graph_offset)
+        } else {
+            clamped_from_input
+        };
+        return (scroll, ctx.highlighted_node_id.map(str::to_string));
+    }
+    (
+        recenter(graph_offset),
+        ctx.follow_anchor.map(str::to_string),
+    )
 }
 
 fn ensure_visible(start: u16, span: u16, scroll: u16, height: u16) -> u16 {
@@ -726,6 +745,30 @@ struct GraphLinesResult<'a> {
     highlighted_offset: Option<u16>,
 }
 
+/// A collapsed box entry: either a plain node or a whole ensemble.
+enum Collapsed<'a> {
+    Node(&'a GraphNode),
+    Ensemble(&'a EnsembleLiveInfo),
+}
+
+/// Indexes over the state's ensembles, used to collapse members into one box.
+struct EnsembleIndex<'a> {
+    join_ids: std::collections::HashSet<&'a str>,
+    by_member: HashMap<&'a str, &'a EnsembleLiveInfo>,
+    by_join: HashMap<&'a str, &'a EnsembleLiveInfo>,
+}
+
+/// Borrowed state the recursive DFS walk needs.
+struct DfsCtx<'a> {
+    nodes: &'a HashMap<String, Collapsed<'a>>,
+    edges: &'a HashMap<String, Vec<(String, GraphEdgeCondition)>>,
+    state: &'a GraphLiveState,
+    follow: bool,
+    inner: usize,
+    theme: &'a Theme,
+    highlighted_node_id: Option<&'a str>,
+}
+
 fn graph_lines(
     state: &GraphLiveState,
     highlighted_node_id: Option<&str>,
@@ -736,36 +779,102 @@ fn graph_lines(
     let box_width = (area_width as usize).saturating_sub(4).clamp(22, 48);
     let inner = box_width.saturating_sub(2);
 
-    let join_node_ids: std::collections::HashSet<&str> = state
-        .ensembles
-        .iter()
-        .map(|e| e.join_node_id.as_str())
-        .collect();
-    let ensemble_by_member: HashMap<&str, &EnsembleLiveInfo> = state
-        .ensembles
-        .iter()
-        .flat_map(|e| e.members.iter().map(move |m| (m.node_id.as_str(), e)))
-        .collect();
-    let ensemble_by_join: HashMap<&str, &EnsembleLiveInfo> = state
-        .ensembles
-        .iter()
-        .map(|e| (e.join_node_id.as_str(), e))
-        .collect();
-
-    // --- Collapsed node map (key -> renderable) ---
-    enum Collapsed<'a> {
-        Node(&'a GraphNode),
-        Ensemble(&'a EnsembleLiveInfo),
+    let index = ensemble_index(state);
+    let (collapsed_nodes, collapsed_pos) = collapse_nodes(state, &index);
+    if collapsed_nodes.is_empty() {
+        return GraphLinesResult {
+            lines: Vec::new(),
+            highlighted_offset: None,
+        };
     }
+
+    let collapsed_edges = collapse_edges(state, &index, &collapsed_nodes);
+    let entry_key = find_entry_key(&collapsed_nodes, &collapsed_edges, &collapsed_pos);
+    let ctx = DfsCtx {
+        nodes: &collapsed_nodes,
+        edges: &collapsed_edges,
+        state,
+        follow,
+        inner,
+        theme,
+        highlighted_node_id,
+    };
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut highlighted_offset: Option<u16> = None;
+    let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // Start DFS from entry
+    dfs_visit(
+        &entry_key,
+        0,
+        &ctx,
+        &mut lines,
+        &mut highlighted_offset,
+        &mut visited,
+    );
+    // Visit any disconnected components not reached from entry
+    let mut remaining: Vec<String> = collapsed_nodes
+        .keys()
+        .filter(|k| !visited.contains(k.as_str()))
+        .cloned()
+        .collect();
+    remaining.sort_by_key(|k| collapsed_pos.get(k.as_str()).copied().unwrap_or(i64::MAX));
+    for rk in &remaining {
+        dfs_visit(
+            rk,
+            0,
+            &ctx,
+            &mut lines,
+            &mut highlighted_offset,
+            &mut visited,
+        );
+    }
+    // Trim trailing blank lines
+    while lines.last().is_some_and(|l| l.width() == 0) {
+        lines.pop();
+    }
+    GraphLinesResult {
+        lines,
+        highlighted_offset,
+    }
+}
+
+/// Index the state's ensembles by join node and by member node.
+fn ensemble_index(state: &GraphLiveState) -> EnsembleIndex<'_> {
+    EnsembleIndex {
+        join_ids: state
+            .ensembles
+            .iter()
+            .map(|e| e.join_node_id.as_str())
+            .collect(),
+        by_member: state
+            .ensembles
+            .iter()
+            .flat_map(|e| e.members.iter().map(move |m| (m.node_id.as_str(), e)))
+            .collect(),
+        by_join: state
+            .ensembles
+            .iter()
+            .map(|e| (e.join_node_id.as_str(), e))
+            .collect(),
+    }
+}
+
+/// Collapse ensemble members into one box each, recording the first position.
+fn collapse_nodes<'a>(
+    state: &'a GraphLiveState,
+    index: &EnsembleIndex<'a>,
+) -> (HashMap<String, Collapsed<'a>>, HashMap<String, i64>) {
+    let mut collapsed_nodes: HashMap<String, Collapsed<'a>> = HashMap::new();
     // Position for ordering fallback entry selection.
-    let mut collapsed_nodes: HashMap<String, Collapsed> = HashMap::new();
     let mut collapsed_pos: HashMap<String, i64> = HashMap::new();
     let mut seen_ens: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for node in &state.effective_nodes {
-        if join_node_ids.contains(node.id.as_str()) {
+        if index.join_ids.contains(node.id.as_str()) {
             continue;
         }
-        if let Some(ens) = ensemble_by_member.get(node.id.as_str()) {
+        if let Some(ens) = index.by_member.get(node.id.as_str()) {
             if seen_ens.insert(ens.ensemble_id.as_str()) {
                 // position is the first member's position
                 collapsed_nodes.insert(ens.ensemble_id.clone(), Collapsed::Ensemble(ens));
@@ -776,42 +885,28 @@ fn graph_lines(
             collapsed_pos.insert(node.id.clone(), node.position);
         }
     }
-    if collapsed_nodes.is_empty() {
-        return GraphLinesResult {
-            lines: Vec::new(),
-            highlighted_offset: None,
-        };
-    }
+    (collapsed_nodes, collapsed_pos)
+}
 
-    // --- Collapsed edges (deduped, sorted later per DFS) ---
+/// Rewrite edges onto collapsed keys, dropping ensemble-internal edges and
+/// duplicates, then sorting each adjacency by condition priority.
+fn collapse_edges<'a>(
+    state: &'a GraphLiveState,
+    index: &EnsembleIndex<'a>,
+    collapsed_nodes: &HashMap<String, Collapsed<'a>>,
+) -> HashMap<String, Vec<(String, GraphEdgeCondition)>> {
     let mut collapsed_edges: HashMap<String, Vec<(String, GraphEdgeCondition)>> = HashMap::new();
     for edge in &state.effective_edges {
         let from_raw = edge.from_node.as_str();
         let to_raw = edge.to_node.as_str();
         // internal ensemble member -> join edge
-        if let Some(ens) = ensemble_by_member.get(from_raw) {
+        if let Some(ens) = index.by_member.get(from_raw) {
             if ens.join_node_id.as_str() == to_raw {
                 continue;
             }
         }
-        let from_key = if let Some(ens) = ensemble_by_join.get(from_raw) {
-            Some(ens.ensemble_id.clone())
-        } else if let Some(ens) = ensemble_by_member.get(from_raw) {
-            Some(ens.ensemble_id.clone())
-        } else if collapsed_nodes.contains_key(from_raw) {
-            Some(from_raw.to_string())
-        } else {
-            None
-        };
-        let to_key = if let Some(ens) = ensemble_by_join.get(to_raw) {
-            Some(ens.ensemble_id.clone())
-        } else if let Some(ens) = ensemble_by_member.get(to_raw) {
-            Some(ens.ensemble_id.clone())
-        } else if collapsed_nodes.contains_key(to_raw) {
-            Some(to_raw.to_string())
-        } else {
-            None
-        };
+        let from_key = collapse_key(from_raw, index, collapsed_nodes);
+        let to_key = collapse_key(to_raw, index, collapsed_nodes);
         if let (Some(fk), Some(tk)) = (from_key, to_key) {
             if fk == tk {
                 // self-graph: keep as edge but DFS will treat it as back-ref
@@ -833,211 +928,229 @@ fn graph_lines(
             pa.cmp(&pb).then_with(|| la.cmp(&lb))
         });
     }
+    collapsed_edges
+}
 
-    // --- Find entry (node with no incoming collapsed edge) ---
+/// Map a raw node id onto the collapsed key that represents it.
+fn collapse_key(
+    raw: &str,
+    index: &EnsembleIndex,
+    collapsed_nodes: &HashMap<String, Collapsed>,
+) -> Option<String> {
+    if let Some(ens) = index.by_join.get(raw) {
+        return Some(ens.ensemble_id.clone());
+    }
+    if let Some(ens) = index.by_member.get(raw) {
+        return Some(ens.ensemble_id.clone());
+    }
+    if collapsed_nodes.contains_key(raw) {
+        return Some(raw.to_string());
+    }
+    None
+}
+
+/// The DFS entry node: the one with no incoming collapsed edge, or the one
+/// with the smallest position when every node has one.
+fn find_entry_key(
+    nodes: &HashMap<String, Collapsed>,
+    edges: &HashMap<String, Vec<(String, GraphEdgeCondition)>>,
+    positions: &HashMap<String, i64>,
+) -> String {
     let mut incoming: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    for tos in collapsed_edges.values() {
+    for tos in edges.values() {
         for (tk, _) in tos {
             incoming.insert(tk.as_str());
         }
     }
-    let entry_key = collapsed_nodes
+    nodes
         .keys()
         .find(|k| !incoming.contains(k.as_str()))
         .cloned()
         .or_else(|| {
             // fallback to smallest position
-            collapsed_nodes
+            nodes
                 .keys()
-                .min_by_key(|k| collapsed_pos.get(k.as_str()).copied().unwrap_or(i64::MAX))
+                .min_by_key(|k| positions.get(k.as_str()).copied().unwrap_or(i64::MAX))
                 .cloned()
         })
-        .unwrap();
+        .unwrap()
+}
 
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    let mut highlighted_offset: Option<u16> = None;
-    let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+/// Recursive DFS walk over the collapsed tree.
+fn dfs_visit(
+    key: &str,
+    depth: usize,
+    ctx: &DfsCtx,
+    lines: &mut Vec<Line<'static>>,
+    highlighted_offset: &mut Option<u16>,
+    visited: &mut std::collections::HashSet<String>,
+) {
+    if visited.contains(key) {
+        return;
+    }
+    visited.insert(key.to_string());
+    let depth_clamped = depth.min(3);
+    let is_hl = dfs_is_highlighted(ctx, key);
+    if is_hl && highlighted_offset.is_none() {
+        *highlighted_offset = Some(lines.len() as u16);
+    }
+    let Some(entry) = ctx.nodes.get(key) else {
+        return;
+    };
+    dfs_push_box(lines, ctx, entry, depth_clamped, is_hl);
+    let Some(edges) = ctx.edges.get(key) else {
+        // leaf node still needs spacing before next sibling at same depth
+        // Only add blank if not last overall? DFS already pushes blanks per node with edges;
+        // for leaves, add a blank line to separate siblings visually unless at end.
+        // We'll add a blank line for consistency with old rendering.
+        lines.push(Line::from(""));
+        return;
+    };
+    dfs_edge_lines(lines, ctx, key, depth_clamped, edges, visited);
+    lines.push(Line::from(""));
+    // Recurse into unvisited children in priority order
+    dfs_recurse_children(lines, ctx, depth, edges, highlighted_offset, visited);
+}
 
-    #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::needless_pass_by_value)]
-    fn dfs_visit(
-        key: &str,
-        depth: usize,
-        collapsed_nodes: &HashMap<String, Collapsed>,
-        collapsed_edges: &HashMap<String, Vec<(String, GraphEdgeCondition)>>,
-        state: &GraphLiveState,
-        follow: bool,
-        inner: usize,
-        theme: &Theme,
-        lines: &mut Vec<Line<'static>>,
-        highlighted_offset: &mut Option<u16>,
-        visited: &mut std::collections::HashSet<String>,
-        highlighted_node_id: Option<&str>,
-    ) {
-        if visited.contains(key) {
-            return;
+/// Whether this entry is the highlighted node (or holds it as a member/join).
+fn dfs_is_highlighted(ctx: &DfsCtx, key: &str) -> bool {
+    if let Some(Collapsed::Ensemble(ens)) = ctx.nodes.get(key) {
+        return ens
+            .members
+            .iter()
+            .any(|m| Some(m.node_id.as_str()) == ctx.highlighted_node_id)
+            || ctx.highlighted_node_id == Some(ens.join_node_id.as_str());
+    }
+    ctx.highlighted_node_id == Some(key)
+}
+
+/// Render the node or ensemble box for an entry.
+fn dfs_push_box(
+    lines: &mut Vec<Line<'static>>,
+    ctx: &DfsCtx,
+    entry: &Collapsed,
+    depth_clamped: usize,
+    is_hl: bool,
+) {
+    match entry {
+        Collapsed::Node(node) => lines.extend(node_box_lines(
+            node,
+            is_hl,
+            ctx.follow,
+            ctx.inner,
+            ctx.theme,
+            depth_clamped,
+        )),
+        Collapsed::Ensemble(ens) => lines.extend(ensemble_box_lines(
+            ens,
+            is_hl,
+            ctx.follow,
+            ctx.inner,
+            ctx.theme,
+            depth_clamped,
+        )),
+    }
+}
+
+/// Render the edge lines hanging off one entry.
+fn dfs_edge_lines(
+    lines: &mut Vec<Line<'static>>,
+    ctx: &DfsCtx,
+    key: &str,
+    depth_clamped: usize,
+    edges: &[(String, GraphEdgeCondition)],
+    visited: &std::collections::HashSet<String>,
+) {
+    let prefix = depth_prefix(depth_clamped);
+    // Determine taken route for router nodes (only regular nodes)
+    let taken_route = if let Some(Collapsed::Node(node)) = ctx.nodes.get(key) {
+        ctx.state
+            .router_taken_routes
+            .get(node.id.as_str())
+            .map(String::as_str)
+    } else {
+        None
+    };
+    for (i, (to_key, cond)) in edges.iter().enumerate() {
+        let branch = if i == edges.len() - 1 { "└" } else { "├" };
+        let is_back = visited.contains(to_key.as_str());
+        let target_label = dfs_target_label(ctx, to_key);
+        let suffix = if is_back { "  ↩" } else { "" };
+        lines.push(dfs_edge_line(
+            ctx,
+            &prefix,
+            branch,
+            cond,
+            &target_label,
+            suffix,
+            taken_route,
+        ));
+    }
+}
+
+/// Label to show for an edge target — the name, or the collapsed node key.
+fn dfs_target_label(ctx: &DfsCtx, to_key: &str) -> String {
+    match ctx.nodes.get(to_key) {
+        Some(Collapsed::Ensemble(ens)) => {
+            format!("{} [{} models]", ens.name, ens.members.len())
         }
-        visited.insert(key.to_string());
-        let depth_clamped = depth.min(3);
-        let is_hl = if let Some(Collapsed::Ensemble(ens)) = collapsed_nodes.get(key) {
-            ens.members
-                .iter()
-                .any(|m| Some(m.node_id.as_str()) == highlighted_node_id)
-                || highlighted_node_id == Some(ens.join_node_id.as_str())
-        } else {
-            highlighted_node_id == Some(key)
-        };
-        if is_hl && highlighted_offset.is_none() {
-            *highlighted_offset = Some(lines.len() as u16);
-        }
-        match collapsed_nodes.get(key) {
-            Some(Collapsed::Node(node)) => {
-                lines.extend(node_box_lines(
-                    node,
-                    is_hl,
-                    follow,
-                    inner,
-                    theme,
-                    depth_clamped,
-                ));
-            }
-            Some(Collapsed::Ensemble(ens)) => {
-                lines.extend(ensemble_box_lines(
-                    ens,
-                    is_hl,
-                    follow,
-                    inner,
-                    theme,
-                    depth_clamped,
-                ));
-            }
-            None => return,
-        }
-        if let Some(edges) = collapsed_edges.get(key) {
-            let prefix = depth_prefix(depth_clamped);
-            // Determine taken route for router nodes (only regular nodes)
-            let taken_route = if let Some(Collapsed::Node(node)) = collapsed_nodes.get(key) {
-                state
-                    .router_taken_routes
-                    .get(node.id.as_str())
-                    .map(String::as_str)
+        Some(Collapsed::Node(n)) => n.name.clone(),
+        None => to_key.to_string(),
+    }
+}
+
+/// Render one edge line — the route form (with the taken marker) or plain form.
+fn dfs_edge_line(
+    ctx: &DfsCtx,
+    prefix: &str,
+    branch: &str,
+    cond: &GraphEdgeCondition,
+    target_label: &str,
+    suffix: &str,
+    taken_route: Option<&str>,
+) -> Line<'static> {
+    match cond.route_label() {
+        Some(route) => {
+            let taken = taken_route == Some(route);
+            let (marker, style) = if taken {
+                (
+                    "✓",
+                    Style::default()
+                        .fg(ctx.theme.status_ok)
+                        .add_modifier(Modifier::BOLD),
+                )
             } else {
-                None
+                (" ", Style::default().fg(ctx.theme.dim_text))
             };
-            for (i, (to_key, cond)) in edges.iter().enumerate() {
-                let branch = if i == edges.len() - 1 { "└" } else { "├" };
-                let is_back = visited.contains(to_key.as_str());
-                let target_label = match collapsed_nodes.get(to_key.as_str()) {
-                    Some(Collapsed::Ensemble(ens)) => {
-                        format!("{} [{} models]", ens.name, ens.members.len())
-                    }
-                    Some(Collapsed::Node(n)) => n.name.clone(),
-                    None => to_key.clone(),
-                };
-                let suffix = if is_back { "  ↩" } else { "" };
-                match cond.route_label() {
-                    Some(route) => {
-                        let taken = taken_route == Some(route);
-                        let (marker, style) = if taken {
-                            (
-                                "✓",
-                                Style::default()
-                                    .fg(theme.status_ok)
-                                    .add_modifier(Modifier::BOLD),
-                            )
-                        } else {
-                            (" ", Style::default().fg(theme.dim_text))
-                        };
-                        lines.push(Line::from(Span::styled(
-                            format!(
-                                "{prefix}   {branch}─{marker} {route} → {target_label}{suffix}"
-                            ),
-                            style,
-                        )));
-                    }
-                    None => {
-                        let label = format!("{target_label}{suffix}");
-                        lines.push(Line::from(Span::styled(
-                            format!("{prefix}   {}─ {} → {}", branch, cond.as_str(), label),
-                            Style::default().fg(theme.dim_text),
-                        )));
-                    }
-                }
-            }
-            lines.push(Line::from(""));
-            // Recurse into unvisited children in priority order
-            for (to_key, _) in edges {
-                if !visited.contains(to_key.as_str()) {
-                    dfs_visit(
-                        to_key,
-                        depth + 1,
-                        collapsed_nodes,
-                        collapsed_edges,
-                        state,
-                        follow,
-                        inner,
-                        theme,
-                        lines,
-                        highlighted_offset,
-                        visited,
-                        highlighted_node_id,
-                    );
-                }
-            }
-        } else {
-            // leaf node still needs spacing before next sibling at same depth
-            // Only add blank if not last overall? DFS already pushes blanks per node with edges;
-            // for leaves, add a blank line to separate siblings visually unless at end.
-            // We'll add a blank line for consistency with old rendering.
-            lines.push(Line::from(""));
+            Line::from(Span::styled(
+                format!("{prefix}   {branch}─{marker} {route} → {target_label}{suffix}"),
+                style,
+            ))
+        }
+        None => {
+            let label = format!("{target_label}{suffix}");
+            Line::from(Span::styled(
+                format!("{prefix}   {}─ {} → {}", branch, cond.as_str(), label),
+                Style::default().fg(ctx.theme.dim_text),
+            ))
         }
     }
+}
 
-    // Start DFS from entry
-    dfs_visit(
-        &entry_key,
-        0,
-        &collapsed_nodes,
-        &collapsed_edges,
-        state,
-        follow,
-        inner,
-        theme,
-        &mut lines,
-        &mut highlighted_offset,
-        &mut visited,
-        highlighted_node_id,
-    );
-    // Visit any disconnected components not reached from entry
-    let mut remaining: Vec<String> = collapsed_nodes
-        .keys()
-        .filter(|k| !visited.contains(k.as_str()))
-        .cloned()
-        .collect();
-    remaining.sort_by_key(|k| collapsed_pos.get(k.as_str()).copied().unwrap_or(i64::MAX));
-    for rk in &remaining {
-        dfs_visit(
-            rk,
-            0,
-            &collapsed_nodes,
-            &collapsed_edges,
-            state,
-            follow,
-            inner,
-            theme,
-            &mut lines,
-            &mut highlighted_offset,
-            &mut visited,
-            highlighted_node_id,
-        );
-    }
-    // Trim trailing blank lines
-    while lines.last().is_some_and(|l| l.width() == 0) {
-        lines.pop();
-    }
-    GraphLinesResult {
-        lines,
-        highlighted_offset,
+/// Recurse into the unvisited children of an entry, in adjacency order.
+fn dfs_recurse_children(
+    lines: &mut Vec<Line<'static>>,
+    ctx: &DfsCtx,
+    depth: usize,
+    edges: &[(String, GraphEdgeCondition)],
+    highlighted_offset: &mut Option<u16>,
+    visited: &mut std::collections::HashSet<String>,
+) {
+    for (to_key, _) in edges {
+        if visited.contains(to_key.as_str()) {
+            continue;
+        }
+        dfs_visit(to_key, depth + 1, ctx, lines, highlighted_offset, visited);
     }
 }
 

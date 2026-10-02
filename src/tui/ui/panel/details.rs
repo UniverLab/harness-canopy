@@ -153,6 +153,15 @@ pub fn draw_agent_details(frame: &mut Frame, area: Rect, agent: &Agent, app: &Ap
         ]),
     ];
 
+    push_agent_trigger_lines(&mut lines, agent, theme);
+    push_agent_metadata_lines(&mut lines, agent, theme);
+
+    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+    frame.render_widget(paragraph, area);
+}
+
+/// Append the trigger-specific block (cron schedule or watch details).
+fn push_agent_trigger_lines<'a>(lines: &mut Vec<Line<'a>>, agent: &'a Agent, theme: &Theme) {
     match &agent.trigger {
         Some(Trigger::Cron { schedule_expr }) => {
             lines.push(Line::from(vec![
@@ -193,7 +202,10 @@ pub fn draw_agent_details(frame: &mut Frame, area: Rect, agent: &Agent, app: &Ap
         }
         None => {}
     }
+}
 
+/// Append the always-present CLI/timeout lines plus the optional metadata rows.
+fn push_agent_metadata_lines<'a>(lines: &mut Vec<Line<'a>>, agent: &'a Agent, theme: &Theme) {
     lines.push(Line::from(vec![
         Span::styled("CLI:     ", Style::default().fg(theme.dim_text)),
         Span::raw(agent.cli.as_str()),
@@ -245,7 +257,4 @@ pub fn draw_agent_details(frame: &mut Frame, area: Rect, agent: &Agent, app: &Ap
             Span::raw(agent.trigger_count.to_string()),
         ]));
     }
-
-    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
-    frame.render_widget(paragraph, area);
 }
