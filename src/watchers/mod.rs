@@ -70,42 +70,90 @@ impl FireTarget {
     async fn fire(self, file_path: String, evt_str: String) {
         match self {
             FireTarget::Agent { agent, executor } => {
-                tracing::info!(
-                    "Watcher '{}' triggered: {} on {}",
-                    agent.id,
-                    evt_str,
-                    file_path
-                );
-                if let Err(e) = executor
-                    .execute_agent_with_context(agent.as_ref(), &file_path, &evt_str)
-                    .await
-                {
-                    tracing::error!("Watcher '{}' execution failed: {}", agent.id, e);
-                }
+                fire_watch_agent(*agent, executor, file_path, evt_str).await;
             }
             FireTarget::Graph {
                 graph_id,
                 db,
                 graph_engine,
-            } => match db.get_graph(&graph_id) {
-                Ok(Some(lp)) if lp.is_fireable() => {
-                    tracing::info!(
-                        "Watch graph '{}' triggered: {} on {}",
-                        graph_id,
-                        evt_str,
-                        file_path
-                    );
-                    graph_engine.start_background(graph_id);
-                }
-                Ok(Some(_)) => tracing::debug!(
-                    "Watch graph '{}' event ignored (graph already running/paused)",
-                    graph_id
-                ),
-                Ok(None) => tracing::warn!("Watch graph '{}' no longer exists", graph_id),
-                Err(e) => tracing::error!("Watch graph '{}' lookup failed: {}", graph_id, e),
-            },
+            } => fire_watch_graph(graph_id, &db, graph_engine, &file_path, &evt_str),
         }
     }
+}
+
+/// Execute a watch agent's CLI with the triggering event's context, logging
+/// (never propagating) execution failures.
+async fn fire_watch_agent(
+    agent: Agent,
+    executor: Arc<Executor>,
+    file_path: String,
+    evt_str: String,
+) {
+    tracing::info!(
+        "Watcher '{}' triggered: {} on {}",
+        agent.id,
+        evt_str,
+        file_path
+    );
+    if let Err(e) = executor
+        .execute_agent_with_context(&agent, &file_path, &evt_str)
+        .await
+    {
+        tracing::error!("Watcher '{}' execution failed: {}", agent.id, e);
+    }
+}
+
+/// Launch a watch-triggered graph fire-and-forget, skipping graphs that are
+/// already running/paused so an event does not double-launch.
+fn fire_watch_graph(
+    graph_id: String,
+    db: &Database,
+    graph_engine: Arc<GraphEngine>,
+    file_path: &str,
+    evt_str: &str,
+) {
+    match db.get_graph(&graph_id) {
+        Ok(Some(lp)) if lp.is_fireable() => {
+            launch_watch_graph(graph_engine, graph_id, evt_str, file_path);
+        }
+        Ok(Some(_)) => trace_watch_graph_already_running(&graph_id),
+        Ok(None) => trace_watch_graph_missing(&graph_id),
+        Err(e) => trace_watch_graph_lookup_failed(&graph_id, &e),
+    }
+}
+
+/// Log the trigger and launch a fireable watch-triggered graph in the background.
+fn launch_watch_graph(
+    graph_engine: Arc<GraphEngine>,
+    graph_id: String,
+    evt_str: &str,
+    file_path: &str,
+) {
+    tracing::info!(
+        "Watch graph '{}' triggered: {} on {}",
+        graph_id,
+        evt_str,
+        file_path
+    );
+    graph_engine.start_background(graph_id);
+}
+
+/// Log that the watched graph exists but is not fireable right now.
+fn trace_watch_graph_already_running(graph_id: &str) {
+    tracing::debug!(
+        "Watch graph '{}' event ignored (graph already running/paused)",
+        graph_id
+    );
+}
+
+/// Log that the watched graph no longer exists.
+fn trace_watch_graph_missing(graph_id: &str) {
+    tracing::warn!("Watch graph '{}' no longer exists", graph_id);
+}
+
+/// Log the database failure that kept a watch-triggered graph from launching.
+fn trace_watch_graph_lookup_failed(graph_id: &str, error: &impl std::fmt::Display) {
+    tracing::error!("Watch graph '{}' lookup failed: {}", graph_id, error);
 }
 
 /// Resolved watch target: the actual path to watch and an optional filename filter.
@@ -129,6 +177,14 @@ impl WatcherEngine {
     /// Load and start all enabled watch agents and watch-triggered graphs from
     /// the database.
     pub async fn reload_from_db(&self) -> Result<()> {
+        self.reload_watch_agents().await?;
+        self.reload_watch_graphs().await?;
+        Ok(())
+    }
+
+    /// Start every enabled watch agent registered in the database, logging
+    /// (never propagating) per-agent start failures.
+    async fn reload_watch_agents(&self) -> Result<()> {
         let agents = self.db.list_watch_agents()?;
         tracing::info!(
             "Reloading {} enabled watch agents from database",
@@ -139,7 +195,12 @@ impl WatcherEngine {
                 tracing::error!("Failed to start watcher for agent '{}': {}", agent.id, e);
             }
         }
+        Ok(())
+    }
 
+    /// Start every watch-triggered graph registered in the database, logging
+    /// (never propagating) per-graph start failures.
+    async fn reload_watch_graphs(&self) -> Result<()> {
         let graphs = self.db.list_watch_graphs()?;
         tracing::info!(
             "Reloading {} watch-triggered graphs from database",
@@ -706,5 +767,67 @@ mod tests {
             notify::event::RenameMode::From,
         ));
         assert_eq!(map_event_kind(&kind, "test"), Some(WatchEvent::Move));
+    }
+
+    /// The extracted graph arm must ignore an unknown graph id (warn only,
+    /// no panic, no launch) — previously reachable only via a live watcher.
+    #[tokio::test]
+    async fn fire_watch_graph_missing_graph_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::new(&dir.path().join("test.db")).unwrap());
+        let graph_engine = Arc::new(GraphEngine::new(
+            Arc::clone(&db),
+            Arc::new(crate::application::notification_service::DefaultNotificationService),
+        ));
+
+        fire_watch_graph(
+            "missing-graph".to_string(),
+            &db,
+            graph_engine,
+            "/tmp/watched.md",
+            "modify",
+        );
+    }
+
+    /// An unfireable (paused) graph must take the "event ignored" arm: the
+    /// call returns without panicking and without touching the graph.
+    #[tokio::test]
+    async fn fire_watch_graph_refuses_unfireable_graph() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::new(&dir.path().join("test.db")).unwrap());
+        let graph_engine = Arc::new(GraphEngine::new(
+            Arc::clone(&db),
+            Arc::new(crate::application::notification_service::DefaultNotificationService),
+        ));
+        let paused = Graph {
+            archived: false,
+            paused_by_reconciliation: false,
+            allow_dirty_start: false,
+            infra_node_id: None,
+            id: "paused-watch-graph".to_string(),
+            name: "Paused watch graph".to_string(),
+            description: None,
+            workdir: "/tmp/watch-graph-test".to_string(),
+            status: crate::domain::graphs::GraphStatus::Paused,
+            trigger: None,
+            created_at: chrono::Utc::now(),
+            started_at: None,
+            completed_at: None,
+            autorun_at: None,
+            auto_continue_at: None,
+            auto_continue_action: None,
+            active_run_queue_id: None,
+            hooks: std::collections::BTreeMap::new(),
+        };
+        db.insert_graph(&paused).unwrap();
+
+        fire_watch_graph(paused.id, &db, graph_engine, "/tmp/watched.md", "modify");
+
+        let after = db.get_graph("paused-watch-graph").unwrap().unwrap();
+        assert_eq!(
+            after.status,
+            crate::domain::graphs::GraphStatus::Paused,
+            "an unfireable graph must not be launched by a watch event"
+        );
     }
 }

@@ -203,53 +203,20 @@ impl IngestionManager {
 
         let patterns = crate::rag::ragignore::load_patterns(&data_dir);
 
+        let ctx = RagWatchContext {
+            rt,
+            db,
+            queue,
+            notify: notify_handle,
+            roots,
+            patterns,
+            data_dir,
+        };
+
         let mut watcher = match RecommendedWatcher::new(
             move |res: Result<Event, notify::Error>| {
                 let Ok(event) = res else { return };
-                for path in &event.paths {
-                    let matching_root = roots.iter().find(|r| path.starts_with(r));
-                    let Some(root) = matching_root else { continue };
-                    if crate::rag::ragignore::is_ignored(path, root, &patterns) {
-                        continue;
-                    }
-                    let path_str = path.to_string_lossy().to_string();
-                    match event.kind {
-                        EventKind::Create(_) | EventKind::Modify(_)
-                            if detect_lang(&path_str).is_some() =>
-                        {
-                            tracing::info!(
-                                "RAG watcher: queuing '{}' for indexing ({:?})",
-                                path_str,
-                                event.kind
-                            );
-                            let q = Arc::clone(&queue);
-                            let n = Arc::clone(&notify_handle);
-                            let p = path_str.clone();
-                            let db2 = Arc::clone(&db);
-                            rt.spawn(async move {
-                                let now = chrono::Utc::now().timestamp();
-                                let ok = {
-                                    let mut lock = q.lock().await;
-                                    lock.push(&p)
-                                };
-                                if ok {
-                                    let _ = db2.enqueue_rag_item(&p, now);
-                                    n.notify_one();
-                                }
-                            });
-                        }
-                        EventKind::Remove(_) => {
-                            tracing::info!("RAG watcher: '{}' removed — purging chunks", path_str);
-                            let data_dir2 = data_dir.clone();
-                            let db3 = Arc::clone(&db);
-                            let p = path_str;
-                            rt.spawn(async move {
-                                purge_vector_chunks(&data_dir2, &p, Some(&db3)).await;
-                            });
-                        }
-                        _ => {}
-                    }
-                }
+                handle_rag_watcher_event(&ctx, event);
             },
             Config::default(),
         ) {
@@ -260,15 +227,7 @@ impl IngestionManager {
             }
         };
 
-        let mut watched = 0usize;
-        for root in personal_roots {
-            if let Err(e) = watcher.watch(root, RecursiveMode::Recursive) {
-                tracing::warn!("Personal RAG watcher could not watch {:?}: {e}", root);
-            } else {
-                tracing::info!("Personal RAG watcher active on {:?}", root);
-                watched += 1;
-            }
-        }
+        let watched = watch_personal_roots(&mut watcher, personal_roots);
 
         if watched > 0 {
             if let Ok(mut guard) = self._personal_watcher.lock() {
@@ -440,7 +399,7 @@ impl IngestionManager {
         let paths = match store.list_unique_paths().await {
             Ok(p) => p,
             Err(e) => {
-                tracing::warn!("RAG reconcile: failed to list indexed paths: {e:#}");
+                Self::trace_reconcile_list_failed(&e);
                 return;
             }
         };
@@ -461,54 +420,75 @@ impl IngestionManager {
             paths.len(),
             personal_roots
         );
-        let mut purged = 0usize;
-        for path in &paths {
-            let disk_path = std::path::Path::new(path);
-
-            // Case 1: file no longer exists on disk.
-            let missing_on_disk = !disk_path.exists();
-
-            // Case 2: file exists but is outside every configured root
-            // (i.e. the user changed the RAG root via `canopy setup`).
-            let outside_roots = !personal_roots.is_empty()
-                && !personal_roots
-                    .iter()
-                    .any(|root| disk_path.starts_with(root));
-
-            if missing_on_disk || outside_roots {
-                let reason = if missing_on_disk {
-                    "file no longer on disk — orphan chunks purged at startup"
-                } else {
-                    "file outside configured RAG roots — purged after root change"
-                };
-                tracing::info!(
-                    "RAG reconcile: '{}' — {} (missing={}, outside_roots={})",
-                    path,
-                    reason,
-                    missing_on_disk,
-                    outside_roots
-                );
-                if let Err(e) = store.delete_by_path(path).await {
-                    tracing::warn!("RAG reconcile: failed to purge '{}': {e:#}", path);
-                } else {
-                    purged += 1;
-                    let _ = self.db.log_rag_event(
-                        path,
-                        "deleted",
-                        Some(reason),
-                        chrono::Utc::now().timestamp(),
-                    );
-                }
-            }
+        let purged = self
+            .purge_orphaned_paths(&store, &paths, &personal_roots)
+            .await;
+        Self::trace_reconcile_outcome(purged);
+        if purged > 0 {
+            refresh_rag_snapshot(&self.db, &self.data_dir).await;
         }
+    }
+
+    /// WARN that the orphan sweep could not enumerate the store's indexed paths.
+    fn trace_reconcile_list_failed(error: &anyhow::Error) {
+        tracing::warn!("RAG reconcile: failed to list indexed paths: {error:#}");
+    }
+
+    /// Log how many orphaned paths the sweep purged, or that none were found.
+    fn trace_reconcile_outcome(purged: usize) {
         if purged > 0 {
             tracing::info!(
                 "RAG reconcile: removed chunks for {purged} deleted/out-of-scope file(s)"
             );
-            refresh_rag_snapshot(&self.db, &self.data_dir).await;
         } else {
             tracing::debug!("RAG reconcile: no orphan chunks found");
         }
+    }
+
+    /// Delete the chunks of every indexed path that [`orphan_purge_reason`]
+    /// flags, logging each decision and its outcome; returns how many paths
+    /// were successfully purged.
+    async fn purge_orphaned_paths(
+        &self,
+        store: &VectorStore,
+        paths: &[String],
+        personal_roots: &[PathBuf],
+    ) -> usize {
+        let mut purged = 0usize;
+        for path in paths {
+            let disk_path = std::path::Path::new(path);
+
+            let Some((missing_on_disk, outside_roots)) =
+                orphan_purge_reason(disk_path, personal_roots)
+            else {
+                continue;
+            };
+
+            let reason = if missing_on_disk {
+                "file no longer on disk — orphan chunks purged at startup"
+            } else {
+                "file outside configured RAG roots — purged after root change"
+            };
+            tracing::info!(
+                "RAG reconcile: '{}' — {} (missing={}, outside_roots={})",
+                path,
+                reason,
+                missing_on_disk,
+                outside_roots
+            );
+            if let Err(e) = store.delete_by_path(path).await {
+                tracing::warn!("RAG reconcile: failed to purge '{}': {e:#}", path);
+            } else {
+                purged += 1;
+                let _ = self.db.log_rag_event(
+                    path,
+                    "deleted",
+                    Some(reason),
+                    chrono::Utc::now().timestamp(),
+                );
+            }
+        }
+        purged
     }
 
     /// Reconcile the ledger against the vector store at startup. If the
@@ -675,49 +655,19 @@ impl IngestionManager {
                     skipped += 1;
                     let _ = self.db.remove_rag_item(&source_path);
                     let error_detail = format!("{e:#}");
-                    let now = chrono::Utc::now().timestamp();
-                    let _ = self
-                        .db
-                        .log_rag_event(&source_path, "error", Some(&error_detail), now);
-
-                    let prior_errors = self.db.rag_error_count(&source_path).unwrap_or(0);
-                    let attempt = prior_errors + 1;
-                    let permanent =
-                        is_permanent_rag_error(&error_detail) || attempt >= MAX_RAG_ATTEMPTS;
-
-                    let filename = std::path::Path::new(&source_path)
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_else(|| source_path.clone());
-
-                    if permanent {
-                        let _ =
-                            self.db
-                                .log_rag_event(&source_path, "failed", Some(&error_detail), now);
-                        tracing::warn!(
-                            "RAG index permanent failure {source_path}: giving up after {attempt} attempt(s)"
-                        );
-                        crate::domain::notification::send_notification(
-                            "RAG indexing",
-                            &format!(
-                                "{filename} permanently failed after {attempt} attempt(s) — giving up\nCause: {error_detail}"
-                            ),
-                            crate::domain::notification::NotificationLevel::Error,
-                        );
-                    } else {
-                        // Immediate per-file error notification so the user knows right away.
-                        crate::domain::notification::send_notification(
-                            "RAG indexing",
-                            &format!("{filename} could not be indexed\nCause: {error_detail}"),
-                            crate::domain::notification::NotificationLevel::Error,
-                        );
-                    }
+                    self.record_queued_file_failure(&source_path, &error_detail);
                 }
             }
         }
 
+        Self::report_drain_queue_outcome(processed, skipped, &indexed_paths);
+    }
+
+    /// Emit the end-of-drain summary: the indexed count (with its directory
+    /// annotation and success notification) and the failure warning.
+    fn report_drain_queue_outcome(processed: usize, skipped: usize, indexed_paths: &[String]) {
         if processed > 0 {
-            let dir_note = indexing_dir_summary(&indexed_paths);
+            let dir_note = indexing_dir_summary(indexed_paths);
             tracing::info!("Personal RAG: indexed {processed} file(s){dir_note}");
             crate::domain::notification::send_notification(
                 "RAG indexing",
@@ -727,6 +677,49 @@ impl IngestionManager {
         }
         if skipped > 0 {
             tracing::warn!("Personal RAG: {skipped} file(s) failed — check logs above");
+        }
+    }
+
+    /// Record the `"error"` event for a failed indexing attempt and notify
+    /// the user — escalating to a permanent give-up (a `"failed"` event and
+    /// the permanent-failure notification) once
+    /// [`permanent_index_failure`] says no further retry can help.
+    fn record_queued_file_failure(&self, source_path: &str, error_detail: &str) {
+        let now = chrono::Utc::now().timestamp();
+        let _ = self
+            .db
+            .log_rag_event(source_path, "error", Some(error_detail), now);
+
+        let prior_errors = self.db.rag_error_count(source_path).unwrap_or(0);
+        let attempt = prior_errors + 1;
+        let permanent = permanent_index_failure(error_detail, prior_errors);
+
+        let filename = std::path::Path::new(source_path)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| source_path.to_string());
+
+        if permanent {
+            let _ = self
+                .db
+                .log_rag_event(source_path, "failed", Some(error_detail), now);
+            tracing::warn!(
+                "RAG index permanent failure {source_path}: giving up after {attempt} attempt(s)"
+            );
+            crate::domain::notification::send_notification(
+                "RAG indexing",
+                &format!(
+                    "{filename} permanently failed after {attempt} attempt(s) — giving up\nCause: {error_detail}"
+                ),
+                crate::domain::notification::NotificationLevel::Error,
+            );
+        } else {
+            // Immediate per-file error notification so the user knows right away.
+            crate::domain::notification::send_notification(
+                "RAG indexing",
+                &format!("{filename} could not be indexed\nCause: {error_detail}"),
+                crate::domain::notification::NotificationLevel::Error,
+            );
         }
     }
 
@@ -849,16 +842,7 @@ impl IngestionManager {
 
         let meta = std::fs::metadata(path)?;
         if meta.len() > max_bytes {
-            let size_mb = meta.len() as f64 / (1024.0 * 1024.0);
-            let cap_mb = max_bytes as f64 / (1024.0 * 1024.0);
-            // WARN, not DEBUG/INFO: a file dropped from the index is a fact the
-            // operator must be able to see — the same visibility `canopy doctor`
-            // and `canopy rag report` now give the aggregate count (CB20).
-            tracing::warn!(
-                "Personal RAG: skipping '{source_path}' — {size_mb:.1} MB exceeds the \
-                 {cap_mb:.0} MB indexing limit (config.toml: rag_max_file_mb)"
-            );
-            record_oversize_skip(&self.db, source_path, meta.len());
+            warn_and_record_oversize(&self.db, source_path, meta.len(), max_bytes);
             return Ok(());
         }
 
@@ -866,49 +850,17 @@ impl IngestionManager {
             return Ok(());
         };
 
-        let content = extract_file_content(path, lang)?;
-        if content.trim().is_empty() {
-            tracing::warn!("RAG: skipping {source_path} — content is empty after extraction");
+        let Some(content) = read_indexable_content(source_path, path, lang)? else {
             return Ok(());
-        }
-        tracing::debug!(
-            "RAG index_file: {source_path} — extracted {} bytes (lang={lang})",
-            content.len()
-        );
+        };
         let now = chrono::Utc::now().timestamp();
 
-        let threshold = config.similarity_threshold;
-        let Some(semantic_chunks) =
-            build_semantic_chunks(content.clone(), lang.to_owned(), threshold, source_path).await
+        let Some(vector_chunks) = self
+            .embed_file_chunks(&config, source_path, lang, content, now)
+            .await?
         else {
             return Ok(());
         };
-        tracing::debug!(
-            "RAG index_file: {source_path} — {} semantic chunk(s) produced",
-            semantic_chunks.len()
-        );
-        let embedding_client = match self.get_embedding_client(&config).await {
-            Ok(client) => {
-                tracing::debug!("RAG index_file: embedding client ready for {source_path}");
-                client
-            }
-            Err(error) => {
-                tracing::error!(
-                    "RAG: cannot index {source_path} — embedding client unavailable: {error:#}"
-                );
-                return Err(error);
-            }
-        };
-
-        let vector_chunks =
-            embed_semantic_chunks(embedding_client, semantic_chunks, source_path, now).await;
-
-        if vector_chunks.is_empty() {
-            tracing::error!(
-                "RAG: no chunks were embedded for {source_path} — file will not be indexed"
-            );
-            return Ok(());
-        }
 
         tracing::info!(
             "RAG index_file: {source_path} — {} chunk(s) embedded, pushing to vector store",
@@ -924,6 +876,205 @@ impl IngestionManager {
         .await?;
         Ok(())
     }
+
+    /// Semantic-chunk `content`, obtain the embedding client, and embed every
+    /// chunk. Returns `Ok(None)` when chunking produced nothing to embed or
+    /// embedding produced no vectors (the file simply isn't indexed), and
+    /// `Err` when the embedding client itself is unavailable.
+    async fn embed_file_chunks(
+        &self,
+        config: &crate::domain::canopy_config::CanopyConfig,
+        source_path: &str,
+        lang: &'static str,
+        content: String,
+        now: i64,
+    ) -> anyhow::Result<Option<Vec<VectorChunk>>> {
+        let threshold = config.similarity_threshold;
+        let Some(semantic_chunks) =
+            build_semantic_chunks(content.clone(), lang.to_owned(), threshold, source_path).await
+        else {
+            return Ok(None);
+        };
+        tracing::debug!(
+            "RAG index_file: {source_path} — {} semantic chunk(s) produced",
+            semantic_chunks.len()
+        );
+        let embedding_client = self.embedding_client_for_file(config, source_path).await?;
+
+        let vector_chunks =
+            embed_semantic_chunks(embedding_client, semantic_chunks, source_path, now).await;
+
+        if vector_chunks.is_empty() {
+            tracing::error!(
+                "RAG: no chunks were embedded for {source_path} — file will not be indexed"
+            );
+            return Ok(None);
+        }
+
+        Ok(Some(vector_chunks))
+    }
+
+    /// Obtain the embedding client for one indexing pass, logging the same
+    /// readiness or failure line the indexing path always emitted; surfaces
+    /// the client error unchanged so `index_file`'s `?` reports it.
+    async fn embedding_client_for_file(
+        &self,
+        config: &crate::domain::canopy_config::CanopyConfig,
+        source_path: &str,
+    ) -> anyhow::Result<Arc<dyn EmbeddingClient>> {
+        match self.get_embedding_client(config).await {
+            Ok(client) => {
+                tracing::debug!("RAG index_file: embedding client ready for {source_path}");
+                Ok(client)
+            }
+            Err(error) => {
+                tracing::error!(
+                    "RAG: cannot index {source_path} — embedding client unavailable: {error:#}"
+                );
+                Err(error)
+            }
+        }
+    }
+}
+
+/// Everything the RAG watcher's notify callback needs; moved by value into the
+/// closure exactly the clones `start_personal_watcher` already made
+/// (rt/db/queue/notify/roots/patterns/data_dir).
+struct RagWatchContext {
+    rt: tokio::runtime::Handle,
+    db: Arc<Database>,
+    queue: Arc<Mutex<Queue>>,
+    notify: Arc<Notify>,
+    roots: Vec<PathBuf>,
+    patterns: Vec<String>,
+    data_dir: PathBuf,
+}
+
+/// Watch every personal RAG root recursively, logging each outcome; returns
+/// how many roots were successfully watched.
+fn watch_personal_roots(watcher: &mut RecommendedWatcher, personal_roots: &[PathBuf]) -> usize {
+    let mut watched = 0usize;
+    for root in personal_roots {
+        if let Err(e) = watcher.watch(root, RecursiveMode::Recursive) {
+            tracing::warn!("Personal RAG watcher could not watch {:?}: {e}", root);
+        } else {
+            tracing::info!("Personal RAG watcher active on {:?}", root);
+            watched += 1;
+        }
+    }
+    watched
+}
+
+/// Route one watcher event: queue indexable files that sit inside a watched
+/// root and aren't ragignored, and purge vector chunks for removed files.
+fn handle_rag_watcher_event(ctx: &RagWatchContext, event: Event) {
+    let Event { paths, kind, .. } = event;
+    for path in &paths {
+        let matching_root = ctx.roots.iter().find(|r| path.starts_with(r));
+        let Some(root) = matching_root else { continue };
+        if crate::rag::ragignore::is_ignored(path, root, &ctx.patterns) {
+            continue;
+        }
+        let path_str = path.to_string_lossy().to_string();
+        match kind {
+            EventKind::Create(_) | EventKind::Modify(_) if detect_lang(&path_str).is_some() => {
+                spawn_rag_index_enqueue(ctx, &path_str, kind);
+            }
+            EventKind::Remove(_) => {
+                spawn_rag_chunk_purge(ctx, &path_str);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Spawn the queue-push + DB-enqueue + notify for a freshly changed file.
+fn spawn_rag_index_enqueue(ctx: &RagWatchContext, path_str: &str, kind: EventKind) {
+    tracing::info!(
+        "RAG watcher: queuing '{}' for indexing ({:?})",
+        path_str,
+        kind
+    );
+    let q = Arc::clone(&ctx.queue);
+    let n = Arc::clone(&ctx.notify);
+    let p = path_str.to_string();
+    let db2 = Arc::clone(&ctx.db);
+    ctx.rt.spawn(async move {
+        let now = chrono::Utc::now().timestamp();
+        let ok = {
+            let mut lock = q.lock().await;
+            lock.push(&p)
+        };
+        if ok {
+            let _ = db2.enqueue_rag_item(&p, now);
+            n.notify_one();
+        }
+    });
+}
+
+/// Spawn the vector-chunk purge for a file the watcher saw removed.
+fn spawn_rag_chunk_purge(ctx: &RagWatchContext, path_str: &str) {
+    tracing::info!("RAG watcher: '{}' removed — purging chunks", path_str);
+    let data_dir2 = ctx.data_dir.clone();
+    let db3 = Arc::clone(&ctx.db);
+    let p = path_str.to_string();
+    ctx.rt.spawn(async move {
+        purge_vector_chunks(&data_dir2, &p, Some(&db3)).await;
+    });
+}
+
+/// Why an indexed path's chunks are orphans: `(missing_on_disk, outside_roots)`,
+/// or `None` when the file still exists inside a configured root.
+fn orphan_purge_reason(path: &Path, personal_roots: &[PathBuf]) -> Option<(bool, bool)> {
+    // Case 1: file no longer exists on disk.
+    let missing_on_disk = !path.exists();
+
+    // Case 2: file exists but is outside every configured root
+    // (i.e. the user changed the RAG root via `canopy setup`).
+    let outside_roots =
+        !personal_roots.is_empty() && !personal_roots.iter().any(|root| path.starts_with(root));
+
+    (missing_on_disk || outside_roots).then_some((missing_on_disk, outside_roots))
+}
+
+/// An indexing failure is permanent when its message matches a known-fatal
+/// pattern or the file has burned through `MAX_RAG_ATTEMPTS` total attempts.
+fn permanent_index_failure(error_detail: &str, prior_errors: i64) -> bool {
+    is_permanent_rag_error(error_detail) || prior_errors + 1 >= MAX_RAG_ATTEMPTS
+}
+
+/// WARN about a file dropped for exceeding the indexing limit and record the
+/// `"skipped_oversize"` ledger event for it.
+fn warn_and_record_oversize(db: &Database, source_path: &str, size_bytes: u64, max_bytes: u64) {
+    let size_mb = size_bytes as f64 / (1024.0 * 1024.0);
+    let cap_mb = max_bytes as f64 / (1024.0 * 1024.0);
+    // WARN, not DEBUG/INFO: a file dropped from the index is a fact the
+    // operator must be able to see — the same visibility `canopy doctor`
+    // and `canopy rag report` now give the aggregate count (CB20).
+    tracing::warn!(
+        "Personal RAG: skipping '{source_path}' — {size_mb:.1} MB exceeds the \
+         {cap_mb:.0} MB indexing limit (config.toml: rag_max_file_mb)"
+    );
+    record_oversize_skip(db, source_path, size_bytes);
+}
+
+/// Extract a file's indexable content, returning `Ok(None)` (with the same
+/// warning the index path always emitted) when nothing usable was extracted.
+fn read_indexable_content(
+    source_path: &str,
+    path: &Path,
+    lang: &str,
+) -> anyhow::Result<Option<String>> {
+    let content = extract_file_content(path, lang)?;
+    if content.trim().is_empty() {
+        tracing::warn!("RAG: skipping {source_path} — content is empty after extraction");
+        return Ok(None);
+    }
+    tracing::debug!(
+        "RAG index_file: {source_path} — extracted {} bytes (lang={lang})",
+        content.len()
+    );
+    Ok(Some(content))
 }
 
 async fn build_semantic_chunks(
@@ -1013,11 +1164,7 @@ async fn sync_vector_store(
     chunks: &[VectorChunk],
 ) -> anyhow::Result<()> {
     let model = config.embeddings_model.trim();
-    tracing::info!(
-        "RAG sync_vector_store: {} chunk(s) for {source_path} (model={})",
-        chunks.len(),
-        model
-    );
+    trace_sync_vector_store_start(chunks, source_path, model);
 
     let Some(store) = open_vector_store(config, db).await else {
         anyhow::bail!("RAG vector store unavailable — check model config");
@@ -1028,6 +1175,35 @@ async fn sync_vector_store(
         // Non-fatal — continue inserting fresh chunks even if delete failed.
     }
 
+    let (ok, fail) = insert_chunks_into_store(&store, source_path, chunks).await;
+
+    tracing::info!("RAG sync_vector_store: {source_path} — {ok} inserted, {fail} failed");
+
+    if fail > 0 && ok == 0 {
+        anyhow::bail!("All {fail} chunk(s) failed to insert for {source_path} — see errors above");
+    }
+    if ok > 0 {
+        refresh_rag_snapshot(db, data_dir).await;
+    }
+    Ok(())
+}
+
+/// Log the start of a vector-store sync for one file (chunk count + model).
+fn trace_sync_vector_store_start(chunks: &[VectorChunk], source_path: &str, model: &str) {
+    tracing::info!(
+        "RAG sync_vector_store: {} chunk(s) for {source_path} (model={})",
+        chunks.len(),
+        model
+    );
+}
+
+/// Insert every chunk into the store, logging each failure individually;
+/// returns `(inserted, failed)` counts.
+async fn insert_chunks_into_store(
+    store: &VectorStore,
+    source_path: &str,
+    chunks: &[VectorChunk],
+) -> (usize, usize) {
     let mut ok = 0usize;
     let mut fail = 0usize;
     for chunk in chunks {
@@ -1042,48 +1218,48 @@ async fn sync_vector_store(
             }
         }
     }
-
-    tracing::info!("RAG sync_vector_store: {source_path} — {ok} inserted, {fail} failed");
-
-    if fail > 0 && ok == 0 {
-        anyhow::bail!("All {fail} chunk(s) failed to insert for {source_path} — see errors above");
-    }
-    if ok > 0 {
-        refresh_rag_snapshot(db, data_dir).await;
-    }
-    Ok(())
+    (ok, fail)
 }
 
 async fn purge_vector_chunks(data_dir: &Path, source_path: &str, db: Option<&crate::db::Database>) {
     let config = crate::domain::canopy_config::CanopyConfig::load(data_dir);
     let Some(store) = open_vector_store(&config, db.unwrap()).await else {
-        tracing::warn!(
-            "RAG purge: vector store unavailable — chunks for '{}' may be orphaned",
-            source_path
-        );
+        trace_purge_store_unavailable(source_path);
         return;
     };
 
-    match store.delete_by_path(source_path).await {
-        Ok(()) => {
-            tracing::info!("RAG purge: removed chunks for '{}'", source_path);
-            if let Some(db) = db {
-                let _ = db.log_rag_event(
-                    source_path,
-                    "deleted",
-                    Some("file removed — watcher triggered chunk purge"),
-                    chrono::Utc::now().timestamp(),
-                );
-                refresh_rag_snapshot(db, data_dir).await;
-            }
-        }
-        Err(error) => {
-            tracing::warn!(
-                "RAG purge: failed to remove chunks for '{}': {error:#}",
-                source_path
-            );
-        }
+    if let Err(error) = store.delete_by_path(source_path).await {
+        trace_purge_delete_failed(source_path, &error);
+        return;
     }
+
+    tracing::info!("RAG purge: removed chunks for '{}'", source_path);
+    if let Some(db) = db {
+        let _ = db.log_rag_event(
+            source_path,
+            "deleted",
+            Some("file removed — watcher triggered chunk purge"),
+            chrono::Utc::now().timestamp(),
+        );
+        refresh_rag_snapshot(db, data_dir).await;
+    }
+}
+
+/// WARN that the vector store could not be opened, so this purge can only
+/// leave the file's chunks orphaned.
+fn trace_purge_store_unavailable(source_path: &str) {
+    tracing::warn!(
+        "RAG purge: vector store unavailable — chunks for '{}' may be orphaned",
+        source_path
+    );
+}
+
+/// WARN that a file's chunks could not be removed from the store.
+fn trace_purge_delete_failed(source_path: &str, error: &anyhow::Error) {
+    tracing::warn!(
+        "RAG purge: failed to remove chunks for '{}': {error:#}",
+        source_path
+    );
 }
 
 /// Record a `"skipped_oversize"` ledger event for a file that exceeds the
@@ -1456,52 +1632,97 @@ async fn open_vector_store(
         return None;
     }
 
-    let dimensions = match model_dimensions(model) {
-        Ok(dimensions) => {
-            tracing::info!("RAG open_vector_store: model='{model}' dimensions={dimensions}");
-            dimensions
-        }
-        Err(error) => {
-            tracing::warn!("RAG vector store unavailable for model {model}: {error:#}");
-            return None;
-        }
-    };
+    let dimensions = model_dimensions_for_store(model)?;
+    tracing::info!("RAG open_vector_store: model='{model}' dimensions={dimensions}");
 
     match VectorStore::new(dimensions, Some(config.rag_vector_cache_entries)).await {
         Ok(store) => {
             tracing::info!("RAG open_vector_store: store opened OK");
             Some(store)
         }
+        Err(error) => recover_from_corrupted_store(config, db, dimensions, error).await,
+    }
+}
+
+/// Resolve the configured model's embedding dimensions, or `None` — after
+/// logging the same warning the open path always emitted — when the model is
+/// unknown to this build.
+fn model_dimensions_for_store(model: &str) -> Option<usize> {
+    match model_dimensions(model) {
+        Ok(dimensions) => Some(dimensions),
         Err(error) => {
-            // If the store genuinely fails to open AND we haven't purged yet this
-            // process, remove the corrupted directory and retry exactly once.
-            // A missing directory is NOT an error — VectorStore::new creates it
-            // fresh — so any Err means the store is genuinely corrupted.
-            if !LANCEDB_PURGE_DONE.swap(true, Ordering::Relaxed) {
-                tracing::warn!(
-                    "RAG vector store is corrupted ({error:#}); \
-                     purging directory and retrying once"
-                );
-                if let Err(e) = wipe_lancedb(db, "corrupt store recovery").await {
-                    tracing::warn!("RAG: failed to purge corrupt store: {e:#}");
-                }
-                match VectorStore::new(dimensions, Some(config.rag_vector_cache_entries)).await {
-                    Ok(store) => {
-                        tracing::warn!("RAG open_vector_store: recovered after purge");
-                        return Some(store);
-                    }
-                    Err(retry_err) => {
-                        tracing::warn!(
-                            "RAG open_vector_store: retry after purge also failed: {retry_err:#}"
-                        );
-                    }
-                }
-            } else {
-                tracing::warn!("RAG vector store open error (purge already used): {error:#}");
-            }
+            tracing::warn!("RAG vector store unavailable for model {model}: {error:#}");
             None
         }
     }
+}
+
+/// Handle a failed `VectorStore::new`: purge the corrupted directory and
+/// retry exactly once, gated by [`LANCEDB_PURGE_DONE`] so at most one
+/// corruption-driven purge happens per process lifetime.
+async fn recover_from_corrupted_store(
+    config: &crate::domain::canopy_config::CanopyConfig,
+    db: &Database,
+    dimensions: usize,
+    error: anyhow::Error,
+) -> Option<VectorStore> {
+    // If the store genuinely fails to open AND we haven't purged yet this
+    // process, remove the corrupted directory and retry exactly once.
+    // A missing directory is NOT an error — VectorStore::new creates it
+    // fresh — so any Err means the store is genuinely corrupted.
+    if LANCEDB_PURGE_DONE.swap(true, Ordering::Relaxed) {
+        trace_purge_already_used(&error);
+        return None;
+    }
+    purge_and_retry_store(config, db, dimensions, &error).await
+}
+
+/// Purge the corrupted LanceDB directory once and retry the open; `None`
+/// when the retry also fails.
+async fn purge_and_retry_store(
+    config: &crate::domain::canopy_config::CanopyConfig,
+    db: &Database,
+    dimensions: usize,
+    error: &anyhow::Error,
+) -> Option<VectorStore> {
+    tracing::warn!(
+        "RAG vector store is corrupted ({error:#}); \
+         purging directory and retrying once"
+    );
+    wipe_corrupt_store(db).await;
+    match VectorStore::new(dimensions, Some(config.rag_vector_cache_entries)).await {
+        Ok(store) => {
+            trace_recovered_after_purge();
+            Some(store)
+        }
+        Err(retry_err) => {
+            trace_retry_after_purge_failed(&retry_err);
+            None
+        }
+    }
+}
+
+/// Remove the corrupted LanceDB directory, warning (never failing) when the
+/// wipe itself cannot complete.
+async fn wipe_corrupt_store(db: &Database) {
+    if let Err(e) = wipe_lancedb(db, "corrupt store recovery").await {
+        tracing::warn!("RAG: failed to purge corrupt store: {e:#}");
+    }
+}
+
+/// WARN that the one corruption-driven retry succeeded.
+fn trace_recovered_after_purge() {
+    tracing::warn!("RAG open_vector_store: recovered after purge");
+}
+
+/// WARN that the open still fails after the one corruption-driven retry.
+fn trace_retry_after_purge_failed(retry_err: &anyhow::Error) {
+    tracing::warn!("RAG open_vector_store: retry after purge also failed: {retry_err:#}");
+}
+
+/// WARN that the store failed to open after the one purge already used.
+fn trace_purge_already_used(error: &anyhow::Error) {
+    tracing::warn!("RAG vector store open error (purge already used): {error:#}");
 }
 
 /// Decide whether the vector store has silently lost data relative to the
@@ -2040,6 +2261,133 @@ mod tests {
             "the oversize-skip discard must be logged at WARN, not DEBUG/INFO — found: {:?}",
             &production_code[call_start..call_start + 20.min(production_code.len() - call_start)]
         );
+    }
+
+    /// The permanent-vs-transient decision inside
+    /// `record_queued_file_failure` — previously reachable only through
+    /// `drain_queue`'s internals.
+    #[test]
+    fn permanent_index_failure_respects_threshold_and_fatal_messages() {
+        let transient = "embedding request timed out";
+        assert!(!permanent_index_failure(transient, 1)); // attempt 2
+        assert!(permanent_index_failure(transient, 2)); // attempt 3 == MAX_RAG_ATTEMPTS
+        assert!(permanent_index_failure("document overflowed its stack", 0));
+    }
+
+    /// The permanent path in `record_queued_file_failure` (give-up event +
+    /// notification) used to be reachable only through drain internals.
+    #[tokio::test]
+    async fn record_queued_file_failure_permanent_after_max_attempts() {
+        let (mgr, _dir) = test_manager();
+        let path = "/docs/flaky.md";
+        let now = chrono::Utc::now().timestamp();
+        mgr.db().log_rag_event(path, "error", None, now).unwrap();
+        mgr.db().log_rag_event(path, "error", None, now).unwrap();
+
+        mgr.record_queued_file_failure(path, "embedding request timed out");
+
+        let events = mgr.db().rag_events_for_file(path).unwrap();
+        let types: Vec<&str> = events.iter().map(|e| e.event_type.as_str()).collect();
+        assert!(types.contains(&"error"), "events: {types:?}");
+        assert!(types.contains(&"failed"), "events: {types:?}");
+        assert!(!types.contains(&"indexed"), "events: {types:?}");
+    }
+
+    /// Before extraction the per-path orphan decision only ran inside
+    /// `reconcile_orphan_chunks`' store loop.
+    #[test]
+    fn orphan_purge_reason_ignores_existing_in_scope_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("note.md");
+        std::fs::write(&file, "hi").unwrap();
+        let roots = vec![dir.path().to_path_buf()];
+        assert_eq!(orphan_purge_reason(&file, &roots), None);
+    }
+
+    #[test]
+    fn orphan_purge_reason_purges_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("gone.md");
+        let roots = vec![dir.path().to_path_buf()];
+        assert_eq!(orphan_purge_reason(&missing, &roots), Some((true, false)));
+    }
+
+    #[test]
+    fn orphan_purge_reason_purges_file_outside_roots() {
+        let file_dir = tempfile::tempdir().unwrap();
+        let file = file_dir.path().join("note.md");
+        std::fs::write(&file, "hi").unwrap();
+        let other_dir = tempfile::tempdir().unwrap();
+        let roots = vec![other_dir.path().to_path_buf()];
+        assert_eq!(orphan_purge_reason(&file, &roots), Some((false, true)));
+    }
+
+    #[test]
+    fn orphan_purge_reason_purges_nothing_when_roots_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("note.md");
+        std::fs::write(&file, "hi").unwrap();
+        assert_eq!(orphan_purge_reason(&file, &[]), None);
+    }
+
+    /// The insert loop used to live inline in `sync_vector_store`; pin its
+    /// ok/fail accounting against a real store.
+    #[tokio::test]
+    async fn insert_chunks_into_store_counts_ok_and_failed_chunks() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store = VectorStore::open_at(&VectorStore::path_for_tests(temp_dir.path()), 4, None)
+            .await
+            .unwrap();
+        let good = VectorChunk {
+            id: "good".to_string(),
+            file_path: "/docs/a.md".to_string(),
+            content: "ok".to_string(),
+            embedding: vec![0.0, 0.0, 0.0, 0.0],
+            created_at: 1,
+        };
+        let bad = VectorChunk {
+            id: "bad".to_string(),
+            file_path: "/docs/a.md".to_string(),
+            content: "wrong dims".to_string(),
+            embedding: vec![0.0, 0.0],
+            created_at: 1,
+        };
+
+        let (ok, fail) = insert_chunks_into_store(&store, "/docs/a.md", &[good, bad]).await;
+        assert_eq!((ok, fail), (1, 1));
+    }
+
+    /// The watcher callback's routing used to be buried in the notify closure;
+    /// drive a create event (→ queue) and a remove event (→ purge spawn).
+    #[tokio::test]
+    async fn handle_rag_watcher_event_enqueue_and_purge() {
+        let (mgr, dir) = test_manager();
+        let root = dir.path().to_path_buf();
+        let ctx = RagWatchContext {
+            rt: tokio::runtime::Handle::current(),
+            db: Arc::clone(&mgr.db),
+            queue: Arc::clone(&mgr.queue),
+            notify: Arc::clone(&mgr.notify),
+            roots: vec![root.clone()],
+            patterns: crate::rag::ragignore::load_patterns(dir.path()),
+            data_dir: dir.path().to_path_buf(),
+        };
+        let file = root.join("note.md");
+        std::fs::write(&file, "# hi").unwrap();
+        assert_eq!(mgr.queue_len().await, 0);
+
+        let create =
+            Event::new(EventKind::Create(notify::event::CreateKind::File)).add_path(file.clone());
+        handle_rag_watcher_event(&ctx, create);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(mgr.queue_len().await, 1);
+
+        // The remove arm spawns a purge; with no embeddings model configured
+        // it finds no store and must leave the queue untouched.
+        let remove = Event::new(EventKind::Remove(notify::event::RemoveKind::File)).add_path(file);
+        handle_rag_watcher_event(&ctx, remove);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(mgr.queue_len().await, 1);
     }
 }
 
@@ -2672,5 +3020,23 @@ mod additional_tests {
         std::fs::write(&path, "# Title\nContent").unwrap();
         let result = extract_file_content(&path, "markdown").unwrap();
         assert!(result.contains("Title"));
+    }
+    // ── Coverage for helpers extracted during the quality refactor ────
+
+    /// The end-of-drain summary block moved out of `drain_queue` (which no
+    /// test drives end-to-end); exercise both of its branches directly.
+    #[test]
+    fn report_drain_queue_outcome_covers_indexed_and_failed_branches() {
+        let paths = vec!["/tmp/canopy-drain-summary/a.md".to_string()];
+        IngestionManager::report_drain_queue_outcome(1, 1, &paths);
+        IngestionManager::report_drain_queue_outcome(0, 0, &[]);
+    }
+
+    /// The reconcile outcome log (purged > 0 vs none found) moved out of
+    /// `reconcile_orphan_chunks`, which only runs against a live store.
+    #[test]
+    fn trace_reconcile_outcome_covers_purged_and_none_branches() {
+        IngestionManager::trace_reconcile_outcome(2);
+        IngestionManager::trace_reconcile_outcome(0);
     }
 }

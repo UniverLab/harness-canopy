@@ -856,12 +856,12 @@ impl CliStrategy {
                 }
             }
 
-            // Add working directory if supported
-            if self.supports_working_dir {
-                if let Some(dir) = working_dir {
-                    if let Some(ref flag) = self.working_dir_flag {
-                        cmd.arg(flag).arg(dir);
-                    }
+            // Add working directory if supported. `supports_working_dir`
+            // is a plain bool field, so filtering the optional dir on it is
+            // exactly the original nested-if chain one level shorter.
+            if let Some(dir) = working_dir.filter(|_| self.supports_working_dir) {
+                if let Some(ref flag) = self.working_dir_flag {
+                    cmd.arg(flag).arg(dir);
                 }
             }
         }

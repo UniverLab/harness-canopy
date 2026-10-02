@@ -95,161 +95,214 @@ pub fn validate_ensembles_in_graph(
     nodes: &[GraphNode],
     edges: &[GraphEdge],
 ) -> Result<(), String> {
-    let node_exists = |id: &str| nodes.iter().any(|node| node.id == id);
-    let has_edge = |from: &str, to: &str, condition: GraphEdgeCondition| {
-        edges
-            .iter()
-            .any(|edge| edge.from_node == from && edge.to_node == to && edge.condition == condition)
-    };
-
     for details in ensembles {
-        let ensemble = &details.ensemble;
-        let label = format!("Ensemble '{}' ('{}')", ensemble.id, ensemble.name);
+        ensure_ensemble_membership_bounds(details)?;
+        ensure_ensemble_wiring_ends(details, ensembles, nodes, edges)?;
+        ensure_ensemble_member_edges(details, nodes, edges)?;
+        ensure_ensemble_entry_fanout(details, edges)?;
+    }
+    Ok(())
+}
 
-        let min_members = match ensemble.kind {
-            EnsembleKind::Parallel => 2,
-            EnsembleKind::Cascade | EnsembleKind::RoundRobin => 1,
-        };
-        if details.members.len() < min_members {
-            return Err(format!("{label} has fewer than {min_members} members."));
-        }
-        if ensemble.kind == EnsembleKind::Parallel
-            && (ensemble.min_pass < 1 || ensemble.min_pass > details.members.len() as i64)
-        {
+/// Per-ensemble member-count and `min_pass` bounds.
+fn ensure_ensemble_membership_bounds(details: &EnsembleDetails) -> Result<(), String> {
+    let ensemble = &details.ensemble;
+    let label = format!("Ensemble '{}' ('{}')", ensemble.id, ensemble.name);
+
+    let min_members = match ensemble.kind {
+        EnsembleKind::Parallel => 2,
+        EnsembleKind::Cascade | EnsembleKind::RoundRobin => 1,
+    };
+    if details.members.len() < min_members {
+        return Err(format!("{label} has fewer than {min_members} members."));
+    }
+    if ensemble.kind == EnsembleKind::Parallel
+        && (ensemble.min_pass < 1 || ensemble.min_pass > details.members.len() as i64)
+    {
+        return Err(format!(
+            "{label} has an invalid min_pass ({}) for {} members.",
+            ensemble.min_pass,
+            details.members.len()
+        ));
+    }
+    Ok(())
+}
+
+/// Existence of the entry/join/exit-target nodes, then the quorum's pass and
+/// fail exit edges — in that exact order.
+fn ensure_ensemble_wiring_ends(
+    details: &EnsembleDetails,
+    ensembles: &[EnsembleDetails],
+    nodes: &[GraphNode],
+    edges: &[GraphEdge],
+) -> Result<(), String> {
+    let ensemble = &details.ensemble;
+    let label = format!("Ensemble '{}' ('{}')", ensemble.id, ensemble.name);
+
+    if !graph_node_exists(nodes, &ensemble.entry_from_node) {
+        return Err(format!(
+            "{label}'s entry node '{}' is not reachable in this graph.",
+            ensemble.entry_from_node
+        ));
+    }
+    if !graph_node_exists(nodes, &ensemble.join_node_id) {
+        return Err(format!(
+            "{label}'s quorum node '{}' is missing from this graph.",
+            ensemble.join_node_id
+        ));
+    }
+    if !graph_node_exists(nodes, &ensemble.on_pass_to) {
+        return Err(format!(
+            "{label}'s on_pass_to target '{}' is not wired into this graph.",
+            ensemble.on_pass_to
+        ));
+    }
+    if let Some(on_fail_to) = &ensemble.on_fail_to {
+        if !graph_node_exists(nodes, on_fail_to) {
             return Err(format!(
-                "{label} has an invalid min_pass ({}) for {} members.",
-                ensemble.min_pass,
-                details.members.len()
+                "{label}'s on_fail_to target '{on_fail_to}' is not wired into this graph."
             ));
         }
-        if !node_exists(&ensemble.entry_from_node) {
-            return Err(format!(
-                "{label}'s entry node '{}' is not reachable in this graph.",
-                ensemble.entry_from_node
-            ));
-        }
-        if !node_exists(&ensemble.join_node_id) {
-            return Err(format!(
-                "{label}'s quorum node '{}' is missing from this graph.",
-                ensemble.join_node_id
-            ));
-        }
-        if !node_exists(&ensemble.on_pass_to) {
-            return Err(format!(
-                "{label}'s on_pass_to target '{}' is not wired into this graph.",
-                ensemble.on_pass_to
-            ));
-        }
-        if let Some(on_fail_to) = &ensemble.on_fail_to {
-            if !node_exists(on_fail_to) {
-                return Err(format!(
-                    "{label}'s on_fail_to target '{on_fail_to}' is not wired into this graph."
-                ));
-            }
-        }
+    }
+    if !has_ensemble_exit_edge(
+        ensembles,
+        ensemble,
+        &ensemble.on_pass_to,
+        &GraphEdgeCondition::Pass,
+        edges,
+    ) {
+        let target = exit_target_label(ensembles, ensemble, &ensemble.on_pass_to);
+        return Err(format!(
+            "{label}'s quorum has no pass edge to its on_pass_to target ({target})."
+        ));
+    }
+    if let Some(on_fail_to) = &ensemble.on_fail_to {
         if !has_ensemble_exit_edge(
             ensembles,
             ensemble,
-            &ensemble.on_pass_to,
-            &GraphEdgeCondition::Pass,
+            on_fail_to,
+            &GraphEdgeCondition::Fail,
             edges,
         ) {
-            let target = exit_target_label(ensembles, ensemble, &ensemble.on_pass_to);
+            let target = exit_target_label(ensembles, ensemble, on_fail_to);
             return Err(format!(
-                "{label}'s quorum has no pass edge to its on_pass_to target ({target})."
+                "{label}'s quorum has no fail edge to its on_fail_to target ({target})."
             ));
         }
-        if let Some(on_fail_to) = &ensemble.on_fail_to {
-            if !has_ensemble_exit_edge(
-                ensembles,
-                ensemble,
-                on_fail_to,
-                &GraphEdgeCondition::Fail,
-                edges,
-            ) {
-                let target = exit_target_label(ensembles, ensemble, on_fail_to);
-                return Err(format!(
-                    "{label}'s quorum has no fail edge to its on_fail_to target ({target})."
-                ));
-            }
+    }
+    Ok(())
+}
+
+/// Every member must exist, carry the primary entry edge, and route to the
+/// quorum.
+fn ensure_ensemble_member_edges(
+    details: &EnsembleDetails,
+    nodes: &[GraphNode],
+    edges: &[GraphEdge],
+) -> Result<(), String> {
+    let ensemble = &details.ensemble;
+    let label = format!("Ensemble '{}' ('{}')", ensemble.id, ensemble.name);
+
+    for member in &details.members {
+        if !graph_node_exists(nodes, &member.node_id) {
+            return Err(format!(
+                "{label}'s member node '{}' is missing from this graph.",
+                member.node_id
+            ));
         }
-        // Every entry source — the primary `entry_from_node` and any added
-        // via `add_entry_from` — must reach EVERY member. A source reaching
-        // only some members would make entering from it ambiguous at runtime
-        // (the engine resolves an ensemble only when the outgoing targets are
-        // exactly the full member set). This runs after the per-member
-        // primary-entry check below so a broken primary entry keeps its
-        // original message.
-        let member_ids: HashSet<&str> = details
-            .members
-            .iter()
-            .map(|member| member.node_id.as_str())
-            .collect();
-        for member in &details.members {
-            if !node_exists(&member.node_id) {
-                return Err(format!(
-                    "{label}'s member node '{}' is missing from this graph.",
-                    member.node_id
-                ));
-            }
-            if !has_edge(
-                &ensemble.entry_from_node,
-                &member.node_id,
-                ensemble.entry_condition.clone(),
-            ) {
-                return Err(format!(
-                    "{label}'s member '{}' has no entry edge from '{}'.",
-                    member.node_id, ensemble.entry_from_node
-                ));
-            }
-            if !has_edge(
-                &member.node_id,
-                &ensemble.join_node_id,
-                GraphEdgeCondition::Always,
-            ) {
-                return Err(format!(
-                    "{label}'s member '{}' is not wired to the quorum — every member must route to the quorum.",
-                    member.node_id
-                ));
-            }
+        if !graph_has_edge(
+            edges,
+            &ensemble.entry_from_node,
+            &member.node_id,
+            &ensemble.entry_condition,
+        ) {
+            return Err(format!(
+                "{label}'s member '{}' has no entry edge from '{}'.",
+                member.node_id, ensemble.entry_from_node
+            ));
         }
-        {
-            let mut reached: HashMap<(&str, GraphEdgeCondition), HashSet<&str>> = HashMap::new();
-            for edge in edges {
-                if !member_ids.contains(edge.to_node.as_str()) {
-                    continue;
-                }
-                if member_ids.contains(edge.from_node.as_str())
-                    || edge.from_node == ensemble.join_node_id
-                {
-                    continue;
-                }
-                reached
-                    .entry((edge.from_node.as_str(), edge.condition.clone()))
-                    .or_default()
-                    .insert(edge.to_node.as_str());
-            }
-            let mut sources: Vec<((&str, GraphEdgeCondition), usize)> = reached
-                .iter()
-                .map(|(source, to)| (source.clone(), to.len()))
-                .collect();
-            sources.sort_by(|a, b| {
-                a.0 .0
-                    .cmp(b.0 .0)
-                    .then(a.0 .1.as_str().cmp(b.0 .1.as_str()))
-            });
-            for ((from, _condition), count) in sources {
-                if count != member_ids.len() {
-                    return Err(format!(
-                        "{label} has incomplete entry wiring from '{from}': reaches {count} of {} members — rewire with graph_update_ensemble (from_node/add_entry_from).",
-                        member_ids.len()
-                    ));
-                }
-            }
+        if !graph_has_edge(
+            edges,
+            &member.node_id,
+            &ensemble.join_node_id,
+            &GraphEdgeCondition::Always,
+        ) {
+            return Err(format!(
+                "{label}'s member '{}' is not wired to the quorum — every member must route to the quorum.",
+                member.node_id
+            ));
         }
     }
-
     Ok(())
+}
+
+/// Every entry source — the primary `entry_from_node` and any added
+/// via `add_entry_from` — must reach EVERY member. A source reaching
+/// only some members would make entering from it ambiguous at runtime
+/// (the engine resolves an ensemble only when the outgoing targets are
+/// exactly the full member set). This runs after the per-member
+/// primary-entry check in [`ensure_ensemble_member_edges`] so a broken
+/// primary entry keeps its original message.
+fn ensure_ensemble_entry_fanout(
+    details: &EnsembleDetails,
+    edges: &[GraphEdge],
+) -> Result<(), String> {
+    let ensemble = &details.ensemble;
+    let label = format!("Ensemble '{}' ('{}')", ensemble.id, ensemble.name);
+
+    let member_ids: HashSet<&str> = details
+        .members
+        .iter()
+        .map(|member| member.node_id.as_str())
+        .collect();
+    let mut reached: HashMap<(&str, GraphEdgeCondition), HashSet<&str>> = HashMap::new();
+    for edge in edges {
+        if !member_ids.contains(edge.to_node.as_str()) {
+            continue;
+        }
+        if member_ids.contains(edge.from_node.as_str()) || edge.from_node == ensemble.join_node_id {
+            continue;
+        }
+        reached
+            .entry((edge.from_node.as_str(), edge.condition.clone()))
+            .or_default()
+            .insert(edge.to_node.as_str());
+    }
+    let mut sources: Vec<((&str, GraphEdgeCondition), usize)> = reached
+        .iter()
+        .map(|(source, to)| (source.clone(), to.len()))
+        .collect();
+    sources.sort_by(|a, b| {
+        a.0 .0
+            .cmp(b.0 .0)
+            .then(a.0 .1.as_str().cmp(b.0 .1.as_str()))
+    });
+    for ((from, _condition), count) in sources {
+        if count != member_ids.len() {
+            return Err(format!(
+                "{label} has incomplete entry wiring from '{from}': reaches {count} of {} members — rewire with graph_update_ensemble (from_node/add_entry_from).",
+                member_ids.len()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Whether `id` names a node of this graph.
+fn graph_node_exists(nodes: &[GraphNode], id: &str) -> bool {
+    nodes.iter().any(|node| node.id == id)
+}
+
+/// Whether a `from → to` edge with `condition` exists in this graph.
+fn graph_has_edge(
+    edges: &[GraphEdge],
+    from: &str,
+    to: &str,
+    condition: &GraphEdgeCondition,
+) -> bool {
+    edges
+        .iter()
+        .any(|edge| edge.from_node == from && edge.to_node == to && edge.condition == *condition)
 }
 
 /// Whether the quorum's exit wiring for `condition` is complete. `target` is
@@ -378,9 +431,23 @@ pub fn validate_graph(
         });
     }
 
-    let node_ids: HashSet<&str> = nodes.iter().map(|n| n.id).collect();
+    ensure_graph_edges_reference_known_nodes(nodes, edges)?;
+    ensure_router_edges_declare_routes(nodes, edges)?;
+    let entry_id = resolve_graph_entry_point(nodes, edges)?;
+    ensure_all_nodes_reachable(nodes, edges, entry_id)?;
+    let (terminals, fail_dead_ends) = collect_outgoing_coverage(nodes, edges)?;
+    Ok(GraphValidationReport {
+        terminals,
+        fail_dead_ends,
+    })
+}
 
-    // 1. Edge target validation — every edge must reference existing nodes.
+/// 1. Edge target validation — every edge must reference existing nodes.
+fn ensure_graph_edges_reference_known_nodes(
+    nodes: &[GraphNodeView<'_>],
+    edges: &[GraphEdgeView<'_>],
+) -> Result<(), String> {
+    let node_ids: HashSet<&str> = nodes.iter().map(|n| n.id).collect();
     for edge in edges {
         if !node_ids.contains(edge.from) {
             return Err(format!(
@@ -395,7 +462,14 @@ pub fn validate_graph(
             ));
         }
     }
+    Ok(())
+}
 
+/// Every edge with a route label must leave a router that declares it.
+fn ensure_router_edges_declare_routes(
+    nodes: &[GraphNodeView<'_>],
+    edges: &[GraphEdgeView<'_>],
+) -> Result<(), String> {
     for edge in edges {
         let Some(label) = edge.condition.route_label() else {
             continue;
@@ -413,30 +487,40 @@ pub fn validate_graph(
             ));
         }
     }
+    Ok(())
+}
 
-    // 2. Entry point check — exactly one node with no incoming edges.
+/// 2. Entry point check — exactly one node with no incoming edges.
+fn resolve_graph_entry_point<'a>(
+    nodes: &[GraphNodeView<'a>],
+    edges: &[GraphEdgeView<'_>],
+) -> Result<&'a str, String> {
     let incoming: HashSet<&str> = edges.iter().map(|e| e.to).collect();
     let entry_nodes: Vec<&GraphNodeView<'_>> =
         nodes.iter().filter(|n| !incoming.contains(n.id)).collect();
 
-    let entry_id = match entry_nodes.as_slice() {
-        [single] => single.id,
-        [] => {
-            return Err(
-                "Graph has no entry point: every node has an incoming edge. Expected exactly one node with no incoming edges.".to_string()
-            );
-        }
+    match entry_nodes.as_slice() {
+        [single] => Ok(single.id),
+        [] => Err(
+            "Graph has no entry point: every node has an incoming edge. Expected exactly one node with no incoming edges.".to_string()
+        ),
         many => {
             let mut names: Vec<&str> = many.iter().map(|n| n.id).collect();
             names.sort_unstable();
-            return Err(format!(
+            Err(format!(
                 "Graph has multiple entry points (nodes with no incoming edges): {}. Expected exactly one entry point.",
                 names.join(", ")
-            ));
+            ))
         }
-    };
+    }
+}
 
-    // 3. Reachability — every node reachable from entry via outgoing edges.
+/// 3. Reachability — every node reachable from entry via outgoing edges.
+fn ensure_all_nodes_reachable(
+    nodes: &[GraphNodeView<'_>],
+    edges: &[GraphEdgeView<'_>],
+    entry_id: &str,
+) -> Result<(), String> {
     let mut adjacency: HashMap<&str, Vec<&str>> = HashMap::new();
     for edge in edges {
         adjacency.entry(edge.from).or_default().push(edge.to);
@@ -473,8 +557,15 @@ pub fn validate_graph(
             sorted.join(", ")
         ));
     }
+    Ok(())
+}
 
-    // 4. Outgoing coverage — collect terminals (states with no outgoing edge).
+/// 4. Outgoing coverage — collect terminals (states with no outgoing edge)
+///    and CM19 fail dead-ends; routers must cover every declared route.
+fn collect_outgoing_coverage(
+    nodes: &[GraphNodeView<'_>],
+    edges: &[GraphEdgeView<'_>],
+) -> Result<(Vec<GraphTerminal>, Vec<FailDeadEnd>), String> {
     let mut outgoing: HashMap<&str, Vec<&GraphEdgeCondition>> = HashMap::new();
     for edge in edges {
         outgoing.entry(edge.from).or_default().push(edge.condition);
@@ -490,34 +581,7 @@ pub fn validate_graph(
         if node.kind == GraphNodeKind::Router {
             // Router route coverage is still required — a router missing a route
             // edge is a broken graph, not a terminal.
-            let outgoing_for_node = outgoing.get(node.id);
-            if outgoing_for_node.is_none() {
-                continue; // unwired router, not yet an error
-            }
-            let conds = outgoing_for_node.expect("just checked Some");
-            let has_any_route = conds.iter().any(|c| c.route_label().is_some());
-            if !has_any_route {
-                continue;
-            }
-            for label in conds.iter().filter_map(|condition| condition.route_label()) {
-                if !node.route_labels.iter().any(|declared| declared == label) {
-                    return Err(format!(
-                        "Router node '{}' has outgoing edge for undeclared route '{}'.",
-                        node.id, label
-                    ));
-                }
-            }
-            for label in node.route_labels {
-                let has_route = conds
-                    .iter()
-                    .any(|c| c.route_label() == Some(label.as_str()));
-                if !has_route {
-                    return Err(format!(
-                        "Router node '{}' has no outgoing edge for route '{}'.",
-                        node.id, label
-                    ));
-                }
-            }
+            ensure_router_route_coverage(node, &outgoing)?;
             continue;
         }
         // Agent / Check / Gate — missing pass or fail is a terminal, not an error.
@@ -578,10 +642,43 @@ pub fn validate_graph(
         }
     }
 
-    Ok(GraphValidationReport {
-        terminals,
-        fail_dead_ends,
-    })
+    Ok((terminals, fail_dead_ends))
+}
+
+/// Router-only outgoing coverage: no outgoing edge may use an undeclared
+/// route, and every declared route needs an outgoing edge. A router with no
+/// outgoing edges at all is an unwired router, not yet an error.
+fn ensure_router_route_coverage(
+    node: &GraphNodeView<'_>,
+    outgoing: &HashMap<&str, Vec<&GraphEdgeCondition>>,
+) -> Result<(), String> {
+    let Some(conds) = outgoing.get(node.id) else {
+        return Ok(()); // unwired router, not yet an error
+    };
+    let has_any_route = conds.iter().any(|c| c.route_label().is_some());
+    if !has_any_route {
+        return Ok(());
+    }
+    for label in conds.iter().filter_map(|condition| condition.route_label()) {
+        if !node.route_labels.iter().any(|declared| declared == label) {
+            return Err(format!(
+                "Router node '{}' has outgoing edge for undeclared route '{}'.",
+                node.id, label
+            ));
+        }
+    }
+    for label in node.route_labels {
+        let has_route = conds
+            .iter()
+            .any(|c| c.route_label() == Some(label.as_str()));
+        if !has_route {
+            return Err(format!(
+                "Router node '{}' has no outgoing edge for route '{}'.",
+                node.id, label
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Every `graph_*` MCP tool name registered in `src/daemon/handler.rs` as of

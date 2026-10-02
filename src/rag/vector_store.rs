@@ -119,57 +119,15 @@ impl VectorStore {
             .context("Failed to list LanceDB tables")?;
 
         let table = if !known_tables.iter().any(|name| name == TABLE_NAME) {
-            tracing::info!(
-                "RAG VectorStore: no existing table found, creating fresh with {} dims",
-                embedding_dimensions
-            );
-            connection
-                .create_empty_table(TABLE_NAME, schema.clone())
-                .execute()
-                .await
-                .context("Failed to create LanceDB table")?;
-            // create_empty_table's builder has no cache-size knob (there is no
-            // index yet on an empty table); reopen once so `self.table` always
-            // carries the configured bound, regardless of which branch built it.
-            open_table_with_cache(&connection, cache_entries).await?
+            create_fresh_table(&connection, &schema, embedding_dimensions, cache_entries).await?
         } else {
-            // The table is listed on disk, so it must not be silently replaced:
-            // an open failure here is a transient race (e.g. concurrent manifest
-            // rewrite) or genuine corruption, never "table does not exist".
-            let existing_table = open_existing_table_with_retry(&connection, cache_entries).await?;
-
-            // Check whether the stored schema matches the requested dimensions.
-            // If they differ (e.g. model was changed), drop and recreate the table.
-            let stored_dims = embedding_dims_from_table(&existing_table).await;
-            tracing::info!(
-                "RAG VectorStore: existing table found — stored_dims={:?}, requested={}",
-                stored_dims,
-                embedding_dimensions
-            );
-            if stored_dims != Some(embedding_dimensions) {
-                tracing::warn!(
-                    "RAG VectorStore: schema mismatch (stored={:?} vs requested={}) — dropping and recreating table",
-                    stored_dims,
-                    embedding_dimensions
-                );
-                connection
-                    .drop_table(TABLE_NAME, &[])
-                    .await
-                    .context("Failed to drop outdated LanceDB table")?;
-                connection
-                    .create_empty_table(TABLE_NAME, schema.clone())
-                    .execute()
-                    .await
-                    .context("Failed to recreate LanceDB table after schema change")?;
-                tracing::info!(
-                    "RAG VectorStore: recreated table with {} dimensions",
-                    embedding_dimensions
-                );
-                open_table_with_cache(&connection, cache_entries).await?
-            } else {
-                tracing::info!("RAG VectorStore: schema OK, reusing existing table");
-                existing_table
-            }
+            open_existing_table_or_recreate_on_schema_change(
+                &connection,
+                &schema,
+                embedding_dimensions,
+                cache_entries,
+            )
+            .await?
         };
 
         Ok(Self {
@@ -282,12 +240,14 @@ impl VectorStore {
 
         let mut paths = Vec::new();
         for batch in &batches {
-            if let Some(col) = batch.column_by_name("file_path") {
-                if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
-                    for i in 0..arr.len() {
-                        paths.push(arr.value(i).to_string());
-                    }
-                }
+            let Some(col) = batch.column_by_name("file_path") else {
+                continue;
+            };
+            let Some(arr) = col.as_any().downcast_ref::<StringArray>() else {
+                continue;
+            };
+            for i in 0..arr.len() {
+                paths.push(arr.value(i).to_string());
             }
         }
         Ok(paths)
@@ -308,6 +268,97 @@ impl VectorStore {
             )
         }
     }
+}
+
+/// Create the chunk table from scratch, then reopen it once so the returned
+/// `Table` always carries the configured index cache bound.
+async fn create_fresh_table(
+    connection: &Connection,
+    schema: &Arc<Schema>,
+    embedding_dimensions: i32,
+    cache_entries: u32,
+) -> Result<Table> {
+    tracing::info!(
+        "RAG VectorStore: no existing table found, creating fresh with {} dims",
+        embedding_dimensions
+    );
+    connection
+        .create_empty_table(TABLE_NAME, schema.clone())
+        .execute()
+        .await
+        .context("Failed to create LanceDB table")?;
+    // create_empty_table's builder has no cache-size knob (there is no
+    // index yet on an empty table); reopen once so `self.table` always
+    // carries the configured bound, regardless of which branch built it.
+    open_table_with_cache(connection, cache_entries).await
+}
+
+/// Open the already-listed chunk table, dropping and recreating it when the
+/// stored embedding dimensions no longer match the requested ones (a model
+/// change); otherwise reuse it as-is.
+async fn open_existing_table_or_recreate_on_schema_change(
+    connection: &Connection,
+    schema: &Arc<Schema>,
+    embedding_dimensions: i32,
+    cache_entries: u32,
+) -> Result<Table> {
+    // The table is listed on disk, so it must not be silently replaced:
+    // an open failure here is a transient race (e.g. concurrent manifest
+    // rewrite) or genuine corruption, never "table does not exist".
+    let existing_table = open_existing_table_with_retry(connection, cache_entries).await?;
+
+    // Check whether the stored schema matches the requested dimensions.
+    // If they differ (e.g. model was changed), drop and recreate the table.
+    let stored_dims = embedding_dims_from_table(&existing_table).await;
+    tracing::info!(
+        "RAG VectorStore: existing table found — stored_dims={:?}, requested={}",
+        stored_dims,
+        embedding_dimensions
+    );
+    if stored_dims != Some(embedding_dimensions) {
+        recreate_table_on_schema_change(
+            connection,
+            schema,
+            embedding_dimensions,
+            cache_entries,
+            stored_dims,
+        )
+        .await
+    } else {
+        tracing::info!("RAG VectorStore: schema OK, reusing existing table");
+        Ok(existing_table)
+    }
+}
+
+/// Drop and recreate the chunk table when the stored embedding dimensions no
+/// longer match the requested ones (a model change), then reopen it with the
+/// configured cache bound.
+async fn recreate_table_on_schema_change(
+    connection: &Connection,
+    schema: &Arc<Schema>,
+    embedding_dimensions: i32,
+    cache_entries: u32,
+    stored_dims: Option<i32>,
+) -> Result<Table> {
+    tracing::warn!(
+        "RAG VectorStore: schema mismatch (stored={:?} vs requested={}) — dropping and recreating table",
+        stored_dims,
+        embedding_dimensions
+    );
+    connection
+        .drop_table(TABLE_NAME, &[])
+        .await
+        .context("Failed to drop outdated LanceDB table")?;
+    connection
+        .create_empty_table(TABLE_NAME, schema.clone())
+        .execute()
+        .await
+        .context("Failed to recreate LanceDB table after schema change")?;
+    tracing::info!(
+        "RAG VectorStore: recreated table with {} dimensions",
+        embedding_dimensions
+    );
+    open_table_with_cache(connection, cache_entries).await
 }
 
 /// Number of attempts to open a table already listed by `table_names()` before

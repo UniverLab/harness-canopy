@@ -366,3 +366,53 @@ fn rotate_log_if_needed_handles_missing_file() {
     let result = super::rotate_log_if_needed(&log_path);
     assert!(result.is_ok()); // Should succeed even if file doesn't exist
 }
+
+/// The extracted early-failure path of `run_cli_process` must report the
+/// same not-started result and append the same log entry the inlined arms
+/// always did.
+#[test]
+fn cli_start_failure_logs_and_reports_not_started() {
+    let dir = tempdir().unwrap();
+    let log_path = dir.path().join("agent.log");
+    let cli = Cli::new("definitely-not-a-real-cli-binary-xyz");
+    let params = super::CliRunParams {
+        id: "early-fail-agent",
+        cli: &cli,
+        prompt: "hello".to_string(),
+        model: None,
+        effort: None,
+        working_dir: None,
+        log_path: log_path.to_string_lossy().to_string(),
+        trigger: crate::domain::models::TriggerType::Manual,
+    };
+
+    let result = super::cli_start_failure(&params, "resolve CLI binary", "boom").unwrap();
+    assert_eq!(result.exit_code, -1);
+    assert!(!result.success);
+
+    let content = std::fs::read_to_string(&log_path).unwrap();
+    assert!(content.contains("exit_code: -1"), "log: {content}");
+    assert!(content.contains("boom"), "log: {content}");
+}
+
+/// The extracted stderr-prefix helper must prepend exactly the `[canopy]`
+/// notice lines for whichever reasons are present, byte for byte.
+#[test]
+fn notice_prefixed_stderr_prepends_notice_lines() {
+    let effort = Some("effort is not supported".to_string());
+    let model = Some("no model flag".to_string());
+    let both = super::notice_prefixed_stderr(&effort, &model, b"raw error");
+    assert_eq!(
+        both,
+        b"[canopy] effort not applied: effort is not supported\n\
+          [canopy] model not applied: no model flag\n\
+          raw error"
+            .to_vec()
+    );
+
+    let only_model = super::notice_prefixed_stderr(&None, &Some("m".to_string()), b"x");
+    assert_eq!(only_model, b"[canopy] model not applied: m\nx".to_vec());
+
+    let none = super::notice_prefixed_stderr(&None, &None, b"plain");
+    assert_eq!(none, b"plain".to_vec());
+}

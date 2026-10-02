@@ -116,40 +116,10 @@ fn synthesize_toml_config(
 
     if platform.toml_array_format {
         if let Some(arr) = get_toml_array_mut(&mut doc, servers_key) {
-            let kept: Vec<toml::Value> = arr
-                .iter()
-                .filter(|entry| {
-                    let name = entry
-                        .as_table()
-                        .and_then(|t| t.get("name"))
-                        .and_then(|v| v.as_str());
-                    let keep = match name {
-                        Some(n) => servers.contains(&n),
-                        None => false,
-                    };
-                    if keep {
-                        if let Some(n) = name {
-                            included_names.push(n.to_string());
-                        }
-                    }
-                    keep
-                })
-                .cloned()
-                .collect();
-            *arr = kept;
+            keep_named_toml_array_entries(arr, servers, &mut included_names);
         }
     } else if let Some(table) = get_toml_table_mut(&mut doc, servers_key) {
-        let keys_to_remove: Vec<String> = table
-            .keys()
-            .filter(|k| !servers.contains(&k.as_str()))
-            .cloned()
-            .collect();
-        for k in keys_to_remove {
-            table.remove(&k);
-        }
-        for k in table.keys() {
-            included_names.push(k.clone());
-        }
+        keep_named_toml_table_servers(table, servers, &mut included_names);
     }
 
     let surface = build_surface_description(
@@ -160,6 +130,53 @@ fn synthesize_toml_config(
     );
 
     Ok((toml::to_string_pretty(&doc)?, surface))
+}
+
+/// Keep only the `[[servers]]` array entries named in `servers`, recording
+/// every kept entry's name; entries without a `name` field are dropped.
+fn keep_named_toml_array_entries(
+    arr: &mut Vec<toml::Value>,
+    servers: &[&str],
+    included_names: &mut Vec<String>,
+) {
+    let kept: Vec<toml::Value> = arr
+        .iter()
+        .filter(|entry| {
+            let Some(name) = entry
+                .as_table()
+                .and_then(|t| t.get("name"))
+                .and_then(|v| v.as_str())
+            else {
+                return false;
+            };
+            let keep = servers.contains(&name);
+            if keep {
+                included_names.push(name.to_string());
+            }
+            keep
+        })
+        .cloned()
+        .collect();
+    *arr = kept;
+}
+
+/// Drop every table entry not named in `servers`, recording the survivors.
+fn keep_named_toml_table_servers(
+    table: &mut toml::map::Map<String, toml::Value>,
+    servers: &[&str],
+    included_names: &mut Vec<String>,
+) {
+    let keys_to_remove: Vec<String> = table
+        .keys()
+        .filter(|k| !servers.contains(&k.as_str()))
+        .cloned()
+        .collect();
+    for k in keys_to_remove {
+        table.remove(&k);
+    }
+    for k in table.keys() {
+        included_names.push(k.clone());
+    }
 }
 
 fn build_empty_json_config(platform: &Platform) -> String {
@@ -420,6 +437,32 @@ command = "canopy"
         assert!(names.contains(&"fetch"));
         assert!(names.contains(&"canopy"));
         assert!(!names.contains(&"filesystem"));
+    }
+
+    /// The extracted array-entry helper must drop nameless entries and
+    /// entries outside `servers`, keep the rest, and report the exact kept
+    /// set as the surface description.
+    #[test]
+    fn synthesize_toml_array_config_includes_only_named_servers() {
+        let mut platform = test_platform_toml();
+        platform.toml_array_format = true;
+        let raw = r#"[[mcp_servers]]
+name = "fetch"
+command = "fetch"
+
+[[mcp_servers]]
+command = "nameless"
+
+[[mcp_servers]]
+name = "filesystem"
+command = "fs"
+"#;
+        let (content, surface) = synthesize_toml_config(raw, &platform, &["fetch"]).unwrap();
+        let parsed: toml::Value = toml::from_str(&content).unwrap();
+        let arr = parsed.get("mcp_servers").unwrap().as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0].get("name").and_then(|n| n.as_str()), Some("fetch"));
+        assert_eq!(surface, "fetch");
     }
 
     #[test]

@@ -347,7 +347,6 @@ fn apply_registry_refresh(home: &Path, registry: &RegistryRaw) -> Result<()> {
         .collect();
 
     let baseline = RegistryBaseline::load(&canopy_dir);
-    let is_first_refresh = baseline.is_none();
 
     // First-ever refresh: there's no baseline to tell a deliberate local
     // edit apart from an untouched value, so adopt registry truth outright
@@ -355,6 +354,50 @@ fn apply_registry_refresh(home: &Path, registry: &RegistryRaw) -> Result<()> {
     // users with intentional hand edits to these fields is small and their
     // config is recoverable from this backup; the set stuck with broken
     // invocation flags is everyone, permanently, with no way to even know.
+    backup_config_before_first_refresh(&canopy_dir, baseline.is_none())?;
+
+    let changed_fields =
+        merge_existing_cli_entries(&mut config, &registry_by_name, baseline.as_ref());
+    remove_cli_entries_with_missing_binaries(&mut config, &platforms_with_cli);
+    add_newly_detected_clis(&mut config, &cli_registry);
+
+    // This is the one moment where silence is the failure mode being fixed:
+    // an operator who never asked for a value to change should see that it
+    // did.
+    warn_updated_non_customised_fields(&changed_fields);
+
+    // Platform-level reconciliation: add / update / delete / unchanged.
+    // Structural comparison (field-by-field) rather than textual ensures
+    // reformatted content with identical semantics is not treated as a change.
+    let refresh = reconcile_platforms(home, baseline.as_ref(), registry);
+    warn_platform_reconciliation(&refresh);
+
+    // Always persist: an empty `clis` here only happens when the registry
+    // confirmed every remaining entry's binary is gone (the retain rule
+    // above never touches a manually-added, registry-unknown entry), so
+    // that's a real state worth writing, not a detection glitch to shield
+    // the config from.
+    config.save(&canopy_dir)?;
+
+    RegistryBaseline {
+        clis: cli_registry.available_clis,
+        platforms: refresh.reconciled_platforms,
+    }
+    .save(&canopy_dir)?;
+
+    let db = Database::new_safe(&database_path(&canopy_dir), &canopy_dir)?;
+    db.set_state(
+        REGISTRY_LAST_REFRESH_STATE_KEY,
+        &chrono::Utc::now().to_rfc3339(),
+    )?;
+
+    Ok(())
+}
+
+/// Back up `config.toml` before the first-ever refresh adopts registry
+/// truth outright. Never copies when there is no config file yet — there is
+/// nothing to protect in that case.
+fn backup_config_before_first_refresh(canopy_dir: &Path, is_first_refresh: bool) -> Result<()> {
     if is_first_refresh {
         let config_path = canopy_dir.join("config.toml");
         if config_path.exists() {
@@ -366,17 +409,25 @@ fn apply_registry_refresh(home: &Path, registry: &RegistryRaw) -> Result<()> {
                 .context("Failed to back up config.toml before first registry reconciliation")?;
         }
     }
+    Ok(())
+}
 
+/// Three-way merge, per field, not per CLI: a field still equal to what
+/// the registry published at the previous baseline is user-untouched, so
+/// the new registry value wins; a field that has drifted from the
+/// baseline was deliberately edited, so it's left alone. A user who
+/// customised `model_flag` must still receive a corrected `headless_mode`.
+/// Returns the registry-owned fields that actually changed.
+fn merge_existing_cli_entries(
+    config: &mut crate::domain::canopy_config::CanopyConfig,
+    registry_by_name: &std::collections::HashMap<String, CliConfig>,
+    baseline: Option<&RegistryBaseline>,
+) -> Vec<String> {
     let mut changed_fields: Vec<String> = Vec::new();
 
-    // Three-way merge, per field, not per CLI: a field still equal to what
-    // the registry published at the previous baseline is user-untouched, so
-    // the new registry value wins; a field that has drifted from the
-    // baseline was deliberately edited, so it's left alone. A user who
-    // customised `model_flag` must still receive a corrected `headless_mode`.
     for existing in config.clis.iter_mut() {
         if let Some(registry_cli) = registry_by_name.get(&existing.name) {
-            let baseline_cli = baseline.as_ref().and_then(|b| b.get(&existing.name));
+            let baseline_cli = baseline.and_then(|b| b.get(&existing.name));
             let name = existing.name.clone();
             *existing = merge_cli_fields(
                 existing,
@@ -388,11 +439,18 @@ fn apply_registry_refresh(home: &Path, registry: &RegistryRaw) -> Result<()> {
         }
     }
 
-    // Remove CLIs only when the registry explicitly knows the platform AND
-    // the binary is confirmed missing. We deliberately preserve
-    // manually-configured CLIs even if `which` can't find them right now
-    // (e.g. NVM binaries, custom installs) to avoid silently deleting
-    // entries the user set up intentionally.
+    changed_fields
+}
+
+/// Remove CLIs only when the registry explicitly knows the platform AND
+/// the binary is confirmed missing. We deliberately preserve
+/// manually-configured CLIs even if `which` can't find them right now
+/// (e.g. NVM binaries, custom installs) to avoid silently deleting
+/// entries the user set up intentionally.
+fn remove_cli_entries_with_missing_binaries(
+    config: &mut crate::domain::canopy_config::CanopyConfig,
+    platforms_with_cli: &[PlatformWithCli],
+) {
     let known_names: std::collections::HashSet<String> = platforms_with_cli
         .iter()
         .filter_map(|p| p.cli.as_ref().map(|c| c.name.clone()))
@@ -405,8 +463,13 @@ fn apply_registry_refresh(home: &Path, registry: &RegistryRaw) -> Result<()> {
         // In registry → keep only if binary is present
         c.is_available()
     });
+}
 
-    // Add newly detected CLIs that aren't already in config.
+/// Add newly detected CLIs that aren't already in config.
+fn add_newly_detected_clis(
+    config: &mut crate::domain::canopy_config::CanopyConfig,
+    cli_registry: &crate::domain::cli_config::CliRegistry,
+) {
     let existing_names: std::collections::HashSet<String> =
         config.clis.iter().map(|c| c.name.clone()).collect();
     for cli in cli_registry.available_clis.iter().cloned() {
@@ -414,10 +477,11 @@ fn apply_registry_refresh(home: &Path, registry: &RegistryRaw) -> Result<()> {
             config.clis.push(cli);
         }
     }
+}
 
-    // This is the one moment where silence is the failure mode being fixed:
-    // an operator who never asked for a value to change should see that it
-    // did.
+/// Surface the registry-owned fields a refresh changed that the operator
+/// never customised locally — silence is the failure mode this fixes.
+fn warn_updated_non_customised_fields(changed_fields: &[String]) {
     if !changed_fields.is_empty() {
         tracing::warn!(
             "registry refresh updated {} field(s) not locally customised: {}",
@@ -425,19 +489,37 @@ fn apply_registry_refresh(home: &Path, registry: &RegistryRaw) -> Result<()> {
             changed_fields.join(", ")
         );
     }
+}
 
-    // Platform-level reconciliation: add / update / delete / unchanged.
-    // Structural comparison (field-by-field) rather than textual ensures
-    // reformatted content with identical semantics is not treated as a change.
+/// Platform-level reconciliation outcome: which registry platforms were
+/// added, updated, unchanged or deleted, plus the surviving set that
+/// becomes the next baseline.
+struct PlatformRefresh {
+    added: Vec<String>,
+    updated: Vec<String>,
+    unchanged: Vec<String>,
+    deleted: Vec<String>,
+    reconciled_platforms: Vec<Platform>,
+}
+
+/// Reconcile the registry's platforms against the previous baseline:
+/// add / update / delete / unchanged.
+fn reconcile_platforms(
+    home: &Path,
+    baseline: Option<&RegistryBaseline>,
+    registry: &RegistryRaw,
+) -> PlatformRefresh {
     let baseline_platforms: std::collections::HashMap<String, &Platform> = baseline
-        .as_ref()
         .map(|b| b.platforms.iter().map(|p| (p.name.clone(), p)).collect())
         .unwrap_or_default();
 
-    let mut added_platforms: Vec<String> = Vec::new();
-    let mut updated_platforms: Vec<String> = Vec::new();
-    let mut unchanged_platforms: Vec<String> = Vec::new();
-    let mut reconciled_platforms: Vec<Platform> = Vec::new();
+    let mut refresh = PlatformRefresh {
+        added: Vec::new(),
+        updated: Vec::new(),
+        unchanged: Vec::new(),
+        deleted: Vec::new(),
+        reconciled_platforms: Vec::new(),
+    };
 
     for platform in &registry.platforms {
         if !resolve_config_path(home, &platform.config_path).exists() {
@@ -446,24 +528,24 @@ fn apply_registry_refresh(home: &Path, registry: &RegistryRaw) -> Result<()> {
         match baseline_platforms.get(&platform.name) {
             Some(baseline_platform) => {
                 if platforms_differ(baseline_platform, platform) {
-                    updated_platforms.push(platform.name.clone());
+                    refresh.updated.push(platform.name.clone());
                 } else {
-                    unchanged_platforms.push(platform.name.clone());
+                    refresh.unchanged.push(platform.name.clone());
                 }
             }
             None => {
-                added_platforms.push(platform.name.clone());
+                refresh.added.push(platform.name.clone());
             }
         }
-        reconciled_platforms.push((*platform).clone());
+        refresh.reconciled_platforms.push((*platform).clone());
     }
 
-    let new_platform_names: std::collections::HashSet<String> = reconciled_platforms
+    let new_platform_names: std::collections::HashSet<String> = refresh
+        .reconciled_platforms
         .iter()
         .map(|p| p.name.clone())
         .collect();
-    let mut deleted_platforms: Vec<String> = Vec::new();
-    if let Some(b) = baseline.as_ref() {
+    if let Some(b) = baseline {
         for baseline_platform in &b.platforms {
             if !new_platform_names.contains(&baseline_platform.name) {
                 // Only count as deleted if the platform's config was part of
@@ -471,51 +553,42 @@ fn apply_registry_refresh(home: &Path, registry: &RegistryRaw) -> Result<()> {
                 // not reconciled and should not appear here, but since we
                 // only ever store detected platforms, any missing name is a
                 // genuine deletion.
-                deleted_platforms.push(baseline_platform.name.clone());
+                refresh.deleted.push(baseline_platform.name.clone());
             }
         }
     }
 
-    if !added_platforms.is_empty() || !updated_platforms.is_empty() || !deleted_platforms.is_empty()
-    {
-        tracing::warn!(
-            "registry refresh: {} added, {} updated, {} deleted, {} unchanged platform(s)",
-            added_platforms.len(),
-            updated_platforms.len(),
-            deleted_platforms.len(),
-            unchanged_platforms.len()
-        );
-        if !updated_platforms.is_empty() {
-            tracing::warn!("  updated: {}", updated_platforms.join(", "));
-        }
-        if !added_platforms.is_empty() {
-            tracing::warn!("  added: {}", added_platforms.join(", "));
-        }
-        if !deleted_platforms.is_empty() {
-            tracing::warn!("  deleted: {}", deleted_platforms.join(", "));
-        }
+    refresh
+}
+
+/// Warn about the platforms a refresh added, updated or deleted — summary
+/// first, then names in that order — but only when something changed.
+fn warn_platform_reconciliation(refresh: &PlatformRefresh) {
+    if refresh.added.is_empty() && refresh.updated.is_empty() && refresh.deleted.is_empty() {
+        return;
     }
+    warn_platform_summary(refresh);
+    warn_platform_name_list("updated", &refresh.updated);
+    warn_platform_name_list("added", &refresh.added);
+    warn_platform_name_list("deleted", &refresh.deleted);
+}
 
-    // Always persist: an empty `clis` here only happens when the registry
-    // confirmed every remaining entry's binary is gone (the retain rule
-    // above never touches a manually-added, registry-unknown entry), so
-    // that's a real state worth writing, not a detection glitch to shield
-    // the config from.
-    config.save(&canopy_dir)?;
+/// Warn the one-line reconciliation summary.
+fn warn_platform_summary(refresh: &PlatformRefresh) {
+    tracing::warn!(
+        "registry refresh: {} added, {} updated, {} deleted, {} unchanged platform(s)",
+        refresh.added.len(),
+        refresh.updated.len(),
+        refresh.deleted.len(),
+        refresh.unchanged.len()
+    );
+}
 
-    RegistryBaseline {
-        clis: cli_registry.available_clis,
-        platforms: reconciled_platforms,
+/// Warn the concrete names behind one non-empty reconciliation bucket.
+fn warn_platform_name_list(label: &str, names: &[String]) {
+    if !names.is_empty() {
+        tracing::warn!("  {label}: {}", names.join(", "));
     }
-    .save(&canopy_dir)?;
-
-    let db = Database::new_safe(&database_path(&canopy_dir), &canopy_dir)?;
-    db.set_state(
-        REGISTRY_LAST_REFRESH_STATE_KEY,
-        &chrono::Utc::now().to_rfc3339(),
-    )?;
-
-    Ok(())
 }
 
 /// Structural comparison of two Platform objects. Returns true when any
@@ -948,6 +1021,34 @@ mod tests {
 
         // A baseline now exists for the next refresh to compare against.
         assert!(RegistryBaseline::load(&canopy_dir).is_some());
+    }
+
+    /// The extracted backup helper's skip path — first refresh, but no
+    /// `config.toml` exists yet — was previously only reachable through
+    /// `apply_registry_refresh` on a home that always had a config file.
+    #[test]
+    fn first_refresh_without_config_file_skips_backup() {
+        let dir = TempDir::new().unwrap();
+        let canopy_dir = dir.path().join(".canopy");
+        std::fs::create_dir_all(&canopy_dir).unwrap();
+
+        let list_backups = || -> Vec<String> {
+            std::fs::read_dir(&canopy_dir)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .filter(|n| n.starts_with("config.toml.bak-"))
+                .collect()
+        };
+
+        // First refresh, config file absent: nothing to copy, no backup.
+        backup_config_before_first_refresh(&canopy_dir, true).unwrap();
+        assert!(list_backups().is_empty());
+
+        // And even with a config file present, a later refresh never backs up.
+        std::fs::write(canopy_dir.join("config.toml"), "x = 1\n").unwrap();
+        backup_config_before_first_refresh(&canopy_dir, false).unwrap();
+        assert!(list_backups().is_empty());
     }
 
     #[test]
