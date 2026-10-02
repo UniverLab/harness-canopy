@@ -134,7 +134,7 @@ futures = "0.3"
 tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
 
 # PDF text extraction
-pdf-extract = "0.10.0"
+pdf-extract = "0.12"
 
 # Local embedding models via ONNX Runtime (no API key required)
 # Target-specific: macOS uses default features (bundled ONNX Runtime),
@@ -164,7 +164,10 @@ libc = "0.2"
 # aarch64-apple-darwin and bundles it into the binary at compile time.
 # No runtime download needed.
 [target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
-fastembed = { version = "5", optional = true }
+fastembed = { version = "5", optional = true, default-features = false, features = [
+    "ort-download-binaries-native-tls",
+    "hf-hub-native-tls",
+] }
 
 # Intel macOS: ort ships no prebuilt ONNX Runtime for x86_64-apple-darwin,
 # so download-binaries fails the build (v3.0.0 CD). Same treatment as
@@ -181,7 +184,10 @@ fastembed = { version = "5", optional = true, default-features = false, features
 
 # Any other non-Linux OS keeps the previous behaviour (bundled runtime).
 [target.'cfg(all(not(target_os = "linux"), not(target_os = "macos")))'.dependencies]
-fastembed = { version = "5", optional = true }
+fastembed = { version = "5", optional = true, default-features = false, features = [
+    "ort-download-binaries-native-tls",
+    "hf-hub-native-tls",
+] }
 
 # Linux: ort's prebuilt ONNX Runtime targets glibc, not musl. We compile
 # ort in `load-dynamic` mode so the binary stays thin and loads
