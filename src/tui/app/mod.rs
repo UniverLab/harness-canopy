@@ -24,7 +24,8 @@ use super::context_transfer::{
     interactive_line_page_count, interactive_prompt_count, ContextCaptureKind, ContextSourceKind,
     ContextTransferConfig, ContextTransferModal, ContextTransferStep,
 };
-use crate::domain::graphs::{GraphNodeKind, GraphSpecStatus, GraphStatus};
+use crate::domain::graphs::{GraphEdgeCondition, GraphNodeKind, GraphSpecStatus, GraphStatus};
+use crate::tui::app::graph_live_state::{EnsembleLiveInfo, GraphLiveState};
 use crate::tui::prompt_templates::PromptTemplates;
 
 pub(crate) use crate::tui::mcp_client::send_mcp_task_run;
@@ -45,19 +46,12 @@ pub use types::{
 };
 use types::{GraphSidebarMeta, RagTransferModal, SidebarStepMemory};
 
-impl App {
-    pub fn new(
-        db: Arc<Database>,
-        data_dir: &Path,
-        canopy_config: &crate::domain::canopy_config::CanopyConfig,
-    ) -> Result<Self> {
-        let system_monitor_active = Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let system_info_rx = spawn_system_monitor(&system_monitor_active);
-        let mission_manager = Self::init_mission_manager(Arc::clone(&db))?;
-
-        let mut app = Self {
-            db,
-            data_dir: data_dir.to_path_buf(),
+macro_rules! app_new_fields {
+    ($db:expr, $data_dir:expr, $canopy_config:expr, $system_info_rx:expr,
+     $system_monitor_active:expr, $mission_manager:expr) => {
+        App {
+            db: $db,
+            data_dir: $data_dir,
             agents: Vec::new(),
             active_runs: HashMap::new(),
             recent_runs: Vec::new(),
@@ -175,15 +169,15 @@ impl App {
             notification_service: Arc::new(DefaultNotificationService),
             prev_active_run_ids: std::collections::HashSet::new(),
             animation_tick: 0,
-            temperature_unit: canopy_config.temperature_unit,
-            theme: crate::tui::ui::theme::Theme::resolve(&canopy_config.theme),
+            temperature_unit: $canopy_config.temperature_unit,
+            theme: crate::tui::ui::theme::Theme::resolve(&$canopy_config.theme),
             suggestion_picker: None,
             terminal_histories: HashMap::new(),
             terminal_search: None,
             system_info: crate::system::SystemInfo::default(),
             system_info_target: crate::system::SystemInfo::default(),
-            system_info_rx,
-            system_monitor_active,
+            system_info_rx: $system_info_rx,
+            system_monitor_active: $system_monitor_active,
             last_system_update: std::time::Instant::now() - std::time::Duration::from_secs(10),
             last_system_frame_at: std::time::Instant::now(),
             process_start_time: std::time::Instant::now(),
@@ -201,7 +195,7 @@ impl App {
             playground_project_hash: None,
             rag_paused: false,
             rag_model_loaded: false,
-            rag_embeddings_model: canopy_config.embeddings_model.clone(),
+            rag_embeddings_model: $canopy_config.embeddings_model.clone(),
             rag_acquisition_state: None,
             agents_rag_focused: false,
             sync_scroll_offset: 0,
@@ -213,7 +207,7 @@ impl App {
             graph_face_scroll: 0,
             graph_face_total_lines: 0,
             panel_face: PanelFace::Activity,
-            panel_pinned: App::load_panel_pinned_face(&canopy_config.pinned_panel_face),
+            panel_pinned: App::load_panel_pinned_face(&$canopy_config.pinned_panel_face),
             panel_dwell_face: None,
             panel_dwell_until: None,
             panel_dwell_reason: None,
@@ -243,11 +237,32 @@ impl App {
             atmosphere_ctx: crate::tui::atmosphere::AtmosphereCtx::default(),
             atmosphere_last_mouse: (0, 0),
             atmosphere_hidden: false,
-            mission_manager,
+            mission_manager: $mission_manager,
             mission_pending_events: Vec::new(),
             max_cpu_frequency_seen: None,
             uptime_anchor: None,
-        };
+        }
+    };
+}
+
+impl App {
+    pub fn new(
+        db: Arc<Database>,
+        data_dir: &Path,
+        canopy_config: &crate::domain::canopy_config::CanopyConfig,
+    ) -> Result<Self> {
+        let system_monitor_active = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let system_info_rx = spawn_system_monitor(&system_monitor_active);
+        let mission_manager = Self::init_mission_manager(Arc::clone(&db))?;
+
+        let mut app = app_new_fields!(
+            db,
+            data_dir.to_path_buf(),
+            canopy_config,
+            system_info_rx,
+            system_monitor_active,
+            mission_manager
+        );
         app.refresh()?;
         Ok(app)
     }
@@ -1279,90 +1294,151 @@ impl App {
             return Vec::new();
         }
         // Build collapsed graph identical to graph_live::graph_lines
-        use std::collections::{HashMap, HashSet};
+        let collapsed = Self::collapse_nodes(state);
+        if collapsed.is_empty() {
+            return Vec::new();
+        }
+        let collapsed_pos: HashMap<String, i64> = collapsed
+            .iter()
+            .map(|(key, (_, position))| (key.clone(), *position))
+            .collect();
+        let ensemble_by_join: HashMap<&str, &EnsembleLiveInfo> = state
+            .ensembles
+            .iter()
+            .map(|e| (e.join_node_id.as_str(), e))
+            .collect();
+        let member_to_ensemble = Self::member_to_ensemble(state);
+        let collapsed_edges =
+            Self::dfs_collapsed_edges(state, &collapsed, &ensemble_by_join, &member_to_ensemble);
+        let entry_key = Self::dfs_entry_key(&collapsed, &collapsed_pos, &collapsed_edges);
+        let mut visited: HashSet<String> = HashSet::new();
+        let mut order: Vec<String> = Vec::new();
+        Self::dfs_rec(&entry_key, &collapsed_edges, &mut visited, &mut order);
+        let mut remaining: Vec<String> = collapsed
+            .keys()
+            .filter(|k| !visited.contains(k.as_str()))
+            .cloned()
+            .collect();
+        remaining.sort_by_key(|k| collapsed_pos.get(k.as_str()).copied().unwrap_or(i64::MAX));
+        for rk in remaining {
+            Self::dfs_rec(&rk, &collapsed_edges, &mut visited, &mut order);
+        }
+        Self::dfs_concrete_ids(order, state)
+    }
+
+    /// Collapse join nodes and ensemble members into one key per ensemble
+    /// (`true` = ensemble), carrying each key's node position. Mirrors what
+    /// the graph view draws.
+    fn collapse_nodes(state: &GraphLiveState) -> HashMap<String, (bool, i64)> {
         let join_ids: HashSet<&str> = state
             .ensembles
             .iter()
             .map(|e| e.join_node_id.as_str())
             .collect();
-        let ensemble_by_member: HashMap<
-            &str,
-            &crate::tui::app::graph_live_state::EnsembleLiveInfo,
-        > = state
+        let ensemble_by_member: HashMap<&str, &EnsembleLiveInfo> = state
             .ensembles
             .iter()
             .flat_map(|e| e.members.iter().map(move |m| (m.node_id.as_str(), e)))
             .collect();
-        let ensemble_by_join: HashMap<&str, &crate::tui::app::graph_live_state::EnsembleLiveInfo> =
-            state
-                .ensembles
-                .iter()
-                .map(|e| (e.join_node_id.as_str(), e))
-                .collect();
-
-        // collapsed key -> (kind, pos)
-        let mut collapsed: HashMap<String, (bool, i64)> = HashMap::new(); // true=ensemble
-        let mut member_to_ensemble: HashMap<String, String> = HashMap::new();
+        let mut nodes: HashMap<String, (bool, i64)> = HashMap::new(); // true=ensemble
         let mut seen_ens: HashSet<String> = HashSet::new();
-        let mut collapsed_pos: HashMap<String, i64> = HashMap::new();
         for node in &state.effective_nodes {
             if join_ids.contains(node.id.as_str()) {
                 continue;
             }
-            if let Some(ens) = ensemble_by_member.get(node.id.as_str()) {
-                if seen_ens.insert(ens.ensemble_id.clone()) {
-                    collapsed.insert(ens.ensemble_id.clone(), (true, node.position));
-                    collapsed_pos.insert(ens.ensemble_id.clone(), node.position);
-                    for m in &ens.members {
-                        member_to_ensemble.insert(m.node_id.clone(), ens.ensemble_id.clone());
-                    }
-                }
-            } else {
-                collapsed.insert(node.id.clone(), (false, node.position));
-                collapsed_pos.insert(node.id.clone(), node.position);
+            let Some(ens) = ensemble_by_member.get(node.id.as_str()) else {
+                nodes.insert(node.id.clone(), (false, node.position));
+                continue;
+            };
+            if !seen_ens.insert(ens.ensemble_id.clone()) {
+                continue;
             }
+            nodes.insert(ens.ensemble_id.clone(), (true, node.position));
         }
-        if collapsed.is_empty() {
-            return Vec::new();
+        nodes
+    }
+
+    /// member-id -> ensemble-id for every member of any ensemble that has a
+    /// member in the effective graph (matching `collapse_nodes`'s scope).
+    fn member_to_ensemble(state: &GraphLiveState) -> HashMap<String, String> {
+        let ensemble_by_member: HashMap<&str, &EnsembleLiveInfo> = state
+            .ensembles
+            .iter()
+            .flat_map(|e| e.members.iter().map(move |m| (m.node_id.as_str(), e)))
+            .collect();
+        let mut member_to_ensemble: HashMap<String, String> = HashMap::new();
+        let mut seen_ens: HashSet<String> = HashSet::new();
+        for node in &state.effective_nodes {
+            let Some(ens) = ensemble_by_member.get(node.id.as_str()) else {
+                continue;
+            };
+            if !seen_ens.insert(ens.ensemble_id.clone()) {
+                continue;
+            }
+            member_to_ensemble.extend(
+                ens.members
+                    .iter()
+                    .map(|m| (m.node_id.clone(), ens.ensemble_id.clone())),
+            );
         }
-        let mut collapsed_edges: HashMap<
-            String,
-            Vec<(String, crate::domain::graphs::GraphEdgeCondition)>,
-        > = HashMap::new();
+        member_to_ensemble
+    }
+
+    /// Resolve one raw node id to its collapsed key: the ensemble it is the
+    /// join of, else its ensemble (as a member), else itself when collapsed.
+    fn dfs_endpoint(
+        raw: &str,
+        by_join: &HashMap<&str, &EnsembleLiveInfo>,
+        member_to_ensemble: &HashMap<String, String>,
+        collapsed: &HashMap<String, (bool, i64)>,
+    ) -> Option<String> {
+        if let Some(ens) = by_join.get(raw) {
+            return Some(ens.ensemble_id.clone());
+        }
+        if let Some(ek) = member_to_ensemble.get(raw) {
+            return Some(ek.clone());
+        }
+        if collapsed.contains_key(raw) {
+            return Some(raw.to_string());
+        }
+        None
+    }
+
+    /// Build the collapsed-edge adjacency with member->join edges removed and
+    /// duplicates dropped, sorting each node's outgoing edges by priority.
+    fn dfs_collapsed_edges(
+        state: &GraphLiveState,
+        collapsed: &HashMap<String, (bool, i64)>,
+        by_join: &HashMap<&str, &EnsembleLiveInfo>,
+        member_to_ensemble: &HashMap<String, String>,
+    ) -> HashMap<String, Vec<(String, GraphEdgeCondition)>> {
+        let by_member: HashMap<&str, &EnsembleLiveInfo> = state
+            .ensembles
+            .iter()
+            .flat_map(|e| e.members.iter().map(move |m| (m.node_id.as_str(), e)))
+            .collect();
+        let mut collapsed_edges: HashMap<String, Vec<(String, GraphEdgeCondition)>> =
+            HashMap::new();
         for edge in &state.effective_edges {
             let from_raw = edge.from_node.as_str();
             let to_raw = edge.to_node.as_str();
-            if let Some(ens) = ensemble_by_member.get(from_raw) {
-                if ens.join_node_id.as_str() == to_raw {
-                    continue;
-                }
+            if by_member
+                .get(from_raw)
+                .is_some_and(|e| e.join_node_id.as_str() == to_raw)
+            {
+                continue;
             }
-            let from_key = if let Some(ens) = ensemble_by_join.get(from_raw) {
-                Some(ens.ensemble_id.clone())
-            } else if let Some(ek) = member_to_ensemble.get(from_raw) {
-                Some(ek.clone())
-            } else if collapsed.contains_key(from_raw) {
-                Some(from_raw.to_string())
-            } else {
-                None
+            let from_key = Self::dfs_endpoint(from_raw, by_join, member_to_ensemble, collapsed);
+            let to_key = Self::dfs_endpoint(to_raw, by_join, member_to_ensemble, collapsed);
+            let (Some(fk), Some(tk)) = (from_key, to_key) else {
+                continue;
             };
-            let to_key = if let Some(ens) = ensemble_by_join.get(to_raw) {
-                Some(ens.ensemble_id.clone())
-            } else if let Some(ek) = member_to_ensemble.get(to_raw) {
-                Some(ek.clone())
-            } else if collapsed.contains_key(to_raw) {
-                Some(to_raw.to_string())
-            } else {
-                None
-            };
-            if let (Some(fk), Some(tk)) = (from_key, to_key) {
-                let entry = collapsed_edges.entry(fk).or_default();
-                if !entry
-                    .iter()
-                    .any(|(ek, ec)| ek == &tk && ec == &edge.condition)
-                {
-                    entry.push((tk, edge.condition.clone()));
-                }
+            let entry = collapsed_edges.entry(fk).or_default();
+            if !entry
+                .iter()
+                .any(|(ek, ec)| ek == &tk && ec == &edge.condition)
+            {
+                entry.push((tk, edge.condition.clone()));
             }
         }
         for edges in collapsed_edges.values_mut() {
@@ -1372,13 +1448,24 @@ impl App {
                 pa.cmp(&pb).then_with(|| la.cmp(&lb))
             });
         }
+        collapsed_edges
+    }
+
+    /// The DFS entry key: the collapsed key with no incoming edge, else the
+    /// one at the lowest node position. The `unwrap` panics only on an empty
+    /// `collapsed`, which the caller guards.
+    fn dfs_entry_key(
+        collapsed: &HashMap<String, (bool, i64)>,
+        collapsed_pos: &HashMap<String, i64>,
+        adjacency: &HashMap<String, Vec<(String, GraphEdgeCondition)>>,
+    ) -> String {
         let mut incoming: HashSet<String> = HashSet::new();
-        for tos in collapsed_edges.values() {
+        for tos in adjacency.values() {
             for (tk, _) in tos {
                 incoming.insert(tk.clone());
             }
         }
-        let entry_key = collapsed
+        collapsed
             .keys()
             .find(|k| !incoming.contains(*k))
             .cloned()
@@ -1388,43 +1475,36 @@ impl App {
                     .min_by_key(|k| collapsed_pos.get(*k).copied().unwrap_or(i64::MAX))
                     .cloned()
             })
-            .unwrap();
-        let mut visited: HashSet<String> = HashSet::new();
-        let mut order: Vec<String> = Vec::new();
-        fn dfs_rec(
-            key: &str,
-            collapsed_edges: &HashMap<
-                String,
-                Vec<(String, crate::domain::graphs::GraphEdgeCondition)>,
-            >,
-            visited: &mut HashSet<String>,
-            order: &mut Vec<String>,
-        ) {
-            if visited.contains(key) {
-                return;
-            }
-            visited.insert(key.to_string());
-            order.push(key.to_string());
-            if let Some(edges) = collapsed_edges.get(key) {
-                for (tk, _) in edges {
-                    if !visited.contains(tk.as_str()) {
-                        dfs_rec(tk, collapsed_edges, visited, order);
-                    }
-                }
+            .unwrap()
+    }
+
+    /// Depth-first walk of the collapsed adjacency, appending each key once to
+    /// `order`.
+    fn dfs_rec(
+        key: &str,
+        adjacency: &HashMap<String, Vec<(String, GraphEdgeCondition)>>,
+        visited: &mut HashSet<String>,
+        order: &mut Vec<String>,
+    ) {
+        if visited.contains(key) {
+            return;
+        }
+        visited.insert(key.to_string());
+        order.push(key.to_string());
+        let Some(edges) = adjacency.get(key) else {
+            return;
+        };
+        for (tk, _) in edges {
+            if !visited.contains(tk.as_str()) {
+                Self::dfs_rec(tk, adjacency, visited, order);
             }
         }
-        dfs_rec(&entry_key, &collapsed_edges, &mut visited, &mut order);
-        let mut remaining: Vec<String> = collapsed
-            .keys()
-            .filter(|k| !visited.contains(k.as_str()))
-            .cloned()
-            .collect();
-        remaining.sort_by_key(|k| collapsed_pos.get(k.as_str()).copied().unwrap_or(i64::MAX));
-        for rk in remaining {
-            dfs_rec(&rk, &collapsed_edges, &mut visited, &mut order);
-        }
-        // Map collapsed keys back to concrete node ids for selection.
-        // For ensembles, use the first member's node id (renderer highlights on any member).
+    }
+
+    /// Map collapsed keys back to concrete node ids for selection. For
+    /// ensembles, use the first member's node id (renderer highlights on any
+    /// member).
+    fn dfs_concrete_ids(order: Vec<String>, state: &GraphLiveState) -> Vec<String> {
         let mut ensemble_first_member: HashMap<String, String> = HashMap::new();
         for ens in &state.ensembles {
             if let Some(first) = ens.members.first() {
@@ -1433,12 +1513,9 @@ impl App {
         }
         order
             .into_iter()
-            .map(|ck| {
-                if let Some(mid) = ensemble_first_member.get(&ck) {
-                    mid.clone()
-                } else {
-                    ck
-                }
+            .map(|ck| match ensemble_first_member.get(&ck) {
+                Some(mid) => mid.clone(),
+                None => ck,
             })
             .collect()
     }
@@ -1482,56 +1559,99 @@ impl App {
             }
             return;
         };
-        // Resolve current to its collapsed key if it's an ensemble member
-        let ensemble_by_member: std::collections::HashMap<
-            &str,
-            &crate::tui::app::graph_live_state::EnsembleLiveInfo,
-        > = state
+        let by_member = Self::nav_by_member(state);
+        let by_join = Self::nav_by_join(state);
+        let member_to_ensemble = Self::nav_member_to_ensemble(state);
+        let current_key = Self::nav_collapse_key(&current_id, &by_join, &member_to_ensemble);
+        let mut edges = Self::nav_collapsed_edges(state, &by_join, &by_member, &member_to_ensemble);
+        let Some(targets) = edges.get_mut(&current_key) else {
+            return;
+        };
+        targets.sort_by(|a, b| {
+            let (pa, la) = Self::edge_priority(&a.1);
+            let (pb, lb) = Self::edge_priority(&b.1);
+            pa.cmp(&pb).then_with(|| la.cmp(&lb))
+        });
+        let Some(target_key) = targets.first().map(|(k, _)| k.clone()) else {
+            return;
+        };
+        // Map collapsed target back to a concrete node id.
+        let target_id = Self::nav_ensemble_first_member(state, &target_key)
+            .unwrap_or_else(|| target_key.clone());
+        self.graph_live_selected_node = Some(target_id);
+        self.graph_live_follow = false;
+    }
+
+    /// member-id -> ensemble for every ensemble member.
+    fn nav_by_member(state: &GraphLiveState) -> HashMap<&str, &EnsembleLiveInfo> {
+        state
             .ensembles
             .iter()
             .flat_map(|e| e.members.iter().map(move |m| (m.node_id.as_str(), e)))
-            .collect();
-        let ensemble_by_join: std::collections::HashMap<
-            &str,
-            &crate::tui::app::graph_live_state::EnsembleLiveInfo,
-        > = state
+            .collect()
+    }
+
+    /// join-node-id -> ensemble for every ensemble.
+    fn nav_by_join(state: &GraphLiveState) -> HashMap<&str, &EnsembleLiveInfo> {
+        state
             .ensembles
             .iter()
             .map(|e| (e.join_node_id.as_str(), e))
-            .collect();
-        let mut member_to_ensemble: std::collections::HashMap<String, String> =
-            std::collections::HashMap::new();
+            .collect()
+    }
+
+    /// member-id -> ensemble-id for every ensemble member.
+    fn nav_member_to_ensemble(state: &GraphLiveState) -> HashMap<String, String> {
+        let mut member_to_ensemble: HashMap<String, String> = HashMap::new();
         for ens in &state.ensembles {
             for m in &ens.members {
                 member_to_ensemble.insert(m.node_id.clone(), ens.ensemble_id.clone());
             }
         }
-        let current_key = if let Some(ens) = ensemble_by_join.get(current_id.as_str()) {
-            ens.ensemble_id.clone()
-        } else if let Some(ek) = member_to_ensemble.get(&current_id) {
-            ek.clone()
-        } else {
-            current_id.clone()
-        };
-        // Build collapsed edges to find sorted outgoing
-        let join_ids: std::collections::HashSet<&str> = state
+        member_to_ensemble
+    }
+
+    /// Resolve a raw node id to the collapsed key navigation uses.
+    fn nav_collapse_key(
+        raw: &str,
+        by_join: &HashMap<&str, &EnsembleLiveInfo>,
+        member_to_ensemble: &HashMap<String, String>,
+    ) -> String {
+        if let Some(ens) = by_join.get(raw) {
+            return ens.ensemble_id.clone();
+        }
+        if let Some(ek) = member_to_ensemble.get(raw) {
+            return ek.clone();
+        }
+        raw.to_string()
+    }
+
+    /// Build the navigation adjacency: collapsed edges with member->join edges
+    /// removed and duplicates dropped (unsorted — the caller orders what it
+    /// uses).
+    fn nav_collapsed_edges(
+        state: &GraphLiveState,
+        by_join: &HashMap<&str, &EnsembleLiveInfo>,
+        by_member: &HashMap<&str, &EnsembleLiveInfo>,
+        member_to_ensemble: &HashMap<String, String>,
+    ) -> HashMap<String, Vec<(String, GraphEdgeCondition)>> {
+        let join_ids: HashSet<&str> = state
             .ensembles
             .iter()
             .map(|e| e.join_node_id.as_str())
             .collect();
-        let mut collapsed_edges: std::collections::HashMap<
-            String,
-            Vec<(String, crate::domain::graphs::GraphEdgeCondition)>,
-        > = std::collections::HashMap::new();
+        let mut collapsed_edges: HashMap<String, Vec<(String, GraphEdgeCondition)>> =
+            HashMap::new();
         for edge in &state.effective_edges {
             let from_raw = edge.from_node.as_str();
             let to_raw = edge.to_node.as_str();
-            if let Some(ens) = ensemble_by_member.get(from_raw) {
-                if ens.join_node_id.as_str() == to_raw {
-                    continue;
-                }
+            if by_member
+                .get(from_raw)
+                .is_some_and(|e| e.join_node_id.as_str() == to_raw)
+            {
+                continue;
             }
-            let from_key = if let Some(ens) = ensemble_by_join.get(from_raw) {
+            let from_key = if let Some(ens) = by_join.get(from_raw) {
                 Some(ens.ensemble_id.clone())
             } else if let Some(ek) = member_to_ensemble.get(from_raw) {
                 Some(ek.clone())
@@ -1542,7 +1662,7 @@ impl App {
             } else {
                 None
             };
-            let to_key = if let Some(ens) = ensemble_by_join.get(to_raw) {
+            let to_key = if let Some(ens) = by_join.get(to_raw) {
                 Some(ens.ensemble_id.clone())
             } else if let Some(ek) = member_to_ensemble.get(to_raw) {
                 Some(ek.clone())
@@ -1553,36 +1673,37 @@ impl App {
             } else {
                 None
             };
-            if let (Some(fk), Some(tk)) = (from_key, to_key) {
-                let e = collapsed_edges.entry(fk).or_default();
-                if !e.iter().any(|(ek, ec)| ek == &tk && ec == &edge.condition) {
-                    e.push((tk, edge.condition.clone()));
-                }
+            let (Some(fk), Some(tk)) = (from_key, to_key) else {
+                continue;
+            };
+            let e = collapsed_edges.entry(fk).or_default();
+            if !e.iter().any(|(ek, ec)| ek == &tk && ec == &edge.condition) {
+                e.push((tk, edge.condition.clone()));
             }
         }
-        for edges in collapsed_edges.values_mut() {
-            edges.sort_by(|a, b| {
-                let (pa, la) = Self::edge_priority(&a.1);
-                let (pb, lb) = Self::edge_priority(&b.1);
-                pa.cmp(&pb).then_with(|| la.cmp(&lb))
-            });
+        collapsed_edges
+    }
+
+    /// First collapsed key with an edge into `current_key`.
+    fn nav_find_incoming(
+        edges: &HashMap<String, Vec<(String, GraphEdgeCondition)>>,
+        current_key: &str,
+    ) -> Option<String> {
+        for (fk, tos) in edges {
+            if tos.iter().any(|(tk, _)| tk == current_key) {
+                return Some(fk.clone());
+            }
         }
-        let Some(targets) = collapsed_edges.get(&current_key) else {
-            return;
-        };
-        if targets.is_empty() {
-            return;
-        }
-        let target_key = &targets[0].0;
-        // Map collapsed target back to concrete node id
-        let target_id = state
+        None
+    }
+
+    /// The first member's node id of the ensemble named `key`, if any.
+    fn nav_ensemble_first_member(state: &GraphLiveState, key: &str) -> Option<String> {
+        state
             .ensembles
             .iter()
-            .find(|e| &e.ensemble_id == target_key)
+            .find(|e| e.ensemble_id == key)
             .and_then(|e| e.members.first().map(|m| m.node_id.clone()))
-            .unwrap_or_else(|| target_key.clone());
-        self.graph_live_selected_node = Some(target_id);
-        self.graph_live_follow = false;
     }
 
     /// Move to the incoming edge's source (Left).
@@ -1593,101 +1714,15 @@ impl App {
         let Some(current_id) = self.graph_live_highlighted_node_id().map(str::to_string) else {
             return;
         };
-        let ensemble_by_member: std::collections::HashMap<
-            &str,
-            &crate::tui::app::graph_live_state::EnsembleLiveInfo,
-        > = state
-            .ensembles
-            .iter()
-            .flat_map(|e| e.members.iter().map(move |m| (m.node_id.as_str(), e)))
-            .collect();
-        let ensemble_by_join: std::collections::HashMap<
-            &str,
-            &crate::tui::app::graph_live_state::EnsembleLiveInfo,
-        > = state
-            .ensembles
-            .iter()
-            .map(|e| (e.join_node_id.as_str(), e))
-            .collect();
-        let mut member_to_ensemble: std::collections::HashMap<String, String> =
-            std::collections::HashMap::new();
-        for ens in &state.ensembles {
-            for m in &ens.members {
-                member_to_ensemble.insert(m.node_id.clone(), ens.ensemble_id.clone());
-            }
-        }
-        let current_key = if let Some(ens) = ensemble_by_join.get(current_id.as_str()) {
-            ens.ensemble_id.clone()
-        } else if let Some(ek) = member_to_ensemble.get(&current_id) {
-            ek.clone()
-        } else {
-            current_id.clone()
-        };
-        let join_ids: std::collections::HashSet<&str> = state
-            .ensembles
-            .iter()
-            .map(|e| e.join_node_id.as_str())
-            .collect();
-        let mut collapsed_edges: std::collections::HashMap<
-            String,
-            Vec<(String, crate::domain::graphs::GraphEdgeCondition)>,
-        > = std::collections::HashMap::new();
-        for edge in &state.effective_edges {
-            let from_raw = edge.from_node.as_str();
-            let to_raw = edge.to_node.as_str();
-            if let Some(ens) = ensemble_by_member.get(from_raw) {
-                if ens.join_node_id.as_str() == to_raw {
-                    continue;
-                }
-            }
-            let from_key = if let Some(ens) = ensemble_by_join.get(from_raw) {
-                Some(ens.ensemble_id.clone())
-            } else if let Some(ek) = member_to_ensemble.get(from_raw) {
-                Some(ek.clone())
-            } else if state.effective_nodes.iter().any(|n| n.id == from_raw)
-                && !join_ids.contains(from_raw)
-            {
-                Some(from_raw.to_string())
-            } else {
-                None
-            };
-            let to_key = if let Some(ens) = ensemble_by_join.get(to_raw) {
-                Some(ens.ensemble_id.clone())
-            } else if let Some(ek) = member_to_ensemble.get(to_raw) {
-                Some(ek.clone())
-            } else if state.effective_nodes.iter().any(|n| n.id == to_raw)
-                && !join_ids.contains(to_raw)
-            {
-                Some(to_raw.to_string())
-            } else {
-                None
-            };
-            if let (Some(fk), Some(tk)) = (from_key, to_key) {
-                let e = collapsed_edges.entry(fk).or_default();
-                if !e.iter().any(|(ek, ec)| ek == &tk && ec == &edge.condition) {
-                    e.push((tk, edge.condition.clone()));
-                }
-            }
-        }
-        // Find incoming: any collapsed edge where to == current_key
-        let mut incoming: Vec<String> = Vec::new();
-        for (fk, tos) in &collapsed_edges {
-            for (tk, _) in tos {
-                if tk == &current_key {
-                    incoming.push(fk.clone());
-                    break;
-                }
-            }
-        }
-        if incoming.is_empty() {
+        let by_member = Self::nav_by_member(state);
+        let by_join = Self::nav_by_join(state);
+        let member_to_ensemble = Self::nav_member_to_ensemble(state);
+        let current_key = Self::nav_collapse_key(&current_id, &by_join, &member_to_ensemble);
+        let edges = Self::nav_collapsed_edges(state, &by_join, &by_member, &member_to_ensemble);
+        let Some(parent_key) = Self::nav_find_incoming(&edges, &current_key) else {
             return;
-        }
-        let parent_key = &incoming[0];
-        let parent_id = state
-            .ensembles
-            .iter()
-            .find(|e| &e.ensemble_id == parent_key)
-            .and_then(|e| e.members.first().map(|m| m.node_id.clone()))
+        };
+        let parent_id = Self::nav_ensemble_first_member(state, &parent_key)
             .unwrap_or_else(|| parent_key.clone());
         self.graph_live_selected_node = Some(parent_id);
         self.graph_live_follow = false;
@@ -1710,46 +1745,57 @@ impl App {
             return;
         }
         // (a) running graph: current node.
-        if let Some(id) = self
-            .graph_live_state
-            .as_ref()
-            .and_then(|s| s.current_node_id.clone())
-        {
-            self.graph_live_selected_node = Some(id);
-            self.graph_live_follow = false;
+        if let Some(node) = self.running_graph_current_node() {
+            self.select_manual_graph_node(Some(node));
             return;
         }
         // (b) finished graph: most recent run of strip-selected spec, else
-        // last spec in queue.
-        if let Some(state) = self.graph_live_state.as_ref() {
-            let strip_or_last: Option<String> = self
-                .graph_spec_strip_selected
-                .clone()
-                .or_else(|| state.spec_queue.last().map(|e| e.spec_id.clone()));
-            if let Some(spec_id) = strip_or_last {
-                if let Some(node_id) = self
-                    .db
-                    .list_graph_runs_for_spec(&spec_id)
-                    .unwrap_or_default()
-                    .last()
-                    .map(|r| r.node_id.clone())
-                {
-                    if state.effective_nodes.iter().any(|n| n.id == node_id) {
-                        self.graph_live_selected_node = Some(node_id);
-                        self.graph_live_follow = false;
-                        return;
-                    }
-                }
-            }
-        }
-        // (c) entry node: first of dfs_order, else lowest-position effective
-        // node (dfs_order already falls back to lowest position).
-        if let Some(first) = self.dfs_order().first().cloned() {
-            self.graph_live_selected_node = Some(first);
-            self.graph_live_follow = false;
-        }
+        // last spec in queue; (c) otherwise the graph's entry node (first in
+        // DFS order, which itself falls back to the lowest-position node).
+        let seed = self
+            .finished_graph_seed_node()
+            .or_else(|| self.dfs_order().first().cloned());
+        self.select_manual_graph_node(seed);
         // No effective nodes: stay in follow (nothing to navigate). Do NOT
         // set follow=false with a None selection.
+    }
+
+    /// The engine's current node while the graph is running, if any.
+    fn running_graph_current_node(&self) -> Option<String> {
+        self.graph_live_state
+            .as_ref()
+            .and_then(|s| s.current_node_id.clone())
+    }
+
+    /// On a finished graph, the most recent run's node of the strip-selected
+    /// spec (else the last spec in the queue), provided it still exists in
+    /// the effective graph.
+    fn finished_graph_seed_node(&self) -> Option<String> {
+        let state = self.graph_live_state.as_ref()?;
+        let spec_id = self
+            .graph_spec_strip_selected
+            .clone()
+            .or_else(|| state.spec_queue.last().map(|e| e.spec_id.clone()))?;
+        let node_id = self
+            .db
+            .list_graph_runs_for_spec(&spec_id)
+            .unwrap_or_default()
+            .last()
+            .map(|r| r.node_id.clone())?;
+        state
+            .effective_nodes
+            .iter()
+            .any(|n| n.id == node_id)
+            .then_some(node_id)
+    }
+
+    /// Enter manual navigation on `node_id`, if any: selects it and leaves
+    /// auto-follow. A `None` selection touches nothing (stay in follow).
+    fn select_manual_graph_node(&mut self, node_id: Option<String>) {
+        if let Some(id) = node_id {
+            self.graph_live_selected_node = Some(id);
+            self.graph_live_follow = false;
+        }
     }
 
     /// Return the live graph view to auto-follow, discarding any manual
@@ -3958,20 +4004,7 @@ impl App {
     }
 
     pub fn auto_resume_sessions(&mut self) {
-        // Startup sweep (B32): retire any row still in the removed `orphaned`
-        // status to `completed` so historic red orphan cards disappear. Runs
-        // here, before this function's own resume attempts and before
-        // `restore_scheduled_sends` (see `tui/mod.rs` startup order): a swept
-        // session is not resumed, so it never joins `interactive_agents`, and
-        // `restore_scheduled_sends`'s missing-target drop then discards any
-        // `scheduled_sends` that still pointed at it.
-        match self.db.close_orphaned_interactive_sessions() {
-            Ok(n) if n > 0 => {
-                tracing::info!("Closed {n} orphaned interactive session(s) on startup");
-            }
-            Ok(_) => {}
-            Err(e) => tracing::warn!("Failed to sweep orphaned interactive sessions: {e}"),
-        }
+        self.sweep_orphaned_sessions();
 
         let Ok(sessions) = self.db.get_active_sessions() else {
             return;
@@ -3988,54 +4021,7 @@ impl App {
         let (cols, rows) = Self::session_panel_size();
 
         for session in &sessions {
-            if !should_resume_session(
-                session.pid,
-                session.boot_id.as_deref(),
-                current_boot_id.as_deref(),
-            ) {
-                // The stored PID is alive on the same boot — but that alone is
-                // NOT proof of a session-lock conflict. Two benign cases used
-                // to permanently orphan healthy sessions here:
-                //  * quick TUI close→reopen: the old CLI got its HUP and is
-                //    still in the middle of dying;
-                //  * PID recycling: the number now belongs to an unrelated
-                //    process.
-                // Only a live process that actually IS this CLI, and that
-                // survives a short grace period, is a genuine conflict.
-                let pid = session.pid.unwrap_or(0);
-                if matches!(
-                    resume_decision(true, process_outlives_grace(pid, &session.cli)),
-                    ResumeDecision::Resume
-                ) {
-                    tracing::info!(
-                        "Auto-resuming session '{}': stored pid {pid} was recycled or exited during grace",
-                        session.name
-                    );
-                    self.resume_interactive_session(
-                        session,
-                        &canopy_config,
-                        cols,
-                        rows,
-                        current_boot_id.as_deref(),
-                    );
-                    continue;
-                }
-                tracing::warn!(
-                    "Skipping auto-resume of session '{}' for this start: pid {pid} is still alive and holds it; will retry on the next start",
-                    session.name
-                );
-                // A genuine session-lock conflict: the old CLI is still alive
-                // and holding the session, which makes it unreachable right
-                // now, not dead. Leave the row exactly as it is — still
-                // `active`, still holding its pid and boot_id — so it's
-                // retried on every subsequent start and comes back on its own
-                // once the holder exits. There's nothing to clean up in the
-                // meantime either: only resumed sessions join
-                // `interactive_agents`, so a skipped row is simply absent
-                // from this run's sidebar.
-                continue;
-            }
-            self.resume_interactive_session(
+            self.resume_scanned_session(
                 session,
                 &canopy_config,
                 cols,
@@ -4047,6 +4033,88 @@ impl App {
         if !self.interactive_agents.is_empty() {
             let _ = self.refresh_agents();
         }
+    }
+
+    /// Startup sweep (B32): retire any row still in the removed `orphaned`
+    /// status to `completed` so historic red orphan cards disappear. Runs
+    /// before `auto_resume_sessions`'s own resume attempts and before
+    /// `restore_scheduled_sends` (see `tui/mod.rs` startup order): a swept
+    /// session is not resumed, so it never joins `interactive_agents`, and
+    /// `restore_scheduled_sends`'s missing-target drop then discards any
+    /// `scheduled_sends` that still pointed at it.
+    fn sweep_orphaned_sessions(&self) {
+        match self.db.close_orphaned_interactive_sessions() {
+            Ok(n) if n > 0 => {
+                tracing::info!("Closed {n} orphaned interactive session(s) on startup");
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!("Failed to sweep orphaned interactive sessions: {e}"),
+        }
+    }
+
+    fn resume_scanned_session(
+        &mut self,
+        session: &crate::db::session::InteractiveSession,
+        canopy_config: &crate::domain::canopy_config::CanopyConfig,
+        cols: u16,
+        rows: u16,
+        current_boot_id: Option<&str>,
+    ) {
+        if should_resume_session(session.pid, session.boot_id.as_deref(), current_boot_id) {
+            self.resume_interactive_session(session, canopy_config, cols, rows, current_boot_id);
+            return;
+        }
+        self.resume_or_defer_conflicting_session(
+            session,
+            canopy_config,
+            cols,
+            rows,
+            current_boot_id,
+        );
+    }
+
+    fn resume_or_defer_conflicting_session(
+        &mut self,
+        session: &crate::db::session::InteractiveSession,
+        canopy_config: &crate::domain::canopy_config::CanopyConfig,
+        cols: u16,
+        rows: u16,
+        current_boot_id: Option<&str>,
+    ) {
+        // The stored PID is alive on the same boot — but that alone is
+        // NOT proof of a session-lock conflict. Two benign cases used
+        // to permanently orphan healthy sessions here:
+        //  * quick TUI close→reopen: the old CLI got its HUP and is
+        //    still in the middle of dying;
+        //  * PID recycling: the number now belongs to an unrelated
+        //    process.
+        // Only a live process that actually IS this CLI, and that
+        // survives a short grace period, is a genuine conflict.
+        let pid = session.pid.unwrap_or(0);
+        if matches!(
+            resume_decision(true, process_outlives_grace(pid, &session.cli)),
+            ResumeDecision::Resume
+        ) {
+            tracing::info!(
+                "Auto-resuming session '{}': stored pid {pid} was recycled or exited during grace",
+                session.name
+            );
+            self.resume_interactive_session(session, canopy_config, cols, rows, current_boot_id);
+            return;
+        }
+        tracing::warn!(
+            "Skipping auto-resume of session '{}' for this start: pid {pid} is still alive and holds it; will retry on the next start",
+            session.name
+        );
+        // A genuine session-lock conflict: the old CLI is still alive
+        // and holding the session, which makes it unreachable right
+        // now, not dead. Leave the row exactly as it is — still
+        // `active`, still holding its pid and boot_id — so it's
+        // retried on every subsequent start and comes back on its own
+        // once the holder exits. There's nothing to clean up in the
+        // meantime either: only resumed sessions join
+        // `interactive_agents`, so a skipped row is simply absent
+        // from this run's sidebar.
     }
 
     pub fn auto_resume_terminal_sessions(&mut self) {
@@ -7670,6 +7738,132 @@ mod tests {
     }
 
     #[test]
+    fn navigate_child_with_no_highlight_selects_dfs_first() {
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        let state = graph_state(
+            &[("a", "A"), ("b", "B")],
+            &[("a", "b", crate::domain::graphs::GraphEdgeCondition::Pass)],
+            None,
+        );
+        app.graph_live_state = Some(state);
+        app.graph_live_follow = true;
+        app.graph_live_selected_node = None;
+
+        app.graph_live_navigate_child();
+
+        assert_eq!(
+            app.graph_live_highlighted_node_id(),
+            Some("a"),
+            "no highlight: child enters at the DFS entry node"
+        );
+        assert!(!app.graph_live_follow);
+    }
+
+    #[test]
+    fn navigate_child_through_ensemble_member_target() {
+        use crate::domain::graphs::{GraphEdge, GraphEdgeCondition, GraphNode, GraphNodeKind};
+        use crate::tui::app::graph_live_state::{EnsembleLiveInfo, EnsembleMemberLiveInfo};
+        use chrono::Utc;
+        use serde_json::json;
+
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+
+        let node = |id: &str, pos: i64| GraphNode {
+            id: id.to_string(),
+            spec_id: Some("s1".to_string()),
+            graph_id: None,
+            name: id.to_string(),
+            kind: GraphNodeKind::Agent,
+            config: json!({}),
+            position: pos,
+            created_at: Utc::now(),
+        };
+        let edge = |id: &str, from: &str, to: &str| GraphEdge {
+            id: id.to_string(),
+            spec_id: Some("s1".to_string()),
+            graph_id: None,
+            from_node: from.to_string(),
+            to_node: to.to_string(),
+            condition: GraphEdgeCondition::Pass,
+        };
+        let state = GraphLiveState {
+            graph_id: "lp1".to_string(),
+            graph_name: "graph".to_string(),
+            graph_status: GraphStatus::Running,
+            workdir: "/tmp".to_string(),
+            trigger_type: "manual".to_string(),
+            schedule_expr: None,
+            watch_path: None,
+            autorun_at: None,
+            spec_queue: Vec::new(),
+            done_count: 0,
+            total_count: 0,
+            current_spec_id: Some("s1".to_string()),
+            effective_nodes: vec![
+                node("start", 0),
+                node("m1", 1),
+                node("m2", 2),
+                node("join1", 3),
+            ],
+            effective_edges: vec![
+                edge("e1", "start", "m1"),
+                edge("e2", "m1", "join1"),
+                edge("e3", "m2", "join1"),
+            ],
+            ensembles: vec![EnsembleLiveInfo {
+                ensemble_id: "ens1".to_string(),
+                name: "E".to_string(),
+                join_node_id: "join1".to_string(),
+                members: vec![
+                    EnsembleMemberLiveInfo {
+                        node_id: "m1".to_string(),
+                        label: "claude".to_string(),
+                        status: None,
+                    },
+                    EnsembleMemberLiveInfo {
+                        node_id: "m2".to_string(),
+                        label: "opencode".to_string(),
+                        status: None,
+                    },
+                ],
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
+            }],
+            router_taken_routes: HashMap::new(),
+            current_node_id: Some("start".to_string()),
+            current_node_status: None,
+            current_node_started_at: None,
+            current_node_iteration: None,
+            current_node_output_tail: None,
+        };
+        app.graph_live_state = Some(state);
+        app.graph_live_follow = false;
+        app.graph_live_selected_node = Some("start".to_string());
+
+        // start -> m1 (a member) collapses to ens1, whose first member is m1.
+        app.graph_live_navigate_child();
+        assert_eq!(app.graph_live_highlighted_node_id(), Some("m1"));
+
+        // From the ensemble member, the parent is the external start node.
+        app.graph_live_navigate_parent();
+        assert_eq!(app.graph_live_highlighted_node_id(), Some("start"));
+    }
+
+    #[test]
     fn navigate_sibling_follows_dfs_order() {
         // Graph: a pass->b, a fail->c, b pass->d
         // DFS order should be a,b,d,c
@@ -7826,6 +8020,472 @@ mod tests {
             app.graph_live_selected_node.as_deref(),
             Some("n2"),
             "seed must be the most recent run's node, not the entry node"
+        );
+    }
+
+    #[test]
+    fn graph_live_enter_is_noop_when_not_following() {
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        app.graph_live_follow = false;
+        app.graph_live_selected_node = Some("kept".to_string());
+
+        app.graph_live_enter();
+
+        assert!(!app.graph_live_follow, "already manual: no change");
+        assert_eq!(app.graph_live_selected_node.as_deref(), Some("kept"));
+    }
+
+    #[test]
+    fn graph_live_enter_prefers_current_node_on_running_graph() {
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        let state = graph_state(
+            &[("a", "A"), ("b", "B")],
+            &[("a", "b", crate::domain::graphs::GraphEdgeCondition::Pass)],
+            Some("b"),
+        );
+        app.graph_live_state = Some(state);
+        app.graph_live_follow = true;
+        app.graph_live_selected_node = None;
+
+        app.graph_live_enter();
+
+        assert!(!app.graph_live_follow);
+        assert_eq!(
+            app.graph_live_selected_node.as_deref(),
+            Some("b"),
+            "running graph seeds the engine's current node"
+        );
+    }
+
+    #[test]
+    fn graph_live_enter_falls_back_to_dfs_entry_on_finished_graph_without_runs() {
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        let state = graph_state(
+            &[("a", "A"), ("b", "B")],
+            &[("a", "b", crate::domain::graphs::GraphEdgeCondition::Pass)],
+            None,
+        );
+        app.graph_live_state = Some(state);
+        app.graph_live_follow = true;
+        app.graph_live_selected_node = None;
+        app.graph_spec_strip_selected = None;
+
+        app.graph_live_enter();
+
+        assert_eq!(
+            app.graph_live_selected_node.as_deref(),
+            Some("a"),
+            "no runs: fall back to the DFS entry node"
+        );
+        assert!(!app.graph_live_follow);
+    }
+
+    #[test]
+    fn graph_live_enter_keeps_follow_when_graph_has_no_nodes() {
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        app.graph_live_state = Some(graph_state(&[], &[], None));
+        app.graph_live_follow = true;
+        app.graph_live_selected_node = None;
+
+        app.graph_live_enter();
+
+        assert!(app.graph_live_follow, "no nodes: stay in auto-follow");
+        assert!(app.graph_live_selected_node.is_none());
+    }
+
+    // ── dfs tests ───────────────────────────────────────────────────────
+
+    #[test]
+    fn dfs_endpoint_resolves_join_node_to_ensemble_id() {
+        use crate::tui::app::graph_live_state::EnsembleLiveInfo;
+        use std::collections::HashMap;
+
+        let ens = EnsembleLiveInfo {
+            ensemble_id: "ens1".into(),
+            name: "Ensemble 1".into(),
+            join_node_id: "join1".into(),
+            members: vec![],
+            straggler_timeout_minutes: None,
+            quorum_grace_minutes: None,
+        };
+        let ensemble_by_join: HashMap<&str, &EnsembleLiveInfo> = [("join1", &ens)].into();
+        let member_to_ensemble: HashMap<String, String> = HashMap::new();
+        let collapsed: HashMap<String, (bool, i64)> = HashMap::new();
+
+        let result = App::dfs_endpoint("join1", &ensemble_by_join, &member_to_ensemble, &collapsed);
+        assert_eq!(result, Some("ens1".into()));
+    }
+
+    #[test]
+    fn dfs_endpoint_resolves_ensemble_member_to_ensemble_id() {
+        use crate::tui::app::graph_live_state::EnsembleLiveInfo;
+        use std::collections::HashMap;
+
+        let ens = EnsembleLiveInfo {
+            ensemble_id: "ens1".into(),
+            name: "Ensemble 1".into(),
+            join_node_id: "join1".into(),
+            members: vec![crate::tui::app::graph_live_state::EnsembleMemberLiveInfo {
+                node_id: "m1".into(),
+                label: "claude".into(),
+                status: None,
+            }],
+            straggler_timeout_minutes: None,
+            quorum_grace_minutes: None,
+        };
+        let ensemble_by_join: HashMap<&str, &EnsembleLiveInfo> = [("join1", &ens)].into();
+        let mut member_to_ensemble: HashMap<String, String> = HashMap::new();
+        member_to_ensemble.insert("m1".into(), "ens1".into());
+        let collapsed: HashMap<String, (bool, i64)> = HashMap::new();
+
+        let result = App::dfs_endpoint("m1", &ensemble_by_join, &member_to_ensemble, &collapsed);
+        assert_eq!(result, Some("ens1".into()));
+    }
+
+    #[test]
+    fn dfs_endpoint_resolves_regular_node_in_collapsed() {
+        use std::collections::HashMap;
+
+        let ensemble_by_join: HashMap<&str, &crate::tui::app::graph_live_state::EnsembleLiveInfo> =
+            HashMap::new();
+        let member_to_ensemble: HashMap<String, String> = HashMap::new();
+        let mut collapsed: HashMap<String, (bool, i64)> = HashMap::new();
+        collapsed.insert("regular".into(), (false, 0));
+
+        let result = App::dfs_endpoint(
+            "regular",
+            &ensemble_by_join,
+            &member_to_ensemble,
+            &collapsed,
+        );
+        assert_eq!(result, Some("regular".into()));
+    }
+
+    #[test]
+    fn dfs_endpoint_returns_none_for_unknown_node() {
+        use std::collections::HashMap;
+
+        let ensemble_by_join: HashMap<&str, &crate::tui::app::graph_live_state::EnsembleLiveInfo> =
+            HashMap::new();
+        let member_to_ensemble: HashMap<String, String> = HashMap::new();
+        let collapsed: HashMap<String, (bool, i64)> = HashMap::new();
+
+        let result = App::dfs_endpoint(
+            "unknown",
+            &ensemble_by_join,
+            &member_to_ensemble,
+            &collapsed,
+        );
+        assert_eq!(result, None);
+    }
+
+    /// dfs_order collapses ensemble members to the first member's node id
+    #[test]
+    fn dfs_order_collapses_ensemble_members_to_first_member() {
+        use crate::domain::graphs::{
+            GraphEdge, GraphEdgeCondition, GraphNode, GraphNodeKind, GraphSpecStatus,
+        };
+        use crate::tui::app::graph_live_state::{
+            EnsembleLiveInfo, EnsembleMemberLiveInfo, GraphLiveState, SpecQueueEntry,
+        };
+        use chrono::Utc;
+        use std::collections::HashMap;
+
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+
+        let state = GraphLiveState {
+            graph_id: "g1".into(),
+            graph_name: "Test".into(),
+            graph_status: GraphStatus::Running,
+            workdir: "/tmp".into(),
+            trigger_type: "manual".into(),
+            schedule_expr: None,
+            watch_path: None,
+            autorun_at: None,
+            spec_queue: vec![SpecQueueEntry {
+                spec_id: "s1".into(),
+                spec_name: "S1".into(),
+                status: GraphSpecStatus::Running,
+                failure_reason: None,
+            }],
+            done_count: 0,
+            total_count: 1,
+            current_spec_id: Some("s1".into()),
+            effective_nodes: vec![
+                GraphNode {
+                    id: "m1".into(),
+                    spec_id: Some("s1".into()),
+                    graph_id: Some("g1".into()),
+                    name: "Member 1".into(),
+                    kind: GraphNodeKind::Agent,
+                    config: serde_json::json!({}),
+                    position: 0,
+                    created_at: Utc::now(),
+                },
+                GraphNode {
+                    id: "m2".into(),
+                    spec_id: Some("s1".into()),
+                    graph_id: Some("g1".into()),
+                    name: "Member 2".into(),
+                    kind: GraphNodeKind::Agent,
+                    config: serde_json::json!({}),
+                    position: 1,
+                    created_at: Utc::now(),
+                },
+                GraphNode {
+                    id: "join1".into(),
+                    spec_id: Some("s1".into()),
+                    graph_id: Some("g1".into()),
+                    name: "Join".into(),
+                    kind: GraphNodeKind::Agent,
+                    config: serde_json::json!({}),
+                    position: 2,
+                    created_at: Utc::now(),
+                },
+            ],
+            effective_edges: vec![
+                GraphEdge {
+                    id: "e1".into(),
+                    spec_id: Some("s1".into()),
+                    graph_id: Some("g1".into()),
+                    from_node: "m1".into(),
+                    to_node: "m2".into(),
+                    condition: GraphEdgeCondition::Pass,
+                },
+                GraphEdge {
+                    id: "e2".into(),
+                    spec_id: Some("s1".into()),
+                    graph_id: Some("g1".into()),
+                    from_node: "m2".into(),
+                    to_node: "join1".into(),
+                    condition: GraphEdgeCondition::Pass,
+                },
+            ],
+            ensembles: vec![EnsembleLiveInfo {
+                ensemble_id: "ens1".into(),
+                name: "Ensemble 1".into(),
+                join_node_id: "join1".into(),
+                members: vec![
+                    EnsembleMemberLiveInfo {
+                        node_id: "m1".into(),
+                        label: "claude".into(),
+                        status: None,
+                    },
+                    EnsembleMemberLiveInfo {
+                        node_id: "m2".into(),
+                        label: "opencode".into(),
+                        status: None,
+                    },
+                ],
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
+            }],
+            router_taken_routes: HashMap::new(),
+            current_node_id: Some("m1".into()),
+            current_node_status: None,
+            current_node_started_at: None,
+            current_node_iteration: None,
+            current_node_output_tail: None,
+        };
+        app.graph_live_state = Some(state);
+
+        let order = app.dfs_order();
+        // Ensemble members should be collapsed to first member (m1)
+        // The final order contains concrete ids, so ens1 -> m1
+        assert!(order.contains(&"m1".to_string()));
+        // m2 and join1 should not appear in final order
+        assert!(!order.contains(&"m2".to_string()));
+        assert!(!order.contains(&"join1".to_string()));
+        // m1 should appear exactly once
+        assert_eq!(order.iter().filter(|n| *n == "m1").count(), 1);
+    }
+
+    /// collapse_nodes skips join node ids
+    #[test]
+    fn collapse_nodes_skips_join_node_ids() {
+        use crate::domain::graphs::{GraphNode, GraphNodeKind};
+        use crate::tui::app::graph_live_state::{
+            EnsembleLiveInfo, EnsembleMemberLiveInfo, GraphLiveState,
+        };
+        use chrono::Utc;
+
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let _app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+
+        let state = GraphLiveState {
+            graph_id: "g1".into(),
+            graph_name: "Test".into(),
+            graph_status: GraphStatus::Running,
+            workdir: "/tmp".into(),
+            trigger_type: "manual".into(),
+            schedule_expr: None,
+            watch_path: None,
+            autorun_at: None,
+            spec_queue: vec![],
+            done_count: 0,
+            total_count: 0,
+            current_spec_id: None,
+            effective_nodes: vec![
+                GraphNode {
+                    id: "m1".into(),
+                    spec_id: Some("s1".into()),
+                    graph_id: Some("g1".into()),
+                    name: "Member 1".into(),
+                    kind: GraphNodeKind::Agent,
+                    config: serde_json::json!({}),
+                    position: 0,
+                    created_at: Utc::now(),
+                },
+                GraphNode {
+                    id: "join1".into(),
+                    spec_id: Some("s1".into()),
+                    graph_id: Some("g1".into()),
+                    name: "Join".into(),
+                    kind: GraphNodeKind::Agent,
+                    config: serde_json::json!({}),
+                    position: 1,
+                    created_at: Utc::now(),
+                },
+                GraphNode {
+                    id: "regular".into(),
+                    spec_id: Some("s1".into()),
+                    graph_id: Some("g1".into()),
+                    name: "Regular".into(),
+                    kind: GraphNodeKind::Agent,
+                    config: serde_json::json!({}),
+                    position: 2,
+                    created_at: Utc::now(),
+                },
+            ],
+            effective_edges: vec![],
+            ensembles: vec![EnsembleLiveInfo {
+                ensemble_id: "ens1".into(),
+                name: "Ensemble 1".into(),
+                join_node_id: "join1".into(),
+                members: vec![EnsembleMemberLiveInfo {
+                    node_id: "m1".into(),
+                    label: "claude".into(),
+                    status: None,
+                }],
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
+            }],
+            router_taken_routes: std::collections::HashMap::new(),
+            current_node_id: None,
+            current_node_status: None,
+            current_node_started_at: None,
+            current_node_iteration: None,
+            current_node_output_tail: None,
+        };
+
+        let collapsed = App::collapse_nodes(&state);
+        // join1 should be skipped
+        assert!(!collapsed.contains_key("join1"));
+        // m1 should be collapsed into ensemble
+        assert!(!collapsed.contains_key("m1"));
+        // ens1 should be present
+        assert!(collapsed.contains_key("ens1"));
+        // regular node should be present
+        assert!(collapsed.contains_key("regular"));
+        assert!(collapsed["ens1"].0); // is_ensemble
+        assert!(!collapsed["regular"].0); // not ensemble
+    }
+
+    // ── auto_resume tests ───────────────────────────────────────────────
+
+    #[test]
+    fn sweep_orphaned_sessions_retires_orphan_rows() {
+        let db = test_db();
+        db.insert_interactive_session(
+            "orphan-sess",
+            "orphan",
+            "opencode",
+            "/tmp",
+            None,
+            None,
+            "interactive",
+            None,
+        )
+        .unwrap();
+        db.mark_session_orphaned("orphan-sess").unwrap();
+        assert_eq!(db.get_orphaned_sessions().unwrap().len(), 1);
+
+        let data_dir = tempdir().expect("create data dir");
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+
+        app.sweep_orphaned_sessions();
+
+        assert!(db.get_orphaned_sessions().unwrap().is_empty());
+        assert_eq!(
+            db.get_interactive_session_status("orphan-sess")
+                .unwrap()
+                .as_deref(),
+            Some("completed")
+        );
+    }
+
+    #[test]
+    fn auto_resume_skips_when_no_active_sessions() {
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+
+        app.auto_resume_sessions();
+
+        assert!(
+            app.interactive_agents.is_empty(),
+            "nothing to resume: no agent is spawned"
         );
     }
 }

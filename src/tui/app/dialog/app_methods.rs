@@ -340,22 +340,10 @@ impl App {
         if matches!(dialog.task_type, NewTaskType::Interactive) {
             if dialog.is_planting_new_seed() {
                 self.launch_interactive(&dialog)?;
-                let new_agent_name = self
-                    .interactive_agents
-                    .last()
-                    .map(|agent| agent.name.clone())
-                    .unwrap_or_default();
+                let name = self.take_new_interactive_name();
                 self.new_agent_dialog = None;
                 self.refresh_agents()?;
-                if !new_agent_name.is_empty() {
-                    if let Some(position) = self
-                        .agents
-                        .iter()
-                        .position(|entry| entry.id(self) == new_agent_name)
-                    {
-                        self.selected = position;
-                    }
-                }
+                self.select_agent_by_name(&name);
                 self.focus = super::super::types::Focus::Agent;
                 return Ok(());
             } else {
@@ -365,43 +353,65 @@ impl App {
         }
 
         // Track the name of the newly created agent to select it after refresh
-        let new_agent_name = match dialog.task_type {
-            NewTaskType::Interactive => None,
-            NewTaskType::Background => {
-                match dialog.background_trigger {
-                    BackgroundTrigger::Cron => {
-                        self.launch_scheduled(&dialog, model)?;
-                    }
-                    BackgroundTrigger::Watch => {
-                        self.launch_watcher(&dialog, model)?;
-                    }
-                }
-                None
-            }
-            NewTaskType::Terminal => {
-                self.launch_terminal(&dialog)?;
-                self.terminal_agents.last().map(|agent| agent.name.clone())
-            }
-        };
+        let new_agent_name = self.launch_created_agent(&dialog, model)?;
 
         self.new_agent_dialog = None;
 
         self.refresh_agents()?;
 
         // Select the newly created agent specifically instead of just the last agent
-        if let Some(agent_name) = new_agent_name {
-            if let Some(position) = self
-                .agents
-                .iter()
-                .position(|entry| entry.id(self) == agent_name)
-            {
-                self.selected = position;
-            }
+        if let Some(name) = new_agent_name {
+            self.select_agent_by_name(&name);
         }
 
         // All new sessions start in focus mode
         self.focus = super::super::types::Focus::Agent;
         Ok(())
+    }
+
+    fn select_agent_by_name(&mut self, agent_name: &str) {
+        if agent_name.is_empty() {
+            return;
+        }
+        if let Some(position) = self
+            .agents
+            .iter()
+            .position(|entry| entry.id(self) == agent_name)
+        {
+            self.selected = position;
+        }
+    }
+
+    fn take_new_interactive_name(&self) -> String {
+        self.interactive_agents
+            .last()
+            .map(|agent| agent.name.clone())
+            .unwrap_or_default()
+    }
+
+    fn launch_created_agent(
+        &mut self,
+        dialog: &NewAgentDialog,
+        model: Option<String>,
+    ) -> Result<Option<String>> {
+        match dialog.task_type {
+            NewTaskType::Background => {
+                match dialog.background_trigger {
+                    BackgroundTrigger::Cron => {
+                        self.launch_scheduled(dialog, model)?;
+                    }
+                    BackgroundTrigger::Watch => {
+                        self.launch_watcher(dialog, model)?;
+                    }
+                }
+                Ok(None)
+            }
+            NewTaskType::Terminal => {
+                self.launch_terminal(dialog)?;
+                Ok(self.terminal_agents.last().map(|agent| agent.name.clone()))
+            }
+            NewTaskType::Interactive => Ok(None), // handled above
+        }
     }
 
     fn open_launchpad_dialog(&mut self, dialog: NewAgentDialog) -> Result<()> {
@@ -431,71 +441,102 @@ impl App {
             return Ok(());
         };
 
-        let (mission_title, mission_context, previous_node_id, mode) = match launchpad.choice() {
-            LaunchpadChoice::ContinueMission => {
-                let Some(previous) = launchpad.selected_mission() else {
-                    return Ok(());
-                };
-                (
-                    previous.mission.clone(),
-                    previous.summary.clone(),
-                    Some(previous.node_id.clone()),
-                    "continue",
-                )
-            }
-            LaunchpadChoice::NewMission => {
-                let Some(mission) = launchpad.new_mission_title() else {
-                    return Ok(());
-                };
-                (mission.to_string(), None, None, "new")
-            }
+        let Some((mission_title, mission_context, _previous_node_id, mode)) =
+            Self::launchpad_mission_choice(&launchpad)
+        else {
+            return Ok(());
         };
-
-        let launchpad_node_id = format!("launchpad:{}", uuid::Uuid::new_v4());
-        let dialog_workdir = dialog.working_dir.clone();
         // `continues` edge to previous node is dropped — operational
         // sessions have no edges (CM8, out of scope schema).
-        let _ = previous_node_id;
-        self.db
-            .upsert_operational_session(crate::db::intelligence::OperationalSessionInput {
-                id: Some(launchpad_node_id.clone()),
-                title: mission_title.clone(),
-                body: mission_context
-                    .clone()
-                    .unwrap_or_else(|| "Launchpad session started.".to_string()),
-                metadata: Some(serde_json::json!({
-                    "source": "launchpad",
-                    "workdir": dialog_workdir,
-                    "mode": mode,
-                    "summary": mission_context,
-                })),
-                project_hash: None,
-                session_id: Some(launchpad_node_id),
-            })?;
+
+        let _launchpad_node_id = Self::record_launchpad_session(
+            self,
+            &mission_title,
+            mission_context.as_deref(),
+            mode,
+            &dialog.working_dir,
+        )?;
 
         let is_nursery = dialog.is_planting_new_seed();
         self.launch_interactive(&dialog)?;
-        let new_agent_name = self
-            .interactive_agents
-            .last()
-            .map(|agent| agent.name.clone())
-            .unwrap_or_default();
+        let name = self.take_new_interactive_name();
         self.refresh_agents()?;
-        if !new_agent_name.is_empty() {
-            if let Some(position) = self
-                .agents
-                .iter()
-                .position(|entry| entry.id(self) == new_agent_name)
-            {
-                self.selected = position;
-            }
-        }
+        self.select_agent_by_name(&name);
 
         if is_nursery {
             self.focus = super::super::types::Focus::Agent;
             return Ok(());
         }
 
+        let initial_content = Self::launchpad_initial_content(
+            self,
+            &dialog.working_dir,
+            &mission_title,
+            mission_context.as_deref(),
+            &launchpad,
+        );
+        self.focus = super::super::types::Focus::Agent;
+        if !dialog.is_planting_new_seed() {
+            self.open_simple_prompt_dialog(Some(initial_content));
+        }
+        Ok(())
+    }
+
+    fn launchpad_mission_choice(
+        launchpad: &LaunchpadDialog,
+    ) -> Option<(String, Option<String>, Option<String>, &'static str)> {
+        match launchpad.choice() {
+            LaunchpadChoice::ContinueMission => {
+                let previous = launchpad.selected_mission()?;
+                Some((
+                    previous.mission.clone(),
+                    previous.summary.clone(),
+                    Some(previous.node_id.clone()),
+                    "continue",
+                ))
+            }
+            LaunchpadChoice::NewMission => {
+                let mission = launchpad.new_mission_title()?;
+                Some((mission.to_string(), None, None, "new"))
+            }
+        }
+    }
+
+    fn record_launchpad_session(
+        &self,
+        title: &str,
+        mission_context: Option<&str>,
+        mode: &str,
+        workdir: &str,
+    ) -> Result<String> {
+        let launchpad_node_id = format!("launchpad:{}", uuid::Uuid::new_v4());
+        let body = mission_context
+            .map(str::to_string)
+            .unwrap_or_else(|| "Launchpad session started.".to_string());
+        self.db
+            .upsert_operational_session(crate::db::intelligence::OperationalSessionInput {
+                id: Some(launchpad_node_id.clone()),
+                title: title.to_string(),
+                body,
+                metadata: Some(serde_json::json!({
+                    "source": "launchpad",
+                    "workdir": workdir,
+                    "mode": mode,
+                    "summary": mission_context,
+                })),
+                project_hash: None,
+                session_id: Some(launchpad_node_id.clone()),
+            })?;
+        Ok(launchpad_node_id)
+    }
+
+    fn launchpad_initial_content(
+        &self,
+        workdir: &str,
+        mission_title: &str,
+        mission_context: Option<&str>,
+        launchpad: &LaunchpadDialog,
+    ) -> std::collections::HashMap<String, String> {
         let mut initial_content = std::collections::HashMap::new();
         let mut launchpad_context = format!("mission: {mission_title}");
         if let Some(context) = mission_context {
@@ -514,17 +555,10 @@ impl App {
             }
         }
         initial_content.insert("context".to_string(), launchpad_context);
-        if let Ok(Some(project)) = self
-            .db
-            .get_project_by_path_or_ancestor(Path::new(&dialog.working_dir))
-        {
+        if let Ok(Some(project)) = self.db.get_project_by_path_or_ancestor(Path::new(workdir)) {
             initial_content.insert("project_context".to_string(), project.path);
         }
-        self.focus = super::super::types::Focus::Agent;
-        if !dialog.is_planting_new_seed() {
-            self.open_simple_prompt_dialog(Some(initial_content));
-        }
-        Ok(())
+        initial_content
     }
 
     fn update_scheduled(
@@ -1712,5 +1746,102 @@ mod tests {
             Some("high"),
             "edit must not clear effort"
         );
+    }
+
+    // ── select_agent_by_name ────────────────────────────────────────
+
+    #[test]
+    fn select_agent_by_name_sets_selection_when_present() {
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        app.agents = vec![
+            AgentEntry::Agent(cron_agent("a1")),
+            AgentEntry::Agent(cron_agent("a2")),
+        ];
+        app.select_agent_by_name("a2");
+        assert_eq!(app.selected, 1);
+    }
+
+    #[test]
+    fn select_agent_by_name_ignores_absent_or_empty() {
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        app.agents = vec![AgentEntry::Agent(cron_agent("a1"))];
+        app.selected = 0;
+        app.select_agent_by_name("not-there");
+        assert_eq!(app.selected, 0); // unchanged
+        app.select_agent_by_name("");
+        assert_eq!(app.selected, 0); // unchanged
+    }
+
+    // ── launchpad_mission_choice ────────────────────────────────────
+
+    #[test]
+    fn launchpad_mission_choice_continue_requires_selected_mission() {
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let _app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        let launchpad = LaunchpadDialog::for_workdir(&db, "/tmp").unwrap();
+        // No mission selected -> None
+        assert!(App::launchpad_mission_choice(&launchpad).is_none());
+    }
+
+    // ── launchpad_initial_content ───────────────────────────────────
+
+    #[test]
+    fn launchpad_initial_content_skips_blank_summary_and_lists_peers() {
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+        let mut launchpad = LaunchpadDialog::for_workdir(&db, "/tmp").unwrap();
+        // Simulate an empty mission context and some active peer missions
+        launchpad.active_missions =
+            vec![crate::tui::app::dialog::launchpad::ActiveMissionSummary {
+                agent_name: "peer".into(),
+                impact: "low".into(),
+                mission: "peer mission".into(),
+            }];
+        let content = App::launchpad_initial_content(
+            &app,
+            "/tmp",
+            "My Mission",
+            Some(""), // blank summary -> should be skipped
+            &launchpad,
+        );
+        assert!(content
+            .get("context")
+            .unwrap()
+            .contains("mission: My Mission"));
+        assert!(!content.get("context").unwrap().contains("previous_summary"));
+        assert!(content
+            .get("context")
+            .unwrap()
+            .contains("active_peer_missions"));
+        assert!(content
+            .get("context")
+            .unwrap()
+            .contains("peer [low]: peer mission"));
     }
 }

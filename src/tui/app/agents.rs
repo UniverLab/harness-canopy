@@ -1,5 +1,6 @@
 use super::types::{AgentEntry, App, Focus};
 use crate::tui::agent::{AgentStatus, InteractiveAgent};
+use crate::tui::gamification::MissionEvent;
 use crate::tui::terminal_history::save_history;
 use regex::Regex;
 use std::sync::LazyLock;
@@ -419,80 +420,91 @@ impl App {
         let working_dir = agent.working_dir.clone();
         let cli = agent.cli.as_str().to_string();
         let output_snippet = recent_output_snippet(agent, 5);
-
-        // Finalize nursery if this was a seed creation session
-        if let Some(ref nursery_path_ref) = self.nursery_path {
-            // Clone the path to avoid borrow conflict when we clear self.nursery_path
-            let nursery_path = nursery_path_ref.clone();
-            if nursery_path.to_string_lossy() == working_dir && code == 0 {
-                match crate::domain::nursery::finalize_nursery(&nursery_path) {
-                    Ok(seed_id) => {
-                        // Bind the session to the new seed
-                        let _ = self.db.bind_session_to_seed(&agent_id, &seed_id);
-                        self.queue_mission_event(
-                            crate::tui::gamification::MissionEvent::FirstSeedCreated,
-                        );
-                    }
-                    Err(e) => {
-                        tracing::error!("Nursery finalization failed: {e}");
-                        self.notification_service.notify_nursery_failed(&e);
-                    }
-                }
-            } else if code != 0 {
-                // Clean up temp dir on error exit
-                let _ = std::fs::remove_dir_all(&nursery_path);
-            }
-            // Remove nursery session record from DB — it should not persist as a normal session
-            let _ = self.db.remove_interactive_session(&agent_id);
-            // Also remove the nursery project entry if it was registered
-            let _ = self.db.unregister_project_path(&nursery_path);
-            // Clear nursery state — do this after all uses of nursery_path
-            self.nursery_path = None;
-        } else {
-            let _ = self.db.finish_interactive_session(&agent_id, code);
-        }
-
-        if let Some(ref sb) = self.active_sandbox {
-            let sandbox = sb.clone();
-            let merge_result = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current()
-                    .block_on(async { crate::domain::sandbox::merge_sandbox(&sandbox).await })
-            });
-            match merge_result {
-                Ok(outcome) => {
-                    let status = match &outcome {
-                        crate::domain::sandbox::MergeOutcome::CleanMerge => "merged",
-                        crate::domain::sandbox::MergeOutcome::ConflictResolution => "merged",
-                        crate::domain::sandbox::MergeOutcome::MergeFailed(_) => "failed",
-                    };
-                    let _ = self.db.update_sandbox_run_status(&sandbox.id, status);
-                    if let crate::domain::sandbox::MergeOutcome::MergeFailed(ref reason) = outcome {
-                        tracing::error!("Sandbox merge failed: {reason}");
-                        self.notification_service
-                            .notify_nursery_failed(&format!("Sandbox merge failed: {reason}"));
-                    }
-                }
-                Err(e) => {
-                    tracing::error!("Sandbox merge error: {e}");
-                    let _ = self.db.update_sandbox_run_status(&sandbox.id, "failed");
-                }
-            }
-            self.active_sandbox = None;
-        }
-
+        self.record_interactive_exit_in_db(&agent_id, &working_dir, code);
+        self.merge_active_sandbox();
         let _ = self
             .db
             .close_agent_missions(&agent_id, &agent_name, &working_dir);
-        if code != 0 {
-            self.notify_failed_interactive_exit(&agent_id, &cli, code, &output_snippet);
-        } else if self.session_args_contain_yolo(&agent_id, &cli) {
-            self.queue_mission_event(crate::tui::gamification::MissionEvent::YoloTaskCompleted);
+        self.announce_interactive_exit(&agent_id, &cli, code, &output_snippet);
+        if let Some(agent) = self.interactive_agents.get_mut(idx) {
+            agent.exit_notified = true;
         }
+    }
 
-        let Some(agent) = self.interactive_agents.get_mut(idx) else {
+    fn record_interactive_exit_in_db(&mut self, agent_id: &str, working_dir: &str, code: i32) {
+        let Some(nursery_path) = self.nursery_path.clone() else {
+            let _ = self.db.finish_interactive_session(agent_id, code); // non-nursery path
             return;
         };
-        agent.exit_notified = true;
+        if nursery_path.to_string_lossy() == working_dir && code == 0 {
+            match crate::domain::nursery::finalize_nursery(&nursery_path) {
+                Ok(seed_id) => {
+                    let _ = self.db.bind_session_to_seed(agent_id, &seed_id);
+                    self.queue_mission_event(MissionEvent::FirstSeedCreated);
+                }
+                Err(e) => {
+                    tracing::error!("Nursery finalization failed: {e}");
+                    self.notification_service.notify_nursery_failed(&e);
+                }
+            }
+        } else if code != 0 {
+            let _ = std::fs::remove_dir_all(&nursery_path);
+        }
+        let _ = self.db.remove_interactive_session(agent_id);
+        let _ = self.db.unregister_project_path(&nursery_path);
+        self.nursery_path = None;
+    }
+
+    fn merge_active_sandbox(&mut self) {
+        let Some(sandbox) = self.active_sandbox.clone() else {
+            return;
+        };
+        let merge_result = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(async { crate::domain::sandbox::merge_sandbox(&sandbox).await })
+        });
+        match merge_result {
+            Ok(outcome) => {
+                let _ = self.db.update_sandbox_run_status(
+                    &sandbox.id,
+                    Self::sandbox_merge_run_status(&outcome),
+                );
+                if let crate::domain::sandbox::MergeOutcome::MergeFailed(ref reason) = outcome {
+                    tracing::error!("Sandbox merge failed: {reason}");
+                    self.notification_service
+                        .notify_nursery_failed(&format!("Sandbox merge failed: {reason}"));
+                }
+            }
+            Err(e) => {
+                tracing::error!("Sandbox merge error: {e}");
+                let _ = self.db.update_sandbox_run_status(&sandbox.id, "failed");
+            }
+        }
+        self.active_sandbox = None;
+    }
+
+    fn sandbox_merge_run_status(outcome: &crate::domain::sandbox::MergeOutcome) -> &'static str {
+        match outcome {
+            crate::domain::sandbox::MergeOutcome::CleanMerge => "merged",
+            crate::domain::sandbox::MergeOutcome::ConflictResolution => "merged",
+            crate::domain::sandbox::MergeOutcome::MergeFailed(_) => "failed",
+        }
+    }
+
+    fn announce_interactive_exit(
+        &mut self,
+        agent_id: &str,
+        cli: &str,
+        code: i32,
+        output_snippet: &str,
+    ) {
+        if code != 0 {
+            self.notify_failed_interactive_exit(agent_id, cli, code, output_snippet);
+            return;
+        }
+        if self.session_args_contain_yolo(agent_id, cli) {
+            self.queue_mission_event(crate::tui::gamification::MissionEvent::YoloTaskCompleted);
+        }
     }
 
     fn successful_interactive_exit_indices(&self) -> Vec<usize> {
@@ -1252,6 +1264,323 @@ mod tests {
     fn effective_brain_dims_height_exactly_minimum() {
         let (_cols, rows) = effective_brain_dims((100, 3));
         assert_eq!(rows, 3);
+    }
+}
+
+// ── handle_interactive_exit tests ───────────────────────────────────
+
+#[cfg(test)]
+mod handle_interactive_exit_tests {
+    use super::*;
+    use crate::db::Database;
+    use crate::tui::agent::{AgentStatus, InteractiveAgent};
+    use std::sync::Arc;
+    use tempfile::{tempdir, NamedTempFile};
+
+    fn test_db() -> Arc<Database> {
+        let tmp = NamedTempFile::new().expect("create temp file");
+        let path = tmp.path().to_path_buf();
+        std::mem::forget(tmp);
+        Arc::new(Database::new(&path).expect("create test db"))
+    }
+
+    fn spawn_mock_interactive(name: &str) -> InteractiveAgent {
+        InteractiveAgent::spawn_terminal(
+            "cat",
+            "/tmp",
+            80,
+            24,
+            Some(name),
+            &[],
+            ratatui::style::Color::White,
+        )
+        .expect("spawn mock interactive")
+    }
+
+    /// record_interactive_exit_in_db: nursery_path is Some and matches working_dir with code 0
+    #[test]
+    fn record_interactive_exit_in_db_nursery_success() {
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+
+        let nursery_path = data_dir.path().join("nursery-test");
+        std::fs::create_dir_all(&nursery_path).expect("create nursery dir");
+        app.nursery_path = Some(nursery_path.clone());
+
+        let agent_id = "test-agent-1";
+        let working_dir = nursery_path.to_string_lossy().to_string();
+
+        // Should not panic and should clear nursery_path
+        app.record_interactive_exit_in_db(agent_id, &working_dir, 0);
+        assert!(app.nursery_path.is_none());
+    }
+
+    /// record_interactive_exit_in_db: nursery_path is Some but code != 0 (removes nursery)
+    #[test]
+    fn record_interactive_exit_in_db_nursery_failure() {
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+
+        let nursery_path = data_dir.path().join("nursery-fail");
+        std::fs::create_dir_all(&nursery_path).expect("create nursery dir");
+        app.nursery_path = Some(nursery_path.clone());
+
+        let agent_id = "test-agent-2";
+        let working_dir = nursery_path.to_string_lossy().to_string();
+
+        app.record_interactive_exit_in_db(agent_id, &working_dir, 1);
+        assert!(app.nursery_path.is_none());
+        assert!(
+            !nursery_path.exists(),
+            "nursery should be removed on failure"
+        );
+    }
+
+    /// record_interactive_exit_in_db: nursery_path is None (non-nursery path)
+    #[test]
+    fn record_interactive_exit_in_db_no_nursery() {
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+
+        app.nursery_path = None;
+        let agent_id = "test-agent-3";
+        let working_dir = "/some/other/path";
+
+        // Should not panic
+        app.record_interactive_exit_in_db(agent_id, working_dir, 0);
+        assert!(app.nursery_path.is_none());
+    }
+
+    /// record_interactive_exit_in_db: nursery_path is Some but working_dir doesn't match
+    #[test]
+    fn record_interactive_exit_in_db_nursery_mismatch() {
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+
+        let nursery_path = data_dir.path().join("nursery-mismatch");
+        std::fs::create_dir_all(&nursery_path).expect("create nursery dir");
+        app.nursery_path = Some(nursery_path);
+
+        let agent_id = "test-agent-4";
+        let working_dir = "/different/path";
+
+        // Should fall through to non-nursery path
+        app.record_interactive_exit_in_db(agent_id, working_dir, 0);
+        assert!(app.nursery_path.is_none());
+    }
+
+    /// sandbox_merge_run_status returns "merged" for CleanMerge
+    #[test]
+    fn sandbox_merge_run_status_clean_merge() {
+        let status =
+            App::sandbox_merge_run_status(&crate::domain::sandbox::MergeOutcome::CleanMerge);
+        assert_eq!(status, "merged");
+    }
+
+    /// sandbox_merge_run_status returns "merged" for ConflictResolution
+    #[test]
+    fn sandbox_merge_run_status_conflict_resolution() {
+        let status = App::sandbox_merge_run_status(
+            &crate::domain::sandbox::MergeOutcome::ConflictResolution,
+        );
+        assert_eq!(status, "merged");
+    }
+
+    /// sandbox_merge_run_status returns "failed" for MergeFailed
+    #[test]
+    fn sandbox_merge_run_status_merge_failed() {
+        let status = App::sandbox_merge_run_status(
+            &crate::domain::sandbox::MergeOutcome::MergeFailed("reason".into()),
+        );
+        assert_eq!(status, "failed");
+    }
+
+    /// merge_active_sandbox: no active sandbox is a no-op
+    #[test]
+    fn merge_active_sandbox_none() {
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+
+        app.active_sandbox = None;
+        // Should not panic
+        app.merge_active_sandbox();
+        assert!(app.active_sandbox.is_none());
+    }
+
+    /// announce_interactive_exit: code != 0 calls notify_failed_interactive_exit
+    #[test]
+    fn announce_interactive_exit_failure() {
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+
+        // Just verify it doesn't panic - the actual notification is tested elsewhere
+        app.announce_interactive_exit("agent-1", "claude", 1, "error output");
+    }
+
+    /// announce_interactive_exit: code == 0 with yolo args queues YoloTaskCompleted
+    #[test]
+    fn announce_interactive_exit_success_yolo() {
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+
+        // The yolo check is internal; just verify no panic
+        app.announce_interactive_exit("agent-yolo", "claude --yolo", 0, "success");
+    }
+
+    /// announce_interactive_exit: code == 0 without yolo is a no-op
+    #[test]
+    fn announce_interactive_exit_success_no_yolo() {
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+
+        app.announce_interactive_exit("agent-normal", "claude", 0, "success");
+    }
+
+    /// handle_interactive_exit: early return if agent not found
+    #[test]
+    fn handle_interactive_exit_agent_not_found() {
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+
+        app.interactive_agents.clear();
+        // Should not panic
+        app.handle_interactive_exit(0);
+    }
+
+    /// handle_interactive_exit: early return if exit_notified already true
+    #[test]
+    fn handle_interactive_exit_already_notified() {
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+
+        let mut agent = spawn_mock_interactive("test-agent");
+        agent.status = AgentStatus::Exited(0);
+        agent.exit_notified = true;
+        app.interactive_agents.push(agent);
+
+        // Should not panic and not double-process
+        app.handle_interactive_exit(0);
+    }
+
+    /// handle_interactive_exit: early return if status is not Exited
+    #[test]
+    fn handle_interactive_exit_not_exited() {
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+
+        let mut agent = spawn_mock_interactive("test-agent");
+        agent.status = AgentStatus::Running;
+        app.interactive_agents.push(agent);
+
+        // Should not panic
+        app.handle_interactive_exit(0);
+    }
+
+    /// handle_interactive_exit: full non-nursery path finishes the session row
+    /// and marks the agent notified.
+    #[test]
+    fn non_nursery_exit_finishes_session_and_marks_notified() {
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+
+        let mut agent = spawn_mock_interactive("exit-agent");
+        agent.status = AgentStatus::Exited(1);
+        agent.exit_notified = false;
+        let agent_id = agent.id.clone();
+        db.insert_interactive_session(
+            &agent_id,
+            &agent.name,
+            "opencode",
+            "/tmp",
+            None,
+            None,
+            "interactive",
+            None,
+        )
+        .unwrap();
+        assert_eq!(db.get_active_sessions().unwrap().len(), 1);
+        app.nursery_path = None;
+        app.interactive_agents.push(agent);
+
+        app.handle_interactive_exit(0);
+
+        assert!(app.interactive_agents[0].exit_notified);
+        assert!(
+            db.get_active_sessions().unwrap().is_empty(),
+            "non-nursery exit finishes the session row"
+        );
     }
 }
 

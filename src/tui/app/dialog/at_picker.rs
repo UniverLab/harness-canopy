@@ -111,37 +111,8 @@ impl AtPicker {
         let mut files: Vec<AtEntry> = Vec::new();
 
         if q.is_empty() {
-            // No query — list current directory only (flat browse mode)
-            if let Ok(rd) = std::fs::read_dir(&self.current_dir) {
-                for entry in rd.flatten() {
-                    let path = entry.path();
-                    let name = match path.file_name().and_then(|n| n.to_str()) {
-                        Some(n) => n.to_string(),
-                        None => continue,
-                    };
-                    if AT_IGNORE_DIRS.contains(&name.as_str()) {
-                        continue;
-                    }
-                    if path.is_dir() {
-                        dirs.push(AtEntry {
-                            name,
-                            path,
-                            is_dir: true,
-                            depth: 0,
-                        });
-                    } else {
-                        files.push(AtEntry {
-                            name,
-                            path,
-                            is_dir: false,
-                            depth: 0,
-                        });
-                    }
-                }
-            }
+            Self::collect_flat_entries(&self.current_dir, &mut dirs, &mut files);
         } else {
-            // Query active — breadth-first so the closest (shallowest) matches
-            // surface first, and the scan budget keeps it from freezing the UI.
             Self::breadth_first_search(&self.current_dir, &q, &mut dirs, &mut files);
         }
 
@@ -150,6 +121,37 @@ impl AtPicker {
         dirs.extend(files);
         self.entries = dirs;
         self.selected = 0;
+    }
+
+    fn collect_flat_entries(dir: &Path, dirs: &mut Vec<AtEntry>, files: &mut Vec<AtEntry>) {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in rd.flatten() {
+            let path = entry.path();
+            let Some(n) = path.file_name().and_then(|x| x.to_str()) else {
+                continue;
+            };
+            let name = n.to_string();
+            if AT_IGNORE_DIRS.contains(&name.as_str()) {
+                continue;
+            }
+            if path.is_dir() {
+                dirs.push(AtEntry {
+                    name,
+                    path,
+                    is_dir: true,
+                    depth: 0,
+                });
+            } else {
+                files.push(AtEntry {
+                    name,
+                    path,
+                    is_dir: false,
+                    depth: 0,
+                });
+            }
+        }
     }
 
     /// Breadth-first search for files/dirs matching `q`. Visits the tree level
@@ -167,7 +169,7 @@ impl AtPicker {
         let mut scanned = 0usize;
 
         while let Some((dir, depth)) = queue.pop_front() {
-            if dirs.len() + files.len() >= MAX_RESULTS || scanned >= MAX_ENTRIES_SCANNED {
+            if Self::bfs_budget_reached(dirs, files, scanned) {
                 break;
             }
             let Ok(rd) = std::fs::read_dir(&dir) else {
@@ -175,42 +177,55 @@ impl AtPicker {
             };
             for entry in rd.flatten() {
                 scanned += 1;
-                if dirs.len() + files.len() >= MAX_RESULTS || scanned >= MAX_ENTRIES_SCANNED {
+                if Self::bfs_budget_reached(dirs, files, scanned) {
                     break;
                 }
-                let path = entry.path();
-                let name = match path.file_name().and_then(|n| n.to_str()) {
-                    Some(n) => n.to_string(),
-                    None => continue,
-                };
-                if AT_IGNORE_DIRS.contains(&name.as_str()) {
-                    continue;
-                }
-                // file_type() avoids an extra stat syscall per entry.
-                let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
-                let matches = name.to_lowercase().contains(q);
-                if is_dir {
-                    if matches {
-                        dirs.push(AtEntry {
-                            name,
-                            path: path.clone(),
-                            is_dir: true,
-                            depth,
-                        });
-                    }
-                    // Enqueue for a later level instead of recursing now (BFS).
-                    if depth < MAX_DEPTH {
-                        queue.push_back((path, depth + 1));
-                    }
-                } else if matches {
-                    files.push(AtEntry {
-                        name,
-                        path,
-                        is_dir: false,
-                        depth,
-                    });
-                }
+                Self::bfs_visit_entry(&entry, q, depth, dirs, files, &mut queue);
             }
+        }
+    }
+
+    fn bfs_budget_reached(dirs: &[AtEntry], files: &[AtEntry], scanned: usize) -> bool {
+        dirs.len() + files.len() >= MAX_RESULTS || scanned >= MAX_ENTRIES_SCANNED
+    }
+
+    fn bfs_visit_entry(
+        entry: &std::fs::DirEntry,
+        q: &str,
+        depth: usize,
+        dirs: &mut Vec<AtEntry>,
+        files: &mut Vec<AtEntry>,
+        queue: &mut VecDeque<(PathBuf, usize)>,
+    ) {
+        let path = entry.path();
+        let Some(n) = path.file_name().and_then(|x| x.to_str()) else {
+            return;
+        };
+        let name = n.to_string();
+        if AT_IGNORE_DIRS.contains(&name.as_str()) {
+            return;
+        }
+        let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
+        let matched = name.to_lowercase().contains(q);
+        if is_dir {
+            if matched {
+                dirs.push(AtEntry {
+                    name,
+                    path: path.clone(),
+                    is_dir: true,
+                    depth,
+                });
+            }
+            if depth < MAX_DEPTH {
+                queue.push_back((path, depth + 1));
+            }
+        } else if matched {
+            files.push(AtEntry {
+                name,
+                path,
+                is_dir: false,
+                depth,
+            });
         }
     }
 
@@ -362,5 +377,39 @@ mod tests {
         picker.go_up();
         assert_eq!(picker.current_dir, root);
         assert_eq!(picker.entries[picker.selected].name, "tui");
+    }
+
+    #[test]
+    fn bfs_budget_caps_results() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        // Create more than MAX_RESULTS matching files
+        for i in 0..(MAX_RESULTS + 10) {
+            fs::write(root.join(format!("match_{i}.txt")), "").unwrap();
+        }
+
+        let mut dirs = Vec::new();
+        let mut files = Vec::new();
+        AtPicker::breadth_first_search(root, "match", &mut dirs, &mut files);
+
+        assert!(dirs.len() + files.len() <= MAX_RESULTS);
+    }
+
+    #[test]
+    fn collect_flat_entries_skips_ignored_and_splits_dirs_files() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        fs::create_dir(root.join(".git")).unwrap();
+        fs::write(root.join("file.txt"), "").unwrap();
+        fs::create_dir(root.join("subdir")).unwrap();
+
+        let mut dirs = Vec::new();
+        let mut files = Vec::new();
+        AtPicker::collect_flat_entries(root, &mut dirs, &mut files);
+
+        assert_eq!(dirs.len(), 1);
+        assert_eq!(dirs[0].name, "subdir");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].name, "file.txt");
     }
 }
