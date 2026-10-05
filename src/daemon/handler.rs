@@ -11296,7 +11296,7 @@ pub(crate) fn handle_retry_current_node(db: &Database, graph_id: &str) -> Result
         Some(spec) if spec.status == GraphSpecStatus::Failed => McpError::invalid_params(
             format!(
                 "Graph '{graph_id}': current spec '{}' is 'failed', not resumable by \
-                 loop_continue. Use loop_reset to reset it.",
+                 graph_continue. Use graph_reset to reset it.",
                 spec.name
             ),
             None,
@@ -11304,7 +11304,7 @@ pub(crate) fn handle_retry_current_node(db: &Database, graph_id: &str) -> Result
         Some(spec) => McpError::invalid_params(
             format!(
                 "Graph '{graph_id}': current spec '{}' is '{}', not resumable by \
-                 loop_continue. Use loop_run to restart it from its entry node.",
+                 graph_continue. Use graph_run to restart it from its entry node.",
                 spec.name,
                 spec.status.as_str()
             ),
@@ -14517,7 +14517,8 @@ mod tests {
         let error = handle_retry_current_node(&db, "graph-owner").unwrap_err();
         assert!(error.message.contains("spec-failed"), "{}", error.message);
         assert!(error.message.contains("failed"), "{}", error.message);
-        assert!(error.message.contains("loop_reset"), "{}", error.message);
+        assert!(error.message.contains("graph_reset"), "{}", error.message);
+        assert!(!error.message.contains("loop_"), "{}", error.message);
     }
 
     #[test]
