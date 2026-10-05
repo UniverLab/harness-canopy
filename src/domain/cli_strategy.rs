@@ -13,6 +13,8 @@ use anyhow::{Context, Result};
 mod identity;
 mod template;
 
+use template::TemplateArgs;
+
 #[cfg(test)]
 use identity::{truncate_identity_output, IDENTITY_CHECK_OUTPUT_LIMIT};
 // `examples/rag_search.rs` re-includes `src/domain` via `#[path]` as a private
@@ -369,11 +371,13 @@ impl CliStrategy {
             let argv = self.build_argv_from_template(
                 template,
                 prompt,
-                model,
-                working_dir,
-                session_arg,
-                effort,
-                mcp_config,
+                TemplateArgs {
+                    model,
+                    working_dir,
+                    session_arg,
+                    effort,
+                    mcp_config,
+                },
             );
 
             // Headless flags are always prepended (not part of template).
@@ -1109,11 +1113,13 @@ mod tests {
         let argv = s.build_argv_from_template(
             "{{model}}[context=1m,effort={{effort}},fast=false] {{prompt}}",
             "the prompt",
-            Some("claude-opus-4-8"),
-            None,
-            None,
-            Some("high"),
-            None,
+            TemplateArgs {
+                model: Some("claude-opus-4-8"),
+                working_dir: None,
+                session_arg: None,
+                effort: Some("high"),
+                mcp_config: None,
+            },
         );
 
         assert_eq!(argv.len(), 2);
@@ -1157,11 +1163,13 @@ mod tests {
         let argv = s.build_argv_from_template(
             "{{model}}[context=1m,effort={{effort}},fast=false] {{prompt}}",
             "the prompt",
-            Some("claude-opus-4-8"),
-            None,
-            None,
-            None, // effort unavailable
-            None,
+            TemplateArgs {
+                model: Some("claude-opus-4-8"),
+                working_dir: None,
+                session_arg: None,
+                effort: None,
+                mcp_config: None,
+            },
         );
 
         assert_eq!(argv.len(), 1);
@@ -1249,11 +1257,13 @@ mod tests {
         let argv = s.build_argv_from_template(
             "-m {{model}}#{{effort?}} {{prompt}}",
             "implement",
-            Some("opencode/big-pickle"),
-            None,
-            None,
-            Some("high"),
-            None,
+            TemplateArgs {
+                model: Some("opencode/big-pickle"),
+                working_dir: None,
+                session_arg: None,
+                effort: Some("high"),
+                mcp_config: None,
+            },
         );
         assert_eq!(argv, vec!["-m", "opencode/big-pickle#high", "implement"]);
     }
@@ -1264,11 +1274,13 @@ mod tests {
         let argv = s.build_argv_from_template(
             "-m {{model}}#{{effort?}} {{prompt}}",
             "implement",
-            Some("opencode/big-pickle"),
-            None,
-            None,
-            None,
-            None,
+            TemplateArgs {
+                model: Some("opencode/big-pickle"),
+                working_dir: None,
+                session_arg: None,
+                effort: None,
+                mcp_config: None,
+            },
         );
         assert_eq!(argv, vec!["-m", "opencode/big-pickle", "implement"]);
         assert!(argv.contains(&"opencode/big-pickle".to_string()));
@@ -1282,21 +1294,25 @@ mod tests {
         let with_effort = s.build_argv_from_template(
             template,
             "go",
-            Some("claude-sonnet-5"),
-            None,
-            None,
-            Some("high"),
-            None,
+            TemplateArgs {
+                model: Some("claude-sonnet-5"),
+                working_dir: None,
+                session_arg: None,
+                effort: Some("high"),
+                mcp_config: None,
+            },
         );
         assert_eq!(with_effort, vec!["--model", "claude-sonnet-5-high", "go"]);
         let without_effort = s.build_argv_from_template(
             template,
             "go",
-            Some("claude-sonnet-5"),
-            None,
-            None,
-            None,
-            None,
+            TemplateArgs {
+                model: Some("claude-sonnet-5"),
+                working_dir: None,
+                session_arg: None,
+                effort: None,
+                mcp_config: None,
+            },
         );
         assert_eq!(without_effort, vec!["--model", "claude-sonnet-5", "go"]);
     }
@@ -1305,7 +1321,17 @@ mod tests {
     fn template_required_marker_still_drops_token_and_flag() {
         let s = sample_strategy();
         let template = "--variant {{effort}} {{prompt}}";
-        let argv = s.build_argv_from_template(template, "go", None, None, None, None, None);
+        let argv = s.build_argv_from_template(
+            template,
+            "go",
+            TemplateArgs {
+                model: None,
+                working_dir: None,
+                session_arg: None,
+                effort: None,
+                mcp_config: None,
+            },
+        );
         assert_eq!(argv, vec!["go"]);
         assert!(!argv.contains(&"--variant".to_string()));
     }
@@ -1314,10 +1340,29 @@ mod tests {
     fn template_optional_marker_alone_in_token_drops_with_flag() {
         let s = sample_strategy();
         let template = "--variant {{effort?}} {{prompt}}";
-        let argv = s.build_argv_from_template(template, "go", None, None, None, None, None);
+        let argv = s.build_argv_from_template(
+            template,
+            "go",
+            TemplateArgs {
+                model: None,
+                working_dir: None,
+                session_arg: None,
+                effort: None,
+                mcp_config: None,
+            },
+        );
         assert_eq!(argv, vec!["go"]);
-        let argv2 =
-            s.build_argv_from_template(template, "go", None, None, None, Some("high"), None);
+        let argv2 = s.build_argv_from_template(
+            template,
+            "go",
+            TemplateArgs {
+                model: None,
+                working_dir: None,
+                session_arg: None,
+                effort: Some("high"),
+                mcp_config: None,
+            },
+        );
         assert_eq!(argv2, vec!["--variant", "high", "go"]);
     }
 
@@ -1374,11 +1419,13 @@ mod tests {
         let argv = s.build_argv_from_template(
             template,
             "fix the bug",
-            Some("gpt-4"),
-            None,
-            None,
-            None,
-            None,
+            TemplateArgs {
+                model: Some("gpt-4"),
+                working_dir: None,
+                session_arg: None,
+                effort: None,
+                mcp_config: None,
+            },
         );
         assert_eq!(argv, vec!["-p", "fix the bug", "--model", "gpt-4"]);
         assert_eq!(argv[0], "-p");
@@ -1388,11 +1435,13 @@ mod tests {
         let argv2 = s.build_argv_from_template(
             template,
             "fix the bug",
-            Some("gpt-4"),
-            None,
-            Some(("--session-id", "uuid-123")),
-            None,
-            None,
+            TemplateArgs {
+                model: Some("gpt-4"),
+                working_dir: None,
+                session_arg: Some(("--session-id", "uuid-123")),
+                effort: None,
+                mcp_config: None,
+            },
         );
         assert_eq!(
             argv2,
@@ -1421,11 +1470,13 @@ mod tests {
         let argv = s.build_argv_from_template(
             template,
             "do the thing",
-            Some("claude-opus-4-8"),
-            None,
-            Some(("--session-id", "ses_abc")),
-            Some("high"),
-            None,
+            TemplateArgs {
+                model: Some("claude-opus-4-8"),
+                working_dir: None,
+                session_arg: Some(("--session-id", "ses_abc")),
+                effort: Some("high"),
+                mcp_config: None,
+            },
         );
         assert_eq!(
             argv,
@@ -1450,11 +1501,13 @@ mod tests {
         let argv = s.build_argv_from_template(
             template,
             "do the thing",
-            Some("claude-opus-4-8"),
-            None,
-            None,
-            None,
-            None,
+            TemplateArgs {
+                model: Some("claude-opus-4-8"),
+                working_dir: None,
+                session_arg: None,
+                effort: None,
+                mcp_config: None,
+            },
         );
         assert_eq!(argv, vec!["--model", "claude-opus-4-8", "do the thing"]);
         assert!(!argv.contains(&"--effort".to_string()));
@@ -1470,11 +1523,13 @@ mod tests {
         let argv = s.build_argv_from_template(
             template,
             "analyze this",
-            Some("gemini-2.5-pro"),
-            None,
-            Some(("--session-id", "ses_gem")),
-            None,
-            None,
+            TemplateArgs {
+                model: Some("gemini-2.5-pro"),
+                working_dir: None,
+                session_arg: Some(("--session-id", "ses_gem")),
+                effort: None,
+                mcp_config: None,
+            },
         );
         assert_eq!(
             argv,
@@ -1491,11 +1546,13 @@ mod tests {
         let argv2 = s.build_argv_from_template(
             template,
             "analyze this",
-            Some("gemini-2.5-pro"),
-            None,
-            None,
-            None,
-            None,
+            TemplateArgs {
+                model: Some("gemini-2.5-pro"),
+                working_dir: None,
+                session_arg: None,
+                effort: None,
+                mcp_config: None,
+            },
         );
         assert_eq!(
             argv2,
@@ -1513,11 +1570,13 @@ mod tests {
         let argv = s.build_argv_from_template(
             template,
             "refactor",
-            Some("o3"),
-            Some("/proj"),
-            None,
-            Some("high"),
-            None,
+            TemplateArgs {
+                model: Some("o3"),
+                working_dir: Some("/proj"),
+                session_arg: None,
+                effort: Some("high"),
+                mcp_config: None,
+            },
         );
         assert_eq!(
             argv,
@@ -1538,11 +1597,13 @@ mod tests {
         let argv2 = s.build_argv_from_template(
             template,
             "refactor",
-            Some("o3"),
-            Some("/proj"),
-            None,
-            None,
-            None,
+            TemplateArgs {
+                model: Some("o3"),
+                working_dir: Some("/proj"),
+                session_arg: None,
+                effort: None,
+                mcp_config: None,
+            },
         );
         assert_eq!(argv2, vec!["-m", "o3", "-C", "/proj", "refactor"]);
         assert!(!argv2.contains(&"-c".to_string()));
@@ -1558,11 +1619,13 @@ mod tests {
         let argv = s.build_argv_from_template(
             template,
             "build ui",
-            Some("claude-opus-4-8"),
-            Some("/proj"),
-            None,
-            Some("high"),
-            None,
+            TemplateArgs {
+                model: Some("claude-opus-4-8"),
+                working_dir: Some("/proj"),
+                session_arg: None,
+                effort: Some("high"),
+                mcp_config: None,
+            },
         );
         assert_eq!(
             argv,
@@ -1589,11 +1652,13 @@ mod tests {
         let argv = s.build_argv_from_template(
             template,
             "build ui",
-            Some("claude-opus-4-8"),
-            Some("/proj"),
-            None,
-            None,
-            None,
+            TemplateArgs {
+                model: Some("claude-opus-4-8"),
+                working_dir: Some("/proj"),
+                session_arg: None,
+                effort: None,
+                mcp_config: None,
+            },
         );
         assert_eq!(argv, vec!["--workspace", "/proj", "build ui"]);
         assert!(!argv.iter().any(|w| w.contains("effort=")));
@@ -1608,11 +1673,13 @@ mod tests {
         let argv = s.build_argv_from_template(
             template,
             "explain",
-            Some("gpt-4"),
-            Some("/proj"),
-            None,
-            Some("medium"),
-            None,
+            TemplateArgs {
+                model: Some("gpt-4"),
+                working_dir: Some("/proj"),
+                session_arg: None,
+                effort: Some("medium"),
+                mcp_config: None,
+            },
         );
         assert_eq!(
             argv,
@@ -1630,11 +1697,13 @@ mod tests {
         let argv2 = s.build_argv_from_template(
             template,
             "explain",
-            Some("gpt-4"),
-            Some("/proj"),
-            None,
-            None,
-            None,
+            TemplateArgs {
+                model: Some("gpt-4"),
+                working_dir: Some("/proj"),
+                session_arg: None,
+                effort: None,
+                mcp_config: None,
+            },
         );
         assert_eq!(argv2, vec!["-m", "gpt-4", "-c", "/proj", "explain"]);
         assert!(!argv2.contains(&"--thinking".to_string()));
@@ -1650,11 +1719,13 @@ mod tests {
         let argv = s.build_argv_from_template(
             template,
             "implement",
-            Some("opencode/big-pickle"),
-            Some("/proj"),
-            None,
-            Some("max"),
-            None,
+            TemplateArgs {
+                model: Some("opencode/big-pickle"),
+                working_dir: Some("/proj"),
+                session_arg: None,
+                effort: Some("max"),
+                mcp_config: None,
+            },
         );
         assert_eq!(
             argv,
@@ -1671,11 +1742,13 @@ mod tests {
         let argv2 = s.build_argv_from_template(
             template,
             "implement",
-            Some("opencode/big-pickle"),
-            Some("/proj"),
-            None,
-            None,
-            None,
+            TemplateArgs {
+                model: Some("opencode/big-pickle"),
+                working_dir: Some("/proj"),
+                session_arg: None,
+                effort: None,
+                mcp_config: None,
+            },
         );
         assert_eq!(
             argv2,
@@ -1691,18 +1764,29 @@ mod tests {
         // effort_declaration = { form = "", values = [] } — declared as not supporting effort.
         let template = "-p {{prompt}} --add-dir {{workdir}}";
         let s = strategy_with_template(template);
-        let argv =
-            s.build_argv_from_template(template, "hello", None, Some("/proj"), None, None, None);
+        let argv = s.build_argv_from_template(
+            template,
+            "hello",
+            TemplateArgs {
+                model: None,
+                working_dir: Some("/proj"),
+                session_arg: None,
+                effort: None,
+                mcp_config: None,
+            },
+        );
         assert_eq!(argv, vec!["-p", "hello", "--add-dir", "/proj"]);
         // Even if effort is passed, template has no {{effort}} marker so argv is unchanged.
         let argv2 = s.build_argv_from_template(
             template,
             "hello",
-            None,
-            Some("/proj"),
-            None,
-            Some("high"),
-            None,
+            TemplateArgs {
+                model: None,
+                working_dir: Some("/proj"),
+                session_arg: None,
+                effort: Some("high"),
+                mcp_config: None,
+            },
         );
         assert_eq!(argv2, vec!["-p", "hello", "--add-dir", "/proj"]);
         assert!(!argv2.iter().any(|w| w.contains("high")));
@@ -1715,11 +1799,13 @@ mod tests {
         let argv = s.build_argv_from_template(
             template,
             "hello",
-            None,
-            None,
-            None,
-            None,
-            Some("/tmp/mcp.json"),
+            TemplateArgs {
+                model: None,
+                working_dir: None,
+                session_arg: None,
+                effort: None,
+                mcp_config: Some("/tmp/mcp.json"),
+            },
         );
         assert!(argv.contains(&"/tmp/mcp.json".to_string()));
         assert!(argv.contains(&"--mcp-config".to_string()));
@@ -1729,7 +1815,17 @@ mod tests {
     fn build_command_with_mcp_config_none_omits_marker() {
         let template = "-p {{prompt}} --mcp-config {{mcp_config}}";
         let s = strategy_with_template(template);
-        let argv = s.build_argv_from_template(template, "hello", None, None, None, None, None);
+        let argv = s.build_argv_from_template(
+            template,
+            "hello",
+            TemplateArgs {
+                model: None,
+                working_dir: None,
+                session_arg: None,
+                effort: None,
+                mcp_config: None,
+            },
+        );
         assert!(!argv.iter().any(|w| w.contains("mcp")));
         assert_eq!(argv, vec!["-p", "hello"]);
     }

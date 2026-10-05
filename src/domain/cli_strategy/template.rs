@@ -13,21 +13,35 @@ enum TokenPart<'a> {
     Marker { name: &'a str, optional: bool },
 }
 
+/// Optional marker values supplied to [`CliStrategy::build_argv_from_template`].
+/// Grouping these keeps the call signature within the argument-count gate.
+#[derive(Copy, Clone)]
+pub(super) struct TemplateArgs<'a> {
+    pub model: Option<&'a str>,
+    pub working_dir: Option<&'a str>,
+    /// `(flag, session_id)` pair — e.g. `("--resume", "ses_abc")`.
+    pub session_arg: Option<(&'a str, &'a str)>,
+    pub effort: Option<&'a str>,
+    pub mcp_config: Option<&'a str>,
+}
+
 impl CliStrategy {
     /// Build argv from the invocation template. Returns the substituted
     /// argv words (without headless flags) for the given marker values.
     /// Effort and mcp_config are declared but not yet wired (CB3/CB4).
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn build_argv_from_template(
         &self,
         template: &str,
         prompt: &str,
-        model: Option<&str>,
-        working_dir: Option<&str>,
-        session_arg: Option<(&str, &str)>,
-        effort: Option<&str>,
-        mcp_config: Option<&str>,
+        args: TemplateArgs<'_>,
     ) -> Vec<String> {
+        let TemplateArgs {
+            model,
+            working_dir,
+            session_arg,
+            effort,
+            mcp_config,
+        } = args;
         let mut markers: HashMap<&str, Option<&str>> = HashMap::new();
         // When prompt is delivered via stdin, treat {{prompt}} as unavailable
         // so it and any preceding flag are elided from argv.
