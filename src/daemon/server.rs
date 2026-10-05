@@ -1602,19 +1602,84 @@ mod stdio_startup_reconciliation_tests {
         let ingestion = IngestionManager::new(Arc::clone(&db), dir.path().to_path_buf());
         db.set_state("rag_last_model", "old-model").unwrap();
         db.set_state("rag_chunking_version", "v1").unwrap();
+        let scratch_store = dir.path().join("vectors.lancedb");
+        std::fs::create_dir_all(&scratch_store).unwrap();
+        std::fs::write(scratch_store.join("marker"), b"stale").unwrap();
         let config = crate::domain::canopy_config::CanopyConfig {
             embeddings_model: "new-model".to_string(),
             ..Default::default()
         };
-        migrate_personal_rag_model(&ingestion, &config).await;
+        migrate_personal_rag_model(&ingestion, &config, &scratch_store).await;
         assert_eq!(
             db.get_state("rag_last_model").unwrap().as_deref(),
             Some("new-model")
         );
-        migrate_personal_rag_chunking(&ingestion).await;
+        migrate_personal_rag_chunking(&ingestion, &scratch_store).await;
         assert_eq!(
             db.get_state("rag_chunking_version").unwrap().as_deref(),
             Some(super::RAG_CHUNKING_VERSION)
+        );
+        assert!(
+            !scratch_store.exists(),
+            "the wipe must delete the scratch LanceDB directory, not a home-dir store"
+        );
+    }
+
+    /// RAII guard: sets the real `$HOME` env var to `path` for the test body,
+    /// restoring the previous value on drop. `VectorStore::default_lancedb_path`
+    /// reads `dirs::home_dir()` (real `$HOME`), so a migration test that must
+    /// prove the production default path is untouched needs this to avoid
+    /// touching the real developer's `~/.canopy`. Safe under `cargo nextest`
+    /// (one process per test) but would race under plain `cargo test`.
+    struct HomeVar {
+        prev: Option<std::ffi::OsString>,
+    }
+
+    impl HomeVar {
+        fn set(path: &std::path::Path) -> Self {
+            let prev = std::env::var_os("HOME");
+            unsafe { std::env::set_var("HOME", path) };
+            HomeVar { prev }
+        }
+    }
+
+    impl Drop for HomeVar {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => unsafe { std::env::set_var("HOME", v) },
+                None => unsafe { std::env::remove_var("HOME") },
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn personal_rag_migrations_never_touch_the_home_store() {
+        use crate::application::ports::StateRepository;
+        let home = tempdir().unwrap();
+        let _home = HomeVar::set(home.path());
+
+        let home_store = home.path().join(".canopy/rag/vectors.lancedb");
+        std::fs::create_dir_all(&home_store).unwrap();
+        std::fs::write(home_store.join("marker"), b"live").unwrap();
+
+        let scratch = tempdir().unwrap();
+        let scratch_store = scratch.path().join("vectors.lancedb");
+
+        let db = Arc::new(test_db());
+        let ingestion = IngestionManager::new(Arc::clone(&db), scratch.path().to_path_buf());
+        db.set_state("rag_last_model", "old-model").unwrap();
+        db.set_state("rag_chunking_version", "v1").unwrap();
+        let config = crate::domain::canopy_config::CanopyConfig {
+            embeddings_model: "new-model".to_string(),
+            ..Default::default()
+        };
+
+        migrate_personal_rag_model(&ingestion, &config, &scratch_store).await;
+        migrate_personal_rag_chunking(&ingestion, &scratch_store).await;
+
+        assert!(
+            home_store.join("marker").exists(),
+            "$HOME/.canopy/rag/vectors.lancedb/marker must survive both migrations"
         );
     }
 

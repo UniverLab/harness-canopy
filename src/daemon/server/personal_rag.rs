@@ -27,8 +27,13 @@ pub(super) async fn startup_personal_rag(
         return;
     }
 
-    migrate_personal_rag_model(&ingestion, &config).await;
-    migrate_personal_rag_chunking(&ingestion).await;
+    match crate::rag::vector_store::VectorStore::default_lancedb_path() {
+        Ok(lancedb_path) => {
+            migrate_personal_rag_model(&ingestion, &config, &lancedb_path).await;
+            migrate_personal_rag_chunking(&ingestion, &lancedb_path).await;
+        }
+        Err(e) => tracing::error!("startup_personal_rag: cannot resolve LanceDB path: {e:#}"),
+    }
 
     // ── Ledger vs vector-store reconciliation ───────────────────────────
     // A hard crash (e.g. a WSL kill) can destroy the LanceDB directory while
@@ -89,6 +94,7 @@ pub(super) async fn prepare_personal_rag_roots(
 pub(super) async fn migrate_personal_rag_model(
     ingestion: &IngestionManager,
     config: &crate::domain::canopy_config::CanopyConfig,
+    lancedb_path: &std::path::Path,
 ) {
     let current_model = config.embeddings_model.trim().to_string();
     if current_model.is_empty() {
@@ -108,7 +114,10 @@ pub(super) async fn migrate_personal_rag_model(
             last_model,
             current_model
         );
-        if let Err(e) = crate::rag::ingestion::wipe_lancedb(ingestion.db(), "model change").await {
+        if let Err(e) =
+            crate::rag::ingestion::wipe_lancedb_at(lancedb_path, ingestion.db(), "model change")
+                .await
+        {
             tracing::error!("startup_personal_rag: LanceDB wipe failed: {e:#}");
         }
         ingestion.clear_queue().await;
@@ -121,7 +130,10 @@ pub(super) async fn migrate_personal_rag_model(
 /// Bump RAG_CHUNKING_VERSION whenever chunk boundaries change (e.g. the
 /// v2 switch from merge-dissimilar to merge-similar semantics). Existing
 /// chunks were produced by the old algorithm, so wipe and re-index.
-pub(super) async fn migrate_personal_rag_chunking(ingestion: &IngestionManager) {
+pub(super) async fn migrate_personal_rag_chunking(
+    ingestion: &IngestionManager,
+    lancedb_path: &std::path::Path,
+) {
     let last_chunking = ingestion
         .db()
         .get_state("rag_chunking_version")
@@ -141,8 +153,12 @@ pub(super) async fn migrate_personal_rag_chunking(ingestion: &IngestionManager) 
         },
         RAG_CHUNKING_VERSION
     );
-    if let Err(e) =
-        crate::rag::ingestion::wipe_lancedb(ingestion.db(), "chunking version change").await
+    if let Err(e) = crate::rag::ingestion::wipe_lancedb_at(
+        lancedb_path,
+        ingestion.db(),
+        "chunking version change",
+    )
+    .await
     {
         tracing::error!("startup_personal_rag: LanceDB wipe failed: {e:#}");
     }
