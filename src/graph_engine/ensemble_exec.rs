@@ -25,7 +25,7 @@ impl GraphEngine {
     /// is bounded by `self.ensemble_concurrency`, a semaphore shared across
     /// every graph this engine drives, so an 8-member ensemble queues past the
     /// cap rather than spawning all 8 processes at once.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub(crate) async fn execute_ensemble(
         &self,
         lp: &crate::domain::graphs::Graph,

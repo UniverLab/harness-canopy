@@ -197,7 +197,7 @@ pub(crate) const AGENT_PROMPT_BINDINGS: &[&str] = &[
     "previous_feedback",
 ];
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(crate) fn render_agent_prompt(
     lp: &crate::domain::graphs::Graph,
     spec: &GraphSpec,
@@ -316,7 +316,7 @@ pub(crate) const RESUME_PROMPT_CROSS_SPEC_DEFAULT: &str = "# [CONTINUE: NEW SPEC
 /// already has that spec in its history; re-rendering it wastes tokens and
 /// invites regurgitation), but the cross-spec default does (that session has
 /// never seen this spec).
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(crate) fn render_resume_prompt(
     lp: &crate::domain::graphs::Graph,
     spec: &GraphSpec,

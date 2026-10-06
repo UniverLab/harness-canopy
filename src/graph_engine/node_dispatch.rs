@@ -1,7 +1,7 @@
 use super::*;
 
 impl GraphEngine {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub(crate) async fn execute_node(
         &self,
         lp: &crate::domain::graphs::Graph,

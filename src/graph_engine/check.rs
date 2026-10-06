@@ -248,7 +248,7 @@ pub(crate) fn handle_completion(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(crate) async fn execute_check_node(
     db: &Database,
     run_id: &str,

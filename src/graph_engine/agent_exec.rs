@@ -17,7 +17,7 @@ use super::*;
 /// content, so the incremental prompt renders it — plus a boundary notice
 /// that the previous spec is done — instead of the bare feedback-only
 /// template. See [`render_resume_prompt`].
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(crate) async fn execute_agent_node(
     db: &Arc<Database>,
     lp: &crate::domain::graphs::Graph,

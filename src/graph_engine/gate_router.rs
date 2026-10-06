@@ -209,7 +209,7 @@ pub(crate) struct HookExecution {
 /// against, no hard-error timeout: a hook failure is always recorded and
 /// reported to the caller as data, never propagated as an `Err`, since it
 /// must never affect the already-finalized graph run that spawned it).
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(crate) async fn run_completion_hook_process(
     db: &Database,
     hook_run_id: &str,

@@ -12610,7 +12610,7 @@ echo done
     /// assembles in one MCP call — but constructed here node-by-node so
     /// engine tests can drive it through the real `execute_ensemble` path
     /// via `GraphEngine::run_graph` without spinning up the MCP server.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     fn insert_test_ensemble(
         db: &Database,
         spec_id: &str,
@@ -12773,7 +12773,7 @@ echo done
     /// the `select_next_step` fan-out convention documented on
     /// [`select_next_step`]) rather than always terminating at a fixed
     /// pass/fail node the way [`insert_test_ensemble`] does.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     fn insert_bouncing_ensemble(
         db: &Database,
         spec_id: &str,

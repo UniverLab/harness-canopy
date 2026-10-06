@@ -310,7 +310,7 @@ pub(crate) fn is_no_spec_placeholder(spec: &GraphSpec) -> bool {
     spec.name.trim().is_empty()
 }
 
-#[allow(clippy::type_complexity)]
+#[expect(clippy::type_complexity)]
 pub(crate) fn resolve_spec_start(
     nodes: &[GraphNode],
     edges: &[GraphEdge],

@@ -86,7 +86,7 @@ pub(crate) enum CliProcessOutcome {
 /// leave it running indefinitely (`Command::output` gives the caller no
 /// handle to kill), which is exactly what let a `mimo run` child outlive its
 /// node run by 42+ minutes in the 2026-07-12 incident.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(crate) async fn spawn_and_wait_cli_process(
     strategy: &crate::domain::cli_strategy::CliStrategy,
     prompt: &str,
@@ -272,7 +272,7 @@ pub(crate) fn cli_model_flag(platform: &str) -> Option<Option<String>> {
     config.get_cli(platform).map(|cli| cli.model_flag.clone())
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(crate) async fn run_agent_process(
     db: &Database,
     run_id: &str,

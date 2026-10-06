@@ -30,7 +30,7 @@ pub(crate) enum MemberAttempt {
 }
 
 impl GraphEngine {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub(crate) async fn run_ensemble_member(
         &self,
         lp: &crate::domain::graphs::Graph,
@@ -278,7 +278,7 @@ impl GraphEngine {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub(crate) async fn execute_ensemble_cascade(
         &self,
         lp: &crate::domain::graphs::Graph,
@@ -380,7 +380,7 @@ impl GraphEngine {
         Ok(execution)
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub(crate) async fn execute_ensemble_round_robin(
         &self,
         lp: &crate::domain::graphs::Graph,

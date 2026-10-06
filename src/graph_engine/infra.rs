@@ -204,7 +204,7 @@ pub(crate) fn is_infra_crash_shape(
 /// retry_limit > 0 exhaustion (already partially visible via the retried
 /// attempts' own markers) and any non-crash outcome, so a config that sets
 /// nothing behaves exactly as today (no new fields appear).
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(crate) async fn finalize_infra_crash_shape(
     db: &Database,
     run_id: &str,
@@ -262,7 +262,7 @@ pub(crate) fn execution_is_infra_failure(output: &Value) -> bool {
 /// is the zero-based index of the attempt that just crashed. Shared by the
 /// sequential node path and ensemble members (B26) so every infra retry — no
 /// matter which path — leaves the same distinct, marker-carrying run rows.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(crate) async fn begin_infra_retry(
     db: &Database,
     lp: &crate::domain::graphs::Graph,
