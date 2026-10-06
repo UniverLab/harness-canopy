@@ -27,14 +27,12 @@ pub(super) fn agent_section_border_style(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn render_agent_list_panel(
     frame: &mut Frame,
     area: Option<Rect>,
     title: &str,
     indices: &[usize],
     app: &mut App,
-    accent: Color,
     border_style: Style,
     theme: &Theme,
 ) {
@@ -48,7 +46,7 @@ pub(super) fn render_agent_list_panel(
         Style::default().fg(theme.dim_text),
         border_style,
         theme,
-        |frame, inner| draw_agent_list(frame, inner, indices, app, accent, theme),
+        |frame, inner| draw_agent_list(frame, inner, indices, app, theme),
     );
 }
 
@@ -80,7 +78,6 @@ pub(super) fn draw_agent_list(
     area: Rect,
     indices: &[usize],
     app: &mut App,
-    accent: Color,
     theme: &Theme,
 ) {
     let card_h = 3u16;
@@ -117,7 +114,6 @@ pub(super) fn draw_agent_list(
             app,
             selected,
             hovered,
-            accent,
             theme,
         );
         app.sidebar_click_map.push((idx, y, y + card_h));
@@ -138,7 +134,6 @@ pub(super) struct AgentCardMeta<'a> {
     work_dir: Option<&'a str>,
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn draw_sidebar_card(
     frame: &mut Frame,
     area: Rect,
@@ -146,7 +141,6 @@ pub(super) fn draw_sidebar_card(
     app: &App,
     selected: bool,
     hovered: bool,
-    _accent: Color,
     theme: &Theme,
 ) {
     let meta = agent_card_meta(agent, app, theme);

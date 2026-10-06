@@ -628,6 +628,19 @@ pub struct SubagentRunRecord {
     pub expires_at: String,
 }
 
+/// Parameters for [`Database::insert_subagent_run`]: bundled so the insert
+/// stays within the argument-count lint without changing the row it writes.
+#[derive(Debug, Clone, Copy)]
+pub struct NewSubagentRun<'a> {
+    pub id: &'a str,
+    pub platform: &'a str,
+    pub model: Option<&'a str>,
+    pub prompt: &'a str,
+    pub workdir: &'a str,
+    pub started_at: &'a str,
+    pub expires_at: &'a str,
+}
+
 pub mod achievements;
 pub mod activity_log;
 pub mod agent;

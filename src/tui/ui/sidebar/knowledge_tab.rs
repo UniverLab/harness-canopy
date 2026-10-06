@@ -74,9 +74,11 @@ pub(super) fn draw_projects_list(frame: &mut Frame, area: Rect, app: &mut App, t
             frame,
             Rect::new(area.x, y, area.width, 3),
             *idx == app.selected_project,
-            name,
-            hash,
-            path,
+            ProjectCardText {
+                title: name,
+                meta1: hash,
+                meta2: path,
+            },
             panel_focused,
             theme,
         );
@@ -87,14 +89,21 @@ pub(super) fn draw_projects_list(frame: &mut Frame, area: Rect, app: &mut App, t
     draw_scroll_indicators(frame, area, scroll.has_up, scroll.has_down, theme);
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Text rows for [`draw_project_graph_card`]: title plus two meta lines.
+/// Bundled so the card renderer stays within the argument-count lint
+/// without changing what it draws.
+#[derive(Clone, Copy)]
+pub(super) struct ProjectCardText<'a> {
+    pub(super) title: &'a str,
+    pub(super) meta1: &'a str,
+    pub(super) meta2: &'a str,
+}
+
 pub(super) fn draw_project_graph_card(
     frame: &mut Frame,
     area: Rect,
     selected: bool,
-    title: &str,
-    meta1: &str,
-    meta2: &str,
+    text: ProjectCardText<'_>,
     panel_focused: bool,
     theme: &Theme,
 ) {
@@ -107,7 +116,7 @@ pub(super) fn draw_project_graph_card(
     let meta_style = project_meta_style(selected, theme);
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            truncate_str(title, area.width as usize),
+            truncate_str(text.title, area.width as usize),
             title_style,
         )))
         .style(Style::default().bg(bg)),
@@ -115,7 +124,7 @@ pub(super) fn draw_project_graph_card(
     );
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            truncate_str(meta1, area.width as usize),
+            truncate_str(text.meta1, area.width as usize),
             meta_style,
         )))
         .style(Style::default().bg(bg)),
@@ -123,7 +132,7 @@ pub(super) fn draw_project_graph_card(
     );
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            truncate_str(meta2, area.width as usize),
+            truncate_str(text.meta2, area.width as usize),
             meta_style,
         )))
         .style(Style::default().bg(bg)),

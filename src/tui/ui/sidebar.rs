@@ -9,9 +9,7 @@ use ratatui::widgets::{Block, Paragraph};
 use ratatui::Frame;
 
 use super::theme::Theme;
-use super::{
-    borders_for, dialog_borders_for, last_two_segments, truncate_str, BG_HOVER, INTERACTIVE_COLOR,
-};
+use super::{borders_for, dialog_borders_for, last_two_segments, truncate_str, BG_HOVER};
 use super::{
     STATUS_DISABLED, STATUS_FAIL, STATUS_OK, STATUS_RUNNING, STATUS_RUNNING_BRIGHT,
     STATUS_RUNNING_DIM, STATUS_WAIT_OFF, STATUS_WAIT_ON,

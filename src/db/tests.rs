@@ -6263,15 +6263,15 @@ fn insert_and_collect_subagent_run() {
     let db = test_db();
     let now = Utc::now().to_rfc3339();
     let expires = (Utc::now() + Duration::hours(1)).to_rfc3339();
-    db.insert_subagent_run(
-        "run-1",
-        "opencode",
-        Some("model-x"),
-        "do stuff",
-        "/tmp",
-        &now,
-        &expires,
-    )
+    db.insert_subagent_run(NewSubagentRun {
+        id: "run-1",
+        platform: "opencode",
+        model: Some("model-x"),
+        prompt: "do stuff",
+        workdir: "/tmp",
+        started_at: &now,
+        expires_at: &expires,
+    })
     .unwrap();
     db.complete_subagent_run("run-1", 0, "hello", "", Some("blind"), &now)
         .unwrap();
@@ -6292,8 +6292,16 @@ fn collect_while_running_does_not_discard_the_result() {
     let db = test_db();
     let now = Utc::now().to_rfc3339();
     let expires = (Utc::now() + Duration::hours(1)).to_rfc3339();
-    db.insert_subagent_run("run-2", "opencode", None, "p", "/tmp", &now, &expires)
-        .unwrap();
+    db.insert_subagent_run(NewSubagentRun {
+        id: "run-2",
+        platform: "opencode",
+        model: None,
+        prompt: "p",
+        workdir: "/tmp",
+        started_at: &now,
+        expires_at: &expires,
+    })
+    .unwrap();
 
     // A poll before the subagent finishes reports "running" but must NOT
     // delete the row — otherwise the eventual result is lost forever.
@@ -6317,8 +6325,16 @@ fn expire_subagent_runs_deletes_expired() {
     let db = test_db();
     let past = (Utc::now() - Duration::hours(1)).to_rfc3339();
     let now = Utc::now().to_rfc3339();
-    db.insert_subagent_run("run-exp", "opencode", None, "p", "/tmp", &now, &past)
-        .unwrap();
+    db.insert_subagent_run(NewSubagentRun {
+        id: "run-exp",
+        platform: "opencode",
+        model: None,
+        prompt: "p",
+        workdir: "/tmp",
+        started_at: &now,
+        expires_at: &past,
+    })
+    .unwrap();
     let deleted = db.expire_subagent_runs().unwrap();
     assert_eq!(deleted, 1);
     assert!(db.get_subagent_run("run-exp").unwrap().is_none());
@@ -6329,8 +6345,16 @@ fn expire_subagent_runs_keeps_unexpired() {
     let db = test_db();
     let now = Utc::now().to_rfc3339();
     let future = (Utc::now() + Duration::hours(1)).to_rfc3339();
-    db.insert_subagent_run("run-keep", "opencode", None, "p", "/tmp", &now, &future)
-        .unwrap();
+    db.insert_subagent_run(NewSubagentRun {
+        id: "run-keep",
+        platform: "opencode",
+        model: None,
+        prompt: "p",
+        workdir: "/tmp",
+        started_at: &now,
+        expires_at: &future,
+    })
+    .unwrap();
     let deleted = db.expire_subagent_runs().unwrap();
     assert_eq!(deleted, 0);
     assert!(db.get_subagent_run("run-keep").unwrap().is_some());
@@ -6341,8 +6365,16 @@ fn fail_subagent_run_sets_status() {
     let db = test_db();
     let now = Utc::now().to_rfc3339();
     let expires = (Utc::now() + Duration::hours(1)).to_rfc3339();
-    db.insert_subagent_run("run-fail", "opencode", None, "p", "/tmp", &now, &expires)
-        .unwrap();
+    db.insert_subagent_run(NewSubagentRun {
+        id: "run-fail",
+        platform: "opencode",
+        model: None,
+        prompt: "p",
+        workdir: "/tmp",
+        started_at: &now,
+        expires_at: &expires,
+    })
+    .unwrap();
     db.fail_subagent_run("run-fail", "oops", Some("blind"), &now)
         .unwrap();
     let record = db.get_subagent_run("run-fail").unwrap().unwrap();
@@ -6407,8 +6439,16 @@ fn blocking_delivery_sequence_collect_reports_delivered_not_missing() {
     let db = test_db();
     let now = Utc::now().to_rfc3339();
     let expires = (Utc::now() + Duration::hours(1)).to_rfc3339();
-    db.insert_subagent_run("run-block", "opencode", None, "p", "/tmp", &now, &expires)
-        .unwrap();
+    db.insert_subagent_run(NewSubagentRun {
+        id: "run-block",
+        platform: "opencode",
+        model: None,
+        prompt: "p",
+        workdir: "/tmp",
+        started_at: &now,
+        expires_at: &expires,
+    })
+    .unwrap();
     db.complete_subagent_run("run-block", 0, "the answer", "", Some("blind"), &now)
         .unwrap();
 
@@ -7472,15 +7512,15 @@ fn cb43_all_run_kinds_contribute() {
     .unwrap();
 
     // Subagent run.
-    db.insert_subagent_run(
-        &uuid::Uuid::new_v4().to_string(),
-        "p-sub",
-        Some("m-sub"),
-        "prompt",
-        "/tmp",
-        &now.to_rfc3339(),
-        &(now + Duration::hours(1)).to_rfc3339(),
-    )
+    db.insert_subagent_run(NewSubagentRun {
+        id: &uuid::Uuid::new_v4().to_string(),
+        platform: "p-sub",
+        model: Some("m-sub"),
+        prompt: "prompt",
+        workdir: "/tmp",
+        started_at: &now.to_rfc3339(),
+        expires_at: &(now + Duration::hours(1)).to_rfc3339(),
+    })
     .unwrap();
 
     let rows = db
@@ -7531,15 +7571,15 @@ fn cb46_sources_keep_every_run_kind_attribution() {
         executed_model: Some("agent-model".into()),
     })
     .unwrap();
-    db.insert_subagent_run(
-        &uuid::Uuid::new_v4().to_string(),
-        "sub-platform",
-        Some("sub-model"),
-        "prompt",
-        "/tmp/cb46",
-        &now.to_rfc3339(),
-        &(now + Duration::hours(1)).to_rfc3339(),
-    )
+    db.insert_subagent_run(NewSubagentRun {
+        id: &uuid::Uuid::new_v4().to_string(),
+        platform: "sub-platform",
+        model: Some("sub-model"),
+        prompt: "prompt",
+        workdir: "/tmp/cb46",
+        started_at: &now.to_rfc3339(),
+        expires_at: &(now + Duration::hours(1)).to_rfc3339(),
+    })
     .unwrap();
 
     let rows = db

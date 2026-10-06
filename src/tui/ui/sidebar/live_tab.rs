@@ -78,7 +78,6 @@ pub(super) fn draw_live_body(
             " interactive ",
             interactive_indices,
             app,
-            INTERACTIVE_COLOR,
             border_style,
             theme,
         );
@@ -92,7 +91,6 @@ pub(super) fn draw_live_body(
             " terminal ",
             terminal_indices,
             app,
-            theme.success,
             border_style,
             theme,
         );
@@ -133,7 +131,6 @@ pub(super) fn draw_automation_body(
             " agents ",
             background_indices,
             app,
-            theme.header_color,
             border_style,
             theme,
         );

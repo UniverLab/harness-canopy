@@ -1,25 +1,23 @@
 use anyhow::Result;
 use rusqlite::OptionalExtension;
 
-use super::{Database, SubagentRunRecord};
+use super::{Database, NewSubagentRun, SubagentRunRecord};
 
 impl Database {
-    #[allow(clippy::too_many_arguments)]
-    pub fn insert_subagent_run(
-        &self,
-        id: &str,
-        platform: &str,
-        model: Option<&str>,
-        prompt: &str,
-        workdir: &str,
-        started_at: &str,
-        expires_at: &str,
-    ) -> Result<()> {
+    pub fn insert_subagent_run(&self, run: NewSubagentRun<'_>) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO subagent_runs (id, platform, model, prompt, workdir, status, started_at, expires_at)
              VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6, ?7)",
-            rusqlite::params![id, platform, model, prompt, workdir, started_at, expires_at],
+            rusqlite::params![
+                run.id,
+                run.platform,
+                run.model,
+                run.prompt,
+                run.workdir,
+                run.started_at,
+                run.expires_at
+            ],
         )?;
         Ok(())
     }

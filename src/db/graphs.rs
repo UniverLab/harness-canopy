@@ -1021,4 +1021,88 @@ mod tests {
             "CHECK constraint must reject streams other than stdout/stderr"
         );
     }
+
+    #[test]
+    fn insert_node_with_edges_rolls_back_node_when_an_edge_fails() {
+        use crate::domain::graphs::{
+            GraphEdge, GraphEdgeCondition, GraphNode, GraphNodeKind, GraphSpec, GraphSpecStatus,
+        };
+        let db = test_db();
+        db.insert_graph(&sample_graph("atomic-graph")).unwrap();
+        db.insert_graph_spec(&GraphSpec {
+            id: "atomic-spec".to_string(),
+            graph_id: Some("atomic-graph".to_string()),
+            name: "Atomic spec".to_string(),
+            description: None,
+            position: 0,
+            parallelizable: false,
+            status: GraphSpecStatus::Pending,
+            started_at: None,
+            completed_at: None,
+            spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
+            spec_committed_head: None,
+            workdir: None,
+            completed_via: None,
+            completed_via_reason: None,
+            completed_via_at: None,
+        })
+        .unwrap();
+        db.insert_graph_node(&GraphNode {
+            id: "atomic-n1".to_string(),
+            spec_id: Some("atomic-spec".to_string()),
+            graph_id: None,
+            name: "n1".to_string(),
+            kind: GraphNodeKind::Agent,
+            config: serde_json::json!({}),
+            position: 0,
+            created_at: Utc::now(),
+        })
+        .unwrap();
+        let node = GraphNode {
+            id: "atomic-n2".to_string(),
+            spec_id: Some("atomic-spec".to_string()),
+            graph_id: None,
+            name: "n2".to_string(),
+            kind: GraphNodeKind::Agent,
+            config: serde_json::json!({}),
+            position: 1,
+            created_at: Utc::now(),
+        };
+        let ok_edge = GraphEdge {
+            id: "atomic-e1".to_string(),
+            spec_id: Some("atomic-spec".to_string()),
+            graph_id: None,
+            from_node: "atomic-n1".to_string(),
+            to_node: "atomic-n2".to_string(),
+            condition: GraphEdgeCondition::Always,
+        };
+        // Same id as `ok_edge`: the second insert fails on the primary key,
+        // so the whole `conn.transaction()` must roll back.
+        let dup_edge = GraphEdge {
+            id: "atomic-e1".to_string(),
+            spec_id: Some("atomic-spec".to_string()),
+            graph_id: None,
+            from_node: "atomic-n2".to_string(),
+            to_node: "atomic-n1".to_string(),
+            condition: GraphEdgeCondition::Always,
+        };
+        let err = db
+            .insert_node_with_edges(&node, &[ok_edge, dup_edge])
+            .unwrap_err();
+        assert!(
+            !err.to_string().is_empty(),
+            "duplicate edge id must fail the write"
+        );
+        assert!(
+            db.get_graph_node("atomic-n2").unwrap().is_none(),
+            "failed insert_node_with_edges must not leave the node behind"
+        );
+        assert!(
+            db.get_graph_edge("atomic-e1").unwrap().is_none(),
+            "failed insert_node_with_edges must not leave a partial edge behind"
+        );
+    }
 }
