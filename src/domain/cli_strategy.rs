@@ -1981,7 +1981,7 @@ mod tests {
     fn agent_dispatch_never_runs_identity_check() {
         for (name, source) in [
             ("executor", include_str!("../executor/mod.rs")),
-            ("graph_engine", include_str!("../graph_engine.rs")),
+            ("graph_engine", include_str!("../graph_engine/mod.rs")),
         ] {
             let production_code = source.split("mod tests {").next().unwrap_or(source);
             for marker in ["verify_identity", "identity_check"] {

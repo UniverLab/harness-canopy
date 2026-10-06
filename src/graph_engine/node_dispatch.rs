@@ -1,0 +1,312 @@
+use super::*;
+
+impl GraphEngine {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn execute_node(
+        &self,
+        lp: &crate::domain::graphs::Graph,
+        spec: &GraphSpec,
+        node: &GraphNode,
+        previous_output: Option<&Value>,
+        spec_start_head: Option<&str>,
+        spec_committed_head: Option<&str>,
+        run_id: &str,
+        workdir: &str,
+        resume_session_id: Option<&str>,
+        resume_crosses_spec: bool,
+        node_outputs: &HashMap<String, Value>,
+        all_node_names: &[String],
+    ) -> Result<NodeExecution> {
+        match node.kind {
+            GraphNodeKind::Check => {
+                execute_check_node(
+                    &self.db,
+                    run_id,
+                    lp,
+                    spec,
+                    node,
+                    spec_start_head,
+                    spec_committed_head,
+                    workdir,
+                )
+                .await
+            }
+            GraphNodeKind::Gate => execute_gate_node(node, previous_output),
+            GraphNodeKind::Agent => {
+                execute_agent_node(
+                    &self.db,
+                    lp,
+                    spec,
+                    node,
+                    previous_output,
+                    run_id,
+                    workdir,
+                    resume_session_id,
+                    resume_crosses_spec,
+                    self.dynamic_skills.as_ref(),
+                    node_outputs,
+                    all_node_names,
+                )
+                .await
+            }
+            // A quorum node (F1) never reaches the single-node path: `run_spec`
+            // detects the fan-out into its ensemble before this would ever be
+            // called and runs `execute_ensemble` instead. This arm exists
+            // only so the match stays exhaustive against future callers.
+            GraphNodeKind::Join => bail!(
+                "Quorum node '{}' cannot execute directly; it only runs as part of ensemble fan-out.",
+                node.name
+            ),
+            GraphNodeKind::Router => {
+                execute_router_node(&self.db, node, previous_output, run_id, workdir).await
+            }
+        }
+    }
+
+    /// Best-effort termination (B12) of `run`'s OS process, if it still has
+    /// one recorded, and finalization of its DB row as `Fail` so it stops
+    /// showing up as `running`. Every abnormal end that abandons a node run
+    /// without letting it finish on its own — a stale row from a crashed
+    /// prior attempt, `graph_pause`, `graph_reset` of a running spec, or this
+    /// run failing elsewhere — goes through here. A no-op beyond the
+    /// status/summary update if `run` never got a pid recorded (e.g. a gate
+    /// node, or an agent/check node that hadn't finished spawning yet).
+    pub(crate) fn terminate_run(&self, run: &GraphNodeRun, reason: &str) {
+        terminate_run_row(&self.db, run, reason);
+    }
+
+    pub(crate) fn is_paused(&self, graph_id: &str) -> Result<bool> {
+        Ok(self
+            .db
+            .get_graph(graph_id)?
+            .is_some_and(|lp| lp.status == GraphStatus::Paused))
+    }
+
+    pub(crate) fn is_pausing(&self, graph_id: &str) -> Result<bool> {
+        Ok(self
+            .db
+            .get_graph(graph_id)?
+            .is_some_and(|lp| lp.status == GraphStatus::Pausing))
+    }
+
+    /// Fail `graph_id`, sweeping every run still `running` under it — but
+    /// only when `dispatch_started_at` (this call's claimed generation, from
+    /// `run_graph_dispatch`'s own atomic claim) still matches the graph's
+    /// current `started_at`. A mismatch means a newer dispatch has since
+    /// claimed the graph (a reset + relaunch raced this one), so this call is
+    /// itself the stale one: it must not flip status out from under the
+    /// fresher dispatch, and — critically — must not sweep `list_running_graph_runs`,
+    /// which would otherwise terminate that fresher dispatch's entirely
+    /// healthy runs (the 2026-08-05 incident this guards against). `None`
+    /// skips the check (the two catch-all call sites in
+    /// `start_background_run`/`resume_background` have no captured
+    /// generation to compare, since the error they're reacting to already
+    /// unwound out of `run_graph_dispatch`'s scope) — decision-4's broadened
+    /// `run_was_terminated_out_of_band` check is what keeps a stale run's
+    /// completion from reaching either of those paths in the first place.
+    /// CB42: tear down a sandboxed run's worktree/branch after its final
+    /// status is written. Takes `Option` so the completed and failed paths
+    /// share it; `None` is a no-op. A teardown failure never changes the
+    /// graph's status — it is recorded on the sandbox row by
+    /// `teardown_sandbox_at_end`, never silent.
+    pub(crate) async fn teardown_sandbox_after_final_status(
+        &self,
+        sandbox: Option<Sandbox>,
+        reason: String,
+    ) {
+        let Some(sb) = sandbox else { return };
+        let row = match self.db.get_sandbox_run(&sb.id) {
+            Ok(Some(row)) => row,
+            Ok(None) => {
+                tracing::warn!(
+                    "Sandbox '{}' has no sandbox_runs row; leaving its worktree in place",
+                    sb.id
+                );
+                return;
+            }
+            Err(e) => {
+                tracing::warn!("Could not load sandbox run '{}': {e:#}", sb.id);
+                return;
+            }
+        };
+        crate::domain::sandbox::teardown_sandbox_at_end(&self.db, &row, &reason).await;
+    }
+
+    pub(crate) async fn fail_graph(
+        &self,
+        graph_id: &str,
+        dispatch_started_at: Option<chrono::DateTime<chrono::Utc>>,
+        spec_name: Option<&str>,
+        spec_id: Option<&str>,
+        summary: &str,
+    ) -> Result<()> {
+        if let Some(expected) = dispatch_started_at {
+            let current_started_at = self.db.get_graph(graph_id)?.and_then(|lp| lp.started_at);
+            let still_current =
+                current_started_at.is_some_and(|at| at.timestamp() == expected.timestamp());
+            if !still_current {
+                tracing::info!(
+                    "Graph '{}' failure from a stale dispatch (claimed at {}) ignored — a newer \
+                     dispatch has since taken over; this attempt's own run row already records \
+                     its own outcome.",
+                    graph_id,
+                    expected.to_rfc3339()
+                );
+                return Ok(());
+            }
+        }
+
+        self.db.update_graph_status(
+            graph_id,
+            GraphStatus::Failed,
+            None,
+            Some(chrono::Utc::now()),
+        )?;
+        if let Ok(Some(lp)) = self.db.get_graph(graph_id) {
+            if let Some(spec_name) = spec_name {
+                activity::publish(
+                    &self.db,
+                    &lp.workdir,
+                    graph_id,
+                    &lp.name,
+                    format!("Spec '{spec_name}' failed: {summary}"),
+                );
+            }
+            activity::publish(
+                &self.db,
+                &lp.workdir,
+                graph_id,
+                &lp.name,
+                format!("Failed: {summary}"),
+            );
+        }
+        // Resolve the human-readable ending node name BEFORE sweeping the
+        // running runs below — afterwards there is nothing left to resolve.
+        let ending_node = self.ending_node_name(graph_id, spec_name);
+        // B12 catch-all: whatever hard-error path got us here (a node
+        // timeout already kills its own process before bubbling up, but a
+        // DB error or any other error class reaching this point wouldn't
+        // have), make sure nothing is left running under this now-failed
+        // graph. Safe to sweep every run still `running` under `graph_id`
+        // unscoped: the generation check above already established that no
+        // newer dispatch has claimed the graph since this one did, so
+        // anything still `running` here can only belong to this dispatch.
+        for run in self
+            .db
+            .list_running_graph_runs(graph_id)
+            .unwrap_or_default()
+        {
+            self.terminate_run(&run, "graph run failed");
+        }
+
+        // Fire `on_failed` hooks if any are registered.
+        if let Ok(Some(lp)) = self.db.get_graph(graph_id) {
+            let ending_node_with_dirty_note = spec_id
+                .and_then(|id| self.db.get_graph_spec(id).ok().flatten())
+                .and_then(|spec| {
+                    dirty_tree_note(
+                        spec.spec_end_dirty,
+                        &spec.spec_end_dirty_paths.unwrap_or_default(),
+                    )
+                })
+                .map(|note| match ending_node.as_deref() {
+                    Some(node) => format!("{node} ({note})"),
+                    None => note,
+                })
+                .or_else(|| ending_node.clone());
+            let ctx = HookContext {
+                graph_name: &lp.name,
+                workdir: &lp.workdir,
+                completed_specs: &[],
+                spec_name: None,
+                spec_id: None,
+                blocker: Some(summary),
+                node_name: ending_node_with_dirty_note.as_deref(),
+            };
+            self.fire_hooks(&lp, GraphHookEvent::OnFailed, &ctx).await;
+        }
+
+        let graph_name = self
+            .db
+            .get_graph(graph_id)?
+            .map(|lp| lp.name)
+            .unwrap_or_else(|| graph_id.to_string());
+        self.notification_service.notify_graph_finished(
+            &graph_name,
+            GraphFinishOutcome::Failed {
+                spec_name: spec_name.unwrap_or(summary),
+            },
+        );
+        // CB42: same teardown as the completed path, after the final status
+        // and after hooks/notifications. `Paused`/`blocked` runs keep their
+        // sandbox (a resumed graph reuses it).
+        if let Ok(sb) = self.db.get_active_sandbox_for_owner("graph", graph_id) {
+            self.teardown_sandbox_after_final_status(sb, format!("failed: {summary}"))
+                .await;
+        }
+        Ok(())
+    }
+    /// C19: the `Blocked` counterpart to [`Self::fail_graph`] — same
+    /// stale-dispatch guard (a reset + relaunch that's already claimed the
+    /// graph must not be paused out from under it) and the same B12 sweep of
+    /// any run still `running` under `graph_id`, but pauses the graph instead
+    /// of failing it and fires [`Self::notify_blocked`] instead of the
+    /// ordinary failed-graph notification. This is what a spec that exceeded
+    /// its persisted cross-run attempt budget routes through: unlike
+    /// `Failed`, `Paused` is not accepted by a pending autorun
+    /// ([`crate::domain::graphs::Graph::is_autorun_due`] already excludes it
+    /// unless `paused_by_reconciliation`, which `update_graph_status` always
+    /// clears) and is refused by `graph_run` once it carries a blocker (see
+    /// the daemon's `graph_run` tool) — exactly the "not started again until
+    /// a human clears it" FR4 asks for, reusing the graph_report_blocker
+    /// mechanism wholesale rather than inventing a parallel one.
+    pub(crate) async fn block_graph(
+        &self,
+        graph_id: &str,
+        dispatch_started_at: Option<chrono::DateTime<chrono::Utc>>,
+        blocker: &str,
+    ) -> Result<()> {
+        if let Some(expected) = dispatch_started_at {
+            let current_started_at = self.db.get_graph(graph_id)?.and_then(|lp| lp.started_at);
+            let still_current =
+                current_started_at.is_some_and(|at| at.timestamp() == expected.timestamp());
+            if !still_current {
+                tracing::info!(
+                    "Graph '{}' block from a stale dispatch (claimed at {}) ignored — a newer \
+                     dispatch has since taken over; this attempt's own run row already records \
+                     its own outcome.",
+                    graph_id,
+                    expected.to_rfc3339()
+                );
+                return Ok(());
+            }
+        }
+
+        // Resolve the ending node BEFORE sweeping running runs, then share
+        // the single post-transition blocked helper with `graph_report_blocker`
+        // (notification + exactly one `on_blocked` firing per transition).
+        let ending_node = self.ending_node_name(graph_id, None);
+        self.db
+            .update_graph_status(graph_id, GraphStatus::Paused, None, None)?;
+        if let Ok(Some(lp)) = self.db.get_graph(graph_id) {
+            activity::publish(
+                &self.db,
+                &lp.workdir,
+                graph_id,
+                &lp.name,
+                format!("Blocked: {blocker}"),
+            );
+        }
+        for run in self
+            .db
+            .list_running_graph_runs(graph_id)
+            .unwrap_or_default()
+        {
+            self.terminate_run(&run, "spec exceeded cross-run attempt budget");
+        }
+        self.notify_blocked(graph_id, blocker)?;
+        self.fire_on_blocked_hooks(graph_id, blocker, ending_node.as_deref())
+            .await;
+        Ok(())
+    }
+}
