@@ -1,13 +1,9 @@
 use super::types::{AgentEntry, App, Focus};
-use crate::tui::agent::{AgentStatus, InteractiveAgent};
+use crate::tui::agent::InteractiveAgent;
 use crate::tui::gamification::MissionEvent;
-use crate::tui::terminal_history::save_history;
 use regex::Regex;
 use std::sync::LazyLock;
 use std::time::Duration;
-
-const SHADOW_SUMMARY_LINGER_SECS: u64 = 7;
-const SHADOW_SUMMARY_INSTRUCTION: &str = "Session terminated by user. Before exit, call intelligence_upsert with kind='session' and persist a concise summary including: mission outcome, key decisions, pending follow-ups, and any reusable facts/patterns.";
 
 static ANSI_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\x1b\[[0-9;]*[A-Za-z]").expect("invalid ANSI regex"));
@@ -17,7 +13,7 @@ fn strip_ansi_codes(s: &str) -> String {
     ANSI_RE.replace_all(s, "").into_owned()
 }
 
-fn recent_output_snippet(agent: &InteractiveAgent, n: usize) -> String {
+pub(super) fn recent_output_snippet(agent: &InteractiveAgent, n: usize) -> String {
     let clean: Vec<String> = agent
         .last_output_lines(n)
         .into_iter()
@@ -33,12 +29,12 @@ fn recent_output_snippet(agent: &InteractiveAgent, n: usize) -> String {
 }
 
 #[derive(Clone, Copy)]
-enum SessionTarget {
+pub(super) enum SessionTarget {
     Interactive(usize),
     Terminal(usize),
 }
 
-fn reverse_sorted_indices(mut indices: Vec<usize>) -> Vec<usize> {
+pub(super) fn reverse_sorted_indices(mut indices: Vec<usize>) -> Vec<usize> {
     indices.sort_unstable();
     indices.reverse();
     indices
@@ -47,7 +43,7 @@ fn reverse_sorted_indices(mut indices: Vec<usize>) -> Vec<usize> {
 /// Selection index after a session-list mutation: keep the previously-selected
 /// entry by identity when it survived the mutation, otherwise clamp into range.
 /// Pure so the "navigate Down over a reaped session" fix is unit-testable.
-fn selection_after_mutation(
+pub(super) fn selection_after_mutation(
     entry_ids: &[&str],
     anchor: Option<&str>,
     prev_selected: usize,
@@ -69,14 +65,17 @@ fn poll_agents(agents: &mut [InteractiveAgent]) {
     }
 }
 
-fn remove_session_name(sessions: &mut Vec<InteractiveAgent>, idx: usize) -> Option<String> {
+pub(super) fn remove_session_name(
+    sessions: &mut Vec<InteractiveAgent>,
+    idx: usize,
+) -> Option<String> {
     let agent_name = sessions.get(idx).map(|agent| agent.name.clone())?;
 
     sessions.remove(idx);
     Some(agent_name)
 }
 
-fn log_terminal_exit(name: &str, shell: &str, code: i32, output_snippet: &str) {
+pub(super) fn log_terminal_exit(name: &str, shell: &str, code: i32, output_snippet: &str) {
     tracing::warn!(
         "Terminal '{}' ({}) exited with code {code}.{}",
         name,
@@ -125,7 +124,7 @@ impl App {
         };
 
         if self.atmosphere_ctx.firefly_caught {
-            self.queue_mission_event(crate::tui::gamification::MissionEvent::FireflyCaught);
+            self.queue_mission_event(MissionEvent::FireflyCaught);
             self.atmosphere_ctx.firefly_caught = false;
         }
         self.atmosphere_ctx.mouse_clicked = false;
@@ -177,7 +176,7 @@ impl App {
     }
 
     pub(super) fn dismiss_copied(&mut self) {
-        if self.show_copied && self.copied_at.elapsed() > std::time::Duration::from_secs(2) {
+        if self.show_copied && self.copied_at.elapsed() > Duration::from_secs(2) {
             self.show_copied = false;
         }
     }
@@ -265,41 +264,6 @@ impl App {
         Some(SessionTarget::Terminal(idx))
     }
 
-    fn close_session_target(&mut self, target: SessionTarget, exit_code: i32) -> bool {
-        match target {
-            SessionTarget::Interactive(idx) => self.close_interactive_session_at(idx, exit_code),
-            SessionTarget::Terminal(idx) => self.close_terminal_session_at(idx),
-        }
-    }
-
-    fn remove_session_target(&mut self, target: SessionTarget) -> bool {
-        match target {
-            SessionTarget::Interactive(idx) => self.remove_interactive_session_entry(idx),
-            SessionTarget::Terminal(idx) => self.remove_terminal_session_entry(idx),
-        }
-    }
-
-    fn delete_group_at(&mut self, idx: usize) -> bool {
-        let Some(group_id) = self.split_groups.get(idx).map(|group| group.id.clone()) else {
-            return false;
-        };
-
-        self.delete_group_by_id(&group_id)
-    }
-
-    fn delete_group_by_id(&mut self, id: &str) -> bool {
-        if !self.split_groups.iter().any(|group| group.id == id) {
-            return false;
-        }
-
-        let _ = self.db.delete_group(id);
-        self.split_groups.retain(|group| group.id != id);
-        if self.active_split_id.as_deref() == Some(id) {
-            self.active_split_id = None;
-        }
-        true
-    }
-
     fn mark_selected_terminal_viewed(&mut self) {
         if !matches!(self.focus, Focus::Agent | Focus::Preview) {
             return;
@@ -328,214 +292,6 @@ impl App {
         };
 
         agent.mark_viewed();
-    }
-
-    fn exited_terminal_indices(&self) -> Vec<usize> {
-        self.terminal_agents
-            .iter()
-            .enumerate()
-            .filter(|(_, agent)| matches!(agent.status, AgentStatus::Exited(_)))
-            .map(|(idx, _)| idx)
-            .collect()
-    }
-
-    fn handle_terminal_exit(&mut self, idx: usize) {
-        let Some(agent) = self.terminal_agents.get(idx) else {
-            return;
-        };
-        if agent.exit_notified {
-            return;
-        }
-
-        let AgentStatus::Exited(code) = agent.status else {
-            return;
-        };
-
-        let agent_id = agent.id.clone();
-        let agent_name = agent.name.clone();
-        let shell = agent.shell.clone();
-        let output_snippet = recent_output_snippet(agent, 5);
-
-        let _ = self.db.finish_terminal_session(&agent_id);
-        if code != 0 {
-            log_terminal_exit(&agent_name, &shell, code, &output_snippet);
-        }
-
-        let Some(agent) = self.terminal_agents.get_mut(idx) else {
-            return;
-        };
-        agent.exit_notified = true;
-    }
-
-    fn exited_interactive_indices(&self) -> Vec<usize> {
-        self.interactive_agents
-            .iter()
-            .enumerate()
-            .filter(|(_, agent)| matches!(agent.status, AgentStatus::Exited(_)))
-            .map(|(idx, _)| idx)
-            .collect()
-    }
-
-    fn notify_failed_interactive_exit(
-        &mut self,
-        agent_id: &str,
-        cli: &str,
-        code: i32,
-        output_snippet: &str,
-    ) {
-        tracing::warn!(
-            "Agent '{agent_id}' ({cli}) exited with code {code}.{}",
-            if output_snippet.is_empty() {
-                ""
-            } else {
-                output_snippet
-            }
-        );
-
-        self.whimsg
-            .notify_event(crate::tui::whimsg::WhimContext::AgentFailed);
-        if !self.notifications_enabled {
-            return;
-        }
-
-        let output = output_snippet.trim_start_matches('\n').to_string();
-        self.notification_service
-            .notify_agent_failed(agent_id, cli, code, &output);
-    }
-
-    fn handle_interactive_exit(&mut self, idx: usize) {
-        let Some(agent) = self.interactive_agents.get(idx) else {
-            return;
-        };
-        if agent.exit_notified {
-            return;
-        }
-
-        let AgentStatus::Exited(code) = agent.status else {
-            return;
-        };
-
-        let agent_id = agent.id.clone();
-        let agent_name = agent.name.clone();
-        let working_dir = agent.working_dir.clone();
-        let cli = agent.cli.as_str().to_string();
-        let output_snippet = recent_output_snippet(agent, 5);
-        self.record_interactive_exit_in_db(&agent_id, &working_dir, code);
-        self.merge_active_sandbox();
-        let _ = self
-            .db
-            .close_agent_missions(&agent_id, &agent_name, &working_dir);
-        self.announce_interactive_exit(&agent_id, &cli, code, &output_snippet);
-        if let Some(agent) = self.interactive_agents.get_mut(idx) {
-            agent.exit_notified = true;
-        }
-    }
-
-    fn record_interactive_exit_in_db(&mut self, agent_id: &str, working_dir: &str, code: i32) {
-        let Some(nursery_path) = self.nursery_path.clone() else {
-            let _ = self.db.finish_interactive_session(agent_id, code); // non-nursery path
-            return;
-        };
-        if nursery_path.to_string_lossy() == working_dir && code == 0 {
-            match crate::domain::nursery::finalize_nursery(&nursery_path) {
-                Ok(seed_id) => {
-                    let _ = self.db.bind_session_to_seed(agent_id, &seed_id);
-                    self.queue_mission_event(MissionEvent::FirstSeedCreated);
-                }
-                Err(e) => {
-                    tracing::error!("Nursery finalization failed: {e}");
-                    self.notification_service.notify_nursery_failed(&e);
-                }
-            }
-        } else if code != 0 {
-            let _ = std::fs::remove_dir_all(&nursery_path);
-        }
-        let _ = self.db.remove_interactive_session(agent_id);
-        let _ = self.db.unregister_project_path(&nursery_path);
-        self.nursery_path = None;
-    }
-
-    fn merge_active_sandbox(&mut self) {
-        let Some(sandbox) = self.active_sandbox.clone() else {
-            return;
-        };
-        let merge_result = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(async { crate::domain::sandbox::merge_sandbox(&sandbox).await })
-        });
-        match merge_result {
-            Ok(outcome) => {
-                let _ = self.db.update_sandbox_run_status(
-                    &sandbox.id,
-                    Self::sandbox_merge_run_status(&outcome),
-                );
-                if let crate::domain::sandbox::MergeOutcome::MergeFailed(ref reason) = outcome {
-                    tracing::error!("Sandbox merge failed: {reason}");
-                    self.notification_service
-                        .notify_nursery_failed(&format!("Sandbox merge failed: {reason}"));
-                }
-            }
-            Err(e) => {
-                tracing::error!("Sandbox merge error: {e}");
-                let _ = self.db.update_sandbox_run_status(&sandbox.id, "failed");
-            }
-        }
-        self.active_sandbox = None;
-    }
-
-    fn sandbox_merge_run_status(outcome: &crate::domain::sandbox::MergeOutcome) -> &'static str {
-        match outcome {
-            crate::domain::sandbox::MergeOutcome::CleanMerge => "merged",
-            crate::domain::sandbox::MergeOutcome::ConflictResolution => "merged",
-            crate::domain::sandbox::MergeOutcome::MergeFailed(_) => "failed",
-        }
-    }
-
-    fn announce_interactive_exit(
-        &mut self,
-        agent_id: &str,
-        cli: &str,
-        code: i32,
-        output_snippet: &str,
-    ) {
-        if code != 0 {
-            self.notify_failed_interactive_exit(agent_id, cli, code, output_snippet);
-            return;
-        }
-        if self.session_args_contain_yolo(agent_id, cli) {
-            self.queue_mission_event(crate::tui::gamification::MissionEvent::YoloTaskCompleted);
-        }
-    }
-
-    fn successful_interactive_exit_indices(&self) -> Vec<usize> {
-        // Keep a successfully-finished session on screen while it is the one the
-        // user is currently viewing — its final output often carries useful
-        // end-of-run stats. It is reaped on a later poll, once the user moves
-        // the selection to another session.
-        let viewing = match self.selected_session_target() {
-            Some(SessionTarget::Interactive(idx)) => Some(idx),
-            _ => None,
-        };
-        self.interactive_agents
-            .iter()
-            .enumerate()
-            .filter(|(idx, agent)| {
-                matches!(agent.status, AgentStatus::Exited(0)) && Some(*idx) != viewing
-            })
-            .map(|(idx, _)| idx)
-            .collect()
-    }
-
-    fn remove_terminal_sessions(&mut self, indices: Vec<usize>) {
-        for idx in reverse_sorted_indices(indices) {
-            let _ = self.remove_session_target(SessionTarget::Terminal(idx));
-        }
-    }
-
-    fn remove_interactive_sessions(&mut self, indices: Vec<usize>) {
-        for idx in reverse_sorted_indices(indices) {
-            let _ = self.remove_session_target(SessionTarget::Interactive(idx));
-        }
     }
 
     fn terminate_active_split_session(&mut self) -> bool {
@@ -725,62 +481,6 @@ impl App {
         }
     }
 
-    pub fn delete_selected(&mut self) -> anyhow::Result<()> {
-        let Some(selected) = self.selected_agent() else {
-            return Ok(());
-        };
-
-        match selected {
-            AgentEntry::Agent(agent) => {
-                use crate::application::ports::AgentRepository;
-                self.db.delete_agent(&agent.id)?;
-            }
-            AgentEntry::Corrupt(corrupt) => {
-                // Deletes by id without parsing the stored row — a corrupt
-                // row must always be removable.
-                use crate::application::ports::AgentRepository;
-                self.db.delete_agent(&corrupt.id)?;
-            }
-            AgentEntry::Group(idx) => {
-                if !self.delete_group_at(*idx) {
-                    return Ok(());
-                }
-            }
-            AgentEntry::Interactive(idx) => {
-                if !self.close_session_target(SessionTarget::Interactive(*idx), 0) {
-                    return Ok(());
-                }
-            }
-            AgentEntry::Terminal(idx) => {
-                if !self.close_session_target(SessionTarget::Terminal(*idx), 0) {
-                    return Ok(());
-                }
-            }
-            AgentEntry::Orphaned(idx) => {
-                // Orphaned sessions are DB-only; just drop the entry.
-                self.orphaned_sessions.remove(*idx);
-                self.finish_session_mutation();
-            }
-        }
-
-        self.finish_session_mutation();
-        Ok(())
-    }
-
-    /// Dissolve all split groups that contain the given session name.
-    fn dissolve_groups_for_session(&mut self, session_name: &str) {
-        let ids_to_dissolve: Vec<String> = self
-            .split_groups
-            .iter()
-            .filter(|group| group.session_a == session_name || group.session_b == session_name)
-            .map(|group| group.id.clone())
-            .collect();
-
-        for id in ids_to_dissolve {
-            let _ = self.delete_group_by_id(&id);
-        }
-    }
-
     pub fn cleanup(&mut self) {
         for agent in &mut self.interactive_agents {
             agent.kill();
@@ -791,205 +491,10 @@ impl App {
         // Clear any lingering toast notifications from the Windows Action Center
         crate::domain::notification::clear_notifications_on_exit();
     }
-
-    /// Terminate the session(s) currently in focus.
-    ///
-    /// - Single agent/terminal: kill it and remove.
-    /// - Active split group: kill both sessions and dissolve the group.
-    pub fn terminate_focused_session(&mut self) {
-        let terminated = if self.active_split_id.is_some() {
-            self.terminate_active_split_session()
-        } else {
-            self.terminate_selected_session()
-        };
-        if !terminated {
-            return;
-        }
-
-        self.finish_session_mutation();
-    }
-
-    /// Kill and remove a session by name (interactive or terminal).
-    fn kill_session_by_name(&mut self, name: &str) {
-        let Some(target) = self.session_target_by_name(name) else {
-            return;
-        };
-
-        let _ = self.close_session_target(target, 0);
-    }
-
-    fn finish_session_mutation(&mut self) {
-        let _ = self.refresh_agents();
-        self.sync_selection_after_session_mutation();
-        self.reset_focus_after_session_mutation();
-    }
-
-    fn selected_entry_identity(&self) -> Option<String> {
-        self.agents
-            .get(self.selected)
-            .map(|entry| entry.id(self).to_string())
-    }
-
-    fn finish_session_mutation_preserving(&mut self, anchor: Option<&str>) {
-        let _ = self.refresh_agents();
-        let ids: Vec<String> = self
-            .agents
-            .iter()
-            .map(|entry| entry.id(self).to_string())
-            .collect();
-        let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
-        self.selected = selection_after_mutation(&id_refs, anchor, self.selected);
-        self.reset_focus_after_session_mutation();
-    }
-
-    fn close_interactive_session_at(&mut self, idx: usize, exit_code: i32) -> bool {
-        let Some(agent_id) = self
-            .interactive_agents
-            .get(idx)
-            .map(|agent| agent.id.clone())
-        else {
-            return false;
-        };
-
-        let _ = self.db.finish_interactive_session(&agent_id, exit_code);
-        let Some(agent) = self.interactive_agents.get(idx) else {
-            return false;
-        };
-        agent.schedule_shadow_shutdown(
-            SHADOW_SUMMARY_INSTRUCTION,
-            Duration::from_secs(SHADOW_SUMMARY_LINGER_SECS),
-        );
-        self.remove_session_target(SessionTarget::Interactive(idx))
-    }
-
-    fn close_terminal_session_at(&mut self, idx: usize) -> bool {
-        let Some(agent_id) = self.terminal_agents.get(idx).map(|agent| agent.id.clone()) else {
-            return false;
-        };
-
-        let _ = self.db.finish_terminal_session(&agent_id);
-        let Some(agent) = self.terminal_agents.get_mut(idx) else {
-            return false;
-        };
-
-        // Design decision: keep scrollback as plain text and exclude
-        // full-screen programs, rather than switch to storing a replayable
-        // raw ANSI byte stream.
-        //
-        // A byte stream would let a full-screen app (vim, htop, a nested
-        // canopy) replay faithfully, but it changes what lands on disk in
-        // ways this spec explicitly flags as needing its own size/safety
-        // review, and it would still have to solve accumulation (the same
-        // append-forever bug that corrupts the current text format).
-        // Excluding full-screen output instead reuses the existing
-        // plain-text, line-capped format and needs no new on-disk shape.
-        //
-        // vt100 already tells us when a full-screen program is active:
-        // `Screen::alternate_screen()` mirrors DECSET 1049, and the crate
-        // never threads the alternate grid into scrollback (it's allocated
-        // with `scrollback_len: 0` — see vt100::Screen::new). So if the
-        // session is still in alternate-screen mode at close time,
-        // `last_lines` would only be able to return the program's current
-        // on-screen frame (there's no line history to fall back to), and
-        // persisting that as scrollback text is exactly the "rendered
-        // frames printed back as literal text" bug. Skip the capture
-        // entirely in that case and keep whatever was already persisted —
-        // once the program exits back to the shell, a later close captures
-        // real shell history again, since alternate-grid content never
-        // reached the primary grid's scrollback in the first place.
-        if !agent.in_alternate_screen() {
-            let scrollback = agent.last_lines(2000);
-            if let Some(hist) = self.terminal_histories.get_mut(&agent.name) {
-                let lines: Vec<String> = scrollback.lines().map(|s| s.to_string()).collect();
-                hist.update_scrollback(&lines);
-                save_history(&self.data_dir, &agent.name, hist);
-            }
-        }
-        agent.kill();
-        self.remove_session_target(SessionTarget::Terminal(idx))
-    }
-
-    fn remove_interactive_session_entry(&mut self, idx: usize) -> bool {
-        let Some(agent_name) = remove_session_name(&mut self.interactive_agents, idx) else {
-            return false;
-        };
-
-        self.dissolve_groups_for_session(&agent_name);
-        true
-    }
-
-    fn remove_terminal_session_entry(&mut self, idx: usize) -> bool {
-        let Some(agent_name) = remove_session_name(&mut self.terminal_agents, idx) else {
-            return false;
-        };
-
-        self.dissolve_groups_for_session(&agent_name);
-        true
-    }
-
-    pub(crate) fn selected_session_is_exited(&self) -> bool {
-        match self.selected_session_target() {
-            Some(SessionTarget::Interactive(idx)) => self
-                .interactive_agents
-                .get(idx)
-                .is_some_and(|agent| matches!(agent.status, AgentStatus::Exited(_))),
-            Some(SessionTarget::Terminal(idx)) => self
-                .terminal_agents
-                .get(idx)
-                .is_some_and(|agent| matches!(agent.status, AgentStatus::Exited(_))),
-            None => false,
-        }
-    }
-
-    pub(crate) fn dismiss_selected_exited_session(&mut self) {
-        // The session already exited (DB was finalized in handle_*_exit); just drop
-        // it from the list and let the selection clamp to a neighbour.
-        let Some(target) = self.selected_session_target() else {
-            return;
-        };
-        if self.remove_session_target(target) {
-            self.finish_session_mutation();
-        }
-    }
-
-    /// Revive a selected orphaned session by re-launching its CLI with stored
-    /// args in its stored workdir.
-    pub(crate) fn revive_selected_orphaned_session(&mut self) {
-        let Some(AgentEntry::Orphaned(idx)) = self.selected_agent() else {
-            return;
-        };
-        let idx = *idx;
-        let Some(session) = self.orphaned_sessions.get(idx).cloned() else {
-            return;
-        };
-
-        let home = dirs::home_dir().unwrap_or_default();
-        let canopy_config = crate::domain::canopy_config::CanopyConfig::load(&home.join(".canopy"));
-        let (cols, rows) = Self::session_panel_size();
-        let current_boot_id = crate::system::boot_id();
-
-        // Remove from orphaned list first.
-        self.orphaned_sessions.remove(idx);
-        self.resume_interactive_session(
-            &session,
-            &canopy_config,
-            cols,
-            rows,
-            current_boot_id.as_deref(),
-        );
-        self.finish_session_mutation();
-    }
-
-    /// Dismiss (remove) a selected orphaned session without reviving it.
-    pub(crate) fn dismiss_selected_orphaned_session(&mut self) {
-        let Some(AgentEntry::Orphaned(idx)) = self.selected_agent() else {
-            return;
-        };
-        let idx = *idx;
-        self.orphaned_sessions.remove(idx);
-        self.finish_session_mutation();
-    }
 }
+
+mod exits;
+mod session_close;
 
 // ── Brain helpers ─────────────────────────────────────────────────
 
