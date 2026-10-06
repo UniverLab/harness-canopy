@@ -1,11 +1,14 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+use super::types::App;
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 use crate::db::Database;
 use crate::domain::graphs::{
-    GraphEdge, GraphNode, GraphNodeKind, GraphRunStatus, GraphSpecStatus, GraphStatus,
+    GraphEdge, GraphEdgeCondition, GraphNode, GraphNodeKind, GraphRunStatus, GraphSpecStatus,
+    GraphStatus,
 };
 
 /// A snapshot of the currently-selected graph's runtime state, assembled
@@ -481,6 +484,214 @@ fn tail_lines(content: &str, n: usize) -> String {
     let lines: Vec<&str> = content.lines().collect();
     let start = lines.len().saturating_sub(n);
     lines[start..].join("\n")
+}
+
+impl App {
+    pub(super) fn edge_priority(
+        condition: &crate::domain::graphs::GraphEdgeCondition,
+    ) -> (u8, Option<String>) {
+        match condition {
+            crate::domain::graphs::GraphEdgeCondition::Pass => (0, None),
+            crate::domain::graphs::GraphEdgeCondition::Fail => (1, None),
+            crate::domain::graphs::GraphEdgeCondition::Always => (2, None),
+            crate::domain::graphs::GraphEdgeCondition::Route(label) => (3, Some(label.clone())),
+            crate::domain::graphs::GraphEdgeCondition::Error => (4, None),
+        }
+    }
+
+    /// Collapse join nodes and ensemble members into one key per ensemble
+    /// (`true` = ensemble), carrying each key's node position. Mirrors what
+    /// the graph view draws.
+    pub(super) fn collapse_nodes(state: &GraphLiveState) -> HashMap<String, (bool, i64)> {
+        let join_ids: HashSet<&str> = state
+            .ensembles
+            .iter()
+            .map(|e| e.join_node_id.as_str())
+            .collect();
+        let ensemble_by_member: HashMap<&str, &EnsembleLiveInfo> = state
+            .ensembles
+            .iter()
+            .flat_map(|e| e.members.iter().map(move |m| (m.node_id.as_str(), e)))
+            .collect();
+        let mut nodes: HashMap<String, (bool, i64)> = HashMap::new(); // true=ensemble
+        let mut seen_ens: HashSet<String> = HashSet::new();
+        for node in &state.effective_nodes {
+            if join_ids.contains(node.id.as_str()) {
+                continue;
+            }
+            let Some(ens) = ensemble_by_member.get(node.id.as_str()) else {
+                nodes.insert(node.id.clone(), (false, node.position));
+                continue;
+            };
+            if !seen_ens.insert(ens.ensemble_id.clone()) {
+                continue;
+            }
+            nodes.insert(ens.ensemble_id.clone(), (true, node.position));
+        }
+        nodes
+    }
+
+    /// member-id -> ensemble-id for every member of any ensemble that has a
+    /// member in the effective graph (matching `collapse_nodes`'s scope).
+    pub(super) fn member_to_ensemble(state: &GraphLiveState) -> HashMap<String, String> {
+        let ensemble_by_member: HashMap<&str, &EnsembleLiveInfo> = state
+            .ensembles
+            .iter()
+            .flat_map(|e| e.members.iter().map(move |m| (m.node_id.as_str(), e)))
+            .collect();
+        let mut member_to_ensemble: HashMap<String, String> = HashMap::new();
+        let mut seen_ens: HashSet<String> = HashSet::new();
+        for node in &state.effective_nodes {
+            let Some(ens) = ensemble_by_member.get(node.id.as_str()) else {
+                continue;
+            };
+            if !seen_ens.insert(ens.ensemble_id.clone()) {
+                continue;
+            }
+            member_to_ensemble.extend(
+                ens.members
+                    .iter()
+                    .map(|m| (m.node_id.clone(), ens.ensemble_id.clone())),
+            );
+        }
+        member_to_ensemble
+    }
+
+    /// Resolve one raw node id to its collapsed key: the ensemble it is the
+    /// join of, else its ensemble (as a member), else itself when collapsed.
+    pub(super) fn dfs_endpoint(
+        raw: &str,
+        by_join: &HashMap<&str, &EnsembleLiveInfo>,
+        member_to_ensemble: &HashMap<String, String>,
+        collapsed: &HashMap<String, (bool, i64)>,
+    ) -> Option<String> {
+        if let Some(ens) = by_join.get(raw) {
+            return Some(ens.ensemble_id.clone());
+        }
+        if let Some(ek) = member_to_ensemble.get(raw) {
+            return Some(ek.clone());
+        }
+        if collapsed.contains_key(raw) {
+            return Some(raw.to_string());
+        }
+        None
+    }
+
+    /// Build the collapsed-edge adjacency with member->join edges removed and
+    /// duplicates dropped, sorting each node's outgoing edges by priority.
+    pub(super) fn dfs_collapsed_edges(
+        state: &GraphLiveState,
+        collapsed: &HashMap<String, (bool, i64)>,
+        by_join: &HashMap<&str, &EnsembleLiveInfo>,
+        member_to_ensemble: &HashMap<String, String>,
+    ) -> HashMap<String, Vec<(String, GraphEdgeCondition)>> {
+        let by_member: HashMap<&str, &EnsembleLiveInfo> = state
+            .ensembles
+            .iter()
+            .flat_map(|e| e.members.iter().map(move |m| (m.node_id.as_str(), e)))
+            .collect();
+        let mut collapsed_edges: HashMap<String, Vec<(String, GraphEdgeCondition)>> =
+            HashMap::new();
+        for edge in &state.effective_edges {
+            let from_raw = edge.from_node.as_str();
+            let to_raw = edge.to_node.as_str();
+            if by_member
+                .get(from_raw)
+                .is_some_and(|e| e.join_node_id.as_str() == to_raw)
+            {
+                continue;
+            }
+            let from_key = Self::dfs_endpoint(from_raw, by_join, member_to_ensemble, collapsed);
+            let to_key = Self::dfs_endpoint(to_raw, by_join, member_to_ensemble, collapsed);
+            let (Some(fk), Some(tk)) = (from_key, to_key) else {
+                continue;
+            };
+            let entry = collapsed_edges.entry(fk).or_default();
+            if !entry
+                .iter()
+                .any(|(ek, ec)| ek == &tk && ec == &edge.condition)
+            {
+                entry.push((tk, edge.condition.clone()));
+            }
+        }
+        for edges in collapsed_edges.values_mut() {
+            edges.sort_by(|a, b| {
+                let (pa, la) = Self::edge_priority(&a.1);
+                let (pb, lb) = Self::edge_priority(&b.1);
+                pa.cmp(&pb).then_with(|| la.cmp(&lb))
+            });
+        }
+        collapsed_edges
+    }
+
+    /// The DFS entry key: the collapsed key with no incoming edge, else the
+    /// one at the lowest node position. The `unwrap` panics only on an empty
+    /// `collapsed`, which the caller guards.
+    pub(super) fn dfs_entry_key(
+        collapsed: &HashMap<String, (bool, i64)>,
+        collapsed_pos: &HashMap<String, i64>,
+        adjacency: &HashMap<String, Vec<(String, GraphEdgeCondition)>>,
+    ) -> String {
+        let mut incoming: HashSet<String> = HashSet::new();
+        for tos in adjacency.values() {
+            for (tk, _) in tos {
+                incoming.insert(tk.clone());
+            }
+        }
+        collapsed
+            .keys()
+            .find(|k| !incoming.contains(*k))
+            .cloned()
+            .or_else(|| {
+                collapsed
+                    .keys()
+                    .min_by_key(|k| collapsed_pos.get(*k).copied().unwrap_or(i64::MAX))
+                    .cloned()
+            })
+            .unwrap()
+    }
+
+    /// Depth-first walk of the collapsed adjacency, appending each key once to
+    /// `order`.
+    pub(super) fn dfs_rec(
+        key: &str,
+        adjacency: &HashMap<String, Vec<(String, GraphEdgeCondition)>>,
+        visited: &mut HashSet<String>,
+        order: &mut Vec<String>,
+    ) {
+        if visited.contains(key) {
+            return;
+        }
+        visited.insert(key.to_string());
+        order.push(key.to_string());
+        let Some(edges) = adjacency.get(key) else {
+            return;
+        };
+        for (tk, _) in edges {
+            if !visited.contains(tk.as_str()) {
+                Self::dfs_rec(tk, adjacency, visited, order);
+            }
+        }
+    }
+
+    /// Map collapsed keys back to concrete node ids for selection. For
+    /// ensembles, use the first member's node id (renderer highlights on any
+    /// member).
+    pub(super) fn dfs_concrete_ids(order: Vec<String>, state: &GraphLiveState) -> Vec<String> {
+        let mut ensemble_first_member: HashMap<String, String> = HashMap::new();
+        for ens in &state.ensembles {
+            if let Some(first) = ens.members.first() {
+                ensemble_first_member.insert(ens.ensemble_id.clone(), first.node_id.clone());
+            }
+        }
+        order
+            .into_iter()
+            .map(|ck| match ensemble_first_member.get(&ck) {
+                Some(mid) => mid.clone(),
+                None => ck,
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
