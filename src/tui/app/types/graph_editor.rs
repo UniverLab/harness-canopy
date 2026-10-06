@@ -157,7 +157,6 @@ impl GraphEditorDialog {
         Some(self.edge_targets[next_index].0.clone())
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn new_router_routes(
         node_id: String,
         node_name: String,

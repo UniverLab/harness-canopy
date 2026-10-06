@@ -3,7 +3,7 @@ use ratatui::text::{Line, Span};
 
 use super::fields::{
     append_directory_section, append_identity_section, append_prompt_section,
-    append_sandbox_section, append_yolo_section, terminal_shell_row,
+    append_sandbox_section, append_yolo_section, terminal_shell_row, DirSection,
 };
 use super::{
     background_trigger_label, filter_row, focus_style, interactive_mode_row, model_value,
@@ -15,17 +15,24 @@ use super::{
 use crate::tui::app::dialog::new_agent::{BackgroundTrigger, NewAgentDialog};
 use crate::tui::ui::theme::Theme;
 
-#[allow(clippy::too_many_arguments)]
+/// Layout inputs shared by the section builders: the per-field layout, the
+/// inner field width, and how many directory rows are visible.
+#[derive(Clone, Copy)]
+pub(super) struct SectionLayout {
+    pub fields: FieldLayout,
+    pub field_width: usize,
+    pub dir_visible: usize,
+}
+
 pub(super) fn append_interactive_sections(
     lines: &mut Vec<Line<'static>>,
     dialog: &NewAgentDialog,
     accent: Color,
     filtered_clis: &[usize],
-    layout: FieldLayout,
-    _field_width: usize,
     theme: &Theme,
-    dir_visible: usize,
+    section: SectionLayout,
 ) {
+    let layout = section.fields;
     if !dialog.is_edit_mode() {
         push_spaced_row(lines, interactive_mode_row(dialog, accent, theme));
         // Sits between choosing Resume and CLI selection: the harness
@@ -42,11 +49,13 @@ pub(super) fn append_interactive_sections(
         lines,
         dialog,
         accent,
-        layout.dir,
-        false,
-        layout.dir,
         theme,
-        dir_visible,
+        DirSection {
+            field: layout.dir,
+            hidden: false,
+            browser_field: layout.dir,
+            visible: section.dir_visible,
+        },
     );
 }
 
@@ -54,7 +63,6 @@ pub(super) fn append_terminal_sections(
     lines: &mut Vec<Line<'static>>,
     dialog: &NewAgentDialog,
     accent: Color,
-    _field_width: usize,
     theme: &Theme,
     dir_visible: usize,
 ) {
@@ -62,30 +70,30 @@ pub(super) fn append_terminal_sections(
         lines,
         dialog,
         accent,
-        TERMINAL_DIR_FIELD,
-        false,
-        TERMINAL_DIR_FIELD,
         theme,
-        dir_visible,
+        DirSection {
+            field: TERMINAL_DIR_FIELD,
+            hidden: false,
+            browser_field: TERMINAL_DIR_FIELD,
+            visible: dir_visible,
+        },
     );
     push_spaced_row(lines, terminal_shell_row(dialog, accent, theme));
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn append_background_sections(
     lines: &mut Vec<Line<'static>>,
     dialog: &NewAgentDialog,
     accent: Color,
     filtered_clis: &[usize],
-    layout: FieldLayout,
-    field_width: usize,
     theme: &Theme,
-    dir_visible: usize,
+    section: SectionLayout,
 ) {
+    let layout = section.fields;
     append_trigger_section(lines, dialog, accent, theme);
     append_cli_section(lines, dialog, accent, filtered_clis, layout.cli, theme);
     append_model_section(lines, dialog, accent, layout.model, theme);
-    append_prompt_section(lines, dialog, accent, layout, field_width, theme);
+    append_prompt_section(lines, dialog, accent, layout, section.field_width, theme);
 
     let hide_dir = dialog.background_trigger == BackgroundTrigger::Watch;
     let browser_field = if hide_dir { layout.extra } else { layout.dir };
@@ -93,11 +101,13 @@ pub(super) fn append_background_sections(
         lines,
         dialog,
         accent,
-        layout.dir,
-        hide_dir,
-        browser_field,
         theme,
-        dir_visible,
+        DirSection {
+            field: layout.dir,
+            hidden: hide_dir,
+            browser_field,
+            visible: section.dir_visible,
+        },
     );
 }
 
@@ -165,7 +175,6 @@ fn append_cli_section(
     lines.push(Line::from(""));
 }
 
-#[allow(clippy::too_many_arguments)]
 fn append_cli_picker_rows(
     lines: &mut Vec<Line<'static>>,
     dialog: &NewAgentDialog,

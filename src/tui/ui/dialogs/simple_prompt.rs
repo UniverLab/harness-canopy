@@ -20,7 +20,7 @@ mod sections;
 
 use geometry::{centered_rect_fixed, compute_prompt_geometry};
 use hints::prompt_hint_line;
-use scheduled::{draw_raw_tab_content, draw_scheduled_list};
+use scheduled::{draw_raw_tab_content, draw_scheduled_list, ScheduledList};
 use sections::{draw_prompt_normal_content, prompt_accent};
 
 #[cfg(test)]
@@ -297,11 +297,13 @@ pub fn draw_simple_prompt_dialog(
         let panel_top = inner.y + inner.height.saturating_sub(1 + list_panel_height);
         draw_scheduled_list(
             frame,
-            &pending_scheduled,
-            list_selected,
-            list_scroll,
-            list_visible_rows,
-            dialog.editing_scheduled_id.as_deref(),
+            &ScheduledList {
+                pending: &pending_scheduled,
+                selected: list_selected,
+                scroll: list_scroll,
+                visible_rows: list_visible_rows,
+                editing_id: dialog.editing_scheduled_id.as_deref(),
+            },
             accent,
             inner,
             panel_top,

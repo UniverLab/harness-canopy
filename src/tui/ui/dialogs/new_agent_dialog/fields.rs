@@ -48,7 +48,6 @@ fn background_prompt_label(
 /// lines starting from `dialog.prompt_scroll`, drawing a block cursor at
 /// `dialog.prompt_cursor`. Mirrors the math in `prompt_visual_line_count` so
 /// scrolling, the input handler, and the render stay in lockstep.
-#[allow(clippy::too_many_arguments)]
 fn append_prompt_input_block(
     lines: &mut Vec<Line<'static>>,
     dialog: &NewAgentDialog,
@@ -298,19 +297,26 @@ pub(super) fn append_sandbox_section(
     push_spaced_row(lines, Line::from(spans));
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Inputs for one directory section: the field index the `Dir:` row binds
+/// to, whether that row is hidden (the watch trigger hides it), the field
+/// index the browser rows bind to, and how many browser rows fit.
+#[derive(Clone, Copy)]
+pub(super) struct DirSection {
+    pub field: usize,
+    pub hidden: bool,
+    pub browser_field: usize,
+    pub visible: usize,
+}
+
 pub(super) fn append_directory_section(
     lines: &mut Vec<Line<'static>>,
     dialog: &NewAgentDialog,
     accent: Color,
-    dir_field: usize,
-    hide_dir: bool,
-    browser_field: usize,
     theme: &Theme,
-    dir_visible: usize,
+    dir: DirSection,
 ) {
-    if !hide_dir {
-        push_spaced_row(lines, working_dir_row(dialog, accent, dir_field, theme));
+    if !dir.hidden {
+        push_spaced_row(lines, working_dir_row(dialog, accent, dir.field, theme));
     }
     if dialog.dir_entries.is_empty() {
         return;
@@ -319,9 +325,9 @@ pub(super) fn append_directory_section(
     lines.extend(dir_browser_lines(
         dialog,
         accent,
-        dialog.field == browser_field,
+        dialog.field == dir.browser_field,
         theme,
-        dir_visible,
+        dir.visible,
     ));
 }
 

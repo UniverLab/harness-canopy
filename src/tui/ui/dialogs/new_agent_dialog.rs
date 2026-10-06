@@ -18,7 +18,7 @@ mod pickers;
 use fields::prompt_visual_line_range;
 use pickers::{
     append_background_sections, append_interactive_sections, append_terminal_sections,
-    session_resume_label,
+    session_resume_label, SectionLayout,
 };
 
 const TYPE_FIELD: usize = 0;
@@ -259,34 +259,21 @@ fn build_dialog_lines(
 ) -> Vec<Line<'static>> {
     let layout = FieldLayout::for_task(dialog.task_type);
     let mut lines = dialog_header_lines(dialog, accent, theme);
+    let section = SectionLayout {
+        fields: layout,
+        field_width,
+        dir_visible,
+    };
 
     match dialog.task_type {
         NewTaskType::Interactive => {
-            append_interactive_sections(
-                &mut lines,
-                dialog,
-                accent,
-                filtered_clis,
-                layout,
-                field_width,
-                theme,
-                dir_visible,
-            );
+            append_interactive_sections(&mut lines, dialog, accent, filtered_clis, theme, section);
         }
         NewTaskType::Terminal => {
-            append_terminal_sections(&mut lines, dialog, accent, field_width, theme, dir_visible);
+            append_terminal_sections(&mut lines, dialog, accent, theme, dir_visible);
         }
         NewTaskType::Background => {
-            append_background_sections(
-                &mut lines,
-                dialog,
-                accent,
-                filtered_clis,
-                layout,
-                field_width,
-                theme,
-                dir_visible,
-            );
+            append_background_sections(&mut lines, dialog, accent, filtered_clis, theme, section);
         }
     }
 

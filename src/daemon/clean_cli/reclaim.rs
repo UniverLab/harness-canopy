@@ -303,6 +303,17 @@ fn spawn_detached_daemon(data_dir: &Path, port: u16) -> Result<()> {
     Ok(())
 }
 
+/// The operator-facing choices for one reclaim window: how much history to
+/// keep, the timestamp the cleanup plan is computed against, whether to also
+/// run the hard cascade, and whether confirmation prompts are skipped.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ReclaimOptions {
+    pub retention_days: u64,
+    pub now_ts: i64,
+    pub hard: bool,
+    pub yes: bool,
+}
+
 /// What happened inside the reclaim window — every branch reports exactly
 /// what the spec requires (busy names what's busy; a `quick_check` failure
 /// says nothing was modified; the happy path reports every step
@@ -364,19 +375,21 @@ fn restore_daemon_once(
 /// requires tests for (busy refusal, `quick_check`-gates-VACUUM,
 /// restore-on-failure, infeasible-restoration refusal), and none of that
 /// needs a real daemon process to exercise.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn run_reclaim_window(
     db: &Database,
     data_dir: &Path,
     db_path: &Path,
-    retention_days: u64,
-    now_ts: i64,
-    hard: bool,
-    yes: bool,
+    options: ReclaimOptions,
     daemon_pid: Option<u32>,
     ops: &dyn DaemonOps,
     restored: &Mutex<bool>,
 ) -> Result<ReclaimWindowOutcome> {
+    let ReclaimOptions {
+        retention_days,
+        now_ts,
+        hard,
+        yes,
+    } = options;
     let busy = db.busy_reasons()?;
     if !busy.is_empty() {
         return Ok(ReclaimWindowOutcome::Refused(format!(
@@ -581,10 +594,12 @@ pub(super) async fn run_reclaim_window_and_report(
                 &db,
                 &db_dir_owned,
                 &db_owned,
-                retention_days,
-                now_ts,
-                hard,
-                yes,
+                ReclaimOptions {
+                    retention_days,
+                    now_ts,
+                    hard,
+                    yes,
+                },
                 daemon_pid,
                 blocking_ops.as_ref(),
                 &blocking_restored,

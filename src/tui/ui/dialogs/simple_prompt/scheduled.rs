@@ -12,7 +12,6 @@ use crate::tui::ui::theme::Theme;
 /// content area, or — when the buffer is empty — a dimmed, read-only preview
 /// of the composed Normal-form prompt (the exact string a send would produce),
 /// clamped with a "… (+N lines)" tail when it overflows.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn draw_raw_tab_content(
     frame: &mut Frame,
     dialog: &crate::tui::app::dialog::SimplePromptDialog,
@@ -132,22 +131,35 @@ pub(super) fn scheduled_row_text(
     truncate_str(&full, width)
 }
 
+/// The pending-sends list state: the entries, the focused row (only set while
+/// the list has keyboard focus), the scroll offset, how many rows fit, and the
+/// id currently being edited inline.
+pub(super) struct ScheduledList<'a> {
+    pub pending: &'a [crate::db::scheduled_sends::ScheduledSend],
+    pub selected: Option<usize>,
+    pub scroll: usize,
+    pub visible_rows: usize,
+    pub editing_id: Option<&'a str>,
+}
+
 /// Draw the pending-scheduled-sends list panel (B33): a labeled top border,
 /// then one row per visible entry (fire time + prompt preview). The selected
 /// row (only set while the list has keyboard focus) is drawn reversed.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn draw_scheduled_list(
     frame: &mut Frame,
-    pending: &[crate::db::scheduled_sends::ScheduledSend],
-    selected: Option<usize>,
-    scroll: usize,
-    visible_rows: usize,
-    editing_id: Option<&str>,
+    list: &ScheduledList<'_>,
     accent: Color,
     inner: ratatui::layout::Rect,
     panel_top: u16,
     theme: &Theme,
 ) {
+    let ScheduledList {
+        pending,
+        selected,
+        scroll,
+        visible_rows,
+        editing_id,
+    } = *list;
     let editing = editing_id.is_some_and(|id| pending.iter().any(|send| send.id == id));
     let label = if editing {
         format!(" Scheduled sends ({}) — editing ", pending.len())
