@@ -225,6 +225,13 @@ impl TaskTriggerHandler {
     }
 }
 
+/// Whether `graph_run` accepts relaunching a graph in `status`, factored out as
+/// a pure function so the guard (and its wording) can be unit-tested without
+/// building a full `TaskTriggerHandler`.
+///
+/// `graph_run` refuses `failed`/`completed` graphs outright — `graph_reset` (or,
+/// for a `failed` graph, `graph_schedule_autorun`'s auto-reset-and-resume) is
+/// the sanctioned way out, mirroring [`Database::reset_graph`].
 pub(crate) fn graph_run_status_guard(graph_id: &str, status: GraphStatus) -> Result<(), String> {
     match status {
         GraphStatus::Running | GraphStatus::Pausing => {
@@ -240,6 +247,18 @@ pub(crate) fn graph_run_status_guard(graph_id: &str, status: GraphStatus) -> Res
     }
 }
 
+/// Ground truth for "is this graph actually busy right now": any `graph_runs`
+/// row still `running` under it, regardless of what the graph's own `status`
+/// column says. Status and a run's lifetime are independent — a sibling
+/// node's `graph_report_blocker` can flip status to `paused` while a
+/// different node under the same graph keeps executing — so `graph_run` and
+/// [`Database::reset_graph`] both consult this (the latter internally, since
+/// the scheduler's autorun also calls it directly) instead of trusting
+/// status alone. One indexed query (`idx_graph_runs_graph_started`) at
+/// dispatch time.
+///
+/// Returns the first still-`running` row found — an actionable pointer for a
+/// human operator (wait or kill), not an exhaustive list.
 pub(crate) fn find_in_flight_run(
     db: &Database,
     graph_id: &str,
@@ -251,6 +270,10 @@ pub(crate) fn find_in_flight_run(
         .next())
 }
 
+/// The actionable refusal text for a `graph_run`/`graph_reset` call blocked by
+/// [`find_in_flight_run`] (or [`Database::reset_graph`]'s own equivalent
+/// check): names the node and run still executing, and since when, because
+/// the caller's next decision is to wait for it or terminate it.
 pub(crate) fn in_flight_run_error(
     graph_id: &str,
     run_id: &str,
@@ -264,6 +287,9 @@ pub(crate) fn in_flight_run_error(
     )
 }
 
+/// `node_id`'s display name, falling back to the raw id if the node row is
+/// somehow gone (e.g. deleted out from under a still-running attempt) — used
+/// to build [`in_flight_run_error`]'s message from a bare `GraphNodeRun`.
 pub(crate) fn node_name_for_error(db: &Database, node_id: &str) -> Result<String, String> {
     Ok(db
         .get_graph_node(node_id)
@@ -272,6 +298,12 @@ pub(crate) fn node_name_for_error(db: &Database, node_id: &str) -> Result<String
         .unwrap_or_else(|| node_id.to_string()))
 }
 
+/// Validate every ensemble (F1) reachable by a `graph_run` call — the graph's
+/// own top-level graph, plus the own graph of every spec that could actually
+/// run (the graph's bound specs, and a queue's members when `queue_id` is
+/// given). A spec with no nodes of its own falls back to the top-level
+/// graph at execution time (see `GraphEngine::run_spec`), so it's skipped
+/// here rather than double-validated.
 pub(crate) fn validate_graph_ensembles_for_run(
     db: &Database,
     graph_id: &str,
@@ -320,6 +352,20 @@ pub(crate) fn validate_graph_ensembles_for_run(
     Ok(())
 }
 
+/// Resolve the exact node run a `graph_complete_node`/`graph_report_blocker`
+/// report belongs to (B12). A node can be retried, so more than one run can
+/// exist for the same `node_id` over a spec's lifetime — matching on
+/// `node_id` alone (as this used to) means a report arriving late from a
+/// killed/superseded attempt (e.g. a timed-out or paused agent that ignores
+/// its own termination and calls the tool anyway) would get silently applied
+/// to whatever newer run is now active for that node. Requiring the exact
+/// `run_id` and verifying it's both still `running` and actually for the
+/// claimed `node_id` closes that gap: anything else is rejected outright
+/// rather than guessed at.
+///
+/// Returns `Err(McpError)` only for a genuine DB failure; a stale/malformed
+/// report is a normal `Ok(Err(CallToolResult))` — the tool call succeeded at
+/// the protocol level, it's just telling the caller its report didn't stick.
 pub(crate) fn resolve_reported_run(
     db: &Database,
     run_id: &str,
@@ -364,6 +410,11 @@ pub(crate) fn resolve_reported_run(
     Ok(Ok(run))
 }
 
+/// Find and skip `graph_id`'s currently `running` spec — its own bound spec,
+/// or, for a queue-driven run, the queue member currently in flight. A queue
+/// member's `graph_id` column stays `None` (queue membership never binds it),
+/// so `list_graph_specs(graph_id)` alone can't see it (B18): the graph's
+/// persisted `active_run_queue_id` is what names the queue to look in instead.
 pub(crate) fn handle_skip_next_spec(db: &Database, graph_id: &str) -> Result<(), McpError> {
     let bound_running = db
         .list_graph_specs(graph_id)
@@ -391,6 +442,13 @@ pub(crate) fn handle_skip_next_spec(db: &Database, graph_id: &str) -> Result<(),
     Ok(())
 }
 
+/// Validate that a resumable spec exists for `retry_current_node` — `Running`
+/// or `Interrupted` (see [`GraphSpecStatus::is_resumable`], CB50), the same
+/// lookup shape as [`handle_skip_next_spec`] but only checks, never mutates.
+/// When nothing resumable is found, the error names whichever spec IS
+/// current (if any) and its status, and points at the verb that does apply —
+/// `loop_run` to restart a non-`Failed` spec from its entry node, `loop_reset`
+/// for a `Failed` one (FR5) — rather than a bare "not found".
 pub(crate) fn handle_retry_current_node(db: &Database, graph_id: &str) -> Result<(), McpError> {
     let bound_specs = db.list_graph_specs(graph_id).map_err(internal_error)?;
     if bound_specs.iter().any(|spec| spec.status.is_resumable()) {
@@ -438,6 +496,8 @@ pub(crate) fn handle_retry_current_node(db: &Database, graph_id: &str) -> Result
     })
 }
 
+/// The `running` member of `graph_id`'s currently active queue run, if any —
+/// `None` if the graph isn't drawing from a queue, or no member is `running`.
 pub(crate) fn queue_running_spec(
     db: &Database,
     graph_id: &str,
@@ -462,6 +522,12 @@ pub(crate) fn queue_running_spec(
     Ok(None)
 }
 
+/// The current member of `graph_id`'s active queue: the first `Running` or
+/// `Interrupted` member (either is resumable — CB50), found in queue
+/// position order. If none is resumable, falls back to the first member not
+/// yet `Completed`/`Skipped`, purely so callers building an error message
+/// (FR5) have a spec to name instead of nothing. `None` if the graph isn't
+/// drawing from a queue, or every member is terminal.
 pub(crate) fn queue_current_spec(
     db: &Database,
     graph_id: &str,

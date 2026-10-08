@@ -28,6 +28,10 @@ pub(crate) fn validate_absolute_dir(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Unlike [`validate_absolute_dir`], a spec's `workdir` tag doesn't require
+/// the directory to exist yet — a backlog spec can be authored for a workdir
+/// before that project is cloned or a graph targeting it is created. It's
+/// only ever used for filtering (`spec_list`), never to drive execution.
 pub(crate) fn validate_spec_workdir(path: &str) -> Result<(), String> {
     if !std::path::Path::new(path).is_absolute() {
         return Err("Spec workdir must be an absolute path.".into());
@@ -99,6 +103,13 @@ pub(crate) fn validate_position_conflict(
     }
 }
 
+/// Refuse to delete a spec that's still bound to a graph, with an actionable
+/// message pointing at the fix (detach it, or delete the graph instead).
+///
+/// Note: a spec that's a member of a [`Queue`] can still be deleted — the
+/// `queue_members` row cascades away with it (see `queues` table). Queues are
+/// just queues over specs that already exist; they don't own them the way a
+/// graph owns its bound specs.
 pub(crate) fn validate_spec_deletable(spec: &GraphSpec) -> Result<(), String> {
     if let Some(graph_id) = &spec.graph_id {
         return Err(format!(
@@ -125,6 +136,9 @@ pub(crate) fn validate_spec_unbindable(_db: &Database, spec: &GraphSpec) -> Resu
     Ok(())
 }
 
+/// Check a node's sibling graph — its spec's nodes, or its graph's top-level
+/// graph nodes — for a position conflict. `node` targets exactly one of
+/// `spec_id`/`graph_id` (the DB layer enforces it), so exactly one branch runs.
 pub(crate) fn validate_node_position_conflict(
     db: &Database,
     node: &GraphNode,
@@ -163,6 +177,10 @@ pub(crate) fn validate_edge_condition(condition: &str) -> Result<GraphEdgeCondit
     })
 }
 
+/// [`validate_edge_condition`] plus `route` support for
+/// `graph_add_edge`/`graph_update_edge`: a `"route"` condition requires a
+/// non-empty `route` param naming the label. `pass`/`fail`/`always` are
+/// unaffected — delegated straight to [`validate_edge_condition`].
 pub(crate) fn validate_edge_condition_with_route(
     condition: &str,
     route: Option<&str>,
@@ -181,6 +199,9 @@ pub(crate) fn validate_edge_condition_with_route(
     })
 }
 
+/// If `condition` is a `Route`, validate that its label names a route
+/// actually declared by the router node `from_node_id` — never accepted
+/// free-form. Every other condition is a no-op.
 pub(crate) fn validate_route_edge_target(
     db: &Database,
     from_node_id: &str,
@@ -215,6 +236,9 @@ pub(crate) fn validate_node_kind(kind: &str) -> Result<GraphNodeKind, String> {
         .ok_or_else(|| "Graph node kind must be one of: agent, check, gate, router.".to_string())
 }
 
+/// `graph_add_node`/`graph_update_node`'s `kind: "join"` guard — a quorum node is
+/// engine-managed and only ever created as part of `graph_add_ensemble`'s
+/// one-call expansion, never directly.
 pub(crate) fn validate_not_join_kind(kind: GraphNodeKind) -> Result<(), String> {
     if kind == GraphNodeKind::Join {
         return Err(
@@ -225,6 +249,12 @@ pub(crate) fn validate_not_join_kind(kind: GraphNodeKind) -> Result<(), String> 
     Ok(())
 }
 
+/// Refuse to edit a node directly with `graph_update_node`/`graph_add_edge` if
+/// it belongs to an ensemble (member or quorum) — a member's prompt/platform/
+/// model (including its optional `prompt_override`) and the quorum's own
+/// config are all owned by the ensemble unit, so every edit goes through
+/// `graph_update_ensemble`, never a direct node/edge tool. Deleting the whole
+/// unit is `graph_delete_ensemble`'s job, never `graph_delete_node`'s.
 pub(crate) fn validate_node_not_ensemble_owned(db: &Database, node_id: &str) -> Result<(), String> {
     if let Some(details) = db
         .get_ensemble_by_member_node(node_id)
@@ -247,6 +277,15 @@ pub(crate) fn validate_node_not_ensemble_owned(db: &Database, node_id: &str) -> 
     Ok(())
 }
 
+/// CB52: refuse to delete a plain node that an ensemble references without
+/// owning — as primary entry (`entry_from_node`), as an extra entry source,
+/// or as an exit target (`on_pass_to`/`on_fail_to`). Before this guard the
+/// `ensembles` FKs were `ON DELETE CASCADE`, so the delete silently removed
+/// the ensemble row (and its `ensemble_members` rows) while the member/join
+/// nodes survived as orphans; the next dispatch then died with an
+/// "ambiguous outgoing edges" message naming none of the cause. The schema
+/// is now `ON DELETE RESTRICT` as the last line; this check is the readable
+/// first line, naming each ensemble, the role, and the detaching verbs.
 pub(crate) fn validate_node_not_ensemble_referenced(
     db: &Database,
     node_id: &str,
@@ -269,6 +308,10 @@ pub(crate) fn validate_node_not_ensemble_referenced(
     Err(parts.join("; "))
 }
 
+/// Resolve the [`GraphStatus`] (and id) of the graph that owns a spec-scoped or
+/// graph-scoped graph object. A node/edge always has exactly one of
+/// `spec_id`/`graph_id` set. `None` means the object belongs to a standalone
+/// spec not yet bound to any graph — nothing running to guard against.
 pub(crate) fn resolve_owning_graph_status(
     db: &Database,
     spec_id: Option<&str>,
@@ -294,6 +337,16 @@ pub(crate) fn resolve_owning_graph_status(
     Ok(None)
 }
 
+/// Reject a topology mutation (retargeting/deleting an edge, deleting a
+/// node) while the owning graph is `running`. Deliberately stricter than node
+/// CONFIG edits. Since CM15 the engine re-reads a node's config (and an
+/// ensemble's member set) from the database at each dispatch
+/// (`GraphEngine::run_spec`), so a `graph_update_node` / `graph_update_ensemble`
+/// config edit takes effect on that node's next dispatch within the same running
+/// spec. Topology is different: a node's `kind`/`position`, the ensemble `kind`,
+/// and entry/exit wiring (edges) are resolved once from the per-run snapshot and
+/// never re-read, so an edit to them mid-run would make execution and routing
+/// disagree — those are refused here.
 pub(crate) fn validate_topology_mutation_allowed(
     db: &Database,
     spec_id: Option<&str>,
@@ -309,6 +362,9 @@ pub(crate) fn validate_topology_mutation_allowed(
     Ok(())
 }
 
+/// `to_node` must exist in the same spec/graph as `edge` — a
+/// cross-graph retarget would leave the edge's `spec_id`/`graph_id` naming one
+/// graph while `to_node` lives in another.
 pub(crate) fn validate_edge_retarget_destination(
     db: &Database,
     edge: &GraphEdge,
@@ -331,6 +387,10 @@ pub(crate) fn validate_edge_retarget_destination(
     Ok(())
 }
 
+/// Whether `node` is the computed entry point of its graph (spec-scoped or
+/// graph-scoped) — see [`crate::graph_engine::find_entry_node`]. A graph with
+/// no *confirmed* single entry (e.g. `find_entry_node` errors on multiple
+/// sources) never blocks deletion here; only a confirmed single entry does.
 pub(crate) fn validate_node_not_entry_point(db: &Database, node: &GraphNode) -> Result<(), String> {
     let (nodes, edges) = if let Some(spec_id) = &node.spec_id {
         (
@@ -359,6 +419,10 @@ pub(crate) fn validate_node_not_entry_point(db: &Database, node: &GraphNode) -> 
     Ok(())
 }
 
+/// Validated retarget of an existing edge's `to_node` — the shared path used
+/// by both the `graph_update_edge` MCP tool and the TUI's edge editor, so an
+/// ordinary `pass`/`fail` edge gets the same checks a router's route edges
+/// have always had.
 pub(crate) fn retarget_graph_edge(
     db: &Database,
     edge_id: &str,
@@ -377,6 +441,8 @@ pub(crate) fn retarget_graph_edge(
     })
 }
 
+/// Validated deletion of a single edge — the shared path used by both the
+/// `graph_delete_edge` MCP tool and the TUI's edge editor.
 pub(crate) fn delete_graph_edge_checked(db: &Database, edge_id: &str) -> Result<GraphEdge, String> {
     let edge = validate_edge_exists(db, edge_id)?;
     validate_topology_mutation_allowed(db, edge.spec_id.as_deref(), edge.graph_id.as_deref())?;
@@ -384,6 +450,10 @@ pub(crate) fn delete_graph_edge_checked(db: &Database, edge_id: &str) -> Result<
     Ok(edge)
 }
 
+/// Validated deletion of a node — cascades (at the DB layer, via `ON DELETE
+/// CASCADE` foreign keys on `graph_edges.from_node`/`to_node`) to every edge
+/// naming it. The shared path used by both the `graph_delete_node` MCP tool
+/// and the TUI's graph editor.
 pub(crate) fn delete_graph_node_checked(db: &Database, node_id: &str) -> Result<GraphNode, String> {
     let node = validate_node_exists(db, node_id)?;
     validate_topology_mutation_allowed(db, node.spec_id.as_deref(), node.graph_id.as_deref())?;
@@ -394,6 +464,10 @@ pub(crate) fn delete_graph_node_checked(db: &Database, node_id: &str) -> Result<
     Ok(node)
 }
 
+/// Unlike [`GraphSpecStatus::from_str`] (infallible, defaults to `Pending`
+/// for callers that already trust the value came from the DB), a
+/// `spec_list` status filter comes from the caller — an unrecognized value
+/// should be rejected, not silently reinterpreted as "pending".
 pub(crate) fn validate_spec_status(status: &str) -> Result<GraphSpecStatus, String> {
     match status.trim().to_lowercase().as_str() {
         "pending" => Ok(GraphSpecStatus::Pending),
@@ -429,6 +503,11 @@ pub(crate) fn json_value_kind_name(value: &serde_json::Value) -> &'static str {
     }
 }
 
+/// Parse a router node's `config` into its declared routes + fallback
+/// label. Shared by [`validate_node_config`]'s config-shape check and by
+/// edge validation (`graph_add_edge`/`graph_update_edge`/`graph_update_node`),
+/// which need to check a route name against what a router actually
+/// declares.
 pub(crate) fn parse_router_routes(
     config: &serde_json::Value,
 ) -> Result<(Vec<RouterRoute>, String), String> {

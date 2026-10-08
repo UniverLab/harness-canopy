@@ -146,10 +146,22 @@ where
 const MISSING_SYNC_IDENTITY_MESSAGE: &str =
     "Missing Canopy session identity. Launch via `canopy bridge --id <AGENT_ID>` so requests include Canopy identity headers.";
 
+/// MCP result budget in bytes. Read surfaces must fit within this limit so
+/// that reading state never requires the database. Both
+/// `intelligence_graph_walk` and `spec_list` read this constant; the next
+/// surface that needs paging should reuse it instead of a new hardcoded
+/// number.
 pub(crate) const MCP_RESULT_BUDGET_BYTES: usize = 32_000;
 
+/// Measured serialised size of one compact `spec_list` row in bytes: 339
+/// compact specs measured 55,605 characters on 2026-09-02, i.e. ~164
+/// bytes/row. Budgeted at 200 bytes/row so the default page keeps headroom
+/// against longer-than-average names.
 const SPEC_LIST_COMPACT_ROW_BYTES: usize = 200;
 
+/// Default `session_list` page derived from the MCP result budget. The
+/// compact row estimate leaves room for long names while keeping the default
+/// response within the result budget.
 const SESSION_LIST_COMPACT_ROW_BYTES: usize = 160;
 
 pub(crate) const SESSION_LIST_DEFAULT_LIMIT: u32 =
@@ -160,6 +172,10 @@ const _: () = assert!(
     "session_list default page must stay within [1, 200]"
 );
 
+/// Default `spec_list` page derived from the budget, not a round number:
+/// `MCP_RESULT_BUDGET_BYTES / SPEC_LIST_COMPACT_ROW_BYTES`, clamped to
+/// `[1, 200]` like `graph_node_runs_list` (the quotient is 160, so the upper
+/// clamp is vacuous and the lower clamp is enforced by the const assert).
 pub(crate) const SPEC_LIST_DEFAULT_LIMIT: u32 =
     MCP_RESULT_BUDGET_BYTES as u32 / SPEC_LIST_COMPACT_ROW_BYTES as u32;
 
@@ -168,6 +184,14 @@ const _: () = assert!(
     "spec_list default page must stay within [1, 200]"
 );
 
+/// Estimated serialised size of one `intelligence_upsert` duplicate-candidate
+/// row (id ~36, kind ~10, title ~60, project_hash ~64, excerpt up to
+/// `crate::db::intelligence::DUPLICATE_EXCERPT_MAX_CHARS` chars, plus JSON
+/// keys/quotes/commas) in bytes. Budgeted generously since excerpt is free
+/// text. `intelligence_upsert` reads this so its duplicate-candidate report
+/// stays inside `MCP_RESULT_BUDGET_BYTES` regardless of corpus size — CB45,
+/// following the same derivation `SPEC_LIST_DEFAULT_LIMIT` and
+/// `SESSION_LIST_DEFAULT_LIMIT` already use.
 const INTELLIGENCE_DUPLICATE_CANDIDATE_ROW_BYTES: usize = 450;
 
 pub(crate) const INTELLIGENCE_DUPLICATE_CANDIDATES_CAP: usize =
@@ -283,6 +307,13 @@ impl TaskTriggerHandler {
     }
 }
 
+/// CB68 FR1: MCP tool names kept callable (see `complete_node_impl` /
+/// `report_blocker_impl` / `schedule_autorun_impl`) but excluded from
+/// `tools/list` so no new caller discovers and adopts a 2.x name. Filtering
+/// happens here — in a hand-written `list_tools` — rather than via
+/// `ToolRouter::disable_route`, because a disabled route also rejects
+/// `call()` (see `rmcp::handler::server::router::tool::ToolRouter::call`),
+/// which would break the alias's whole purpose.
 const HIDDEN_DEPRECATED_TOOLS: &[&str] = &[
     "loop_complete_node",
     "loop_report_blocker",

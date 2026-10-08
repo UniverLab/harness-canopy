@@ -274,6 +274,9 @@ impl TaskTriggerHandler {
     }
 }
 
+/// Build a graph [`Trigger`] from MCP parameters, reusing the same cron/watch
+/// validation as agents. Returns `Ok(None)` for a manual graph (no trigger or
+/// `kind = "manual"`), and an `Err(message)` for invalid input.
 pub(crate) fn build_graph_trigger(
     params: &Option<GraphTriggerParams>,
 ) -> Result<Option<Trigger>, String> {
@@ -326,6 +329,11 @@ pub(crate) fn build_graph_trigger(
     }
 }
 
+/// Build a validated [`crate::domain::graphs::GraphCompletionHook`] from MCP
+/// params — an agent payload (platform + prompt), a command, an
+/// interactive message (prompt + target_session_id), or a graph launch
+/// (target_graph_id). Exactly one mode must be configured; any other
+/// combination is rejected.
 pub(crate) fn validate_graph_hook_templates(
     params: &GraphCompletionHookParams,
 ) -> Result<(), String> {
@@ -415,6 +423,9 @@ pub(crate) fn build_graph_completion_hook(
     build_command_graph_hook(params)
 }
 
+/// Which hook mode the params select. Computed once from trimmed non-empty
+/// presence, so every validation and builder below reads the same
+/// booleans — at most one mode may be configured.
 pub(crate) struct GraphHookModes {
     /// `target_graph_id` set — the graph-launch mode.
     pub(crate) target_graph: bool,
@@ -434,6 +445,7 @@ pub(crate) struct GraphHookModes {
     pub(crate) effort: bool,
 }
 
+/// Trimmed non-empty presence — the same test every hook field is judged by.
 pub(crate) fn non_blank(value: Option<&str>) -> bool {
     value.is_some_and(|s| !s.trim().is_empty())
 }
@@ -451,6 +463,9 @@ pub(crate) fn graph_hook_modes(params: &GraphCompletionHookParams) -> GraphHookM
     }
 }
 
+/// The graph-launch hook: `target_graph_id`, optionally paired with exactly
+/// one of `queue_id`/`idea`. Exclusivity against every other mode's fields
+/// is checked before anything else, exactly as the planner has always done.
 pub(crate) fn build_graph_hook_target(
     params: &GraphCompletionHookParams,
     modes: &GraphHookModes,
@@ -511,6 +526,9 @@ pub(crate) fn build_graph_hook_target(
     })
 }
 
+/// The interactive hook: a prompt plus exactly one of `target_session_id`/
+/// `target_session_name`, and no agent/command fields (the caller has
+/// already rejected both-or-neither targets and a targetless prompt).
 pub(crate) fn build_interactive_graph_hook(
     params: &GraphCompletionHookParams,
     modes: &GraphHookModes,
@@ -568,6 +586,8 @@ pub(crate) fn build_interactive_graph_hook(
     })
 }
 
+/// The agent hook: platform + prompt (+ optional model/effort). A prompt
+/// that is empty once trimmed is rejected, not silently dropped.
 pub(crate) fn build_agent_graph_hook(
     params: &GraphCompletionHookParams,
 ) -> Result<crate::domain::graphs::GraphCompletionHook, String> {
@@ -608,6 +628,8 @@ pub(crate) fn build_agent_graph_hook(
     })
 }
 
+/// The command hook — the last mode standing once every other one has been
+/// rejected: a non-blank command, nothing else set.
 pub(crate) fn build_command_graph_hook(
     params: &GraphCompletionHookParams,
 ) -> Result<crate::domain::graphs::GraphCompletionHook, String> {

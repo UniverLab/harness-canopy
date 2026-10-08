@@ -484,6 +484,8 @@ pub(crate) fn validate_ensemble_members(
         .collect()
 }
 
+/// This member's effective prompt: its own `prompt_override` if it has one,
+/// else the ensemble's shared `prompt_template`.
 pub(crate) fn effective_member_prompt<'a>(
     prompt_override: Option<&'a str>,
     shared: &'a str,
@@ -491,6 +493,10 @@ pub(crate) fn effective_member_prompt<'a>(
     prompt_override.unwrap_or(shared)
 }
 
+/// Build a member agent node's `config` — its effective prompt (its own
+/// override, or the shared ensemble prompt) plus this member's own
+/// platform/model, the same shape `validate_node_config`'s `Agent` arm
+/// expects.
 pub(crate) fn member_node_config(
     platform: &str,
     model: Option<&str>,

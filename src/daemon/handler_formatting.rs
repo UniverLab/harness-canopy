@@ -495,16 +495,24 @@ pub(crate) fn build_id_result(id: &str, key: &str) -> CallToolResult {
     )])
 }
 
+/// Return an arbitrary JSON value as a tool result — used by the copy tools
+/// (`graph_copy_node`/`graph_copy_ensemble`) whose response carries an explicit
+/// old→new id mapping and a wiring report, not just a single id.
 pub(crate) fn build_json_result(value: &serde_json::Value) -> CallToolResult {
     CallToolResult::success(vec![Content::text(
         serde_json::to_string_pretty(value).unwrap_or_default(),
     )])
 }
 
+/// Format a `SystemTime` as an RFC 3339 / ISO 8601 UTC timestamp for the
+/// `agent_models` cache metadata.
 pub(crate) fn format_system_time(time: std::time::SystemTime) -> String {
     chrono::DateTime::<chrono::Utc>::from(time).to_rfc3339()
 }
 
+/// Render a `Duration` as a short human-readable age/TTL (`45s`, `12m`,
+/// `2h15m`, `3d4h`) for the `agent_models` footer — coarse on purpose, since
+/// the footer only needs to convey rough freshness, not precise timing.
 pub(crate) fn format_duration_short(d: std::time::Duration) -> String {
     let secs = d.as_secs();
     if secs < 60 {

@@ -603,6 +603,10 @@ impl TaskTriggerHandler {
     }
 }
 
+/// (CB25) Build the design-review prompt for a `graph_preflight` reviewer.
+/// The full audit checklist lives in the `graph-reviewer` skill — never
+/// duplicated here. The fallback checklist below is used ONLY when the
+/// skill cannot be resolved, and names the areas, not the checks.
 pub(crate) fn build_preflight_reviewer_prompt(
     graph_id: &str,
     queue_id: Option<&str>,
@@ -633,6 +637,11 @@ pub(crate) fn build_preflight_reviewer_prompt(
     prompt
 }
 
+/// (CB25) Resolve the `graph-reviewer` skill for the preflight reviewer
+/// prompt. Success inlines the instructions under the pinned-skill
+/// delimiter; anything else degrades to the unresolved note and the
+/// reviewer still spawns. Blocking (git/network), so the caller runs it
+/// via `spawn_blocking`.
 pub(crate) fn resolve_reviewer_skill_section(store: &crate::dynamic_skills::SkillStore) -> String {
     match store.get("graph-reviewer") {
         Ok(content) => format!("\n\n## Skill: graph-reviewer\n{}", content.instructions),
@@ -641,6 +650,9 @@ pub(crate) fn resolve_reviewer_skill_section(store: &crate::dynamic_skills::Skil
     }
 }
 
+/// (CB25) Spawn the `graph_preflight` design reviewer. NEVER returns Err:
+/// every failure degrades to a `not_spawned` note so the reviewer can
+/// never fail the preflight itself.
 pub(crate) async fn spawn_preflight_reviewer(
     handler: &TaskTriggerHandler,
     graph_id: &str,

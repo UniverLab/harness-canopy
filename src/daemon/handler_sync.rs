@@ -498,12 +498,16 @@ impl TaskTriggerHandler {
     }
 }
 
+/// Project knowledge rows tagged with traversal origin: (record,
+/// via_project_hash, via_relation). Root rows carry `via_relation: None`.
 pub(crate) type TaggedProjectKnowledge = Vec<(
     crate::db::intelligence::IntelligenceNodeRecord,
     String,
     Option<String>,
 )>;
 
+/// The context endpoint's knowledge bundle: generic session nodes, tagged
+/// project knowledge, and traversal metadata.
 pub(crate) struct ContextKnowledge {
     pub(crate) generic: Vec<crate::db::intelligence::IntelligenceNodeRecord>,
     pub(crate) project: TaggedProjectKnowledge,

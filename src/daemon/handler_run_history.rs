@@ -167,6 +167,10 @@ impl TaskTriggerHandler {
     }
 }
 
+/// One row of `graph_node_runs_list` — deliberately excludes `input`/`output`
+/// (can be large; a caller wanting them calls `graph_node_run_get` with this
+/// row's `id`) but resolves `node_name` so a caller isn't left matching a
+/// bare node id back to the graph by hand.
 pub(crate) fn graph_node_run_summary_json(
     db: &Database,
     run: &GraphNodeRun,
@@ -276,6 +280,12 @@ pub(crate) fn graph_node_run_summary_json(
     }
 }
 
+/// The `graph_node_run_get` response: everything `graph_node_run_summary_json`
+/// carries, plus the full `input`/`output` the engine stored — redacted
+/// (see [`redact_sensitive_value`]) since either can carry secret-shaped
+/// content echoed by the wrapped CLI. `output` preserves whatever the engine
+/// wrote verbatim otherwise, including the B19 `infra_attempt`/`infra_crash`
+/// markers a caller needs to tell an infra retry from a semantic failure.
 pub(crate) fn graph_node_run_detail_json(
     run: &GraphNodeRun,
     node_name: Option<&str>,

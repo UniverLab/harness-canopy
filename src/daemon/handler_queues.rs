@@ -363,6 +363,14 @@ pub(crate) fn validate_queue_exists(db: &Database, queue_id: &str) -> Result<Que
         .ok_or_else(|| format!("Queue '{queue_id}' not found."))
 }
 
+/// Refuse to start a queue run when one of the queue's specs is already
+/// `running` under a different graph. A queue spec's own `graph_id` stays
+/// `None` (queue membership never binds it), so ownership is read off the
+/// spec's most recent `graph_runs` row instead — the graph that most recently
+/// touched the spec is the only one that could have set it `running`.
+///
+/// This is a start-time check, not a lock: two `graph_run` calls issued in
+/// the same instant, before either has run a single node, can still race.
 pub(crate) fn validate_queue_not_consumed(
     db: &Database,
     queue_id: &str,
@@ -393,6 +401,11 @@ pub(crate) fn validate_queue_not_consumed(
     Ok(())
 }
 
+/// Validate that `spec_ids` is a total permutation of `current`: same
+/// length, same set, no duplicates, no unknown ids. This rejects any partial
+/// reorder (a subset, or a list with an unrecognized id) so the operation is
+/// always "here is the whole new order," never a swap of two entries applied
+/// on top of unknown existing state.
 pub(crate) fn validate_queue_reorder(
     current: &[String],
     spec_ids: &[String],
@@ -417,6 +430,11 @@ pub(crate) fn validate_queue_reorder(
     Ok(())
 }
 
+/// Live queues (R6): refuse to remove a queue member that is currently
+/// `running` — the tool-layer half of the same lock `queue_reorder` enforces
+/// via [`validate_queue_reorder_locking`]. A spec that isn't a queue member at
+/// all, or isn't found, is left for [`Database::remove_queue_member`]'s own
+/// "no such spec" error — this only ever blocks a positive `running` match.
 pub(crate) fn validate_queue_member_removable(
     db: &Database,
     queue_id: &str,
@@ -432,6 +450,13 @@ pub(crate) fn validate_queue_member_removable(
     Ok(())
 }
 
+/// Live queues (R6): the currently running spec and every already-executed
+/// one (`completed`/`failed`/`skipped`) are immutable in the queue's order —
+/// only `pending` members may move. Call after [`validate_queue_reorder`] has
+/// already confirmed `spec_ids` is a total permutation of `current`: under
+/// that guarantee, a locked member "doesn't move" iff it sits at the same
+/// index in both slices, since moving it necessarily displaces whatever now
+/// occupies its old slot.
 pub(crate) fn validate_queue_reorder_locking(
     db: &Database,
     current: &[String],

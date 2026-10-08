@@ -700,6 +700,13 @@ impl TaskTriggerHandler {
     }
 }
 
+/// Whether an interactive session is attached to a live CLI process on this
+/// host right now (CM16). `true` only when provable: the row was recorded on
+/// the current boot AND its PID is still alive. A different boot id, a NULL
+/// boot id, or a missing/dead PID all read as `false` — the session may
+/// still be a valid hook target (an enqueued send is delivered when a TUI
+/// next attaches), it just is not attached at this moment. Side-effect-free:
+/// no PTY touched, no session woken.
 pub(crate) fn session_is_attached(session: &InteractiveSession) -> bool {
     match (
         session.boot_id.as_deref(),

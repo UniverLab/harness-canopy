@@ -215,6 +215,11 @@ impl TaskTriggerHandler {
     }
 }
 
+/// Resolve `agent_probe`/`graph_preflight`'s `timeout_seconds` param to an
+/// actual bound: the configured default when omitted, clamped to
+/// `[MIN_PROBE_TIMEOUT_SECS, MAX_PROBE_TIMEOUT_SECS]` otherwise — a probe is
+/// a liveness check, not a capability benchmark, so callers can't ask for an
+/// unbounded wait.
 pub(crate) fn clamp_probe_timeout(requested: Option<u64>) -> u64 {
     requested
         .unwrap_or(crate::daemon::probe::DEFAULT_PROBE_TIMEOUT_SECS)
@@ -228,6 +233,10 @@ pub(crate) fn clamp_max_recent_pairs(requested: Option<u32>) -> usize {
     requested.unwrap_or(15).clamp(1, 50) as usize
 }
 
+/// Human display string for a platform slug ("Provider · Tool" when the
+/// registry knows both, slug otherwise). Probe JSON keeps `"platform"` as
+/// the slug and carries this as the sibling `"platform_display"` key —
+/// display is never matched on or accepted as input.
 pub(crate) fn display_for_slug(
     config: &crate::domain::canopy_config::CanopyConfig,
     slug: &str,
@@ -238,6 +247,11 @@ pub(crate) fn display_for_slug(
         .unwrap_or_else(|| slug.to_string())
 }
 
+/// Validate a requested `agent_models` platform against the CLIs actually
+/// configured in canopy (registry-driven, from `~/.canopy/config.toml`).
+/// Returns `Some(error_message)` if config exists and the platform isn't among
+/// the configured CLIs; `None` when the platform is configured, or when no
+/// config is present yet (stay lenient rather than rejecting everything).
 pub(crate) fn validate_platform_configured(platform: &str) -> Option<String> {
     let home = dirs::home_dir()?;
     let config = crate::domain::canopy_config::CanopyConfig::load(&home.join(".canopy"));
@@ -269,6 +283,11 @@ pub(crate) fn platform_model_selection_warning(platform: &str) -> Option<String>
     ))
 }
 
+/// The `(binary, enumeration args)` for a platform that can list its own
+/// models, read straight from its registry-driven `CliConfig` — `None` when the
+/// platform has no such command configured (so nothing is inferred from the CLI
+/// name). This is the seam that decides opencode enumerates via `opencode
+/// models` while claude does not.
 pub(crate) fn platform_enumeration_cmd(platform: &str) -> Option<(String, String)> {
     let home = dirs::home_dir()?;
     let config = crate::domain::canopy_config::CanopyConfig::load(&home.join(".canopy"));
@@ -280,6 +299,9 @@ pub(crate) fn platform_enumeration_cmd(platform: &str) -> Option<(String, String
     Some((cli.binary.clone(), args.to_string()))
 }
 
+/// Build the `agent_models` result from a platform's native enumeration. The
+/// CLI run happens off the async executor (it may spawn a process); a fresh
+/// cache returns with no CLI call at all.
 pub(crate) async fn native_models_result(
     platform: &str,
     binary: String,
@@ -344,6 +366,8 @@ pub(crate) async fn native_models_result(
     ))])
 }
 
+/// Why [`catalogue_models_text`] could not produce a listing — the two cases
+/// have different remedies, so the caller must tell them apart.
 pub(crate) enum CatalogTextError {
     /// `platform` has no models.dev provider mapping at all, so no id list can
     /// be derived from the catalogue. Not a transient outage — retrying or
@@ -353,6 +377,10 @@ pub(crate) enum CatalogTextError {
     Unavailable,
 }
 
+/// Format the models.dev provider catalogue as text (without wrapping in a
+/// `CallToolResult`). Returns [`CatalogTextError`] when no listing can be
+/// produced. Used by both `catalogue_models_result` (normal path) and
+/// `native_models_result` (enumeration-failure fallback).
 pub(crate) async fn catalogue_models_text(
     platform: Option<&str>,
     force_refresh: bool,
@@ -404,6 +432,8 @@ pub(crate) async fn catalogue_models_text(
     ))
 }
 
+/// Build the `agent_models` result from the models.dev provider catalogue.
+/// Used by `task_models` for platforms without native enumeration.
 pub(crate) async fn catalogue_models_result(
     platform: Option<&str>,
     force_refresh: bool,
@@ -424,12 +454,23 @@ pub(crate) async fn catalogue_models_result(
     }
 }
 
+/// This daemon's `[models]` TTL configuration, read fresh from
+/// `~/.canopy/config.toml` on every call (like `rag_max_file_bytes`) so a
+/// config edit is picked up on the next `agent_models` call without
+/// restarting the daemon. Falls back to the compiled defaults when no home
+/// directory or config file can be found.
 pub(crate) fn configured_models() -> crate::domain::canopy_config::ModelsConfig {
     dirs::home_dir()
         .map(|home| crate::domain::canopy_config::CanopyConfig::load(&home.join(".canopy")).models)
         .unwrap_or_default()
 }
 
+/// CB43: the "recently used" section that leads `agent_models` output — one
+/// line per platform+model pair this installation has run in the last 30
+/// days (most recent first, capped at fifteen): when it last ran, how many
+/// times, and how the most recent run ended. Computed only from this
+/// installation's own runs; a pair never run here never appears. The
+/// catalogue below is unchanged.
 pub(crate) fn recent_usage_section(db: &Database) -> String {
     let since =
         chrono::Utc::now() - chrono::Duration::days(crate::db::graphs::RECENT_USAGE_WINDOW_DAYS);
@@ -439,6 +480,10 @@ pub(crate) fn recent_usage_section(db: &Database) -> String {
     }
 }
 
+/// CB43: render the section (testable without a database). A NULL model is
+/// the CLI's default. The last outcome is what keeps the list honest: a
+/// pair used forty times whose last run timed out must not read as a
+/// recommendation.
 pub(crate) fn format_recent_usage_section(rows: &[crate::db::graphs::RecentModelUsage]) -> String {
     const HEADER: &str =
         "Recently used on this machine (last 30 days) — from this installation's own runs:";
@@ -471,6 +516,10 @@ pub(crate) fn format_recent_usage_section(rows: &[crate::db::graphs::RecentModel
     out
 }
 
+/// CB43: lead a successful `agent_models` result with the recently-used
+/// section. Error results (unknown platform, unreachable catalogue) are left
+/// untouched — the section informs a model choice, and there is no choice
+/// on offer when the listing itself failed.
 pub(crate) fn prepend_recent_usage(result: &mut CallToolResult, section: &str) {
     if section.is_empty() || result.is_error == Some(true) {
         return;
@@ -486,6 +535,10 @@ pub(crate) fn prepend_recent_usage(result: &mut CallToolResult, section: &str) {
     }
 }
 
+/// The shared provenance/footer block for `agent_models`, used by both the
+/// models.dev and native-enumeration paths. States the cache's age and
+/// whether a refresh is due, not just its timestamp — and when the source was
+/// unreachable, folds how stale the served cache is into that same notice.
 pub(crate) fn model_result_footer(
     listing: &str,
     source: crate::domain::models_db::CatalogSource,

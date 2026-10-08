@@ -248,12 +248,18 @@ impl TaskTriggerHandler {
     }
 }
 
+/// Where a graph node/edge belongs: a spec's own graph, or a graph's
+/// top-level graph (shared across every spec in that graph).
 #[derive(Debug)]
 pub(crate) enum GraphTarget {
     Spec(String),
     Graph(String),
 }
 
+/// Resolve `spec_id`/`graph_id` MCP params into exactly one validated
+/// [`GraphTarget`]. Empty/whitespace-only strings are treated as absent, so
+/// a client that always sends both fields (one blank) still gets a clean
+/// "provide exactly one" error instead of a confusing "not found".
 pub(crate) fn resolve_graph_target(
     db: &Database,
     spec_id: Option<&str>,
@@ -285,8 +291,13 @@ pub(crate) fn resolve_graph_target(
     }
 }
 
+/// A graph target split into `(spec_id, graph_id, existing_nodes)` — exactly one
+/// of the ids is set. Returned by [`graph_target_parts`].
 pub(crate) type GraphParts = (Option<String>, Option<String>, Vec<GraphNode>);
 
+/// Resolve the target graph for a copy: an explicit `spec_id`/`graph_id`, or —
+/// when both are absent — the source's own graph. Cross-graph copies are
+/// allowed; the source graph is only a default, never a constraint.
 pub(crate) fn resolve_copy_target(
     db: &Database,
     spec_id: Option<&str>,
@@ -329,6 +340,9 @@ pub(crate) fn resolve_copy_target(
     }
 }
 
+/// Split a [`GraphTarget`] into `(spec_id, graph_id)` (exactly one set) plus the
+/// target graph's current nodes — used by the copy planners to place the copy
+/// at the next free position and to validate wiring targets against that graph.
 pub(crate) fn graph_target_parts(
     db: &Database,
     target: &GraphTarget,

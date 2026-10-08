@@ -402,6 +402,11 @@ impl TaskTriggerHandler {
     }
 }
 
+/// Whether an agent node's config names a harness — a non-empty `platform`
+/// or `cli` field. Shared by [`validate_node_config`]'s `Agent` arm (the
+/// general "this config can run" gate) and `resolve_node_kind_and_config`'s
+/// blueprint branch (which needs the same check before merge, to give a
+/// blueprint-specific error instead of the generic one).
 pub(crate) fn config_has_agent_harness(map: &serde_json::Map<String, serde_json::Value>) -> bool {
     let has_non_empty_str = |field: &str| {
         map.get(field)
@@ -411,6 +416,20 @@ pub(crate) fn config_has_agent_harness(map: &serde_json::Map<String, serde_json:
     has_non_empty_str("platform") || has_non_empty_str("cli")
 }
 
+/// Every config key an `agent` node is actually read for — see
+/// `execute_agent_node`/`resolve_node_prompt_template` in `graph_engine.rs`.
+/// Notably absent: `prompt`. An agent's prompt is `prompt_template` (or
+/// `prompt_preset`); `prompt` is a plain node never reads, and a node that
+/// carries it silently runs on the bare fallback template instead — the
+/// defect this allowlist exists to catch. `commit_rights` (B37) is accepted
+/// on every kind since the engine checks it uniformly regardless of which
+/// node in the graph actually moves HEAD. `require_report` (boolean, default
+/// `false`) exists because a harness can exit 0 having done nothing — see
+/// `agent_finished_execution` in `graph_engine.rs`. CM30:
+/// `infra_retry_limit`/`infra_crash_max_seconds`/`infra_backoff_seconds`
+/// override the infra-crash retry budget for this node alone (validated as
+/// non-negative integers); absent, the platform's config.toml value applies,
+/// then the engine default (2/60/30).
 pub(crate) const AGENT_CONFIG_KEYS: &[&str] = &[
     "platform",
     "cli",
@@ -429,6 +448,7 @@ pub(crate) const AGENT_CONFIG_KEYS: &[&str] = &[
     "infra_backoff_seconds",
 ];
 
+/// Every config key a `check` node is read for — see `execute_check_node`.
 pub(crate) const CHECK_CONFIG_KEYS: &[&str] = &[
     "command",
     "success_condition",
@@ -436,10 +456,19 @@ pub(crate) const CHECK_CONFIG_KEYS: &[&str] = &[
     "commit_rights",
 ];
 
+/// Every config key a `gate` node is read for — see `execute_gate_node`.
 pub(crate) const GATE_CONFIG_KEYS: &[&str] = &["evaluate", "value", "commit_rights"];
 
+/// Every config key a `router` node is read for — see `parse_router_routes`.
 pub(crate) const ROUTER_CONFIG_KEYS: &[&str] = &["routes", "fallback", "commit_rights"];
 
+/// The config keys a node's kind is actually read for, or `None` for `Join`
+/// (engine-managed — see `validate_node_config`'s `Join` arm — so there is
+/// no caller-supplied key to check against). Shared by
+/// [`validate_known_config_keys`] (write-time rejection) and
+/// [`unknown_config_keys`] (read-only detection of already-stored nodes via
+/// the `graph_audit_node_configs` tool), so the two can never name a
+/// different accepted set for the same kind.
 pub(crate) fn allowed_config_keys(kind: GraphNodeKind) -> Option<&'static [&'static str]> {
     match kind {
         GraphNodeKind::Agent => Some(AGENT_CONFIG_KEYS),
@@ -450,6 +479,12 @@ pub(crate) fn allowed_config_keys(kind: GraphNodeKind) -> Option<&'static [&'sta
     }
 }
 
+/// Every key in `map` that `kind` will never read, sorted. Empty for `Join`
+/// (see [`allowed_config_keys`]) and for a config that only carries
+/// recognized keys. Pure read-only classification — no error message, no
+/// early return — so it doubles as both [`validate_known_config_keys`]'s
+/// rejection check and `graph_audit_node_configs`'s detection query over
+/// nodes that predate this validation.
 pub(crate) fn unknown_config_keys(
     kind: GraphNodeKind,
     map: &serde_json::Map<String, serde_json::Value>,
@@ -466,6 +501,14 @@ pub(crate) fn unknown_config_keys(
     unknown
 }
 
+/// Reject any config key a node's kind will never read. This is what makes
+/// `{ "platform": "claude", "prompt": "..." }` on an agent node fail loudly
+/// at write time instead of being accepted, stored, and silently run on the
+/// bare fallback template (`resolve_node_prompt_template`'s default) — the
+/// exact incident this check exists to prevent. `prompt` on an agent node
+/// gets its own message naming `prompt_template` as the field that actually
+/// gets read; every other unrecognized key gets the generic message naming
+/// what the kind does accept.
 pub(crate) fn validate_known_config_keys(
     kind: GraphNodeKind,
     map: &serde_json::Map<String, serde_json::Value>,
@@ -494,6 +537,17 @@ pub(crate) fn validate_known_config_keys(
     ))
 }
 
+/// Validate that a graph node's config is a JSON object with the fields its
+/// kind needs at execution time. This exists because a double-encoded config
+/// (e.g. `"{\"platform\": \"mimo\"}"` instead of `{"platform": "mimo"}`) used
+/// to be accepted at creation time and only surfaced as an engine crash
+/// ("Agent node ... is missing a platform/cli") mid-run, long after the node
+/// was saved. It also rejects any key the node's kind will never read (see
+/// [`validate_known_config_keys`]) — the same "surfaced at write time, not
+/// run time" guarantee, for the case where the config shape is otherwise
+/// valid but carries a key like `prompt` that a typo or a wrong mental model
+/// (confusing it with the graph completion hook's own `prompt` field) put
+/// there instead of `prompt_template`.
 pub(crate) fn validate_node_config(
     kind: GraphNodeKind,
     config: &serde_json::Value,
@@ -567,6 +621,9 @@ pub(crate) fn validate_node_config(
     Ok(())
 }
 
+/// Look up a blueprint by name, or an actionable error listing every
+/// available blueprint name (builtin and custom) so the caller can pick a
+/// valid one without a separate `blueprint_list` round trip.
 pub(crate) fn validate_blueprint_exists(db: &Database, name: &str) -> Result<Blueprint, String> {
     match db.get_blueprint_by_name(name).map_err(|e| e.to_string())? {
         Some(blueprint) => Ok(blueprint),
@@ -585,6 +642,11 @@ pub(crate) fn validate_blueprint_exists(db: &Database, name: &str) -> Result<Blu
     }
 }
 
+/// Resolve a `graph_add_node` call's kind/config, either from an explicit
+/// `kind`+`config` pair or from a named blueprint (optionally shallow-merged
+/// with `config_overrides`). Exactly one of `config`/`blueprint` must be
+/// usable — this is the "blueprint as an alternative to a full config"
+/// surface described in R7.
 pub(crate) fn resolve_node_kind_and_config(
     db: &Database,
     kind: Option<&str>,

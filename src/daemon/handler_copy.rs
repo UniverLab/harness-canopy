@@ -155,6 +155,11 @@ impl TaskTriggerHandler {
     }
 }
 
+/// A planned single-node copy: the new node, its optional wiring edges, and a
+/// report of the wiring actually applied. Pure of side effects — the caller
+/// persists it with [`Database::insert_node_with_edges`]. Split out from
+/// `graph_copy_node` so the copy/override/wiring logic is unit-testable with
+/// just a `Database`.
 #[derive(Debug)]
 pub(crate) struct NodeCopyPlan {
     pub(crate) source_id: String,
@@ -214,6 +219,9 @@ pub(crate) fn plan_node_copy(
     })
 }
 
+/// Resolves the copy's source node by id prefix, refusing quorum nodes and
+/// ensemble-owned nodes before any target lookup — the same order the
+/// planner has always enforced.
 pub(crate) fn resolve_node_copy_source(
     db: &Database,
     raw_source_id: &str,
@@ -237,6 +245,9 @@ pub(crate) fn resolve_node_copy_source(
     Ok((source_id, source))
 }
 
+/// Copies the source config, shallow-merging any override keys over it
+/// (including the non-object source case), then validates the result for
+/// the source kind. Called after target resolution, as before.
 pub(crate) fn merge_node_copy_config(
     source: &GraphNode,
     params: &GraphCopyNodeParams,
@@ -256,6 +267,9 @@ pub(crate) fn merge_node_copy_config(
     Ok(config)
 }
 
+/// The copy's edges plus the wiring report the response carries. Built and
+/// validated against the target graph in the order the planner has always
+/// used: incoming entry edge first, then outgoing pass, then outgoing fail.
 pub(crate) struct NodeCopyWiring {
     pub(crate) edges: Vec<GraphEdge>,
     pub(crate) wiring: serde_json::Map<String, serde_json::Value>,
@@ -328,6 +342,9 @@ pub(crate) fn plan_node_copy_wiring(
     Ok(NodeCopyWiring { edges, wiring })
 }
 
+/// The `note` line a `graph_copy_node` response carries. An unwired copy is a
+/// valid outcome, but callers must never assume edges exist — so the note says
+/// so explicitly and points at how to wire it.
 pub(crate) fn node_copy_note(source_id: &str, new_id: &str, wired: bool) -> String {
     if wired {
         format!("Copied node config from '{source_id}' into a new node '{new_id}'.")
@@ -340,6 +357,9 @@ pub(crate) fn node_copy_note(source_id: &str, new_id: &str, wired: bool) -> Stri
     }
 }
 
+/// A planned ensemble copy: the fully-built new unit plus the metadata needed
+/// to report the old→new id mapping and the applied wiring. Pure of side
+/// effects — the caller persists `built` with [`Database::insert_ensemble_unit`].
 #[derive(Debug)]
 pub(crate) struct EnsembleCopyPlan {
     pub(crate) source_ensemble_id: String,
@@ -355,6 +375,9 @@ pub(crate) struct EnsembleCopyPlan {
     pub(crate) on_fail_to: Option<String>,
 }
 
+/// Everything the ensemble-copy planner resolves from the source unit and
+/// the params before wiring and quorum validation: the source details, the
+/// target placement, and the copy's own name/prompt/member list.
 pub(crate) struct EnsembleCopyInputs {
     pub(crate) details: crate::domain::graphs::EnsembleDetails,
     pub(crate) spec_id: Option<String>,
@@ -367,6 +390,8 @@ pub(crate) struct EnsembleCopyInputs {
     pub(crate) members: Vec<EnsembleMemberSpec>,
 }
 
+/// The copy's exit wiring — resolved from params over the source's own
+/// routing, with both nodes validated against the target graph first.
 pub(crate) struct EnsembleCopyWiring {
     pub(crate) entry_from_node: String,
     pub(crate) entry_condition: GraphEdgeCondition,
@@ -374,6 +399,8 @@ pub(crate) struct EnsembleCopyWiring {
     pub(crate) on_fail_to: Option<String>,
 }
 
+/// The quorum knobs the copy ends up with, each validated (bounds and
+/// non-negativity) before the unit is built.
 pub(crate) struct EnsembleQuorumOptions {
     pub(crate) min_pass: i64,
     pub(crate) timeout_minutes: i64,
@@ -411,6 +438,9 @@ pub(crate) fn plan_ensemble_copy(
     })
 }
 
+/// Source unit + target placement + the copy's own name, prompt and member
+/// list (either the params' explicit members, or the source's own members
+/// mapped through unchanged).
 pub(crate) fn resolve_ensemble_copy_inputs(
     db: &Database,
     params: &GraphCopyEnsembleParams,
@@ -465,6 +495,9 @@ pub(crate) fn resolve_ensemble_copy_inputs(
     })
 }
 
+/// The copy's member list: explicit params validated for the copy kind, or
+/// the source's own members mapped through unchanged. Returns the members
+/// plus whether they were replaced.
 pub(crate) fn copy_ensemble_members(
     details: &crate::domain::graphs::EnsembleDetails,
     params: &GraphCopyEnsembleParams,
@@ -492,6 +525,10 @@ pub(crate) fn copy_ensemble_members(
     Ok((members, members_replaced))
 }
 
+/// Entry/pass/fail routing for the copy: params win over the source's own
+/// routing, and every target node must exist in the *target* graph
+/// (respecting that graph's own validation for a cross-graph copy) and must
+/// not be ensemble-owned — the same rules graph_add_ensemble enforces.
 pub(crate) fn resolve_ensemble_copy_wiring(
     db: &Database,
     params: &GraphCopyEnsembleParams,
@@ -546,6 +583,9 @@ pub(crate) fn resolve_ensemble_copy_wiring(
     })
 }
 
+/// Validates one quorum exit target against the target graph: it must exist
+/// there and must not be ensemble-owned — the same rules
+/// graph_add_ensemble enforces.
 pub(crate) fn validate_ensemble_copy_wiring(
     db: &Database,
     existing_nodes: &[GraphNode],
@@ -571,6 +611,8 @@ pub(crate) fn validate_ensemble_copy_wiring(
     Ok(())
 }
 
+/// Assembles the copy's new ensemble unit from resolved inputs, wiring and
+/// quorum options. `commit_rights` is never copied (see CM28 note inline).
 pub(crate) fn build_ensemble_copy_unit(
     inputs: &EnsembleCopyInputs,
     wiring: &EnsembleCopyWiring,
@@ -611,6 +653,8 @@ pub(crate) fn build_ensemble_copy_unit(
     })
 }
 
+/// Quorum limits for the copy — `min_pass` within the member count, and no
+/// negative timeout/straggler/grace values, in that order.
 pub(crate) fn resolve_ensemble_quorum_options(
     params: &GraphCopyEnsembleParams,
     source: &Ensemble,

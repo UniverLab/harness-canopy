@@ -621,6 +621,13 @@ pub(crate) fn intelligence_node_json(
     })
 }
 
+/// Compact projection of an intelligence node for `intelligence_graph_walk`:
+/// `id`, `kind`, `title`, `created_at`, `updated_at` and `project_hash`,
+/// omitting `body` and `metadata`. Uses the same field names as the rows
+/// `intelligence_search` emits where the fields overlap — no second compact
+/// shape for the same entity. The database layer keeps returning whole
+/// nodes; this projection happens at the MCP boundary, where the budget
+/// lives.
 pub(crate) fn intelligence_node_compact_json(
     node: &crate::db::intelligence::IntelligenceNodeRecord,
 ) -> serde_json::Value {
@@ -634,6 +641,8 @@ pub(crate) fn intelligence_node_compact_json(
     })
 }
 
+/// JSON for one `intelligence_upsert` duplicate candidate — id, kind,
+/// title, project_hash and a short excerpt, never the full body. CB45.
 pub(crate) fn intelligence_duplicate_candidate_json(
     candidate: &crate::db::intelligence::DuplicateCandidate,
 ) -> serde_json::Value {

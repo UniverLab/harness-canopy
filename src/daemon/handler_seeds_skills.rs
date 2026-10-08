@@ -166,6 +166,13 @@ impl TaskTriggerHandler {
     }
 }
 
+/// Secret-shaped substrings a node run's stored input/output can carry
+/// through whatever CLI it wrapped (an API key echoed into a shell command,
+/// a leaked token in stderr, a pasted private key). Compiled once and
+/// applied uniformly to every string leaf in the run's JSON — see
+/// [`redact_sensitive_value`] — rather than to specific fields like `stdout`
+/// or `command`, since sensitive content can land in any of them alike and a
+/// per-field allowlist would miss the next field name that carries it.
 pub(crate) static SECRET_PATTERNS: std::sync::LazyLock<Vec<regex::Regex>> =
     std::sync::LazyLock::new(|| {
         [
@@ -195,6 +202,8 @@ pub(crate) fn redact_secrets(text: &str) -> String {
     result
 }
 
+/// Recursively redacts every string leaf of a node run's stored `input`/
+/// `output` before it crosses the MCP boundary via `graph_node_run_get`.
 pub(crate) fn redact_sensitive_value(value: &serde_json::Value) -> serde_json::Value {
     match value {
         serde_json::Value::String(s) => serde_json::Value::String(redact_secrets(s)),

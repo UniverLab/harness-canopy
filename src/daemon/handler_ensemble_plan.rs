@@ -14,6 +14,10 @@ use crate::domain::graphs::{
 };
 use rmcp::model::CallToolResult;
 
+/// Validated inputs for assembling one ensemble unit — see
+/// [`build_ensemble_unit`]. All wiring targets (`entry_from_node`,
+/// `on_pass_to`, `on_fail_to`) must already have been checked to exist in the
+/// target graph by the caller.
 pub(crate) struct EnsembleUnitSpec<'a> {
     pub(crate) spec_id: Option<String>,
     pub(crate) graph_id: Option<String>,
@@ -42,6 +46,9 @@ pub(crate) struct EnsembleUnitSpec<'a> {
     pub(crate) commit_rights: bool,
 }
 
+/// The concrete graph pieces of one ensemble unit, all with fresh ids: the
+/// join node, member nodes, wiring edges (entry fan-out, member→join fan-in,
+/// join exit routing), the ensemble row, and its member rows.
 #[derive(Debug)]
 pub(crate) struct BuiltEnsembleUnit {
     pub(crate) ensemble: Ensemble,
@@ -51,6 +58,16 @@ pub(crate) struct BuiltEnsembleUnit {
     pub(crate) edges: Vec<GraphEdge>,
 }
 
+/// Assemble an ensemble unit from validated inputs. Shared by
+/// `graph_add_ensemble` and `graph_copy_ensemble` so the two can never drift in
+/// how members, the join, and the wiring are laid out. Purely constructs
+/// in-memory values (fresh ids, no runtime state) — persistence is the
+/// caller's `insert_ensemble_unit`.
+/// One member's contribution to an ensemble unit: its agent node, its
+/// member row, and the two edges that wire it (entry fan-out in, fan-in to
+/// the join). Built as one unit so the id-generation order inside
+/// [`build_ensemble_unit`] stays node → incoming edge → fan-in edge, per
+/// member.
 pub(crate) struct BuiltEnsembleMember {
     pub(crate) node: GraphNode,
     pub(crate) member: EnsembleMember,
@@ -133,6 +150,11 @@ pub(crate) fn build_ensemble_unit(spec: &EnsembleUnitSpec) -> BuiltEnsembleUnit 
     }
 }
 
+/// One member unit: the agent node (named `{ensemble} [{index}]` and placed
+/// at `position`), the entry fan-out edge from `entry_from_node`, the fan-in
+/// edge to the join, and the member row — with the member's own
+/// prompt/timeout/infra overrides falling back to the ensemble's shared
+/// values exactly as before.
 pub(crate) fn build_ensemble_member_unit(
     spec: &EnsembleUnitSpec,
     ensemble_id: &str,
@@ -219,6 +241,11 @@ pub(crate) fn build_ensemble_member_unit(
     }
 }
 
+/// The join's outgoing edges: one `Pass` edge per pass target (the single
+/// `on_pass_to`, or one per member of the ensemble it chains into), then —
+/// only when the unit declares a failure destination — one `Fail` edge per
+/// fail target. The `ensembles` row still holds the single `on_pass_to`/
+/// `on_fail_to` value (the node id, or the target's quorum id).
 pub(crate) fn build_ensemble_exit_edges(
     spec: &EnsembleUnitSpec,
     join_node_id: &str,
@@ -260,6 +287,11 @@ pub(crate) fn build_ensemble_exit_edges(
     edges
 }
 
+/// Where one quorum exit (pass or fail) points: a plain node, or a whole
+/// other ensemble — the chained case, where the quorum fans out to every
+/// member of the target with no intermediate node. The `ensembles` row keeps
+/// naming the target in the same column either way (a node id, or the target
+/// ensemble's quorum id when chained), so reads never need a new column.
 pub(crate) enum EnsembleExitTarget {
     Node(String),
     Ensemble {
@@ -288,6 +320,11 @@ impl EnsembleExitTarget {
     }
 }
 
+/// If `raw` names an ensemble (by id or prefix), resolve it as a chained exit
+/// target: the target must live in the same graph (`owner_spec_id`/
+/// `owner_graph_id`) and must not be the source ensemble itself. Returns
+/// `Ok(None)` when `raw` names no ensemble, so the caller falls through to
+/// its plain-node handling — node ids and unknown ids both take that path.
 pub(crate) fn resolve_chained_exit_ensemble(
     db: &Database,
     raw: &str,

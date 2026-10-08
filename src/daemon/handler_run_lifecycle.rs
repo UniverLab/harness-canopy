@@ -583,6 +583,13 @@ impl TaskTriggerHandler {
     }
 }
 
+/// Core logic for `graph_reset`, factored out of the tool method so it only
+/// needs `&Database` (no engine/executor) and can be unit-tested directly.
+///
+/// Delegates the actual state transition to [`Database::reset_graph`] — the
+/// scheduler's auto-reset-and-resume of a `failed` graph on autorun goes
+/// through the same function, so this tool and that background path can
+/// never drift apart.
 pub(crate) fn perform_graph_reset(
     db: &Database,
     graph_id: &str,

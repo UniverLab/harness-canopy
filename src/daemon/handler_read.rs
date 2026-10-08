@@ -113,6 +113,8 @@ pub(crate) fn build_graph_summary_json(
     Ok(out)
 }
 
+/// Serialize a graph's trigger for MCP responses: always a `type` label, plus
+/// the cron schedule or watch path/events when applicable.
 pub(crate) fn graph_trigger_json(lp: &Graph) -> serde_json::Value {
     let mut out = serde_json::json!({ "type": lp.trigger_type_label() });
     if let Some(schedule) = lp.schedule_expr() {
@@ -138,6 +140,14 @@ pub(crate) fn build_graph_list_json(
         .collect()
 }
 
+/// What a graph is actually working on (CB30).
+///
+/// `list_graph_specs` returns the graph's *bound* specs, which for a queue or
+/// idea run is the blank-name placeholder row the engine inserts as
+/// `graph_runs.spec_id` bookkeeping — never the work itself. Every display
+/// surface must go through [`active_graph_spec_context`] instead of reading
+/// the bound list directly, so `graph_get`, `graph list` and `canopy graph
+/// info` agree on the answer.
 #[derive(Debug)]
 pub(crate) enum ActiveGraphSpec {
     /// A normal bound spec (never a placeholder).
@@ -154,6 +164,12 @@ pub(crate) enum ActiveGraphSpec {
     None,
 }
 
+/// The single answer to "what spec is this graph on", shared by `graph_get`
+/// ([`graph_details_json`]), `graph list` ([`build_graph_summary_json`]) and
+/// `canopy graph info` (`handle_graph_info` in `daemon/graph_cli.rs`).
+///
+/// The placeholder is hidden, never relabelled: a fabricated name would
+/// replace a confusing answer with a false one.
 pub(crate) fn active_graph_spec_context(
     db: &Database,
     lp: &Graph,
@@ -172,6 +188,11 @@ pub(crate) fn active_graph_spec_context(
     bound_active_graph_spec(db, &lp.id, lp.active_run_queue_id.is_some())
 }
 
+/// The spec dispatch is on inside `queue_id`, or `None` when the queue holds
+/// nothing runnable: a `Running` member anywhere beats an earlier pending one
+/// (dispatch is sequential, so a running member means everything before it
+/// already completed); with nothing running, the first runnable — or stalled —
+/// member in queue order is the one to report.
 pub(crate) fn queue_active_graph_spec(
     db: &Database,
     queue_id: &str,
@@ -209,6 +230,11 @@ pub(crate) fn queue_active_graph_spec(
     }))
 }
 
+/// The bound spec dispatch is on — the first non-terminal real spec in
+/// position order, the same pick `build_graph_summary_json` historically
+/// made — or the idea placeholder when that's all the graph has. The
+/// placeholder is hidden, never relabelled: a fabricated name would
+/// replace a confusing answer with a false one.
 pub(crate) fn bound_active_graph_spec(
     db: &Database,
     graph_id: &str,
@@ -251,6 +277,10 @@ pub(crate) fn bound_active_graph_spec(
     Ok(ActiveGraphSpec::None)
 }
 
+/// CB52 FR4: one `orphan_join_warnings` entry for a join node with no
+/// ensemble row. Shared by `graph_get` (advisory, always reported) and
+/// `graph_preflight` (refusal — a graph in this state would die with
+/// "ambiguous outgoing edges", so no probe quota is spent on it).
 pub(crate) fn orphan_join_warning_text(node: &GraphNode) -> String {
     format!(
         "join node '{}' ({}) belongs to no ensemble — it was orphaned when an ensemble that owned or referenced its entry/exit was deleted. Delete this orphan node with graph_delete_node or wire it into a repaired graph; do not re-create an ensemble around it automatically. (canopy doctor also lists orphaned joins per graph.)",
@@ -389,6 +419,12 @@ pub(crate) fn graph_details_json(
     Ok(out)
 }
 
+/// Serialize an ensemble (F1) as the one unit `graph_get`/`graph_update_ensemble`
+/// address — members in position order alongside the join's own config, so a
+/// client can render/edit it without reconstructing it from the underlying
+/// nodes/edges itself. `edges` is the owning graph's full edge list, from
+/// which every entry source (not just the primary `entry_from_node`) is
+/// derived — an ensemble entered from several places shows all of them.
 pub(crate) fn ensemble_details_json(
     details: &crate::domain::graphs::EnsembleDetails,
     edges: &[GraphEdge],
@@ -550,6 +586,12 @@ pub(crate) fn graph_node_json(node: &GraphNode, edges: &[GraphEdge]) -> serde_js
     })
 }
 
+/// CM30/FR3: an agent node's effective infra-retry config plus where each
+/// field came from — `"node"` (this node's own config key, which for an
+/// ensemble member may be a baked-in member/ensemble override — see the
+/// ensemble's own `infra_retry_limit`/members[].infra_retry_limit_override
+/// fields for which), `"platform"`, or `"default"`. `None` for every other
+/// node kind.
 pub(crate) fn infra_config_json(node: &GraphNode) -> Option<serde_json::Value> {
     if node.kind != GraphNodeKind::Agent {
         return None;
@@ -571,6 +613,13 @@ pub(crate) fn infra_config_json(node: &GraphNode) -> Option<serde_json::Value> {
     }))
 }
 
+/// For an agent node, which branch of `resolve_node_prompt_template`'s
+/// precedence it will actually run on — `"explicit"`, `"preset"`, or
+/// `"default_fallback"` (see `graph_engine::agent_prompt_source`) — so
+/// `graph_get` makes a node quietly running on the bare fallback template
+/// (no `prompt_template`, no `prompt_preset`) visible without requiring a
+/// run first. `None` for every other node kind, same convention as
+/// [`router_routes_json`].
 pub(crate) fn agent_prompt_source_json(node: &GraphNode) -> Option<&'static str> {
     if node.kind != GraphNodeKind::Agent {
         return None;
@@ -578,6 +627,11 @@ pub(crate) fn agent_prompt_source_json(node: &GraphNode) -> Option<&'static str>
     Some(crate::graph_engine::agent_prompt_source(&node.config))
 }
 
+/// For a router node, every declared route alongside the edge (if any) that
+/// currently serves it — `graph_get`'s view into "which edge serves each
+/// route". `None` for every other node kind (or if the router's `config`
+/// somehow fails to parse — `graph_get` should never fail outright over a
+/// display concern).
 pub(crate) fn router_routes_json(
     node: &GraphNode,
     edges: &[GraphEdge],
