@@ -1,8 +1,9 @@
 use chrono::Utc;
+use rmcp::model::{CallToolResult, Content};
 use rmcp::ErrorData as McpError;
 
 use crate::application::ports::{AgentRepository, RunRepository};
-use crate::daemon::helpers::{data_dir, filter_log_line};
+use crate::daemon::helpers::{data_dir, filter_log_line, success_result};
 use crate::db::Database;
 use crate::domain::models::{Agent, RunLog, Trigger};
 
@@ -456,6 +457,89 @@ fn format_models_for_providers(
     }
 
     (sections.join("\n"), truncation)
+}
+
+pub(crate) fn build_graph_update_response(graph_id: &str) -> CallToolResult {
+    success_result(&format!("Graph '{graph_id}' updated."))
+}
+
+pub(crate) fn build_spec_update_response(spec_id: &str) -> CallToolResult {
+    success_result(&format!("Graph spec '{spec_id}' updated."))
+}
+
+pub(crate) fn build_node_update_response_with_changes(
+    node_id: &str,
+    changed_keys: &[String],
+) -> CallToolResult {
+    if changed_keys.is_empty() {
+        return success_result(&format!(
+            "Graph node '{node_id}' updated (no config changes)."
+        ));
+    }
+    let mut map = serde_json::Map::new();
+    map.insert("node_id".to_string(), serde_json::json!(node_id));
+    map.insert(
+        "changed_config_keys".to_string(),
+        serde_json::json!(changed_keys),
+    );
+    CallToolResult::success(vec![Content::text(
+        serde_json::to_string_pretty(&serde_json::Value::Object(map)).unwrap_or_default(),
+    )])
+}
+
+pub(crate) fn build_id_result(id: &str, key: &str) -> CallToolResult {
+    let mut map = serde_json::Map::new();
+    map.insert(key.to_string(), serde_json::json!(id));
+    CallToolResult::success(vec![Content::text(
+        serde_json::to_string_pretty(&serde_json::Value::Object(map)).unwrap_or_default(),
+    )])
+}
+
+pub(crate) fn build_json_result(value: &serde_json::Value) -> CallToolResult {
+    CallToolResult::success(vec![Content::text(
+        serde_json::to_string_pretty(value).unwrap_or_default(),
+    )])
+}
+
+pub(crate) fn format_system_time(time: std::time::SystemTime) -> String {
+    chrono::DateTime::<chrono::Utc>::from(time).to_rfc3339()
+}
+
+pub(crate) fn format_duration_short(d: std::time::Duration) -> String {
+    let secs = d.as_secs();
+    if secs < 60 {
+        return format!("{secs}s");
+    }
+    let mins = secs / 60;
+    if mins < 60 {
+        return format!("{mins}m");
+    }
+    let hours = mins / 60;
+    let rem_mins = mins % 60;
+    if hours < 24 {
+        return if rem_mins == 0 {
+            format!("{hours}h")
+        } else {
+            format!("{hours}h{rem_mins}m")
+        };
+    }
+    let days = hours / 24;
+    let rem_hours = hours % 24;
+    if rem_hours == 0 {
+        format!("{days}d")
+    } else {
+        format!("{days}d{rem_hours}h")
+    }
+}
+
+pub(crate) fn append_temporal_agents_section(status: &mut String, agents: &[Agent]) {
+    let temporal = format_temporal_agents(agents);
+    if temporal.is_empty() {
+        return;
+    }
+
+    status.push_str("\n\nTemporal agents:\n");
+    status.push_str(&temporal);
 }
 
 #[cfg(test)]

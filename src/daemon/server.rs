@@ -5,6 +5,7 @@ use rmcp::ServiceExt;
 
 use crate::application::notification_service::{DefaultNotificationService, NotificationService};
 use crate::application::ports::StateRepository;
+use crate::daemon::handler::HandlerDeps;
 use crate::daemon::health_routine::HealthRoutine;
 use crate::daemon::process::{
     acquire_daemon_lock, kill_port_occupant, remove_pid_file, write_pid_file,
@@ -88,7 +89,7 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
 
     let ct = tokio_util::sync::CancellationToken::new();
     let router = build_mcp_router(
-        McpHandlerDeps {
+        HandlerDeps {
             db: Arc::clone(&db),
             executor: Arc::clone(&executor),
             watcher_engine: Arc::clone(&watcher_engine),
@@ -222,28 +223,13 @@ fn start_background_tasks(
 
 /// Everything the `/mcp` handler closure clones per session, plus the port
 /// it reports — the daemon-side owners stay alive in `run_http_server`.
-struct McpHandlerDeps {
-    db: Arc<Database>,
-    executor: Arc<Executor>,
-    watcher_engine: Arc<WatcherEngine>,
-    scheduler_notify: Arc<tokio::sync::Notify>,
-    graph_engine: Arc<GraphEngine>,
-    notification_service: Arc<dyn NotificationService>,
-    sync_manager: Arc<SyncManager>,
-    ingestion: Arc<IngestionManager>,
-    dynamic_skills: Arc<crate::dynamic_skills::SkillStore>,
-    port: u16,
-}
-
+/// `HandlerDeps` (re-exported from handler) is the canonical bundle.
 /// Builds the `/mcp` router: the streamable-HTTP service (one
 /// `TaskTriggerHandler` per session), the session manager, and the server
 /// config wired to the shutdown cancellation token, layered with the
 /// error-status logger.
-fn build_mcp_router(
-    deps: McpHandlerDeps,
-    ct: &tokio_util::sync::CancellationToken,
-) -> axum::Router {
-    let McpHandlerDeps {
+fn build_mcp_router(deps: HandlerDeps, ct: &tokio_util::sync::CancellationToken) -> axum::Router {
+    let HandlerDeps {
         db: handler_db,
         executor: handler_executor,
         watcher_engine: handler_watcher_engine,
@@ -258,18 +244,18 @@ fn build_mcp_router(
 
     let service = rmcp::transport::streamable_http_server::StreamableHttpService::new(
         move || {
-            Ok(TaskTriggerHandler::new(
-                Arc::clone(&handler_db),
-                Arc::clone(&handler_executor),
-                Arc::clone(&handler_watcher_engine),
-                Arc::clone(&handler_scheduler_notify),
-                Arc::clone(&handler_graph_engine),
-                Arc::clone(&notification_service),
-                Arc::clone(&handler_sync_manager),
-                Arc::clone(&handler_ingestion),
-                Arc::clone(&handler_dynamic_skills),
+            Ok(TaskTriggerHandler::with_deps(HandlerDeps {
+                db: Arc::clone(&handler_db),
+                executor: Arc::clone(&handler_executor),
+                watcher_engine: Arc::clone(&handler_watcher_engine),
+                scheduler_notify: Arc::clone(&handler_scheduler_notify),
+                graph_engine: Arc::clone(&handler_graph_engine),
+                notification_service: Arc::clone(&notification_service),
+                sync_manager: Arc::clone(&handler_sync_manager),
+                ingestion: Arc::clone(&handler_ingestion),
+                dynamic_skills: Arc::clone(&handler_dynamic_skills),
                 port,
-            ))
+            }))
         },
         {
             let mut mgr =
@@ -436,18 +422,18 @@ pub(crate) async fn run_stdio_server() -> Result<()> {
 /// The MCP handler over the startup dependencies — port 0, because stdio
 /// has no port of its own to report.
 fn build_stdio_handler(db: &Arc<Database>, startup: &StdioServerStartup) -> TaskTriggerHandler {
-    TaskTriggerHandler::new(
-        Arc::clone(db),
-        Arc::clone(&startup.executor),
-        Arc::clone(&startup.watcher_engine),
-        Arc::clone(&startup.scheduler_notify),
-        Arc::clone(&startup.graph_engine),
-        Arc::clone(&startup.notification_service),
-        Arc::clone(&startup.sync_manager),
-        Arc::clone(&startup.ingestion),
-        Arc::clone(&startup.dynamic_skills),
-        0,
-    )
+    TaskTriggerHandler::with_deps(HandlerDeps {
+        db: Arc::clone(db),
+        executor: Arc::clone(&startup.executor),
+        watcher_engine: Arc::clone(&startup.watcher_engine),
+        scheduler_notify: Arc::clone(&startup.scheduler_notify),
+        graph_engine: Arc::clone(&startup.graph_engine),
+        notification_service: Arc::clone(&startup.notification_service),
+        sync_manager: Arc::clone(&startup.sync_manager),
+        ingestion: Arc::clone(&startup.ingestion),
+        dynamic_skills: Arc::clone(&startup.dynamic_skills),
+        port: 0,
+    })
 }
 
 /// Serves JSON-RPC over the stdio transport until the client closes it:
@@ -720,18 +706,18 @@ mod hang_repro {
 
         let service = rmcp::transport::streamable_http_server::StreamableHttpService::new(
             move || {
-                Ok(TaskTriggerHandler::new(
-                    Arc::clone(&handler_db),
-                    Arc::clone(&handler_executor),
-                    Arc::clone(&handler_watcher_engine),
-                    Arc::clone(&handler_scheduler_notify),
-                    Arc::clone(&handler_graph_engine),
-                    Arc::clone(&handler_notif),
-                    Arc::clone(&handler_sync_manager),
-                    Arc::clone(&handler_ingestion),
-                    Arc::clone(&handler_dynamic_skills),
-                    0,
-                ))
+                Ok(TaskTriggerHandler::with_deps(HandlerDeps {
+                    db: Arc::clone(&handler_db),
+                    executor: Arc::clone(&handler_executor),
+                    watcher_engine: Arc::clone(&handler_watcher_engine),
+                    scheduler_notify: Arc::clone(&handler_scheduler_notify),
+                    graph_engine: Arc::clone(&handler_graph_engine),
+                    notification_service: Arc::clone(&handler_notif),
+                    sync_manager: Arc::clone(&handler_sync_manager),
+                    ingestion: Arc::clone(&handler_ingestion),
+                    dynamic_skills: Arc::clone(&handler_dynamic_skills),
+                    port: 0,
+                }))
             },
             rmcp::transport::streamable_http_server::session::local::LocalSessionManager::default()
                 .into(),
