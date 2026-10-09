@@ -229,8 +229,12 @@ pub(crate) enum SpecExecutionOutcome {
     /// someone can inspect and clear it instead of the engine relaunching
     /// blindly. Two sources: (a) C19 — a genuine verdict failure that has now
     /// exceeded its persisted cross-run attempt budget
-    /// ([`GraphEngine::spec_attempt_limit`]); the spec is left `Failed` and
-    /// only [`GraphEngine::run_graph_dispatch`]'s resume path re-enters it, and
+    /// ([`GraphEngine::spec_attempt_limit`]); the spec is left `Failed`, which
+    /// every resume validation refuses (`retry_current_node` and
+    /// `skip_next_spec` both, and the scheduler's auto-continue applies the
+    /// same two) — the way back in is an explicit `graph_reset` (naming the
+    /// spec also clears its cross-run count) followed by a fresh `graph_run`
+    /// dispatch, and
     /// (b) FR4 — a parallel/round-robin ensemble exited with no verdict and no
     /// `Error` edge to absorb it; that spec is left `Interrupted`
     /// (resumable via `retry_current_node` without a `graph_reset`) so an
@@ -17045,7 +17049,8 @@ echo done
         assert_eq!(
             db.get_graph_spec(&spec.id).unwrap().unwrap().status,
             GraphSpecStatus::Interrupted,
-            "the ensemble-bearing spec must have been fully consumed by the queue run"
+            "FR1: the no-verdict block leaves the queue member interrupted \
+             (resumable), never failed"
         );
     }
 
