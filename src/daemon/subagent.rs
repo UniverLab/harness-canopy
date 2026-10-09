@@ -215,6 +215,7 @@ pub async fn spawn_subagent(
         Some(workdir),
         mcp_config_arg,
         effort,
+        None,
     )?;
 
     command.stdout(std::process::Stdio::piped());
@@ -338,6 +339,7 @@ pub async fn spawn_subagent_blocking(
         Some(workdir),
         mcp_config_arg,
         effort,
+        None,
     )?;
 
     command.stdout(std::process::Stdio::piped());
@@ -451,6 +453,9 @@ mod tests {
             session_list_cmd: None,
             session_list_format_args: None,
             session_id_pattern: None,
+            session_title_flag: None,
+            session_list_args: None,
+            session_end_args: None,
             session_resume_cmd: None,
             trust_flag: None,
             invocation_template: None,

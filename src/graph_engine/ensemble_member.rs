@@ -280,7 +280,7 @@ impl GraphEngine {
                 let (terminate_reason, source) =
                     Self::member_timeout_source(ctx.member_timeout_minutes);
                 if let Ok(Some(run)) = ctx.db.get_active_graph_run_for_node(&ctx.node.id) {
-                    terminate_run_row(&ctx.db, &run, terminate_reason);
+                    terminate_run_row(&ctx.db, &run, terminate_reason, &ctx.workdir);
                 }
                 Ok(MemberAttempt::NoVerdict(NodeExecution {
                     status: GraphRunStatus::Fail,

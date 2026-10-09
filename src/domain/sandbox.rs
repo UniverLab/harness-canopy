@@ -316,7 +316,7 @@ async fn resolve_merge_conflicts(sandbox: &Sandbox) -> Result<()> {
     // Resolve the conflict in the user's checkout (where the merge is in
     // progress), but bound it: a hung agent must not wedge the graph dispatch
     // forever with the repo stuck mid-merge.
-    let mut cmd = strategy.build_command(&prompt, None, Some(&sandbox.original_workdir))?;
+    let mut cmd = strategy.build_command(&prompt, None, Some(&sandbox.original_workdir), None)?;
     let output = tokio::time::timeout(std::time::Duration::from_secs(15 * 60), cmd.output())
         .await
         .context("Conflict resolution agent timed out")?

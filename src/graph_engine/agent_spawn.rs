@@ -97,6 +97,7 @@ pub(crate) async fn spawn_and_wait_cli_process(
     session_id: Option<&str>,
     resume_session_id: Option<&str>,
     trust_workdir: bool,
+    run_id: Option<&str>,
     on_pid: impl FnOnce(u32),
 ) -> Result<CliProcessOutcome, SpawnError> {
     // A resume (RS2) uses the by-id resume flag and continues an existing
@@ -104,10 +105,10 @@ pub(crate) async fn spawn_and_wait_cli_process(
     // mutually exclusive — the caller passes at most one.
     let mut command = match resume_session_id {
         Some(sid) => strategy
-            .build_resume_command(sid, prompt, model, Some(workdir))
+            .build_resume_command(sid, prompt, model, Some(workdir), None)
             .map_err(|error| SpawnError::from_build(&error))?,
         None => strategy
-            .build_command_with_session(prompt, model, Some(workdir), session_id, effort)
+            .build_command_with_session(prompt, model, Some(workdir), session_id, effort, run_id)
             .map_err(|error| SpawnError::from_build(&error))?,
     };
     // Only appended when the caller opted in (per node.config["trust_workdir"])
@@ -306,6 +307,14 @@ pub(crate) async fn run_agent_process(
         capture.set_at_spawn.as_deref(),
         resume_session_id,
         trust_workdir,
+        // CB84: cold starts stamp `canopy-<run_id>` as the session title so a
+        // terminated run whose id was never captured can still be found by
+        // title. Resumes continue an existing session and must not rename it.
+        if resume_session_id.is_none() {
+            Some(run_id)
+        } else {
+            None
+        },
         |pid| {
             let _ = db.set_graph_run_pid(run_id, pid as i64, crate::system::boot_id().as_deref());
         },

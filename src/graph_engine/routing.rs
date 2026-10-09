@@ -360,11 +360,30 @@ impl GraphEngine {
     }
 }
 
+/// Resolve the workdir for a run from its graph row — the same directory the
+/// harness was launched in. CB84: the session-end command runs with this as
+/// cwd, and the title lookup is scoped to it. A blank result just means the
+/// session end is skipped (same as a platform with no `session_end_args`).
+pub(crate) fn workdir_for_run(db: &Database, run: &GraphNodeRun) -> String {
+    db.get_graph(&run.graph_id)
+        .ok()
+        .flatten()
+        .map(|g| g.workdir)
+        .unwrap_or_default()
+}
+
 /// Best-effort termination (B12) of `run`'s OS process, if it still has one
 /// recorded, and finalization of its DB row as `Fail`. Free-function core of
 /// [`GraphEngine::terminate_run`] — also used by ensemble member tasks, which
 /// don't have a `&GraphEngine` to call the method on.
-pub(crate) fn terminate_run_row(db: &Database, run: &GraphNodeRun, reason: &str) {
+///
+/// CB84: after the process group is killed, best-effort end the harness
+/// session behind this run (the opencode v2 service-side session that keeps
+/// ticking after the client is gone). `workdir` is the run's workdir — the
+/// session-end command runs with it as cwd, and the title lookup is scoped to
+/// it. Never fails the caller: the session end is spawned detached with its
+/// own 30s timeout.
+pub(crate) fn terminate_run_row(db: &Database, run: &GraphNodeRun, reason: &str, workdir: &str) {
     tracing::info!(
         run_id = %run.id,
         node_id = %run.node_id,
@@ -380,6 +399,103 @@ pub(crate) fn terminate_run_row(db: &Database, run: &GraphNodeRun, reason: &str)
         Some(&serde_json::json!({ "terminated": true, "reason": reason })),
         Some(chrono::Utc::now()),
     );
+    // CB84: end the harness session (best-effort, async, detached).
+    let platform = run.executed_platform.clone().unwrap_or_default();
+    let run_clone = run.clone();
+    let workdir = workdir.to_string();
+    if !platform.is_empty() {
+        tokio::spawn(async move {
+            end_harness_session(&platform, &run_clone, &workdir).await;
+        });
+    }
+}
+
+/// CB84: end the harness session behind a terminated node run. Best-effort —
+/// never fails the caller. Looks up the session id from the run row first,
+/// then by title from the platform's session list. Runs the platform's
+/// session-end command with a 30s timeout.
+pub(crate) async fn end_harness_session(platform: &str, run: &GraphNodeRun, workdir: &str) {
+    let Some(cli_config) = load_cli_config(platform) else {
+        return;
+    };
+    let strategy = crate::domain::cli_strategy::CliStrategy::from_cli_config(&cli_config);
+
+    // Resolve session id: from the run row first, then by title lookup.
+    let session_id = if let Some(sid) = &run.session_id {
+        Some(sid.clone())
+    } else {
+        lookup_session_id_by_title(&strategy, workdir, &run.id).await
+    };
+
+    let Some(session_id) = session_id else {
+        return;
+    };
+
+    let Some(mut cmd) = strategy.build_session_end_command(&session_id, workdir) else {
+        return;
+    };
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+
+    let timeout = std::time::Duration::from_secs(30);
+    match tokio::time::timeout(timeout, cmd.output()).await {
+        Ok(Ok(output)) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let preview = stdout.chars().take(200).collect::<String>();
+            tracing::info!(
+                run_id = %run.id,
+                session_id = %session_id,
+                exit_code = ?output.status.code(),
+                stdout_preview = %preview,
+                "harness session ended"
+            );
+        }
+        Ok(Err(e)) => {
+            tracing::warn!(run_id = %run.id, session_id = %session_id, error = %e, "session end command failed");
+        }
+        Err(_) => {
+            tracing::warn!(run_id = %run.id, session_id = %session_id, "session end command timed out");
+        }
+    }
+}
+
+/// Load a CLI config by platform name from `~/.canopy/config.toml`.
+fn load_cli_config(platform_name: &str) -> Option<crate::domain::cli_config::CliConfig> {
+    let canopy_dir = crate::domain::prompts::canopy_dir();
+    let config = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir);
+    config.get_cli(platform_name).cloned()
+}
+
+/// Look up a session id by title: run the platform's session-list command
+/// (cwd = workdir) and find the entry whose `title` equals `canopy-<run_id>`.
+/// Returns `None` when the list command isn't configured, fails, times out,
+/// or the JSON is malformed — never panics.
+async fn lookup_session_id_by_title(
+    strategy: &crate::domain::cli_strategy::CliStrategy,
+    workdir: &str,
+    run_id: &str,
+) -> Option<String> {
+    let mut cmd = strategy.build_session_list_command_by_title(workdir)?;
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    let output = tokio::time::timeout(std::time::Duration::from_secs(10), cmd.output())
+        .await
+        .ok()
+        .and_then(|r| r.ok())?;
+    find_session_id_by_title(&String::from_utf8_lossy(&output.stdout), run_id)
+}
+
+/// Parse a session-list JSON array and return the id of the entry whose
+/// `title` equals `canopy-<run_id>`. Returns `None` on malformed JSON, a
+/// missing or non-string `id`/`title`, or no match — never panics.
+fn find_session_id_by_title(json: &str, run_id: &str) -> Option<String> {
+    let sessions: Vec<serde_json::Value> = serde_json::from_str(json).ok()?;
+    let target_title = format!("canopy-{}", run_id);
+    sessions.iter().find_map(|s| {
+        let title = s.get("title")?.as_str()?;
+        let id = s.get("id")?.as_str()?;
+        (title == target_title).then(|| id.to_string())
+    })
 }
 
 /// `"platform #N"` or `"platform/model #N"` (1-based `N` from the member's
@@ -426,4 +542,37 @@ pub(crate) fn should_advance_to_next_spec(node: &GraphNode, status: GraphRunStat
             .get(route_key)
             .and_then(Value::as_str)
             .is_some_and(|route| route == "next_spec")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn find_session_id_by_title_matches() {
+        let json = r#"[{"id":"ses_1","title":"canopy-run-abc"},{"id":"ses_2","title":"other"}]"#;
+        assert_eq!(
+            find_session_id_by_title(json, "run-abc"),
+            Some("ses_1".to_string())
+        );
+    }
+
+    #[test]
+    fn find_session_id_by_title_no_match() {
+        let json = r#"[{"id":"ses_1","title":"other"}]"#;
+        assert_eq!(find_session_id_by_title(json, "run-abc"), None);
+    }
+
+    #[test]
+    fn find_session_id_by_title_malformed_json_returns_none() {
+        assert_eq!(find_session_id_by_title("not valid json", "run-abc"), None);
+    }
+
+    #[test]
+    fn find_session_id_by_title_ignores_entries_missing_fields() {
+        // An entry with a matching title but no `id`, and one with an id but
+        // a non-string title, must not panic — just be skipped.
+        let json = r#"[{"title":"canopy-run-abc"},{"id":"ses_2","title":7}]"#;
+        assert_eq!(find_session_id_by_title(json, "run-abc"), None);
+    }
 }

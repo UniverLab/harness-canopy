@@ -524,9 +524,9 @@ fn build_cli_command(
 ) -> Result<Command> {
     let strategy = cli.strategy();
     let mut cmd = if let Some(e) = effort {
-        strategy.build_command_with_session(prompt, model, working_dir, None, Some(e))?
+        strategy.build_command_with_session(prompt, model, working_dir, None, Some(e), None)?
     } else {
-        strategy.build_command(prompt, model, working_dir)?
+        strategy.build_command(prompt, model, working_dir, None)?
     };
 
     // Stdin is already set by `build_command` (null for argv-mode CLIs, or

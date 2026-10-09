@@ -59,6 +59,21 @@ pub struct CliStrategy {
     ///
     /// [`CliConfig::session_id_pattern`]: super::cli_config::CliConfig::session_id_pattern
     pub session_id_pattern: Option<String>,
+    /// Flag that sets the session title at spawn. See
+    /// [`CliConfig::session_title_flag`].
+    ///
+    /// [`CliConfig::session_title_flag`]: super::cli_config::CliConfig::session_title_flag
+    pub session_title_flag: Option<String>,
+    /// Args to list sessions as JSON. See
+    /// [`CliConfig::session_list_args`].
+    ///
+    /// [`CliConfig::session_list_args`]: super::cli_config::CliConfig::session_list_args
+    pub session_list_args: Option<Vec<String>>,
+    /// Args to end a session by id (with `{session_id}` substitution). See
+    /// [`CliConfig::session_end_args`].
+    ///
+    /// [`CliConfig::session_end_args`]: super::cli_config::CliConfig::session_end_args
+    pub session_end_args: Option<Vec<String>>,
     /// Headless flag that resumes a specific session by id (RS2), e.g.
     /// `"--session"` (opencode/mimo/kilo), `"--resume"` (qwen/claude), or
     /// `"--fork"` (cn). The id is appended as the next argument, before the
@@ -216,6 +231,9 @@ impl CliStrategy {
             session_list_cmd: cli_config.session_list_cmd.clone(),
             session_list_format_args: cli_config.session_list_format_args.clone(),
             session_id_pattern: cli_config.session_id_pattern.clone(),
+            session_title_flag: cli_config.session_title_flag.clone(),
+            session_list_args: cli_config.session_list_args.clone(),
+            session_end_args: cli_config.session_end_args.clone(),
             session_resume_cmd: cli_config.session_resume_cmd.clone(),
             trust_flag: cli_config.trust_flag.clone(),
             invocation_template: cli_config.invocation_template.clone(),
@@ -230,6 +248,68 @@ impl CliStrategy {
     fn selectable_model_flag(&self) -> Option<&str> {
         let f = self.model_flag.as_deref()?;
         crate::domain::cli_config::model_flag_selects_model(Some(f)).then_some(f)
+    }
+
+    /// CB84: the `(flag, canopy-<run_id>)` title pair to stamp on a headless
+    /// spawn, or `None` when the platform sets no `session_title_flag` or the
+    /// caller has no run id (probes, conflict-resolution agents, MCP
+    /// subagents keep today's behaviour).
+    fn session_title_for(&self, run_id: Option<&str>) -> Option<(&str, String)> {
+        let flag = self.session_title_flag.as_deref()?;
+        let run_id = run_id?;
+        Some((flag, format!("canopy-{run_id}")))
+    }
+
+    /// Build the command to end a session by id, replacing `{session_id}` in
+    /// `session_end_args`. Returns `None` when the platform has no
+    /// `session_end_args` (or its binary cannot be resolved) — the caller
+    /// keeps today's behaviour.
+    pub fn build_session_end_command(
+        &self,
+        session_id: &str,
+        workdir: &str,
+    ) -> Option<tokio::process::Command> {
+        let end_args = self.session_end_args.as_ref()?;
+        let resolved = resolve_binary(&self.binary).ok()?;
+        let mut cmd = tokio::process::Command::new(resolved);
+        #[cfg(unix)]
+        cmd.process_group(0);
+        cmd.kill_on_drop(true);
+        for (key, value) in &self.env_vars {
+            cmd.env(key, value);
+        }
+        for arg in end_args {
+            cmd.arg(arg.replace("{session_id}", session_id));
+        }
+        cmd.current_dir(workdir);
+        cmd.stdin(std::process::Stdio::null());
+        Some(cmd)
+    }
+
+    /// Build the command to list sessions as JSON. Returns `None` when the
+    /// platform has no `session_list_args` (or its binary cannot be
+    /// resolved). The caller runs it with the run's workdir as cwd — several
+    /// CLIs scope their session list to the current project — and finds the
+    /// entry whose `title` equals `canopy-<run_id>`.
+    pub fn build_session_list_command_by_title(
+        &self,
+        workdir: &str,
+    ) -> Option<tokio::process::Command> {
+        let list_args = self.session_list_args.as_ref()?;
+        let resolved = resolve_binary(&self.binary).ok()?;
+        let mut cmd = tokio::process::Command::new(resolved);
+        #[cfg(unix)]
+        cmd.process_group(0);
+        cmd.kill_on_drop(true);
+        for (key, value) in &self.env_vars {
+            cmd.env(key, value);
+        }
+        for arg in list_args {
+            cmd.arg(arg);
+        }
+        cmd.current_dir(workdir);
+        cmd.stdin(std::process::Stdio::null());
+        Some(cmd)
     }
 
     /// Return a copy of this strategy with `prompt_via_stdin` forced to
@@ -253,8 +333,9 @@ impl CliStrategy {
         prompt: &str,
         model: Option<&str>,
         working_dir: Option<&str>,
+        run_id: Option<&str>,
     ) -> Result<Command> {
-        self.build_command_with_session(prompt, model, working_dir, None, None)
+        self.build_command_with_session(prompt, model, working_dir, None, None, run_id)
     }
 
     /// [`build_command`], additionally injecting a caller-chosen session id
@@ -270,6 +351,7 @@ impl CliStrategy {
         working_dir: Option<&str>,
         session_id: Option<&str>,
         effort: Option<&str>,
+        run_id: Option<&str>,
     ) -> Result<Command> {
         // Cold start: inject the set-at-spawn flag + id only when both the
         // registry flag and a caller-minted id exist.
@@ -277,7 +359,15 @@ impl CliStrategy {
             (Some(flag), Some(id)) => Some((flag, id)),
             _ => None,
         };
-        self.build_headless_command(prompt, model, working_dir, session_arg, None, effort)
+        self.build_headless_command(
+            prompt,
+            model,
+            working_dir,
+            session_arg,
+            None,
+            effort,
+            run_id,
+        )
     }
 
     /// CM5: build a headless command that points the CLI at a canopy-synthesized
@@ -293,8 +383,17 @@ impl CliStrategy {
         working_dir: Option<&str>,
         mcp_config_path: Option<&str>,
         effort: Option<&str>,
+        run_id: Option<&str>,
     ) -> Result<Command> {
-        self.build_headless_command(prompt, model, working_dir, None, mcp_config_path, effort)
+        self.build_headless_command(
+            prompt,
+            model,
+            working_dir,
+            None,
+            mcp_config_path,
+            effort,
+            run_id,
+        )
     }
 
     /// Build a headless command that RESUMES an existing session by id (RS2).
@@ -310,6 +409,7 @@ impl CliStrategy {
         prompt: &str,
         model: Option<&str>,
         working_dir: Option<&str>,
+        run_id: Option<&str>,
     ) -> Result<Command> {
         let flag = self.session_resume_cmd.as_deref().ok_or_else(|| {
             anyhow::anyhow!(
@@ -324,6 +424,7 @@ impl CliStrategy {
             Some((flag, session_id)),
             None,
             None,
+            run_id,
         )
     }
 
@@ -339,6 +440,10 @@ impl CliStrategy {
     /// cold path passes the set-at-spawn flag; the resume path passes the
     /// resume flag; a plain `build_command` passes `None`. Keeping this one
     /// function means the cold layout is byte-identical whichever caller runs.
+    /// `run_id`, when `Some` and the platform sets `session_title_flag`,
+    /// appends `<flag> canopy-<run_id>` right after the headless flags so the
+    /// session can later be found by title.
+    #[expect(clippy::too_many_arguments)]
     fn build_headless_command(
         &self,
         prompt: &str,
@@ -347,6 +452,7 @@ impl CliStrategy {
         session_arg: Option<(&str, &str)>,
         mcp_config: Option<&str>,
         effort: Option<&str>,
+        run_id: Option<&str>,
     ) -> Result<Command> {
         let resolved = resolve_binary(&self.binary)?;
         let mut cmd = Command::new(resolved);
@@ -385,6 +491,11 @@ impl CliStrategy {
                 cmd.arg(arg);
             }
 
+            // CB84: title flag so the session can be found by title later.
+            if let Some((flag, value)) = self.session_title_for(run_id) {
+                cmd.arg(flag).arg(value);
+            }
+
             // Deliver prompt via stdin vs argv. When prompt_via_stdin is true,
             // {{prompt}} is already elided (markers inserted as None), but for
             // safety filter any argv word that equals the prompt text.
@@ -411,6 +522,11 @@ impl CliStrategy {
             // Add headless mode flags (before prompt)
             for arg in shell_words::split(&self.headless_mode).unwrap_or_default() {
                 cmd.arg(arg);
+            }
+
+            // CB84: title flag so the session can be found by title later.
+            if let Some((flag, value)) = self.session_title_for(run_id) {
+                cmd.arg(flag).arg(value);
             }
 
             // Inject the session flag + id (set-at-spawn for a cold start, or the
@@ -552,6 +668,9 @@ mod tests {
             session_list_cmd: None,
             session_list_format_args: None,
             session_id_pattern: None,
+            session_title_flag: None,
+            session_list_args: None,
+            session_end_args: None,
             session_resume_cmd: None,
             trust_flag: None,
             invocation_template: None,
@@ -562,7 +681,9 @@ mod tests {
     #[test]
     fn test_build_command_basic() {
         let strategy = sample_strategy();
-        let cmd = strategy.build_command("test prompt", None, None).unwrap();
+        let cmd = strategy
+            .build_command("test prompt", None, None, None)
+            .unwrap();
 
         let cmd_str = format!("{:?}", cmd);
         assert!(cmd_str.contains("test-cli"));
@@ -572,7 +693,7 @@ mod tests {
     fn test_build_command_with_model() {
         let strategy = sample_strategy();
         let cmd = strategy
-            .build_command("test prompt", Some("gpt-4"), None)
+            .build_command("test prompt", Some("gpt-4"), None, None)
             .unwrap();
 
         let cmd_str = format!("{:?}", cmd);
@@ -584,7 +705,7 @@ mod tests {
     fn test_build_command_with_working_dir() {
         let strategy = sample_strategy();
         let cmd = strategy
-            .build_command("test prompt", None, Some("/tmp/project"))
+            .build_command("test prompt", None, Some("/tmp/project"), None)
             .unwrap();
 
         let cmd_str = format!("{:?}", cmd);
@@ -598,7 +719,7 @@ mod tests {
         strategy.supports_working_dir = false;
 
         let cmd = strategy
-            .build_command("test prompt", None, Some("/tmp/project"))
+            .build_command("test prompt", None, Some("/tmp/project"), None)
             .unwrap();
 
         let cmd_str = format!("{:?}", cmd);
@@ -611,7 +732,7 @@ mod tests {
         strategy.model_flag = None;
 
         let cmd = strategy
-            .build_command("test prompt", Some("gpt-4"), None)
+            .build_command("test prompt", Some("gpt-4"), None, None)
             .unwrap();
 
         let cmd_str = format!("{:?}", cmd);
@@ -626,7 +747,7 @@ mod tests {
         strategy.model_flag = Some(String::new());
 
         let cmd = strategy
-            .build_command("test prompt", Some("gpt-4"), None)
+            .build_command("test prompt", Some("gpt-4"), None, None)
             .unwrap();
 
         let args: Vec<String> = cmd
@@ -651,7 +772,7 @@ mod tests {
         let strategy = sample_strategy(); // model_flag = Some("--model")
 
         let cmd = strategy
-            .build_command("test prompt", Some("gpt-4"), None)
+            .build_command("test prompt", Some("gpt-4"), None, None)
             .unwrap();
 
         let args: Vec<String> = cmd
@@ -672,7 +793,9 @@ mod tests {
         let mut strategy = sample_strategy();
         strategy.headless_mode = String::new();
 
-        let cmd = strategy.build_command("test prompt", None, None).unwrap();
+        let cmd = strategy
+            .build_command("test prompt", None, None, None)
+            .unwrap();
 
         let cmd_str = format!("{:?}", cmd);
         assert!(cmd_str.contains("test-cli"));
@@ -700,7 +823,7 @@ mod tests {
         strategy.prompt_via_stdin = true;
 
         let cmd = strategy
-            .build_command("this must not appear in argv", None, None)
+            .build_command("this must not appear in argv", None, None, None)
             .unwrap();
 
         let cmd_str = format!("{:?}", cmd);
@@ -720,7 +843,9 @@ mod tests {
         strategy.prompt_via_stdin = true;
 
         let huge_prompt = "x".repeat(500 * 1024);
-        let mut cmd = strategy.build_command(&huge_prompt, None, None).unwrap();
+        let mut cmd = strategy
+            .build_command(&huge_prompt, None, None, None)
+            .unwrap();
         cmd.stdout(std::process::Stdio::piped());
 
         let output = cmd.output().await.unwrap();
@@ -739,6 +864,7 @@ mod tests {
                 None,
                 Some("11111111-2222-3333-4444-555555555555"),
                 None,
+                None,
             )
             .unwrap();
         let cmd_str = format!("{:?}", cmd);
@@ -752,7 +878,7 @@ mod tests {
         // silently dropped, never passed as a stray argument.
         let strategy = sample_strategy();
         let cmd = strategy
-            .build_command_with_session("p", None, None, Some("sid-123"), None)
+            .build_command_with_session("p", None, None, Some("sid-123"), None, None)
             .unwrap();
         let cmd_str = format!("{:?}", cmd);
         assert!(!cmd_str.contains("sid-123"));
@@ -762,16 +888,87 @@ mod tests {
     fn build_command_never_injects_session_flag_without_id() {
         let mut strategy = sample_strategy();
         strategy.session_id_set_flag = Some("--session-id".to_string());
-        let cmd = strategy.build_command("p", None, None).unwrap();
+        let cmd = strategy.build_command("p", None, None, None).unwrap();
         let cmd_str = format!("{:?}", cmd);
         assert!(!cmd_str.contains("--session-id"));
+    }
+
+    #[test]
+    fn build_command_adds_title_flag_when_configured() {
+        let mut s = sample_strategy();
+        s.session_title_flag = Some("--title".to_string());
+        let cmd = s
+            .build_command("prompt", None, None, Some("run-123"))
+            .unwrap();
+        let cmd_str = format!("{:?}", cmd);
+        assert!(cmd_str.contains("--title"));
+        assert!(cmd_str.contains("canopy-run-123"));
+    }
+
+    #[test]
+    fn build_command_omits_title_flag_when_not_configured() {
+        let s = sample_strategy(); // session_title_flag = None
+        let cmd = s
+            .build_command("prompt", None, None, Some("run-123"))
+            .unwrap();
+        let cmd_str = format!("{:?}", cmd);
+        assert!(!cmd_str.contains("--title"));
+        assert!(!cmd_str.contains("canopy-run-123"));
+    }
+
+    #[test]
+    fn build_command_omits_title_flag_when_run_id_none() {
+        let mut s = sample_strategy();
+        s.session_title_flag = Some("--title".to_string());
+        let cmd = s.build_command("prompt", None, None, None).unwrap();
+        let cmd_str = format!("{:?}", cmd);
+        assert!(!cmd_str.contains("--title"));
+    }
+
+    #[test]
+    fn build_command_with_session_adds_title_flag_when_configured() {
+        let mut s = sample_strategy();
+        s.session_title_flag = Some("--title".to_string());
+        let cmd = s
+            .build_command_with_session("prompt", None, None, None, None, Some("run-456"))
+            .unwrap();
+        let cmd_str = format!("{:?}", cmd);
+        assert!(cmd_str.contains("--title"));
+        assert!(cmd_str.contains("canopy-run-456"));
+    }
+
+    #[test]
+    fn build_session_end_command_substitutes_session_id() {
+        let mut s = sample_strategy();
+        s.session_end_args = Some(vec![
+            "api".to_string(),
+            "session.interrupt".to_string(),
+            "--param".to_string(),
+            "sessionID={session_id}".to_string(),
+        ]);
+        let cmd = s.build_session_end_command("ses_abc", "/tmp").unwrap();
+        let cmd_str = format!("{:?}", cmd);
+        assert!(cmd_str.contains("sessionID=ses_abc"));
+        assert!(!cmd_str.contains("{session_id}"));
+    }
+
+    #[test]
+    fn build_session_end_command_none_without_config() {
+        let s = sample_strategy();
+        assert!(s.build_session_end_command("ses_abc", "/tmp").is_none());
+    }
+
+    #[test]
+    fn build_session_list_command_none_without_config() {
+        let s = sample_strategy();
+        assert!(s.build_session_list_command_by_title("/tmp").is_none());
     }
 
     #[test]
     fn test_build_command_all_options() {
         let strategy = sample_strategy();
         let cmd = strategy
-            .build_command("my prompt", Some("claude-3"), Some("/home/project"))
+            .build_command("my prompt", Some("claude-3"), Some("/home/project"), None)
             .unwrap();
 
         let cmd_str = format!("{:?}", cmd);
@@ -872,7 +1069,7 @@ mod tests {
         let mut s = sample_strategy();
         s.session_resume_cmd = Some("--session".to_string());
         let cmd = s
-            .build_resume_command("ses_abc", "the prompt", None, None)
+            .build_resume_command("ses_abc", "the prompt", None, None, None)
             .unwrap();
         let cmd_str = format!("{:?}", cmd);
         assert!(cmd_str.contains("--session"));
@@ -890,7 +1087,7 @@ mod tests {
     fn build_resume_command_errors_without_session_resume_cmd() {
         let s = sample_strategy();
         let err = s
-            .build_resume_command("ses_abc", "p", None, None)
+            .build_resume_command("ses_abc", "p", None, None, None)
             .unwrap_err();
         assert!(err.to_string().contains("session_resume_cmd"));
     }
@@ -902,7 +1099,9 @@ mod tests {
         let mut s = sample_strategy();
         s.session_id_set_flag = Some("--session-id".to_string());
         s.session_resume_cmd = Some("--resume".to_string());
-        let cmd = s.build_resume_command("ses_xyz", "p", None, None).unwrap();
+        let cmd = s
+            .build_resume_command("ses_xyz", "p", None, None, None)
+            .unwrap();
         let cmd_str = format!("{:?}", cmd);
         assert!(cmd_str.contains("--resume"));
         assert!(cmd_str.contains("ses_xyz"));
@@ -1052,7 +1251,14 @@ mod tests {
         s.session_id_set_flag = Some("--session-id".to_string());
 
         let cmd = s
-            .build_command_with_session("the prompt", Some("gpt-4"), None, Some("ses_123"), None)
+            .build_command_with_session(
+                "the prompt",
+                Some("gpt-4"),
+                None,
+                Some("ses_123"),
+                None,
+                None,
+            )
             .unwrap();
         let cmd_str = format!("{:?}", cmd);
 
@@ -1076,7 +1282,7 @@ mod tests {
         s.session_id_set_flag = Some("--session-id".to_string());
 
         let cmd = s
-            .build_command_with_session("the prompt", None, None, Some("ses_456"), None)
+            .build_command_with_session("the prompt", None, None, Some("ses_456"), None, None)
             .unwrap();
         let cmd_str = format!("{:?}", cmd);
 
@@ -1097,7 +1303,9 @@ mod tests {
         let mut s = sample_strategy();
         s.invocation_template = Some("--model={{model}} {{prompt}}".to_string());
 
-        let cmd = s.build_command("the prompt", Some("gpt-4"), None).unwrap();
+        let cmd = s
+            .build_command("the prompt", Some("gpt-4"), None, None)
+            .unwrap();
         let cmd_str = format!("{:?}", cmd);
 
         // Assert: --model=gpt-4 is a single argv word (no space between flag and value).
@@ -1136,7 +1344,7 @@ mod tests {
         let mut s = sample_strategy();
         s.invocation_template = Some("--model {{model}} {{prompt}}".to_string());
 
-        let cmd = s.build_command("the prompt", None, None).unwrap();
+        let cmd = s.build_command("the prompt", None, None, None).unwrap();
         let cmd_str = format!("{:?}", cmd);
 
         assert!(cmd_str.contains("the prompt"));
@@ -1149,7 +1357,7 @@ mod tests {
         let mut s = sample_strategy();
         s.invocation_template = Some("--model={{model}} {{prompt}}".to_string());
 
-        let cmd = s.build_command("the prompt", None, None).unwrap();
+        let cmd = s.build_command("the prompt", None, None, None).unwrap();
         let cmd_str = format!("{:?}", cmd);
 
         assert!(cmd_str.contains("the prompt"));
@@ -1181,7 +1389,7 @@ mod tests {
         // Backward compat: no template → legacy fixed-order behavior.
         let s = sample_strategy(); // invocation_template is None
         let cmd = s
-            .build_command("the prompt", Some("gpt-4"), Some("/tmp"))
+            .build_command("the prompt", Some("gpt-4"), Some("/tmp"), None)
             .unwrap();
         let cmd_str = format!("{:?}", cmd);
 
@@ -1202,7 +1410,7 @@ mod tests {
         s.session_id_set_flag = Some("--session-id".to_string());
 
         let cmd = s
-            .build_resume_command("ses_123", "the prompt", None, None)
+            .build_resume_command("ses_123", "the prompt", None, None, None)
             .unwrap();
         let cmd_str = format!("{:?}", cmd);
 
@@ -1222,7 +1430,9 @@ mod tests {
         s.invocation_template = Some("--model {{model}} {{prompt}}".to_string());
         s.prompt_via_stdin = true;
 
-        let cmd = s.build_command("the prompt", Some("gpt-4"), None).unwrap();
+        let cmd = s
+            .build_command("the prompt", Some("gpt-4"), None, None)
+            .unwrap();
         let cmd_str = format!("{:?}", cmd);
 
         assert!(cmd_str.contains("--model"));
@@ -1237,7 +1447,7 @@ mod tests {
         s.invocation_template = Some("--workdir {{workdir}} {{prompt}}".to_string());
 
         let cmd = s
-            .build_command("the prompt", None, Some("/tmp/project"))
+            .build_command("the prompt", None, Some("/tmp/project"), None)
             .unwrap();
         let cmd_str = format!("{:?}", cmd);
         assert!(cmd_str.contains("--workdir"));
@@ -1245,7 +1455,7 @@ mod tests {
         assert!(cmd_str.contains("the prompt"));
 
         // Without workdir, --workdir is elided
-        let cmd2 = s.build_command("the prompt", None, None).unwrap();
+        let cmd2 = s.build_command("the prompt", None, None, None).unwrap();
         let cmd_str2 = format!("{:?}", cmd2);
         assert!(!cmd_str2.contains("--workdir"));
         assert!(cmd_str2.contains("the prompt"));
@@ -1835,7 +2045,14 @@ mod tests {
         let template = "-p {{prompt}} --mcp-config {{mcp_config}} --effort {{effort}}";
         let s = strategy_with_template(template);
         let cmd = s
-            .build_command_with_mcp_config("hello", None, None, Some("/tmp/mcp.json"), Some("high"))
+            .build_command_with_mcp_config(
+                "hello",
+                None,
+                None,
+                Some("/tmp/mcp.json"),
+                Some("high"),
+                None,
+            )
             .unwrap();
         let cmd_str = format!("{:?}", cmd);
         assert!(cmd_str.contains("--effort"));
@@ -1847,7 +2064,7 @@ mod tests {
         let template = "-p {{prompt}} --mcp-config {{mcp_config}} --effort {{effort}}";
         let s = strategy_with_template(template);
         let cmd = s
-            .build_command_with_mcp_config("hello", None, None, Some("/tmp/mcp.json"), None)
+            .build_command_with_mcp_config("hello", None, None, Some("/tmp/mcp.json"), None, None)
             .unwrap();
         let cmd_str = format!("{:?}", cmd);
         assert!(!cmd_str.contains("--effort"));

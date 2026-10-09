@@ -4539,6 +4539,9 @@ mod tests {
             session_list_cmd: None,
             session_list_format_args: None,
             session_id_pattern: None,
+            session_title_flag: None,
+            session_list_args: None,
+            session_end_args: None,
             session_resume_cmd: None,
             trust_flag: None,
             invocation_template: None,
@@ -4686,6 +4689,9 @@ esac
             session_list_cmd: Some("list".to_string()),
             session_list_format_args: None,
             session_id_pattern: Some(r#""id"\s*:\s*"([^"]+)""#.to_string()),
+            session_title_flag: None,
+            session_list_args: None,
+            session_end_args: None,
             session_resume_cmd: None,
             trust_flag: None,
             invocation_template: None,
@@ -7478,7 +7484,10 @@ echo done
         .unwrap();
 
         // G2 boot reconcile.
-        assert_eq!(db.reconcile_orphaned_graphs(data_dir.path()).unwrap(), 1);
+        assert_eq!(
+            db.reconcile_orphaned_graphs(data_dir.path()).unwrap().len(),
+            1
+        );
         let lp_after_reconcile = db.get_graph(&graph_id).unwrap().unwrap();
         assert_eq!(lp_after_reconcile.status, GraphStatus::Paused);
         let interrupted_after_reconcile = db.get_graph_spec(&interrupted.id).unwrap().unwrap();
@@ -7650,7 +7659,10 @@ echo done
         // "interrupted" marker output), the spec Interrupted, the graph
         // Paused. This is exactly what a real daemon restart mid-ensemble
         // leaves behind.
-        assert_eq!(db.reconcile_orphaned_graphs(data_dir.path()).unwrap(), 1);
+        assert_eq!(
+            db.reconcile_orphaned_graphs(data_dir.path()).unwrap().len(),
+            1
+        );
         let spec_after_reconcile = db.get_graph_spec(&spec_id).unwrap().unwrap();
         assert_eq!(spec_after_reconcile.status, GraphSpecStatus::Interrupted);
 
@@ -8552,7 +8564,8 @@ echo done
         let superseded_run_id = loop {
             if let Some(run) = db.get_active_graph_run_for_node("implement").unwrap() {
                 if run.pid.is_some() {
-                    terminate_run_row(&db, &run, SUPERSEDE_REASON);
+                    let workdir = crate::graph_engine::routing::workdir_for_run(&db, &run);
+                    terminate_run_row(&db, &run, SUPERSEDE_REASON, &workdir);
                     break run.id;
                 }
             }
@@ -8655,7 +8668,8 @@ echo done
         let terminated_run_id = loop {
             if let Some(run) = db.get_active_graph_run_for_node("implement").unwrap() {
                 if run.pid.is_some() {
-                    terminate_run_row(&db, &run, "spec reset");
+                    let workdir = crate::graph_engine::routing::workdir_for_run(&db, &run);
+                    terminate_run_row(&db, &run, "spec reset", &workdir);
                     break run.id;
                 }
             }
@@ -23386,7 +23400,7 @@ exit 0
             .unwrap();
 
         let reconciled = db.reconcile_orphaned_graphs(dir.path()).unwrap();
-        assert_eq!(reconciled, 1);
+        assert_eq!(reconciled.len(), 1);
         let lp = db.get_graph(&graph_id).unwrap().unwrap();
         assert_eq!(lp.status, GraphStatus::Paused);
         assert!(
@@ -23525,6 +23539,198 @@ exit 0
                 serde_json::json!({"exit_code": 1, "command": "false"})
             )),
             "a genuine check failure must still route its fail edge"
+        );
+    }
+
+    // ── CB84: session end on termination ──────────────────────────────
+
+    /// CB84 6d: `terminate_run_row` must invoke the platform's session-end
+    /// command with the run's session id (after `{session_id}` substitution)
+    /// and the run's workdir as cwd.  Uses a fake binary that records its argv
+    /// and cwd to a file we assert on — no real harness is involved.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminate_run_row_calls_session_end_script() {
+        let home = tempdir().unwrap();
+        let canopy_dir = home.path().join(".canopy");
+        std::fs::create_dir_all(&canopy_dir).unwrap();
+
+        // Fake binary: records cwd + every argv word to RECORD, then a final
+        // `done=1` marker so the test can wait for a complete record.
+        let scratch = tempdir().unwrap();
+        let record = scratch.path().join("end_record.txt");
+        let record_str = record.to_string_lossy().to_string();
+        let fake_bin = scratch.path().join("fake-end-cli");
+        std::fs::write(
+            &fake_bin,
+            format!(
+                "#!/bin/sh\necho \"cwd=$(pwd)\" >> '{record_str}'\nfor arg in \"$@\"; do echo \"arg=$arg\" >> '{record_str}'; done\necho \"done=1\" >> '{record_str}'\n"
+            ),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        // Config: fake platform with session_end_args pointing at the script.
+        let config_toml = format!(
+            r#"[[clis]]
+name = "fake-end"
+binary = "{}"
+session_end_args = ["end", "--session-id", "{{session_id}}"]
+"#,
+            fake_bin.to_string_lossy()
+        );
+        std::fs::write(canopy_dir.join("config.toml"), config_toml).unwrap();
+
+        // Serializes against the other `CANOPY_HOME_OVERRIDE` tests and
+        // restores the previous value on drop.
+        let _home = HomeGuard::set(home.path());
+
+        // DB + graph + run with executed_platform and session_id set.
+        let (_dir, db, _engine, graph_id) = bare_graph_fixture().unwrap();
+        let spec = standalone_spec("sid-end", 1);
+        db.insert_graph_spec(&spec).unwrap();
+        let mut node = sample_agent_node();
+        node.spec_id = Some(spec.id.clone());
+        db.insert_graph_node(&node).unwrap();
+
+        let run = GraphNodeRun {
+            id: "run-end-test".to_string(),
+            graph_id: graph_id.clone(),
+            spec_id: spec.id,
+            node_id: node.id.clone(),
+            status: GraphRunStatus::Running,
+            input: None,
+            output: None,
+            started_at: chrono::Utc::now(),
+            completed_at: None,
+            iteration: 1,
+            pid: None,
+            boot_id: None,
+            session_id: Some("ses_abc".to_string()),
+            executed_platform: Some("fake-end".to_string()),
+            executed_model: None,
+        };
+        db.insert_graph_run(&run).unwrap();
+
+        // Call terminate_run_row — spawns end_harness_session detached.
+        let workdir = workdir_for_run(&db, &run);
+        assert!(!workdir.is_empty(), "fixture must have a real workdir");
+        terminate_run_row(&db, &run, "test termination", &workdir);
+
+        // Wait for the detached task to write a complete record.
+        let recorded = loop {
+            if let Ok(recorded) = std::fs::read_to_string(&record) {
+                if recorded.contains("done=1") {
+                    break recorded;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        };
+
+        assert!(
+            recorded.contains("arg=--session-id") && recorded.contains("arg=ses_abc"),
+            "session id must reach the end script: {}",
+            recorded
+        );
+        assert!(
+            recorded.contains(&format!("cwd={workdir}")),
+            "script must run with the run's workdir as cwd: {}",
+            recorded
+        );
+    }
+
+    /// CB84 6d (negative): a platform with no `session_end_args` leaves no
+    /// session to end, so `terminate_run_row` runs no command at all. This
+    /// proves the positive test's script invocation is driven by the config,
+    /// not by `terminate_run_row` unconditionally.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminate_run_row_skips_session_end_without_config() {
+        let home = tempdir().unwrap();
+        let canopy_dir = home.path().join(".canopy");
+        std::fs::create_dir_all(&canopy_dir).unwrap();
+
+        let scratch = tempdir().unwrap();
+        let record = scratch.path().join("end_record.txt");
+        let record_str = record.to_string_lossy().to_string();
+        let fake_bin = scratch.path().join("fake-end-cli");
+        std::fs::write(
+            &fake_bin,
+            format!("#!/bin/sh\necho \"ran=1\" >> '{record_str}'\n"),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        // Same fake platform, but no `session_end_args` — the binary must
+        // never even be invoked.
+        let config_toml = format!(
+            r#"[[clis]]
+name = "fake-end"
+binary = "{}"
+"#,
+            fake_bin.to_string_lossy()
+        );
+        std::fs::write(canopy_dir.join("config.toml"), config_toml).unwrap();
+
+        let _home = HomeGuard::set(home.path());
+
+        let (_dir, db, _engine, graph_id) = bare_graph_fixture().unwrap();
+        let spec = standalone_spec("sid-end", 1);
+        db.insert_graph_spec(&spec).unwrap();
+        let mut node = sample_agent_node();
+        node.spec_id = Some(spec.id.clone());
+        db.insert_graph_node(&node).unwrap();
+
+        let run = GraphNodeRun {
+            id: "run-end-skip".to_string(),
+            graph_id: graph_id.clone(),
+            spec_id: spec.id,
+            node_id: node.id.clone(),
+            status: GraphRunStatus::Running,
+            input: None,
+            output: None,
+            started_at: chrono::Utc::now(),
+            completed_at: None,
+            iteration: 1,
+            pid: None,
+            boot_id: None,
+            session_id: Some("ses_abc".to_string()),
+            executed_platform: Some("fake-end".to_string()),
+            executed_model: None,
+        };
+        db.insert_graph_run(&run).unwrap();
+
+        let workdir = workdir_for_run(&db, &run);
+        terminate_run_row(&db, &run, "test termination", &workdir);
+
+        // Give any (wrongly) spawned task ample time to run, then assert the
+        // binary never wrote anything.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            !record.exists(),
+            "no session-end command must run for a platform without session_end_args"
+        );
+    }
+
+    /// CB84 6e: a run that completes normally (pass/fail reported by the agent
+    /// via `graph_complete_node`) never triggers `end_harness_session`.  The
+    /// completion path only calls `update_graph_run_result` — `terminate_run_row`
+    /// is absent from it, so completed sessions stay intact for warm-session
+    /// groups that resume them.
+    #[test]
+    fn normal_completion_does_not_end_session() {
+        let source = include_str!("../daemon/handler_run_lifecycle.rs");
+        let prod = source.split("mod tests {").next().unwrap_or(source);
+        assert!(
+            !prod.contains("terminate_run_row"),
+            "normal completion path (graph_complete_node -> complete_node_impl) \
+             must not call terminate_run_row — sessions stay intact for warm-session groups"
         );
     }
 }

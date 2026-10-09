@@ -1742,7 +1742,7 @@ fn reconcile_orphaned_graphs_pauses_running_graph_and_interrupts_its_run() {
         .unwrap();
 
     let reconciled = db.reconcile_orphaned_graphs(data_dir.path()).unwrap();
-    assert_eq!(reconciled, 1);
+    assert_eq!(reconciled.len(), 1);
 
     // Test 1: the graph is paused, and its dangling run is no longer `running`.
     let lp_after = db.get_graph(&lp.id).unwrap().unwrap();
@@ -1819,7 +1819,10 @@ fn reconcile_orphaned_graphs_marks_queue_member_spec_interrupted() {
     })
     .unwrap();
 
-    assert_eq!(db.reconcile_orphaned_graphs(data_dir.path()).unwrap(), 1);
+    assert_eq!(
+        db.reconcile_orphaned_graphs(data_dir.path()).unwrap().len(),
+        1
+    );
 
     let lp_after = db.get_graph(&lp.id).unwrap().unwrap();
     assert_eq!(lp_after.status, GraphStatus::Paused);
@@ -1923,14 +1926,14 @@ fn reconcile_orphaned_graphs_is_idempotent() {
     db.insert_graph_run(&run).unwrap();
 
     let first_pass = db.reconcile_orphaned_graphs(data_dir.path()).unwrap();
-    assert_eq!(first_pass, 1);
+    assert_eq!(first_pass.len(), 1);
     let lp_after_first = db.get_graph(&lp.id).unwrap().unwrap();
     let run_after_first = db.get_graph_run(&run.id).unwrap().unwrap();
 
     // Test 3: a second reconcile pass finds nothing left to reconcile, and
     // leaves the already-paused graph/run untouched.
     let second_pass = db.reconcile_orphaned_graphs(data_dir.path()).unwrap();
-    assert_eq!(second_pass, 0);
+    assert_eq!(second_pass.len(), 0);
     let lp_after_second = db.get_graph(&lp.id).unwrap().unwrap();
     let run_after_second = db.get_graph_run(&run.id).unwrap().unwrap();
     assert_eq!(lp_after_second.status, lp_after_first.status);
@@ -1997,7 +2000,10 @@ async fn reconcile_orphaned_graphs_kills_survivor_pid_from_same_boot() {
     db.insert_graph_node(&node).unwrap();
     db.insert_graph_run(&run).unwrap();
 
-    assert_eq!(db.reconcile_orphaned_graphs(data_dir.path()).unwrap(), 1);
+    assert_eq!(
+        db.reconcile_orphaned_graphs(data_dir.path()).unwrap().len(),
+        1
+    );
 
     // The kill is fired via a detached task (see
     // `terminate_process_group_async`); poll briefly for the SIGTERM to
@@ -2058,7 +2064,10 @@ fn reconcile_orphaned_graphs_skips_kill_for_mismatched_boot_id() {
     // Must not panic or error even though pid 1 is a real (unkillable by
     // us) process — the boot_id mismatch must short-circuit before any
     // signal is ever attempted.
-    assert_eq!(db.reconcile_orphaned_graphs(data_dir.path()).unwrap(), 1);
+    assert_eq!(
+        db.reconcile_orphaned_graphs(data_dir.path()).unwrap().len(),
+        1
+    );
     let run_after = db.get_graph_run(&run.id).unwrap().unwrap();
     assert_ne!(run_after.status, GraphRunStatus::Running);
 }
@@ -2073,7 +2082,7 @@ fn reconcile_orphaned_graphs_leaves_completed_graph_untouched() {
 
     // Test 4: a `Completed` graph is not reconciled.
     let reconciled = db.reconcile_orphaned_graphs(data_dir.path()).unwrap();
-    assert_eq!(reconciled, 0);
+    assert_eq!(reconciled.len(), 0);
     let lp_after = db.get_graph(&lp.id).unwrap().unwrap();
     assert_eq!(lp_after.status, GraphStatus::Completed);
 }
@@ -2136,7 +2145,8 @@ async fn reconcile_orphaned_graphs_skips_everything_when_foreign_daemon_pid_is_l
 
     let reconciled = db.reconcile_orphaned_graphs(data_dir.path()).unwrap();
     assert_eq!(
-        reconciled, 0,
+        reconciled.len(),
+        0,
         "must not report any graph reconciled while a foreign live daemon owns the pid file"
     );
 
@@ -2221,7 +2231,7 @@ fn reconcile_orphaned_graphs_skips_kill_for_own_ancestor_pid() {
     db.insert_graph_run(&run).unwrap();
 
     let reconciled = db.reconcile_orphaned_graphs(data_dir.path()).unwrap();
-    assert_eq!(reconciled, 1);
+    assert_eq!(reconciled.len(), 1);
 
     // Run must be marked interrupted in DB, but parent process must still be alive.
     let run_after = db.get_graph_run(&run.id).unwrap().unwrap();
@@ -5302,7 +5312,10 @@ fn reconcile_orphaned_graphs_marks_interrupted_and_leaves_dirty_worktree_untouch
     db.insert_graph_node(&node).unwrap();
     db.insert_graph_run(&run).unwrap();
 
-    assert_eq!(db.reconcile_orphaned_graphs(data_dir.path()).unwrap(), 1);
+    assert_eq!(
+        db.reconcile_orphaned_graphs(data_dir.path()).unwrap().len(),
+        1
+    );
 
     assert!(
         !git_is_clean(dir.path()),
@@ -5365,7 +5378,10 @@ fn reconcile_orphaned_graphs_marks_interrupted_for_clean_worktree_too() {
     db.insert_graph_node(&node).unwrap();
     db.insert_graph_run(&run).unwrap();
 
-    assert_eq!(db.reconcile_orphaned_graphs(data_dir.path()).unwrap(), 1);
+    assert_eq!(
+        db.reconcile_orphaned_graphs(data_dir.path()).unwrap().len(),
+        1
+    );
 
     assert!(git_is_clean(dir.path()), "still nothing to touch");
 
@@ -5423,7 +5439,10 @@ fn reconcile_orphaned_graphs_marks_interrupted_in_non_git_workdir() {
     db.insert_graph_node(&node).unwrap();
     db.insert_graph_run(&run).unwrap();
 
-    assert_eq!(db.reconcile_orphaned_graphs(data_dir.path()).unwrap(), 1);
+    assert_eq!(
+        db.reconcile_orphaned_graphs(data_dir.path()).unwrap().len(),
+        1
+    );
 
     assert_eq!(
         std::fs::read_to_string(dir.path().join("truncated.rs")).unwrap(),
@@ -5479,14 +5498,20 @@ fn reconcile_orphaned_graphs_interrupted_marking_is_idempotent_across_two_passes
     db.insert_graph_node(&node).unwrap();
     db.insert_graph_run(&run).unwrap();
 
-    assert_eq!(db.reconcile_orphaned_graphs(data_dir.path()).unwrap(), 1);
+    assert_eq!(
+        db.reconcile_orphaned_graphs(data_dir.path()).unwrap().len(),
+        1
+    );
     let spec_after_first = db.get_graph_spec(&spec.id).unwrap().unwrap();
     assert_eq!(spec_after_first.status, GraphSpecStatus::Interrupted);
 
     // Second pass: the graph is already `Paused`, so it's not even a
     // candidate — nothing should change again, and the worktree stays
     // exactly as it was after the first pass.
-    assert_eq!(db.reconcile_orphaned_graphs(data_dir.path()).unwrap(), 0);
+    assert_eq!(
+        db.reconcile_orphaned_graphs(data_dir.path()).unwrap().len(),
+        0
+    );
     let spec_after_second = db.get_graph_spec(&spec.id).unwrap().unwrap();
     assert_eq!(spec_after_second.status, GraphSpecStatus::Interrupted);
     assert_eq!(

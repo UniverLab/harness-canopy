@@ -231,6 +231,7 @@ pub(crate) async fn run_completion_hook_process(
         None,
         None,
         false,
+        None,
         |pid| {
             let _ = db.set_graph_completion_hook_run_pid(
                 hook_run_id,

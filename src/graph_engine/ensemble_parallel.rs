@@ -206,7 +206,8 @@ pub(crate) async fn settle_parallel_member_outcome(
         }
         Err(_elapsed) => {
             if let Ok(Some(run)) = db.get_active_graph_run_for_node(&node.id) {
-                terminate_run_row(db, &run, "ensemble straggler timeout");
+                let workdir = crate::graph_engine::routing::workdir_for_run(db, &run);
+                terminate_run_row(db, &run, "ensemble straggler timeout", &workdir);
             }
             (
                 NodeExecution {

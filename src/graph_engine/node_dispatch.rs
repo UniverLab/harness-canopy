@@ -71,8 +71,15 @@ impl GraphEngine {
     /// run failing elsewhere — goes through here. A no-op beyond the
     /// status/summary update if `run` never got a pid recorded (e.g. a gate
     /// node, or an agent/check node that hadn't finished spawning yet).
+    ///
+    /// CB84: the workdir is resolved from the run's graph here rather than
+    /// threaded through every caller — the session-end command needs it as
+    /// cwd, and the title lookup is scoped to it. A run with no graph (or a
+    /// graph whose workdir is blank) just means the session end is skipped,
+    /// same as a platform with no `session_end_args`.
     pub(crate) fn terminate_run(&self, run: &GraphNodeRun, reason: &str) {
-        terminate_run_row(&self.db, run, reason);
+        let workdir = workdir_for_run(&self.db, run);
+        terminate_run_row(&self.db, run, reason, &workdir);
     }
 
     pub(crate) fn is_paused(&self, graph_id: &str) -> Result<bool> {

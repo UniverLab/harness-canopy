@@ -51,7 +51,10 @@ impl Database {
     /// is used for the ownership gate below, which is the second line of
     /// defence against exactly that mistake, not a substitute for keeping
     /// the caller list to one entry.
-    pub fn reconcile_orphaned_graphs(&self, data_dir: &std::path::Path) -> Result<usize> {
+    pub fn reconcile_orphaned_graphs(
+        &self,
+        data_dir: &std::path::Path,
+    ) -> Result<Vec<(Graph, GraphNodeRun)>> {
         // Ownership gate: if the on-disk pid file names a *live* process
         // that isn't us, some other process owns the daemon lifecycle right
         // now and this call has no business touching graph state — signal
@@ -62,7 +65,7 @@ impl Database {
         if crate::daemon::process::read_pid(data_dir).is_some_and(|pid| {
             pid != std::process::id() && crate::daemon::process::is_process_running(pid)
         }) {
-            return Ok(0);
+            return Ok(Vec::new());
         }
 
         let conn = self
@@ -89,11 +92,12 @@ impl Database {
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
 
+        let mut reconciled: Vec<(Graph, GraphNodeRun)> = Vec::new();
         for lp in &orphaned {
             let dangling_runs: Vec<GraphNodeRun> = {
                 let mut stmt = tx.prepare(
                     "SELECT id, graph_id, spec_id, node_id, status, input, output, started_at, completed_at, iteration, pid, boot_id, session_id, executed_platform, executed_model
-                     FROM graph_runs WHERE graph_id = ?1 AND status = 'running'",
+                      FROM graph_runs WHERE graph_id = ?1 AND status = 'running'",
                 )?;
                 let rows = stmt.query_map(params![lp.id], map_graph_run_row)?;
                 rows.collect::<rusqlite::Result<Vec<_>>>()?
@@ -106,12 +110,17 @@ impl Database {
             }
             for run in &dangling_runs {
                 Self::reconcile_orphan_run(&tx, lp, run)?;
+                reconciled.push((lp.clone(), run.clone()));
             }
             // CB82: graceful-shutdown rows were finalized Fail+`interrupted`
             // by the engine (or the shutdown sweep), so the `running` query
             // above misses them while their spec is still `Running` — repair
             // those specs so retry resumes at the interrupted node itself.
-            Self::reconcile_interrupted_shutdown_runs(&tx, lp)?;
+            Self::reconcile_interrupted_shutdown_runs(&tx, lp)?
+                .into_iter()
+                .for_each(|run| {
+                    reconciled.push((lp.clone(), run));
+                });
             // C1: flag this pause as reconciliation's own, distinct from an
             // operator's `graph_pause`/`graph_report_blocker` (both go through
             // `update_graph_status`, which always clears this flag) — see
@@ -123,7 +132,7 @@ impl Database {
         }
 
         tx.commit()?;
-        Ok(orphaned.len())
+        Ok(reconciled)
     }
 
     /// Attempt a best-effort kill of a same-boot orphan's process group,
@@ -236,11 +245,12 @@ impl Database {
     /// when the graph ran a queue) still `Running` whose latest run carries
     /// the `interrupted` marker. Without this the spec would stay `Running`
     /// instead of `Interrupted`, and `retry_current_node` could not resume
-    /// at the interrupted node itself.
+    /// at the interrupted node itself. Returns the interrupted runs so the
+    /// caller can count them in the `reconciled` vector.
     pub(super) fn reconcile_interrupted_shutdown_runs(
         tx: &rusqlite::Transaction<'_>,
         lp: &Graph,
-    ) -> Result<()> {
+    ) -> Result<Vec<GraphNodeRun>> {
         let mut spec_ids: Vec<String> = {
             let mut stmt = tx
                 .prepare("SELECT id FROM graph_specs WHERE graph_id = ?1 AND status = 'running'")?;
@@ -260,8 +270,19 @@ impl Database {
                 }
             }
         }
+        let mut interrupted_runs: Vec<GraphNodeRun> = Vec::new();
         for spec_id in &spec_ids {
             if Self::spec_latest_run_was_interrupted(tx, spec_id)? {
+                let run = tx
+                    .query_row(
+                        "SELECT id, graph_id, spec_id, node_id, status, input, output, started_at, completed_at, iteration, pid, boot_id, session_id, executed_platform, executed_model FROM graph_runs WHERE spec_id = ?1 ORDER BY started_at DESC LIMIT 1",
+                        params![spec_id],
+                        map_graph_run_row,
+                    )
+                    .optional()?;
+                if let Some(run) = run {
+                    interrupted_runs.push(run);
+                }
                 tracing::warn!(
                     "Reconciling orphaned graph '{}': spec '{}' ended interrupted by daemon shutdown; marking the spec interrupted.",
                     lp.id,
@@ -270,7 +291,7 @@ impl Database {
                 Self::mark_spec_interrupted(tx, spec_id)?;
             }
         }
-        Ok(())
+        Ok(interrupted_runs)
     }
 
     /// Whether the latest run for `spec_id` carries the CB82 `interrupted`

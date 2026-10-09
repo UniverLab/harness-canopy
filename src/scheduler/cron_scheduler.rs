@@ -1165,7 +1165,10 @@ mod tests {
 
         // The next boot's reconciliation pass — this is what must leave the
         // graph resumable, not the test hand-setting `paused_by_reconciliation`.
-        assert_eq!(db.reconcile_orphaned_graphs(data_dir.path()).unwrap(), 1);
+        assert_eq!(
+            db.reconcile_orphaned_graphs(data_dir.path()).unwrap().len(),
+            1
+        );
         let lp_after_reconcile = db.get_graph(&graph_id).unwrap().unwrap();
         assert_eq!(lp_after_reconcile.status, GraphStatus::Paused);
         assert!(

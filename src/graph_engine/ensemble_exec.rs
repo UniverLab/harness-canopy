@@ -279,7 +279,8 @@ impl GraphEngine {
             }
             terminated_any = true;
             if let Ok(Some(run)) = self.db.get_active_graph_run_for_node(&member.node_id) {
-                terminate_run_row(&self.db, &run, "quorum met");
+                let workdir = crate::graph_engine::routing::workdir_for_run(&self.db, &run);
+                terminate_run_row(&self.db, &run, "quorum met", &workdir);
             }
             let node_name = ctx
                 .member_nodes

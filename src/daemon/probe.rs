@@ -386,7 +386,7 @@ fn build_probe_command(
     workdir: Option<&str>,
 ) -> Result<(tokio::process::Command, String), String> {
     let mut command = strategy
-        .build_command(prompt, model, workdir)
+        .build_command(prompt, model, workdir, None)
         .map_err(|e| e.to_string())?;
     let argv = command_argv(&command);
     command.stdout(std::process::Stdio::piped());

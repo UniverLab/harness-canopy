@@ -139,11 +139,23 @@ fn write_startup_state(db: &Database, port: u16) -> Result<()> {
 /// Startup reconciliation 1/2: graphs a previous daemon left `Running`.
 fn reconcile_orphaned_graphs_on_startup(db: &Database, data_dir: &std::path::Path) {
     match db.reconcile_orphaned_graphs(data_dir) {
-        Ok(count) if count > 0 => {
+        Ok(reconciled) if !reconciled.is_empty() => {
             tracing::warn!(
                 "Reconciled {} graph(s) left running by a previous daemon",
-                count
+                reconciled.len()
             );
+            // CB84: best-effort end the harness sessions behind every
+            // reconciled run — the previous daemon's harness service may
+            // still be ticking. Detached so startup isn't blocked.
+            for (lp, run) in reconciled {
+                let platform = run.executed_platform.clone().unwrap_or_default();
+                let workdir = lp.workdir.clone();
+                if !platform.is_empty() {
+                    tokio::spawn(async move {
+                        crate::graph_engine::end_harness_session(&platform, &run, &workdir).await;
+                    });
+                }
+            }
         }
         Ok(_) => {}
         Err(e) => tracing::error!("Failed to reconcile orphaned graphs: {}", e),
@@ -409,6 +421,29 @@ async fn terminate_all_running_node_processes_at_shutdown(db: &Database) {
                 let _ = crate::daemon::process::send_signal_to_group(pid as i32, libc::SIGKILL);
             }
         }
+    }
+
+    // CB84: after the SIGKILL pass, best-effort end every run's harness
+    // session concurrently — the opencode v2 service-side session keeps
+    // ticking after the client process group is gone, so this is the only
+    // way to stop it. One detached task per run so they run in parallel (and
+    // in parallel with the DB finalization below), each with its own 30s
+    // timeout: total wall time stays inside the existing KILL_GRACE budget
+    // plus at most 30s.
+    for run in &runs {
+        let Some(platform) = run.executed_platform.clone() else {
+            continue;
+        };
+        let workdir = db
+            .get_graph(&run.graph_id)
+            .ok()
+            .flatten()
+            .map(|g| g.workdir)
+            .unwrap_or_default();
+        let run = run.clone();
+        tokio::spawn(async move {
+            crate::graph_engine::end_harness_session(&platform, &run, &workdir).await;
+        });
     }
 
     for run in &runs {

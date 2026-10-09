@@ -74,6 +74,25 @@ pub struct CliConfig {
     /// [`session_list_format_args`]: Self::session_list_format_args
     #[serde(default)]
     pub session_id_pattern: Option<String>,
+    /// Flag that sets the session's human-readable title when spawning a new
+    /// headless session, e.g. `"--title"`. When present, the headless command
+    /// gets `<flag> canopy-<run_id>` so the session can be found by title
+    /// later (for platforms that don't record the session id at spawn).
+    /// Optional — a platform without it keeps today's behaviour.
+    #[serde(default)]
+    pub session_title_flag: Option<String>,
+    /// Subcommand/args that list this platform's sessions as a JSON array of
+    /// objects with `id` and `title`, e.g. `["session", "list", "--format",
+    /// `"json"]`. Used to find a session by title when the id was not
+    /// captured at spawn. Optional.
+    #[serde(default)]
+    pub session_list_args: Option<Vec<String>>,
+    /// Subcommand/args that interrupt/end a session by id, e.g.
+    /// `["api", "session.interrupt", "--param", "sessionID={session_id}"]`.
+    /// `{session_id}` is replaced with the session id. Optional — a platform
+    /// without it keeps today's behaviour.
+    #[serde(default)]
+    pub session_end_args: Option<Vec<String>>,
     /// Subcommand/args that make this CLI print its own available model ids,
     /// one passable id per line (e.g. opencode's `models` → `opencode/big-pickle`,
     /// `opencode-go/glm-5.2`). When set, `agent_models` uses this enumeration as
@@ -501,6 +520,9 @@ mod tests {
             session_id_set_flag: None,
             session_list_format_args: None,
             session_id_pattern: None,
+            session_title_flag: None,
+            session_list_args: None,
+            session_end_args: None,
             models_list_cmd: None,
             identity_check: None,
             accent_color: None,
@@ -710,6 +732,53 @@ mod tests {
     #[test]
     fn default_paste_submit_presses_is_one() {
         assert_eq!(default_paste_submit_presses(), 1);
+    }
+
+    #[test]
+    fn session_end_fields_serde_roundtrip() {
+        let mut config = sample_cli_config();
+        config.session_title_flag = Some("--title".to_string());
+        config.session_list_args = Some(vec![
+            "session".to_string(),
+            "list".to_string(),
+            "--format".to_string(),
+            "json".to_string(),
+        ]);
+        config.session_end_args = Some(vec![
+            "api".to_string(),
+            "session.interrupt".to_string(),
+            "--param".to_string(),
+            "sessionID={session_id}".to_string(),
+        ]);
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: CliConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.session_title_flag.as_deref(), Some("--title"));
+        assert_eq!(
+            deserialized.session_list_args,
+            Some(vec![
+                "session".to_string(),
+                "list".to_string(),
+                "--format".to_string(),
+                "json".to_string(),
+            ])
+        );
+        assert_eq!(
+            deserialized.session_end_args,
+            Some(vec![
+                "api".to_string(),
+                "session.interrupt".to_string(),
+                "--param".to_string(),
+                "sessionID={session_id}".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn session_end_fields_absent_from_json_default_to_none() {
+        let config: CliConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(config.session_title_flag, None);
+        assert_eq!(config.session_list_args, None);
+        assert_eq!(config.session_end_args, None);
     }
 
     #[test]
