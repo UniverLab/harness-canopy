@@ -100,6 +100,17 @@ platform: `infra_retry_limit` (default 2), `infra_crash_max_seconds`
 (default 60) and `infra_backoff_seconds` (default 30). More specific
 ensemble/member/node overrides win; see docs/graphs.md.
 
+An entry may also declare a binary identity check: `identity_args` (an
+argv array, e.g. `["--version"]`) plus `identity_pattern` (a regex the
+combined stdout+stderr must match). When both are set, every surface that
+resolves the binary — `agent_probe`, node dispatch, `agent_add` /
+`agent_watch` validation and `canopy doctor` — runs
+`<binary> <identity_args>` once per path+mtime (5 s timeout) and reports
+the platform as **not installed**
+(`<platform>: '<path>' is not <name> (identity check failed: …)`) on a
+mismatch or timeout, so a wrong program answering to the name (e.g. the
+Debian `blackbox` window manager) is never invoked as if it were the CLI.
+
 ## Health check
 
 ```bash
@@ -109,5 +120,8 @@ canopy doctor
 Checks the data directory, database, config, harnesses, RAG status, file
 watchers, daemon process, registry connectivity and auto-update health.
 For platforms, it confirms each configured binary is present and
-executable on `PATH` — it does **not** check that you're logged in. Check
-that per platform, e.g. `claude auth status` or `codex login status`.
+executable on `PATH`, and — when the entry declares `identity_args` /
+`identity_pattern` — that the binary really is that program; a wrong
+program is reported as not installed. It does **not** check that you're
+logged in. Check that per platform, e.g. `claude auth status` or
+`codex login status`.
