@@ -619,7 +619,7 @@ pub struct QueueCreateParams {
 pub struct QueueAddSpecParams {
     /// Existing queue ID.
     pub queue_id: String,
-    /// Existing spec ID to append to the end of the queue.
+    /// Existing spec ID to add to the queue.
     pub spec_id: String,
     /// Optional context group. Specs sharing a group in the same queue reuse
     /// one warm harness session: a grouped spec resumes the session captured

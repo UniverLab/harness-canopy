@@ -33,7 +33,7 @@ impl TaskTriggerHandler {
 
     #[tool(
         name = "queue_add_spec",
-        description = "Append an existing spec to the end of a queue."
+        description = "Add an existing spec to a queue; a grouped add lands right after the group's last pending member."
     )]
     pub(crate) async fn queue_add_spec(
         &self,
