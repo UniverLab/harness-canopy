@@ -340,6 +340,15 @@ auto-resumes (useful for quota-limited graphs that fail and need to
 wait before retrying). Call it again with `at` omitted to cancel a
 pending schedule.
 
+If the daemon stops while a node is running — a graceful shutdown or a
+crash — the killed run is finalized as interrupted and routes no edge
+(in particular, never its fail edge). On the next start the graph is
+reconciled to `Paused` with the spec `Interrupted`, and
+`graph_continue` with `retry` re-runs the interrupted node itself with
+the same input it had (the same command for a check node, the same
+`previous_feedback` for an ensemble member) — not whichever node an
+edge would have led to.
+
 ## Concurrency
 
 Running many graphs at once, against different working directories, is
