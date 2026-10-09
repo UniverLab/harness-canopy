@@ -625,6 +625,7 @@ mod tests {
         "queue_list",
         "queue_remove_spec",
         "queue_reorder",
+        "queue_set_group",
         "rag_search",
         "remove_seed",
         "scheduled_send_cancel",
@@ -729,6 +730,7 @@ mod tests {
                 "queue_list|1f3e846f9b91428f0a705e8e2232e40ed93bd57e45eeb2960fee25b912bd06dc|6e2c5062a027279e85f76b630dac6eb45935821cc7b9fe21d0b5e85d5fa1a4ba",
                 "queue_remove_spec|d607661fcaed39c344ae545f5a1f2246ed530af3ce9cc13615e2a62b933aafa8|20e00504d371ad091fc75d443e57fe7fe7479b6304cae52402e207af924ce134",
                 "queue_reorder|c2553e02e72d85646d644b7aa94c6096ffcea3ffb819194875bc9e7d421ffb26|5d1dfef5e6016db1e4c9adddf9df2d7b22b4816fa0d3b5a38a08de10de4802b0",
+                "queue_set_group|3eb98961df3f175e2b84f14beecc1629cf21c635e2bef749fe79919470056082|fceee53aad275541592e779fa462c4257d72f85c1649abcfa64aeebc84cdc146",
                 "rag_search|8a1f6386074319d1c99700410f884ba9ed3a3f0f91276a50766cf677bf1b26cd|84c021f51349dfecbea78f5ebe89887d0f3e1e764ac91540bc20bc7e2d13ba45",
                 "remove_seed|b24cd25a52f13d1714cd1a02c3156317166b33f19df049dc99326685750fc374|44f5accf3bb686511aa4445599a499601592df037d84886e46a92dccb6924c69",
                 "scheduled_send_cancel|e97ad927d1c1d8778e0e7862e7ac4df954098bd847329a5cac398d19177d47e8|31cd20154b502bce97777d5d0b780d65ae849538b776016a121ba608bb227b9c",
@@ -2235,6 +2237,103 @@ mod tests {
 
         let error = validate_queue_reorder(&current, &order).unwrap_err();
         assert!(error.contains("no spec 'ghost'"), "{error}");
+    }
+
+    fn queue_raw_text(result: &rmcp::model::CallToolResult) -> String {
+        result.content[0].as_text().unwrap().text.clone()
+    }
+
+    fn queue_is_err(result: &rmcp::model::CallToolResult) -> bool {
+        result.is_error == Some(true)
+    }
+
+    /// CM44 FR1/FR2/FR6: setting a member's group reorders the queue and
+    /// returns the resulting order with groups.
+    #[tokio::test]
+    async fn queue_set_group_tool_returns_reordered_queue() {
+        let (_dir, db, handler) = queue_test_handler();
+        for id in ["a", "b", "c"] {
+            db.insert_graph_spec(&standalone_spec(id)).unwrap();
+        }
+        insert_queue(&db, "queue-1");
+        db.append_queue_member("queue-1", "a", Some("g1")).unwrap();
+        db.append_queue_member("queue-1", "b", None).unwrap();
+        db.append_queue_member("queue-1", "c", Some("g1")).unwrap();
+
+        let result = handler
+            .do_queue_set_group("queue-1", "b", Some("g1"))
+            .await
+            .unwrap();
+
+        assert!(!queue_is_err(&result), "{}", result_text(&result));
+        let value: serde_json::Value = serde_json::from_str(&queue_raw_text(&result)).unwrap();
+        let members = value["queue"]["members"].as_array().unwrap();
+        let ids: Vec<&str> = members.iter().map(|m| m["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, vec!["a", "c", "b"]);
+        let b = &members[2];
+        assert_eq!(b["group"], serde_json::json!("g1"));
+        assert_eq!(b["queue_position"], serde_json::json!(3));
+    }
+
+    /// CM44 FR3: a reorder that would split a group's pending members is
+    /// refused, names the group and the offending positions, and changes
+    /// nothing.
+    #[tokio::test]
+    async fn queue_reorder_refuses_a_split_group() {
+        let (_dir, db, handler) = queue_test_handler();
+        for id in ["a", "b", "c"] {
+            db.insert_graph_spec(&standalone_spec(id)).unwrap();
+        }
+        insert_queue(&db, "queue-1");
+        db.append_queue_member("queue-1", "a", Some("g")).unwrap();
+        db.append_queue_member("queue-1", "b", Some("g")).unwrap();
+        db.append_queue_member("queue-1", "c", None).unwrap();
+
+        let result = handler
+            .do_queue_reorder(
+                "queue-1",
+                &["a".to_string(), "c".to_string(), "b".to_string()],
+            )
+            .await
+            .unwrap();
+
+        assert!(queue_is_err(&result), "{}", result_text(&result));
+        let msg = queue_raw_text(&result);
+        assert!(msg.contains("group 'g'"), "{msg}");
+        assert!(msg.contains("positions 1, 3"), "{msg}");
+        assert!(msg.contains("Nothing was changed"), "{msg}");
+        assert_eq!(
+            db.list_queue_member_spec_ids("queue-1").unwrap(),
+            vec!["a", "b", "c"]
+        );
+    }
+
+    /// CM44 FR2/FR6: adding a spec to an existing group places it right after
+    /// the group's last pending member and returns the resulting order.
+    #[tokio::test]
+    async fn queue_add_spec_tool_returns_order_with_groups() {
+        let (_dir, db, handler) = queue_test_handler();
+        for id in ["a", "b", "c", "x"] {
+            db.insert_graph_spec(&standalone_spec(id)).unwrap();
+        }
+        insert_queue(&db, "queue-1");
+        db.append_queue_member("queue-1", "a", Some("g")).unwrap();
+        db.append_queue_member("queue-1", "b", Some("g")).unwrap();
+        db.append_queue_member("queue-1", "c", None).unwrap();
+
+        let result = handler
+            .do_queue_add_spec("queue-1", "x", Some("g"))
+            .await
+            .unwrap();
+
+        assert!(!queue_is_err(&result), "{}", result_text(&result));
+        let value: serde_json::Value = serde_json::from_str(&queue_raw_text(&result)).unwrap();
+        let members = value["queue"]["members"].as_array().unwrap();
+        let ids: Vec<&str> = members.iter().map(|m| m["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, vec!["a", "b", "x", "c"]);
+        let x = &members[2];
+        assert_eq!(x["group"], serde_json::json!("g"));
+        assert_eq!(x["queue_position"], serde_json::json!(3));
     }
 
     fn running_spec(id: &str) -> GraphSpec {

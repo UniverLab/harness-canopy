@@ -2,7 +2,7 @@
 //! Moved verbatim; tool names, schemas, and behaviour unchanged.
 
 use crate::daemon::handler::TaskTriggerHandler;
-use crate::daemon::handler_formatting::{build_id_result, internal_error};
+use crate::daemon::handler_formatting::{build_id_result, build_json_result, internal_error};
 use crate::daemon::handler_specs::spec_summary_json;
 use crate::daemon::handler_validate::{
     resolve_prefix_or_error, validate_non_empty, validate_spec_exists, validate_spec_unbindable,
@@ -12,8 +12,7 @@ use crate::daemon::params::*;
 use crate::daemon::params_extract::Parameters;
 use crate::db::Database;
 use crate::domain::graphs::GraphSpecStatus;
-use crate::domain::queues::Queue;
-use crate::domain::queues::QueueDetails;
+use crate::domain::queues::{Queue, QueueDetails, QueueMember};
 use rmcp::model::{CallToolResult, Content};
 use rmcp::tool;
 use rmcp::tool_router;
@@ -151,6 +150,36 @@ impl TaskTriggerHandler {
         }
         self.do_queue_reorder(&queue_id, &resolved_spec_ids).await
     }
+
+    #[tool(
+        name = "queue_set_group",
+        description = "Set or clear the context group of an existing queue member; each group's pending members stay contiguous."
+    )]
+    pub(crate) async fn queue_set_group(
+        &self,
+        Parameters(params): Parameters<QueueSetGroupParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let queue_id = match resolve_prefix_or_error(
+            &self.db,
+            params.queue_id.trim(),
+            Database::resolve_queue_id_by_prefix,
+            "queue",
+        ) {
+            Ok(id) => id,
+            Err(e) => return Ok(e),
+        };
+        let spec_id = match resolve_prefix_or_error(
+            &self.db,
+            params.spec_id.trim(),
+            Database::resolve_spec_id_by_prefix,
+            "spec",
+        ) {
+            Ok(id) => id,
+            Err(e) => return Ok(e),
+        };
+        self.do_queue_set_group(&queue_id, &spec_id, params.group.as_deref())
+            .await
+    }
 }
 
 impl TaskTriggerHandler {
@@ -186,9 +215,10 @@ impl TaskTriggerHandler {
             return Ok(error_result(&e));
         }
         let spec_id = spec_id.trim();
-        if let Err(e) = validate_spec_exists(&self.db, spec_id) {
-            return Ok(error_result(&e));
-        }
+        let spec = match validate_spec_exists(&self.db, spec_id) {
+            Ok(spec) => spec,
+            Err(e) => return Ok(error_result(&e)),
+        };
         let already_member = self
             .db
             .queue_has_member(queue_id, spec_id)
@@ -201,17 +231,44 @@ impl TaskTriggerHandler {
 
         // An all-whitespace or empty `group` is treated as ungrouped.
         let group = group.map(str::trim).filter(|g| !g.is_empty());
+        let new_member_is_pending = spec.status == GraphSpecStatus::Pending;
 
         self.db
-            .append_queue_member(queue_id, spec_id, group)
+            .add_queue_member_grouped(queue_id, spec_id, group, new_member_is_pending)
             .map_err(internal_error)?;
 
-        let group_note = group
-            .map(|g| format!(" in group '{g}'"))
-            .unwrap_or_default();
-        Ok(success_result(&format!(
-            "Spec '{spec_id}' added to queue '{queue_id}'{group_note}."
-        )))
+        queue_order_result(&self.db, queue_id)
+    }
+
+    pub(crate) async fn do_queue_set_group(
+        &self,
+        queue_id: &str,
+        spec_id: &str,
+        group: Option<&str>,
+    ) -> Result<CallToolResult, McpError> {
+        let queue_id = queue_id.trim();
+        if let Err(e) = validate_queue_exists(&self.db, queue_id) {
+            return Ok(error_result(&e));
+        }
+        let spec_id = spec_id.trim();
+        let is_member = self
+            .db
+            .queue_has_member(queue_id, spec_id)
+            .map_err(internal_error)?;
+        if !is_member {
+            return Ok(error_result(&format!(
+                "Spec '{spec_id}' is not a member of queue '{queue_id}'."
+            )));
+        }
+
+        // An all-whitespace or empty `group` is treated as clearing it.
+        let group = group.map(str::trim).filter(|g| !g.is_empty());
+
+        self.db
+            .set_queue_member_group(queue_id, spec_id, group)
+            .map_err(internal_error)?;
+
+        queue_order_result(&self.db, queue_id)
     }
 
     pub(crate) async fn do_queue_list(
@@ -348,12 +405,15 @@ impl TaskTriggerHandler {
         if let Err(e) = validate_queue_reorder_locking(&self.db, &current, spec_ids) {
             return Ok(error_result(&e));
         }
+        if let Err(e) = validate_reorder_groups_intact(&self.db, queue_id, spec_ids) {
+            return Ok(error_result(&e));
+        }
 
         self.db
             .reorder_queue_members(queue_id, spec_ids)
             .map_err(internal_error)?;
 
-        Ok(success_result(&format!("Queue '{queue_id}' reordered.")))
+        queue_order_result(&self.db, queue_id)
     }
 }
 
@@ -479,6 +539,60 @@ pub(crate) fn validate_queue_reorder_locking(
         }
     }
     Ok(())
+}
+
+/// Refuse a reorder that would split a context group's pending members. Built
+/// from the CURRENT membership's groups + statuses, applied to the requested
+/// order, so it works before anything is written. Runs after
+/// [`validate_queue_reorder`] confirmed `spec_ids` is a total permutation.
+pub(crate) fn validate_reorder_groups_intact(
+    db: &Database,
+    queue_id: &str,
+    spec_ids: &[String],
+) -> Result<(), String> {
+    let members = db
+        .queue_members_in_order(queue_id)
+        .map_err(|e| e.to_string())?;
+    let by_id: std::collections::HashMap<&str, &QueueMember> = members
+        .iter()
+        .map(|member| (member.spec_id.as_str(), member))
+        .collect();
+    let proposed: Vec<QueueMember> = spec_ids
+        .iter()
+        .map(|spec_id| {
+            let current = by_id.get(spec_id.as_str());
+            QueueMember {
+                spec_id: spec_id.clone(),
+                group: current.and_then(|member| member.group.clone()),
+                locked: current.is_some_and(|member| member.locked),
+            }
+        })
+        .collect();
+    let Some(split) = crate::domain::queues::split_group(&proposed) else {
+        return Ok(());
+    };
+    let positions = split
+        .positions
+        .iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(format!(
+        "Reorder would split group '{}': its pending members would sit at positions {}. Nothing was changed.",
+        split.group, positions
+    ))
+}
+
+/// The queue's resulting order, with groups, as the tool result of a write
+/// that moved a member (CM44 FR6).
+fn queue_order_result(db: &Database, queue_id: &str) -> Result<CallToolResult, McpError> {
+    let details = db
+        .get_queue_details(queue_id)
+        .map_err(internal_error)?
+        .ok_or_else(|| internal_error(format!("Queue '{queue_id}' not found.")))?;
+    Ok(build_json_result(&serde_json::json!({
+        "queue": queue_details_json(&details, false),
+    })))
 }
 
 pub(crate) fn queue_details_json(

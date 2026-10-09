@@ -665,6 +665,18 @@ pub struct QueueReorderParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct QueueSetGroupParams {
+    /// Existing queue ID.
+    pub queue_id: String,
+    /// Existing queue member's spec ID.
+    pub spec_id: String,
+    /// Context group to assign. Omit or pass `null` to clear (ungroup) the
+    /// member.
+    #[serde(default)]
+    pub group: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GraphGetParams {
     /// Graph ID.
     pub graph_id: String,

@@ -49,6 +49,7 @@ pub(crate) mod probe;
 pub(crate) mod process;
 pub(crate) mod project_cli;
 pub(crate) mod prompts_cli;
+pub(crate) mod queue_cli;
 pub(crate) mod rag_cli;
 
 pub(crate) mod sandbox_cli;

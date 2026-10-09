@@ -148,7 +148,7 @@ pipeline, all 83 MCP tools, and the complete CLI reference.
 
 - **Ordered Specs** — Graphs contain sequenced `Spec`s, each with `Node`s connected by `Edge`s with routing conditions (`pass`/`fail`/`always`).
 - **Standalone Spec Backlog** — Specs exist independently from graphs; tag them to a workdir for filtering. Managed via `spec_create`, `spec_list`, `spec_update`, `spec_delete`.
-- **Spec Queues** — Ordered queues of existing specs that a graph drains one by one. Append and reorder while a graph is running via `queue_create`, `queue_add_spec`, `queue_list`, `queue_remove_spec`, `queue_reorder`.
+- **Spec Queues** — Ordered queues of existing specs that a graph drains one by one. Append and reorder while a graph is running via `queue_create`, `queue_add_spec`, `queue_list`, `queue_remove_spec`, `queue_reorder`, `queue_set_group`.
 - **Node Kinds** — `agent` nodes invoke CLI tools with prompt templates; `check` nodes execute shell commands; `gate` nodes validate previous output (e.g., `output_contains`); `router` nodes classify and route by token matching with fallback; `quorum` is the engine-managed node that closes an ensemble.
 - **Ensembles** — `graph_add_ensemble` creates a parallel group of 2-8 agent-node members sharing one prompt (or per-member prompt overrides for specialist panels), plus a wait-all quorum that consolidates their outputs and routes onward, in a single MCP call. `graph_update_ensemble` edits the shared prompt, member list, quorum/exit config, and entry wiring (including multi-source entry and chaining a quorum into another ensemble) as one unit; `graph_delete_ensemble` removes the whole unit. See [docs/graphs.md](docs/graphs.md#ensembles).
 - **Node Blueprints** — Reusable `{name, kind, config}` templates referenced by name in `graph_add_node`. Five builtins seeded at startup; custom blueprints via `blueprint_create`/`blueprint_delete`/`blueprint_list`.
@@ -205,7 +205,7 @@ pipeline, all 83 MCP tools, and the complete CLI reference.
 | **Seed Identity** (5) | `get_identity`, `evolve_identity`, `create_seed`, `list_seeds`, `remove_seed` |
 | **Graph Engine** (33) | `graph_create`, `graph_update`, `graph_add_spec`, `graph_update_spec`, `graph_add_node`, `graph_update_node`, `graph_add_edge`, `graph_update_edge`, `graph_delete_edge`, `graph_delete_node`, `graph_add_ensemble`, `graph_update_ensemble`, `graph_delete_ensemble`, `graph_get`, `graph_list`, `graph_run`, `graph_reset`, `graph_schedule_autorun`, `graph_pause`, `graph_continue`, `graph_complete_node`, `graph_report_blocker`, `graph_export`, `graph_import`, `graph_archive`, `graph_restore`, `graph_node_runs_list`, `graph_node_run_get`, `graph_copy_node`, `graph_copy_ensemble`, `graph_audit_node_configs`, `graph_schedule_continue`, `graph_preflight` |
 | **Spec Backlog** (5) | `spec_create`, `spec_list`, `spec_update`, `spec_delete`, `spec_set_status` |
-| **Spec Queues** (5) | `queue_create`, `queue_add_spec`, `queue_list`, `queue_remove_spec`, `queue_reorder` |
+| **Spec Queues** (6) | `queue_create`, `queue_add_spec`, `queue_list`, `queue_remove_spec`, `queue_reorder`, `queue_set_group` |
 | **Node Blueprints** (3) | `blueprint_list`, `blueprint_create`, `blueprint_delete` |
 | **Project** (4) | `project_search`, `project_update`, `project_remap`, `project_register` |
 | **RAG** (1) | `rag_search` |

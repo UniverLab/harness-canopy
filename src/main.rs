@@ -39,6 +39,7 @@ use daemon::graph_cli::{handle_graph_action, GraphAction};
 use daemon::models_cli::{handle_models_action, ModelsAction};
 use daemon::project_cli::{handle_project_action, ProjectAction};
 use daemon::prompts_cli::{handle_prompts_action, PromptsAction};
+use daemon::queue_cli::{handle_queue_action, QueueAction};
 use daemon::rag_cli::{handle_rag_action, RagAction};
 use daemon::sandbox_cli::{handle_sandbox_action, SandboxAction};
 use daemon::server::{run_http_server, run_stdio_server};
@@ -132,6 +133,11 @@ enum Commands {
     Spec {
         #[command(subcommand)]
         action: SpecAction,
+    },
+    /// Manage spec queues.
+    Queue {
+        #[command(subcommand)]
+        action: QueueAction,
     },
     /// Inspect or refresh the `agent_models` catalog cache.
     Models {
@@ -256,6 +262,7 @@ async fn main() -> Result<()> {
         Some(Commands::Graph { action }) => handle_graph_action(action, cli.port).await,
         Some(Commands::Agent { action }) => handle_agent_action(action).await,
         Some(Commands::Spec { action }) => handle_spec_action(action, cli.port).await,
+        Some(Commands::Queue { action }) => handle_queue_action(action, cli.port).await,
         Some(Commands::Models { action }) => handle_models_action(action).await,
         Some(Commands::Project { action }) => handle_project_action(action).await,
         Some(Commands::Clean {

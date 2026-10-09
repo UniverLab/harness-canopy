@@ -117,6 +117,13 @@ Read-only inspection of registered agents, served from the local database
 | `canopy spec reopen <spec-id> --reason <text>` | Reopen a completed/skipped spec back to pending |
 | `canopy spec convert` | Migrate legacy heading-format spec bodies to the tagged `<spec>` format (skips tagged and running specs; prints a report) |
 
+## Spec queues
+
+| Command | Description |
+|---|---|
+| `canopy queue group <queue> <spec> <group>` | Set the context group of an existing queue member; a spec joining a group with pending members moves next to them |
+| `canopy queue group <queue> <spec> --clear` | Clear the member's group (it stays in place unless that splits its old group) |
+
 ## RAG
 
 | Command | Description |

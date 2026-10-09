@@ -175,15 +175,16 @@ tags — `<objective>`, `<functional_requirements>`,
 are rejected naming the offending tag; legacy heading-format bodies remain
 readable until `spec_convert` migrates them.
 
-## Spec queues (5)
+## Spec queues (6)
 
 | Tool | Description |
 |---|---|
 | `queue_create` | Create an ordered queue of specs |
-| `queue_add_spec` | Append a spec to the end of a queue |
+| `queue_add_spec` | Append a spec to a queue — a grouped add lands after the group's last pending member |
 | `queue_list` | List a queue's members, or all queues |
 | `queue_remove_spec` | Remove a spec from a queue |
 | `queue_reorder` | Full replacement of a queue's order |
+| `queue_set_group` | Set or clear a member's context group |
 
 ## Node blueprints (3)
 
