@@ -410,8 +410,11 @@ pub(crate) fn resolve_reported_run(
     Ok(Ok(run))
 }
 
-/// Find and skip `graph_id`'s currently `running` spec — its own bound spec,
-/// or, for a queue-driven run, the queue member currently in flight. A queue
+/// Find and skip `graph_id`'s current spec — its own bound spec, or, for a
+/// queue-driven run, the queue member currently in flight. "Current" means
+/// resumable ([`GraphSpecStatus::is_resumable`]: `running`, or `interrupted`
+/// after a no-verdict block), so `skip_next_spec` applies to the same paused
+/// graphs `retry_current_node` does. A queue
 /// member's `graph_id` column stays `None` (queue membership never binds it),
 /// so `list_graph_specs(graph_id)` alone can't see it (B18): the graph's
 /// persisted `active_run_queue_id` is what names the queue to look in instead.
@@ -420,7 +423,7 @@ pub(crate) fn handle_skip_next_spec(db: &Database, graph_id: &str) -> Result<(),
         .list_graph_specs(graph_id)
         .map_err(internal_error)?
         .into_iter()
-        .find(|spec| spec.status == GraphSpecStatus::Running);
+        .find(|spec| spec.status.is_resumable());
 
     let current_spec = match bound_running {
         Some(spec) => spec,
@@ -496,8 +499,10 @@ pub(crate) fn handle_retry_current_node(db: &Database, graph_id: &str) -> Result
     })
 }
 
-/// The `running` member of `graph_id`'s currently active queue run, if any —
-/// `None` if the graph isn't drawing from a queue, or no member is `running`.
+/// The current member of `graph_id`'s active queue run — the first resumable
+/// one (`running`, or `interrupted` after a no-verdict block; see
+/// [`GraphSpecStatus::is_resumable`]) — if any. `None` if the graph isn't
+/// drawing from a queue, or no member is resumable.
 pub(crate) fn queue_running_spec(
     db: &Database,
     graph_id: &str,
@@ -514,7 +519,7 @@ pub(crate) fn queue_running_spec(
         .map_err(internal_error)?
     {
         if let Some(spec) = db.get_graph_spec(&spec_id).map_err(internal_error)? {
-            if spec.status == GraphSpecStatus::Running {
+            if spec.status.is_resumable() {
                 return Ok(Some(spec));
             }
         }

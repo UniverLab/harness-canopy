@@ -224,15 +224,19 @@ pub(crate) enum SpecExecutionOutcome {
     /// terminated it (a newer attempt, or the dispatch that won the graph
     /// claim after a reset) is what now drives the graph.
     Superseded,
-    /// C19: this spec has now failed with a genuine verdict often enough,
-    /// across separate graph executions, to exceed its persisted cross-run
-    /// attempt budget ([`GraphEngine::spec_attempt_limit`]). Unlike `Failed`,
-    /// which invites another relaunch, this converts the dispatch's outcome
-    /// into a paused, human-visible blocker — see
-    /// [`GraphEngine::block_graph`] — so an unsatisfiable spec stops quietly
-    /// costing another quota window on every reset. The `String` is the
-    /// blocker text, naming the spec, the attempt count, and the last
-    /// failure.
+    /// The spec has paused mid-attempt under a human-visible blocker — surfaced
+    /// by [`GraphEngine::block_graph`]/[`GraphEngine::handle_spec_outcome`] — so
+    /// someone can inspect and clear it instead of the engine relaunching
+    /// blindly. Two sources: (a) C19 — a genuine verdict failure that has now
+    /// exceeded its persisted cross-run attempt budget
+    /// ([`GraphEngine::spec_attempt_limit`]); the spec is left `Failed` and
+    /// only [`GraphEngine::run_graph_dispatch`]'s resume path re-enters it, and
+    /// (b) FR4 — a parallel/round-robin ensemble exited with no verdict and no
+    /// `Error` edge to absorb it; that spec is left `Interrupted`
+    /// (resumable via `retry_current_node` without a `graph_reset`) so an
+    /// operator can rewire or retry the ensemble. In both cases the `String` is
+    /// the blocker text, and the graph is paused with exactly one `on_blocked`
+    /// firing per transition.
     Blocked(String),
 }
 
@@ -17034,9 +17038,13 @@ echo done
         // join is Error with no_verdict (CB66) and the spec pauses with a
         // blocker instead of failing.
         assert_eq!(lp.status, GraphStatus::Paused);
+        // CM42: the queue run consumed the spec — it is never left `Pending`
+        // for a later run to start from scratch — and the no-verdict block
+        // lands it `Interrupted`, which queue selection treats as runnable
+        // (resumable at the ensemble) exactly like `Pending`.
         assert_eq!(
-            db.queue_next_pending_spec_id("queue-1").unwrap(),
-            None,
+            db.get_graph_spec(&spec.id).unwrap().unwrap().status,
+            GraphSpecStatus::Interrupted,
             "the ensemble-bearing spec must have been fully consumed by the queue run"
         );
     }
@@ -22227,6 +22235,203 @@ exit 0
             member_runs(&db, &spec_id, "done-fail").is_empty(),
             "the Fail edge must never fire on a no-verdict exit"
         );
+    }
+
+    /// CM42 (FR1/FR2/FR5): the incident end to end. A two-spec graph runs
+    /// `Designer` to `Completed`, then `Implementer`'s round-robin ensemble
+    /// exits with every member unreported and no `Error` edge. The block must
+    /// leave the spec `Interrupted` (resumable), not `Failed`; the blocker
+    /// must name the ensemble and BOTH ways out (`graph_continue
+    /// retry_current_node`, `graph_reset`); and after a `graph_update_ensemble`
+    /// member swap plus `graph_continue retry_current_node` (the validation
+    /// call `graph_continue` makes, then the same `is_resume: true` dispatch
+    /// `resume_background` fires) the REWIRED member runs, the already-passed
+    /// Designer node gets no new run row, and the spec and graph complete.
+    #[tokio::test]
+    async fn no_verdict_block_is_resumable_via_retry_current_node() {
+        let (dir, db, engine, graph_id, designer_id) = graph_fixture().unwrap();
+        db.update_graph_spec_details(&designer_id, Some("Designer"), None, Some(1), None)
+            .unwrap();
+        let implementer = GraphSpec {
+            graph_id: Some(graph_id.clone()),
+            name: "Implementer".to_string(),
+            ..standalone_spec("spec-implementer", 2)
+        };
+        db.insert_graph_spec(&implementer).unwrap();
+
+        // Designer: one check node that passes on its own — the work the old
+        // `graph_reset`-only escape hatch made every resume pay for again.
+        db.insert_graph_node(&GraphNode {
+            id: "designer".to_string(),
+            spec_id: Some(designer_id.clone()),
+            graph_id: None,
+            name: "designer".to_string(),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({
+                "command": "printf ok",
+                "success_condition": "exit_code_0"
+            }),
+            position: 1,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+
+        // Implementer: a round-robin ensemble whose two members both exit
+        // unreported (CM13: script-backed doubles never call
+        // `graph_complete_node`), with no `Error` edge to absorb the join.
+        let crash_a = write_member_script(dir.path(), "a.sh", "exit 1");
+        let crash_b = write_member_script(dir.path(), "b.sh", "exit 1");
+        let db_path = dir.path().join(TEST_DB_FILENAME);
+        let rewired = write_self_reporting_member_script(
+            dir.path(),
+            "rewired.sh",
+            "printf ok",
+            &db_path,
+            "m-old-1",
+            "pass",
+            None,
+        );
+        let fake_home = setup_multi_cli_home(&[
+            ("old-a", crash_a.as_str()),
+            ("old-b", crash_b.as_str()),
+            ("m-new-1", rewired.as_str()),
+        ]);
+        insert_kind_ensemble(
+            &db,
+            &implementer.id,
+            crate::domain::graphs::EnsembleKind::RoundRobin,
+            &[("m-old-1", "old-a"), ("m-old-2", "old-b")],
+        );
+
+        let _home = HomeGuard::set(fake_home.path());
+        engine
+            .run_graph(graph_id.clone(), None, None, None, None)
+            .await
+            .unwrap();
+        drop(_home);
+
+        // ── After the block ────────────────────────────────────────────
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        assert_eq!(
+            lp.status,
+            GraphStatus::Paused,
+            "the no-verdict exit pauses the graph"
+        );
+        let designer_after = db.get_graph_spec(&designer_id).unwrap().unwrap();
+        assert_eq!(
+            designer_after.status,
+            GraphSpecStatus::Completed,
+            "Designer must have passed before the block"
+        );
+        let implementer_after = db.get_graph_spec(&implementer.id).unwrap().unwrap();
+        assert_eq!(
+            implementer_after.status,
+            GraphSpecStatus::Interrupted,
+            "FR1: a no-verdict block leaves the spec interrupted (resumable), never failed"
+        );
+
+        let join = join_run(&db, &implementer.id, "join1");
+        assert_eq!(join.status, GraphRunStatus::Error);
+        let blocker = crate::daemon::handler_run_exec::graph_run_blocker(&join)
+            .expect("FR1: the blocked run records a blocker");
+        assert!(
+            blocker.contains("Switched Ensemble"),
+            "the blocker names the blocked node (the ensemble): {blocker}"
+        );
+        assert!(
+            blocker.contains("`graph_continue retry_current_node` resumes at this ensemble"),
+            "FR5: the blocked text names retry_current_node as the way to resume here: {blocker}"
+        );
+        assert!(
+            blocker.contains("`graph_reset` restarts the spec from Start"),
+            "FR5: the blocked text names graph_reset as the way to restart the spec: {blocker}"
+        );
+
+        // `graph_continue retry_current_node` must accept this spec…
+        crate::daemon::handler_run_exec::handle_retry_current_node(&db, &graph_id)
+            .expect("FR2: an interrupted no-verdict spec is resumable by graph_continue");
+
+        // …and `graph_update_ensemble`'s member swap: the surviving slot keeps
+        // its node row, the crew is now platform `m-new-1`, the other member
+        // (node row included) is gone.
+        db.replace_ensemble_members(
+            "ens1",
+            &[EnsembleMember {
+                ensemble_id: "ens1".to_string(),
+                node_id: "m-old-1".to_string(),
+                position: 0,
+                platform: "m-new-1".to_string(),
+                model: None,
+                prompt_override: None,
+                timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
+            }],
+            &[GraphNode {
+                id: "m-old-1".to_string(),
+                spec_id: Some(implementer.id.clone()),
+                graph_id: None,
+                name: "member-1".to_string(),
+                kind: GraphNodeKind::Agent,
+                config: serde_json::json!({
+                    "platform": "m-new-1",
+                    "prompt_template": "ignored by the member's test script",
+                    "timeout_minutes": 5,
+                    "infra_backoff_seconds": 0,
+                }),
+                position: 2,
+                created_at: chrono::Utc::now(),
+            }],
+        )
+        .unwrap();
+
+        let designer_runs_before = member_runs(&db, &designer_id, "designer").len();
+        let kickoff_runs_before = member_runs(&db, &implementer.id, "kickoff").len();
+        let member_runs_before = member_runs(&db, &implementer.id, "m-old-1").len();
+
+        // The resume `graph_continue` fires (`retry_current_node` validates,
+        // then `resume_background` dispatches with `is_resume: true`).
+        let _home = HomeGuard::set(fake_home.path());
+        engine
+            .run_graph_dispatch(graph_id.clone(), None, None, true, None, None)
+            .await
+            .unwrap();
+        drop(_home);
+
+        // ── After the resume ───────────────────────────────────────────
+        let member_runs_after = member_runs(&db, &implementer.id, "m-old-1");
+        assert!(
+            member_runs_after.len() > member_runs_before,
+            "FR2: the rewired member gets a fresh run row on resume"
+        );
+        let resumed_join = member_runs(&db, &implementer.id, "join1")
+            .into_iter()
+            .find(|run| run.status == GraphRunStatus::Pass)
+            .expect("FR2: the resumed ensemble reaches a verdict and records a passing join");
+        assert_eq!(
+            resumed_join.output.as_ref().unwrap()["member"]["platform"],
+            "m-new-1",
+            "FR2: the resumed dispatch uses the rewired member list, not the blocked one"
+        );
+        assert_eq!(
+            member_runs(&db, &implementer.id, "kickoff").len(),
+            kickoff_runs_before,
+            "re-entry happens at the blocked ensemble, not at the spec's entry node"
+        );
+        assert_eq!(
+            member_runs(&db, &designer_id, "designer").len(),
+            designer_runs_before,
+            "FR2: the Designer spec already passed and must not run again"
+        );
+        let implementer_final = db.get_graph_spec(&implementer.id).unwrap().unwrap();
+        assert_eq!(
+            implementer_final.status,
+            GraphSpecStatus::Completed,
+            "the resumed spec runs to completion"
+        );
+        let lp_final = db.get_graph(&graph_id).unwrap().unwrap();
+        assert_eq!(lp_final.status, GraphStatus::Completed);
     }
 
     /// CB66.3 (FR3): one member crashes, the other files a real `fail`

@@ -178,15 +178,29 @@ impl GraphEngine {
         let member_texts = Self::ensemble_member_failure_lines(&step.execution.output);
         let ensemble_name = Self::ensemble_name_for_join(ctx.ensembles, &step.from_node_id);
         let blocker = format!(
-            "Ensemble '{}' produced no verdict ({} members, none filed a verdict): {}. The graph is paused; inspect member runs and retry or rewire the ensemble.",
+            "Ensemble '{}' produced no verdict ({} members, none filed a verdict): {}. The graph is paused; \
+             this spec is marked interrupted (not failed). Two ways out: `graph_continue retry_current_node` \
+             resumes at this ensemble — its current member list, with the nodes that already passed in this \
+             spec left alone (rewire the members first with `graph_update_ensemble` if the crew itself is the \
+             problem) — while `graph_reset` restarts the spec from Start.",
             ensemble_name,
             member_texts.len(),
             member_texts.join("; "),
         );
         self.set_last_run_error_blocker(&ctx.spec.id, &blocker)?;
+        // FR1: a no-verdict block is transient — an operator can fix it by
+        // retrying or rewiring the ensemble — so it lands `Interrupted` (its
+        // cursor is the ensemble join and `is_resumable`), not `Failed`. The
+        // C19 cross-run-budget and B12 iteration-budget blocks stay `Failed`.
         Ok(SpecLoopFlow::Done(
-            self.finish_failed_spec(ctx.spec, ctx.workdir, blocker, true)
-                .await?,
+            self.finish_failed_spec(
+                ctx.spec,
+                ctx.workdir,
+                blocker,
+                GraphSpecStatus::Interrupted,
+                true,
+            )
+            .await?,
         ))
     }
 
@@ -389,11 +403,23 @@ impl GraphEngine {
                 )?;
             }
             return self
-                .finish_failed_spec(ctx.spec, ctx.workdir, blocker, true)
+                .finish_failed_spec(
+                    ctx.spec,
+                    ctx.workdir,
+                    blocker,
+                    GraphSpecStatus::Failed,
+                    true,
+                )
                 .await;
         }
-        self.finish_failed_spec(ctx.spec, ctx.workdir, step.execution.summary.clone(), false)
-            .await
+        self.finish_failed_spec(
+            ctx.spec,
+            ctx.workdir,
+            step.execution.summary.clone(),
+            GraphSpecStatus::Failed,
+            false,
+        )
+        .await
     }
 
     pub(crate) async fn finish_failed_spec(
@@ -401,14 +427,11 @@ impl GraphEngine {
         spec: &GraphSpec,
         workdir: &str,
         summary: String,
+        final_status: GraphSpecStatus,
         blocked: bool,
     ) -> Result<SpecExecutionOutcome> {
-        self.db.update_graph_spec_status(
-            &spec.id,
-            GraphSpecStatus::Failed,
-            None,
-            Some(chrono::Utc::now()),
-        )?;
+        self.db
+            .update_graph_spec_status(&spec.id, final_status, None, Some(chrono::Utc::now()))?;
         let (dirty, paths) = self.record_spec_end_dirty(&spec.id, workdir).await;
         let summary = match dirty_tree_note(dirty, &paths) {
             Some(note) => format!("{summary} ({note})"),

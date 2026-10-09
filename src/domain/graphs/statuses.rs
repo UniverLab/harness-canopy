@@ -101,12 +101,14 @@ pub enum GraphSpecStatus {
     Skipped,
     /// The run working this spec was cut short by something external to the
     /// spec — a daemon restart, a machine crash, an unrelated process dying —
-    /// not by the work itself failing. Set only by reconciliation, in place
-    /// of the `git stash` it used to run: the working tree is left exactly
-    /// as the interrupted attempt left it, and the spec is picked up again
-    /// like any other runnable spec (queue selection treats this exactly
-    /// like `Pending`), with its node prompt telling the agent a prior
-    /// attempt exists so it continues rather than restarts.
+    /// not by the work itself failing. Set by reconciliation (in place of the
+    /// `git stash` it used to run), or by a no-verdict ensemble exit (FR4) that
+    /// pauses the graph with a blocker the operator can clear by rewiring or
+    /// retrying the ensemble. In every case the working tree is left exactly
+    /// as the interrupted attempt left it, and the spec is picked up again like
+    /// any other runnable spec (queue selection treats this exactly like
+    /// `Pending`), with its node prompt telling the agent a prior attempt
+    /// exists so it continues rather than restarts.
     ///
     /// Contract: `loop_continue` { retry_current_node } resumes a spec in
     /// this status at its cursor (the node/ensemble its last run was on,

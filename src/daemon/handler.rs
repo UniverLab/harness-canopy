@@ -108,7 +108,7 @@ pub(crate) use crate::daemon::handler_read::{
 #[cfg(test)]
 pub(crate) use crate::daemon::handler_run_exec::{
     find_in_flight_run, graph_run_blocker, graph_run_json, graph_run_status_guard,
-    in_flight_run_error, node_name_for_error, resolve_reported_run,
+    in_flight_run_error, node_name_for_error, queue_running_spec, resolve_reported_run,
 };
 #[cfg(test)]
 pub(crate) use crate::daemon::handler_run_history::{
@@ -412,8 +412,8 @@ mod tests {
         graph_details_json, graph_run_status_guard, graph_trigger_json, handle_retry_current_node,
         handle_skip_next_spec, header_str, in_flight_run_error, json_value_kind_name,
         member_node_config, missing_sync_identity_error, node_copy_note, node_name_for_error,
-        perform_graph_reset, plan_ensemble_copy, plan_node_copy, rag_result_json,
-        resolve_graph_target, resolve_node_kind_and_config, resolve_reported_run,
+        perform_graph_reset, plan_ensemble_copy, plan_node_copy, queue_running_spec,
+        rag_result_json, resolve_graph_target, resolve_node_kind_and_config, resolve_reported_run,
         spec_summary_json, unknown_config_keys, validate_absolute_dir, validate_at_least_one_bool,
         validate_blueprint_exists, validate_edge_condition, validate_edge_condition_with_route,
         validate_ensemble_members, validate_node_config, validate_node_kind,
@@ -2523,6 +2523,47 @@ mod tests {
 
         let error = handle_skip_next_spec(&db, "graph-owner").unwrap_err();
         assert!(error.message.contains("No running spec found"));
+    }
+
+    /// CM42 (FR3): `skip_next_spec` must find a spec left `Interrupted` by a
+    /// no-verdict ensemble block — not only a `running` one — so the skip verb
+    /// keeps working on the same paused graph `retry_current_node` can retry.
+    #[test]
+    fn skip_next_spec_finds_interrupted_spec() {
+        let (_dir, db) = queue_test_db();
+        insert_test_graph(&db, "graph-owner");
+        let mut bound = interrupted_spec("spec-bound");
+        bound.graph_id = Some("graph-owner".to_string());
+        db.insert_graph_spec(&bound).unwrap();
+
+        handle_skip_next_spec(&db, "graph-owner").unwrap();
+
+        let after = db.get_graph_spec("spec-bound").unwrap().unwrap();
+        assert_eq!(after.status, GraphSpecStatus::Skipped);
+    }
+
+    /// CM42 (FR3): the queue-side half of the same lookup —
+    /// `queue_running_spec` is `handle_skip_next_spec`'s fallback for a
+    /// queue-driven pause and must see an `Interrupted` in-flight member too.
+    #[test]
+    fn queue_running_spec_finds_interrupted_spec() {
+        let (_dir, db) = queue_test_db();
+        insert_test_graph(&db, "graph-owner");
+        db.set_graph_active_run_queue("graph-owner", Some("queue-1"))
+            .unwrap();
+        db.insert_graph_spec(&interrupted_spec("spec-a")).unwrap();
+        db.insert_graph_spec(&standalone_spec("spec-b")).unwrap();
+        insert_queue(&db, "queue-1");
+        db.append_queue_member("queue-1", "spec-a", None).unwrap();
+        db.append_queue_member("queue-1", "spec-b", None).unwrap();
+
+        let found = queue_running_spec(&db, "graph-owner").unwrap();
+
+        assert_eq!(
+            found.map(|spec| spec.id),
+            Some("spec-a".to_string()),
+            "the interrupted in-flight member is the current one"
+        );
     }
 
     /// B35: `retry_current_node` must error when no spec is running in

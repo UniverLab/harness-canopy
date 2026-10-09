@@ -525,12 +525,15 @@ pub(crate) fn graph_spec_details_json(
         .find(|run| run.status == GraphRunStatus::Running)
         .or_else(|| runs.last());
     let blocker = runs.last().and_then(graph_run_blocker);
-    let resume_actions =
-        if graph_status == GraphStatus::Paused && spec.spec.status == GraphSpecStatus::Running {
-            vec!["retry_current_node", "skip_next_spec"]
-        } else {
-            Vec::new()
-        };
+    let resume_actions = if graph_status == GraphStatus::Paused
+        && matches!(
+            spec.spec.status,
+            GraphSpecStatus::Running | GraphSpecStatus::Interrupted
+        ) {
+        vec!["retry_current_node", "skip_next_spec"]
+    } else {
+        Vec::new()
+    };
     let runs = runs.iter().map(graph_run_json).collect::<Vec<_>>();
     let ensembles = db
         .list_ensembles_for_spec(&spec.spec.id)?

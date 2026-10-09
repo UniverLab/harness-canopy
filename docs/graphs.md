@@ -204,6 +204,21 @@ member's own `resume: false` still forces a cold start. The TUI graph view rende
 collapsed as one box (`name [N models]` + quorum) with live per-member
 state while running, expandable on inspect.
 
+### No-verdict blocks
+
+A parallel or round-robin ensemble that exits with no verdict and no
+outgoing `Error` edge cannot route — every member infra-failed or walked
+off without filing a verdict. Rather than failing the spec, the graph
+pauses with a blocker that names the ensemble and the member reasons,
+and the spec is marked `interrupted` (not `failed`). That makes the
+block resumable in place: `graph_continue retry_current_node` re-enters
+the ensemble at its join cursor (already-passed nodes such as the entry
+node are not re-run), and `graph_update_ensemble` lets you rewire the
+members before retrying. A `graph_run` on a blocked (paused + blocker)
+graph refuses and reports the blocker, so a blind relaunch never masks a
+crew that is silently filing nothing; clear the blocker first, or
+`graph_reset` the spec.
+
 ## Commit rights
 
 Most graphs want exactly one node to land work in git — a committer at
@@ -353,6 +368,14 @@ reconciled to `Paused` with the spec `Interrupted`, and
 the same input it had (the same command for a check node, the same
 `previous_feedback` for an ensemble member) — not whichever node an
 edge would have led to.
+
+A spec interrupted by a no-verdict ensemble block (see
+[No-verdict blocks](#no-verdict-blocks)) is resumed the same way:
+`graph_continue` with `retry` re-enters the blocked ensemble with its
+current member list, without re-running nodes or specs that already
+passed, and `graph_continue` with `skip` marks that blocked spec
+`skipped` and moves on to the next one. `graph_reset` still restarts
+the blocked spec from its entry node.
 
 ## Concurrency
 
