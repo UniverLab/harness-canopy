@@ -505,6 +505,34 @@ pub(super) fn read_systemctl_show_environment() -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+/// CB81 FR3: read `OOMPolicy` from systemd (`systemctl --user show
+/// canopy.service -p OOMPolicy`), the sibling of `read_systemctl_show_environment`.
+/// `None` when systemctl is missing or fails — the caller then skips the check
+/// instead of false-positiving. Tests never call this; they inject a canned
+/// string into `oom_policy_is_stop` / `report_service_unit` instead.
+pub(super) fn read_systemctl_show_oom_policy() -> Option<String> {
+    let output = std::process::Command::new("systemctl")
+        .args(["--user", "show", "canopy.service", "-p", "OOMPolicy"])
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// CB81 FR3: parse the stdout of `systemctl --user show canopy.service -p
+/// OOMPolicy` and return whether it reports `stop`. Pure over `&str` so tests
+/// drive it without a live service manager. `false` for `continue`/`kill`, for
+/// an absent property line, or for empty output; a `None` output (systemctl
+/// unavailable) is handled by the caller skipping the check entirely.
+pub(super) fn oom_policy_is_stop(output: &str) -> bool {
+    output
+        .lines()
+        .find_map(|line| line.strip_prefix("OOMPolicy="))
+        .is_some_and(|value| value.trim() == "stop")
+}
+
 /// CB73 FR2 (I/O): raw `/proc/<pid>/environ` bytes for the process
 /// holding the daemon port, or `None` if it is gone/unreadable. Tests
 /// never call this; they inject bytes into `report_service_unit`.
@@ -547,6 +575,14 @@ pub(super) fn read_effective_unit_browser(
     unit_defines_browser(&combined)
 }
 
+/// CB81 FR3: exact warning/issue text shared by the printed ⚠ line and the
+/// pushed issue so the verbiage lives in one place. `systemctl show -p OOMPolicy`
+/// reports `stop` when the unit has no drop-in/inline value (systemd's default)
+/// or a drop-in that explicitly sets it — either way a node OOM-kill takes the
+/// whole unit down, so the fix is to reinstall. Module-private: only
+/// `report_service_unit` consumes it (same file).
+const OOM_POLICY_STOP_MESSAGE: &str = "canopy service unit keeps OOMPolicy=stop: a node that runs out of memory stops the daemon — reinstall the service (canopy daemon install) to get OOMPolicy=continue";
+
 /// Report on the systemd/launchd service unit, if any: its path, the binary
 /// it names, and whether that binary is the problem. Running the daemon by
 /// hand instead of via a unit is legitimate, so no unit at all is a neutral
@@ -564,6 +600,7 @@ pub(super) fn report_service_unit(
     manager_pid: Option<u32>,
     systemctl_output: Option<&str>,
     orphan_environ: Option<&[u8]>,
+    oom_policy_output: Option<&str>,
     issues: &mut Vec<String>,
 ) {
     let Some((manager, unit_path)) = service_unit_location(home) else {
@@ -623,6 +660,12 @@ pub(super) fn report_service_unit(
     }
 
     if manager == "systemd" {
+        if let Some(policy) = oom_policy_output {
+            if oom_policy_is_stop(policy) {
+                println!("     \x1b[33m⚠\x1b[0m {}", OOM_POLICY_STOP_MESSAGE);
+                issues.push(OOM_POLICY_STOP_MESSAGE.to_string());
+            }
+        }
         let unit_set = read_effective_unit_browser(&unit_path, systemctl_output);
         // CB73 FR2: the environ bytes only count when they came from a
         // real orphan — the port holder exists and is not the unit's

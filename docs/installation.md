@@ -80,6 +80,14 @@ keys missing from the current environment. Hand drop-ins under
 `~/.config/systemd/user/canopy.service.d/` are never touched. `canopy
 doctor` warns when the unit lacks `BROWSER`.
 
+The generated unit also sets `OOMPolicy=continue` and `MemoryMax=80%`, so a
+process spawned by a graph node that exhausts memory is killed alone instead
+of taking the daemon (and every other running graph) down with it. `MemoryMax`
+is a percentage of the machine's physical memory, so the unit stays portable.
+`canopy doctor` warns when an installed unit still keeps `OOMPolicy=stop`
+(the systemd default for a unit written before this), naming the reinstall
+that fixes it.
+
 ## Data directory
 
 All state lives under `~/.canopy/`:

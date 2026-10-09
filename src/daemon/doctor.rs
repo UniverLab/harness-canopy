@@ -483,6 +483,11 @@ fn report_service_unit_section(home: &Path, facts: &DoctorDaemonFacts, issues: &
     } else {
         None
     };
+    let oom_policy_out = if facts.manager.is_some_and(|m| m.name == "systemd") {
+        read_systemctl_show_oom_policy()
+    } else {
+        None
+    };
     let is_orphan =
         facts.port_pid.is_some() && manager_pid != facts.port_pid && facts.manager.is_some();
     let orphan_env: Option<Vec<u8>> = if is_orphan {
@@ -496,6 +501,7 @@ fn report_service_unit_section(home: &Path, facts: &DoctorDaemonFacts, issues: &
         manager_pid,
         show_out.as_deref(),
         orphan_env.as_deref(),
+        oom_policy_out.as_deref(),
         issues,
     );
 }
@@ -862,6 +868,12 @@ mod tests {
         issues.iter().filter(|i| i.contains("BROWSER")).collect()
     }
 
+    /// Mirror of `browser_issues` for the CB81 OOMPolicy check.
+    #[cfg(target_os = "linux")]
+    fn oom_policy_issues(issues: &[String]) -> Vec<&String> {
+        issues.iter().filter(|i| i.contains("OOMPolicy")).collect()
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn report_service_unit_no_browser_issue_when_effective_env_set() {
@@ -877,6 +889,7 @@ mod tests {
             None,
             None,
             Some("Environment=BROWSER=/x/wsl-browser\n"),
+            None,
             None,
             &mut issues,
         );
@@ -898,6 +911,7 @@ mod tests {
             None,
             Some("Environment=BROWSER=/x/wsl-browser\n"),
             Some(b"PATH=/usr/bin\0"),
+            None,
             &mut issues,
         );
         let browser = browser_issues(&issues);
@@ -926,6 +940,7 @@ mod tests {
             Some(99),
             Some("Environment=PATH=/usr/bin\n"),
             Some(b"BROWSER=/x/wsl-browser\0"),
+            None,
             &mut issues,
         );
         let browser = browser_issues(&issues);
@@ -940,6 +955,73 @@ mod tests {
             "the orphan has BROWSER and must not be reported missing: {}",
             browser[0]
         );
+    }
+
+    /// CB81 FR3: pin the parse of `systemctl --user show -p OOMPolicy`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn oom_policy_is_stop_parser() {
+        assert!(oom_policy_is_stop("OOMPolicy=stop\n"));
+        assert!(oom_policy_is_stop("OOMPolicy=stop"));
+        assert!(!oom_policy_is_stop("OOMPolicy=continue\n"));
+        assert!(!oom_policy_is_stop("OOMPolicy=kill\n"));
+        assert!(!oom_policy_is_stop("Environment=PATH=/usr/bin\n"));
+        assert!(!oom_policy_is_stop(""));
+    }
+
+    /// CB81 FR3: an installed unit whose effective OOMPolicy is `stop`
+    /// warns with the verbatim fix wording.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn report_service_unit_warns_when_oom_policy_stop() {
+        let dir = tempfile::tempdir().unwrap();
+        write_minimal_unit(dir.path());
+        let mut issues = Vec::new();
+        report_service_unit(
+            dir.path(),
+            None,
+            None,
+            None,
+            None,
+            Some("OOMPolicy=stop\n"),
+            &mut issues,
+        );
+        let oom = oom_policy_issues(&issues);
+        assert_eq!(oom.len(), 1, "{issues:?}");
+        assert!(oom[0].contains("OOMPolicy=stop"));
+        assert!(oom[0].contains("a node that runs out of memory stops the daemon"));
+        assert!(oom[0].contains("reinstall the service (canopy daemon install)"));
+        assert!(oom[0].contains("OOMPolicy=continue"));
+    }
+
+    /// CB81 FR3: `OOMPolicy=continue` must not warn (no false positive).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn report_service_unit_silent_when_oom_policy_continue() {
+        let dir = tempfile::tempdir().unwrap();
+        write_minimal_unit(dir.path());
+        let mut issues = Vec::new();
+        report_service_unit(
+            dir.path(),
+            None,
+            None,
+            None,
+            None,
+            Some("OOMPolicy=continue\n"),
+            &mut issues,
+        );
+        assert!(oom_policy_issues(&issues).is_empty(), "{issues:?}");
+    }
+
+    /// CB81 FR3: systemctl unavailable (`None`) must not warn.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn report_service_unit_silent_when_oom_policy_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+        write_minimal_unit(dir.path());
+        let mut issues = Vec::new();
+        report_service_unit(dir.path(), None, None, None, None, None, &mut issues);
+        assert!(oom_policy_issues(&issues).is_empty(), "{issues:?}");
     }
 
     #[test]

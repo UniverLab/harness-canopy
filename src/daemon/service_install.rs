@@ -111,6 +111,8 @@ Restart=on-failure
 RestartSec=5
 StartLimitIntervalSec=60
 StartLimitBurst=5
+OOMPolicy=continue
+MemoryMax=80%
 Environment=RUST_LOG=info
 Environment=PATH={path_value}
 {extra_lines}
@@ -596,5 +598,62 @@ mod tests {
         assert!(!parsed.contains_key("PATH"));
         assert!(!parsed.contains_key("BROWSER"));
         assert!(!parsed.contains_key("RUST_LOG"));
+    }
+
+    /// CB81 FR1/FR4: a fresh unit carries the OOM directives exactly once,
+    /// inside `[Service]`. `OOMPolicy=continue`/`MemoryMax=80%` are only
+    /// ever emitted by `render_unit_content`, so counting in the slice after
+    /// `[Service]` is equivalent to counting inside the section.
+    #[test]
+    fn render_unit_includes_oom_policy_and_memory_max_once() {
+        let content = render_unit_content(
+            "/usr/bin/canopy",
+            4177,
+            "/usr/bin:/bin",
+            &std::collections::BTreeMap::new(),
+        );
+        let service = content
+            .split_once("[Service]\n")
+            .expect("unit has [Service]")
+            .1;
+        assert_eq!(
+            service.matches("OOMPolicy=continue").count(),
+            1,
+            "OOMPolicy=continue must appear exactly once inside [Service]"
+        );
+        assert_eq!(
+            service.matches("MemoryMax=80%").count(),
+            1,
+            "MemoryMax=80% must appear exactly once inside [Service]"
+        );
+    }
+
+    /// CB81 FR2/FR4: the reinstall path re-renders through
+    /// `render_unit_content`, so a unit written before CB81 (no OOM
+    /// directives) comes back with both, exactly once each.
+    #[test]
+    fn render_unit_reinstall_over_unit_without_oom_directives() {
+        let tmp = tempfile::tempdir().unwrap();
+        let unit_path = tmp.path().join("canopy.service");
+        std::fs::write(
+            &unit_path,
+            "[Service]\nEnvironment=PATH=/home/u/.opencode/bin:/usr/bin:/bin\nEnvironment=RUST_LOG=info\nExecStart=/old/canopy serve --port 4177\n",
+        )
+        .unwrap();
+
+        let path = reconcile_path(&unit_path, "/usr/bin:/bin");
+        let content = render_unit_content(
+            "/usr/bin/canopy",
+            4177,
+            &path,
+            &std::collections::BTreeMap::new(),
+        );
+
+        let service = content
+            .split_once("[Service]\n")
+            .expect("unit has [Service]")
+            .1;
+        assert_eq!(service.matches("OOMPolicy=continue").count(), 1);
+        assert_eq!(service.matches("MemoryMax=80%").count(), 1);
     }
 }
