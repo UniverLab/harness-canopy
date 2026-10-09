@@ -1028,6 +1028,44 @@ mod tests {
         assert_eq!(dialog.filtered_cli_indices(), vec![1]);
     }
 
+    /// CM35 FR3: an interactive-only platform (`headless = false`) stays
+    /// listed in the new-session picker — selectable for a live session —
+    /// but its label carries `(interactive only)`, while a headless-capable
+    /// platform's label is unchanged. Breaks if the marker is dropped or if
+    /// the list starts filtering interactive-only platforms out.
+    #[test]
+    fn cli_display_label_marks_interactive_only_platform() {
+        let mut dialog = NewAgentDialog::new(None);
+        dialog.available_clis = vec![Cli::new("freebuff"), Cli::new("claude")];
+        dialog.cli_configs = vec![
+            Some(crate::domain::cli_config::CliConfig {
+                name: "freebuff".into(),
+                provider: Some("Codebuff".into()),
+                tool_name: Some("Freebuff".into()),
+                headless: false,
+                ..Default::default()
+            }),
+            Some(crate::domain::cli_config::CliConfig {
+                name: "claude".into(),
+                provider: Some("Anthropic".into()),
+                tool_name: Some("Claude Code".into()),
+                headless: true,
+                ..Default::default()
+            }),
+        ];
+        assert_eq!(
+            dialog.cli_display_label(0),
+            "Codebuff · Freebuff (freebuff) (interactive only)"
+        );
+        assert_eq!(
+            dialog.cli_display_label(1),
+            "Anthropic · Claude Code (claude)"
+        );
+        // Both remain selectable — the picker never filters the list.
+        dialog.cli_index = 0;
+        assert_eq!(dialog.selected_cli().as_str(), "freebuff");
+    }
+
     // ── selected_args ────────────────────────────────────────────
 
     #[test]

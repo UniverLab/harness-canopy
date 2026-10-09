@@ -948,9 +948,10 @@ mod tests {
             name: "mistral".to_string(),
             provider: Some("Mistral AI".to_string()),
             tool_name: Some("Vibe".to_string()),
-            // Explicit: `Default` derives `headless = false`, and this fixture
-            // represents an ordinary headless-capable platform (the serde
-            // default is what production configs get).
+            // Explicit: this fixture represents an ordinary headless-capable
+            // platform, which is what `CliConfig`'s hand-written `Default`
+            // (and the serde default) give — pinned here so the label test
+            // cannot pass by accident if that default ever changes.
             headless: true,
             ..Default::default()
         };

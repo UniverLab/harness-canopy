@@ -792,6 +792,11 @@ mod tests {
         assert_eq!(report.outcome, ProbeOutcome::InteractiveOnly);
         assert!(!report.outcome.reachable());
         assert_eq!(report.outcome.as_str(), "interactive_only");
+        // Classification: a confirmed failure for `would_fail` (a graph node
+        // on this platform really would fail), never folded into `unknown`
+        // (its validity was determined — it cannot run headless at all).
+        assert_eq!(would_fail_count(std::slice::from_ref(&report)), 1);
+        assert_eq!(unknown_count(std::slice::from_ref(&report)), 0);
         assert_eq!(
             report.error.as_deref(),
             Some("platform 'freebuff' is interactive-only (no headless mode)")

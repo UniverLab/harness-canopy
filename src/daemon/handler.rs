@@ -9119,6 +9119,48 @@ mod endpoint_tests {
         assert!(db.get_agent("agt-wrong-bin").unwrap().is_none());
     }
 
+    /// CM35 FR2: `agent_add` refuses a platform marked `headless = false`
+    /// with the exact spec wording, and the agent never reaches the DB — so
+    /// the scheduler can never dispatch a headless run onto it. The check
+    /// runs before `ensure_cli_installed`, so no process is spawned either
+    /// (the fixture binary would `touch` a marker if it ran).
+    #[tokio::test]
+    async fn task_add_rejects_interactive_only_platform() {
+        let home = tempdir().unwrap();
+        let marker = write_freebuff_config(home.path());
+        let _home_guard = HomeVar::set(home.path());
+
+        let (_dir, db, handler) = endpoint_test_handler();
+
+        let result = handler
+            .task_add(Parameters(TaskAddParams {
+                id: "agt-live-only".to_string(),
+                prompt: "run the tests".to_string(),
+                schedule: "*/5 * * * *".to_string(),
+                cli: Some("freebuff".to_string()),
+                model: None,
+                effort: None,
+                duration_minutes: None,
+                working_dir: None,
+                timeout_minutes: None,
+            }))
+            .await
+            .unwrap();
+
+        assert!(is_err(&result), "{}", text(&result));
+        assert!(
+            raw_text(&result)
+                .contains("platform 'freebuff' is interactive-only (no headless mode)"),
+            "{}",
+            raw_text(&result)
+        );
+        assert!(db.get_agent("agt-live-only").unwrap().is_none());
+        assert!(
+            !marker.exists(),
+            "the interactive-only gate must fire before any process is spawned"
+        );
+    }
+
     // ── task_watch / agent_watch ─────────────────────────────────
 
     #[tokio::test]
@@ -10037,6 +10079,42 @@ mod endpoint_tests {
 
         assert!(is_err(&result));
         assert!(text(&result).contains("is not configured in canopy"));
+    }
+
+    /// CM35 FR2: `agent_models` on an interactive-only platform is a
+    /// *success* carrying an empty list plus the rejection reason — not an
+    /// error — and it never runs `models_list_cmd` or falls through to
+    /// models.dev (the fixture binary would `touch` a marker if it ran).
+    #[tokio::test]
+    async fn task_models_returns_empty_list_with_reason_for_interactive_only_platform() {
+        let home = tempdir().unwrap();
+        let marker = write_freebuff_config(home.path());
+        let _home_guard = HomeVar::set(home.path());
+
+        let (_dir, _db, handler) = endpoint_test_handler();
+        let result = handler
+            .task_models(Parameters(TaskModelsParams {
+                platform: Some("freebuff".to_string()),
+                refresh: Some(true),
+                full: None,
+            }))
+            .await
+            .unwrap();
+
+        assert!(!is_err(&result), "{}", text(&result));
+        let body: serde_json::Value = serde_json::from_str(&raw_text(&result)).unwrap();
+        assert_eq!(body["platform"], serde_json::json!("freebuff"), "{body}");
+        assert_eq!(body["models"], serde_json::json!([]), "{body}");
+        assert!(
+            body["reason"].as_str().is_some_and(
+                |r| r.contains("platform 'freebuff' is interactive-only (no headless mode)")
+            ),
+            "{body}"
+        );
+        assert!(
+            !marker.exists(),
+            "no enumeration process may be spawned for an interactive-only platform"
+        );
     }
 
     #[tokio::test]
@@ -13129,6 +13207,61 @@ mod endpoint_tests {
         assert!(db.list_graph_nodes(&spec.id).unwrap().is_empty());
     }
 
+    /// CM35 FR2: `graph_update_node` rejects the same platform with the same
+    /// wording, and a rejected update leaves the stored node untouched. The
+    /// node is created first and only then repointed — the ordering an
+    /// operator actually hits when "fixing" a node onto an interactive-only
+    /// harness.
+    #[tokio::test]
+    async fn graph_update_node_rejects_interactive_only_platform() {
+        let home = tempdir().unwrap();
+        write_freebuff_config(home.path());
+        let _home_guard = HomeVar::set(home.path());
+
+        let (dir, db, handler) = endpoint_test_handler();
+        let lp = insert_test_graph(&db, dir.path());
+        let spec = insert_test_spec(&db, &lp.id, 1);
+
+        let added = handler
+            .graph_add_node(Parameters(GraphAddNodeParams {
+                spec_id: Some(spec.id.clone()),
+                graph_id: None,
+                name: "Implementer".to_string(),
+                kind: Some("agent".to_string()),
+                config: Some(agent_node_config("claude")),
+                blueprint: None,
+                config_overrides: None,
+            }))
+            .await
+            .unwrap();
+        let node_id = extract_id(&added, "node_id");
+
+        let rejected = handler
+            .graph_update_node(Parameters(GraphUpdateNodeParams {
+                node_id: node_id.clone(),
+                name: None,
+                kind: None,
+                config: Some(agent_node_config("freebuff")),
+                config_replace: None,
+                position: None,
+            }))
+            .await
+            .unwrap();
+        assert!(is_err(&rejected), "{}", text(&rejected));
+        assert!(
+            raw_text(&rejected)
+                .contains("platform 'freebuff' is interactive-only (no headless mode)"),
+            "{}",
+            raw_text(&rejected)
+        );
+        let stored = db.get_graph_node(&node_id).unwrap().unwrap();
+        assert_eq!(
+            stored.config["platform"].as_str(),
+            Some("claude"),
+            "a rejected update must not reach the DB"
+        );
+    }
+
     #[tokio::test]
     async fn graph_update_node_renames_and_validates() {
         let (dir, db, handler) = endpoint_test_handler();
@@ -15052,6 +15185,67 @@ mod endpoint_tests {
             .await
             .unwrap();
         assert!(is_err(&too_few_members));
+    }
+
+    /// CM35 FR2: an ensemble member naming an interactive-only platform is
+    /// rejected with the spec wording and no ensemble is persisted.
+    /// `graph_add_ensemble` and `graph_update_ensemble` both validate
+    /// members through `validate_ensemble_members`, so the add arm pins the
+    /// shared gate; a second member on a normal platform proves the check is
+    /// per-member, not whole-ensemble.
+    #[tokio::test]
+    async fn graph_add_ensemble_rejects_interactive_only_member() {
+        let home = tempdir().unwrap();
+        write_freebuff_config(home.path());
+        let _home_guard = HomeVar::set(home.path());
+
+        let (dir, db, handler) = endpoint_test_handler();
+        let lp = insert_test_graph(&db, dir.path());
+        let spec = insert_test_spec(&db, &lp.id, 1);
+        let entry = add_agent_node(&handler, &spec.id, "Entry").await;
+        let arbiter = add_agent_node(&handler, &spec.id, "Arbiter").await;
+        let member = |platform: &str| crate::daemon::params::EnsembleMemberParams {
+            platform: platform.to_string(),
+            model: None,
+            prompt_override: None,
+            timeout_minutes: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
+        };
+
+        let rejected = handler
+            .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                commit_rights: None,
+                spec_id: Some(spec.id.clone()),
+                graph_id: None,
+                name: "Live Panel".to_string(),
+                kind: None,
+                prompt_template: Some("Review".to_string()),
+                members: Some(vec![member("freebuff"), member("claude")]),
+                blueprint: None,
+                from_node: entry,
+                condition: "always".to_string(),
+                min_pass: None,
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
+                timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
+                on_pass_to: arbiter,
+                on_fail_to: None,
+            }))
+            .await
+            .unwrap();
+        assert!(is_err(&rejected), "{}", text(&rejected));
+        assert!(
+            raw_text(&rejected)
+                .contains("platform 'freebuff' is interactive-only (no headless mode)"),
+            "{}",
+            raw_text(&rejected)
+        );
+        assert!(db.list_ensembles_for_spec(&spec.id).unwrap().is_empty());
     }
 
     /// CM24: a negative `quorum_grace_minutes` is refused on add with the
@@ -18040,6 +18234,74 @@ mod endpoint_tests {
         let msg = text(&result);
         assert!(msg.contains("bad-template-cli"), "{msg}");
         assert!(msg.contains("{{model?}}"), "{msg}");
+    }
+
+    /// CM35 FR2: `graph_preflight` flags every existing node that points at
+    /// an interactive-only platform — advisory (never a tool error), naming
+    /// the node through `used_by` — and that pair's probe is
+    /// `interactive_only` with nothing spawned. The node is written straight
+    /// to the DB because `graph_add_node` now refuses this platform: this is
+    /// how a node created before the gate reaches preflight.
+    #[tokio::test]
+    async fn graph_preflight_flags_interactive_only_nodes() {
+        let home = tempdir().unwrap();
+        let marker = write_freebuff_config(home.path());
+        let _home_guard = HomeVar::set(home.path());
+
+        let (dir, db, handler) = endpoint_test_handler();
+        let lp = insert_test_graph(&db, dir.path());
+        let spec = insert_test_spec(&db, &lp.id, 1);
+        db.insert_graph_node(&GraphNode {
+            id: uuid::Uuid::new_v4().to_string(),
+            spec_id: Some(spec.id.clone()),
+            graph_id: None,
+            name: "Live Only".to_string(),
+            kind: GraphNodeKind::Agent,
+            config: serde_json::json!({"platform": "freebuff"}),
+            position: 1,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+
+        let result = handler
+            .graph_preflight(Parameters(GraphPreflightParams {
+                graph_id: lp.id.clone(),
+                timeout_seconds: Some(5),
+                reviewer: None,
+            }))
+            .await
+            .unwrap();
+
+        assert!(!is_err(&result), "{}", text(&result));
+        let body: serde_json::Value = serde_json::from_str(&raw_text(&result)).unwrap();
+        let warnings = body["interactive_only_warnings"]
+            .as_array()
+            .unwrap_or_else(|| panic!("expected interactive_only_warnings: {body}"));
+        assert_eq!(warnings.len(), 1, "{body}");
+        assert_eq!(
+            warnings[0]["platform"],
+            serde_json::json!("freebuff"),
+            "{body}"
+        );
+        assert_eq!(
+            warnings[0]["used_by"],
+            serde_json::json!(["node: Live Only"]),
+            "{body}"
+        );
+        assert!(
+            warnings[0]["warning"].as_str().is_some_and(
+                |w| w.contains("platform 'freebuff' is interactive-only (no headless mode)")
+            ),
+            "{body}"
+        );
+        let probe = &body["probes"][0];
+        assert_eq!(probe["platform"], serde_json::json!("freebuff"), "{body}");
+        assert_eq!(
+            probe["outcome"],
+            serde_json::json!("interactive_only"),
+            "{body}"
+        );
+        assert!(!marker.exists(), "preflight must not spawn a process");
     }
 
     #[tokio::test]
@@ -22325,6 +22587,43 @@ mod endpoint_tests {
         .unwrap();
     }
 
+    /// Write a canopy config at `<home>/.canopy` declaring one platform named
+    /// `freebuff` marked `headless = false` — the CM35 interactive-only
+    /// fixture (freebuff v0.1.2 has no print/headless mode). The binary is an
+    /// executable script that `touch`es a marker file if it is ever spawned,
+    /// and it carries a `models_list_cmd` so a handler that reaches the
+    /// enumeration path would run it. The returned marker path lets a test
+    /// prove a gate fired *before* any process started: the marker must not
+    /// exist afterwards.
+    fn write_freebuff_config(home: &std::path::Path) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let canopy_dir = home.join(".canopy");
+        std::fs::create_dir_all(&canopy_dir).unwrap();
+        let marker = home.join("freebuff-spawned-marker");
+        let binary = home.join("freebuff-bin");
+        std::fs::write(
+            &binary,
+            format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        crate::domain::canopy_config::CanopyConfig {
+            clis: vec![crate::domain::cli_config::CliConfig {
+                name: "freebuff".to_string(),
+                binary: binary.to_string_lossy().to_string(),
+                headless: false,
+                models_list_cmd: Some("--list".to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+        .save(&canopy_dir)
+        .unwrap();
+        marker
+    }
+
     /// (CM32) `agent_probe` accepts the slug and its result names the
     /// product: `platform` stays `mistral` while a sibling
     /// `platform_display` carries `Mistral AI · Vibe`. This pins the
@@ -22410,6 +22709,51 @@ mod endpoint_tests {
             mistral["platform_display"],
             serde_json::json!("Mistral AI \u{b7} Vibe")
         );
+    }
+
+    /// CM35 FR2: `agent_probe` reports an interactive-only platform as
+    /// `interactive_only` — not reachable, counted as a confirmed
+    /// `would_fail`, never `unknown` — and spawns nothing (the fixture
+    /// binary would `touch` a marker if it ran). Handler-level half of the
+    /// guarantee; `probe_target_reports_interactive_only_without_spawning`
+    /// pins the same gate one layer down.
+    #[tokio::test]
+    async fn agent_probe_reports_interactive_only_without_spawning() {
+        let home = tempdir().unwrap();
+        let marker = write_freebuff_config(home.path());
+        let _home_guard = HomeVar::set(home.path());
+
+        let (_dir, _db, handler) = endpoint_test_handler();
+
+        let result = handler
+            .agent_probe(Parameters(AgentProbeParams {
+                platform: Some("freebuff".to_string()),
+                model: None,
+                timeout_seconds: Some(5),
+            }))
+            .await
+            .unwrap();
+
+        assert!(!is_err(&result), "{}", text(&result));
+        let body: serde_json::Value = serde_json::from_str(&raw_text(&result)).unwrap();
+        assert_eq!(body["would_fail"], serde_json::json!(1), "{body}");
+        assert_eq!(body["unknown"], serde_json::json!(0), "{body}");
+        let probe = &body["probes"][0];
+        assert_eq!(probe["platform"], serde_json::json!("freebuff"), "{body}");
+        assert_eq!(
+            probe["outcome"],
+            serde_json::json!("interactive_only"),
+            "{body}"
+        );
+        assert_eq!(probe["reachable"], serde_json::json!(false), "{body}");
+        assert!(
+            probe["error"].as_str().is_some_and(
+                |e| e.contains("platform 'freebuff' is interactive-only (no headless mode)")
+            ),
+            "{body}"
+        );
+        assert!(probe["argv"].is_null(), "{body}");
+        assert!(!marker.exists(), "probe must not spawn a process");
     }
 
     /// (CB25) Without a `reviewer`, preflight returns `"review": null` and
