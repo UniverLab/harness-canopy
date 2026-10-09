@@ -211,6 +211,28 @@ impl GraphEngine {
                 retry_limit,
                 crash_max_secs,
             ) {
+                // CB82: a shutdown kill must take no edge at all (via the
+                // run_spec/spec_step guards) — never the `Error` edge. Settle
+                // the attempt as interrupted without inserting a new retry row.
+                if self.is_shutting_down() {
+                    let _ = self.db.update_graph_run_result(
+                        &retry.run_id,
+                        GraphRunStatus::Fail,
+                        Some(&shutdown_interrupted_output()),
+                        Some(chrono::Utc::now()),
+                    );
+                    let run = self.db.get_graph_run(&retry.run_id)?.ok_or_else(|| {
+                        anyhow!("Graph run '{}' not found after execution.", retry.run_id)
+                    })?;
+                    return Ok((
+                        interrupted_execution(format!(
+                            "Node '{}' interrupted: daemon shutdown.",
+                            retry.node.name
+                        )),
+                        run,
+                        false,
+                    ));
+                }
                 // B19: retry resuming the crashed attempt's own
                 // session if it managed to create one before dying;
                 // an infra crash at spawn usually created none, so

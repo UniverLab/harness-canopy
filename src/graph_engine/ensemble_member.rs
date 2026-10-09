@@ -19,6 +19,9 @@ pub(crate) struct EnsembleMemberContext {
     pub(crate) retry_limit: u32,
     pub(crate) crash_max_secs: u64,
     pub(crate) backoff_secs: u64,
+    /// CB82: the engine's shutdown flag — `drive_ensemble_member` is a static
+    /// method with no `&GraphEngine`, so the flag travels in the context.
+    pub(crate) shutdown: Arc<AtomicBool>,
 }
 
 /// Outcome of one attempt of an ensemble member: either the attempt produced
@@ -87,6 +90,7 @@ impl GraphEngine {
             retry_limit,
             crash_max_secs,
             backoff_secs,
+            shutdown: Arc::clone(&self.shutdown),
         };
 
         let (result, member_had_no_verdict, settled_session_id) =
@@ -166,6 +170,23 @@ impl GraphEngine {
                 ctx.retry_limit,
                 ctx.crash_max_secs,
             ) {
+                // CB82: no new retry row is inserted during shutdown — settle
+                // the crashed attempt as interrupted and stop.
+                if ctx.shutdown.load(Ordering::SeqCst) {
+                    let _ = ctx.db.update_graph_run_result(
+                        &member_run_id,
+                        GraphRunStatus::Fail,
+                        Some(&shutdown_interrupted_output()),
+                        Some(chrono::Utc::now()),
+                    );
+                    break (
+                        interrupted_execution(format!(
+                            "Ensemble member '{}' interrupted: daemon shutdown.",
+                            ctx.node.name
+                        )),
+                        false,
+                    );
+                }
                 resume_candidate = run.session_id.clone();
                 member_run_id = begin_infra_retry(
                     &ctx.db,
@@ -312,6 +333,17 @@ impl GraphEngine {
         let mut saw_verdict = false;
         let mut tried_members: Vec<(String, String, Value, String)> = Vec::new();
         for (offset, member) in details.members.iter().enumerate().skip(walk_start) {
+            // CB82: stop before running another member — settle its active run
+            // if any, return interrupted with no join row and no advance.
+            if self.is_shutting_down() {
+                return Ok(self.shutdown_interrupted_member_execution(
+                    &member.node_id,
+                    format!(
+                        "Ensemble '{}' (cascade member) interrupted: daemon shutdown.",
+                        ensemble.name
+                    ),
+                ));
+            }
             let is_resume_start = offset == walk_start;
             let candidate = if is_resume_start {
                 initial_resume_candidate.clone()
@@ -426,6 +458,18 @@ impl GraphEngine {
         for offset in 0..member_count {
             let current_index = (start_index + offset).rem_euclid(member_count);
             let member = &details.members[current_index as usize];
+            // CB82: start no further round-robin member during shutdown —
+            // settle the member's active run if any, return interrupted with
+            // no join row (`push_round_robin_no_verdict` not called).
+            if self.is_shutting_down() {
+                return Ok(self.shutdown_interrupted_member_execution(
+                    &member.node_id,
+                    format!(
+                        "Ensemble '{}' (round-robin member) interrupted: daemon shutdown.",
+                        ensemble.name
+                    ),
+                ));
+            }
             let node = member_nodes
                 .get(&member.node_id)
                 .cloned()
@@ -551,9 +595,10 @@ impl GraphEngine {
         &self,
         ctx: &EnsembleJoinCtx<'_>,
         execution: &NodeExecution,
-    ) -> Result<()> {
+    ) -> Result<String> {
+        let join_run_id = uuid::Uuid::new_v4().to_string();
         self.db.insert_graph_run(&GraphNodeRun {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: join_run_id.clone(),
             graph_id: ctx.lp.id.clone(),
             spec_id: ctx.spec.id.clone(),
             node_id: ctx.join_node_id.to_string(),
@@ -576,6 +621,50 @@ impl GraphEngine {
             &ctx.lp.name,
             execution.summary.clone(),
         );
+        Ok(join_run_id)
+    }
+
+    /// CB82 loop-head guard shared by the cascade/round-robin walks: settle
+    /// the member's active run as interrupted if it has one, and build the
+    /// interrupted execution — no join row is written, no advance happens.
+    pub(crate) fn shutdown_interrupted_member_execution(
+        &self,
+        node_id: &str,
+        summary: String,
+    ) -> NodeExecution {
+        if let Ok(Some(active)) = self.db.get_active_graph_run_for_node(node_id) {
+            let _ = self.db.update_graph_run_result(
+                &active.id,
+                GraphRunStatus::Fail,
+                Some(&shutdown_interrupted_output()),
+                Some(chrono::Utc::now()),
+            );
+        }
+        interrupted_execution(summary)
+    }
+
+    /// CB82: stamp the latest join row for `details` as interrupted (it was
+    /// written by the ensemble walk just before the shutdown flag was seen).
+    /// Member rows need no marker: the ensemble resume cursor is the join.
+    pub(crate) fn stamp_ensemble_join_interrupted(
+        &self,
+        spec: &GraphSpec,
+        details: &EnsembleDetails,
+    ) -> Result<()> {
+        let join_id = details.ensemble.join_node_id.as_str();
+        let join = self
+            .db
+            .list_graph_runs_for_spec(&spec.id)?
+            .into_iter()
+            .rfind(|run| run.node_id == join_id);
+        if let Some(join) = join {
+            let _ = self.db.update_graph_run_result(
+                &join.id,
+                GraphRunStatus::Fail,
+                Some(&shutdown_interrupted_output()),
+                Some(chrono::Utc::now()),
+            );
+        }
         Ok(())
     }
 }

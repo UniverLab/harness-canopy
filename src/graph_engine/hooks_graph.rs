@@ -229,6 +229,7 @@ impl GraphEngine {
         let ensemble_concurrency = Arc::clone(&self.ensemble_concurrency);
         let dynamic_skills = self.dynamic_skills.clone();
         let spec_attempt_limit = self.spec_attempt_limit;
+        let shutdown = Arc::clone(&self.shutdown);
 
         tokio::spawn(async move {
             let engine = GraphEngine {
@@ -237,6 +238,7 @@ impl GraphEngine {
                 ensemble_concurrency,
                 dynamic_skills,
                 spec_attempt_limit,
+                shutdown,
             };
             if let Err(error) = engine
                 .run_graph(graph_id.clone(), queue_id, workdir_override, idea, None)

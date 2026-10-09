@@ -107,6 +107,11 @@ impl Database {
             for run in &dangling_runs {
                 Self::reconcile_orphan_run(&tx, lp, run)?;
             }
+            // CB82: graceful-shutdown rows were finalized Fail+`interrupted`
+            // by the engine (or the shutdown sweep), so the `running` query
+            // above misses them while their spec is still `Running` — repair
+            // those specs so retry resumes at the interrupted node itself.
+            Self::reconcile_interrupted_shutdown_runs(&tx, lp)?;
             // C1: flag this pause as reconciliation's own, distinct from an
             // operator's `graph_pause`/`graph_report_blocker` (both go through
             // `update_graph_status`, which always clears this flag) — see
@@ -191,21 +196,28 @@ impl Database {
                 run.id,
             ],
         )?;
-        // The engine never touches git (no more `git stash`): the
-        // partial work an interrupted run left in the workdir stays
-        // exactly where it is. Marking the spec `Interrupted` (not
-        // reset to `Pending`) is what used to be the stash's job —
-        // it's what tells the next pickup's rendered prompt to say
-        // "a previous attempt exists, continue it" instead of
-        // silently starting fresh. `spec_start_head` and
-        // `spec_committed_head` (C15) are still cleared: the next
-        // attempt captures its own fresh baseline and starts with no
-        // committed-head evidence of its own (`run_spec` only reuses
-        // a persisted baseline for a same-attempt resume of a
-        // `Running` spec, which an `Interrupted` pickup is not) — a
-        // restart must never let a *stale* `spec_committed_head` from
-        // the interrupted attempt pass a check for an attempt that
-        // hasn't committed anything itself yet.
+        Self::mark_spec_interrupted(tx, &run.spec_id)?;
+        Ok(())
+    }
+
+    /// Mark `spec_id` interrupted and clear its attempt baselines — the
+    /// shared half of every orphan reconciliation path. The engine never
+    /// touches git (no more `git stash`): the partial work an interrupted
+    /// run left in the workdir stays exactly where it is. Marking the spec
+    /// `Interrupted` (not reset to `Pending`) is what used to be the stash's
+    /// job — it's what tells the next pickup's rendered prompt to say "a
+    /// previous attempt exists, continue it" instead of silently starting
+    /// fresh. `spec_start_head` and `spec_committed_head` (C15) are still
+    /// cleared: the next attempt captures its own fresh baseline and starts
+    /// with no committed-head evidence of its own (`run_spec` only reuses a
+    /// persisted baseline for a same-attempt resume of a `Running` spec,
+    /// which an `Interrupted` pickup is not) — a restart must never let a
+    /// *stale* `spec_committed_head` from the interrupted attempt pass a
+    /// check for an attempt that hasn't committed anything itself yet.
+    pub(super) fn mark_spec_interrupted(
+        tx: &rusqlite::Transaction<'_>,
+        spec_id: &str,
+    ) -> Result<()> {
         tx.execute(
             "UPDATE graph_specs
              SET status = ?1, started_at = NULL, completed_at = NULL, spec_start_head = NULL, spec_committed_head = NULL,
@@ -213,11 +225,77 @@ impl Database {
              WHERE id = ?2",
             params![
                 GraphSpecStatus::Interrupted.as_str(),
-                run.spec_id,
+                spec_id,
                 Utc::now().timestamp_millis()
             ],
         )?;
         Ok(())
+    }
+
+    /// CB82 sweep for graceful-shutdown rows: bound specs (plus queue members
+    /// when the graph ran a queue) still `Running` whose latest run carries
+    /// the `interrupted` marker. Without this the spec would stay `Running`
+    /// instead of `Interrupted`, and `retry_current_node` could not resume
+    /// at the interrupted node itself.
+    pub(super) fn reconcile_interrupted_shutdown_runs(
+        tx: &rusqlite::Transaction<'_>,
+        lp: &Graph,
+    ) -> Result<()> {
+        let mut spec_ids: Vec<String> = {
+            let mut stmt = tx
+                .prepare("SELECT id FROM graph_specs WHERE graph_id = ?1 AND status = 'running'")?;
+            let rows = stmt.query_map(params![lp.id], |row| row.get(0))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        if let Some(queue_id) = lp.active_run_queue_id.as_deref() {
+            let mut stmt = tx.prepare(
+                "SELECT ls.id FROM queue_members pm
+                 JOIN graph_specs ls ON ls.id = pm.spec_id
+                 WHERE pm.queue_id = ?1 AND ls.status = 'running'",
+            )?;
+            let rows = stmt.query_map(params![queue_id], |row| row.get(0))?;
+            for id in rows.collect::<rusqlite::Result<Vec<String>>>()? {
+                if !spec_ids.contains(&id) {
+                    spec_ids.push(id);
+                }
+            }
+        }
+        for spec_id in &spec_ids {
+            if Self::spec_latest_run_was_interrupted(tx, spec_id)? {
+                tracing::warn!(
+                    "Reconciling orphaned graph '{}': spec '{}' ended interrupted by daemon shutdown; marking the spec interrupted.",
+                    lp.id,
+                    spec_id
+                );
+                Self::mark_spec_interrupted(tx, spec_id)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether the latest run for `spec_id` carries the CB82 `interrupted`
+    /// marker (engine finalizer or shutdown sweep).
+    fn spec_latest_run_was_interrupted(
+        tx: &rusqlite::Transaction<'_>,
+        spec_id: &str,
+    ) -> Result<bool> {
+        let output: Option<String> = tx
+            .query_row(
+                "SELECT output FROM graph_runs WHERE spec_id = ?1 ORDER BY started_at DESC LIMIT 1",
+                params![spec_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(text) = output else {
+            return Ok(false);
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+            return Ok(false);
+        };
+        Ok(value
+            .get("interrupted")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true))
     }
 
     /// Reset queue-member specs stuck `running` with no active node run in

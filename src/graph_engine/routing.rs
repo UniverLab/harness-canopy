@@ -313,11 +313,51 @@ pub(crate) const SUPERSEDE_REASON: &str = "superseded by a new attempt at this n
 /// nothing that terminates a run out-of-band can be missed here. A genuine
 /// agent output can never be mistaken for one: self-reports never set this
 /// key.
+///
+/// CB82 also recognises `{ "interrupted": true }`, written by the graceful-
+/// shutdown finalizer and the shutdown sweep — a late completion from a
+/// shutdown-killed run must likewise route no edge. Genuine node outputs
+/// never set either key, so genuine fails still route their fail edge.
 pub(crate) fn run_was_terminated_out_of_band(run: &GraphNodeRun) -> bool {
     let Some(output) = run.output.as_ref() else {
         return false;
     };
     output.get("terminated").and_then(Value::as_bool) == Some(true)
+        || output.get("interrupted").and_then(Value::as_bool) == Some(true)
+}
+
+/// CB82 output marker for a run cut short by daemon shutdown: `Fail` status
+/// with this output, never routed down any edge. Same shape as the crash
+/// path's `reconcile_orphan_run` marker, so resume/reconcile code treats
+/// graceful-shutdown rows exactly like crash rows.
+pub(crate) fn shutdown_interrupted_output() -> Value {
+    serde_json::json!({ "interrupted": true, "reason": "daemon shutdown" })
+}
+
+/// CB82 execution naming a shutdown interruption — a `Fail`-shaped verdict
+/// so rows settle uniformly, always paired with
+/// [`shutdown_interrupted_output`].
+pub(crate) fn interrupted_execution(summary: String) -> NodeExecution {
+    NodeExecution {
+        status: GraphRunStatus::Fail,
+        output: shutdown_interrupted_output(),
+        summary,
+    }
+}
+
+impl GraphEngine {
+    /// CB82: finalize `run_id` as interrupted by daemon shutdown and stop
+    /// silently — route no edge, fail nothing. The dispatch's outcome is
+    /// `Superseded`, whose dispatch semantics are exactly this.
+    pub(crate) fn finalize_shutdown_interrupted(&self, run_id: &str) -> SpecExecutionOutcome {
+        let _ = self.db.update_graph_run_result(
+            run_id,
+            GraphRunStatus::Fail,
+            Some(&shutdown_interrupted_output()),
+            Some(chrono::Utc::now()),
+        );
+        SpecExecutionOutcome::Superseded
+    }
 }
 
 /// Best-effort termination (B12) of `run`'s OS process, if it still has one

@@ -206,6 +206,15 @@ impl GraphEngine {
             "node run completed"
         );
 
+        // CB82: the daemon began graceful shutdown while this node ran (its
+        // process was or will be SIGTERMed). Finalize as interrupted and
+        // route no edge — never the fail edge a nonzero exit would take.
+        if self.is_shutting_down() {
+            return Ok(SpecStepFlow::Done(
+                self.finalize_shutdown_interrupted(&run_id),
+            ));
+        }
+
         // B42/2026-08-05: something terminated this run out from
         // under us — a newer attempt at this node, a concurrent
         // `graph_reset`, `graph_pause`, or budget/`fail_graph`
@@ -327,6 +336,15 @@ impl GraphEngine {
                 &mut state.round_robin_pins,
             )
             .await?;
+
+        // CB82: as in the single-node step, for the ensemble join — stamp the
+        // join row interrupted and route no edge, starting no further member.
+        // Member rows need no marker: the ensemble resume cursor is the join,
+        // and members always re-run as a set.
+        if self.is_shutting_down() {
+            self.stamp_ensemble_join_interrupted(ctx.spec, details)?;
+            return Ok(SpecStepFlow::Done(SpecExecutionOutcome::Superseded));
+        }
 
         // CB31: as in the single-node step — a wait-for-completion
         // pause landed on this ensemble step. Its members ran to

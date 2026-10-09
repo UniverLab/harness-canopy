@@ -67,6 +67,13 @@ impl GraphEngine {
         state: &mut SpecRunState,
         step: NodeStepResult,
     ) -> Result<SpecLoopFlow> {
+        // CB82 backstop choke point for every step type (single node,
+        // parallel quorum, no-verdict join): while shutting down, stop
+        // silently — never the `Error` edge in `apply_no_verdict_step`,
+        // never any routed edge.
+        if self.is_shutting_down() {
+            return Ok(SpecLoopFlow::Done(SpecExecutionOutcome::Superseded));
+        }
         if Self::is_no_verdict_execution(&step.execution) {
             return self.apply_no_verdict_step(ctx, state, &step).await;
         }

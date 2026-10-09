@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -90,6 +91,7 @@ impl GraphEngine {
             ensemble_concurrency: Arc::new(Semaphore::new(DEFAULT_ENSEMBLE_CONCURRENCY_CAP)),
             dynamic_skills: None,
             spec_attempt_limit: DEFAULT_MAX_SPEC_ATTEMPTS,
+            shutdown: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -118,6 +120,23 @@ impl GraphEngine {
     pub fn with_dynamic_skills(mut self, store: Arc<crate::dynamic_skills::SkillStore>) -> Self {
         self.dynamic_skills = Some(store);
         self
+    }
+
+    /// Share the daemon's shutdown flag with this engine (CB82) — the daemon
+    /// sets it first in graceful shutdown, before any node process is
+    /// SIGTERMed; the engine then finalizes in-flight runs as interrupted
+    /// instead of routing their edges.
+    pub fn with_shutdown_flag(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.shutdown = flag;
+        self
+    }
+
+    pub(crate) fn is_shutting_down(&self) -> bool {
+        self.shutdown.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn mark_shutting_down(&self) {
+        self.shutdown.store(true, Ordering::SeqCst);
     }
 }
 
@@ -165,6 +184,11 @@ pub struct GraphEngine {
     dynamic_skills: Option<Arc<crate::dynamic_skills::SkillStore>>,
     /// Cross-run attempt budget (C19) — see [`DEFAULT_MAX_SPEC_ATTEMPTS`].
     spec_attempt_limit: usize,
+    /// Process-wide daemon-shutdown flag (CB82): set once, as the first step
+    /// of graceful shutdown, before any node process is SIGTERMed. Guards in
+    /// `run_spec`/`spec_step`/ensemble loops check it before routing any edge
+    /// so a shutdown kill never traverses a fail edge.
+    shutdown: Arc<AtomicBool>,
 }
 
 /// Where a spec's sequential graph cursor currently is: at a single ordinary
@@ -22448,6 +22472,305 @@ exit 0
         assert_eq!(
             GraphEngine::ensemble_name_for_join(ensembles, "unknown-node"),
             "unknown-node"
+        );
+    }
+
+    // ── CB82: daemon shutdown must not route the killed node's fail edge ──
+
+    /// CB82: a check node whose process is killed while the shutdown flag is
+    /// set traverses no edge — its run output is the interrupted marker and
+    /// the fail-edge target never launches. Breaks if the `run_spec` (3.4)
+    /// guard is removed (B runs, A output is plain check-fail JSON).
+    #[tokio::test]
+    async fn shutdown_check_kill_traverses_no_edge_and_marks_interrupted() {
+        let (_dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+        db.insert_graph_node(&rights_node(&spec_id, "check-a", "false", None, 1))
+            .unwrap();
+        db.insert_graph_node(&rights_node(&spec_id, "check-b", "true", None, 2))
+            .unwrap();
+        db.insert_graph_edge(&GraphEdge {
+            id: "e-fail".to_string(),
+            spec_id: Some(spec_id.clone()),
+            graph_id: None,
+            from_node: "check-a".to_string(),
+            to_node: "check-b".to_string(),
+            condition: crate::domain::graphs::GraphEdgeCondition::Fail,
+        })
+        .unwrap();
+
+        // Simulate "shutdown began mid-run": the routing decision is
+        // synchronous, so a pre-set flag deterministically covers the kill
+        // without timing flakes.
+        engine.mark_shutting_down();
+        engine
+            .run_graph(graph_id, None, None, None, None)
+            .await
+            .unwrap();
+
+        let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
+        assert!(
+            runs.iter().all(|r| r.node_id != "check-b"),
+            "shutdown must not route the fail edge: check-b never launched, runs={runs:?}"
+        );
+        let run_a = runs
+            .iter()
+            .find(|r| r.node_id == "check-a")
+            .expect("check-a ran");
+        assert_eq!(run_a.status, GraphRunStatus::Fail);
+        let output = run_a.output.as_ref().expect("interrupted run has output");
+        assert_eq!(
+            output.get("interrupted").and_then(|v| v.as_bool()),
+            Some(true),
+            "killed run must carry the interrupted marker, output={output}"
+        );
+        assert_eq!(
+            output.get("reason").and_then(|v| v.as_str()),
+            Some("daemon shutdown")
+        );
+        assert!(
+            run_was_terminated_out_of_band(run_a),
+            "a late completion of the killed run must also route no edge"
+        );
+
+        // CB82 backstop (3.5): even an already-settled step routes no edge
+        // while the flag is set — covers parallel-quorum and no-verdict
+        // joins, which never pass through the `run_spec` guard above.
+        let lp = db.get_graph(&runs[0].graph_id).unwrap().unwrap();
+        let spec = db.get_graph_spec(&spec_id).unwrap().unwrap();
+        let nodes_by_id: HashMap<&str, &GraphNode> = HashMap::new();
+        let edges: Vec<GraphEdge> = Vec::new();
+        let ensembles: Vec<EnsembleDetails> = Vec::new();
+        let names: Vec<String> = Vec::new();
+        let ctx = SpecStepCtx {
+            lp: &lp,
+            spec: &spec,
+            workdir: "/tmp",
+            queue_id: None,
+            enforce_commit_rights: false,
+            edges: &edges,
+            ensembles: &ensembles,
+            nodes_by_id: &nodes_by_id,
+            all_node_names: &names,
+            spec_start_head: None,
+            spec_group: None,
+        };
+        let mut state = SpecRunState {
+            cursor: SpecCursor::Node("check-a".to_string()),
+            node_outputs: HashMap::new(),
+            resume_previous_output: None,
+            iterations: HashMap::new(),
+            previous_node_name: None,
+            spec_committed_head: None,
+            resumable_sessions: HashMap::new(),
+            round_robin_pins: HashMap::new(),
+        };
+        let step = NodeStepResult {
+            execution: NodeExecution {
+                status: GraphRunStatus::Fail,
+                output: serde_json::json!({"exit_code": 1}),
+                summary: "check-a failed".to_string(),
+            },
+            from_node_id: "check-a".to_string(),
+            run_id: None,
+            had_infra_crash: false,
+        };
+        let flow = engine
+            .apply_spec_step(&ctx, &mut state, step)
+            .await
+            .unwrap();
+        assert!(
+            matches!(flow, SpecLoopFlow::Done(SpecExecutionOutcome::Superseded)),
+            "apply_spec_step must stop silently during shutdown, routing no edge"
+        );
+    }
+
+    /// CB82: after simulated reconciliation, `retry_current_node` re-runs the
+    /// interrupted check itself — not the ensemble/node on its fail edge —
+    /// with the same input it had. Breaks if the reconcile sweep (3.8) is
+    /// missing (spec stays `Running`) or any later fail-edge row exists.
+    #[test]
+    fn reconcile_then_retry_reruns_interrupted_check_not_fail_edge() {
+        let (dir, db, _engine, graph_id, spec_id) = graph_fixture().unwrap();
+        db.insert_graph_node(&rights_node(&spec_id, "check-a", "false", None, 1))
+            .unwrap();
+        db.insert_graph_node(&rights_node(&spec_id, "check-b", "true", None, 2))
+            .unwrap();
+        db.insert_graph_edge(&GraphEdge {
+            id: "e-fail".to_string(),
+            spec_id: Some(spec_id.clone()),
+            graph_id: None,
+            from_node: "check-a".to_string(),
+            to_node: "check-b".to_string(),
+            condition: crate::domain::graphs::GraphEdgeCondition::Fail,
+        })
+        .unwrap();
+
+        // The engine's shutdown finalizer row: Fail + interrupted marker,
+        // with the input check-a saw (a check node re-runs the same command
+        // from config; an ensemble member keeps this `previous_feedback`).
+        let input = serde_json::json!({"previous_feedback": "do it again"});
+        db.insert_graph_run(&GraphNodeRun {
+            id: "run-a".to_string(),
+            graph_id: graph_id.clone(),
+            spec_id: spec_id.clone(),
+            node_id: "check-a".to_string(),
+            status: GraphRunStatus::Fail,
+            input: Some(input.clone()),
+            output: Some(serde_json::json!({"interrupted": true, "reason": "daemon shutdown"})),
+            started_at: chrono::Utc::now(),
+            completed_at: Some(chrono::Utc::now()),
+            iteration: 1,
+            pid: None,
+            boot_id: None,
+            session_id: None,
+            executed_platform: None,
+            executed_model: None,
+        })
+        .unwrap();
+        db.update_graph_status(&graph_id, GraphStatus::Running, None, None)
+            .unwrap();
+        db.update_graph_spec_status(&spec_id, GraphSpecStatus::Running, None, None)
+            .unwrap();
+
+        let reconciled = db.reconcile_orphaned_graphs(dir.path()).unwrap();
+        assert_eq!(reconciled, 1);
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        assert_eq!(lp.status, GraphStatus::Paused);
+        assert!(
+            lp.paused_by_reconciliation,
+            "reconciliation must flag its own pause"
+        );
+        let spec = db.get_graph_spec(&spec_id).unwrap().unwrap();
+        assert_eq!(
+            spec.status,
+            GraphSpecStatus::Interrupted,
+            "a spec whose latest run is shutdown-interrupted must reconcile to Interrupted, not stay Running"
+        );
+
+        // The `retry_current_node` path: `resolve_spec_start` with
+        // `is_resume=true` must yield the interrupted node itself (never the
+        // fail-edge target) with its original input.
+        let spec_details = db.get_graph_spec_details(&spec_id).unwrap().unwrap();
+        let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
+        assert!(
+            runs.iter().all(|r| r.node_id != "check-b"),
+            "no fail-edge row may exist after a shutdown kill"
+        );
+        let ensembles: Vec<EnsembleDetails> = Vec::new();
+        let (cursor, _outputs, previous, _iterations) = resolve_spec_start(
+            &spec_details.nodes,
+            &spec_details.edges,
+            &spec,
+            &runs,
+            &ensembles,
+            true,
+        )
+        .unwrap();
+        assert_eq!(cursor, SpecCursor::Node("check-a".to_string()));
+        assert_eq!(previous, Some(input));
+    }
+
+    /// CB82: an ensemble in flight when the flag is set starts no further
+    /// round-robin member. Breaks if the loop-head guard (3.6) is removed
+    /// (member rows appear — today the log shows "trying next" on shutdown).
+    #[tokio::test]
+    async fn shutdown_round_robin_starts_no_members() {
+        let (_dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+        insert_kind_ensemble(
+            &db,
+            &spec_id,
+            crate::domain::graphs::EnsembleKind::RoundRobin,
+            &[("rr-a", "rr-a"), ("rr-b", "rr-b")],
+        );
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        let spec = db.get_graph_spec(&spec_id).unwrap().unwrap();
+        let details = db.get_ensemble_details("ens1").unwrap().unwrap();
+
+        engine.mark_shutting_down();
+        let mut resumable_sessions = HashMap::new();
+        let mut round_robin_pins = HashMap::new();
+        let node_outputs = HashMap::new();
+        let all_node_names: Vec<String> = Vec::new();
+        let execution = engine
+            .execute_ensemble_round_robin(
+                &lp,
+                &spec,
+                &details,
+                None,
+                1,
+                &lp.workdir,
+                false,
+                &node_outputs,
+                &all_node_names,
+                &mut resumable_sessions,
+                &mut round_robin_pins,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            execution
+                .output
+                .get("interrupted")
+                .and_then(|v| v.as_bool()),
+            Some(true),
+            "interrupted walk must return the interrupted marker"
+        );
+        let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
+        assert!(
+            runs.iter()
+                .all(|r| r.node_id != "rr-a" && r.node_id != "rr-b"),
+            "no member may start during shutdown, runs={runs:?}"
+        );
+        assert!(
+            runs.iter().all(|r| r.node_id != "join1"),
+            "no join row is written for an interrupted walk, runs={runs:?}"
+        );
+    }
+
+    /// CB82: `run_was_terminated_out_of_band` treats the interrupted marker
+    /// like the terminated one, and still lets genuine fails route. A genuine
+    /// node output never sets either key (constraint: genuine fails keep
+    /// their fail edge).
+    #[test]
+    fn run_was_terminated_out_of_band_recognises_interrupted_marker() {
+        fn run_with_output(output: serde_json::Value) -> GraphNodeRun {
+            GraphNodeRun {
+                id: "run-1".to_string(),
+                graph_id: "wf-test".to_string(),
+                spec_id: "spec-test".to_string(),
+                node_id: "node-a".to_string(),
+                status: GraphRunStatus::Fail,
+                input: None,
+                output: Some(output),
+                started_at: chrono::Utc::now(),
+                completed_at: None,
+                iteration: 1,
+                pid: None,
+                boot_id: None,
+                session_id: None,
+                executed_platform: None,
+                executed_model: None,
+            }
+        }
+
+        assert!(
+            run_was_terminated_out_of_band(&run_with_output(
+                serde_json::json!({"interrupted": true, "reason": "daemon shutdown"})
+            )),
+            "Fail+interrupted:true is out-of-band"
+        );
+        assert!(
+            run_was_terminated_out_of_band(&run_with_output(
+                serde_json::json!({"terminated": true, "reason": "spec reset"})
+            )),
+            "Fail+terminated:true still recognised (unchanged)"
+        );
+        assert!(
+            !run_was_terminated_out_of_band(&run_with_output(
+                serde_json::json!({"exit_code": 1, "command": "false"})
+            )),
+            "a genuine check failure must still route its fail edge"
         );
     }
 }

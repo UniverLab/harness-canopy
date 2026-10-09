@@ -1,4 +1,5 @@
 use anyhow::Result;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use rmcp::ServiceExt;
@@ -53,11 +54,16 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
         &data_dir,
         &canopy_config.skills,
     ));
+    // CB82: the process-wide shutdown flag — set first in graceful shutdown,
+    // before any node process is SIGTERMed, so the engine finalizes in-flight
+    // runs as interrupted instead of routing their fail edges.
+    let shutdown_flag = Arc::new(AtomicBool::new(false));
     let graph_engine = Arc::new(
         GraphEngine::new(Arc::clone(&db), Arc::clone(&notification_service))
             .with_ensemble_concurrency_cap(canopy_config.ensemble_concurrency_cap)
             .with_spec_attempt_limit(canopy_config.spec_attempt_limit)
-            .with_dynamic_skills(Arc::clone(&dynamic_skills)),
+            .with_dynamic_skills(Arc::clone(&dynamic_skills))
+            .with_shutdown_flag(Arc::clone(&shutdown_flag)),
     );
     let watcher_engine = Arc::new(WatcherEngine::new(
         Arc::clone(&db),
@@ -106,7 +112,7 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
 
     bind_and_serve(router, port, ct).await?;
 
-    shutdown_http_server(background, watcher_engine, &db, &data_dir).await;
+    shutdown_http_server(background, watcher_engine, &db, &data_dir, &graph_engine).await;
 
     Ok(())
 }
@@ -317,7 +323,12 @@ async fn shutdown_http_server(
     watcher_engine: Arc<WatcherEngine>,
     db: &Arc<Database>,
     data_dir: &std::path::Path,
+    graph_engine: &Arc<GraphEngine>,
 ) {
+    // CB82: FIRST — before the scheduler/health cancels and before
+    // `terminate_all_...` sends SIGTERM — so the engine finalizes in-flight
+    // runs as interrupted instead of routing the fail edge of a killed node.
+    graph_engine.mark_shutting_down();
     background.scheduler_cancel.cancel();
     background.health_routine_cancel.cancel();
     if let Some(cancel) = background.announcements_cancel {
@@ -371,6 +382,11 @@ async fn log_mcp_error_responses(
 /// to fire, and a *sequential* terminate-and-wait per process would
 /// multiply the shutdown delay by the number of processes instead of
 /// bounding it by one grace period total.
+///
+/// CB82: the shutdown flag is already set before this runs, so rows still
+/// `Running` here are ones whose dispatch died without finalizing — they are
+/// marked `interrupted` (not `terminated`) so the same output-based check
+/// covers late completions from both the engine finalizer and this sweep.
 async fn terminate_all_running_node_processes_at_shutdown(db: &Database) {
     let Ok(runs) = db.list_all_running_graph_runs() else {
         return;
@@ -399,7 +415,7 @@ async fn terminate_all_running_node_processes_at_shutdown(db: &Database) {
         let _ = db.update_graph_run_result(
             &run.id,
             crate::domain::graphs::GraphRunStatus::Fail,
-            Some(&serde_json::json!({ "terminated": true, "reason": "daemon shutdown" })),
+            Some(&serde_json::json!({ "interrupted": true, "reason": "daemon shutdown" })),
             Some(chrono::Utc::now()),
         );
     }
