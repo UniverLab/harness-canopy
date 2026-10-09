@@ -13083,6 +13083,52 @@ mod endpoint_tests {
         assert!(db.list_graph_nodes(&spec.id).unwrap().is_empty());
     }
 
+    /// CM35 FR2: a node naming a platform whose registry entry is
+    /// `headless = false` (freebuff) is rejected by `graph_add_node` with the
+    /// exact spec wording, and nothing reaches the DB. A platform left at the
+    /// serde default (`headless` absent) is unaffected — the happy-path test
+    /// above still adds its `claude` node with this check in place.
+    #[tokio::test]
+    async fn graph_add_node_rejects_interactive_only_platform() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let _home = HomeVar::set(dir.path());
+        crate::domain::canopy_config::CanopyConfig {
+            clis: vec![crate::domain::cli_config::CliConfig {
+                name: "freebuff".to_string(),
+                binary: "freebuff".to_string(),
+                headless: false,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+        .save(&dir.path().join(".canopy"))
+        .unwrap();
+
+        let lp = insert_test_graph(&db, dir.path());
+        let spec = insert_test_spec(&db, &lp.id, 1);
+
+        let rejected = handler
+            .graph_add_node(Parameters(GraphAddNodeParams {
+                spec_id: Some(spec.id.clone()),
+                graph_id: None,
+                name: "Live Only".to_string(),
+                kind: Some("agent".to_string()),
+                config: Some(agent_node_config("freebuff")),
+                blueprint: None,
+                config_overrides: None,
+            }))
+            .await
+            .unwrap();
+        assert!(is_err(&rejected), "{}", text(&rejected));
+        assert!(
+            raw_text(&rejected)
+                .contains("platform 'freebuff' is interactive-only (no headless mode)"),
+            "{}",
+            raw_text(&rejected)
+        );
+        assert!(db.list_graph_nodes(&spec.id).unwrap().is_empty());
+    }
+
     #[tokio::test]
     async fn graph_update_node_renames_and_validates() {
         let (dir, db, handler) = endpoint_test_handler();

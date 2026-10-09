@@ -277,16 +277,22 @@ impl NewAgentDialog {
             .get(idx)
             .map(|c| c.as_str())
             .unwrap_or("");
-        let display = self
-            .cli_configs
-            .get(idx)
-            .and_then(|c| c.as_ref())
+        let config = self.cli_configs.get(idx).and_then(|c| c.as_ref());
+        let display = config
             .map(|c| c.display_name())
             .unwrap_or_else(|| slug.to_string());
-        if display == slug {
+        let base = if display == slug {
             display
         } else {
             format!("{display} ({slug})")
+        };
+        // CM35: interactive-only platforms stay selectable for a live
+        // session — never filtered out — but are marked so the user knows
+        // what this harness can and cannot do.
+        if config.is_some_and(|c| !c.headless) {
+            format!("{base} (interactive only)")
+        } else {
+            base
         }
     }
 
@@ -866,6 +872,7 @@ mod tests {
             name: "antigravity".into(),
             binary: "agy".into(),
             headless_mode: String::new(),
+            headless: true,
             model_flag: None,
             supports_working_dir: false,
             working_dir_flag: None,
@@ -1038,6 +1045,7 @@ mod tests {
             name: "test".into(),
             binary: "test".into(),
             headless_mode: String::new(),
+            headless: true,
             model_flag: None,
             supports_working_dir: false,
             working_dir_flag: None,
@@ -1097,6 +1105,7 @@ mod tests {
             name: "test".into(),
             binary: "test".into(),
             headless_mode: String::new(),
+            headless: true,
             model_flag: None,
             supports_working_dir: false,
             working_dir_flag: None,
@@ -1157,6 +1166,7 @@ mod tests {
             name: "test".into(),
             binary: "test".into(),
             headless_mode: String::new(),
+            headless: true,
             model_flag: None,
             supports_working_dir: false,
             working_dir_flag: None,
@@ -1236,6 +1246,7 @@ mod tests {
             name: "test".into(),
             binary: "test".into(),
             headless_mode: String::new(),
+            headless: true,
             model_flag: None,
             supports_working_dir: false,
             working_dir_flag: None,
@@ -1456,6 +1467,7 @@ mod tests {
             name: "test".into(),
             binary: "test".into(),
             headless_mode: String::new(),
+            headless: true,
             model_flag: None,
             supports_working_dir: false,
             working_dir_flag: None,
@@ -1504,6 +1516,7 @@ mod tests {
             name: "test".into(),
             binary: "test".into(),
             headless_mode: String::new(),
+            headless: true,
             model_flag: None,
             supports_working_dir: false,
             working_dir_flag: None,
@@ -1552,6 +1565,7 @@ mod tests {
             name: "test".into(),
             binary: "test".into(),
             headless_mode: String::new(),
+            headless: true,
             model_flag: None,
             supports_working_dir: false,
             working_dir_flag: None,
@@ -1600,6 +1614,7 @@ mod tests {
             name: "test".into(),
             binary: "test".into(),
             headless_mode: String::new(),
+            headless: true,
             model_flag: None,
             supports_working_dir: false,
             working_dir_flag: None,
@@ -1648,6 +1663,7 @@ mod tests {
             name: "test".into(),
             binary: "test".into(),
             headless_mode: String::new(),
+            headless: true,
             model_flag: None,
             supports_working_dir: false,
             working_dir_flag: None,
@@ -1697,6 +1713,7 @@ mod tests {
             name: "test".into(),
             binary: "test".into(),
             headless_mode: String::new(),
+            headless: true,
             model_flag: None,
             supports_working_dir: false,
             working_dir_flag: None,
@@ -1779,6 +1796,7 @@ mod tests {
             name: "test".into(),
             binary: "test".into(),
             headless_mode: String::new(),
+            headless: true,
             model_flag: None,
             supports_working_dir: false,
             working_dir_flag: None,
@@ -1831,6 +1849,7 @@ mod tests {
             name: "test".into(),
             binary: "test".into(),
             headless_mode: String::new(),
+            headless: true,
             model_flag: None,
             supports_working_dir: false,
             working_dir_flag: None,
@@ -1910,6 +1929,7 @@ mod tests {
             name: "opencode".into(),
             binary: "opencode".into(),
             headless_mode: String::new(),
+            headless: true,
             model_flag: None,
             supports_working_dir: false,
             working_dir_flag: None,
@@ -1966,6 +1986,7 @@ mod tests {
             name: "opencode".into(),
             binary: "opencode".into(),
             headless_mode: String::new(),
+            headless: true,
             model_flag: None,
             supports_working_dir: false,
             working_dir_flag: None,

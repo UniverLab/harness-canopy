@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 /// Complete CLI definition from the registry.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CliConfig {
     #[serde(default)]
     pub name: String,
@@ -17,6 +17,13 @@ pub struct CliConfig {
     pub binary: String,
     #[serde(default)]
     pub headless_mode: String,
+    /// False marks a platform that can only host a live interactive session
+    /// (no headless/print mode), e.g. freebuff v0.1.2. Such platforms stay
+    /// available for interactive sessions but must never run a graph node or
+    /// answer a probe. Defaults to true so every existing platform is
+    /// unchanged.
+    #[serde(default = "default_headless")]
+    pub headless: bool,
     #[serde(default)]
     pub model_flag: Option<String>,
     #[serde(default)]
@@ -236,6 +243,60 @@ pub struct CliConfig {
     pub tool_name: Option<String>,
 }
 
+/// Hand-written (not derived) so [`CliConfig::headless`] defaults to `true`,
+/// matching its serde default: a default-constructed `CliConfig` means an
+/// ordinary headless-capable platform, exactly like one deserialized from a
+/// registry entry that never mentions the field. Leaving the derived
+/// `Default` (which would give `headless = false`) would make every
+/// test/fixture that builds a platform with `..Default::default()` look
+/// interactive-only. Every other field keeps the derived default —
+/// including `paste_submit_presses = 0` (the serde default is 1, applied
+/// only on deserialization).
+impl Default for CliConfig {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            binary: String::new(),
+            headless_mode: String::new(),
+            headless: true,
+            model_flag: None,
+            supports_working_dir: false,
+            working_dir_flag: None,
+            env_vars: std::collections::HashMap::new(),
+            interactive_args: None,
+            fallback_interactive_args: None,
+            resume_args: None,
+            session_list_cmd: None,
+            session_resume_cmd: None,
+            session_id_set_flag: None,
+            session_list_format_args: None,
+            session_id_pattern: None,
+            session_title_flag: None,
+            session_list_args: None,
+            session_end_args: None,
+            models_list_cmd: None,
+            identity_check: None,
+            identity_args: None,
+            identity_pattern: None,
+            accent_color: None,
+            yolo_flag: None,
+            trust_flag: None,
+            instruction_file: None,
+            prompt_via_stdin: false,
+            paste_submit_delay_ms: None,
+            paste_submit_key: None,
+            paste_submit_presses: 0,
+            invocation_template: None,
+            effort_declaration: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
+            provider: None,
+            tool_name: None,
+        }
+    }
+}
+
 /// Display string for a platform slug: "Provider · Tool" when both known,
 /// "Tool" when only tool known, slug otherwise. Pure; never used for matching.
 pub fn platform_display_name(
@@ -338,6 +399,22 @@ pub fn model_rejection_reason(
             "platform '{platform}' cannot select a model; requested model '{model}' was not applied"
         ))
     }
+}
+
+/// The single wording every interactive-only rejection uses — a platform
+/// whose registry entry sets `headless = false` (freebuff v0.1.2). Produced
+/// here so `graph_add_node`/`graph_update_node`, the ensemble handlers,
+/// `agent_add`, `agent_probe` and `graph_preflight` can never drift apart on
+/// the message a caller sees (CM35).
+pub fn interactive_only_reason(platform: &str) -> String {
+    format!("platform '{platform}' is interactive-only (no headless mode)")
+}
+
+/// serde default for [`CliConfig::headless`]: a platform is headless-capable
+/// unless its registry entry explicitly says otherwise, so the field's
+/// absence leaves every existing platform's behaviour unchanged.
+fn default_headless() -> bool {
+    true
 }
 
 fn default_paste_submit_presses() -> u8 {
@@ -527,6 +604,7 @@ mod tests {
             name: "opencode".to_string(),
             binary: "opencode".to_string(),
             headless_mode: "--headless".to_string(),
+            headless: true,
             model_flag: Some("--model".to_string()),
             supports_working_dir: true,
             working_dir_flag: Some("--dir".to_string()),
@@ -808,6 +886,9 @@ mod tests {
         assert!(config.name.is_empty());
         assert!(config.binary.is_empty());
         assert!(config.headless_mode.is_empty());
+        // Hand-written `Default` matches the serde default here so a
+        // default-built platform is never mistaken for interactive-only.
+        assert!(config.headless);
         assert!(config.model_flag.is_none());
         assert!(!config.supports_working_dir);
         assert!(config.working_dir_flag.is_none());
@@ -863,6 +944,43 @@ mod tests {
         let config: CliConfig = serde_json::from_str("{}").unwrap();
         assert!(config.name.is_empty());
         assert!(config.binary.is_empty());
+    }
+
+    /// CM35: a registry entry that never mentions `headless` (every platform
+    /// but freebuff) is headless-capable. The serde default is what the
+    /// registry TOML path (`Platform::to_platform_with_cli`) exercises, so
+    /// this is the guarantee that the new field changes nothing for the
+    /// platforms that already exist.
+    #[test]
+    fn headless_defaults_to_true_when_absent() {
+        let config: CliConfig = serde_json::from_value(serde_json::json!({
+            "binary": "x",
+        }))
+        .unwrap();
+        assert!(config.headless);
+    }
+
+    /// CM35: `headless = false` parses to `false` — the field the freebuff
+    /// registry entry sets to mark itself interactive-only.
+    #[test]
+    fn headless_false_parses() {
+        let config: CliConfig = serde_json::from_value(serde_json::json!({
+            "binary": "x",
+            "headless": false,
+        }))
+        .unwrap();
+        assert!(!config.headless);
+    }
+
+    /// CM35: the exact wording every interactive-only rejection must carry,
+    /// byte-for-byte, as the spec mandates. Every call site routes through
+    /// [`interactive_only_reason`], so this pins the one string they share.
+    #[test]
+    fn interactive_only_reason_matches_spec_wording() {
+        assert_eq!(
+            interactive_only_reason("freebuff"),
+            "platform 'freebuff' is interactive-only (no headless mode)"
+        );
     }
 
     #[test]

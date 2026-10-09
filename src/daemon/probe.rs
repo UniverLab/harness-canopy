@@ -97,6 +97,11 @@ pub(crate) enum ProbeOutcome {
     /// `platform` names a CLI that isn't in `~/.canopy/config.toml` — no
     /// process was ever spawned.
     NotConfigured,
+    /// The platform is configured but marked `headless = false` — it can host
+    /// interactive sessions only. No process was ever spawned; probing it
+    /// headlessly would fail at run time with an "unknown option" parser
+    /// error that says nothing real about the platform (CM35, freebuff).
+    InteractiveOnly,
     /// The command could not even be built/spawned/waited on (binary not
     /// resolvable, permission denied, a `wait()` syscall failure) — distinct
     /// from `Broken` because the harness's own error-reporting was never
@@ -131,6 +136,7 @@ impl ProbeOutcome {
             Self::WrongBinary => "wrong_binary",
             Self::TimedOut => "timed_out",
             Self::NotConfigured => "not_configured",
+            Self::InteractiveOnly => "interactive_only",
             Self::SpawnFailed => "spawn_failed",
             Self::Unknown => "unknown",
             Self::Substituted => "substituted",
@@ -325,6 +331,15 @@ pub(crate) async fn probe_target(
         return probe_not_configured(target, start);
     };
 
+    // CM35: a platform marked `headless = false` (freebuff v0.1.2) has no
+    // print/headless invocation at all — building one would spawn a process
+    // whose own parser rejects `--print`/`--headless`/`-p` with "unknown
+    // option", a verdict about canopy's command line, not about the platform.
+    // Report it interactive-only without spawning anything.
+    if !cli_config.headless {
+        return probe_interactive_only(target, start);
+    }
+
     let strategy = CliStrategy::from_cli_config(cli_config);
 
     // A model was requested but this platform's CLI has no usable model flag
@@ -416,6 +431,22 @@ fn probe_not_configured(target: &ProbeTarget, start: Instant) -> ProbeReport {
             "Platform '{}' is not configured in canopy (~/.canopy/config.toml).",
             target.platform
         )),
+    }
+}
+
+/// The report for a configured-but-interactive-only platform (see the check
+/// in [`probe_target`]): nothing was spawned, and the message is the single
+/// shared wording so it matches every handler rejection byte-for-byte.
+fn probe_interactive_only(target: &ProbeTarget, start: Instant) -> ProbeReport {
+    ProbeReport {
+        platform: target.platform.clone(),
+        model: target.model.clone(),
+        outcome: ProbeOutcome::InteractiveOnly,
+        duration_ms: start.elapsed().as_millis(),
+        error: Some(crate::domain::cli_config::interactive_only_reason(
+            &target.platform,
+        )),
+        argv: None,
     }
 }
 
@@ -732,6 +763,44 @@ mod tests {
         let report = probe_target(&config, &target, None, Duration::from_secs(5)).await;
         assert_eq!(report.outcome, ProbeOutcome::NotConfigured);
         assert!(report.error.unwrap().contains("ghost-cli"));
+    }
+
+    /// CM35: a platform marked `headless = false` is reported
+    /// `interactive_only` and **no process is spawned** — proven by a fixture
+    /// that would `touch` a marker file if it ever executed. The marker's
+    /// absence is the "fake spawner receives no call" assertion; the outcome,
+    /// its `as_str`, the exact shared wording, and a `None` argv pin the rest.
+    /// Breaks if the gate moves after `from_cli_config`/spawn, or if the
+    /// outcome is reported as `not_configured`/`spawn_failed`.
+    #[tokio::test]
+    async fn probe_target_reports_interactive_only_without_spawning() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("spawned-marker");
+        let script = write_script(
+            &dir,
+            "freebuff",
+            &format!("touch '{}'\necho should-not-run\n", marker.display()),
+        );
+        let mut config = config_with_cli("freebuff", &script);
+        config.clis[0].headless = false;
+        let target = ProbeTarget {
+            platform: "freebuff".to_string(),
+            model: None,
+            effort: None,
+        };
+        let report = probe_target(&config, &target, None, Duration::from_secs(5)).await;
+        assert_eq!(report.outcome, ProbeOutcome::InteractiveOnly);
+        assert!(!report.outcome.reachable());
+        assert_eq!(report.outcome.as_str(), "interactive_only");
+        assert_eq!(
+            report.error.as_deref(),
+            Some("platform 'freebuff' is interactive-only (no headless mode)")
+        );
+        assert!(report.argv.is_none());
+        assert!(
+            !marker.exists(),
+            "probe must not spawn a process for an interactive-only platform"
+        );
     }
 
     #[tokio::test]

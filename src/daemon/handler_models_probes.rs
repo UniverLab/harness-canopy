@@ -41,6 +41,20 @@ impl TaskTriggerHandler {
             if let Some(err) = validate_platform_configured(platform) {
                 return Ok(error_result(&err));
             }
+            // CM35: an interactive-only platform has no headless invocation to
+            // enumerate models with — return an empty list with the reason
+            // rather than run `models_list_cmd` or fall through to models.dev.
+            if let Some(msg) = crate::daemon::handler_helpers::interactive_only_rejection(platform)
+            {
+                return Ok(CallToolResult::success(vec![Content::text(
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "platform": platform,
+                        "models": [],
+                        "reason": msg,
+                    }))
+                    .unwrap_or_default(),
+                )]));
+            }
             // Registry-driven: a platform that can enumerate its own models is
             // the authoritative source of passable ids (each line is the literal
             // string its model flag accepts, prefix and all). models.dev cannot

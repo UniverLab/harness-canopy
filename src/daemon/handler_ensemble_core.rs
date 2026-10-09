@@ -441,6 +441,10 @@ pub(crate) fn validate_ensemble_members(
             if platform.is_empty() {
                 return Err("Ensemble member 'platform' must not be empty.".to_string());
             }
+            if let Some(msg) = crate::daemon::handler_helpers::interactive_only_rejection(platform)
+            {
+                return Err(msg);
+            }
             let model = member
                 .model
                 .as_deref()

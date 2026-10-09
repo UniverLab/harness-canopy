@@ -304,6 +304,30 @@ pub(crate) fn map_action_result<T>(
     }
 }
 
+/// `Some(reason)` when `platform` is configured in canopy and its registry
+/// entry is marked `headless = false` — that platform can host a live
+/// interactive session but can never run a graph node, an ensemble member, a
+/// background agent, or answer a probe (CM35, freebuff v0.1.2).
+///
+/// `None` for an *unconfigured* platform: no node/ensemble/agent handler
+/// checks configuration membership today, so an unknown platform keeps its
+/// existing behaviour at every call site — only a platform canopy knows about
+/// can be known to be interactive-only.
+///
+/// Home resolution mirrors `Cli::strategy` (`CANOPY_HOME_OVERRIDE` first, then
+/// `dirs::home_dir`) so handler tests can point it at a fixture config.
+pub(crate) fn interactive_only_rejection(platform: &str) -> Option<String> {
+    let home = std::env::var_os("CANOPY_HOME_OVERRIDE")
+        .map(std::path::PathBuf::from)
+        .or_else(dirs::home_dir)?;
+    let config = crate::domain::canopy_config::CanopyConfig::load(&home.join(".canopy"));
+    let cli = config.get_cli(platform)?;
+    if cli.headless {
+        return None;
+    }
+    Some(crate::domain::cli_config::interactive_only_reason(platform))
+}
+
 // ── Intelligence context helpers ─────────────────────────────────
 
 use crate::db::Database;

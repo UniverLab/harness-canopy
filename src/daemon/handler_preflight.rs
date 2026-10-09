@@ -506,6 +506,7 @@ impl TaskTriggerHandler {
                     "spec_warnings": spec_warnings,
                     "graph_warnings": graph_warnings,
                     "stale_name_warnings": stale_name_warnings,
+                    "interactive_only_warnings": Vec::<serde_json::Value>::new(),
                     "dirty_workdir_warning": dirty_workdir_warning.clone(),
                     "review": reviewer_out,
                     "terminals": terminal_list,
@@ -581,6 +582,26 @@ impl TaskTriggerHandler {
             })
             .collect();
 
+        // CM35: flag every existing node/member/hook that points at a platform
+        // marked `headless = false` — the probe above already reports it
+        // `interactive_only`, and this surfaces which parts of the graph use
+        // it. Advisory only: preflight never fails on this.
+        let interactive_only_warnings: Vec<serde_json::Value> = graph_targets
+            .iter()
+            .filter_map(|lt| {
+                let cli = config.get_cli(&lt.target.platform)?;
+                (!cli.headless).then(|| {
+                    serde_json::json!({
+                        "used_by": lt.used_by,
+                        "platform": lt.target.platform,
+                        "warning": crate::domain::cli_config::interactive_only_reason(
+                            &lt.target.platform,
+                        ),
+                    })
+                })
+            })
+            .collect();
+
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&serde_json::json!({
                 "graph_id": params.graph_id,
@@ -590,6 +611,7 @@ impl TaskTriggerHandler {
                 "unknown": crate::daemon::probe::unknown_count(&reports),
                 "probes": probes,
                 "effort_warnings": effort_warnings,
+                "interactive_only_warnings": interactive_only_warnings,
                 "spec_warnings": spec_warnings,
                 "graph_warnings": graph_warnings,
                 "stale_name_warnings": stale_name_warnings,

@@ -366,14 +366,21 @@ pub(super) fn binary_is_executable(path: &Path) -> bool {
 /// ("Provider · Tool" when the registry knows both), with the slug in
 /// brackets when it differs so the user still knows what to type in
 /// config.toml and flags. A platform with no provider/tool_name renders
-/// the legacy exact slug string. Delegates to `CliConfig::display_name`;
-/// never used for matching.
+/// the legacy exact slug string. CM35: a platform marked `headless = false`
+/// is appended ` (interactive only)` so doctor names it as interactive-only
+/// rather than implying it can run a graph node. Delegates to
+/// `CliConfig::display_name`; never used for matching.
 pub(super) fn doctor_cli_label(cli_config: &crate::domain::cli_config::CliConfig) -> String {
     let display = cli_config.display_name();
-    if display == cli_config.name {
+    let base = if display == cli_config.name {
         display
     } else {
         format!("{} [{}]", display, cli_config.name)
+    };
+    if cli_config.headless {
+        base
+    } else {
+        format!("{base} (interactive only)")
     }
 }
 

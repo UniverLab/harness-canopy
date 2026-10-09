@@ -948,6 +948,10 @@ mod tests {
             name: "mistral".to_string(),
             provider: Some("Mistral AI".to_string()),
             tool_name: Some("Vibe".to_string()),
+            // Explicit: `Default` derives `headless = false`, and this fixture
+            // represents an ordinary headless-capable platform (the serde
+            // default is what production configs get).
+            headless: true,
             ..Default::default()
         };
         assert_eq!(super::doctor_cli_label(&cli), "Mistral AI · Vibe [mistral]");
@@ -955,6 +959,24 @@ mod tests {
         cli.tool_name = None;
         assert_eq!(cli.display_name(), "mistral");
         assert_eq!(super::doctor_cli_label(&cli), "mistral");
+    }
+
+    /// CM35: doctor marks a `headless = false` platform `(interactive only)`
+    /// without changing its display/slug rendering. Fails if the marker is
+    /// dropped.
+    #[test]
+    fn doctor_cli_label_marks_interactive_only_platform() {
+        let cli = crate::domain::cli_config::CliConfig {
+            name: "freebuff".to_string(),
+            provider: Some("Codebuff".to_string()),
+            tool_name: Some("Freebuff".to_string()),
+            headless: false,
+            ..Default::default()
+        };
+        assert_eq!(
+            super::doctor_cli_label(&cli),
+            "Codebuff · Freebuff [freebuff] (interactive only)"
+        );
     }
 
     #[test]

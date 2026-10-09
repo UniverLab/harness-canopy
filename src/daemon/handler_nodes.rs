@@ -66,6 +66,9 @@ impl TaskTriggerHandler {
         if let Err(e) = validate_node_config(kind, &config) {
             return Ok(error_result(&e));
         }
+        if let Some(msg) = reject_interactive_only_platform(&config) {
+            return Ok(error_result(&msg));
+        }
 
         let (spec_id, graph_id, next_position) = match &target {
             GraphTarget::Spec(spec_id) => {
@@ -238,6 +241,9 @@ impl TaskTriggerHandler {
             let effective_kind = kind.unwrap_or(node.kind);
             if let Err(e) = validate_node_config(effective_kind, &effective_config) {
                 return Ok(error_result(&e));
+            }
+            if let Some(msg) = reject_interactive_only_platform(&effective_config) {
+                return Ok(error_result(&msg));
             }
             // A router's routes must stay consistent with whatever edges
             // already name them: no edge left pointing at a route that was
@@ -414,6 +420,23 @@ pub(crate) fn config_has_agent_harness(map: &serde_json::Map<String, serde_json:
             .is_some_and(|s| !s.trim().is_empty())
     };
     has_non_empty_str("platform") || has_non_empty_str("cli")
+}
+
+/// `graph_add_node`/`graph_update_node`'s interactive-only gate (CM35):
+/// `Some(reason)` when the node's effective config names a harness marked
+/// `headless = false`. Extracts the platform exactly the way
+/// [`validate_node_config`]'s `Agent` arm (via [`config_has_agent_harness`])
+/// does — a non-empty `platform` (or `cli`) string; a config of another kind
+/// carries no platform, so this returns `None` for it. An unconfigured
+/// platform is untouched (see `interactive_only_rejection`).
+fn reject_interactive_only_platform(config: &serde_json::Value) -> Option<String> {
+    let map = config.as_object()?;
+    let platform = ["platform", "cli"]
+        .iter()
+        .filter_map(|field| map.get(*field).and_then(serde_json::Value::as_str))
+        .map(str::trim)
+        .find(|s| !s.is_empty())?;
+    crate::daemon::handler_helpers::interactive_only_rejection(platform)
 }
 
 /// Every config key an `agent` node is actually read for — see

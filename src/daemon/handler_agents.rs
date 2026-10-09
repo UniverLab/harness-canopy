@@ -55,6 +55,12 @@ impl TaskTriggerHandler {
             Err(e) => return Ok(error_result(&e)),
         };
 
+        if let Some(msg) =
+            crate::daemon::handler_helpers::interactive_only_rejection(prepared.cli.as_str())
+        {
+            return Ok(error_result(&msg));
+        }
+
         if let Err(error) =
             crate::domain::cli_strategy::ensure_cli_installed(prepared.cli.as_str()).await
         {
