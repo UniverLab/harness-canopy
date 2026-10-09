@@ -193,20 +193,52 @@ impl GraphEngine {
             .map(|s| s.id))
     }
 
+    /// CB69/FR1: the display name for a spec in the dirty-start message —
+    /// the name when non-blank, otherwise its id. A single implementation
+    /// point keeps the two call sites (predecessor and next spec) from
+    /// diverging.
+    fn dirty_display_name(spec: &GraphSpec) -> String {
+        let t = spec.name.trim();
+        if t.is_empty() {
+            spec.id.clone()
+        } else {
+            spec.name.clone()
+        }
+    }
+
+    /// CB69/FR1: the parenthesised detail for the blocking predecessor in the
+    /// refusal message, e.g. `spec 'A' (graph 'G1', failed 2026-…)`.
+    /// Uses the raw `graph_id` (not a name lookup) to avoid an extra fallible
+    /// DB call; "standalone" covers `None` backlog rows the predecessor query
+    /// can return. End time falls back to `started_at` for interrupted rows
+    /// that may lack `completed_at` after boot reconciliation.
+    fn dirty_predecessor_detail(predecessor: &GraphSpec) -> String {
+        let display = Self::dirty_display_name(predecessor);
+        let graph = predecessor.graph_id.as_deref().unwrap_or("standalone");
+        let status = predecessor.status.as_str();
+        let time = predecessor
+            .completed_at
+            .map(|t| t.to_rfc3339())
+            .or_else(|| predecessor.started_at.map(|t| t.to_rfc3339()))
+            .unwrap_or_else(|| "unknown time".to_string());
+        format!("spec '{display}' (graph '{graph}', {status} {time})")
+    }
+
     /// CM29/CB69: whether launching the next spec in `workdir` should be refused
     /// because a different, earlier spec on this same workdir ended without
     /// completing and left the tree dirty (`find_dirty_predecessor_spec` — the
-    /// BLOCKING predicate, unchanged) and which spec the message should name.
-    /// The named spec (CB69) comes from `find_last_dirty_run_spec`: the spec
-    /// whose recorded run in `graph_id` last left the workdir dirty; when this
-    /// graph never recorded dirt the message says "dirty before this graph ran"
-    /// and names no spec. Read-only: two DB lookups plus one live
+    /// BLOCKING predicate, unchanged). On refusal the message names the blocking
+    /// predecessor from `find_dirty_predecessor_spec`; when the next spec is
+    /// resuming its own dirt that sentence also names the next spec. On launch
+    /// the attribution comes from `find_last_dirty_run_spec` (the spec whose
+    /// recorded run in `graph_id` last left the workdir dirty; "dirty before
+    /// this graph ran" when none did). Read-only: two DB lookups plus one live
     /// `git status --porcelain` call (captured only when a notice can exist —
     /// same short-circuit cost as before, plus the resume case).
     /// When the launch proceeds the message says WHY: the graph's
     /// `allow_dirty_start` flag, or — when no predecessor blocks and the next
-    /// spec is the one that left the dirt — the spec resuming its own dirty
-    /// work (that case previously produced no message at all).
+    /// spec is resuming the dirt it left itself — the spec resuming its own
+    /// dirty work (that case previously produced no message at all).
     pub async fn dirty_start_check(
         &self,
         graph_id: &str,
@@ -214,9 +246,10 @@ impl GraphEngine {
         next_spec_id: Option<&str>,
         allow_dirty_start: bool,
     ) -> Result<Option<DirtyStartNotice>> {
-        // Blocking predicate: unchanged from CM29. The result is used only as a
-        // boolean (plus its existing exclusion of next_spec_id) — the NAME in
-        // the message comes from the attribution query below, never from it.
+        // Blocking predicate: unchanged from CM29. The result is used as a
+        // boolean (plus its existing exclusion of next_spec_id); on refusal
+        // the message names this predicate's spec (FR1/FR2), not the
+        // attribution below.
         let predecessor = self.db.find_dirty_predecessor_spec(workdir, next_spec_id)?;
         let attributed = self.db.find_last_dirty_run_spec(graph_id)?;
         let resuming = match (&attributed, next_spec_id) {
@@ -245,14 +278,24 @@ impl GraphEngine {
         let head = format!("workdir '{workdir}' is dirty ({count} entr{plural})");
         let refuse = predecessor.is_some() && !allow_dirty_start;
         let message = if refuse {
-            format!("{head} — {attribution} — not launched. Set allow_dirty_start on the graph to launch anyway.")
+            let pred = predecessor.as_ref().expect("refuse implies a predecessor");
+            let detail = Self::dirty_predecessor_detail(pred);
+            if resuming {
+                let next_name = match (&attributed, next_spec_id) {
+                    (Some(spec), Some(_)) => Self::dirty_display_name(spec),
+                    _ => next_spec_id.unwrap_or("unknown").to_string(),
+                };
+                format!(
+                    "{head} — spec '{next_name}' is resuming its own dirty work, but {detail} also ended dirty on this workdir — not launched. Set allow_dirty_start on the graph to launch anyway."
+                )
+            } else {
+                format!("{head} — {detail} also ended dirty on this workdir — not launched. Set allow_dirty_start on the graph to launch anyway.")
+            }
         } else if predecessor.is_some() {
-            // A blocking predecessor existed; the flag is what let it through.
             format!(
                 "{head} — {attribution} — launched because allow_dirty_start is set on the graph."
             )
         } else {
-            // No predecessor blocks; the only way here is `resuming == true`.
             format!("{head} — {attribution} — launched: the next spec is the one that left the dirt, resuming its own work.")
         };
         Ok(Some(DirtyStartNotice { refuse, message }))

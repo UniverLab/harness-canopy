@@ -74,7 +74,12 @@ workdir is currently dirty and a spec on that same workdir ended `Failed`,
 whose last recorded run in **this graph** left the workdir dirty
 (`graph_runs` joined to `spec_end_dirty > 0`); when no run of this graph
 recorded dirt the warning says `dirty before this graph ran` and names no
-spec. When the launch proceeds, the warning says why — `allow_dirty_start` is
+spec. A resuming spec is still refused while another spec on the same workdir
+ended dirty: the refusal names the blocking predecessor — its name (id when
+the name is empty), the graph it ran in, its end status and end time — and,
+when the next spec is resuming its own dirt, says so in the same line. Finish,
+reset or remove that blocking spec (or set `allow_dirty_start`) to proceed.
+When the launch proceeds, the warning says why — `allow_dirty_start` is
 set on the graph, or the next spec is resuming the dirty work it left itself —
 instead of telling you to set a flag. When it blocks, the message says
 `not launched` before the `Set allow_dirty_start` hint. Set

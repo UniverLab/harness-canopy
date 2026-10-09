@@ -12009,9 +12009,9 @@ mod endpoint_tests {
         let git_dir = tempdir().unwrap();
         init_git_repo(git_dir.path());
 
-        // The failed spec belongs to *another* graph and never recorded
-        // `spec_end_dirty` — no run of `lp` recorded this dirt (CB69 FR1),
-        // so the refusal keeps the CM29 block but names no spec.
+        // Spec A ended Failed on this workdir in another graph — it is the
+        // blocking predecessor. No run of `lp` recorded the dirt, so there is
+        // no attribution, but the refusal still names the predecessor (CB69).
         let failed_lp = insert_test_graph(&db, git_dir.path());
         insert_named_spec(&db, &failed_lp.id, "Spec A", 1, GraphSpecStatus::Failed);
 
@@ -12035,8 +12035,12 @@ mod endpoint_tests {
         assert!(is_err(&result), "{}", text(&result));
         let msg = text(&result);
         assert!(
-            msg.contains("dirty before this graph ran"),
-            "refusal should report unattributed dirt: {msg}"
+            msg.contains("Spec A"),
+            "refusal must name the blocking predecessor: {msg}"
+        );
+        assert!(
+            msg.contains("failed"),
+            "refusal must name the predecessor's end status: {msg}"
         );
         assert!(
             msg.contains("not launched"),
@@ -12047,8 +12051,8 @@ mod endpoint_tests {
             "flag hint kept: {msg}"
         );
         assert!(
-            !msg.contains("Spec A"),
-            "must not blame an unrelated spec: {msg}"
+            !msg.contains("dirty before this graph ran"),
+            "refusal must not use the attribution sentence: {msg}"
         );
     }
 
