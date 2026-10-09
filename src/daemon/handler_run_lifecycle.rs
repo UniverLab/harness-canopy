@@ -4,8 +4,8 @@
 use crate::daemon::handler::TaskTriggerHandler;
 use crate::daemon::handler_formatting::internal_error;
 use crate::daemon::handler_run_exec::{
-    handle_retry_current_node, handle_skip_next_spec, in_flight_run_error, node_name_for_error,
-    resolve_reported_run,
+    directed_run_report, find_in_flight_run, handle_retry_current_node, handle_skip_next_spec,
+    in_flight_run_error, node_name_for_error, resolve_directed_spec, resolve_reported_run,
 };
 use crate::daemon::handler_validate::resolve_prefix_or_error;
 use crate::daemon::helpers::{error_result, success_result, with_deprecated_note};
@@ -294,7 +294,7 @@ impl TaskTriggerHandler {
 
     #[tool(
         name = "graph_continue",
-        description = "Continue a paused graph by retrying the current node or skipping to the next spec."
+        description = "Continue a paused graph by retrying the current node or skipping to the next spec, or start a spec at a chosen node with action run_from_node (requires node_id; optional spec_id defaults to the current spec)."
     )]
     pub(crate) async fn graph_continue(
         &self,
@@ -314,6 +314,11 @@ impl TaskTriggerHandler {
             Ok(None) => return Ok(error_result(&format!("Graph '{}' not found.", graph_id))),
             Err(e) => return Err(internal_error(e.to_string())),
         };
+        if params.action.trim() == "run_from_node" {
+            return self
+                .graph_continue_run_from_node(graph_id, lp, params.node_id, params.spec_id)
+                .await;
+        }
         if lp.status != GraphStatus::Paused {
             return Ok(error_result(&format!(
                 "Graph '{}' is not paused.",
@@ -328,16 +333,89 @@ impl TaskTriggerHandler {
             "skip_next_spec" => handle_skip_next_spec(&self.db, &graph_id)?,
             _ => {
                 return Ok(error_result(
-                    "graph_continue action must be retry_current_node or skip_next_spec.",
+                    "graph_continue action must be retry_current_node, skip_next_spec or run_from_node.",
                 ));
             }
         }
 
-        Arc::clone(&self.graph_engine).resume_background(graph_id.clone());
+        Arc::clone(&self.graph_engine).resume_background(graph_id.clone(), None);
 
         Ok(success_result(&format!(
             "Graph '{}' resumed with action '{}'.",
             graph_id, params.action
+        )))
+    }
+
+    /// `graph_continue { run_from_node }`: run `spec` starting at a chosen node,
+    /// reusing earlier nodes' recorded outputs. Accepts any graph with no active
+    /// run (paused, or completed/failed) — a directed run is the operator's tool
+    /// for exactly those states.
+    pub(crate) async fn graph_continue_run_from_node(
+        &self,
+        graph_id: String,
+        lp: crate::domain::graphs::Graph,
+        node_id: Option<String>,
+        spec_id: Option<String>,
+    ) -> Result<CallToolResult, McpError> {
+        if matches!(lp.status, GraphStatus::Running | GraphStatus::Pausing) {
+            if let Some(run) = find_in_flight_run(&self.db, &graph_id).map_err(internal_error)? {
+                let node_name =
+                    node_name_for_error(&self.db, &run.node_id).map_err(internal_error)?;
+                return Ok(error_result(&in_flight_run_error(
+                    &graph_id,
+                    &run.id,
+                    &node_name,
+                    run.started_at,
+                )));
+            }
+            return Ok(error_result(&format!(
+                "Graph '{}' is running; pause it before a directed run.",
+                graph_id
+            )));
+        }
+        let Some(node_id) = node_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+        else {
+            return Ok(error_result(
+                "graph_continue run_from_node requires a non-empty node_id.",
+            ));
+        };
+        let spec = match resolve_directed_spec(&self.db, &graph_id, spec_id.as_deref()) {
+            Ok(spec) => spec,
+            Err(message) => return Ok(error_result(&message)),
+        };
+        if matches!(
+            spec.status,
+            crate::domain::graphs::GraphSpecStatus::Running
+                | crate::domain::graphs::GraphSpecStatus::Skipped
+        ) {
+            return Ok(error_result(&format!(
+                "Graph '{graph_id}': spec '{}' is '{}', which a directed run does not accept.",
+                spec.name,
+                spec.status.as_str()
+            )));
+        }
+        let plan = match self
+            .graph_engine
+            .plan_directed_run(&graph_id, &spec.id, &node_id)
+        {
+            Ok(plan) => plan,
+            Err(message) => return Ok(error_result(&message)),
+        };
+        Arc::clone(&self.graph_engine).resume_background(
+            graph_id.clone(),
+            Some(crate::graph_engine::DirectedStart {
+                spec_id: spec.id,
+                node_arg: node_id,
+            }),
+        );
+        Ok(success_result(&format!(
+            "Graph '{}' resumed.{}",
+            graph_id,
+            directed_run_report(Some(&plan))
         )))
     }
 
@@ -623,5 +701,28 @@ pub(crate) fn perform_graph_reset(
                 "Graph '{graph_id}' reset to pending; {spec_count} spec(s) reset.{skipped_note}"
             )))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph_engine::DirectedPlan;
+
+    #[test]
+    fn directed_run_report_lists_start_skipped_and_reused() {
+        let plan = DirectedPlan {
+            spec_name: "S".into(),
+            start_label: "node 'Review'".into(),
+            skipped_nodes: vec!["Design".into(), "Build".into()],
+            reused_outputs: vec![("Build".into(), "run-1".into())],
+            start_head: Some("abc123".into()),
+        };
+        let text = directed_run_report(Some(&plan));
+        assert!(text.contains("starts at node 'Review'"));
+        assert!(text.contains("skipped Design, Build node(s)"));
+        assert!(text.contains("Build (run-1)"));
+        assert!(text.contains("iteration counters restarted at 1"));
+        assert!(text.contains("abc123"));
     }
 }

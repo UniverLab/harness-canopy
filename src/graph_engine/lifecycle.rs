@@ -2,7 +2,7 @@ use super::*;
 
 impl GraphEngine {
     pub fn start_background(self: Arc<Self>, graph_id: String) {
-        Arc::clone(&self).start_background_run(graph_id, None, None, None, None);
+        Arc::clone(&self).start_background_run(graph_id, None, None, None, None, None);
     }
 
     /// Same as [`Self::start_background`], but optionally drives the graph's
@@ -25,10 +25,18 @@ impl GraphEngine {
         workdir_override: Option<String>,
         idea: Option<String>,
         sandbox: Option<Sandbox>,
+        directed: Option<DirectedStart>,
     ) {
         tokio::spawn(async move {
             if let Err(error) = self
-                .run_graph(graph_id.clone(), queue_id, workdir_override, idea, sandbox)
+                .run_graph(
+                    graph_id.clone(),
+                    queue_id,
+                    workdir_override,
+                    idea,
+                    sandbox,
+                    directed,
+                )
                 .await
             {
                 if error.downcast_ref::<EmptySpecSetError>().is_some() {
@@ -178,13 +186,18 @@ impl GraphEngine {
         workdir_override: Option<String>,
         idea: Option<String>,
         sandbox: Option<Sandbox>,
+        directed: Option<DirectedStart>,
     ) -> Result<()> {
+        let mode = match directed {
+            Some(d) => DispatchMode::fresh_from(d),
+            None => DispatchMode::fresh(),
+        };
         let result = self
             .run_graph_dispatch(
                 graph_id.clone(),
                 queue_id,
                 workdir_override,
-                false,
+                mode,
                 idea,
                 sandbox,
             )
@@ -195,7 +208,7 @@ impl GraphEngine {
         let _ = self.db.clear_graph_hook_launched(&graph_id);
         result
     }
-    pub fn resume_background(self: Arc<Self>, graph_id: String) {
+    pub fn resume_background(self: Arc<Self>, graph_id: String, directed: Option<DirectedStart>) {
         let queue_id = self
             .db
             .get_graph(&graph_id)
@@ -211,9 +224,13 @@ impl GraphEngine {
             .get_active_sandbox_for_owner("graph", &graph_id)
             .ok()
             .flatten();
+        let mode = match directed {
+            Some(d) => DispatchMode::resume_from(d),
+            None => DispatchMode::resume(),
+        };
         tokio::spawn(async move {
             let result = self
-                .run_graph_dispatch(graph_id.clone(), queue_id, None, true, None, sandbox)
+                .run_graph_dispatch(graph_id.clone(), queue_id, None, mode, None, sandbox)
                 .await;
             // CH4: clear the hook-launched flag on ALL exit paths.
             let _ = self.db.clear_graph_hook_launched(&graph_id);

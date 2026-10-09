@@ -681,7 +681,7 @@ mod tests {
                 "graph_archive|86c62c25726d635c29691b8d1e90acbd2af55efafbf4b2acf866d82146fe9dc2|78e636b08231391ec48053bde18a790e2aede74da54003618003f2febe327bea",
                 "graph_audit_node_configs|be2716e66df14f94162057f5919f89bf87cab3b84d7f90ba6c2614e90b4ec749|efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
                 "graph_complete_node|dd79817c0bd15c7fb324ee65bbf0b920c4d36f7958595932ab728a1d4418c76c|9fbd77387cb892656f3c66e396327bd2d66023f67f9cdae7c808091cac32cf9c",
-                "graph_continue|879fd6915edd66b0a128af2b6a9f99e8efb309582e927edacb8d1e3c4470b2dd|f61bb418820b9623469df2b07547b09b077faa97694a854b7e3cbe472c8b874e",
+                "graph_continue|0b6466413a10ef19b9a929d94e662a4279c523d9b2904fc5e1208fc9a9d07edb|4c6d787abe1add21babc503b93b6ca04c35161ee5c0104ea44e28ed7a7d81770",
                 "graph_copy_ensemble|be5468502eeb1d5ac7e731194b9c052bb7969814aac59c41ae8d95b4fbc6742b|4b299e225f9117c00f10837d84ff727eb9bd6848468dfb34269a499c2cefe5f5",
                 "graph_copy_node|00f28a0220fed92a866e7e9489c5c6d0796b61f125ba83d7f2e4528ed8089d75|7aa9c075d640d2f792c386c0a0ca8d999bbaa223ea9787e40a52ab7471a2c8fc",
                 "graph_create|6f4749b2ffabdacfded946e01630ea558cefcf18110801fab0bb31c7fec79769|5f326cdb2c1ff3d7cca2cf25bf7fec5acc828bf70fe9e5e8e3d6423cb7de4a96",
@@ -700,7 +700,7 @@ mod tests {
                 "graph_report_blocker|e8b03ebc2341ed1dcec92b824650173db7d164d076ff501b3c460682c81f072c|666b976ef1b6f73603515e223da6b187b911606572b2bbba0377f4b5ca2798e7",
                 "graph_reset|5fb36ec5cb4ed11594d06fb11f2be62ef911f5c9bc25c24b7e41e72d9f739a07|5122a2e0495a5d21d911c8571ab1440741434cfc3003d072c862a411ffec8914",
                 "graph_restore|40e6e59ed7d4000db2dc48187e28d916ee02c7ee0a8fa7e2e6c07d9251988044|31a70644d3c87bb210f308e6aa19a31d08b38440498374efbac531b3f7bcb242",
-                "graph_run|1b46bb8c67df36a2085fa2358874530d268f72932539c42d0799c3adf8735b74|01d56f1e6aefc4a3d9cf8e76eafec616d77216374b09d341b4d076e8914b7ea9",
+                "graph_run|fa3db2dcec66808c55e2a5fe3623346e459ae74d796a4f54d478b85ac51636cc|9e084a80601932dc3d7241700eff51bb77c2764b1c886c8d1631cd8bfab52a27",
                 "graph_schedule_autorun|9981ca74a4d734696c604599f06ea45c74621f5931d9ac344c31f14a9cb3a5f4|7961251cc9060f411c0b3065833a2afe07a1c1ba27fb8ec57780eec33945b70a",
                 "graph_schedule_continue|1a383d649dbb9963e8ef76d698b9293b1a517205b3f61cd48d6c484f0c009c35|ab6b9783dd0a4ddb3cbcbe23c4ccaefa955cdffecead28d2a4ee758c21e27a55",
                 "graph_update|27c9d848836295967b3588395ddf8a8038ef4b881b7402fb4b9bcccf430d4da8|e3d416ecd679f65c07b3885c2b787b2cfc8b2f8aa820dfa6ea251aa90f0e21ae",
@@ -12070,6 +12070,7 @@ mod endpoint_tests {
                 workdir: None,
                 idea: None,
                 sandbox: None,
+                start_node_id: None,
             }))
             .await
             .unwrap();
@@ -12121,6 +12122,7 @@ mod endpoint_tests {
                 workdir: None,
                 idea: None,
                 sandbox: None,
+                start_node_id: None,
             }))
             .await
             .unwrap();
@@ -12160,6 +12162,7 @@ mod endpoint_tests {
                 workdir: None,
                 idea: None,
                 sandbox: None,
+                start_node_id: None,
             }))
             .await
             .unwrap();
@@ -12186,6 +12189,7 @@ mod endpoint_tests {
                 workdir: None,
                 idea: None,
                 sandbox: None,
+                start_node_id: None,
             }))
             .await
             .unwrap();
@@ -15360,6 +15364,8 @@ mod endpoint_tests {
             .graph_continue(Parameters(GraphContinueParams {
                 graph_id: lp.id.clone(),
                 action: "retry_current_node".to_string(),
+                node_id: None,
+                spec_id: None,
             }))
             .await
             .unwrap();
@@ -15370,6 +15376,8 @@ mod endpoint_tests {
             .graph_continue(Parameters(GraphContinueParams {
                 graph_id: "ghost".to_string(),
                 action: "retry_current_node".to_string(),
+                node_id: None,
+                spec_id: None,
             }))
             .await
             .unwrap();
@@ -15381,11 +15389,13 @@ mod endpoint_tests {
             .graph_continue(Parameters(GraphContinueParams {
                 graph_id: lp.id.clone(),
                 action: "sideways".to_string(),
+                node_id: None,
+                spec_id: None,
             }))
             .await
             .unwrap();
         assert!(is_err(&bad_action));
-        assert!(text(&bad_action).contains("retry_current_node or skip_next_spec"));
+        assert!(text(&bad_action).contains("retry_current_node, skip_next_spec or run_from_node"));
     }
 
     // ── graph_complete_node / graph_report_blocker ──────────────────
@@ -15656,6 +15666,7 @@ mod endpoint_tests {
                 workdir: None,
                 idea: None,
                 sandbox: None,
+                start_node_id: None,
             }))
             .await
             .unwrap();
@@ -15698,7 +15709,7 @@ mod endpoint_tests {
 
         handler
             .graph_engine
-            .run_graph(lp.id.clone(), None, None, None, None)
+            .run_graph(lp.id.clone(), None, None, None, None, None)
             .await
             .unwrap();
 
@@ -18074,6 +18085,7 @@ mod endpoint_tests {
                     workdir: None,
                     idea: None,
                     sandbox: None,
+                    start_node_id: None,
                 }))
                 .await
                 .unwrap();
@@ -21437,6 +21449,7 @@ mod endpoint_tests {
                 workdir: None,
                 idea: Some("build a landing page".to_string()),
                 sandbox: None,
+                start_node_id: None,
             }))
             .await
             .unwrap();
@@ -21555,6 +21568,7 @@ mod endpoint_tests {
                 workdir: None,
                 idea: None,
                 sandbox: None,
+                start_node_id: None,
             }))
             .await
             .unwrap();
@@ -21596,6 +21610,7 @@ mod endpoint_tests {
                 workdir: None,
                 idea: None,
                 sandbox: None,
+                start_node_id: None,
             }))
             .await
             .unwrap();
@@ -21685,6 +21700,7 @@ mod endpoint_tests {
                 workdir: None,
                 idea: None,
                 sandbox: None,
+                start_node_id: None,
             }))
             .await
             .unwrap();

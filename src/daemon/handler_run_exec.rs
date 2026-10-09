@@ -13,6 +13,7 @@ use crate::db::Database;
 use crate::domain::graphs::{
     GraphNode, GraphNodeKind, GraphNodeRun, GraphRunStatus, GraphSpec, GraphSpecStatus, GraphStatus,
 };
+use crate::graph_engine::DirectedPlan;
 use rmcp::model::CallToolResult;
 use rmcp::tool;
 use rmcp::tool_router;
@@ -23,7 +24,7 @@ use std::sync::Arc;
 impl TaskTriggerHandler {
     #[tool(
         name = "graph_run",
-        description = "Run a graph in the background, spec by spec. With `queue_id`, runs the queue's pending specs (in queue order) through the graph instead of the graph's own bound specs. `workdir` overrides the graph's workdir for this run only. `idea` is free-form text fed to nodes as `{{spec_content}}` when the graph has no bound specs and no queue (mutually exclusive with `queue_id`)."
+        description = "Run a graph in the background, spec by spec. With `queue_id`, runs the queue's pending specs (in queue order) through the graph instead of the graph's own bound specs. `workdir` overrides the graph's workdir for this run only. `idea` is free-form text fed to nodes as `{{spec_content}}` when the graph has no bound specs and no queue (mutually exclusive with `queue_id`). With `start_node_id`, start the first spec executed at that graph node (id, id prefix, node name, or ensemble name), reusing earlier nodes' recorded outputs; later specs begin at Start as usual."
     )]
     pub(crate) async fn graph_run(
         &self,
@@ -44,28 +45,39 @@ impl TaskTriggerHandler {
             Err(e) => return Err(internal_error(e.to_string())),
         };
 
-        if let Err(message) = graph_run_status_guard(&graph_id, lp.status) {
-            return Ok(error_result(&message));
-        }
+        let start_node_id = params
+            .start_node_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
 
-        // C19: a graph paused with an active blocker (whether from
-        // `graph_report_blocker` or from a spec exceeding its cross-run
-        // attempt budget) needs a human, not another relaunch —
-        // `graph_run_status_guard` alone still accepts `Paused` (that's the
-        // normal resume-after-`graph_pause` path), so this is a second,
-        // narrower check on top of it. `graph_reset` always clears the
-        // graph's own status back to `draft` regardless of which specs it
-        // targeted, so this only ever refuses the exact window FR4 asks
-        // for: still-`paused`-and-blocked, not yet reset.
-        if lp.status == GraphStatus::Paused {
-            let summary = build_graph_summary_json(&self.db, &lp)?;
-            if let Some(blocker) = summary.get("blocker").and_then(|v| v.as_str()) {
-                return Ok(error_result(&format!(
-                    "Graph '{}' is blocked and cannot be relaunched via graph_run: {blocker}. \
-                     Resolve it, then graph_reset the affected spec (naming it explicitly \
-                     clears its cross-run attempt count) before relaunching.",
-                    graph_id
-                )));
+        // CM43: a directed run is the operator's way into a completed/failed
+        // graph, so its status guard and blocked-graph refusal apply only to a
+        // plain launch. The in-flight check below always applies.
+        if start_node_id.is_none() {
+            if let Err(message) = graph_run_status_guard(&graph_id, lp.status) {
+                return Ok(error_result(&message));
+            }
+
+            // C19: a graph paused with an active blocker (whether from
+            // `graph_report_blocker` or from a spec exceeding its cross-run
+            // attempt budget) needs a human, not another relaunch —
+            // `graph_run_status_guard` alone still accepts `Paused` (that's the
+            // normal resume-after-`graph_pause` path), so this is a second,
+            // narrower check on top of it. `graph_reset` always clears the
+            // graph's own status back to `draft` regardless of which specs it
+            // targeted, so this only ever refuses the exact window FR4 asks
+            // for: still-`paused`-and-blocked, not yet reset.
+            if lp.status == GraphStatus::Paused {
+                let summary = build_graph_summary_json(&self.db, &lp)?;
+                if let Some(blocker) = summary.get("blocker").and_then(|v| v.as_str()) {
+                    return Ok(error_result(&format!(
+                        "Graph '{}' is blocked and cannot be relaunched via graph_run: {blocker}. \
+                         Resolve it, then graph_reset the affected spec (naming it explicitly \
+                         clears its cross-run attempt count) before relaunching.",
+                        graph_id
+                    )));
+                }
             }
         }
 
@@ -208,19 +220,51 @@ impl TaskTriggerHandler {
             None
         };
 
+        // CM43: resolve the directed start synchronously so a bad node or a
+        // missing reachable output refuses the launch before any dispatch. The
+        // target spec is the first spec this run would execute (the same
+        // preview the dirty-start check above used).
+        let mut directed_plan = None;
+        let directed = match start_node_id {
+            Some(start) => {
+                let Some(spec_id) = next_spec_preview.clone() else {
+                    return Ok(error_result(&format!(
+                        "Graph '{}' has no spec to start a directed run at.",
+                        graph_id
+                    )));
+                };
+                match self
+                    .graph_engine
+                    .plan_directed_run(&graph_id, &spec_id, start)
+                {
+                    Ok(plan) => {
+                        directed_plan = Some(plan);
+                        Some(crate::graph_engine::DirectedStart {
+                            spec_id,
+                            node_arg: start.to_string(),
+                        })
+                    }
+                    Err(message) => return Ok(error_result(&message)),
+                }
+            }
+            None => None,
+        };
+
         Arc::clone(&self.graph_engine).start_background_run(
             graph_id.clone(),
             queue_id.map(str::to_string),
             workdir.map(str::to_string),
             idea,
             sandbox,
+            directed,
         );
+        let report = directed_run_report(directed_plan.as_ref());
         Ok(success_result(&match launch_warning {
             Some(warning) => format!(
-                "Graph '{}' launched in background. WARNING: {}",
-                graph_id, warning
+                "Graph '{}' launched in background. WARNING: {}{}",
+                graph_id, warning, report
             ),
-            None => format!("Graph '{}' launched in background.", graph_id),
+            None => format!("Graph '{}' launched in background.{}", graph_id, report),
         }))
     }
 }
@@ -478,7 +522,8 @@ pub(crate) fn handle_retry_current_node(db: &Database, graph_id: &str) -> Result
         Some(spec) if spec.status == GraphSpecStatus::Failed => McpError::invalid_params(
             format!(
                 "Graph '{graph_id}': current spec '{}' is 'failed', not resumable by \
-                 graph_continue. Use graph_reset to reset it.",
+                 graph_continue. Use `graph_continue run_from_node` to restart it at a chosen \
+                 node (reusing earlier nodes' outputs), or graph_reset to reset it.",
                 spec.name
             ),
             None,
@@ -567,6 +612,58 @@ pub(crate) fn queue_current_spec(
     Ok(fallback)
 }
 
+/// The spec a `run_from_node` directed run targets: the explicit `spec_id` when
+/// given (a bound spec, or a member of the graph's active queue), else the
+/// graph's current spec — the first resumable bound spec, else the first
+/// non-terminal one, else the queue's current member.
+pub(crate) fn resolve_directed_spec(
+    db: &Database,
+    graph_id: &str,
+    spec_id: Option<&str>,
+) -> Result<GraphSpec, String> {
+    let bound = db.list_graph_specs(graph_id).map_err(|e| e.to_string())?;
+    if let Some(spec_id) = spec_id.map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(spec) = bound.iter().find(|s| s.id == spec_id) {
+            return Ok(spec.clone());
+        }
+        if let Some(queue_id) = db
+            .get_graph(graph_id)
+            .map_err(|e| e.to_string())?
+            .and_then(|lp| lp.active_run_queue_id)
+        {
+            for member_id in db
+                .list_queue_member_spec_ids(&queue_id)
+                .map_err(|e| e.to_string())?
+            {
+                if member_id == spec_id {
+                    if let Some(spec) = db.get_graph_spec(spec_id).map_err(|e| e.to_string())? {
+                        return Ok(spec);
+                    }
+                }
+            }
+        }
+        return Err(format!(
+            "Spec '{spec_id}' does not belong to graph '{graph_id}'."
+        ));
+    }
+    if let Some(spec) = bound.iter().find(|s| s.status.is_resumable()).or_else(|| {
+        bound.iter().find(|s| {
+            !matches!(
+                s.status,
+                GraphSpecStatus::Completed | GraphSpecStatus::Skipped
+            )
+        })
+    }) {
+        return Ok(spec.clone());
+    }
+    if let Some(spec) = queue_current_spec(db, graph_id).map_err(|e| e.to_string())? {
+        return Ok(spec);
+    }
+    Err(format!(
+        "Graph '{graph_id}' has no current spec; pass spec_id to choose a completed one."
+    ))
+}
+
 pub(crate) fn graph_run_json(run: &crate::domain::graphs::GraphNodeRun) -> serde_json::Value {
     serde_json::json!({
         "id": run.id,
@@ -588,4 +685,36 @@ pub(crate) fn graph_run_blocker(run: &crate::domain::graphs::GraphNodeRun) -> Op
         .and_then(|output| output.get("blocker"))
         .and_then(serde_json::Value::as_str)
         .map(ToOwned::to_owned)
+}
+
+/// Human report for a directed `graph_run`/`graph_continue run_from_node`
+/// response: the start node, the skipped nodes, the reused outputs, the
+/// counter restart, and whether `{{spec_start_head}}` is reused or fresh.
+pub(crate) fn directed_run_report(plan: Option<&DirectedPlan>) -> String {
+    let Some(plan) = plan else {
+        return String::new();
+    };
+    let skipped = if plan.skipped_nodes.is_empty() {
+        "none".to_string()
+    } else {
+        plan.skipped_nodes.join(", ")
+    };
+    let reused = if plan.reused_outputs.is_empty() {
+        "none".to_string()
+    } else {
+        plan.reused_outputs
+            .iter()
+            .map(|(name, run_id)| format!("{name} ({run_id})"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let head = match plan.start_head.as_deref() {
+        Some(head) => format!("reusing the recorded {{{{spec_start_head}}}} ({head})"),
+        None => "no recorded {{spec_start_head}}; a fresh one will be captured".to_string(),
+    };
+    format!(
+        " Directed run: spec '{}' starts at {}; skipped {skipped} node(s); reused outputs: {reused}; \
+         iteration counters restarted at 1; {head}.",
+        plan.spec_name, plan.start_label
+    )
 }

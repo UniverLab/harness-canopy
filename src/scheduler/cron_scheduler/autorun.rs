@@ -76,7 +76,7 @@ pub(super) async fn launch_due_autorun(
     // exactly how a resumed queue run used to be mistaken for
     // "nothing to do" and marked completed with members still
     // pending.
-    Arc::clone(graph_engine).resume_background(lp.id.clone());
+    Arc::clone(graph_engine).resume_background(lp.id.clone(), None);
     Ok(())
 }
 

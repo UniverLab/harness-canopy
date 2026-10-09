@@ -91,11 +91,11 @@ stdio. Connect any MCP-capable AI CLI with `canopy mcp`.
 | `graph_delete_ensemble` | Delete an ensemble |
 | `graph_get` | Get a graph with its specs, nodes, and edges |
 | `graph_list` | List graphs |
-| `graph_run` | Run a graph |
+| `graph_run` | Run a graph (optionally `start_node_id` to start the first spec at a chosen node) |
 | `graph_reset` | Reset a graph's pending specs |
 | `graph_schedule_autorun` | Schedule a graph to resume or run |
 | `graph_pause` | Pause a running graph |
-| `graph_continue` | Continue a paused graph |
+| `graph_continue` | Continue a paused graph (retry/skip), or start a spec at a chosen node with `run_from_node` |
 | `graph_complete_node` | Complete an active graph node |
 | `graph_report_blocker` | Report a blocker for an active graph node |
 | `graph_export` | Export a graph design |

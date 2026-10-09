@@ -100,6 +100,10 @@ pub(crate) enum GraphAction {
         /// no bound specs and no queue.
         #[arg(long)]
         idea: Option<String>,
+        /// Start the first spec this run executes at this node (id, id prefix,
+        /// node name, or ensemble name) instead of Start.
+        #[arg(long = "from")]
+        from: Option<String>,
     },
     /// Pause a running graph after the current node finishes.
     Pause {
@@ -117,6 +121,13 @@ pub(crate) enum GraphAction {
         /// Skip the current spec and move on to the next one.
         #[arg(long = "skip-next-spec")]
         skip_next_spec: bool,
+        /// Start the current (or --spec) spec at this node instead of resuming
+        /// the paused node: id, id prefix, node name, or ensemble name.
+        #[arg(long = "from")]
+        from: Option<String>,
+        /// Spec to start at when using --from. Defaults to the graph's current spec.
+        #[arg(long)]
+        spec: Option<String>,
     },
     /// Reset a completed/failed graph back to pending so `run` can relaunch
     /// it.
@@ -179,18 +190,23 @@ pub(crate) async fn handle_graph_action(
             queue,
             workdir,
             idea,
-        } => handle_graph_run(&db, port_override, &id_or_name, queue, workdir, idea),
+            from,
+        } => handle_graph_run(&db, port_override, &id_or_name, queue, workdir, idea, from),
         GraphAction::Pause { id_or_name } => handle_graph_pause(&db, port_override, &id_or_name),
         GraphAction::Continue {
             id_or_name,
             retry_current_node,
             skip_next_spec,
+            from,
+            spec,
         } => handle_graph_continue(
             &db,
             port_override,
             &id_or_name,
             retry_current_node,
             skip_next_spec,
+            from,
+            spec,
         ),
         GraphAction::Reset {
             id_or_name,
@@ -224,6 +240,7 @@ fn handle_graph_run(
     queue: Option<String>,
     workdir: Option<String>,
     idea: Option<String>,
+    from: Option<String>,
 ) -> Result<()> {
     let graphs = db.list_graphs(None, true)?;
     let lp = resolve_graph(&graphs, id_or_name)?;
@@ -237,6 +254,9 @@ fn handle_graph_run(
     }
     if let Some(idea_text) = idea {
         args["idea"] = serde_json::json!(idea_text);
+    }
+    if let Some(node) = from {
+        args["start_node_id"] = serde_json::json!(node);
     }
 
     println!("{}", call_tool(port_override, "graph_run", &args)?);
@@ -286,7 +306,28 @@ fn handle_graph_continue(
     id_or_name: &str,
     retry_current_node: bool,
     skip_next_spec: bool,
+    from: Option<String>,
+    spec: Option<String>,
 ) -> Result<()> {
+    let graphs = db.list_graphs(None, true)?;
+    let lp = resolve_graph(&graphs, id_or_name)?;
+
+    if let Some(node) = from {
+        if retry_current_node || skip_next_spec {
+            return Err(anyhow!(
+                "--from cannot be combined with --retry-current-node or --skip-next-spec."
+            ));
+        }
+        let mut args = serde_json::json!({
+            "graph_id": lp.id, "action": "run_from_node", "node_id": node
+        });
+        if let Some(spec) = spec {
+            args["spec_id"] = serde_json::json!(spec);
+        }
+        println!("{}", call_tool(port_override, "graph_continue", &args)?);
+        return Ok(());
+    }
+
     let action = match (retry_current_node, skip_next_spec) {
         (true, false) => "retry_current_node",
         (false, true) => "skip_next_spec",
@@ -301,9 +342,6 @@ fn handle_graph_continue(
             ))
         }
     };
-
-    let graphs = db.list_graphs(None, true)?;
-    let lp = resolve_graph(&graphs, id_or_name)?;
 
     println!(
         "{}",
@@ -595,11 +633,13 @@ mod tests {
                 queue,
                 workdir,
                 idea,
+                from,
             } => {
                 assert_eq!(id_or_name, "my-graph");
                 assert!(queue.is_none());
                 assert!(workdir.is_none());
                 assert!(idea.is_none());
+                assert!(from.is_none());
             }
             other => panic!("expected Run, got {other:?}"),
         }
@@ -620,11 +660,13 @@ mod tests {
                 queue,
                 workdir,
                 idea,
+                from,
             } => {
                 assert_eq!(id_or_name, "my-graph");
                 assert_eq!(queue.as_deref(), Some("q1"));
                 assert_eq!(workdir.as_deref(), Some("/tmp/proj"));
                 assert!(idea.is_none());
+                assert!(from.is_none());
             }
             other => panic!("expected Run, got {other:?}"),
         }
@@ -711,10 +753,14 @@ mod tests {
                 id_or_name,
                 retry_current_node,
                 skip_next_spec,
+                from,
+                spec,
             } => {
                 assert_eq!(id_or_name, "my-graph");
                 assert!(retry_current_node);
                 assert!(!skip_next_spec);
+                assert!(from.is_none());
+                assert!(spec.is_none());
             }
             other => panic!("expected Continue, got {other:?}"),
         }
@@ -1467,6 +1513,7 @@ mod tests {
             Some("q1".to_string()),
             None,
             None,
+            None,
         )
         .expect("run should succeed");
 
@@ -1483,7 +1530,8 @@ mod tests {
         // No fake daemon is spawned — a request that reaches the network at
         // all would fail differently (connection refused) than the
         // not-found error resolution must produce locally.
-        let err = handle_graph_run(&db, Some(65535), "missing", None, None, None).unwrap_err();
+        let err =
+            handle_graph_run(&db, Some(65535), "missing", None, None, None, None).unwrap_err();
         assert!(err.to_string().contains("No graph matches"));
     }
 
@@ -1512,7 +1560,8 @@ mod tests {
         }));
         let port: u16 = fake.port.parse().unwrap();
 
-        handle_graph_continue(&db, Some(port), "graph-1", true, false).expect("should succeed");
+        handle_graph_continue(&db, Some(port), "graph-1", true, false, None, None)
+            .expect("should succeed");
 
         let calls = fake.recorded_calls();
         assert_eq!(calls[0]["arguments"]["action"], "retry_current_node");
@@ -1527,7 +1576,8 @@ mod tests {
         }));
         let port: u16 = fake.port.parse().unwrap();
 
-        handle_graph_continue(&db, Some(port), "graph-1", false, true).expect("should succeed");
+        handle_graph_continue(&db, Some(port), "graph-1", false, true, None, None)
+            .expect("should succeed");
 
         let calls = fake.recorded_calls();
         assert_eq!(calls[0]["arguments"]["action"], "skip_next_spec");
@@ -1536,14 +1586,16 @@ mod tests {
     #[test]
     fn handle_graph_continue_rejects_when_neither_flag_set() {
         let (_dir, db) = db_with_graph("graph-1", "my-graph", GraphStatus::Paused);
-        let err = handle_graph_continue(&db, Some(65535), "graph-1", false, false).unwrap_err();
+        let err = handle_graph_continue(&db, Some(65535), "graph-1", false, false, None, None)
+            .unwrap_err();
         assert!(err.to_string().contains("Specify one of"));
     }
 
     #[test]
     fn handle_graph_continue_rejects_when_both_flags_set() {
         let (_dir, db) = db_with_graph("graph-1", "my-graph", GraphStatus::Paused);
-        let err = handle_graph_continue(&db, Some(65535), "graph-1", true, true).unwrap_err();
+        let err =
+            handle_graph_continue(&db, Some(65535), "graph-1", true, true, None, None).unwrap_err();
         assert!(err.to_string().contains("mutually exclusive"));
     }
 

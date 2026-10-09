@@ -179,10 +179,11 @@ impl GraphEngine {
         let ensemble_name = Self::ensemble_name_for_join(ctx.ensembles, &step.from_node_id);
         let blocker = format!(
             "Ensemble '{}' produced no verdict ({} members, none filed a verdict): {}. The graph is paused; \
-             this spec is marked interrupted (not failed). Two ways out: `graph_continue retry_current_node` \
+             this spec is marked interrupted (not failed). Three ways out: `graph_continue retry_current_node` \
              resumes at this ensemble — its current member list, with the nodes that already passed in this \
              spec left alone (rewire the members first with `graph_update_ensemble` if the crew itself is the \
-             problem) — while `graph_reset` restarts the spec from Start.",
+             problem); `graph_continue run_from_node` restarts the spec at a node you choose, reusing what \
+             earlier nodes already produced; while `graph_reset` restarts the spec from Start.",
             ensemble_name,
             member_texts.len(),
             member_texts.join("; "),

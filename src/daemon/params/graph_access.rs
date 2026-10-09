@@ -125,6 +125,12 @@ pub struct GraphRunParams {
     /// instruction file). The protocol is materialized in the worktree's
     /// instruction file instead of being injected into the prompt.
     pub sandbox: Option<bool>,
+    /// When set, start the first spec this run executes at this graph node
+    /// instead of at the graph's Start node: a node id, an unambiguous node-id
+    /// prefix, a node name, or an ensemble name. Only the first spec is
+    /// directed; later specs begin at Start as usual.
+    #[serde(default)]
+    pub start_node_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -152,8 +158,16 @@ pub struct GraphResetParams {
 pub struct GraphContinueParams {
     /// Graph ID.
     pub graph_id: String,
-    /// Continue mode: retry_current_node or skip_next_spec.
+    /// Continue mode: retry_current_node, skip_next_spec or run_from_node.
     pub action: String,
+    /// Action argument for `run_from_node`: the node (id, unambiguous id prefix,
+    /// node name, or ensemble name) the directed run starts at.
+    #[serde(default)]
+    pub node_id: Option<String>,
+    /// Action argument for `run_from_node`: the spec to start at that node.
+    /// Defaults to the graph's current spec.
+    #[serde(default)]
+    pub spec_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]

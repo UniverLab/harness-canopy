@@ -24,6 +24,7 @@ use crate::domain::sandbox::Sandbox;
 mod agent_exec;
 mod agent_spawn;
 mod check;
+mod directed;
 mod dirty_commit;
 mod dispatch;
 mod ensemble_cascade;
@@ -49,6 +50,7 @@ mod spec_step;
 pub(crate) use agent_exec::*;
 pub(crate) use agent_spawn::*;
 pub(crate) use check::*;
+pub(crate) use directed::*;
 pub(crate) use dirty_commit::*;
 #[allow(unused_imports)]
 pub(crate) use dispatch::*;
@@ -727,7 +729,7 @@ mod tests {
         .unwrap();
 
         engine
-            .run_graph(graph_id, None, None, None, None)
+            .run_graph(graph_id, None, None, None, None, None)
             .await
             .unwrap();
 
@@ -759,7 +761,7 @@ mod tests {
         .unwrap();
 
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
 
@@ -789,7 +791,7 @@ mod tests {
         .unwrap();
 
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
 
@@ -825,7 +827,7 @@ mod tests {
         .unwrap();
 
         engine
-            .run_graph(graph_id, None, Some(workdir), None, None)
+            .run_graph(graph_id, None, Some(workdir), None, None, None)
             .await
             .unwrap();
 
@@ -859,7 +861,7 @@ mod tests {
         .unwrap();
 
         engine
-            .run_graph(graph_id, None, Some(workdir), None, None)
+            .run_graph(graph_id, None, Some(workdir), None, None, None)
             .await
             .unwrap();
 
@@ -900,7 +902,7 @@ mod tests {
         .unwrap();
 
         engine
-            .run_graph(graph_id, None, None, None, None)
+            .run_graph(graph_id, None, None, None, None, None)
             .await
             .unwrap();
 
@@ -1654,7 +1656,7 @@ mod tests {
         .unwrap();
 
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
 
@@ -1716,7 +1718,7 @@ mod tests {
         .unwrap();
 
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
 
@@ -1784,7 +1786,7 @@ mod tests {
 
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
         drop(_home);
@@ -1854,7 +1856,7 @@ mod tests {
         .unwrap();
 
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
 
@@ -1917,7 +1919,7 @@ mod tests {
         .unwrap();
 
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
 
@@ -1941,7 +1943,7 @@ mod tests {
             .unwrap();
 
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
 
@@ -1970,7 +1972,7 @@ mod tests {
         .unwrap();
 
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
 
@@ -2129,7 +2131,7 @@ mod tests {
         .unwrap();
 
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
 
@@ -2207,7 +2209,7 @@ mod tests {
         .unwrap();
 
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
 
@@ -2254,7 +2256,7 @@ mod tests {
         .unwrap();
 
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
 
@@ -2304,7 +2306,14 @@ mod tests {
         .unwrap();
 
         engine
-            .run_graph_dispatch(graph_id.clone(), None, None, true, None, None)
+            .run_graph_dispatch(
+                graph_id.clone(),
+                None,
+                None,
+                DispatchMode::resume(),
+                None,
+                None,
+            )
             .await
             .unwrap();
 
@@ -2356,7 +2365,7 @@ mod tests {
         // `run_graph` is the fresh-dispatch entry point (same one `graph_run`
         // uses) — no `is_resume` flag reaches it.
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
 
@@ -2437,7 +2446,7 @@ mod tests {
         .unwrap();
 
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
 
@@ -2524,8 +2533,11 @@ mod tests {
         let engine = std::sync::Arc::new(engine);
         let engine2 = std::sync::Arc::clone(&engine);
         let graph_id2 = graph_id.clone();
-        let handle =
-            tokio::spawn(async move { engine2.run_graph(graph_id2, None, None, None, None).await });
+        let handle = tokio::spawn(async move {
+            engine2
+                .run_graph(graph_id2, None, None, None, None, None)
+                .await
+        });
 
         // Wait until node-a has completed exactly once, then rewrite its command —
         // this is the `graph_update_node` between two dispatches. Full-config replace,
@@ -2601,8 +2613,11 @@ mod tests {
         let engine = std::sync::Arc::new(engine);
         let engine2 = std::sync::Arc::clone(&engine);
         let graph_id2 = graph_id.clone();
-        let handle =
-            tokio::spawn(async move { engine2.run_graph(graph_id2, None, None, None, None).await });
+        let handle = tokio::spawn(async move {
+            engine2
+                .run_graph(graph_id2, None, None, None, None, None)
+                .await
+        });
 
         // Let the single dispatch get into `sleep 2`, then swap its command.
         tokio::time::sleep(std::time::Duration::from_millis(600)).await;
@@ -2691,7 +2706,7 @@ mod tests {
         .unwrap();
 
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
 
@@ -2764,7 +2779,7 @@ mod tests {
         .unwrap();
 
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
 
@@ -2818,7 +2833,7 @@ mod tests {
         .unwrap();
 
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
 
@@ -2904,7 +2919,14 @@ mod tests {
 
         // A resumed dispatch — same path a daemon restart mid-run takes.
         engine
-            .run_graph_dispatch(graph_id.clone(), None, None, true, None, None)
+            .run_graph_dispatch(
+                graph_id.clone(),
+                None,
+                None,
+                DispatchMode::resume(),
+                None,
+                None,
+            )
             .await
             .unwrap();
 
@@ -2979,7 +3001,7 @@ mod tests {
         .unwrap();
 
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
 
@@ -3037,7 +3059,14 @@ mod tests {
         .unwrap();
 
         engine
-            .run_graph_dispatch(graph_id.clone(), None, None, true, None, None)
+            .run_graph_dispatch(
+                graph_id.clone(),
+                None,
+                None,
+                DispatchMode::resume(),
+                None,
+                None,
+            )
             .await
             .unwrap();
 
@@ -3096,7 +3125,7 @@ mod tests {
         .unwrap();
 
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
 
@@ -3128,7 +3157,7 @@ mod tests {
         .unwrap();
 
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
 
@@ -3175,7 +3204,7 @@ mod tests {
         .unwrap();
 
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
 
@@ -3218,7 +3247,7 @@ mod tests {
         // No Fail edge: mirrors `graph_engine_fails_spec_when_check_fails_without_route`.
 
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
 
@@ -3277,7 +3306,7 @@ mod tests {
         db.update_graph_hooks(&graph_id, &hooks).unwrap();
 
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
 
@@ -3348,8 +3377,16 @@ mod tests {
 
         // CB50 FR4: a `Running` spec resumes regardless of `is_resume` —
         // historic behaviour, unchanged. Pass `false` to prove it.
-        let (cursor, node_outputs, resume_previous_output, iterations) =
-            resolve_spec_start(&details.nodes, &details.edges, &spec, &runs, &[], false).unwrap();
+        let (cursor, node_outputs, resume_previous_output, iterations) = resolve_spec_start(
+            &details.nodes,
+            &details.edges,
+            &spec,
+            &runs,
+            &[],
+            false,
+            None,
+        )
+        .unwrap();
 
         assert_eq!(cursor, SpecCursor::Node("node-1".to_string()));
         assert_eq!(iterations.get("node-1"), Some(&1));
@@ -3468,7 +3505,7 @@ mod tests {
 
         // CB50 FR2: `loop_continue` (`is_resume: true`) must resume at the cursor.
         let (cursor, _node_outputs, _resume_previous_output, _iterations) =
-            resolve_spec_start(&nodes, &edges, &spec, &runs, &[], true).unwrap();
+            resolve_spec_start(&nodes, &edges, &spec, &runs, &[], true, None).unwrap();
 
         assert_eq!(
             cursor,
@@ -3570,7 +3607,7 @@ mod tests {
         ];
 
         let (cursor, _node_outputs, resume_previous_output, iterations) =
-            resolve_spec_start(&nodes, &edges, &spec, &runs, &[], false).unwrap();
+            resolve_spec_start(&nodes, &edges, &spec, &runs, &[], false, None).unwrap();
 
         assert_eq!(
             cursor,
@@ -3639,8 +3676,16 @@ mod tests {
             })
             .collect();
 
-        let (cursor, node_outputs, _resume_previous_output, iterations) =
-            resolve_spec_start(&details.nodes, &details.edges, &spec, &runs, &[], false).unwrap();
+        let (cursor, node_outputs, _resume_previous_output, iterations) = resolve_spec_start(
+            &details.nodes,
+            &details.edges,
+            &spec,
+            &runs,
+            &[],
+            false,
+            None,
+        )
+        .unwrap();
 
         assert_eq!(cursor, SpecCursor::Node("node-1".to_string()));
         assert!(node_outputs.is_empty());
@@ -5072,7 +5117,7 @@ echo done
 
         let guard = HomeGuard::set(home.path());
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
         drop(guard);
@@ -5174,6 +5219,7 @@ echo done
             .run_graph(
                 graph_id.clone(),
                 Some("queue-1".to_string()),
+                None,
                 None,
                 None,
                 None,
@@ -5315,6 +5361,7 @@ echo done
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -5415,6 +5462,7 @@ echo done
             .run_graph(
                 graph_id.clone(),
                 Some("queue-1".to_string()),
+                None,
                 None,
                 None,
                 None,
@@ -6789,7 +6837,7 @@ echo done
         .unwrap();
 
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
 
@@ -6845,7 +6893,7 @@ echo done
         .unwrap();
 
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
 
@@ -6899,7 +6947,7 @@ echo done
         .unwrap();
 
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
 
@@ -6975,7 +7023,7 @@ echo done
         .unwrap();
 
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
 
@@ -7003,7 +7051,7 @@ echo done
         let (_dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
 
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
 
@@ -7149,6 +7197,7 @@ echo done
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -7268,7 +7317,7 @@ echo done
                 graph_id.clone(),
                 Some("queue-1".to_string()),
                 None,
-                true,
+                DispatchMode::resume(),
                 None,
                 None,
             )
@@ -7429,7 +7478,14 @@ echo done
         // `is_resume: true`.
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_graph_dispatch(graph_id.clone(), None, None, true, None, None)
+            .run_graph_dispatch(
+                graph_id.clone(),
+                None,
+                None,
+                DispatchMode::resume(),
+                None,
+                None,
+            )
             .await
             .unwrap();
         drop(_home);
@@ -7538,7 +7594,14 @@ echo done
         .unwrap();
 
         engine
-            .run_graph(lp.id.clone(), None, Some(override_path.clone()), None, None)
+            .run_graph(
+                lp.id.clone(),
+                None,
+                Some(override_path.clone()),
+                None,
+                None,
+                None,
+            )
             .await
             .unwrap();
 
@@ -7579,7 +7642,7 @@ echo done
         .unwrap();
 
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
 
@@ -7629,6 +7692,7 @@ echo done
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -7672,6 +7736,7 @@ echo done
             .run_graph(
                 graph_id.clone(),
                 Some("queue-1".to_string()),
+                None,
                 None,
                 None,
                 None,
@@ -7724,6 +7789,7 @@ echo done
             .run_graph(
                 graph_id.clone(),
                 Some("queue-1".to_string()),
+                None,
                 None,
                 None,
                 None,
@@ -7833,7 +7899,14 @@ echo done
         let run_graph_id = graph_id.clone();
         let handle = tokio::spawn(async move {
             run_engine
-                .run_graph(run_graph_id, Some("queue-1".to_string()), None, None, None)
+                .run_graph(
+                    run_graph_id,
+                    Some("queue-1".to_string()),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
                 .await
         });
 
@@ -7893,7 +7966,14 @@ echo done
         let run_graph_id = graph_id.clone();
         let handle = tokio::spawn(async move {
             run_engine
-                .run_graph(run_graph_id, Some("queue-1".to_string()), None, None, None)
+                .run_graph(
+                    run_graph_id,
+                    Some("queue-1".to_string()),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
                 .await
         });
 
@@ -7943,6 +8023,7 @@ echo done
             .run_graph(
                 graph_id.clone(),
                 Some("queue-1".to_string()),
+                None,
                 None,
                 None,
                 None,
@@ -8196,7 +8277,7 @@ echo done
         .unwrap();
 
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
 
@@ -8276,7 +8357,11 @@ echo done
         let dispatch = {
             let engine = Arc::clone(&engine);
             let graph_id = graph_id.clone();
-            tokio::spawn(async move { engine.run_graph(graph_id, None, None, None, None).await })
+            tokio::spawn(async move {
+                engine
+                    .run_graph(graph_id, None, None, None, None, None)
+                    .await
+            })
         };
 
         // Once the implement run is live (has a pid), supersede it exactly as a
@@ -8376,7 +8461,11 @@ echo done
         let dispatch = {
             let engine = Arc::clone(&engine);
             let graph_id = graph_id.clone();
-            tokio::spawn(async move { engine.run_graph(graph_id, None, None, None, None).await })
+            tokio::spawn(async move {
+                engine
+                    .run_graph(graph_id, None, None, None, None, None)
+                    .await
+            })
         };
 
         // Terminate the live run exactly as `Database::reset_graph` does when
@@ -8441,7 +8530,7 @@ echo done
         // dead-ends right here.
 
         engine
-            .run_graph(graph_id, None, None, None, None)
+            .run_graph(graph_id, None, None, None, None, None)
             .await
             .unwrap();
 
@@ -8485,7 +8574,7 @@ echo done
         .unwrap();
 
         engine
-            .run_graph(graph_id, None, None, None, None)
+            .run_graph(graph_id, None, None, None, None, None)
             .await
             .unwrap();
 
@@ -8536,7 +8625,7 @@ echo done
         // Executions 1 and 2: ordinary Failed, not yet blocked.
         for expected_attempts in 1..=2 {
             engine
-                .run_graph(graph_id.clone(), None, None, None, None)
+                .run_graph(graph_id.clone(), None, None, None, None, None)
                 .await
                 .unwrap();
             let lp = db.get_graph(&graph_id).unwrap().unwrap();
@@ -8554,7 +8643,7 @@ echo done
 
         // Execution 3: the budget (default 3) is now exceeded — blocked.
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
         assert_eq!(db.get_graph_spec_cross_run_attempts(&spec_id).unwrap(), 3);
@@ -8648,7 +8737,7 @@ echo done
         // Two genuine failures — one short of the default budget of 3.
         for _ in 0..2 {
             engine
-                .run_graph(graph_id.clone(), None, None, None, None)
+                .run_graph(graph_id.clone(), None, None, None, None, None)
                 .await
                 .unwrap();
         }
@@ -8674,7 +8763,7 @@ echo done
         // The next execution starts fresh: one more genuine failure lands
         // at count 1, not 3 — still an ordinary Failed, not Blocked.
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
         assert_eq!(db.get_graph_spec_cross_run_attempts(&spec_id).unwrap(), 1);
@@ -8711,7 +8800,7 @@ echo done
         .unwrap();
 
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
         assert_eq!(db.get_graph_spec_cross_run_attempts(&spec_id).unwrap(), 1);
@@ -8971,7 +9060,7 @@ echo done
 
         // A second dispatch (autorun/resume racing the live one) must no-op.
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
 
@@ -9027,7 +9116,7 @@ echo done
         .unwrap();
 
         engine
-            .run_graph(graph_id, None, None, None, None)
+            .run_graph(graph_id, None, None, None, None, None)
             .await
             .unwrap();
 
@@ -9079,7 +9168,7 @@ echo done
         .unwrap();
 
         engine
-            .run_graph(graph_id, None, None, None, None)
+            .run_graph(graph_id, None, None, None, None, None)
             .await
             .unwrap();
 
@@ -9192,7 +9281,7 @@ echo done
         .unwrap();
 
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
 
@@ -9357,7 +9446,7 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         let result = engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await;
         drop(_home);
         result.unwrap();
@@ -9410,7 +9499,7 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         let result = engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await;
         drop(_home);
         result.unwrap();
@@ -9478,7 +9567,7 @@ echo done
         .unwrap();
 
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
 
@@ -9554,7 +9643,7 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_graph("wf-test".to_string(), None, None, None, None)
+            .run_graph("wf-test".to_string(), None, None, None, None, None)
             .await
             .unwrap();
         drop(_home);
@@ -9689,8 +9778,11 @@ echo done
         let _home = HomeGuard::set(fake_home.path());
         let engine2 = Arc::clone(&engine);
         let graph_id2 = graph_id.clone();
-        let dispatch =
-            tokio::spawn(async move { engine2.run_graph(graph_id2, None, None, None, None).await });
+        let dispatch = tokio::spawn(async move {
+            engine2
+                .run_graph(graph_id2, None, None, None, None, None)
+                .await
+        });
 
         tokio::time::sleep(std::time::Duration::from_millis(800)).await;
         let lp_mid = db.get_graph(&graph_id).unwrap().unwrap();
@@ -9754,7 +9846,7 @@ echo done
         let _home = HomeGuard::set(fake_home.path());
         let start = std::time::Instant::now();
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
         eprintln!("DIAG: dispatch-alone total elapsed = {:?}", start.elapsed());
@@ -9857,7 +9949,7 @@ echo done
         // Cli::strategy() reads from $CANOPY_HOME_OVERRIDE/.canopy/config.toml.
         let _home = HomeGuard::set(fake_home.path());
         let result = engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await;
         drop(_home);
         drop(fake_home);
@@ -9913,7 +10005,7 @@ echo done
             .unwrap();
 
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
 
@@ -9972,7 +10064,7 @@ echo done
         let _home = HomeGuard::set(fake_home.path());
         // First completion.
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
         let lp = db.get_graph(&graph_id).unwrap().unwrap();
@@ -9986,7 +10078,7 @@ echo done
         db.reset_graph(&graph_id, Some(std::slice::from_ref(&spec_id)))
             .unwrap();
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
         drop(_home);
@@ -10009,7 +10101,7 @@ echo done
         let (_dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
 
         let error = engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap_err();
         assert!(
@@ -10122,7 +10214,7 @@ echo done
 
         let guard = HomeGuard::set(home.path());
         let error = engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap_err();
         drop(guard);
@@ -10206,7 +10298,7 @@ echo done
 
         let guard = HomeGuard::set(home.path());
         let error = engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap_err();
         drop(guard);
@@ -10267,7 +10359,7 @@ echo done
         .unwrap();
 
         let error = engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap_err();
         assert!(
@@ -10319,7 +10411,7 @@ echo done
         .unwrap();
 
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
 
@@ -10381,6 +10473,7 @@ echo done
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -10421,6 +10514,7 @@ echo done
             .run_graph(
                 graph_id.clone(),
                 Some("queue-1".to_string()),
+                None,
                 None,
                 None,
                 None,
@@ -10514,6 +10608,7 @@ echo done
                 None,
                 Some("build a landing page".to_string()),
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -10552,6 +10647,7 @@ echo done
                 None,
                 None,
                 Some("ship the docs site".to_string()),
+                None,
                 None,
             )
             .await
@@ -10646,7 +10742,7 @@ echo done
         .unwrap();
 
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
 
@@ -10704,7 +10800,7 @@ echo done
         .unwrap();
 
         let error = engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap_err();
         assert!(
@@ -10750,6 +10846,7 @@ echo done
                 None,
                 Some("   \n\t  ".to_string()),
                 None,
+                None,
             )
             .await
             .unwrap_err();
@@ -10785,7 +10882,7 @@ echo done
         // bound specs are still empty — every spec lives in the queue)
         // without passing `queue_id` back.
         let error = engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap_err();
         assert!(
@@ -10823,6 +10920,7 @@ echo done
             .run_graph(
                 graph_id.clone(),
                 Some("queue-1".to_string()),
+                None,
                 None,
                 None,
                 None,
@@ -10896,6 +10994,7 @@ echo done
                 None,
                 None,
                 None,
+                None,
             )
             .await;
         drop(_home);
@@ -10949,7 +11048,7 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         let result = engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await;
         drop(_home);
         drop(fake_home);
@@ -11269,7 +11368,7 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         let result = engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await;
         drop(_home);
         drop(fake_home);
@@ -11333,7 +11432,7 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         let result = engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await;
         drop(_home);
         drop(fake_home);
@@ -11405,6 +11504,7 @@ echo done
                 None,
                 None,
                 None,
+                None,
             )
             .await;
         drop(_home);
@@ -11468,7 +11568,7 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
         drop(_home);
@@ -11619,7 +11719,7 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
         drop(_home);
@@ -11661,7 +11761,7 @@ echo done
 
         // Complete first with no hooks configured.
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
         assert!(db
@@ -12284,7 +12384,7 @@ echo done
         db.update_graph_hooks(&graph_id, &hooks).unwrap();
 
         let result = engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await;
         result.unwrap();
 
@@ -12353,7 +12453,7 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         let result = engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await;
         drop(_home);
         drop(fake_home);
@@ -12424,7 +12524,7 @@ echo done
         db.update_graph_hooks(&graph_id, &hooks).unwrap();
 
         let result = engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await;
         result.unwrap();
 
@@ -12530,7 +12630,7 @@ echo done
         db.update_graph_hooks(&graph_id, &hooks).unwrap();
 
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
 
@@ -12574,7 +12674,7 @@ echo done
         .unwrap();
 
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
 
@@ -13323,7 +13423,7 @@ echo done
 
         let _home = HomeGuard::set(home.path());
         engine
-            .run_graph(graph_id, None, None, None, None)
+            .run_graph(graph_id, None, None, None, None, None)
             .await
             .unwrap();
         drop(_home);
@@ -13502,7 +13602,7 @@ echo done
 
         let _home = HomeGuard::set(home.path());
         engine
-            .run_graph(graph_id, None, None, None, None)
+            .run_graph(graph_id, None, None, None, None, None)
             .await
             .unwrap();
         drop(_home);
@@ -13630,7 +13730,7 @@ echo done
 
         let _home = HomeGuard::set(home.path());
         engine
-            .run_graph(graph_id, None, None, None, None)
+            .run_graph(graph_id, None, None, None, None, None)
             .await
             .unwrap();
         drop(_home);
@@ -13916,7 +14016,7 @@ echo done
 
         let _home = HomeGuard::set(home.path());
         engine
-            .run_graph(graph_id, None, None, None, None)
+            .run_graph(graph_id, None, None, None, None, None)
             .await
             .unwrap();
         drop(_home);
@@ -14023,7 +14123,7 @@ echo done
         let _home = HomeGuard::set(fake_home.path());
         let started = std::time::Instant::now();
         engine
-            .run_graph("wf-test".to_string(), None, None, None, None)
+            .run_graph("wf-test".to_string(), None, None, None, None, None)
             .await
             .unwrap();
         let elapsed = started.elapsed();
@@ -14104,7 +14204,7 @@ echo done
         let _home = HomeGuard::set(fake_home.path());
         let started = std::time::Instant::now();
         engine
-            .run_graph("wf-test".to_string(), None, None, None, None)
+            .run_graph("wf-test".to_string(), None, None, None, None, None)
             .await
             .unwrap();
         let elapsed = started.elapsed();
@@ -14186,7 +14286,7 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_graph("wf-test".to_string(), None, None, None, None)
+            .run_graph("wf-test".to_string(), None, None, None, None, None)
             .await
             .unwrap();
         drop(_home);
@@ -14254,7 +14354,7 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_graph("wf-test".to_string(), None, None, None, None)
+            .run_graph("wf-test".to_string(), None, None, None, None, None)
             .await
             .unwrap();
         drop(_home);
@@ -14310,7 +14410,7 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_graph("wf-test".to_string(), None, None, None, None)
+            .run_graph("wf-test".to_string(), None, None, None, None, None)
             .await
             .unwrap();
         drop(_home);
@@ -14478,7 +14578,7 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_graph("wf-test".to_string(), None, None, None, None)
+            .run_graph("wf-test".to_string(), None, None, None, None, None)
             .await
             .unwrap();
         drop(_home);
@@ -14575,7 +14675,7 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_graph("wf-test".to_string(), None, None, None, None)
+            .run_graph("wf-test".to_string(), None, None, None, None, None)
             .await
             .unwrap();
         drop(_home);
@@ -14669,7 +14769,7 @@ echo done
         let _home = HomeGuard::set(fake_home.path());
         let started = std::time::Instant::now();
         engine
-            .run_graph("wf-test".to_string(), None, None, None, None)
+            .run_graph("wf-test".to_string(), None, None, None, None, None)
             .await
             .unwrap();
         let elapsed = started.elapsed();
@@ -14789,7 +14889,7 @@ echo done
         let _home = HomeGuard::set(fake_home.path());
         let started = std::time::Instant::now();
         engine
-            .run_graph("wf-test".to_string(), None, None, None, None)
+            .run_graph("wf-test".to_string(), None, None, None, None, None)
             .await
             .unwrap();
         let elapsed = started.elapsed();
@@ -14857,7 +14957,7 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
         drop(_home);
@@ -15597,7 +15697,7 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
         drop(_home);
@@ -15685,7 +15785,7 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
         drop(_home);
@@ -15745,7 +15845,7 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
         drop(_home);
@@ -15804,7 +15904,7 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
         drop(_home);
@@ -15876,7 +15976,7 @@ echo done
             db.update_graph_status(&graph_id, GraphStatus::Draft, None, None)
                 .unwrap();
             engine
-                .run_graph(graph_id.clone(), None, None, None, None)
+                .run_graph(graph_id.clone(), None, None, None, None, None)
                 .await
                 .unwrap();
 
@@ -15940,7 +16040,7 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
         drop(_home);
@@ -15996,7 +16096,7 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
         drop(_home);
@@ -16039,7 +16139,7 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
         drop(_home);
@@ -16091,7 +16191,7 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
         drop(_home);
@@ -16150,7 +16250,7 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
         drop(_home);
@@ -16266,8 +16366,11 @@ echo done
         let engine = std::sync::Arc::new(engine);
         let engine2 = std::sync::Arc::clone(&engine);
         let graph_id2 = graph_id.clone();
-        let handle =
-            tokio::spawn(async move { engine2.run_graph(graph_id2, None, None, None, None).await });
+        let handle = tokio::spawn(async move {
+            engine2
+                .run_graph(graph_id2, None, None, None, None, None)
+                .await
+        });
 
         // Wait for the first ensemble dispatch to land its join row, then swap
         // the member set — this is the `graph_update_ensemble` between the two
@@ -16351,7 +16454,7 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
         drop(_home);
@@ -16409,7 +16512,7 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_graph("wf-test".to_string(), None, None, None, None)
+            .run_graph("wf-test".to_string(), None, None, None, None, None)
             .await
             .unwrap();
         drop(_home);
@@ -16477,7 +16580,7 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_graph("wf-test".to_string(), None, None, None, None)
+            .run_graph("wf-test".to_string(), None, None, None, None, None)
             .await
             .unwrap();
         drop(_home);
@@ -16616,7 +16719,7 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_graph("wf-test".to_string(), None, None, None, None)
+            .run_graph("wf-test".to_string(), None, None, None, None, None)
             .await
             .unwrap();
         drop(_home);
@@ -16710,7 +16813,7 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_graph("wf-test".to_string(), None, None, None, None)
+            .run_graph("wf-test".to_string(), None, None, None, None, None)
             .await
             .unwrap();
         drop(_home);
@@ -16763,7 +16866,7 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_graph("wf-test".to_string(), None, None, None, None)
+            .run_graph("wf-test".to_string(), None, None, None, None, None)
             .await
             .unwrap();
         drop(_home);
@@ -16838,7 +16941,7 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_graph("wf-test".to_string(), None, None, None, None)
+            .run_graph("wf-test".to_string(), None, None, None, None, None)
             .await
             .unwrap();
         drop(_home);
@@ -16930,7 +17033,7 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_graph("wf-test".to_string(), None, None, None, None)
+            .run_graph("wf-test".to_string(), None, None, None, None, None)
             .await
             .unwrap();
         drop(_home);
@@ -17032,7 +17135,14 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_graph(lp.id.clone(), Some("queue-1".to_string()), None, None, None)
+            .run_graph(
+                lp.id.clone(),
+                Some("queue-1".to_string()),
+                None,
+                None,
+                None,
+                None,
+            )
             .await
             .unwrap();
         drop(_home);
@@ -17254,7 +17364,7 @@ echo done
         .unwrap();
 
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
 
@@ -17323,7 +17433,7 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         let result = engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await;
         drop(_home);
         result.unwrap();
@@ -17410,7 +17520,7 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         let result = engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await;
         drop(_home);
         result.unwrap();
@@ -17518,7 +17628,7 @@ echo done
         .unwrap();
 
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
 
@@ -17619,7 +17729,7 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         let result = engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await;
         drop(_home);
         result.unwrap();
@@ -17793,7 +17903,7 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         let result = engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await;
         drop(_home);
         result.unwrap();
@@ -18167,7 +18277,7 @@ echo done
 
             let _home = HomeGuard::set(fake_home.path());
             let result = engine
-                .run_graph(graph_id.clone(), None, None, None, None)
+                .run_graph(graph_id.clone(), None, None, None, None, None)
                 .await;
             drop(_home);
             result.unwrap();
@@ -18282,7 +18392,7 @@ echo done
 
         let _home = HomeGuard::set(fake_home.path());
         let result = engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await;
         drop(_home);
         result.unwrap();
@@ -18489,7 +18599,7 @@ echo done
         let graph_b_id = graph_b.id.clone();
         let dispatch = tokio::spawn(async move {
             dispatch_engine
-                .run_graph(graph_b_id, None, None, None, None)
+                .run_graph(graph_b_id, None, None, None, None, None)
                 .await
         });
 
@@ -18537,7 +18647,7 @@ echo done
         // Resume graph B — relaunching a paused graph directly is a
         // supported, documented entry point of `run_graph`.
         engine
-            .run_graph(graph_b.id.clone(), None, None, None, None)
+            .run_graph(graph_b.id.clone(), None, None, None, None, None)
             .await
             .unwrap();
 
@@ -18714,7 +18824,7 @@ echo done
         let graph_b_id = graph_b.id.clone();
         let dispatch = tokio::spawn(async move {
             dispatch_engine
-                .run_graph(graph_b_id, None, None, None, None)
+                .run_graph(graph_b_id, None, None, None, None, None)
                 .await
         });
 
@@ -18798,7 +18908,7 @@ echo done
         let (_dir, db, engine, graph_id, spec_id) = cb31_fixture("sleep 2 && true");
         let disp = {
             let (e, id) = (Arc::clone(&engine), graph_id.clone());
-            tokio::spawn(async move { e.run_graph(id, None, None, None, None).await })
+            tokio::spawn(async move { e.run_graph(id, None, None, None, None, None).await })
         };
 
         cb31_wait_for_running_run(&db, &graph_id).await;
@@ -18839,7 +18949,7 @@ echo done
         let (_dir, db, engine, graph_id, spec_id) = cb31_fixture("sleep 30 && true");
         let disp = {
             let (e, id) = (Arc::clone(&engine), graph_id.clone());
-            tokio::spawn(async move { e.run_graph(id, None, None, None, None).await })
+            tokio::spawn(async move { e.run_graph(id, None, None, None, None, None).await })
         };
 
         cb31_wait_for_running_run(&db, &graph_id).await;
@@ -18878,7 +18988,7 @@ echo done
         let (_dir, db, engine, graph_id, spec_id) = cb31_fixture("sleep 2 && true");
         let disp = {
             let (e, id) = (Arc::clone(&engine), graph_id.clone());
-            tokio::spawn(async move { e.run_graph(id, None, None, None, None).await })
+            tokio::spawn(async move { e.run_graph(id, None, None, None, None, None).await })
         };
 
         cb31_wait_for_running_run(&db, &graph_id).await;
@@ -18891,7 +19001,14 @@ echo done
 
         // Continue (the resume path behind graph_continue).
         engine
-            .run_graph_dispatch(graph_id.clone(), None, None, true, None, None)
+            .run_graph_dispatch(
+                graph_id.clone(),
+                None,
+                None,
+                DispatchMode::resume(),
+                None,
+                None,
+            )
             .await
             .unwrap();
 
@@ -18931,7 +19048,7 @@ echo done
         };
         let disp = {
             let (e, id) = (Arc::clone(&engine), graph_id.clone());
-            tokio::spawn(async move { e.run_graph(id, None, None, None, None).await })
+            tokio::spawn(async move { e.run_graph(id, None, None, None, None, None).await })
         };
 
         cb31_wait_for_running_run(&db, &graph_id).await;
@@ -18941,7 +19058,14 @@ echo done
         std::fs::write(dir.path().join("go.marker"), b"").unwrap();
 
         engine
-            .run_graph_dispatch(graph_id.clone(), None, None, true, None, None)
+            .run_graph_dispatch(
+                graph_id.clone(),
+                None,
+                None,
+                DispatchMode::resume(),
+                None,
+                None,
+            )
             .await
             .unwrap();
 
@@ -18991,9 +19115,10 @@ echo done
 
         let disp = {
             let (e, id) = (Arc::clone(&engine), graph_id.clone());
-            tokio::spawn(
-                async move { e.run_graph_dispatch(id, None, None, true, None, None).await },
-            )
+            tokio::spawn(async move {
+                e.run_graph_dispatch(id, None, None, DispatchMode::resume(), None, None)
+                    .await
+            })
         };
         cb31_wait_for_running_run(&db, &graph_id).await;
         assert!(engine.request_pause(&graph_id, false).unwrap());
@@ -19013,7 +19138,14 @@ echo done
         // Continue: the node must get to run iteration 5 again, not be blocked
         // by a spurious iteration 6.
         engine
-            .run_graph_dispatch(graph_id.clone(), None, None, true, None, None)
+            .run_graph_dispatch(
+                graph_id.clone(),
+                None,
+                None,
+                DispatchMode::resume(),
+                None,
+                None,
+            )
             .await
             .unwrap();
 
@@ -19098,7 +19230,7 @@ echo done
         .unwrap();
 
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
 
@@ -19181,7 +19313,7 @@ echo done
         .unwrap();
 
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
 
@@ -19236,7 +19368,7 @@ echo done
         .unwrap();
 
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
 
@@ -19293,7 +19425,7 @@ echo done
         .unwrap();
 
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
 
@@ -19341,7 +19473,7 @@ echo done
         })
         .unwrap();
 
-        let run_graph = engine.run_graph(graph_id.clone(), None, None, None, None);
+        let run_graph = engine.run_graph(graph_id.clone(), None, None, None, None, None);
         tokio::pin!(run_graph);
         // Poll the future without awaiting it yet: drive one step so the
         // check node spawns, then observe the live tail from this thread.
@@ -19404,7 +19536,7 @@ echo done
         .unwrap();
 
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
 
@@ -19458,7 +19590,7 @@ echo done
         .unwrap();
 
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
 
@@ -19493,7 +19625,7 @@ echo done
         .unwrap();
 
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
 
@@ -20285,7 +20417,7 @@ exit 0
         std::env::set_var("SELF_REPORT_DB", db_path.to_string_lossy().into_owned());
 
         let result = engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await;
         drop(_home);
         std::env::remove_var("CAPTURE_DIR");
@@ -20390,6 +20522,7 @@ exit 0
                 None,
                 Some("Build a landing page for our startup".to_string()),
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -20420,6 +20553,7 @@ exit 0
                 None,
                 Some("some idea".to_string()),
                 None,
+                None,
             )
             .await
             .unwrap_err();
@@ -20441,7 +20575,7 @@ exit 0
         let (_dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
 
         let error = engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap_err();
         assert!(
@@ -20722,7 +20856,7 @@ exit 0
 
         let engine = GraphEngine::new(Arc::clone(&db), Arc::new(DefaultNotificationService));
         let result = engine
-            .run_graph("source-bg".to_string(), None, None, None, None)
+            .run_graph("source-bg".to_string(), None, None, None, None, None)
             .await;
         assert!(result.is_ok(), "source graph should complete: {result:?}");
 
@@ -20754,7 +20888,7 @@ exit 0
 
         let engine = GraphEngine::new(Arc::clone(&db), Arc::new(DefaultNotificationService));
         let result = engine
-            .run_graph("source-idea".to_string(), None, None, None, None)
+            .run_graph("source-idea".to_string(), None, None, None, None, None)
             .await;
         assert!(result.is_ok(), "source graph should complete: {result:?}");
 
@@ -20780,7 +20914,7 @@ exit 0
 
         let engine = GraphEngine::new(Arc::clone(&db), Arc::new(DefaultNotificationService));
         let result = engine
-            .run_graph("source-empty".to_string(), None, None, None, None)
+            .run_graph("source-empty".to_string(), None, None, None, None, None)
             .await;
         assert!(result.is_ok(), "source graph should complete: {result:?}");
 
@@ -20826,7 +20960,7 @@ exit 0
 
         let engine = GraphEngine::new(Arc::clone(&db), Arc::new(DefaultNotificationService));
         let result = engine
-            .run_graph("source-idea2".to_string(), None, None, None, None)
+            .run_graph("source-idea2".to_string(), None, None, None, None, None)
             .await;
         assert!(result.is_ok(), "source graph should complete: {result:?}");
 
@@ -20863,7 +20997,7 @@ exit 0
 
         let engine = GraphEngine::new(Arc::clone(&db), Arc::new(DefaultNotificationService));
         let result = engine
-            .run_graph("source-missing".to_string(), None, None, None, None)
+            .run_graph("source-missing".to_string(), None, None, None, None, None)
             .await;
         assert!(result.is_ok(), "source graph should complete: {result:?}");
 
@@ -20975,7 +21109,7 @@ exit 0
 
         // Run A — this should launch B, which should try to launch C but be refused.
         let result = engine
-            .run_graph("graph-a".to_string(), None, None, None, None)
+            .run_graph("graph-a".to_string(), None, None, None, None, None)
             .await;
         assert!(result.is_ok(), "graph A should complete: {result:?}");
 
@@ -21031,7 +21165,7 @@ exit 0
 
         let engine = GraphEngine::new(Arc::clone(&db), Arc::new(DefaultNotificationService));
         let result = engine
-            .run_graph("source-running".to_string(), None, None, None, None)
+            .run_graph("source-running".to_string(), None, None, None, None, None)
             .await;
         assert!(result.is_ok(), "source graph should complete: {result:?}");
 
@@ -21071,7 +21205,7 @@ exit 0
 
         let engine = GraphEngine::new(Arc::clone(&db), Arc::new(DefaultNotificationService));
         let result = engine
-            .run_graph("source-archived".to_string(), None, None, None, None)
+            .run_graph("source-archived".to_string(), None, None, None, None, None)
             .await;
         assert!(result.is_ok(), "source graph should complete: {result:?}");
 
@@ -21097,7 +21231,7 @@ exit 0
 
         let engine = GraphEngine::new(Arc::clone(&db), Arc::new(DefaultNotificationService));
         let result = engine
-            .run_graph("source-prov".to_string(), None, None, None, None)
+            .run_graph("source-prov".to_string(), None, None, None, None, None)
             .await;
         assert!(result.is_ok(), "source graph should complete: {result:?}");
 
@@ -21122,7 +21256,7 @@ exit 0
 
         let engine = GraphEngine::new(Arc::clone(&db), Arc::new(DefaultNotificationService));
         let result = engine
-            .run_graph("source-flag".to_string(), None, None, None, None)
+            .run_graph("source-flag".to_string(), None, None, None, None, None)
             .await;
         assert!(result.is_ok(), "source graph should complete: {result:?}");
 
@@ -21145,7 +21279,7 @@ exit 0
 
         let engine = GraphEngine::new(Arc::clone(&db), Arc::new(DefaultNotificationService));
         let result = engine
-            .run_graph("source-flag2".to_string(), None, None, None, None)
+            .run_graph("source-flag2".to_string(), None, None, None, None, None)
             .await;
         assert!(result.is_ok(), "source graph should complete: {result:?}");
 
@@ -21342,7 +21476,7 @@ exit 0
 
         let engine = GraphEngine::new(Arc::clone(&db), Arc::new(DefaultNotificationService));
         let result = engine
-            .run_graph("source-compl".to_string(), None, None, None, None)
+            .run_graph("source-compl".to_string(), None, None, None, None, None)
             .await;
         eprintln!("run_graph result: {:?}", result);
         assert!(result.is_ok(), "source graph should complete: {result:?}");
@@ -21696,7 +21830,7 @@ exit 0
 
         let _home = HomeGuard::set(fake_home.path());
         let result = engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await;
         drop(_home);
         result.unwrap();
@@ -21770,7 +21904,7 @@ exit 0
 
         let _home = HomeGuard::set(fake_home.path());
         let result = engine
-            .run_graph(_graph_id.clone(), None, None, None, None)
+            .run_graph(_graph_id.clone(), None, None, None, None, None)
             .await;
         drop(_home);
 
@@ -21842,7 +21976,7 @@ exit 0
 
         let _home = HomeGuard::set(fake_home.path());
         let _result = engine
-            .run_graph(_graph_id.clone(), None, None, None, None)
+            .run_graph(_graph_id.clone(), None, None, None, None, None)
             .await;
         drop(_home);
 
@@ -21904,7 +22038,7 @@ exit 0
 
         let _home = HomeGuard::set(fake_home.path());
         let _result = engine
-            .run_graph(_graph_id.clone(), None, None, None, None)
+            .run_graph(_graph_id.clone(), None, None, None, None, None)
             .await;
         drop(_home);
 
@@ -21999,7 +22133,7 @@ exit 0
 
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
         drop(_home);
@@ -22078,7 +22212,7 @@ exit 0
 
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
         drop(_home);
@@ -22138,7 +22272,7 @@ exit 0
 
         let _home = HomeGuard::set(fake_home.path());
         let result = engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await;
         drop(_home);
         result.unwrap();
@@ -22209,7 +22343,7 @@ exit 0
 
         let _home = HomeGuard::set(fake_home.path());
         let result = engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await;
         drop(_home);
         result.unwrap();
@@ -22310,7 +22444,7 @@ exit 0
 
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
         drop(_home);
@@ -22350,6 +22484,10 @@ exit 0
         assert!(
             blocker.contains("`graph_reset` restarts the spec from Start"),
             "FR5: the blocked text names graph_reset as the way to restart the spec: {blocker}"
+        );
+        assert!(
+            blocker.contains("`graph_continue run_from_node`"),
+            "CM43: the blocked text names run_from_node as a way back in: {blocker}"
         );
 
         // `graph_continue retry_current_node` must accept this spec…
@@ -22399,7 +22537,14 @@ exit 0
         // then `resume_background` dispatches with `is_resume: true`).
         let _home = HomeGuard::set(fake_home.path());
         engine
-            .run_graph_dispatch(graph_id.clone(), None, None, true, None, None)
+            .run_graph_dispatch(
+                graph_id.clone(),
+                None,
+                None,
+                DispatchMode::resume(),
+                None,
+                None,
+            )
             .await
             .unwrap();
         drop(_home);
@@ -22486,7 +22631,7 @@ exit 0
 
         let _home = HomeGuard::set(fake_home.path());
         let _result = engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await;
         drop(_home);
 
@@ -22563,7 +22708,7 @@ exit 0
 
         let _home = HomeGuard::set(fake_home.path());
         let result = engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await;
         drop(_home);
         result.unwrap();
@@ -22931,7 +23076,7 @@ exit 0
         // without timing flakes.
         engine.mark_shutting_down();
         engine
-            .run_graph(graph_id, None, None, None, None)
+            .run_graph(graph_id, None, None, None, None, None)
             .await
             .unwrap();
 
@@ -23092,6 +23237,7 @@ exit 0
             &runs,
             &ensembles,
             true,
+            None,
         )
         .unwrap();
         assert_eq!(cursor, SpecCursor::Node("check-a".to_string()));

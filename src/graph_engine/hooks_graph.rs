@@ -241,7 +241,14 @@ impl GraphEngine {
                 shutdown,
             };
             if let Err(error) = engine
-                .run_graph(graph_id.clone(), queue_id, workdir_override, idea, None)
+                .run_graph(
+                    graph_id.clone(),
+                    queue_id,
+                    workdir_override,
+                    idea,
+                    None,
+                    None,
+                )
                 .await
             {
                 if error.downcast_ref::<EmptySpecSetError>().is_some() {

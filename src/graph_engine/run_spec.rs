@@ -16,6 +16,7 @@ impl GraphEngine {
         workdir: &str,
         is_resume: bool,
         queue_id: Option<&str>,
+        directed: Option<&DirectedStart>,
     ) -> Result<SpecExecutionOutcome> {
         activity::publish(
             &self.db,
@@ -50,10 +51,17 @@ impl GraphEngine {
         let enforce_commit_rights = graph_enforces_commit_rights(nodes, &ensembles);
         let existing_runs = self.db.list_graph_runs_for_spec(&spec.id)?;
         let all_node_names: Vec<String> = nodes.iter().map(|n| n.name.clone()).collect();
-        let (cursor, node_outputs, resume_previous_output, iterations) =
-            resolve_spec_start(nodes, edges, spec, &existing_runs, &ensembles, is_resume)?;
+        let (cursor, node_outputs, resume_previous_output, iterations) = resolve_spec_start(
+            nodes,
+            edges,
+            spec,
+            &existing_runs,
+            &ensembles,
+            is_resume,
+            directed,
+        )?;
         let (spec_start_head, spec_committed_head) = self
-            .resolve_spec_baseline(spec, &spec_details, workdir, is_resume)
+            .resolve_spec_baseline(spec, &spec_details, workdir, is_resume, directed.is_some())
             .await?;
 
         self.db.update_graph_spec_status(
@@ -62,6 +70,33 @@ impl GraphEngine {
             Some(chrono::Utc::now()),
             None,
         )?;
+
+        // CM43 req 6: record the directed start on the run's activity feed —
+        // the start node, the nodes skipped between Start and it, and the
+        // counter restart.
+        if let Some(start) = directed.filter(|d| d.spec_id == spec.id) {
+            if let Ok(target) = resolve_directed_target(&start.node_arg, nodes, edges, &ensembles) {
+                let skipped = if target.skipped_nodes.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [{}]", target.skipped_nodes.join(", "))
+                };
+                activity::publish(
+                    &self.db,
+                    workdir,
+                    &lp.id,
+                    &lp.name,
+                    format!(
+                        "Directed run: spec '{}' starts at {}; skipped {} node(s){}; \
+                         iteration counters restarted at 1.",
+                        spec.name,
+                        target.label,
+                        target.skipped_nodes.len(),
+                        skipped
+                    ),
+                );
+            }
+        }
 
         // RS2: session ids captured for each node during THIS dispatch, so a
         // fail-edge bounce back to a node can resume its prior session instead

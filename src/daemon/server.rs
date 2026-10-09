@@ -933,7 +933,7 @@ mod hang_repro {
         let dispatch_graph_id = graph_id.clone();
         let dispatch = tokio::spawn(async move {
             graph_engine
-                .run_graph(dispatch_graph_id, None, None, None, None)
+                .run_graph(dispatch_graph_id, None, None, None, None, None)
                 .await
         });
 

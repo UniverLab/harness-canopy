@@ -318,12 +318,23 @@ pub(crate) fn resolve_spec_start(
     existing_runs: &[GraphNodeRun],
     ensembles: &[EnsembleDetails],
     is_resume: bool,
+    directed: Option<&DirectedStart>,
 ) -> Result<(
     SpecCursor,
     HashMap<String, Value>,
     Option<Value>,
     HashMap<String, usize>,
 )> {
+    // CM43: a directed run starts the spec at the operator-named node
+    // regardless of status, seeding every earlier node's recorded output so
+    // reachable `{{output:X}}` markers still bind. `iterations` stays empty,
+    // which restarts the per-node iteration counters at 1.
+    if let Some(start) = directed.filter(|d| d.spec_id == spec.id) {
+        let target = resolve_directed_target(&start.node_arg, nodes, edges, ensembles)?;
+        let node_outputs = retained_node_outputs(nodes, existing_runs);
+        let previous = directed_previous_output(&target.start_node_ids, existing_runs);
+        return Ok((target.cursor, node_outputs, previous, HashMap::new()));
+    }
     // CB50 FR4: `Interrupted` resumes at its cursor only via `loop_continue`
     // (`is_resume: true`); `loop_run` (`is_resume: false`) restarts it from the
     // entry node. `Running` keeps its historic unconditional resume — a stale

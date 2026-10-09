@@ -445,7 +445,7 @@ impl CronScheduler {
             lp.id,
             action
         );
-        Arc::clone(graph_engine).resume_background(lp.id.clone());
+        Arc::clone(graph_engine).resume_background(lp.id.clone(), None);
     }
 
     /// Evaluate a single cron graph and launch it via the graph engine if due.
@@ -1339,7 +1339,7 @@ mod tests {
         // exceed the attempt limit of 1 this fixture set up.
 
         graph_engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
         let lp = db.get_graph(&graph_id).unwrap().unwrap();

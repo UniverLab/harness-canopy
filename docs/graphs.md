@@ -217,7 +217,11 @@ node are not re-run), and `graph_update_ensemble` lets you rewire the
 members before retrying. A `graph_run` on a blocked (paused + blocker)
 graph refuses and reports the blocker, so a blind relaunch never masks a
 crew that is silently filing nothing; clear the blocker first, or
-`graph_reset` the spec.
+`graph_reset` the spec. A **directed run** —
+`graph_continue run_from_node` (or `graph_run --from`) — is the general
+escape hatch: it starts a spec at a node you choose, reusing the recorded
+outputs of every earlier node, and accepts a paused, completed or failed
+graph as long as it has no active run.
 
 ## Commit rights
 
@@ -376,6 +380,21 @@ current member list, without re-running nodes or specs that already
 passed, and `graph_continue` with `skip` marks that blocked spec
 `skipped` and moves on to the next one. `graph_reset` still restarts
 the blocked spec from its entry node.
+
+When the work up to some node is already done and good — after a crash,
+a rewired ensemble, or a hand fix — a **directed run** starts a spec at
+a node you choose instead of at Start: `graph_continue run_from_node
+--spec <spec>` (or `graph_run --from` for the first spec the run
+executes). It reuses every earlier node's most recent recorded output
+for that spec, sets the spec cursor to the start node, and then runs the
+graph with its normal edges, routers, ensembles and gates. The per-node
+iteration counters restart at 1 (earlier attempts stay in the run
+history). A directed run accepts a `pending`, `paused`, `interrupted`,
+`failed` or `completed` spec on a graph with no active run; a running
+graph refuses. An ensemble is targeted by its name (or its fan-out
+node); a join node or a single member is refused, naming the ensemble.
+If a reachable prompt or check references a node with no recorded output
+for the spec, the run is refused and the missing node is named.
 
 ## Concurrency
 

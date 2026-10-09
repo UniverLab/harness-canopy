@@ -12,6 +12,9 @@ pub(crate) struct DispatchCtx<'a> {
     pub(crate) graph_id: &'a str,
     pub(crate) workdir: &'a str,
     pub(crate) is_resume: bool,
+    /// CM43: when set, the first spec this run executes starts at this node
+    /// instead of at Start.
+    pub(crate) directed: Option<&'a DirectedStart>,
     pub(crate) claimed_at: chrono::DateTime<chrono::Utc>,
 }
 /// Whether a dispatch helper wants the main loop to keep going or stop.
@@ -96,10 +99,12 @@ impl GraphEngine {
         graph_id: String,
         queue_id: Option<String>,
         workdir_override: Option<String>,
-        is_resume: bool,
+        mode: DispatchMode,
         idea: Option<String>,
         sandbox: Option<Sandbox>,
     ) -> Result<()> {
+        let is_resume = mode.is_resume;
+        let directed = mode.directed.as_ref();
         let Some(lp) = self.db.get_graph(&graph_id)? else {
             bail!("Graph '{}' not found.", graph_id);
         };
@@ -127,6 +132,7 @@ impl GraphEngine {
             graph_id: &graph_id,
             workdir: &workdir,
             is_resume,
+            directed,
             claimed_at,
         };
         match &queue_id {
@@ -247,7 +253,14 @@ impl GraphEngine {
             return Ok(DispatchFlow::Continue);
         };
         let outcome = self
-            .run_spec(ctx.lp, &spec, ctx.workdir, ctx.is_resume, Some(queue_id))
+            .run_spec(
+                ctx.lp,
+                &spec,
+                ctx.workdir,
+                ctx.is_resume,
+                Some(queue_id),
+                ctx.directed.filter(|d| d.spec_id == spec.id),
+            )
             .await?;
         let action = self
             .handle_spec_outcome(
@@ -271,6 +284,9 @@ impl GraphEngine {
         queue_id: &str,
         completed_specs: &mut Vec<(String, String)>,
     ) -> Result<DispatchFlow> {
+        // CM43 queue caveat: a directed `graph_run` only picks the queue's
+        // *pending* member, so it cannot start at a member that is currently
+        // `running`/`interrupted`. Use `graph_continue run_from_node` for that.
         loop {
             if self.is_paused(ctx.graph_id)? {
                 return Ok(DispatchFlow::Stop);
@@ -282,7 +298,14 @@ impl GraphEngine {
                 continue;
             };
             let outcome = self
-                .run_spec(ctx.lp, &spec, ctx.workdir, ctx.is_resume, Some(queue_id))
+                .run_spec(
+                    ctx.lp,
+                    &spec,
+                    ctx.workdir,
+                    ctx.is_resume,
+                    Some(queue_id),
+                    ctx.directed.filter(|d| d.spec_id == spec.id),
+                )
                 .await?;
             let action = self
                 .handle_spec_outcome(
@@ -350,18 +373,37 @@ impl GraphEngine {
         specs: Vec<GraphSpec>,
         completed_specs: &mut Vec<(String, String)>,
     ) -> Result<DispatchFlow> {
+        // CM43: a directed run makes its target spec the FIRST spec it
+        // executes — bound specs before it are skipped, and every spec after
+        // it runs normally from Start.
+        let mut reached_directed = ctx.directed.is_none();
         for spec in specs {
             if self.is_paused(ctx.graph_id)? {
                 return Ok(DispatchFlow::Stop);
             }
-            if matches!(
+            let directed_for_spec = ctx.directed.filter(|d| d.spec_id == spec.id);
+            if let Some(target) = ctx.directed {
+                if !reached_directed {
+                    if spec.id != target.spec_id {
+                        continue; // specs before the directed target are not run
+                    }
+                    reached_directed = true;
+                }
+            } else if matches!(
                 spec.status,
                 GraphSpecStatus::Completed | GraphSpecStatus::Skipped
             ) {
                 continue;
             }
             let outcome = self
-                .run_spec(ctx.lp, &spec, ctx.workdir, ctx.is_resume, None)
+                .run_spec(
+                    ctx.lp,
+                    &spec,
+                    ctx.workdir,
+                    ctx.is_resume,
+                    None,
+                    directed_for_spec,
+                )
                 .await?;
             let action = self
                 .handle_spec_outcome(

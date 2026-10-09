@@ -346,6 +346,7 @@ impl GraphEngine {
         spec_details: &GraphSpecDetails,
         workdir: &str,
         is_resume: bool,
+        directed: bool,
     ) -> Result<(Option<String>, Option<String>)> {
         // B10: capture the workdir's git HEAD once, at the moment the engine
         // starts executing this spec in the *current run attempt*. The
@@ -353,27 +354,45 @@ impl GraphEngine {
         // when resuming the same in-flight attempt (`is_resume` with the spec
         // still `Running`); every other case re-captures strictly before any
         // node of this attempt executes.
-        let (spec_start_head, _spec_start_dirty) =
-            if is_resume && spec.status == GraphSpecStatus::Running {
-                (
-                    spec_details.spec.spec_start_head.clone(),
-                    spec_details.spec.spec_start_dirty,
-                )
-            } else {
-                let head = capture_workdir_head(workdir).await;
-                let dirty = capture_workdir_dirty(workdir).await;
-                self.db
-                    .set_graph_spec_start_state(&spec.id, head.as_deref(), dirty)?;
-                (head, dirty)
-            };
+        //
+        // CM43: a directed run is a third case. It reuses the spec's recorded
+        // start head when one exists — the earlier nodes it skipped already
+        // established the baseline — and otherwise captures a fresh one, which
+        // the response reports.
+        let (spec_start_head, _spec_start_dirty) = if directed {
+            match spec_details.spec.spec_start_head.clone() {
+                Some(head) => (Some(head), spec_details.spec.spec_start_dirty),
+                None => {
+                    let head = capture_workdir_head(workdir).await;
+                    let dirty = capture_workdir_dirty(workdir).await;
+                    self.db
+                        .set_graph_spec_start_state(&spec.id, head.as_deref(), dirty)?;
+                    (head, dirty)
+                }
+            }
+        } else if is_resume && spec.status == GraphSpecStatus::Running {
+            (
+                spec_details.spec.spec_start_head.clone(),
+                spec_details.spec.spec_start_dirty,
+            )
+        } else {
+            let head = capture_workdir_head(workdir).await;
+            let dirty = capture_workdir_dirty(workdir).await;
+            self.db
+                .set_graph_spec_start_state(&spec.id, head.as_deref(), dirty)?;
+            (head, dirty)
+        };
         // C15: `spec_committed_head` follows the exact same
         // same-attempt-vs-fresh-attempt rule as `spec_start_head` above.
-        let spec_committed_head = if is_resume && spec.status == GraphSpecStatus::Running {
-            spec_details.spec.spec_committed_head.clone()
-        } else {
-            self.db.set_graph_spec_committed_head(&spec.id, None)?;
-            None
-        };
+        // CM43: a directed run reuses it for the same reason it reuses the
+        // start head.
+        let spec_committed_head =
+            if directed || (is_resume && spec.status == GraphSpecStatus::Running) {
+                spec_details.spec.spec_committed_head.clone()
+            } else {
+                self.db.set_graph_spec_committed_head(&spec.id, None)?;
+                None
+            };
         Ok((spec_start_head, spec_committed_head))
     }
 
