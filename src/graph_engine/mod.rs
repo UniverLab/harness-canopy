@@ -471,6 +471,129 @@ mod tests {
         ))
     }
 
+    #[tokio::test]
+    async fn on_completed_hook_edit_mid_run_fires_the_new_hook() {
+        use crate::domain::graphs::GraphCompletionHook;
+        let (dir, db, engine, graph_id, _spec_id) = graph_fixture().unwrap();
+        let v1_file = dir.path().join("hook_v1");
+        let v2_file = dir.path().join("hook_v2");
+
+        let hook_v1 = GraphCompletionHook {
+            platform: None,
+            model: None,
+            effort: None,
+            prompt: None,
+            command: Some(format!("printf v1 > \"{}\"", v1_file.display())),
+            target_session_id: None,
+            target_session_name: None,
+            timeout_minutes: Some(1),
+            target_graph_id: None,
+            queue_id: None,
+            workdir_override: None,
+            idea: None,
+        };
+        let mut hooks = std::collections::BTreeMap::new();
+        hooks.insert(GraphHookEvent::OnCompleted, vec![hook_v1]);
+        db.update_graph_hooks(&graph_id, &hooks).unwrap();
+
+        // The run context would have captured this graph (holding hook_v1).
+        let stale_lp = db.get_graph(&graph_id).unwrap().unwrap();
+
+        let hook_v2 = GraphCompletionHook {
+            platform: None,
+            model: None,
+            effort: None,
+            prompt: None,
+            command: Some(format!("printf v2 > \"{}\"", v2_file.display())),
+            target_session_id: None,
+            target_session_name: None,
+            timeout_minutes: Some(1),
+            target_graph_id: None,
+            queue_id: None,
+            workdir_override: None,
+            idea: None,
+        };
+        let mut hooks = std::collections::BTreeMap::new();
+        hooks.insert(GraphHookEvent::OnCompleted, vec![hook_v2.clone()]);
+        db.update_graph_hooks(&graph_id, &hooks).unwrap();
+
+        let completed = vec![("Spec".to_string(), "ok".to_string())];
+        let ctx = HookContext {
+            graph_name: &stale_lp.name,
+            workdir: &stale_lp.workdir,
+            completed_specs: &completed,
+            spec_name: None,
+            spec_id: None,
+            blocker: None,
+            node_name: None,
+        };
+        engine
+            .fire_hooks(&stale_lp, GraphHookEvent::OnCompleted, &ctx)
+            .await;
+
+        assert!(v2_file.exists(), "the edited hook must fire");
+        assert!(!v1_file.exists(), "the captured hook must NOT fire");
+        let runs = db.list_graph_completion_hook_runs(&graph_id).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].hook_config.as_ref(), Some(&hook_v2));
+    }
+
+    #[tokio::test]
+    async fn on_spec_completed_hook_edit_between_specs_fires_new_version() {
+        use crate::domain::graphs::GraphCompletionHook;
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+        let spec = db.get_graph_spec(&spec_id).unwrap().unwrap();
+        let v1_file = dir.path().join("spec_v1");
+        let v2_file = dir.path().join("spec_v2");
+
+        let v1 = GraphCompletionHook {
+            platform: None,
+            model: None,
+            effort: None,
+            prompt: None,
+            command: Some(format!("printf v1 > \"{}\"", v1_file.display())),
+            target_session_id: None,
+            target_session_name: None,
+            timeout_minutes: Some(1),
+            target_graph_id: None,
+            queue_id: None,
+            workdir_override: None,
+            idea: None,
+        };
+        let mut hooks = std::collections::BTreeMap::new();
+        hooks.insert(GraphHookEvent::OnSpecCompleted, vec![v1]);
+        db.update_graph_hooks(&graph_id, &hooks).unwrap();
+        let stale_lp = db.get_graph(&graph_id).unwrap().unwrap();
+
+        engine.fire_on_spec_completed_hooks(&stale_lp, &spec).await;
+        assert!(v1_file.exists());
+
+        let v2 = GraphCompletionHook {
+            platform: None,
+            model: None,
+            effort: None,
+            prompt: None,
+            command: Some(format!("printf v2 > \"{}\"", v2_file.display())),
+            target_session_id: None,
+            target_session_name: None,
+            timeout_minutes: Some(1),
+            target_graph_id: None,
+            queue_id: None,
+            workdir_override: None,
+            idea: None,
+        };
+        let mut hooks = std::collections::BTreeMap::new();
+        hooks.insert(GraphHookEvent::OnSpecCompleted, vec![v2.clone()]);
+        db.update_graph_hooks(&graph_id, &hooks).unwrap();
+
+        engine.fire_on_spec_completed_hooks(&stale_lp, &spec).await;
+        assert!(v2_file.exists(), "second spec must fire the edited hook");
+        assert_eq!(std::fs::read_to_string(&v2_file).unwrap(), "v2");
+        let runs = db.list_graph_completion_hook_runs(&graph_id).unwrap();
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[1].hook_config.as_ref(), Some(&v2));
+    }
+
     #[derive(Debug, Clone, PartialEq)]
     enum RecordedNotification {
         GraphStarted {

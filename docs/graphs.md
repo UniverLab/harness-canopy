@@ -444,8 +444,18 @@ already happened does not fire. A hook that fails is recorded and never
 changes the graph's own status, and never stops the remaining hooks of that
 event from running.
 
+Editing hooks on a running graph takes effect for that run: the engine reads
+the graph's stored hooks at the moment each event fires, so a `graph_update`
+landing before an event fires is the edit that fires on the current run's
+remaining events — the same way ensembles, nodes and prompts already take
+effect at the next dispatch. When `graph_update` changes hooks while a run is
+active, its response names those remaining events. An edit made after an
+event already fired does not re-fire it.
+
 Every hook run records the event it served and which hook of that event it
-was (`event`, `hook_index`), and is readable from `graph_get`'s
+was (`event`, `hook_index`), plus a copy of the exact hook config that
+actually fired (`hook_config`) — so a later reader can see what ran even
+after the hooks are edited again. Hook runs are readable from `graph_get`'s
 `completion_hook_runs` and `canopy graph info`'s hook-runs listing alongside
 the graph's node runs.
 

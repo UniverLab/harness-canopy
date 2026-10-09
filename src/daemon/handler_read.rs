@@ -510,6 +510,7 @@ pub(crate) fn graph_completion_hook_run_json(
         "summary": run.summary,
         "started_at": run.started_at.to_rfc3339(),
         "completed_at": run.completed_at.map(|value| value.to_rfc3339()),
+        "hook_config": run.hook_config,
     })
 }
 

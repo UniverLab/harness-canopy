@@ -11,8 +11,8 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         conn.execute(
-            "INSERT INTO graph_completion_hook_runs (id, graph_id, status, output, summary, started_at, completed_at, pid, boot_id, event, hook_index, executed_platform, executed_model)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            "INSERT INTO graph_completion_hook_runs (id, graph_id, status, output, summary, started_at, completed_at, pid, boot_id, event, hook_index, executed_platform, executed_model, hook_config)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 &run.id,
                 &run.graph_id,
@@ -27,6 +27,10 @@ impl Database {
                 run.hook_index,
                 &run.executed_platform,
                 &run.executed_model,
+                run.hook_config
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()?,
             ],
         )?;
         Ok(())
@@ -93,7 +97,7 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, graph_id, status, output, summary, started_at, completed_at, pid, boot_id, event, hook_index, executed_platform, executed_model
+            "SELECT id, graph_id, status, output, summary, started_at, completed_at, pid, boot_id, event, hook_index, executed_platform, executed_model, hook_config
              FROM graph_completion_hook_runs WHERE graph_id = ?1 ORDER BY started_at ASC, rowid ASC",
         )?;
         let rows = stmt.query_map(params![graph_id], map_graph_completion_hook_run_row)?;

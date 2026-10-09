@@ -22,7 +22,15 @@ impl GraphEngine {
         event: GraphHookEvent,
         ctx: &HookContext<'_>,
     ) {
-        let Some(hooks) = lp.hooks.get(&event) else {
+        // CM45: read the graph's hooks as stored RIGHT NOW. `lp` is the run
+        // context's single `&Graph`, captured when the run was claimed/resumed;
+        // a `graph_update hooks=` made mid-run must be the edit that fires. Read
+        // through the same accessor every other graph read uses
+        // (`Database::get_graph`), never from `lp.hooks`.
+        let Ok(Some(fresh)) = self.db.get_graph(&lp.id) else {
+            return;
+        };
+        let Some(hooks) = fresh.hooks.get(&event) else {
             return;
         };
         if hooks.is_empty() {
@@ -117,6 +125,7 @@ impl GraphEngine {
                 boot_id: None,
                 executed_platform,
                 executed_model,
+                hook_config: Some(hook.clone()),
             })
         {
             tracing::warn!(

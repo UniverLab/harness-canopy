@@ -408,6 +408,11 @@ fn map_graph_completion_hook_run_row(
         boot_id: row.get(8)?,
         executed_platform: row.get(11)?,
         executed_model: row.get(12)?,
+        hook_config: row
+            .get::<_, Option<String>>(13)?
+            .as_deref()
+            .map(decode_graph_completion_hook)
+            .transpose()?,
     })
 }
 

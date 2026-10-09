@@ -5520,7 +5520,7 @@ mod tests {
 
     #[test]
     fn build_graph_update_response_contains_graph_id() {
-        let result = build_graph_update_response("graph-42");
+        let result = build_graph_update_response("graph-42", None);
         let text = format!("{:?}", result.content);
         assert!(text.contains("graph-42"), "{text}");
         assert!(text.contains("updated"), "{text}");
@@ -6414,7 +6414,7 @@ mod additional_tests {
 
     #[test]
     fn build_graph_update_response_text() {
-        let result = build_graph_update_response("graph-xyz");
+        let result = build_graph_update_response("graph-xyz", None);
         let text = format!("{:?}", result.content);
         assert!(text.contains("graph-xyz"));
         assert!(text.contains("updated"));
@@ -7752,6 +7752,7 @@ mod coverage_tests {
             boot_id: None,
             executed_platform: None,
             executed_model: None,
+            hook_config: None,
         };
         let json = super::graph_completion_hook_run_json(&run);
         assert_eq!(json["id"], "chr1");
@@ -7775,6 +7776,7 @@ mod coverage_tests {
             boot_id: None,
             executed_platform: None,
             executed_model: None,
+            hook_config: None,
         };
         let json = super::graph_completion_hook_run_json(&run);
         assert!(json["completed_at"].is_null());
@@ -10731,6 +10733,127 @@ mod endpoint_tests {
             db.get_graph(&graph_id).unwrap().unwrap().name,
             "Renamed Graph"
         );
+    }
+
+    #[tokio::test]
+    async fn graph_update_response_names_remaining_events_when_run_active() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let workdir = dir.path().to_string_lossy().to_string();
+        let created = handler
+            .graph_create(Parameters(GraphCreateParams {
+                name: "Active Hook Graph".to_string(),
+                description: None,
+                workdir,
+                trigger: None,
+                infra_node_id: None,
+                allow_dirty_start: false,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&created), "{}", text(&created));
+        let graph_id = extract_id(&created, "graph_id");
+
+        db.update_graph_status(
+            &graph_id,
+            GraphStatus::Running,
+            Some(chrono::Utc::now()),
+            None,
+        )
+        .unwrap();
+
+        let mut hooks = std::collections::BTreeMap::new();
+        for event in ["on_completed", "on_spec_completed"] {
+            hooks.insert(
+                event.to_string(),
+                vec![GraphCompletionHookParams {
+                    platform: None,
+                    model: None,
+                    effort: None,
+                    prompt: None,
+                    command: Some("printf ok".to_string()),
+                    target_session_id: None,
+                    target_session_name: None,
+                    timeout_minutes: Some(1),
+                    target_graph_id: None,
+                    queue_id: None,
+                    workdir_override: None,
+                    idea: None,
+                }],
+            );
+        }
+        let updated = handler
+            .graph_update(Parameters(GraphUpdateParams {
+                graph_id: graph_id.clone(),
+                name: None,
+                description: None,
+                workdir: None,
+                trigger: None,
+                on_completed: None,
+                hooks: Some(hooks),
+                infra_node_id: None,
+                allow_dirty_start: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&updated), "{}", text(&updated));
+        let message = text(&updated);
+        assert!(message.contains("remaining events"), "{message}");
+        assert!(message.contains("on_completed"), "{message}");
+        assert!(message.contains("on_spec_completed"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn graph_update_response_has_no_hook_note_without_active_run() {
+        let (dir, _db, handler) = endpoint_test_handler();
+        let workdir = dir.path().to_string_lossy().to_string();
+        let created = handler
+            .graph_create(Parameters(GraphCreateParams {
+                name: "Idle Hook Graph".to_string(),
+                description: None,
+                workdir,
+                trigger: None,
+                infra_node_id: None,
+                allow_dirty_start: false,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&created));
+        let graph_id = extract_id(&created, "graph_id");
+
+        let mut hooks = std::collections::BTreeMap::new();
+        hooks.insert(
+            "on_completed".to_string(),
+            vec![GraphCompletionHookParams {
+                platform: None,
+                model: None,
+                effort: None,
+                prompt: None,
+                command: Some("printf ok".to_string()),
+                target_session_id: None,
+                target_session_name: None,
+                timeout_minutes: Some(1),
+                target_graph_id: None,
+                queue_id: None,
+                workdir_override: None,
+                idea: None,
+            }],
+        );
+        let updated = handler
+            .graph_update(Parameters(GraphUpdateParams {
+                graph_id: graph_id.clone(),
+                name: None,
+                description: None,
+                workdir: None,
+                trigger: None,
+                on_completed: None,
+                hooks: Some(hooks),
+                infra_node_id: None,
+                allow_dirty_start: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&updated), "{}", text(&updated));
+        assert!(!text(&updated).contains("remaining events"));
     }
 
     #[tokio::test]

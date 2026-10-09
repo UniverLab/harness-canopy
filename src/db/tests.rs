@@ -6981,6 +6981,7 @@ mod hooks_tests {
             boot_id: None,
             executed_platform: None,
             executed_model: None,
+            hook_config: None,
         }
     }
 
@@ -7086,6 +7087,21 @@ mod hooks_tests {
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].event, GraphHookEvent::OnCompleted);
         assert_eq!(runs[0].hook_index, 0);
+    }
+
+    #[test]
+    fn graph_hook_run_config_round_trips() {
+        let db = test_db();
+        let lp = graph_with_hooks("graph1", BTreeMap::new());
+        db.insert_graph(&lp).unwrap();
+        let mut run = sample_hook_run(GraphHookEvent::OnCompleted, 0);
+        run.graph_id = "graph1".to_string();
+        run.hook_config = Some(hook_fixture("claude", "done: {{graph_name}}"));
+        db.insert_graph_completion_hook_run(&run).unwrap();
+
+        let runs = db.list_graph_completion_hook_runs("graph1").unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].hook_config, run.hook_config);
     }
 
     #[test]
@@ -7491,6 +7507,7 @@ fn cb43_all_run_kinds_contribute() {
         boot_id: None,
         executed_platform: Some("p-hook".to_string()),
         executed_model: Some("m-hook".to_string()),
+        hook_config: None,
     })
     .unwrap();
 
@@ -7554,6 +7571,7 @@ fn cb46_sources_keep_every_run_kind_attribution() {
         boot_id: None,
         executed_platform: Some("hook-platform".into()),
         executed_model: Some("hook-model".into()),
+        hook_config: None,
     })
     .unwrap();
     db.upsert_agent(&sample_cron_agent("cb46-agent")).unwrap();

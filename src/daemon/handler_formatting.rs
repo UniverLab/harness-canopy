@@ -459,8 +459,14 @@ fn format_models_for_providers(
     (sections.join("\n"), truncation)
 }
 
-pub(crate) fn build_graph_update_response(graph_id: &str) -> CallToolResult {
-    success_result(&format!("Graph '{graph_id}' updated."))
+pub(crate) fn build_graph_update_response(
+    graph_id: &str,
+    active_run_note: Option<&str>,
+) -> CallToolResult {
+    match active_run_note {
+        Some(note) => success_result(&format!("Graph '{graph_id}' updated. {note}")),
+        None => success_result(&format!("Graph '{graph_id}' updated.")),
+    }
 }
 
 pub(crate) fn build_spec_update_response(spec_id: &str) -> CallToolResult {

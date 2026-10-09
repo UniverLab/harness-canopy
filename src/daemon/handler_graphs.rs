@@ -5,6 +5,7 @@ use crate::daemon::handler::TaskTriggerHandler;
 use crate::daemon::handler_formatting::{
     build_graph_update_response, build_id_result, internal_error,
 };
+use crate::daemon::handler_run_exec::find_in_flight_run;
 use crate::daemon::handler_specs::validate_at_least_one_bool;
 use crate::daemon::handler_validate::{
     resolve_prefix_or_error, validate_absolute_dir, validate_graph_exists, validate_non_empty,
@@ -221,6 +222,8 @@ impl TaskTriggerHandler {
             }
         }
 
+        let hooks_changed = new_hooks.is_some() || new_completion_hook.is_some();
+
         if let Some(hooks_map) = new_hooks {
             // Merge legacy `on_completed` into the hooks map if both are provided
             let mut final_hooks = hooks_map;
@@ -255,7 +258,15 @@ impl TaskTriggerHandler {
                 .map_err(internal_error)?;
         }
 
-        Ok(build_graph_update_response(&graph_id))
+        let active_run_note = if hooks_changed {
+            remaining_hook_events_for_active_run(&self.db, &graph_id)
+        } else {
+            None
+        };
+        Ok(build_graph_update_response(
+            &graph_id,
+            active_run_note.as_deref(),
+        ))
     }
 }
 
@@ -327,6 +338,41 @@ pub(crate) fn build_graph_trigger(
             "Unknown trigger kind '{other}'. Use 'cron', 'watch', or 'manual'."
         )),
     }
+}
+
+/// CM45: when a `graph_update` changes hooks while a run is active, name the
+/// events that run will still fire under the new hooks — the events the
+/// just-applied map configures that have not already fired since the run
+/// started. Returns `None` when no run is active, when nothing was configured,
+/// or when every configured event has already fired this run (FR2: hooks are
+/// never retroactive).
+fn remaining_hook_events_for_active_run(db: &Database, graph_id: &str) -> Option<String> {
+    let lp = db.get_graph(graph_id).ok().flatten()?;
+    let active = matches!(lp.status, GraphStatus::Running | GraphStatus::Pausing)
+        || find_in_flight_run(db, graph_id).ok().flatten().is_some();
+    if !active {
+        return None;
+    }
+    let fired: std::collections::HashSet<GraphHookEvent> = db
+        .list_graph_completion_hook_runs(graph_id)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|run| lp.started_at.is_none_or(|start| run.started_at >= start))
+        .map(|run| run.event)
+        .collect();
+    let remaining: Vec<&str> = lp
+        .hooks
+        .keys()
+        .filter(|event| !fired.contains(event))
+        .map(|event| event.as_str())
+        .collect();
+    if remaining.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "A run is active; the new hooks apply to the current run's remaining events: {}.",
+        remaining.join(", ")
+    ))
 }
 
 /// Build a validated [`crate::domain::graphs::GraphCompletionHook`] from MCP

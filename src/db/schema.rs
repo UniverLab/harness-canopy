@@ -446,6 +446,27 @@ impl Database {
         Ok(())
     }
 
+    /// CM45: add `graph_completion_hook_runs.hook_config` — the JSON config of
+    /// the hook that actually fired. Additive and idempotent; pre-migration
+    /// rows keep NULL (the config was never captured for them).
+    pub(in crate::db) fn migrate_graph_hook_config_column(conn: &Connection) -> Result<()> {
+        let has_column: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('graph_completion_hook_runs') WHERE name = 'hook_config'",
+                [],
+                |row| Ok(row.get::<_, i32>(0)? > 0),
+            )
+            .unwrap_or(false);
+        if !has_column {
+            conn.execute(
+                "ALTER TABLE graph_completion_hook_runs ADD COLUMN hook_config TEXT",
+                [],
+            )
+            .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
+        }
+        Ok(())
+    }
+
     /// CH4: add graph `hook_launched` and the `graph_hook_launches` table.
     pub(in crate::db) fn migrate_hook_launch_tracking(conn: &Connection) -> Result<()> {
         // CH4: hook-launched depth tracking and provenance.

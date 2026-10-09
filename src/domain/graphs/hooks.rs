@@ -20,7 +20,7 @@ use crate::domain::graphs::GraphRunStatus;
 /// without waiting for it (CH4). The launched graph's outcome never changes the
 /// launching graph's status. Depth is capped at one: a graph launched by a hook
 /// cannot itself launch another graph via hooks.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GraphCompletionHook {
     /// CLI platform for agent hooks (e.g. "mimo", "claude"). `None` for
     /// command and interactive hooks.
@@ -140,6 +140,11 @@ pub struct GraphCompletionHookRun {
     /// CB43: see `executed_platform`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub executed_model: Option<String>,
+    /// CM45: the hook config that actually fired, captured at fire time. A
+    /// later read sees what ran even after `graph_update` replaces the hook.
+    /// `None` for pre-migration rows and for rows whose hook was never stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hook_config: Option<GraphCompletionHook>,
 }
 
 /// The four events a graph hook can fire on. Key name for the event-keyed

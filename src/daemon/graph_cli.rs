@@ -1976,6 +1976,7 @@ mod tests {
             boot_id: None,
             executed_platform: None,
             executed_model: None,
+            hook_config: None,
         };
         print_graph_info_hook_runs(std::slice::from_ref(&run));
     }

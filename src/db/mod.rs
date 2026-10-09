@@ -361,7 +361,8 @@ const BASE_SCHEMA_BATCHES: &[&str] = &[
                 event TEXT NOT NULL DEFAULT 'on_completed',
                 hook_index INTEGER NOT NULL DEFAULT 0,
                 executed_platform TEXT,
-                executed_model TEXT
+                executed_model TEXT,
+                hook_config TEXT
             );
 
             CREATE INDEX IF NOT EXISTS idx_graph_completion_hook_runs_graph_started
@@ -599,6 +600,7 @@ impl Database {
         Self::migrate_graph_run_output_tails(&conn)?;
         Self::migrate_run_paused_through_column(&conn)?;
         Self::migrate_graph_hook_event_columns(&conn)?;
+        Self::migrate_graph_hook_config_column(&conn)?;
         Self::migrate_hook_launch_tracking(&conn)?;
         Self::migrate_executed_platform_columns(&conn)?;
         Self::migrate_ensemble_infra_columns(&conn)?;
