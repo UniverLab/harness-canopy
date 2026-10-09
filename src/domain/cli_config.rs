@@ -110,8 +110,27 @@ pub struct CliConfig {
     /// `cmd` is shell-words-split and appended to the resolved binary, e.g. `"--version"`.
     /// `contains` is matched case-insensitively against combined stdout+stderr.
     /// Example (registry): `identity_check = { cmd = "--version", contains = "blackbox" }`
+    ///
+    /// Diagnosis-only (probe/doctor, CB44) — never run on dispatch. CB85's
+    /// `identity_args`/`identity_pattern` below are the dispatch-enforced pair.
     #[serde(default)]
     pub identity_check: Option<IdentityCheck>,
+    /// CB85: argv that makes the resolved binary prove it is this platform,
+    /// run as `<binary> <identity_args...>` (e.g. `["--version"]`). Paired
+    /// with `identity_pattern`: both must be set (and non-empty) for the
+    /// check to run.
+    #[serde(default)]
+    pub identity_args: Option<Vec<String>>,
+    /// CB85: regex the combined stdout+stderr of
+    /// `<binary> <identity_args>` must match (e.g.
+    /// `(?i)blackbox ai|blackboxai`). A mismatch or a 5 s timeout makes the
+    /// platform "not installed" — `<platform>: '<path>' is not
+    /// <platform_display> (identity check failed: <first line of its
+    /// output>)` — on every surface that resolves the platform's binary
+    /// (probe, node dispatch, `agent_add` validation, doctor). The verdict
+    /// is cached per resolved path + mtime for the daemon's lifetime.
+    #[serde(default)]
+    pub identity_pattern: Option<String>,
     /// RGB accent color for this CLI's agents in the TUI.
     #[serde(default)]
     pub accent_color: Option<[u8; 3]>,
@@ -525,6 +544,8 @@ mod tests {
             session_end_args: None,
             models_list_cmd: None,
             identity_check: None,
+            identity_args: None,
+            identity_pattern: None,
             accent_color: None,
             yolo_flag: None,
             trust_flag: None,
@@ -1084,5 +1105,37 @@ mod tests {
         let back: CliConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(back.provider.as_deref(), Some("Mistral AI"));
         assert_eq!(back.tool_name.as_deref(), Some("Vibe"));
+    }
+
+    #[test]
+    fn identity_args_and_pattern_default_to_none() {
+        let config: CliConfig = serde_json::from_str(r#"{"name":"x"}"#).unwrap();
+        assert_eq!(config.identity_args, None);
+        assert_eq!(config.identity_pattern, None);
+    }
+
+    #[test]
+    fn identity_args_and_pattern_parse_and_roundtrip() {
+        let json = r#"{"name":"blackbox","binary":"blackbox","identity_args":["--version"],"identity_pattern":"(?i)blackbox ai|blackboxai"}"#;
+        let config: CliConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            config.identity_args.as_deref(),
+            Some(&["--version".to_string()][..])
+        );
+        assert_eq!(
+            config.identity_pattern.as_deref(),
+            Some("(?i)blackbox ai|blackboxai")
+        );
+
+        let roundtrip = serde_json::to_string(&config).unwrap();
+        let back: CliConfig = serde_json::from_str(&roundtrip).unwrap();
+        assert_eq!(
+            back.identity_args.as_deref(),
+            Some(&["--version".to_string()][..])
+        );
+        assert_eq!(
+            back.identity_pattern.as_deref(),
+            Some("(?i)blackbox ai|blackboxai")
+        );
     }
 }

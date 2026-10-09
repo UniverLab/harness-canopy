@@ -1082,6 +1082,64 @@ mod tests {
         assert!(diagnose_cli_identity(&cli, &script).is_none());
     }
 
+    fn binary_identity_cli_config(
+        binary: &std::path::Path,
+        args: Option<Vec<&str>>,
+        pattern: Option<&str>,
+    ) -> CliConfig {
+        CliConfig {
+            name: "blackbox".to_string(),
+            binary: binary.to_string_lossy().to_string(),
+            identity_args: args.map(|a| a.into_iter().map(String::from).collect()),
+            identity_pattern: pattern.map(String::from),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn doctor_reports_not_installed_when_identity_args_pattern_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = write_identity_script(
+            &dir,
+            "blackbox",
+            "if [ \"$1\" = \"--version\" ]; then echo \"blackbox: another window manager is already running on display ':0'\"; else echo \"$1\"; fi\n",
+        );
+        let cli =
+            binary_identity_cli_config(&script, Some(vec!["--version"]), Some("(?i)blackbox ?ai"));
+        let err = diagnose_binary_identity(&cli, &script)
+            .expect("a mismatch must be reported as not-installed");
+        let message = err.message();
+        assert!(
+            message.contains(&script.to_string_lossy().to_string()),
+            "must name the resolved path: {message}"
+        );
+        assert!(
+            message.contains("is not blackbox"),
+            "must say the binary is not the platform: {message}"
+        );
+        assert!(
+            message.contains("identity check failed: blackbox: another window manager"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn doctor_reports_nothing_when_identity_args_pattern_passes() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = write_identity_script(&dir, "real-bb", "echo 'blackbox ai 1.2.3'\n");
+        let cli =
+            binary_identity_cli_config(&script, Some(vec!["--version"]), Some("(?i)blackbox ?ai"));
+        assert!(diagnose_binary_identity(&cli, &script).is_none());
+    }
+
+    #[test]
+    fn doctor_reports_nothing_when_identity_fields_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = write_identity_script(&dir, "plain-cli", "echo \"$1\"\n");
+        let cli = binary_identity_cli_config(&script, None, None);
+        assert!(diagnose_binary_identity(&cli, &script).is_none());
+    }
+
     #[test]
     fn doctor_respects_absolute_path_override() {
         // Two binaries share the bare name: the failing one would win a

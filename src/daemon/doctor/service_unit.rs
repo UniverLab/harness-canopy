@@ -67,6 +67,21 @@ pub(super) fn report_cli_resolution(
                     issues.push(wb.report(&cli_config.binary, check_cmd));
                     continue;
                 }
+                // CB85: identity_args/identity_pattern — the same verdict the
+                // probe and dispatch paths produce, cached per path+mtime so
+                // a doctor run checks each binary once. A mismatch is reported
+                // as not-installed rather than a skew warning.
+                if let Some(error) = diagnose_binary_identity(cli_config, &resolved) {
+                    println!(
+                        " \x1b[31m✗\x1b[0m {} → {} (via {} — {})",
+                        label,
+                        resolved.display(),
+                        step.label(),
+                        error.message()
+                    );
+                    issues.push(error.message());
+                    continue;
+                }
                 // Check daemon reachability: does the binary also
                 // resolve under the daemon's captured PATH?
                 let daemon_reachable = match &daemon_path {
@@ -373,6 +388,22 @@ pub(crate) fn diagnose_cli_identity(
 ) -> Option<crate::domain::cli_strategy::WrongBinaryError> {
     let _check = cli_config.identity_check.as_ref()?;
     crate::domain::cli_strategy::verify_identity(cli_config, resolved).err()
+}
+
+/// CB85: run the platform's registry-declared `identity_args` /
+/// `identity_pattern` against the already-resolved absolute path — the
+/// dispatch-enforced sibling of [`diagnose_cli_identity`]. `Some(error)`
+/// exactly when the binary does not identify as this platform; `None` when
+/// the platform declares neither field (backward compatible), its binary
+/// does not resolve (the line above already reported that), or the check
+/// passes. Cached per path+mtime, so repeated doctor runs in one process
+/// check once.
+pub(crate) fn diagnose_binary_identity(
+    cli_config: &crate::domain::cli_config::CliConfig,
+    resolved: &Path,
+) -> Option<crate::domain::cli_strategy::NotInstalled> {
+    let identity = crate::domain::cli_strategy::BinaryIdentity::from_cli_config(cli_config)?;
+    crate::domain::cli_strategy::ensure_binary_identity_blocking(resolved, &identity).err()
 }
 
 /// Best-effort `<binary> --version` output, trimmed. `None` on any failure —

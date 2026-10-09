@@ -50,6 +50,33 @@ impl SpawnError {
             permanent_reason: None,
         }
     }
+
+    /// CB85: the resolved binary failed its platform identity check — a
+    /// different program answering to the platform's name. Permanent: the
+    /// verdict is deterministic (and cached per path+mtime), so the
+    /// infra-retry budget must not be spent on it (B39).
+    pub(crate) fn from_identity(error: &crate::domain::cli_strategy::NotInstalled) -> Self {
+        Self {
+            message: error.message(),
+            permanent_reason: Some("resolved binary is not this platform (identity check failed)"),
+        }
+    }
+}
+
+/// CB85: the platform's binary must identify as the platform before
+/// anything is spawned. `None` when the platform declares no identity
+/// fields, or its binary does not resolve (the build below then reports
+/// the canonical `BinaryResolutionError`, unchanged). Cached per
+/// path+mtime, so calling this twice for one run is a hashmap hit.
+pub(crate) async fn ensure_platform_identity(
+    strategy: &crate::domain::cli_strategy::CliStrategy,
+) -> Option<SpawnError> {
+    let identity = strategy.identity.as_ref()?;
+    let resolved = crate::domain::cli_strategy::resolve_binary(&strategy.binary).ok()?;
+    crate::domain::cli_strategy::ensure_binary_identity(&resolved, identity)
+        .await
+        .err()
+        .map(|error| SpawnError::from_identity(&error))
 }
 
 /// Outcome of actually running the child process to completion, as opposed
@@ -100,6 +127,20 @@ pub(crate) async fn spawn_and_wait_cli_process(
     run_id: Option<&str>,
     on_pid: impl FnOnce(u32),
 ) -> Result<CliProcessOutcome, SpawnError> {
+    // CB85: identity check before anything is spawned. Cached per
+    // path+mtime, so this is a hashmap hit after the first check for a
+    // given binary; the node path also checks in `run_agent_process`
+    // (which also runs the session-list capture below against the binary).
+    if let Some(identity) = strategy.identity.as_ref() {
+        if let Ok(resolved) = crate::domain::cli_strategy::resolve_binary(&strategy.binary) {
+            if let Err(error) =
+                crate::domain::cli_strategy::ensure_binary_identity(&resolved, identity).await
+            {
+                return Err(SpawnError::from_identity(&error));
+            }
+        }
+    }
+
     // A resume (RS2) uses the by-id resume flag and continues an existing
     // session; a cold start uses the set-at-spawn flag (if any). The two are
     // mutually exclusive — the caller passes at most one.
@@ -287,8 +328,6 @@ pub(crate) async fn run_agent_process(
     timeout_minutes: u64,
     resume_session_id: Option<&str>,
 ) -> Result<NodeExecution> {
-    let capture = prepare_session_capture(db, run_id, strategy, workdir, resume_session_id).await;
-
     // Opt-in only (per node config), never a default — see [`CliConfig::trust_flag`].
     let trust_workdir = node
         .config
@@ -297,6 +336,22 @@ pub(crate) async fn run_agent_process(
         .unwrap_or(false);
     let effort_not_applied = effort_notice(cli.as_str(), strategy, effort);
     let model_not_applied = model_notice(cli.as_str(), strategy, model);
+
+    // CB85: fail before spawning anything — including the session-list
+    // capture, which also runs the platform's binary.
+    if let Some(error) = ensure_platform_identity(strategy).await {
+        let mut exec = agent_spawn_failure(node, cli, model, &error);
+        stamp_effort_model_notices(
+            &mut exec.output,
+            effort,
+            effort_not_applied.as_ref(),
+            model_not_applied.as_ref(),
+        );
+        return Ok(exec);
+    }
+
+    let capture = prepare_session_capture(db, run_id, strategy, workdir, resume_session_id).await;
+
     let outcome = spawn_and_wait_cli_process(
         strategy,
         prompt,

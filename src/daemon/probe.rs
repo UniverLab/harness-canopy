@@ -346,6 +346,13 @@ pub(crate) async fn probe_target(
         return report;
     }
 
+    // CB85: a platform whose binary is a different program is "not
+    // installed" — reported as `spawn_failed` with the not-installed
+    // wording, and never probed.
+    if let Some(report) = probe_target_binary_identity(target, cli_config, start).await {
+        return report;
+    }
+
     let token = probe_token();
     let prompt = probe_prompt(&token);
 
@@ -493,6 +500,43 @@ async fn probe_target_identity(
         ));
     }
     None
+}
+
+/// CB85: identity check for the registry's `identity_args`/`identity_pattern`
+/// pair (the dispatch-enforced sibling of CB44's `identity_check`). `None`
+/// means the platform declares no identity fields, or its binary resolved
+/// and identified correctly, and the probe may proceed. A mismatch or a 5 s
+/// timeout reports `SpawnFailed` with the not-installed message naming the
+/// resolved absolute path — never a quota, model, or network problem — and
+/// the probe prompt is never built.
+async fn probe_target_binary_identity(
+    target: &ProbeTarget,
+    cli_config: &crate::domain::cli_config::CliConfig,
+    start: Instant,
+) -> Option<ProbeReport> {
+    let identity = crate::domain::cli_strategy::BinaryIdentity::from_cli_config(cli_config)?;
+    let resolved_path = match cli_config.resolve() {
+        Ok((path, _step)) => path,
+        Err(error) => {
+            return Some(probe_failure(
+                target,
+                ProbeOutcome::SpawnFailed,
+                start,
+                None,
+                &error.to_string(),
+            ));
+        }
+    };
+    match crate::domain::cli_strategy::ensure_binary_identity(&resolved_path, &identity).await {
+        Ok(()) => None,
+        Err(error) => Some(probe_failure(
+            target,
+            ProbeOutcome::SpawnFailed,
+            start,
+            None,
+            &error.message(),
+        )),
+    }
 }
 
 /// Waits for the spawned probe (bounded by `timeout`) and judges how it
@@ -1158,6 +1202,94 @@ mod tests {
         };
         let report = probe_target(&config, &target, None, Duration::from_secs(5)).await;
         assert_eq!(report.outcome, ProbeOutcome::Broken);
+    }
+
+    /// CB85: the dispatch-enforced identity pair (`identity_args`/
+    /// `identity_pattern`). The resolved binary answers with the window-
+    /// manager usage line, so the probe reports `spawn_failed` — naming the
+    /// resolved path and ending in the consistent not-installed sentence —
+    /// never a quota, model, or network problem, and the probe prompt is never
+    /// built.
+    #[tokio::test]
+    async fn probe_target_reports_spawn_failed_when_identity_args_pattern_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = write_script(
+            &dir,
+            "blackbox",
+            "if [ \"$1\" = \"--version\" ]; then echo \"blackbox: another window manager is already running on display ':0'\"; else echo \"$1\"; fi\n",
+        );
+        let mut config = config_with_cli("blackbox", &script);
+        config.clis[0].identity_args = Some(vec!["--version".to_string()]);
+        config.clis[0].identity_pattern = Some("(?i)blackbox ?ai".to_string());
+        let target = ProbeTarget {
+            platform: "blackbox".to_string(),
+            model: None,
+            effort: None,
+        };
+        let report = probe_target(&config, &target, None, Duration::from_secs(5)).await;
+        assert_eq!(report.outcome, ProbeOutcome::SpawnFailed);
+        assert!(!report.outcome.reachable());
+        assert_eq!(report.outcome.as_str(), "spawn_failed");
+        let error = report.error.unwrap();
+        assert!(
+            error.contains(&script.to_string_lossy().to_string()),
+            "must name the resolved absolute path: {error}"
+        );
+        assert!(
+            error.contains("is not blackbox"),
+            "must say the binary is not the platform: {error}"
+        );
+        assert!(
+            error.contains("identity check failed: blackbox: another window manager"),
+            "must quote the window-manager line: {error}"
+        );
+    }
+
+    /// CB85: once the identity check fails, the probe prompt is never built
+    /// or spawned — the fixture would echo the token (looking healthy) if the
+    /// probe prompt ever ran; `spawn_failed` proves it didn't.
+    #[tokio::test]
+    async fn probe_target_does_not_run_probe_prompt_when_identity_args_fail() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = write_script(
+            &dir,
+            "blackbox-noprompt",
+            "if [ \"$1\" = \"--version\" ]; then echo 'wrong program'; else echo \"$1\"; fi\n",
+        );
+        let mut config = config_with_cli("blackbox-noprompt", &script);
+        config.clis[0].identity_args = Some(vec!["--version".to_string()]);
+        config.clis[0].identity_pattern = Some("expected-token-xyz".to_string());
+        let target = ProbeTarget {
+            platform: "blackbox-noprompt".to_string(),
+            model: None,
+            effort: None,
+        };
+        let report = probe_target(&config, &target, None, Duration::from_secs(5)).await;
+        assert_eq!(report.outcome, ProbeOutcome::SpawnFailed);
+        assert!(!report.outcome.reachable());
+    }
+
+    /// CB85: a binary that passes the identity check proceeds to the normal
+    /// probe prompt and is `Reachable` when it echoes the token.
+    #[tokio::test]
+    async fn probe_target_reachable_when_identity_args_pattern_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = write_script(
+            &dir,
+            "real-bb",
+            "if [ \"$1\" = \"--version\" ]; then echo 'blackbox ai 1.2.3'; else echo \"$1\"; fi\n",
+        );
+        let mut config = config_with_cli("real-bb", &script);
+        config.clis[0].identity_args = Some(vec!["--version".to_string()]);
+        config.clis[0].identity_pattern = Some("(?i)blackbox ?ai".to_string());
+        let target = ProbeTarget {
+            platform: "real-bb".to_string(),
+            model: None,
+            effort: None,
+        };
+        let report = probe_target(&config, &target, None, Duration::from_secs(5)).await;
+        assert_eq!(report.outcome, ProbeOutcome::Reachable);
+        assert!(report.error.is_none());
     }
 
     #[tokio::test]

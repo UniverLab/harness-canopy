@@ -4546,6 +4546,7 @@ mod tests {
             trust_flag: None,
             invocation_template: None,
             effort_declaration: None,
+            identity: None,
         }
     }
 
@@ -4696,6 +4697,7 @@ esac
             trust_flag: None,
             invocation_template: None,
             effort_declaration: None,
+            identity: None,
         }
     }
 
@@ -6506,6 +6508,131 @@ echo done
         assert!(
             execution.output.get("infra_retry_skipped").is_some(),
             "the run row must record why the retry was skipped"
+        );
+    }
+
+    /// CB85: a binary that does not identify as its platform must fail the node
+    /// dispatch before anything is spawned — and must not consume the infra-
+    /// retry budget (B39: it is deterministic, like an unresolvable binary).
+    /// Mirrors the real-world `/usr/bin/blackbox` case (window manager, not the
+    /// AI CLI): the identity call answers with the window manager's usage line.
+    #[tokio::test]
+    async fn cb85_identity_mismatch_fails_node_dispatch_before_spawn() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let marker = dir.path().join("spawned");
+        let marker_str = marker.to_string_lossy();
+        let script = dir.path().join("blackbox");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\ncase \"$1\" in\n  --version) echo \"blackbox: another window manager is already running on display ':0'\" ;;\n  *) echo spawned >> \"{marker_str}\" ;;\nesac\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let (_dir, db) = test_db();
+        let cli = Cli::new("blackbox");
+        let binary = script.to_string_lossy().into_owned();
+        let mut strategy = sample_strategy(&binary);
+        strategy.identity = Some(crate::domain::cli_strategy::BinaryIdentity {
+            platform: "blackbox".to_string(),
+            display: "BLACKBOX AI · CLI".to_string(),
+            args: vec!["--version".to_string()],
+            pattern: "(?i)blackbox ?ai".to_string(),
+        });
+        let node = sample_agent_node();
+
+        let execution = run_agent_process(
+            &db, "run-test", &cli, &strategy, &node, "prompt", None, None, "/tmp", 1, None,
+        )
+        .await
+        .expect("identity failure must not propagate as a hard error");
+
+        assert_eq!(execution.status, GraphRunStatus::Fail);
+        assert_eq!(
+            execution
+                .output
+                .get("spawn_permanent")
+                .and_then(Value::as_bool),
+            Some(true),
+        );
+        assert_eq!(
+            execution
+                .output
+                .get("infra_retry_skipped")
+                .and_then(Value::as_str),
+            Some("resolved binary is not this platform (identity check failed)"),
+        );
+        let error = execution
+            .output
+            .get("error")
+            .and_then(Value::as_str)
+            .expect("failed dispatch must report an error");
+        assert!(
+            error.contains("is not BLACKBOX AI · CLI"),
+            "error must name the platform display: {error}"
+        );
+        assert!(
+            error.contains("identity check failed: blackbox: another window manager"),
+            "error must quote the window-manager line: {error}"
+        );
+        assert!(
+            !marker.exists(),
+            "nothing must be spawned on identity failure"
+        );
+    }
+
+    /// CB85: the matching case dispatches normally — the identity check runs
+    /// once (cached), then the agent process is spawned. The run that actually
+    /// executes is not marked permanent/spawn-errored.
+    #[tokio::test]
+    async fn cb85_identity_match_dispatches_normally() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let marker = dir.path().join("spawned");
+        let marker_str = marker.to_string_lossy();
+        let script = dir.path().join("blackbox");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'blackbox ai 1.2.3' ;;\n  *) echo spawned >> \"{marker_str}\"; echo done ;;\nesac\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let (_dir, db) = test_db();
+        let cli = Cli::new("blackbox");
+        let binary = script.to_string_lossy().into_owned();
+        let mut strategy = sample_strategy(&binary);
+        strategy.identity = Some(crate::domain::cli_strategy::BinaryIdentity {
+            platform: "blackbox".to_string(),
+            display: "BLACKBOX AI · CLI".to_string(),
+            args: vec!["--version".to_string()],
+            pattern: "(?i)blackbox ?ai".to_string(),
+        });
+        let node = sample_agent_node();
+
+        let execution = run_agent_process(
+            &db, "run-test", &cli, &strategy, &node, "prompt", None, None, "/tmp", 1, None,
+        )
+        .await
+        .expect("a matching identity must still run the agent");
+
+        assert!(
+            execution.output.get("spawn_permanent").is_none(),
+            "a passing identity must not be flagged permanent"
+        );
+        assert!(
+            execution.output.get("error").is_none(),
+            "a passing identity must dispatch with no spawn error: {:?}",
+            execution.output
+        );
+        assert!(
+            marker.exists(),
+            "the dispatch must really run after the identity check passes"
         );
     }
 

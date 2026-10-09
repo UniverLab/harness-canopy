@@ -9070,6 +9070,55 @@ mod endpoint_tests {
         assert!(text(&result).contains("alphanumeric"));
     }
 
+    #[tokio::test]
+    async fn task_add_rejects_platform_whose_binary_is_the_wrong_program() {
+        let home = tempdir().unwrap();
+        let script = home.path().join("blackbox");
+        std::fs::write(
+            &script,
+            "if [ \"$1\" = \"--version\" ]; then echo \"blackbox: another window manager is already running on display ':0'\"; else echo \"$1\"; fi\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        let canopy_dir = home.path().join(".canopy");
+        std::fs::create_dir_all(&canopy_dir).unwrap();
+        crate::domain::canopy_config::CanopyConfig {
+            clis: vec![crate::domain::cli_config::CliConfig {
+                name: "blackbox".to_string(),
+                binary: script.to_string_lossy().to_string(),
+                identity_args: Some(vec!["--version".to_string()]),
+                identity_pattern: Some("(?i)blackbox ?ai".to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+        .save(&canopy_dir)
+        .unwrap();
+        let _home_guard = HomeVar::set(home.path());
+
+        let (_dir, db, handler) = endpoint_test_handler();
+        let result = handler
+            .task_add(Parameters(TaskAddParams {
+                id: "agt-wrong-bin".to_string(),
+                prompt: "run the tests".to_string(),
+                schedule: "*/5 * * * *".to_string(),
+                cli: Some("blackbox".to_string()),
+                model: None,
+                effort: None,
+                duration_minutes: None,
+                working_dir: None,
+                timeout_minutes: None,
+            }))
+            .await
+            .unwrap();
+
+        assert!(is_err(&result));
+        assert!(text(&result).contains("is not"));
+        assert!(text(&result).contains("identity check failed"));
+        assert!(db.get_agent("agt-wrong-bin").unwrap().is_none());
+    }
+
     // ── task_watch / agent_watch ─────────────────────────────────
 
     #[tokio::test]

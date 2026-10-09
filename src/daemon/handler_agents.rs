@@ -55,6 +55,12 @@ impl TaskTriggerHandler {
             Err(e) => return Ok(error_result(&e)),
         };
 
+        if let Err(error) =
+            crate::domain::cli_strategy::ensure_cli_installed(prepared.cli.as_str()).await
+        {
+            return Ok(error_result(&error.message()));
+        }
+
         let log_path = make_log_path(&params.id)?;
         let mut agent = new_agent_base(
             params.id.clone(),
@@ -107,6 +113,12 @@ impl TaskTriggerHandler {
             Ok(prepared) => prepared,
             Err(e) => return Ok(error_result(&e)),
         };
+
+        if let Err(error) =
+            crate::domain::cli_strategy::ensure_cli_installed(prepared.cli.as_str()).await
+        {
+            return Ok(error_result(&error.message()));
+        }
 
         let log_path = make_log_path(&params.id)?;
         let mut agent = new_agent_base(

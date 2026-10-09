@@ -10,6 +10,7 @@ use tokio::process::Command;
 
 use anyhow::{Context, Result};
 
+mod binary_identity;
 mod identity;
 mod template;
 
@@ -22,6 +23,14 @@ use identity::{truncate_identity_output, IDENTITY_CHECK_OUTPUT_LIMIT};
 // (probe/doctor) uses them. Same pattern as `domain::graphs`' re-export.
 #[allow(unused_imports)]
 pub use identity::{verify_identity, verify_identity_async, WrongBinaryError};
+// Same `#[allow(unused_imports)]` pattern as `identity` above: `examples/rag_search.rs`
+// re-includes `src/domain` via `#[path]` as a private module, so these re-exports
+// look unused in that crate even though probe/dispatch/doctor use them.
+#[allow(unused_imports)]
+pub use binary_identity::{
+    ensure_binary_identity, ensure_binary_identity_blocking, ensure_cli_installed,
+    ensure_cli_installed_in, BinaryIdentity, NotInstalled,
+};
 
 /// Strategy for building CLI commands from registry config.
 #[derive(Clone)]
@@ -93,6 +102,12 @@ pub struct CliStrategy {
     /// Declarative argv template. See [`CliConfig::invocation_template`].
     pub invocation_template: Option<String>,
     pub effort_declaration: Option<super::cli_config::EffortDeclaration>,
+    /// CB85: identity declaration enforced on dispatch. `None` for every
+    /// platform that does not declare both `identity_args` and
+    /// `identity_pattern` — those keep today's behaviour with no per-call
+    /// tax. Mirrored here (not `identity_check`, see the note on
+    /// [`Self::from_cli_config`]) so the one shared spawn path can check it.
+    pub identity: Option<binary_identity::BinaryIdentity>,
 }
 
 /// A CLI's configured `binary` could not be resolved to an executable.
@@ -216,6 +231,11 @@ impl CliStrategy {
     /// builds every command through this strategy, so leaving the check out
     /// keeps verification diagnosis-only (probe/doctor) with zero per-call
     /// tax — a user who never runs doctor or probe keeps today's behaviour.
+    /// CB85 reverses that decision for its own pair: `identity_args`/
+    /// `identity_pattern` ARE mirrored and ARE enforced on dispatch,
+    /// because a platform whose binary is a different program must never be
+    /// invoked as if it were — the cached check makes the per-spawn cost a
+    /// hashmap hit.
     ///
     /// [`CliConfig`]: super::cli_config::CliConfig
     pub fn from_cli_config(cli_config: &super::cli_config::CliConfig) -> Self {
@@ -238,6 +258,7 @@ impl CliStrategy {
             trust_flag: cli_config.trust_flag.clone(),
             invocation_template: cli_config.invocation_template.clone(),
             effort_declaration: cli_config.effort_declaration.clone(),
+            identity: binary_identity::BinaryIdentity::from_cli_config(cli_config),
         }
     }
 
@@ -675,6 +696,7 @@ mod tests {
             trust_flag: None,
             invocation_template: None,
             effort_declaration: None,
+            identity: None,
         }
     }
 
