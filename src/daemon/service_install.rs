@@ -600,10 +600,21 @@ mod tests {
         assert!(!parsed.contains_key("RUST_LOG"));
     }
 
+    /// The `[Service]` section of a rendered unit: everything after the
+    /// `[Service]` header up to the next section header (`[Install]`), so a
+    /// directive that migrated into (or was duplicated into) another section
+    /// can never be counted as if it were still in `[Service]`.
+    fn service_section(content: &str) -> &str {
+        let rest = content
+            .split_once("[Service]\n")
+            .expect("unit has [Service]")
+            .1;
+        let end = rest.find("\n[").map_or(rest.len(), |i| i + 1);
+        &rest[..end]
+    }
+
     /// CB81 FR1/FR4: a fresh unit carries the OOM directives exactly once,
-    /// inside `[Service]`. `OOMPolicy=continue`/`MemoryMax=80%` are only
-    /// ever emitted by `render_unit_content`, so counting in the slice after
-    /// `[Service]` is equivalent to counting inside the section.
+    /// inside `[Service]`.
     #[test]
     fn render_unit_includes_oom_policy_and_memory_max_once() {
         let content = render_unit_content(
@@ -612,10 +623,7 @@ mod tests {
             "/usr/bin:/bin",
             &std::collections::BTreeMap::new(),
         );
-        let service = content
-            .split_once("[Service]\n")
-            .expect("unit has [Service]")
-            .1;
+        let service = service_section(&content);
         assert_eq!(
             service.matches("OOMPolicy=continue").count(),
             1,
@@ -649,10 +657,7 @@ mod tests {
             &std::collections::BTreeMap::new(),
         );
 
-        let service = content
-            .split_once("[Service]\n")
-            .expect("unit has [Service]")
-            .1;
+        let service = service_section(&content);
         assert_eq!(service.matches("OOMPolicy=continue").count(), 1);
         assert_eq!(service.matches("MemoryMax=80%").count(), 1);
     }
