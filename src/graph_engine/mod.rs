@@ -23720,9 +23720,10 @@ binary = "{}"
 
     /// CB84 6e: a run that completes normally (pass/fail reported by the agent
     /// via `graph_complete_node`) never triggers `end_harness_session`.  The
-    /// completion path only calls `update_graph_run_result` — `terminate_run_row`
-    /// is absent from it, so completed sessions stay intact for warm-session
-    /// groups that resume them.
+    /// completion path only calls `update_graph_run_result` — neither
+    /// `terminate_run_row` nor `end_harness_session` may appear in it, so
+    /// completed sessions stay intact for warm-session groups that resume
+    /// them.
     #[test]
     fn normal_completion_does_not_end_session() {
         let source = include_str!("../daemon/handler_run_lifecycle.rs");
@@ -23731,6 +23732,11 @@ binary = "{}"
             !prod.contains("terminate_run_row"),
             "normal completion path (graph_complete_node -> complete_node_impl) \
              must not call terminate_run_row — sessions stay intact for warm-session groups"
+        );
+        assert!(
+            !prod.contains("end_harness_session"),
+            "normal completion path must not call end_harness_session directly either — \
+             sessions stay intact for warm-session groups"
         );
     }
 }

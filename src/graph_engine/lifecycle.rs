@@ -152,6 +152,19 @@ impl GraphEngine {
         }
         // Mark as interrupted (not fail)
         let _ = self.db.interrupt_graph_run(&run.id, reason);
+        // CB84: end the harness session too, same as `terminate_run_row` —
+        // `graph_pause(interrupt: true)` kills a live node run for reason
+        // "graph pause", which the objective names explicitly; without this
+        // the opencode v2 service-side session keeps ticking beside the
+        // resumed attempt. Best-effort, detached, never fails the caller.
+        let platform = run.executed_platform.clone().unwrap_or_default();
+        if !platform.is_empty() {
+            let run_clone = run.clone();
+            let workdir = workdir_for_run(&self.db, &run_clone);
+            tokio::spawn(async move {
+                end_harness_session(&platform, &run_clone, &workdir).await;
+            });
+        }
     }
 
     /// Run `graph_id`'s specs through its graph (R2).

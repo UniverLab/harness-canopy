@@ -344,6 +344,19 @@ pub(crate) async fn run_agent_process(
             Ok(exec)
         }
         Ok(CliProcessOutcome::TimedOut) => {
+            // CB84: the process group is already killed by the spawn path
+            // (B12), but the opencode v2 service-side session keeps ticking
+            // — end it too. Best-effort, detached, never fails the caller.
+            // The run row's `session_id` was recorded at spawn (set-at-spawn
+            // or resume), so no title lookup is needed here.
+            let platform = cli.as_str().to_string();
+            if let Ok(Some(run)) = db.get_graph_run(run_id) {
+                let workdir = workdir.to_string();
+                tokio::spawn(async move {
+                    crate::graph_engine::routing::end_harness_session(&platform, &run, &workdir)
+                        .await;
+                });
+            }
             let mut output = serde_json::json!({
                 "kind": "agent",
                 "node_id": node.id,
