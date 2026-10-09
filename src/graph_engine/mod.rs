@@ -7224,6 +7224,63 @@ echo done
         );
     }
 
+    /// CM43: `graph_run --from` must target the spec a FRESH dispatch would
+    /// actually execute. [`GraphEngine::preview_next_spec_id`] returns a
+    /// queue's still-`running` member first (the resumed-queue path
+    /// `graph_continue` takes), but a fresh pick loop never re-picks it — so
+    /// the directed preview must skip it and name the next pickable member,
+    /// keeping the plan the operator gets and the run the engine performs on
+    /// the same spec.
+    #[test]
+    fn preview_directed_run_spec_id_skips_a_queues_running_member() {
+        let (_dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
+        let mut running = standalone_spec("queue-running", 1);
+        running.status = GraphSpecStatus::Running;
+        let next = standalone_spec("queue-next", 2);
+        db.insert_graph_spec(&running).unwrap();
+        db.insert_graph_spec(&next).unwrap();
+        insert_queue_with_members(&db, "queue-1", &[&running.id, &next.id]);
+
+        // Plain preview: mirrors the resumed-queue path — running member first.
+        assert_eq!(
+            engine
+                .preview_next_spec_id(&graph_id, Some("queue-1"))
+                .unwrap()
+                .as_deref(),
+            Some(running.id.as_str())
+        );
+        // Directed preview: mirrors a fresh dispatch — the next pickable member.
+        assert_eq!(
+            engine
+                .preview_directed_run_spec_id(&graph_id, Some("queue-1"))
+                .unwrap()
+                .as_deref(),
+            Some(next.id.as_str())
+        );
+        // Bound specs: same first non-terminal pick as the plain preview.
+        let mut bound = standalone_spec("bound-failed", 1);
+        bound.graph_id = Some(graph_id.clone());
+        bound.status = GraphSpecStatus::Failed;
+        let mut bound_done = standalone_spec("bound-done", 2);
+        bound_done.graph_id = Some(graph_id.clone());
+        bound_done.status = GraphSpecStatus::Completed;
+        db.insert_graph_spec(&bound).unwrap();
+        db.insert_graph_spec(&bound_done).unwrap();
+        assert_eq!(
+            engine
+                .preview_directed_run_spec_id(&graph_id, None)
+                .unwrap(),
+            engine.preview_next_spec_id(&graph_id, None).unwrap()
+        );
+        assert_eq!(
+            engine
+                .preview_directed_run_spec_id(&graph_id, None)
+                .unwrap()
+                .as_deref(),
+            Some(bound.id.as_str())
+        );
+    }
+
     /// B18, end to end: the real incident. A queue-driven run's in-flight
     /// member is left `running` by a daemon restart — a dangling node run
     /// with no live process behind it — while another member sits `pending`

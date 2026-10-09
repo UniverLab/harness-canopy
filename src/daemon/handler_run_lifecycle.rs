@@ -357,17 +357,20 @@ impl TaskTriggerHandler {
         node_id: Option<String>,
         spec_id: Option<String>,
     ) -> Result<CallToolResult, McpError> {
+        // FR2: "the graph has no active run" is checked against the run rows,
+        // not the graph's own status — a blocker can flip a graph to `paused`
+        // while a sibling node keeps executing, and a live run must refuse
+        // (and be named) whatever the status column says.
+        if let Some(run) = find_in_flight_run(&self.db, &graph_id).map_err(internal_error)? {
+            let node_name = node_name_for_error(&self.db, &run.node_id).map_err(internal_error)?;
+            return Ok(error_result(&in_flight_run_error(
+                &graph_id,
+                &run.id,
+                &node_name,
+                run.started_at,
+            )));
+        }
         if matches!(lp.status, GraphStatus::Running | GraphStatus::Pausing) {
-            if let Some(run) = find_in_flight_run(&self.db, &graph_id).map_err(internal_error)? {
-                let node_name =
-                    node_name_for_error(&self.db, &run.node_id).map_err(internal_error)?;
-                return Ok(error_result(&in_flight_run_error(
-                    &graph_id,
-                    &run.id,
-                    &node_name,
-                    run.started_at,
-                )));
-            }
             return Ok(error_result(&format!(
                 "Graph '{}' is running; pause it before a directed run.",
                 graph_id
@@ -387,15 +390,15 @@ impl TaskTriggerHandler {
             Ok(spec) => spec,
             Err(message) => return Ok(error_result(&message)),
         };
-        if matches!(
-            spec.status,
-            crate::domain::graphs::GraphSpecStatus::Running
-                | crate::domain::graphs::GraphSpecStatus::Skipped
-        ) {
+        // FR2 accepts a spec the run is `paused` on — which this schema
+        // stores as spec status `running` with a paused graph and no active
+        // run (the exact state `graph_pause` mid-spec leaves behind). Only
+        // `skipped` is outside the accepted states; an active run was already
+        // refused above.
+        if spec.status == crate::domain::graphs::GraphSpecStatus::Skipped {
             return Ok(error_result(&format!(
-                "Graph '{graph_id}': spec '{}' is '{}', which a directed run does not accept.",
-                spec.name,
-                spec.status.as_str()
+                "Graph '{graph_id}': spec '{}' is 'skipped', which a directed run does not accept.",
+                spec.name
             )));
         }
         let plan = match self

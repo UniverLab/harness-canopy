@@ -72,14 +72,24 @@ impl GraphEngine {
         )?;
 
         // CM43 req 6: record the directed start on the run's activity feed —
-        // the start node, the nodes skipped between Start and it, and the
-        // counter restart.
+        // the start node, the nodes skipped between Start and it, the
+        // outputs reused (by node and run id), and the counter restart.
         if let Some(start) = directed.filter(|d| d.spec_id == spec.id) {
             if let Ok(target) = resolve_directed_target(&start.node_arg, nodes, edges, &ensembles) {
                 let skipped = if target.skipped_nodes.is_empty() {
                     String::new()
                 } else {
                     format!(" [{}]", target.skipped_nodes.join(", "))
+                };
+                let reused = reused_output_records(nodes, &existing_runs);
+                let reused = if reused.is_empty() {
+                    "none".to_string()
+                } else {
+                    reused
+                        .iter()
+                        .map(|(name, run_id)| format!("{name} ({run_id})"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 };
                 activity::publish(
                     &self.db,
@@ -88,7 +98,7 @@ impl GraphEngine {
                     &lp.name,
                     format!(
                         "Directed run: spec '{}' starts at {}; skipped {} node(s){}; \
-                         iteration counters restarted at 1.",
+                         reused outputs: {reused}; iteration counters restarted at 1.",
                         spec.name,
                         target.label,
                         target.skipped_nodes.len(),

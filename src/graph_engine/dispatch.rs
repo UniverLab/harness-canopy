@@ -284,9 +284,11 @@ impl GraphEngine {
         queue_id: &str,
         completed_specs: &mut Vec<(String, String)>,
     ) -> Result<DispatchFlow> {
-        // CM43 queue caveat: a directed `graph_run` only picks the queue's
-        // *pending* member, so it cannot start at a member that is currently
-        // `running`/`interrupted`. Use `graph_continue run_from_node` for that.
+        // CM43 queue caveat: a directed `graph_run` targets the queue's next
+        // pickable member (pending/interrupted — the same query the pick
+        // loop below uses). A member that is still `running` is never
+        // re-picked by a fresh run; `graph_continue run_from_node` is the
+        // entry point for it.
         loop {
             if self.is_paused(ctx.graph_id)? {
                 return Ok(DispatchFlow::Stop);

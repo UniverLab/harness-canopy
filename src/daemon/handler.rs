@@ -15398,6 +15398,163 @@ mod endpoint_tests {
         assert!(text(&bad_action).contains("retry_current_node, skip_next_spec or run_from_node"));
     }
 
+    // ── graph_continue run_from_node (CM43 directed runs) ───────────
+
+    #[tokio::test]
+    async fn graph_continue_run_from_node_refuses_a_graph_with_an_active_run() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let lp = insert_test_graph(&db, dir.path());
+        // A blocker can flip a graph to `paused` while a sibling node is
+        // still executing — FR2 refuses a directed run there, naming the
+        // run, whatever the status column says.
+        let run = insert_running_node_run(&db, &lp.id);
+        db.update_graph_status(&lp.id, GraphStatus::Paused, None, None)
+            .unwrap();
+
+        let refused = handler
+            .graph_continue(Parameters(GraphContinueParams {
+                graph_id: lp.id.clone(),
+                action: "run_from_node".to_string(),
+                node_id: Some("Node".to_string()),
+                spec_id: None,
+            }))
+            .await
+            .unwrap();
+        assert!(is_err(&refused), "{}", text(&refused));
+        let msg = text(&refused);
+        assert!(msg.contains("still executing"), "{msg}");
+        assert!(msg.contains(&run.id), "must name the run: {msg}");
+
+        // A graph that is outright `running` (between nodes — no live run
+        // row) also refuses.
+        db.interrupt_graph_run(&run.id, "test").unwrap();
+        db.update_graph_status(&lp.id, GraphStatus::Running, None, None)
+            .unwrap();
+        let running = handler
+            .graph_continue(Parameters(GraphContinueParams {
+                graph_id: lp.id.clone(),
+                action: "run_from_node".to_string(),
+                node_id: Some("Node".to_string()),
+                spec_id: None,
+            }))
+            .await
+            .unwrap();
+        assert!(is_err(&running), "{}", text(&running));
+        assert!(text(&running).contains("pause it before a directed run"));
+    }
+
+    #[tokio::test]
+    async fn graph_continue_run_from_node_accepts_spec_paused_on_and_reports_directed_plan() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let lp = insert_test_graph(&db, dir.path());
+
+        // The state `graph_pause` mid-spec leaves behind: graph paused, no
+        // active run, paused-on spec reading `running`. FR2's "paused" is
+        // exactly this — a directed run must accept it.
+        insert_named_spec(&db, &lp.id, "Spec One", 1, GraphSpecStatus::Running);
+        let skipped = insert_named_spec(&db, &lp.id, "Spec Two", 2, GraphSpecStatus::Skipped);
+        db.update_graph_status(&lp.id, GraphStatus::Paused, None, None)
+            .unwrap();
+
+        // Top-level graph the specs fall back to: A --pass--> B (both quick
+        // checks, so the background dispatch the accepted call spawns stays
+        // harmless — under the plan's semantics every spec AFTER the
+        // directed target also runs from Start, including the `Skipped` one).
+        db.insert_graph_node(&GraphNode {
+            id: "node-a".to_string(),
+            spec_id: None,
+            graph_id: Some(lp.id.clone()),
+            name: "A".to_string(),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({
+                "command": "true",
+                "success_condition": "exit_code_0"
+            }),
+            position: 1,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+        db.insert_graph_node(&GraphNode {
+            id: "node-b".to_string(),
+            spec_id: None,
+            graph_id: Some(lp.id.clone()),
+            name: "B".to_string(),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({
+                "command": "true",
+                "success_condition": "exit_code_0"
+            }),
+            position: 2,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+        db.insert_graph_edge(&GraphEdge {
+            id: "edge-a-b".to_string(),
+            spec_id: None,
+            graph_id: Some(lp.id.clone()),
+            from_node: "node-a".to_string(),
+            to_node: "node-b".to_string(),
+            condition: GraphEdgeCondition::Pass,
+        })
+        .unwrap();
+
+        // A `skipped` target is the one spec status outside FR2's accepted
+        // states.
+        let refused = handler
+            .graph_continue(Parameters(GraphContinueParams {
+                graph_id: lp.id.clone(),
+                action: "run_from_node".to_string(),
+                node_id: Some("B".to_string()),
+                spec_id: Some(skipped.id.clone()),
+            }))
+            .await
+            .unwrap();
+        assert!(is_err(&refused), "{}", text(&refused));
+        assert!(
+            text(&refused).contains("'skipped', which a directed run does not accept"),
+            "{}",
+            text(&refused)
+        );
+
+        // An unknown node is refused with the list of valid names.
+        let unknown = handler
+            .graph_continue(Parameters(GraphContinueParams {
+                graph_id: lp.id.clone(),
+                action: "run_from_node".to_string(),
+                node_id: Some("Zed".to_string()),
+                spec_id: None,
+            }))
+            .await
+            .unwrap();
+        assert!(is_err(&unknown), "{}", text(&unknown));
+        let unknown_msg = text(&unknown);
+        assert!(
+            unknown_msg.contains("No node or ensemble matches 'Zed'"),
+            "{unknown_msg}"
+        );
+        assert!(unknown_msg.contains("Valid nodes"), "{unknown_msg}");
+        assert!(unknown_msg.contains("A, B"), "{unknown_msg}");
+
+        // The paused-on spec is accepted (spec_id defaults to it), and the
+        // response reports the whole directed plan.
+        let accepted = handler
+            .graph_continue(Parameters(GraphContinueParams {
+                graph_id: lp.id.clone(),
+                action: "run_from_node".to_string(),
+                node_id: Some("B".to_string()),
+                spec_id: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&accepted), "{}", text(&accepted));
+        let msg = text(&accepted);
+        assert!(msg.contains("resumed"), "{msg}");
+        assert!(msg.contains("starts at node 'B'"), "{msg}");
+        assert!(msg.contains("skipped A node(s)"), "{msg}");
+        assert!(msg.contains("reused outputs: none"), "{msg}");
+        assert!(msg.contains("iteration counters restarted at 1"), "{msg}");
+    }
+
     // ── graph_complete_node / graph_report_blocker ──────────────────
 
     /// Creates a spec + agent node under `graph_id` and a `Running` node-run

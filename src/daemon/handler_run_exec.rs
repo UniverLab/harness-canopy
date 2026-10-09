@@ -149,10 +149,18 @@ impl TaskTriggerHandler {
         }
 
         let effective_workdir = workdir.unwrap_or(&lp.workdir);
-        let next_spec_preview = self
-            .graph_engine
-            .preview_next_spec_id(&graph_id, queue_id)
-            .map_err(internal_error)?;
+        // CM43: with `start_node_id`, the preview must be the first spec a
+        // FRESH dispatch executes (the directed target — see
+        // [`GraphEngine::preview_directed_run_spec_id`]); without it, the
+        // running-member-first preview keeps feeding the dirty-start
+        // exclusion as before.
+        let next_spec_preview = if start_node_id.is_some() {
+            self.graph_engine
+                .preview_directed_run_spec_id(&graph_id, queue_id)
+        } else {
+            self.graph_engine.preview_next_spec_id(&graph_id, queue_id)
+        }
+        .map_err(internal_error)?;
         let mut launch_warning: Option<String> = None;
         match self
             .graph_engine

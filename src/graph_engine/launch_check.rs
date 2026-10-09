@@ -224,6 +224,26 @@ impl GraphEngine {
         format!("spec '{display}' (graph '{graph}', {status} {time})")
     }
 
+    /// CM43: the spec a *directed* `graph_run` (`start_node_id`) targets —
+    /// the first spec a FRESH dispatch would actually execute, so the plan
+    /// the operator gets back names the spec the run really starts at. Unlike
+    /// [`Self::preview_next_spec_id`] this never returns a queue member that
+    /// is still `running`: a fresh dispatch re-enters such a member only via
+    /// the resumed-queue path (`graph_continue`), never through the pick
+    /// loop, so planning a directed run at it would report a spec the run
+    /// never executes. Bound specs are the same first non-terminal pick as
+    /// [`Self::preview_next_spec_id`].
+    pub fn preview_directed_run_spec_id(
+        &self,
+        graph_id: &str,
+        queue_id: Option<&str>,
+    ) -> Result<Option<String>> {
+        match queue_id {
+            Some(queue_id) => self.db.queue_next_pending_spec_id(queue_id),
+            None => self.preview_next_spec_id(graph_id, None),
+        }
+    }
+
     /// CM29/CB69: whether launching the next spec in `workdir` should be refused
     /// because a different, earlier spec on this same workdir ended without
     /// completing and left the tree dirty (`find_dirty_predecessor_spec` — the
