@@ -290,6 +290,15 @@ impl TaskTriggerHandler {
             }
         }
 
+        // CM38 FR4: an unknown `{{...}}` marker in a check command is a
+        // static authoring defect — the engine fails the node before running
+        // it (see `render_check_command`). Report it before any reviewer
+        // spawn or probe quota is spent, across the graph's own nodes and
+        // every spec's nodes.
+        if let Some(message) = crate::graph_engine::check_command_marker_error(&details) {
+            return Ok(error_result(&format!("Preflight: {message}")));
+        }
+
         // Ensemble-owned wiring must be complete before any platform probes
         // spend quota. This is the same structural check graph_run performs.
         if let Err(e) = validate_graph_ensembles_for_run(&self.db, &details.lp.id, None) {

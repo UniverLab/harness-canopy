@@ -12255,6 +12255,109 @@ mod endpoint_tests {
         );
     }
 
+    /// (CM38 FR4) `graph_preflight` reports an unknown `{{...}}` marker in a
+    /// check command as an error, before any probe quota is spent.
+    #[tokio::test]
+    async fn graph_preflight_reports_unknown_marker_in_check_command() {
+        let (dir, _db, handler) = endpoint_test_handler();
+        let created = handler
+            .graph_create(Parameters(GraphCreateParams {
+                name: "Marker Graph".to_string(),
+                description: None,
+                workdir: dir.path().to_string_lossy().to_string(),
+                trigger: None,
+                infra_node_id: None,
+                allow_dirty_start: false,
+            }))
+            .await
+            .unwrap();
+        let graph_id = extract_id(&created, "graph_id");
+
+        handler
+            .graph_add_node(Parameters(GraphAddNodeParams {
+                spec_id: None,
+                graph_id: Some(graph_id.clone()),
+                name: "gatekeeper".to_string(),
+                kind: Some("check".to_string()),
+                config: Some(check_node_config("echo {{nope}}")),
+                blueprint: None,
+                config_overrides: None,
+            }))
+            .await
+            .unwrap();
+
+        let result = handler
+            .graph_preflight(Parameters(GraphPreflightParams {
+                graph_id: graph_id.clone(),
+                timeout_seconds: None,
+                reviewer: None,
+            }))
+            .await
+            .unwrap();
+        assert!(
+            is_err(&result),
+            "preflight must report the unknown marker: {}",
+            text(&result)
+        );
+        let msg = text(&result);
+        assert!(
+            msg.contains("unknown marker {{nope}} in check command"),
+            "message must carry the exact refusal text: {msg}"
+        );
+        assert!(
+            msg.contains("gatekeeper"),
+            "message must name the node: {msg}"
+        );
+    }
+
+    /// (CM38 FR4) every documented check-command marker clears preflight.
+    #[tokio::test]
+    async fn graph_preflight_accepts_every_known_check_command_marker() {
+        let (dir, _db, handler) = endpoint_test_handler();
+        let created = handler
+            .graph_create(Parameters(GraphCreateParams {
+                name: "Marker Graph".to_string(),
+                description: None,
+                workdir: dir.path().to_string_lossy().to_string(),
+                trigger: None,
+                infra_node_id: None,
+                allow_dirty_start: false,
+            }))
+            .await
+            .unwrap();
+        let graph_id = extract_id(&created, "graph_id");
+
+        handler
+            .graph_add_node(Parameters(GraphAddNodeParams {
+                spec_id: None,
+                graph_id: Some(graph_id.clone()),
+                name: "gatekeeper".to_string(),
+                kind: Some("check".to_string()),
+                config: Some(check_node_config(
+                    "echo {{graph_name}} {{workdir}} {{spec_id}} {{spec_name}} \
+                     {{spec_start_head}} {{spec_start_dirty}} {{spec_committed_head}}",
+                )),
+                blueprint: None,
+                config_overrides: None,
+            }))
+            .await
+            .unwrap();
+
+        let result = handler
+            .graph_preflight(Parameters(GraphPreflightParams {
+                graph_id: graph_id.clone(),
+                timeout_seconds: None,
+                reviewer: None,
+            }))
+            .await
+            .unwrap();
+        assert!(
+            !is_err(&result),
+            "all seven check-command markers must clear preflight: {}",
+            text(&result)
+        );
+    }
+
     /// (CM19) `graph_preflight` reports a non-terminal node with no `fail`
     /// edge as a structured `graph_warnings` entry — advisory, not a tool
     /// error, and it does not change the verdict. A declared terminal with

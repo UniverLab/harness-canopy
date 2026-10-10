@@ -42,11 +42,47 @@ Agent node prompts support these placeholders:
 | `{{node_id}}` | The node's unique ID |
 | `{{previous_feedback}}` | JSON output of the previous node (truncated if oversized) |
 
-Check node commands additionally support `{{spec_start_head}}` — the
-git HEAD commit at the start of the spec run — and
-`{{spec_committed_head}}` — the git HEAD left behind by the last
-`commit_rights: true` node's own execution during *this* spec run,
-empty until one actually commits (see [Commit rights](#commit-rights)).
+### Check node commands
+
+Check node `command` strings have their own marker vocabulary, separate
+from the agent-prompt table above — a check command cannot use
+`{{spec_content}}`, `{{node_id}}`, `{{previous_feedback}}` or
+`{{output:…}}`. Every marker a check command supports:
+
+| Marker | Expands to | Quoting |
+|---|---|---|
+| `{{graph_name}}` | The graph's name | shell-quoted — safe for values with spaces or quotes |
+| `{{workdir}}` | The directory the command runs in (the graph's workdir, or the run's sandbox worktree / `workdir_override` when one applies) | shell-quoted |
+| `{{spec_id}}` | The spec's unique ID | shell-quoted |
+| `{{spec_name}}` | The spec's name (empty on an idea run) | shell-quoted |
+| `{{spec_start_head}}` | The git HEAD commit at the start of the spec run, empty when the workdir is not a Git repository or on a legacy run | raw — a hex SHA |
+| `{{spec_start_dirty}}` | The number of non-ignored entries reported by `git status --porcelain` at the spec boundary, empty when unknown | raw — a number |
+| `{{spec_committed_head}}` | The git HEAD left behind by the last `commit_rights: true` node's own execution during *this* spec run, empty until one actually commits (see [Commit rights](#commit-rights)) | raw — a hex SHA |
+
+The shell-quoted markers expand to a single POSIX-quoted shell word, so a
+name containing spaces or quotes can never break or inject into the
+command. Write them bare (`{{spec_name}}`) or already single-quoted
+(`'{{spec_name}}'` — the engine strips that exact wrapper so the quoting
+is not doubled), never inside other quotes; a `\{{marker}}` escape stays
+literal text. The raw markers expand unquoted exactly as before.
+
+Any other `{{…}}` marker fails the check node before the command runs: the
+run records `unknown marker {{x}} in check command` and nothing reaches
+the shell. `graph_preflight` reports the same defect as an error before
+spending any probe quota.
+
+Every check command also runs with these environment variables (there is
+no `CANOPY_WORKDIR` — the command's working directory already is the
+workdir):
+
+| Variable | Value |
+|---|---|
+| `CANOPY_SPEC_ID` | The spec's unique ID |
+| `CANOPY_SPEC_NAME` | The spec's name; the empty string on an idea run |
+| `CANOPY_GRAPH_ID` | The graph's unique ID |
+| `CANOPY_GRAPH_NAME` | The graph's name |
+| `CANOPY_SPEC_START_HEAD` | The same value as `{{spec_start_head}}`; the empty string when unknown |
+| `CANOPY_SPEC_FILE` | Absolute path of a file holding the spec's full description — the idea text on an idea run, an empty file for a spec with no description. The engine writes it just before the command runs and removes it once the node finishes, so read it inside the command (quote the expansion: `"$CANOPY_SPEC_FILE"`). There is deliberately no `{{spec_content}}` marker in check commands: a file has no quoting problem and no command-length limit |
 
 `{{spec_start_head}}` only proves *some* commit landed since the spec
 began; it's satisfied just as well by a commit from outside this run

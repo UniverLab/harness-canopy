@@ -925,6 +925,281 @@ mod tests {
         assert_eq!(spec.spec_start_head, None);
     }
 
+    // ── CM38: check-command marker quoting, refusal, and env vars ──────
+
+    /// CM38 FR1: `{{spec_name}}` expands through the CB48 shell quoting, so
+    /// a name containing a space compares equal and cannot break the command.
+    #[tokio::test]
+    async fn check_command_quotes_spec_name_with_spaces() {
+        let (_dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
+        let mut spec = standalone_spec("spec-spaces", 1);
+        spec.name = "a b".to_string();
+        spec.graph_id = Some(graph_id.clone());
+        db.insert_graph_spec(&spec).unwrap();
+
+        db.insert_graph_node(&GraphNode {
+            id: "graph-check".to_string(),
+            spec_id: None,
+            graph_id: Some(graph_id.clone()),
+            name: "check".to_string(),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({
+                "command": "test {{spec_name}} = 'a b'",
+                "success_condition": "exit_code_0"
+            }),
+            position: 1,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+
+        engine
+            .run_graph(graph_id.clone(), None, None, None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            db.get_graph(&graph_id).unwrap().unwrap().status,
+            GraphStatus::Completed
+        );
+    }
+
+    /// CM38 FR1: a spec named `x'; touch <p>; '` cannot inject into the
+    /// command — the quoted expansion round-trips the name byte for byte and
+    /// the probed file is never created.
+    #[tokio::test]
+    async fn check_command_injection_shaped_spec_name_is_neutralized() {
+        let (dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
+        let probed = dir.path().join("p");
+        let mut spec = standalone_spec("spec-inject", 1);
+        spec.name = format!("x'; touch {}; '", probed.display());
+        spec.graph_id = Some(graph_id.clone());
+        db.insert_graph_spec(&spec).unwrap();
+
+        db.insert_graph_node(&GraphNode {
+            id: "graph-check".to_string(),
+            spec_id: None,
+            graph_id: Some(graph_id.clone()),
+            name: "check".to_string(),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({
+                "command": "printf %s {{spec_name}} > name.txt",
+                "success_condition": "exit_code_0"
+            }),
+            position: 1,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+
+        engine
+            .run_graph(graph_id.clone(), None, None, None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            db.get_graph(&graph_id).unwrap().unwrap().status,
+            GraphStatus::Completed
+        );
+        assert!(!probed.exists(), "the injection must not have executed");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("name.txt")).unwrap(),
+            spec.name,
+            "the quoted expansion must round-trip the name exactly"
+        );
+    }
+
+    /// CM38 FR3: an unknown marker fails the node before anything reaches
+    /// the shell — the run row records the exact message and no side effect
+    /// happens.
+    #[tokio::test]
+    async fn check_command_unknown_marker_fails_node_without_running() {
+        let (dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
+        let mut spec = standalone_spec("spec-marker", 1);
+        spec.graph_id = Some(graph_id.clone());
+        db.insert_graph_spec(&spec).unwrap();
+
+        db.insert_graph_node(&GraphNode {
+            id: "graph-check".to_string(),
+            spec_id: None,
+            graph_id: Some(graph_id.clone()),
+            name: "check".to_string(),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({
+                "command": "echo {{nope}} && printf RAN > ran.txt",
+                "success_condition": "exit_code_0"
+            }),
+            position: 1,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+
+        engine
+            .run_graph(graph_id.clone(), None, None, None, None, None)
+            .await
+            .unwrap();
+
+        let runs = db.list_graph_runs_for_spec(&spec.id).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].status, GraphRunStatus::Fail);
+        let output = runs[0].output.as_ref().expect("run row must carry output");
+        assert_eq!(
+            output.get("error").and_then(serde_json::Value::as_str),
+            Some("unknown marker {{nope}} in check command")
+        );
+        assert!(
+            !dir.path().join("ran.txt").exists(),
+            "nothing may reach the shell"
+        );
+        assert_ne!(
+            db.get_graph(&graph_id).unwrap().unwrap().status,
+            GraphStatus::Completed
+        );
+    }
+
+    /// CM38 FR6, bound-spec run: every CANOPY_* variable is set, the spec
+    /// file holds the spec's description, and the file is gone once the node
+    /// has finished.
+    #[tokio::test]
+    async fn check_command_env_vars_and_spec_file_on_bound_spec_run() {
+        let (dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
+        let mut spec = standalone_spec("bound-spec", 1);
+        spec.name = "Bound Spec".to_string();
+        spec.graph_id = Some(graph_id.clone());
+        db.insert_graph_spec(&spec).unwrap();
+
+        let command = concat!(
+            r#"test -s "$CANOPY_SPEC_FILE""#,
+            r#" && grep -q Functional "$CANOPY_SPEC_FILE""#,
+            r#" && test "$CANOPY_SPEC_NAME" = "Bound Spec""#,
+            r#" && test "$CANOPY_SPEC_ID" = bound-spec"#,
+            r#" && test "$CANOPY_GRAPH_NAME" = Graph"#,
+            r#" && test "$CANOPY_GRAPH_ID" = wf-test"#,
+            r#" && test -z "$CANOPY_SPEC_START_HEAD""#,
+            r#" && printf %s "$CANOPY_SPEC_FILE" > spec_file_path.txt"#,
+        );
+        db.insert_graph_node(&GraphNode {
+            id: "graph-check".to_string(),
+            spec_id: None,
+            graph_id: Some(graph_id.clone()),
+            name: "check".to_string(),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({
+                "command": command,
+                "success_condition": "exit_code_0"
+            }),
+            position: 1,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+
+        engine
+            .run_graph(graph_id.clone(), None, None, None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            db.get_graph(&graph_id).unwrap().unwrap().status,
+            GraphStatus::Completed
+        );
+
+        let recorded = std::fs::read_to_string(dir.path().join("spec_file_path.txt")).unwrap();
+        assert!(
+            !std::path::Path::new(&recorded).exists(),
+            "the spec file must be removed after the node finishes (was at {recorded})"
+        );
+    }
+
+    /// CM38 FR6, queue run: the same contract holds when the spec arrives
+    /// through a run queue instead of being pre-bound.
+    #[tokio::test]
+    async fn check_command_env_vars_and_spec_file_on_queue_run() {
+        let (dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
+        let spec = standalone_spec("queue-spec", 1);
+        db.insert_graph_spec(&spec).unwrap();
+        insert_queue_with_members(&db, "queue-1", &[&spec.id]);
+
+        let command = concat!(
+            r#"test -s "$CANOPY_SPEC_FILE""#,
+            r#" && grep -q Functional "$CANOPY_SPEC_FILE""#,
+            r#" && test "$CANOPY_SPEC_NAME" = queue-spec"#,
+            r#" && test "$CANOPY_SPEC_ID" = queue-spec"#,
+            r#" && printf %s "$CANOPY_SPEC_FILE" > spec_file_path.txt"#,
+        );
+        db.insert_graph_node(&GraphNode {
+            id: "graph-check".to_string(),
+            spec_id: None,
+            graph_id: Some(graph_id.clone()),
+            name: "check".to_string(),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({
+                "command": command,
+                "success_condition": "exit_code_0"
+            }),
+            position: 1,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+
+        engine
+            .run_graph(
+                graph_id.clone(),
+                Some("queue-1".to_string()),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            db.get_graph(&graph_id).unwrap().unwrap().status,
+            GraphStatus::Completed
+        );
+
+        let recorded = std::fs::read_to_string(dir.path().join("spec_file_path.txt")).unwrap();
+        assert!(!std::path::Path::new(&recorded).exists());
+    }
+
+    /// CM38 FR6, idea run: `CANOPY_SPEC_NAME` is empty and
+    /// `CANOPY_SPEC_FILE` holds the idea text.
+    #[tokio::test]
+    async fn check_command_env_vars_on_idea_run_point_at_idea_text() {
+        let (_dir, db, engine, graph_id) = bare_graph_fixture().unwrap();
+
+        let command = concat!(
+            r#"test -z "$CANOPY_SPEC_NAME""#,
+            r#" && test -s "$CANOPY_SPEC_FILE""#,
+            r#" && grep -q "CM38 IDEA" "$CANOPY_SPEC_FILE""#,
+            r#" && printf APPROVED"#,
+        );
+        db.insert_graph_node(&GraphNode {
+            id: "graph-check".to_string(),
+            spec_id: None,
+            graph_id: Some(graph_id.clone()),
+            name: "check".to_string(),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({
+                "command": command,
+                "success_condition": "exit_code_0_and_output_contains:APPROVED"
+            }),
+            position: 1,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+
+        engine
+            .run_graph(
+                graph_id.clone(),
+                None,
+                None,
+                Some("A CM38 IDEA: check commands must be able to read the idea text.".to_string()),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            db.get_graph(&graph_id).unwrap().unwrap().status,
+            GraphStatus::Completed
+        );
+    }
+
     // ── CM29: spec-end dirty-tree capture and dirty-start refusal ────────
 
     #[tokio::test]
