@@ -54,6 +54,14 @@ impl Database {
         mut input: IntelligenceNodeInput,
     ) -> Result<UpsertResult> {
         Self::validate_intelligence_node_input(&input)?;
+        // Resolve relation prefixes BEFORE taking the write lock: each
+        // `resolve_node_id_by_prefix` call locks `self.conn` itself and the
+        // mutex is not reentrant, so resolving inside the transaction would
+        // deadlock. An unknown target fails here — before any write — with a
+        // clear message; an ambiguous prefix propagates its listing error.
+        if let Some(ref rels) = input.relations {
+            input.relations = Some(self.resolve_relation_target_ids(rels)?);
+        }
 
         let node_id = input
             .id
@@ -61,18 +69,23 @@ impl Database {
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let now = Utc::now().timestamp();
         let content_touched_at = Utc::now().timestamp_millis();
-        let conn = self
+        let mut conn = self
             .conn
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        // Every write below runs inside one transaction: the node insert or
+        // update, the edge replacement and the edge inserts. Any `Err` before
+        // `tx.commit()` drops the transaction uncommitted and rolls the whole
+        // upsert back, so a failing edge can never leave an orphan node or a
+        // partial edge list behind.
+        let tx = conn.transaction()?;
         // Determine creation vs update before writing. For auto-generated
-        // ids this is always creation. Done inside the same lock as the
-        // write to avoid a race where another thread inserts between the
-        // check and the write. The existing row is read here too so an
-        // update that omits a field preserves it without a second lock
-        // acquisition.
+        // ids this is always creation. Done inside the same transaction as
+        // the write so the check and the write cannot be split by another
+        // thread's insert. The existing row is read here too so an update
+        // that omits a field preserves it without a second lock acquisition.
         let existing: Option<IntelligenceNodeRecord> = {
-            let mut stmt = conn.prepare(
+            let mut stmt = tx.prepare(
                 "SELECT id, kind, status, title, body, metadata, project_hash, session_id, created_at, updated_at
                  FROM intelligence_nodes WHERE id = ?1 LIMIT 1",
             )?;
@@ -85,32 +98,31 @@ impl Database {
         let was_created = existing.is_none();
 
         let mut changed_fields = match existing {
-            None => {
-                Self::create_intelligence_node(&conn, &node_id, input, now, content_touched_at)?
-            }
+            None => Self::create_intelligence_node(&tx, &node_id, input, now, content_touched_at)?,
             Some(prev) => {
                 let finals = Self::resolve_updated_fields(prev, &input, &node_id)?;
                 Self::ensure_supersedes_available(
-                    &conn,
+                    &tx,
                     &node_id,
                     &finals.status,
                     input.relations.as_deref(),
                 )?;
-                Self::apply_node_update(&conn, &node_id, &finals, now, content_touched_at)?;
+                Self::apply_node_update(&tx, &node_id, &finals, now, content_touched_at)?;
                 let mut changed_fields = finals.changed_fields;
                 if let Some(rels) = input.relations.take() {
                     changed_fields.push("relations".to_string());
-                    conn.execute(
+                    tx.execute(
                         "DELETE FROM intelligence_edges WHERE from_node_id = ?1",
                         rusqlite::params![&node_id],
                     )?;
-                    Self::insert_intelligence_relations(&conn, &node_id, rels, now)?;
+                    Self::insert_intelligence_relations(&tx, &node_id, rels, now)?;
                 }
                 changed_fields
             }
         };
         changed_fields.push("updated_at".to_string());
 
+        tx.commit()?;
         drop(conn);
         let record = self
             .get_intelligence_node(&node_id)?
@@ -289,7 +301,7 @@ impl Database {
     /// the edge itself; a write that leaves relations untouched is checked
     /// against the stored edges.
     fn ensure_supersedes_available(
-        conn: &rusqlite::Connection,
+        tx: &rusqlite::Transaction,
         node_id: &str,
         final_status: &str,
         relations: Option<&[IntelligenceRelationInput]>,
@@ -300,7 +312,7 @@ impl Database {
         let has_supersedes = match relations {
             Some(rels) => rels.iter().any(|r| r.relation == "supersedes"),
             None => {
-                let mut stmt = conn.prepare(
+                let mut stmt = tx.prepare(
                     "SELECT COUNT(*) FROM intelligence_edges WHERE from_node_id = ?1 AND relation = 'supersedes'",
                 )?;
                 let count: i64 = stmt.query_row(rusqlite::params![node_id], |row| row.get(0))?;
@@ -318,7 +330,7 @@ impl Database {
     /// Execute the dynamic `UPDATE intelligence_nodes` for an update, setting
     /// only the columns that changed plus `updated_at` / `content_touched_at`.
     fn apply_node_update(
-        conn: &rusqlite::Connection,
+        tx: &rusqlite::Transaction,
         node_id: &str,
         finals: &IntelligenceNodeFinals,
         now: i64,
@@ -368,19 +380,19 @@ impl Database {
         // The WHERE id is the trailing parameter after every SET value.
         let mut all: Vec<&dyn rusqlite::types::ToSql> = params;
         all.push(&node_id);
-        conn.execute(&sql, all.as_slice())?;
+        tx.execute(&sql, all.as_slice())?;
         Ok(())
     }
 
     /// Insert the edges of a node's relation list.
     fn insert_intelligence_relations(
-        conn: &rusqlite::Connection,
+        tx: &rusqlite::Transaction,
         node_id: &str,
         relations: Vec<IntelligenceRelationInput>,
         now: i64,
     ) -> Result<()> {
         for relation in relations {
-            conn.execute(
+            tx.execute(
                 "INSERT INTO intelligence_edges (
                     from_node_id, to_node_id, relation, weight, created_at
                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -400,7 +412,7 @@ impl Database {
     /// the create reported as changed (without `updated_at`, which the caller
     /// appends for both paths).
     fn create_intelligence_node(
-        conn: &rusqlite::Connection,
+        tx: &rusqlite::Transaction,
         node_id: &str,
         input: IntelligenceNodeInput,
         now: i64,
@@ -456,7 +468,7 @@ impl Database {
             }
         }
 
-        conn.execute(
+        tx.execute(
             "INSERT INTO intelligence_nodes (
                 id, kind, status, title, body, metadata, project_hash, session_id, created_at, updated_at, content_touched_at
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
@@ -492,7 +504,7 @@ impl Database {
         }
         let relations_changed = relations.is_some();
         if let Some(rels) = relations {
-            Self::insert_intelligence_relations(conn, node_id, rels, now)?;
+            Self::insert_intelligence_relations(tx, node_id, rels, now)?;
         }
         if relations_changed {
             changed_fields.push("relations".to_string());

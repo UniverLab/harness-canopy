@@ -162,7 +162,8 @@ impl TaskTriggerHandler {
     #[tool(
         name = "intelligence_upsert",
         description = "Create or update an intelligence node and optional relations. \
-         project_hash is auto-detected from the session workdir if not provided."
+         project_hash is auto-detected from the session workdir if not provided. \
+         Relation targets accept the same node IDs or unique ID prefixes as node_data.id."
     )]
     pub(crate) async fn intelligence_upsert(
         &self,

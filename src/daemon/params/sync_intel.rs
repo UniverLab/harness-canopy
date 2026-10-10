@@ -60,7 +60,9 @@ pub struct IntelligenceGetContextParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct IntelligenceRelationParams {
-    /// Target node ID for the relation.
+    /// Target node ID for the relation. Accepts a full node ID or a unique
+    /// ID prefix, exactly like node_data.id; the stored edge always carries
+    /// the full ID.
     pub to_node_id: String,
     /// Relation label, e.g. "depends_on" or "summarizes".
     pub relation: String,

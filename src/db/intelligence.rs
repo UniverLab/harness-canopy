@@ -11,6 +11,7 @@ use crate::db::Database;
 mod containment;
 mod node_crud;
 mod projects;
+mod relation_targets;
 mod search;
 mod traversal;
 
@@ -1263,6 +1264,129 @@ mod tests {
             err.to_string().contains("unknown edge relation"),
             "expected edge rejection, got: {err}"
         );
+    }
+
+    #[test]
+    fn upsert_create_with_unknown_second_relation_writes_nothing() {
+        let db = test_db();
+        db.upsert_intelligence_node(sample_node_input("t1"))
+            .unwrap();
+        let err = db
+            .upsert_intelligence_node(IntelligenceNodeInput {
+                relations: Some(vec![
+                    IntelligenceRelationInput {
+                        to_node_id: "t1".to_string(),
+                        relation: "extends".to_string(),
+                        weight: None,
+                    },
+                    IntelligenceRelationInput {
+                        to_node_id: "does-not-exist-zzz".to_string(),
+                        relation: "extends".to_string(),
+                        weight: None,
+                    },
+                ]),
+                ..sample_node_input("new-x")
+            })
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("relation target 'does-not-exist-zzz' matches no intelligence node"),
+            "expected unknown-target rejection, got: {err}"
+        );
+        // The whole upsert rolled back: no node, no partial edge from the
+        // valid first relation, and the target gained no edge either.
+        assert!(db.get_intelligence_node("new-x").unwrap().is_none());
+        assert_eq!(db.list_intelligence_nodes(None, 100).unwrap().len(), 1);
+        assert!(db
+            .list_recent_intelligence_edges("new-x")
+            .unwrap()
+            .is_empty());
+        assert!(db.list_recent_intelligence_edges("t1").unwrap().is_empty());
+    }
+
+    #[test]
+    fn upsert_create_with_unique_prefix_relation_stores_full_id() {
+        let db = test_db();
+        let full = "aaaaaaaa-1111-2222-3333-444444444444";
+        db.upsert_intelligence_node(sample_node_input(full))
+            .unwrap();
+        db.upsert_intelligence_node(IntelligenceNodeInput {
+            relations: Some(vec![IntelligenceRelationInput {
+                to_node_id: full[..8].to_string(),
+                relation: "extends".to_string(),
+                weight: None,
+            }]),
+            ..sample_node_input("new-y")
+        })
+        .unwrap();
+        let edges = db.list_recent_intelligence_edges("new-y").unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].to_node_id, full);
+    }
+
+    #[test]
+    fn upsert_create_with_ambiguous_prefix_writes_nothing() {
+        let db = test_db();
+        let id1 = "abc12345-0000-0000-0000-000000000001";
+        let id2 = "abc12345-0000-0000-0000-000000000002";
+        db.upsert_intelligence_node(sample_node_input(id1)).unwrap();
+        db.upsert_intelligence_node(sample_node_input(id2)).unwrap();
+        let err = db
+            .upsert_intelligence_node(IntelligenceNodeInput {
+                relations: Some(vec![IntelligenceRelationInput {
+                    to_node_id: "abc12345".to_string(),
+                    relation: "extends".to_string(),
+                    weight: None,
+                }]),
+                ..sample_node_input("amb-x")
+            })
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("Ambiguous"),
+            "expected ambiguous-prefix rejection, got: {err}"
+        );
+        assert!(db.get_intelligence_node("amb-x").unwrap().is_none());
+        assert_eq!(db.list_intelligence_nodes(None, 100).unwrap().len(), 2);
+        assert!(db.list_recent_intelligence_edges(id1).unwrap().is_empty());
+        assert!(db.list_recent_intelligence_edges(id2).unwrap().is_empty());
+    }
+
+    #[test]
+    fn upsert_update_with_unknown_relation_keeps_old_body_and_edges() {
+        let db = test_db();
+        db.upsert_intelligence_node(sample_node_input("t1"))
+            .unwrap();
+        db.upsert_intelligence_node(IntelligenceNodeInput {
+            body: Some("v1".to_string()),
+            relations: Some(vec![IntelligenceRelationInput {
+                to_node_id: "t1".to_string(),
+                relation: "extends".to_string(),
+                weight: None,
+            }]),
+            ..sample_node_input("u1")
+        })
+        .unwrap();
+        let err = db
+            .upsert_intelligence_node(IntelligenceNodeInput {
+                body: Some("v2".to_string()),
+                relations: Some(vec![IntelligenceRelationInput {
+                    to_node_id: "unknown-id-9999".to_string(),
+                    relation: "extends".to_string(),
+                    weight: None,
+                }]),
+                ..sample_node_input("u1")
+            })
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("matches no intelligence node"),
+            "expected unknown-target rejection, got: {err}"
+        );
+        // The update path is transactional: the old body survives and the
+        // previous edge was not dropped by the failing replacement.
+        assert_eq!(db.get_intelligence_node("u1").unwrap().unwrap().body, "v1");
+        let edges = db.list_recent_intelligence_edges("u1").unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].to_node_id, "t1");
     }
 
     #[test]
