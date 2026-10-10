@@ -1193,6 +1193,44 @@ mod formatting_unit_tests {
         let result = format_log_output(path, "test-agent", None, 100);
         assert!(result.is_err());
     }
+
+    fn busy_anyhow() -> anyhow::Error {
+        anyhow::Error::new(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: rusqlite::ErrorCode::DatabaseBusy,
+                extended_code: 5,
+            },
+            None,
+        ))
+    }
+
+    #[test]
+    fn write_error_busy_names_operation_and_says_retry() {
+        let mcp = write_error("graph_import", &busy_anyhow());
+        assert_eq!(mcp.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
+        assert_eq!(
+            mcp.message.to_string(),
+            "graph_import: database busy after 5 s — nothing was written, retry"
+        );
+    }
+
+    #[test]
+    fn write_error_non_busy_passes_through_unchanged() {
+        let mcp = write_error("graph_import", &anyhow::anyhow!("disk full"));
+        assert_eq!(mcp.message.to_string(), "disk full");
+    }
+
+    #[test]
+    fn write_error_message_busy_and_plain() {
+        assert_eq!(
+            write_error_message("graph_import", &busy_anyhow()),
+            "graph_import: database busy after 5 s — nothing was written, retry"
+        );
+        assert_eq!(
+            write_error_message("graph_import", &anyhow::anyhow!("disk full")),
+            "disk full"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1341,44 +1379,6 @@ mod model_listing_tests {
         assert_eq!(
             out1, out2,
             "two consecutive calls must produce identical output"
-        );
-    }
-
-    fn busy_anyhow() -> anyhow::Error {
-        anyhow::Error::new(rusqlite::Error::SqliteFailure(
-            rusqlite::ffi::Error {
-                code: rusqlite::ErrorCode::DatabaseBusy,
-                extended_code: 5,
-            },
-            None,
-        ))
-    }
-
-    #[test]
-    fn write_error_busy_names_operation_and_says_retry() {
-        let mcp = write_error("graph_import", &busy_anyhow());
-        assert_eq!(mcp.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
-        assert_eq!(
-            mcp.message.to_string(),
-            "graph_import: database busy after 5 s — nothing was written, retry"
-        );
-    }
-
-    #[test]
-    fn write_error_non_busy_passes_through_unchanged() {
-        let mcp = write_error("graph_import", &anyhow::anyhow!("disk full"));
-        assert_eq!(mcp.message.to_string(), "disk full");
-    }
-
-    #[test]
-    fn write_error_message_busy_and_plain() {
-        assert_eq!(
-            write_error_message("graph_import", &busy_anyhow()),
-            "graph_import: database busy after 5 s — nothing was written, retry"
-        );
-        assert_eq!(
-            write_error_message("graph_import", &anyhow::anyhow!("disk full")),
-            "disk full"
         );
     }
 }
