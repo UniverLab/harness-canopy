@@ -912,5 +912,39 @@ mod check_command_tests {
             message,
             "unknown marker {{nope}} in check command (check node 'gatekeeper')."
         );
+
+        // FR4 must also reach check nodes bound to a spec, not just the
+        // graph's own nodes — drop the graph-level one and keep the defect
+        // inside `specs[].nodes` only.
+        let mut spec_only = details;
+        spec_only.graph_nodes.clear();
+        spec_only.specs = vec![crate::domain::graphs::GraphSpecDetails {
+            spec: GraphSpec {
+                id: "s".to_string(),
+                graph_id: Some("g".to_string()),
+                name: "Spec".to_string(),
+                description: None,
+                position: 1,
+                parallelizable: false,
+                status: GraphSpecStatus::Pending,
+                started_at: None,
+                completed_at: None,
+                spec_start_head: None,
+                spec_start_dirty: None,
+                spec_end_dirty: None,
+                spec_end_dirty_paths: None,
+                spec_committed_head: None,
+                workdir: None,
+                completed_via: None,
+                completed_via_reason: None,
+                completed_via_at: None,
+            },
+            nodes: vec![node("echo {{specnope}}", "spec-gate")],
+            edges: vec![],
+        }];
+        assert_eq!(
+            check_command_marker_error(&spec_only).unwrap(),
+            "unknown marker {{specnope}} in check command (check node 'spec-gate')."
+        );
     }
 }
