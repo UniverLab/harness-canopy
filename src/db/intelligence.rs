@@ -1352,7 +1352,7 @@ mod tests {
     }
 
     #[test]
-    fn upsert_update_with_unknown_relation_keeps_old_body_and_edges() {
+    fn upsert_update_with_unknown_relation_leaves_node_unchanged() {
         let db = test_db();
         db.upsert_intelligence_node(sample_node_input("t1"))
             .unwrap();
@@ -1366,9 +1366,20 @@ mod tests {
             ..sample_node_input("u1")
         })
         .unwrap();
+        // Snapshot the node state after the successful create, BEFORE the
+        // failing update, so every field can be compared afterwards.
+        let snapshot = db.get_intelligence_node("u1").unwrap().unwrap();
+        let updated_at_before = snapshot.updated_at;
+        assert_eq!(snapshot.title, "Node u1");
+        assert_eq!(snapshot.body, "v1");
+        let edges_before = db.list_recent_intelligence_edges("u1").unwrap();
+        assert_eq!(edges_before.len(), 1);
+        assert_eq!(edges_before[0].to_node_id, "t1");
+
         let err = db
             .upsert_intelligence_node(IntelligenceNodeInput {
                 body: Some("v2".to_string()),
+                title: Some("Node u1 renamed".to_string()),
                 relations: Some(vec![IntelligenceRelationInput {
                     to_node_id: "unknown-id-9999".to_string(),
                     relation: "extends".to_string(),
@@ -1378,12 +1389,18 @@ mod tests {
             })
             .unwrap_err();
         assert!(
-            err.to_string().contains("matches no intelligence node"),
-            "expected unknown-target rejection, got: {err}"
+            err.to_string().contains("unknown-id-9999"),
+            "error should name the missing target id, got: {err}"
         );
-        // The update path is transactional: the old body survives and the
-        // previous edge was not dropped by the failing replacement.
-        assert_eq!(db.get_intelligence_node("u1").unwrap().unwrap().body, "v1");
+        // The whole update rolled back: title, body, updated_at and the
+        // existing edge list are all exactly as they were before the call.
+        let after = db.get_intelligence_node("u1").unwrap().unwrap();
+        assert_eq!(after.title, "Node u1");
+        assert_eq!(after.body, "v1");
+        assert_eq!(
+            after.updated_at, updated_at_before,
+            "updated_at must not move on a failed update"
+        );
         let edges = db.list_recent_intelligence_edges("u1").unwrap();
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].to_node_id, "t1");

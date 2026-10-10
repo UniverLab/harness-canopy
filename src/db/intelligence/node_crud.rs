@@ -13,40 +13,11 @@ impl Database {
         if prefix.is_empty() {
             return Ok(None);
         }
-        // If exact match exists, return it without LIKE scan — handles full
-        // UUIDs and avoids ambiguous error when the exact id happens to share
-        // a prefix with others.
-        if let Some(_node) = self.get_intelligence_node(prefix)? {
-            return Ok(Some(prefix.to_string()));
-        }
         let conn = self
             .conn
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
-        // Escape LIKE metacharacters so a prefix that happens to contain '%' or
-        // '_' (or the escape char itself) is matched literally rather than as a
-        // wildcard — otherwise a stray '_' would silently over-match and turn a
-        // single valid target into a spurious "ambiguous" error.
-        let escaped_prefix = prefix
-            .replace('\\', "\\\\")
-            .replace('%', "\\%")
-            .replace('_', "\\_");
-        let mut stmt =
-            conn.prepare("SELECT id FROM intelligence_nodes WHERE id LIKE ?1 || '%' ESCAPE '\\'")?;
-        let ids: Vec<String> = stmt
-            .query_map(rusqlite::params![escaped_prefix], |row| row.get(0))?
-            .filter_map(|r| r.ok())
-            .collect();
-        match ids.len() {
-            0 => Ok(None),
-            1 => Ok(Some(ids.into_iter().next().unwrap())),
-            _ => Err(anyhow!(
-                "Ambiguous node id prefix '{}' matches {} nodes: {}",
-                prefix,
-                ids.len(),
-                ids.join(", ")
-            )),
-        }
+        Self::resolve_node_id_by_prefix_on(&conn, prefix)
     }
 
     pub fn upsert_intelligence_node(
@@ -54,14 +25,6 @@ impl Database {
         mut input: IntelligenceNodeInput,
     ) -> Result<UpsertResult> {
         Self::validate_intelligence_node_input(&input)?;
-        // Resolve relation prefixes BEFORE taking the write lock: each
-        // `resolve_node_id_by_prefix` call locks `self.conn` itself and the
-        // mutex is not reentrant, so resolving inside the transaction would
-        // deadlock. An unknown target fails here — before any write — with a
-        // clear message; an ambiguous prefix propagates its listing error.
-        if let Some(ref rels) = input.relations {
-            input.relations = Some(self.resolve_relation_target_ids(rels)?);
-        }
 
         let node_id = input
             .id
@@ -79,6 +42,16 @@ impl Database {
         // upsert back, so a failing edge can never leave an orphan node or a
         // partial edge list behind.
         let tx = conn.transaction()?;
+        // Resolve relation target prefixes INSIDE the transaction so the
+        // existence check and the node/edge writes are one atomic unit: a
+        // missing target fails here — before any row is written — and the `?`
+        // drops the transaction uncommitted (rollback). The helper takes a
+        // `&Connection` (`&Transaction` derefs to `&Connection`) and never locks
+        // `self.conn`, so there is no reentrant-mutex deadlock and no TOCTOU
+        // window between resolution and the write.
+        if let Some(ref rels) = input.relations {
+            input.relations = Some(Self::resolve_relation_target_ids(&tx, rels)?);
+        }
         // Determine creation vs update before writing. For auto-generated
         // ids this is always creation. Done inside the same transaction as
         // the write so the check and the write cannot be split by another
