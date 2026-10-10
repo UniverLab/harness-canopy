@@ -24,6 +24,7 @@ use crate::domain::sandbox::Sandbox;
 mod agent_exec;
 mod agent_spawn;
 mod check;
+mod decision;
 mod directed;
 mod dirty_commit;
 mod dispatch;
@@ -50,6 +51,7 @@ mod spec_step;
 pub(crate) use agent_exec::*;
 pub(crate) use agent_spawn::*;
 pub(crate) use check::*;
+pub(crate) use decision::*;
 pub(crate) use directed::*;
 pub(crate) use dirty_commit::*;
 #[allow(unused_imports)]
@@ -4821,6 +4823,7 @@ mod tests {
             trust_flag: None,
             invocation_template: None,
             effort_declaration: None,
+            decision_args: None,
             identity: None,
         }
     }
@@ -4972,6 +4975,7 @@ esac
             trust_flag: None,
             invocation_template: None,
             effort_declaration: None,
+            decision_args: None,
             identity: None,
         }
     }
@@ -18778,11 +18782,21 @@ echo done
             "technical",
             1,
         );
+        let lp = decision_graph();
+        let spec = decision_spec("spec-1");
 
         let _home = HomeGuard::set(fake_home.path());
-        let execution = execute_router_node(&db, &node, None, "run-router-spawn-fail", "/tmp")
-            .await
-            .unwrap();
+        let execution = execute_router_node(
+            &db,
+            &lp,
+            &spec,
+            &node,
+            None,
+            "run-router-spawn-fail",
+            "/tmp",
+        )
+        .await
+        .unwrap();
         drop(_home);
 
         assert_eq!(execution.status, GraphRunStatus::Fail);
@@ -18805,11 +18819,14 @@ echo done
             "technical",
             1,
         );
+        let lp = decision_graph();
+        let spec = decision_spec("spec-1");
 
         let _home = HomeGuard::set(fake_home.path());
-        let execution = execute_router_node(&db, &node, None, "run-router-billing", "/tmp")
-            .await
-            .unwrap();
+        let execution =
+            execute_router_node(&db, &lp, &spec, &node, None, "run-router-billing", "/tmp")
+                .await
+                .unwrap();
         drop(_home);
 
         assert_eq!(execution.status, GraphRunStatus::Pass);
@@ -18847,11 +18864,14 @@ echo done
             "technical",
             1,
         );
+        let lp = decision_graph();
+        let spec = decision_spec("spec-1");
 
         let _home = HomeGuard::set(fake_home.path());
-        let execution = execute_router_node(&db, &node, None, "run-router-narration", "/tmp")
-            .await
-            .unwrap();
+        let execution =
+            execute_router_node(&db, &lp, &spec, &node, None, "run-router-narration", "/tmp")
+                .await
+                .unwrap();
         drop(_home);
 
         assert_eq!(execution.status, GraphRunStatus::Pass);
@@ -24320,6 +24340,734 @@ binary = "{}"
             !prod.contains("end_harness_session"),
             "normal completion path must not call end_harness_session directly either — \
              sessions stay intact for warm-session groups"
+        );
+    }
+
+    // ── CB88: decision-mode router tests ─────────────────────────────
+
+    /// A router node config with `decision: true` and `min_confidence`.
+    fn router_decision_node(
+        id: &str,
+        spec_id: &str,
+        platform: &str,
+        routes: &[(&str, &str)],
+        fallback: &str,
+        position: i64,
+        min_confidence: f64,
+    ) -> GraphNode {
+        let routes_json: Vec<Value> = routes
+            .iter()
+            .map(|(label, description)| {
+                serde_json::json!({ "label": label, "description": description })
+            })
+            .collect();
+        GraphNode {
+            id: id.to_string(),
+            spec_id: Some(spec_id.to_string()),
+            graph_id: None,
+            name: id.to_string(),
+            kind: GraphNodeKind::Router,
+            config: serde_json::json!({
+                "platform": platform,
+                "routes": routes_json,
+                "fallback": fallback,
+                "decision": true,
+                "min_confidence": min_confidence,
+                "timeout_minutes": 1,
+            }),
+            position,
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    /// Like `setup_multi_cli_home` but each entry also carries `decision_args`
+    /// (CB88). A separate helper so existing callers keep working.
+    fn setup_decision_cli_home(clis: &[(&str, &str, &str)]) -> tempfile::TempDir {
+        let fake_home = tempfile::tempdir().unwrap();
+        let canopy_dir = fake_home.path().join(".canopy");
+        std::fs::create_dir_all(&canopy_dir).unwrap();
+        let config = crate::domain::canopy_config::CanopyConfig {
+            configured_at: Some(chrono::Utc::now().to_rfc3339()),
+            clis: clis
+                .iter()
+                .map(
+                    |(name, binary, decision_args)| crate::domain::cli_config::CliConfig {
+                        name: name.to_string(),
+                        binary: binary.to_string(),
+                        headless_mode: String::new(),
+                        model_flag: Some("-m".to_string()),
+                        supports_working_dir: false,
+                        working_dir_flag: None,
+                        env_vars: std::collections::HashMap::new(),
+                        interactive_args: None,
+                        fallback_interactive_args: None,
+                        resume_args: None,
+                        session_list_cmd: None,
+                        session_resume_cmd: None,
+                        accent_color: None,
+                        yolo_flag: None,
+                        prompt_via_stdin: true,
+                        decision_args: Some(decision_args.to_string()),
+                        ..Default::default()
+                    },
+                )
+                .collect(),
+            ..Default::default()
+        };
+        config.save(&canopy_dir).unwrap();
+        fake_home
+    }
+
+    /// A minimal `GraphSpec` for decision router tests.
+    fn decision_spec(spec_id: &str) -> GraphSpec {
+        GraphSpec {
+            id: spec_id.to_string(),
+            graph_id: None,
+            name: format!("Spec {spec_id}"),
+            description: Some(format!("Description for {spec_id}")),
+            position: 1,
+            parallelizable: false,
+            status: GraphSpecStatus::Pending,
+            started_at: None,
+            completed_at: None,
+            spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
+            spec_committed_head: None,
+            workdir: None,
+            completed_via: None,
+            completed_via_reason: None,
+            completed_via_at: None,
+        }
+    }
+
+    /// A minimal `Graph` for decision router tests.
+    fn decision_graph() -> crate::domain::graphs::Graph {
+        use std::collections::BTreeMap;
+        crate::domain::graphs::Graph {
+            id: "graph-decision-test".to_string(),
+            name: "decision-test-graph".to_string(),
+            description: None,
+            workdir: "/tmp".to_string(),
+            status: GraphStatus::Draft,
+            trigger: None,
+            created_at: chrono::Utc::now(),
+            started_at: None,
+            completed_at: None,
+            autorun_at: None,
+            auto_continue_at: None,
+            auto_continue_action: None,
+            active_run_queue_id: None,
+            hooks: BTreeMap::new(),
+            archived: false,
+            paused_by_reconciliation: false,
+            infra_node_id: None,
+            allow_dirty_start: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn decision_confident_choice_is_taken() {
+        let (dir, db) = test_db();
+        let answer = serde_json::json!({
+            "answers": {
+                "route": {
+                    "type": "choice",
+                    "choice": "quota_with_reset",
+                    "confidence": 0.92,
+                    "probabilities": {
+                        "quota_with_reset": 0.92,
+                        "transient_glitch": 0.05,
+                        "other": 0.03
+                    }
+                }
+            },
+            "usage": {"tokens": 12}
+        });
+        let answer_str = serde_json::to_string(&answer).unwrap();
+        let answer_file = dir.path().join("answer.json");
+        std::fs::write(&answer_file, &answer_str).unwrap();
+        let script = write_member_script(
+            dir.path(),
+            "decision-cli.sh",
+            &format!("cat '{}'", answer_file.to_string_lossy()),
+        );
+        let fake_home = setup_decision_cli_home(&[("decision-cli", &script, "-p")]);
+        let node = router_decision_node(
+            "r1",
+            "spec-1",
+            "decision-cli",
+            &[
+                ("quota_with_reset", "Quota was reset"),
+                ("transient_glitch", "Transient glitch"),
+                ("other", "Other"),
+            ],
+            "other",
+            1,
+            0.5,
+        );
+        let lp = decision_graph();
+        let spec = decision_spec("spec-1");
+
+        let _home = HomeGuard::set(fake_home.path());
+        let execution = execute_router_node(
+            &db,
+            &lp,
+            &spec,
+            &node,
+            None,
+            "run-decision-confident",
+            "/tmp",
+        )
+        .await
+        .unwrap();
+        drop(_home);
+
+        assert_eq!(execution.status, GraphRunStatus::Pass);
+        assert_eq!(
+            execution.output.get("route").and_then(Value::as_str),
+            Some("quota_with_reset")
+        );
+        assert_eq!(
+            execution.output.get("mode").and_then(Value::as_str),
+            Some("decision")
+        );
+        assert_eq!(
+            execution
+                .output
+                .get("used_fallback")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            execution.output.get("confidence").and_then(Value::as_f64),
+            Some(0.92)
+        );
+        let probs = execution
+            .output
+            .get("probabilities")
+            .and_then(Value::as_object)
+            .unwrap();
+        assert_eq!(
+            probs.get("quota_with_reset").and_then(Value::as_f64),
+            Some(0.92)
+        );
+        assert_eq!(
+            execution
+                .output
+                .get("usage")
+                .and_then(|u| u.get("tokens"))
+                .and_then(Value::as_u64),
+            Some(12)
+        );
+    }
+
+    #[tokio::test]
+    async fn decision_low_confidence_falls_back() {
+        let (dir, db) = test_db();
+        let answer = serde_json::json!({
+            "answers": {
+                "route": {
+                    "type": "choice",
+                    "choice": "quota_with_reset",
+                    "confidence": 0.2,
+                    "probabilities": {"quota_with_reset": 0.2, "transient_glitch": 0.1, "other": 0.7}
+                }
+            },
+            "usage": {"tokens": 5}
+        });
+        let answer_str = serde_json::to_string(&answer).unwrap();
+        let answer_file = dir.path().join("answer.json");
+        std::fs::write(&answer_file, &answer_str).unwrap();
+        let script = write_member_script(
+            dir.path(),
+            "decision-cli.sh",
+            &format!("cat '{}'", answer_file.to_string_lossy()),
+        );
+        let fake_home = setup_decision_cli_home(&[("decision-cli", &script, "-p")]);
+        let node = router_decision_node(
+            "r1",
+            "spec-1",
+            "decision-cli",
+            &[
+                ("quota_with_reset", "Quota was reset"),
+                ("transient_glitch", "Transient glitch"),
+                ("other", "Other"),
+            ],
+            "other",
+            1,
+            0.5,
+        );
+        let lp = decision_graph();
+        let spec = decision_spec("spec-1");
+
+        let _home = HomeGuard::set(fake_home.path());
+        let execution = execute_router_node(
+            &db,
+            &lp,
+            &spec,
+            &node,
+            None,
+            "run-decision-low-conf",
+            "/tmp",
+        )
+        .await
+        .unwrap();
+        drop(_home);
+
+        assert_eq!(execution.status, GraphRunStatus::Pass);
+        assert_eq!(
+            execution.output.get("route").and_then(Value::as_str),
+            Some("other")
+        );
+        assert_eq!(
+            execution
+                .output
+                .get("used_fallback")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            execution.output.get("confidence").and_then(Value::as_f64),
+            Some(0.2)
+        );
+    }
+
+    #[tokio::test]
+    async fn decision_unknown_label_falls_back() {
+        let (dir, db) = test_db();
+        let answer = serde_json::json!({
+            "answers": {
+                "route": {
+                    "type": "choice",
+                    "choice": "nonsense",
+                    "confidence": 0.99,
+                    "probabilities": {"nonsense": 0.99}
+                }
+            },
+            "usage": {"tokens": 3}
+        });
+        let answer_str = serde_json::to_string(&answer).unwrap();
+        let answer_file = dir.path().join("answer.json");
+        std::fs::write(&answer_file, &answer_str).unwrap();
+        let script = write_member_script(
+            dir.path(),
+            "decision-cli.sh",
+            &format!("cat '{}'", answer_file.to_string_lossy()),
+        );
+        let fake_home = setup_decision_cli_home(&[("decision-cli", &script, "-p")]);
+        let node = router_decision_node(
+            "r1",
+            "spec-1",
+            "decision-cli",
+            &[
+                ("quota_with_reset", "Quota was reset"),
+                ("transient_glitch", "Transient glitch"),
+                ("other", "Other"),
+            ],
+            "other",
+            1,
+            0.0,
+        );
+        let lp = decision_graph();
+        let spec = decision_spec("spec-1");
+
+        let _home = HomeGuard::set(fake_home.path());
+        let execution =
+            execute_router_node(&db, &lp, &spec, &node, None, "run-decision-unknown", "/tmp")
+                .await
+                .unwrap();
+        drop(_home);
+
+        assert_eq!(execution.status, GraphRunStatus::Pass);
+        assert_eq!(
+            execution.output.get("route").and_then(Value::as_str),
+            Some("other")
+        );
+        assert_eq!(
+            execution
+                .output
+                .get("used_fallback")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+    }
+
+    #[tokio::test]
+    async fn decision_invalid_json_falls_back() {
+        let (dir, db) = test_db();
+        let script = write_member_script(dir.path(), "decision-cli.sh", "printf 'not json'");
+        let fake_home = setup_decision_cli_home(&[("decision-cli", &script, "-p")]);
+        let node = router_decision_node(
+            "r1",
+            "spec-1",
+            "decision-cli",
+            &[
+                ("quota_with_reset", "Quota was reset"),
+                ("transient_glitch", "Transient glitch"),
+                ("other", "Other"),
+            ],
+            "other",
+            1,
+            0.0,
+        );
+        let lp = decision_graph();
+        let spec = decision_spec("spec-1");
+
+        let _home = HomeGuard::set(fake_home.path());
+        let execution =
+            execute_router_node(&db, &lp, &spec, &node, None, "run-decision-invalid", "/tmp")
+                .await
+                .unwrap();
+        drop(_home);
+
+        assert_eq!(execution.status, GraphRunStatus::Pass);
+        assert_eq!(
+            execution.output.get("route").and_then(Value::as_str),
+            Some("other")
+        );
+        assert_eq!(
+            execution
+                .output
+                .get("used_fallback")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            execution.output.get("confidence").and_then(Value::as_f64),
+            Some(0.0)
+        );
+    }
+
+    #[tokio::test]
+    async fn decision_nonzero_exit_is_node_failure() {
+        let (dir, db) = test_db();
+        let script = write_member_script(dir.path(), "decision-cli.sh", "exit 3");
+        let fake_home = setup_decision_cli_home(&[("decision-cli", &script, "-p")]);
+        let node = router_decision_node(
+            "r1",
+            "spec-1",
+            "decision-cli",
+            &[
+                ("quota_with_reset", "Quota was reset"),
+                ("transient_glitch", "Transient glitch"),
+                ("other", "Other"),
+            ],
+            "other",
+            1,
+            0.0,
+        );
+        let lp = decision_graph();
+        let spec = decision_spec("spec-1");
+
+        let _home = HomeGuard::set(fake_home.path());
+        let execution =
+            execute_router_node(&db, &lp, &spec, &node, None, "run-decision-exit3", "/tmp")
+                .await
+                .unwrap();
+        drop(_home);
+
+        assert_eq!(execution.status, GraphRunStatus::Fail);
+        assert!(
+            execution.output.get("route").is_none(),
+            "a non-zero exit must not carry a chosen route"
+        );
+    }
+
+    #[tokio::test]
+    async fn decision_process_timeout_is_node_failure() {
+        let (dir, db) = test_db();
+        // A script that sleeps longer than the node's timeout.
+        let script = write_member_script(dir.path(), "decision-cli.sh", "sleep 30");
+        let fake_home = setup_decision_cli_home(&[("decision-cli", &script, "-p")]);
+        let node = {
+            let mut n = router_decision_node(
+                "r1",
+                "spec-1",
+                "decision-cli",
+                &[
+                    ("quota_with_reset", "Quota was reset"),
+                    ("transient_glitch", "Transient glitch"),
+                    ("other", "Other"),
+                ],
+                "other",
+                1,
+                0.0,
+            );
+            // timeout_minutes: 0 → 0*60=0s fires immediately.
+            n.config["timeout_minutes"] = Value::from(0);
+            n
+        };
+        let lp = decision_graph();
+        let spec = decision_spec("spec-1");
+
+        let _home = HomeGuard::set(fake_home.path());
+        let execution =
+            execute_router_node(&db, &lp, &spec, &node, None, "run-decision-timeout", "/tmp")
+                .await
+                .unwrap();
+        drop(_home);
+
+        assert_eq!(execution.status, GraphRunStatus::Fail);
+        assert!(
+            execution.output.get("route").is_none(),
+            "a timeout must not carry a chosen route"
+        );
+    }
+
+    #[tokio::test]
+    async fn decision_request_file_holds_criteria_and_rendered_state() {
+        let (dir, db) = test_db();
+        // The stub script copies stdin to a known path so we can inspect it.
+        let capture_path = dir.path().join("captured_stdin.json");
+        let capture_path_str = capture_path.to_string_lossy().to_string();
+        let script_body = format!("cat > '{capture_path_str}'");
+        let script = write_member_script(dir.path(), "decision-cli.sh", &script_body);
+        let fake_home = setup_decision_cli_home(&[("decision-cli", &script, "-p")]);
+        let node = {
+            let mut n = router_decision_node(
+                "r1",
+                "spec-1",
+                "decision-cli",
+                &[
+                    ("quota_with_reset", "Quota was reset"),
+                    ("transient_glitch", "Transient glitch"),
+                    ("other", "Other"),
+                ],
+                "other",
+                1,
+                0.0,
+            );
+            n.config["prompt_template"] =
+                Value::String("FAIL? {{previous_output}} [{{spec_name}}]".to_string());
+            n
+        };
+        let previous_output = serde_json::json!({"err": "quota reset at 12:00"});
+        let lp = decision_graph();
+        let spec = decision_spec("spec-1");
+
+        let _home = HomeGuard::set(fake_home.path());
+        let execution = execute_router_node(
+            &db,
+            &lp,
+            &spec,
+            &node,
+            Some(&previous_output),
+            "run-decision-request-file",
+            "/tmp",
+        )
+        .await
+        .unwrap();
+        drop(_home);
+
+        assert_eq!(execution.status, GraphRunStatus::Pass);
+        let captured = std::fs::read_to_string(&capture_path).unwrap();
+        let parsed: Value = serde_json::from_str(&captured).unwrap();
+        let criteria = parsed
+            .get("questions")
+            .and_then(|q| q.get("route"))
+            .and_then(|r| r.get("criteria"))
+            .and_then(Value::as_object)
+            .unwrap();
+        assert_eq!(criteria.len(), 3);
+        assert!(criteria.contains_key("quota_with_reset"));
+        assert!(criteria.contains_key("transient_glitch"));
+        assert!(criteria.contains_key("other"));
+        assert_eq!(
+            criteria.get("quota_with_reset").and_then(Value::as_str),
+            Some("Quota was reset")
+        );
+        let instructions = parsed
+            .get("questions")
+            .and_then(|q| q.get("route"))
+            .and_then(|r| r.get("instructions"))
+            .and_then(Value::as_str)
+            .unwrap();
+        assert!(instructions.contains("FAIL?"));
+        let state = parsed.get("state").and_then(Value::as_str).unwrap();
+        assert!(state.contains("quota reset at 12:00"));
+        assert!(state.contains("spec-1"));
+    }
+
+    #[test]
+    fn decision_platform_without_invocation_is_refused_at_write_time() {
+        // A fake home where the platform has no decision_args.
+        let fake_home = tempfile::tempdir().unwrap();
+        let canopy_dir = fake_home.path().join(".canopy");
+        std::fs::create_dir_all(&canopy_dir).unwrap();
+        let config = crate::domain::canopy_config::CanopyConfig {
+            configured_at: Some(chrono::Utc::now().to_rfc3339()),
+            clis: vec![crate::domain::cli_config::CliConfig {
+                name: "no-dec-cli".to_string(),
+                binary: "/bin/echo".to_string(),
+                headless_mode: String::new(),
+                model_flag: None,
+                supports_working_dir: false,
+                working_dir_flag: None,
+                env_vars: std::collections::HashMap::new(),
+                interactive_args: None,
+                fallback_interactive_args: None,
+                resume_args: None,
+                session_list_cmd: None,
+                session_resume_cmd: None,
+                accent_color: None,
+                yolo_flag: None,
+                prompt_via_stdin: false,
+                decision_args: None,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        config.save(&canopy_dir).unwrap();
+
+        let _home = HomeGuard::set(fake_home.path());
+        let config_json = serde_json::json!({
+            "routes": [
+                {"label": "a", "description": "A"},
+                {"label": "b", "description": "B"}
+            ],
+            "fallback": "b",
+            "platform": "no-dec-cli",
+            "decision": true,
+        });
+        let err = crate::daemon::handler_nodes::validate_node_config(
+            crate::domain::graphs::GraphNodeKind::Router,
+            &config_json,
+        )
+        .unwrap_err();
+        drop(_home);
+
+        assert!(
+            err.contains("no-dec-cli"),
+            "error must name the platform: {err}"
+        );
+        assert!(
+            err.contains("decision-model invocation"),
+            "error must mention decision-model invocation: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_decision_route_boundary_equality_passes() {
+        let routes = vec![
+            RouterRoute {
+                label: "a".to_string(),
+                description: "A".to_string(),
+            },
+            RouterRoute {
+                label: "b".to_string(),
+                description: "B".to_string(),
+            },
+        ];
+        let (route, used_fallback) = resolve_decision_route(Some("a"), 0.5, &routes, "b", 0.5);
+        assert_eq!(route, "a");
+        assert!(!used_fallback);
+    }
+
+    #[test]
+    fn parse_decision_answer_defaults_probabilities_and_usage() {
+        let stdout = r#"{"answers":{"route":{"type":"choice","choice":"x","confidence":0.8}}}"#;
+        let ans = parse_decision_answer(stdout).unwrap();
+        assert_eq!(ans.choice, "x");
+        assert_eq!(ans.confidence, 0.8);
+        assert!(ans.probabilities.is_empty());
+        assert_eq!(ans.usage, Value::Null);
+    }
+
+    #[test]
+    fn build_decision_argv_contains_decision_args_and_model_flag() {
+        let strategy = crate::domain::cli_strategy::CliStrategy {
+            binary: "/usr/local/bin/cmd".to_string(),
+            headless_mode: String::new(),
+            model_flag: Some("-m".to_string()),
+            supports_working_dir: false,
+            working_dir_flag: None,
+            env_vars: std::collections::HashMap::new(),
+            prompt_via_stdin: true,
+            session_id_set_flag: None,
+            session_list_cmd: None,
+            session_list_format_args: None,
+            session_id_pattern: None,
+            session_title_flag: None,
+            session_list_args: None,
+            session_end_args: None,
+            session_resume_cmd: None,
+            trust_flag: None,
+            invocation_template: None,
+            effort_declaration: None,
+            decision_args: Some("-p".to_string()),
+            identity: None,
+        };
+        let (binary, argv) = build_decision_argv(&strategy, Some("typesafe/jev")).unwrap();
+        assert_eq!(binary, std::path::PathBuf::from("/usr/local/bin/cmd"));
+        assert!(argv.contains(&"-p".to_string()));
+        let m_pos = argv.iter().position(|a| a == "-m").unwrap();
+        assert_eq!(argv[m_pos + 1], "typesafe/jev");
+    }
+
+    #[test]
+    fn build_decision_argv_omits_model_flag_when_blank() {
+        let strategy = crate::domain::cli_strategy::CliStrategy {
+            binary: "/usr/local/bin/cmd".to_string(),
+            headless_mode: String::new(),
+            model_flag: Some(String::new()),
+            supports_working_dir: false,
+            working_dir_flag: None,
+            env_vars: std::collections::HashMap::new(),
+            prompt_via_stdin: true,
+            session_id_set_flag: None,
+            session_list_cmd: None,
+            session_list_format_args: None,
+            session_id_pattern: None,
+            session_title_flag: None,
+            session_list_args: None,
+            session_end_args: None,
+            session_resume_cmd: None,
+            trust_flag: None,
+            invocation_template: None,
+            effort_declaration: None,
+            decision_args: Some("-p".to_string()),
+            identity: None,
+        };
+        let (_binary, argv) = build_decision_argv(&strategy, Some("typesafe/jev")).unwrap();
+        assert!(!argv.iter().any(|a| a == "typesafe/jev"));
+    }
+
+    #[tokio::test]
+    async fn agent_mode_router_unchanged_without_decision_flag() {
+        let (dir, db) = test_db();
+        let script = write_member_script(dir.path(), "router-agent-mode.sh", "printf 'billing\\n'");
+        let fake_home = setup_multi_cli_home(&[("router-agent-mode-cli", &script)]);
+        let node = router_node(
+            "r1",
+            "spec-1",
+            "router-agent-mode-cli",
+            &[("billing", "Billing"), ("technical", "Technical")],
+            "technical",
+            1,
+        );
+        let lp = decision_graph();
+        let spec = decision_spec("spec-1");
+
+        let _home = HomeGuard::set(fake_home.path());
+        let execution = execute_router_node(
+            &db,
+            &lp,
+            &spec,
+            &node,
+            None,
+            "run-agent-mode-unchanged",
+            "/tmp",
+        )
+        .await
+        .unwrap();
+        drop(_home);
+
+        assert_eq!(execution.status, GraphRunStatus::Pass);
+        assert!(
+            execution.output.get("mode").is_none(),
+            "agent-mode router output must not carry a 'mode' key"
         );
     }
 }

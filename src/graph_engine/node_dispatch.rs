@@ -58,7 +58,8 @@ impl GraphEngine {
                 node.name
             ),
             GraphNodeKind::Router => {
-                execute_router_node(&self.db, node, previous_output, run_id, workdir).await
+                execute_router_node(&self.db, lp, spec, node, previous_output, run_id, workdir)
+                    .await
             }
         }
     }

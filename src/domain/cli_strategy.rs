@@ -102,6 +102,11 @@ pub struct CliStrategy {
     /// Declarative argv template. See [`CliConfig::invocation_template`].
     pub invocation_template: Option<String>,
     pub effort_declaration: Option<super::cli_config::EffortDeclaration>,
+    /// Extra headless flags for decision-model invocation (CB88). See
+    /// [`CliConfig::decision_args`].
+    ///
+    /// [`CliConfig::decision_args`]: super::cli_config::CliConfig::decision_args
+    pub decision_args: Option<String>,
     /// CB85: identity declaration enforced on dispatch. `None` for every
     /// platform that does not declare both `identity_args` and
     /// `identity_pattern` — those keep today's behaviour with no per-call
@@ -258,6 +263,7 @@ impl CliStrategy {
             trust_flag: cli_config.trust_flag.clone(),
             invocation_template: cli_config.invocation_template.clone(),
             effort_declaration: cli_config.effort_declaration.clone(),
+            decision_args: cli_config.decision_args.clone(),
             identity: binary_identity::BinaryIdentity::from_cli_config(cli_config),
         }
     }
@@ -696,6 +702,7 @@ mod tests {
             trust_flag: None,
             invocation_template: None,
             effort_declaration: None,
+            decision_args: None,
             identity: None,
         }
     }

@@ -460,6 +460,7 @@ mod tests {
             trust_flag: None,
             invocation_template: None,
             effort_declaration: decl,
+            decision_args: None,
             identity: None,
         }
     }

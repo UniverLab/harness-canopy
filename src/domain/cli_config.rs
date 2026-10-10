@@ -234,6 +234,12 @@ pub struct CliConfig {
     /// `DEFAULT_INFRA_BACKOFF_SECONDS` (30).
     #[serde(default)]
     pub infra_backoff_seconds: Option<u64>,
+    /// Extra headless flags for decision-model invocation (CB88), e.g. `"-p"`
+    /// for commandcode (`cmd -p -m <model>`, request JSON on stdin). `None`
+    /// means this platform offers no decision-model invocation; router nodes
+    /// with `decision: true` on it are refused. Registry-driven, `#[serde(default)]`.
+    #[serde(default)]
+    pub decision_args: Option<String>,
     /// Human product identity from the registry (canopy-registry PR #2).
     /// Optional: hand-added or pre-PR#2 entries lack them and render as slug.
     /// Identity/matching/storage always use `name`; these are display-only.
@@ -291,6 +297,7 @@ impl Default for CliConfig {
             infra_retry_limit: None,
             infra_crash_max_seconds: None,
             infra_backoff_seconds: None,
+            decision_args: None,
             provider: None,
             tool_name: None,
         }
@@ -637,6 +644,7 @@ mod tests {
             infra_retry_limit: None,
             infra_crash_max_seconds: None,
             infra_backoff_seconds: None,
+            decision_args: None,
             provider: None,
             tool_name: None,
         }

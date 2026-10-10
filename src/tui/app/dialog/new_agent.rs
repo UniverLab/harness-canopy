@@ -905,6 +905,7 @@ mod tests {
             infra_retry_limit: None,
             infra_crash_max_seconds: None,
             infra_backoff_seconds: None,
+            decision_args: None,
 
             provider: None,
             tool_name: None,
@@ -1116,6 +1117,7 @@ mod tests {
             infra_retry_limit: None,
             infra_crash_max_seconds: None,
             infra_backoff_seconds: None,
+            decision_args: None,
 
             provider: None,
             tool_name: None,
@@ -1176,6 +1178,7 @@ mod tests {
             infra_retry_limit: None,
             infra_crash_max_seconds: None,
             infra_backoff_seconds: None,
+            decision_args: None,
 
             provider: None,
             tool_name: None,
@@ -1237,6 +1240,7 @@ mod tests {
             infra_retry_limit: None,
             infra_crash_max_seconds: None,
             infra_backoff_seconds: None,
+            decision_args: None,
 
             provider: None,
             tool_name: None,
@@ -1317,6 +1321,7 @@ mod tests {
             infra_retry_limit: None,
             infra_crash_max_seconds: None,
             infra_backoff_seconds: None,
+            decision_args: None,
 
             provider: None,
             tool_name: None,
@@ -1538,6 +1543,7 @@ mod tests {
             infra_retry_limit: None,
             infra_crash_max_seconds: None,
             infra_backoff_seconds: None,
+            decision_args: None,
 
             provider: None,
             tool_name: None,
@@ -1587,6 +1593,7 @@ mod tests {
             infra_retry_limit: None,
             infra_crash_max_seconds: None,
             infra_backoff_seconds: None,
+            decision_args: None,
 
             provider: None,
             tool_name: None,
@@ -1636,6 +1643,7 @@ mod tests {
             infra_retry_limit: None,
             infra_crash_max_seconds: None,
             infra_backoff_seconds: None,
+            decision_args: None,
 
             provider: None,
             tool_name: None,
@@ -1685,6 +1693,7 @@ mod tests {
             infra_retry_limit: None,
             infra_crash_max_seconds: None,
             infra_backoff_seconds: None,
+            decision_args: None,
 
             provider: None,
             tool_name: None,
@@ -1734,6 +1743,7 @@ mod tests {
             infra_retry_limit: None,
             infra_crash_max_seconds: None,
             infra_backoff_seconds: None,
+            decision_args: None,
 
             provider: None,
             tool_name: None,
@@ -1784,6 +1794,7 @@ mod tests {
             infra_retry_limit: None,
             infra_crash_max_seconds: None,
             infra_backoff_seconds: None,
+            decision_args: None,
 
             provider: None,
             tool_name: None,
@@ -1867,6 +1878,7 @@ mod tests {
             infra_retry_limit: None,
             infra_crash_max_seconds: None,
             infra_backoff_seconds: None,
+            decision_args: None,
 
             provider: None,
             tool_name: None,
@@ -1920,6 +1932,7 @@ mod tests {
             infra_retry_limit: None,
             infra_crash_max_seconds: None,
             infra_backoff_seconds: None,
+            decision_args: None,
 
             provider: None,
             tool_name: None,
@@ -2000,6 +2013,7 @@ mod tests {
             infra_retry_limit: None,
             infra_crash_max_seconds: None,
             infra_backoff_seconds: None,
+            decision_args: None,
 
             provider: None,
             tool_name: None,
@@ -2057,6 +2071,7 @@ mod tests {
             infra_retry_limit: None,
             infra_crash_max_seconds: None,
             infra_backoff_seconds: None,
+            decision_args: None,
 
             provider: None,
             tool_name: None,

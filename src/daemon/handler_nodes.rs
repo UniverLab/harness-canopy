@@ -31,7 +31,7 @@ use rmcp::ErrorData as McpError;
 impl TaskTriggerHandler {
     #[tool(
         name = "graph_add_node",
-        description = "Add a graph node to an existing graph spec, or (via graph_id instead of spec_id) to the graph's top-level graph. Provide either a full 'config' (with 'kind'), or a 'blueprint' name (see blueprint_list) optionally shallow-merged with 'config_overrides'. An agent node also accepts `infra_retry_limit`/`infra_crash_max_seconds`/`infra_backoff_seconds` (defaults 2/60/30) to override the infra-crash retry budget for this node alone, taking precedence over its platform's config.toml value."
+        description = "Add a graph node to an existing graph spec, or (via graph_id instead of spec_id) to the graph's top-level graph. Provide either a full 'config' (with 'kind'), or a 'blueprint' name (see blueprint_list) optionally shallow-merged with 'config_overrides'. An agent node also accepts `infra_retry_limit`/`infra_crash_max_seconds`/`infra_backoff_seconds` (defaults 2/60/30) to override the infra-crash retry budget for this node alone, taking precedence over its platform's config.toml value. A router node with {\"decision\": true} classifies via the platform's decision model instead of spawning an agent (optional \"min_confidence\" 0-1, default 0); e.g. routes quota_with_reset/transient_glitch/other with fallback other."
     )]
     pub(crate) async fn graph_add_node(
         &self,
@@ -127,7 +127,7 @@ impl TaskTriggerHandler {
 
     #[tool(
         name = "graph_update_node",
-        description = "Update an existing graph node. Config merges with the stored config by default (partial update: keys present are changed, keys absent are left as-is). Set `config_replace` to `true` to replace the entire config instead."
+        description = "Update an existing graph node. Config merges with the stored config by default (partial update: keys present are changed, keys absent are left as-is). Set `config_replace` to `true` to replace the entire config instead. Router nodes accept \"decision\"/\"min_confidence\" (see graph_add_node)."
     )]
     pub(crate) async fn graph_update_node(
         &self,
@@ -482,8 +482,20 @@ pub(crate) const CHECK_CONFIG_KEYS: &[&str] = &[
 /// Every config key a `gate` node is read for — see `execute_gate_node`.
 pub(crate) const GATE_CONFIG_KEYS: &[&str] = &["evaluate", "value", "commit_rights"];
 
-/// Every config key a `router` node is read for — see `parse_router_routes`.
-pub(crate) const ROUTER_CONFIG_KEYS: &[&str] = &["routes", "fallback", "commit_rights"];
+/// Every config key a `router` node is read for — see `parse_router_routes`
+/// and `parse_router_decision`.
+pub(crate) const ROUTER_CONFIG_KEYS: &[&str] = &[
+    "routes",
+    "fallback",
+    "platform",
+    "cli",
+    "model",
+    "timeout_minutes",
+    "prompt_template",
+    "decision",
+    "min_confidence",
+    "commit_rights",
+];
 
 /// The config keys a node's kind is actually read for, or `None` for `Join`
 /// (engine-managed — see `validate_node_config`'s `Join` arm — so there is
@@ -638,6 +650,48 @@ pub(crate) fn validate_node_config(
         GraphNodeKind::Router => {
             let (routes, fallback) = parse_router_routes(config)?;
             validate_router_routes(&routes, &fallback)?;
+            if let Some(value) = map.get("decision") {
+                if value.as_bool().is_none() {
+                    return Err("Graph node config field 'decision' must be a boolean.".to_string());
+                }
+            }
+            if let Some(value) = map.get("min_confidence") {
+                let n = value.as_f64().ok_or_else(|| {
+                    "Graph node config field 'min_confidence' must be a number from 0 to 1."
+                        .to_string()
+                })?;
+                if !(0.0..=1.0).contains(&n) || n.is_nan() {
+                    return Err(
+                        "Graph node config field 'min_confidence' must be a number from 0 to 1."
+                            .to_string(),
+                    );
+                }
+            }
+            if map.get("decision").and_then(serde_json::Value::as_bool) == Some(true) {
+                let platform = map
+                    .get("platform")
+                    .or_else(|| map.get("cli"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty());
+                if let Some(name) = platform {
+                    let home = std::env::var_os("CANOPY_HOME_OVERRIDE")
+                        .map(std::path::PathBuf::from)
+                        .or_else(dirs::home_dir);
+                    if let Some(home) = home {
+                        let canopy_config =
+                            crate::domain::canopy_config::CanopyConfig::load(&home.join(".canopy"));
+                        if let Some(cli_config) = canopy_config.get_cli(name) {
+                            if cli_config.decision_args.is_none() {
+                                return Err(format!(
+                                    "Router node uses decision mode but platform '{}' has no decision-model invocation in the registry.",
+                                    name
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
