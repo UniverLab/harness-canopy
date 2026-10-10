@@ -3,7 +3,7 @@ use anyhow::Result;
 use clap::Subcommand;
 
 use crate::application::ports::{AgentRepository, StateRepository};
-use crate::daemon::daemon_start::{start_daemon_live, StartIntent};
+use crate::daemon::daemon_start::{restart_daemon_live, start_daemon_live, StartIntent};
 use crate::daemon::process::{
     diagnose_daemon, is_process_running, kill_port_occupant, orphan_needs_kill, print_last_n_lines,
     read_pid, remove_pid_file, resolve_port_pid, send_signal, service_manager_facts,
@@ -15,6 +15,7 @@ use crate::daemon::process::{is_service_enabled, is_systemd_available};
 
 use crate::daemon::health_routine;
 use crate::daemon::service_install;
+use crate::daemon::service_reconcile;
 use crate::db::Database;
 use crate::domain::db_health::DbHealthOutcome;
 use crate::domain::db_paths::database_path;
@@ -112,6 +113,12 @@ async fn handle_start(data_dir: &std::path::Path, port_override: Option<u16>) ->
     }
 
     install_service_if_needed(&exe, port);
+
+    // CB75 FR1: before the unit is asked to start, make sure its ExecStart
+    // still names this binary. An installer that moved the binary (or a unit
+    // left behind by a past `cargo install`) otherwise loops 203/EXEC and
+    // the only symptom is a port that never opens.
+    service_reconcile::reconcile_unit_binary_live(&exe, port);
 
     // CB72 orphan rule (FR2): with a unit installed, clear the port only
     // when the live occupant is provably NOT that unit's MainPID — a
@@ -318,7 +325,35 @@ fn handle_status(data_dir: &std::path::Path) -> Result<()> {
 }
 
 async fn handle_restart(port_override: Option<u16>) -> Result<()> {
+    let exe = std::env::current_exe()?;
+    let port = crate::resolve_port(port_override);
+
     println!("  Restarting daemon...");
+
+    // CB75 FR1: reconcile the unit before touching it, exactly as `start`
+    // does — a unit pointing at a binary that no longer exists must be
+    // re-rendered and reloaded before a restart can mean anything.
+    service_reconcile::reconcile_unit_binary_live(&exe, port);
+
+    // CB75 FR2: with an installed unit this is one daemon-reload + restart
+    // and a wait for the port, not the stop-then-start pair below — a failed
+    // unit never recovers from being stopped and started again.
+    if restart_daemon_live(port)? {
+        println!("Daemon restarted on port {port} (managed by systemd/launchd)");
+        return Ok(());
+    }
+
+    // CB75 D5: an orphan holding the port would otherwise survive the unit
+    // restart (same CB72 predicate `handle_start` uses), and the restart
+    // would report success while the orphan keeps serving.
+    if orphan_needs_kill(
+        service_unit_installed(),
+        service_manager_facts().and_then(|m| m.pid),
+        resolve_port_pid(port),
+    ) {
+        kill_port_occupant(port);
+    }
+
     let stop_result = Box::pin(handle_daemon_action(DaemonAction::Stop, port_override)).await;
     if let Err(e) = stop_result {
         eprintln!("Warning: stop failed: {}", e);

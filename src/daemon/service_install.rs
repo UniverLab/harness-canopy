@@ -48,13 +48,34 @@ fn systemd_unit_dir() -> Result<std::path::PathBuf> {
     Ok(home.join(".config/systemd/user"))
 }
 
-fn install_systemd_service(exe: &std::path::Path, port: u16) -> Result<()> {
-    let unit_dir = systemd_unit_dir()?;
-    std::fs::create_dir_all(&unit_dir)?;
+/// The path this platform's systemd user unit lives at. Also the path the
+/// CB75 reconcile reads and rewrites.
+pub(crate) fn systemd_unit_path() -> Result<std::path::PathBuf> {
+    Ok(systemd_unit_dir()?.join(SYSTEMD_SERVICE_NAME))
+}
 
-    let unit_path = unit_dir.join(SYSTEMD_SERVICE_NAME);
+/// Render and write the systemd unit at `unit_path` for `exe`, preserving
+/// an existing unit's PATH, BROWSER, DISPLAY and WAYLAND_DISPLAY through the
+/// same reconciliation `install` has always used.
+///
+/// CB75: split out of `install_systemd_service` so the reconcile path (and
+/// its tests) can rewrite an existing unit's `ExecStart` for the current
+/// binary without also enabling and starting it. The `unit_path` is a
+/// parameter precisely so tests inject a temp file instead of the user's
+/// real `~/.config/systemd/user`.
+///
+/// The PATH comment from the old `install_systemd_service` body (why the
+/// PATH is captured from the process environment rather than a login shell)
+/// moves here verbatim.
+pub(crate) fn write_systemd_unit(
+    exe: &std::path::Path,
+    port: u16,
+    unit_path: &std::path::Path,
+) -> Result<()> {
+    if let Some(parent) = unit_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     let exe_str = exe.display().to_string();
-
     // Capture PATH from the process environment rather than shelling out to a
     // login shell. This is the correct choice because `canopy daemon install` is
     // run by the same user who installed their CLIs, and the process already
@@ -63,20 +84,20 @@ fn install_systemd_service(exe: &std::path::Path, port: u16) -> Result<()> {
     // environments). The daemon's PATH is written once at install time and
     // kept up to date by re-running `canopy daemon install`.
     let current_path = std::env::var("PATH").unwrap_or_default();
-    let path_value = reconcile_path(unit_path.as_path(), &current_path);
-
+    let path_value = reconcile_path(unit_path, &current_path);
     let current_browser_env = collect_browser_env_from_process();
-    let extra_env = reconcile_browser_env(unit_path.as_path(), &current_browser_env);
-
+    let extra_env = reconcile_browser_env(unit_path, &current_browser_env);
     let unit_content = render_unit_content(&exe_str, port, &path_value, &extra_env);
-
-    std::fs::write(&unit_path, unit_content)?;
-    println!("Created {}", unit_path.display());
-
-    ensure_linger_enabled();
-    reload_and_enable_service()?;
-
+    std::fs::write(unit_path, unit_content)?;
     Ok(())
+}
+
+fn install_systemd_service(exe: &std::path::Path, port: u16) -> Result<()> {
+    let unit_path = systemd_unit_path()?;
+    write_systemd_unit(exe, port, &unit_path)?;
+    println!("Created {}", unit_path.display());
+    ensure_linger_enabled();
+    reload_and_enable_service()
 }
 
 /// Render the systemd unit file contents.
@@ -660,5 +681,38 @@ mod tests {
         let service = service_section(&content);
         assert_eq!(service.matches("OOMPolicy=continue").count(), 1);
         assert_eq!(service.matches("MemoryMax=80%").count(), 1);
+    }
+
+    #[test]
+    fn write_systemd_unit_rewrites_exec_start_for_the_current_binary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let unit_path = tmp.path().join("canopy.service");
+        std::fs::write(
+            &unit_path,
+            "[Service]\nEnvironment=PATH=/usr/bin:/bin\nExecStart=/old/canopy serve --port 4177\n",
+        )
+        .unwrap();
+        write_systemd_unit(std::path::Path::new("/new/canopy"), 4177, &unit_path).unwrap();
+        let rewritten = std::fs::read_to_string(&unit_path).unwrap();
+        assert!(rewritten.contains("ExecStart=/new/canopy serve --port 4177"));
+        assert!(rewritten.contains("/usr/bin"));
+    }
+
+    #[test]
+    fn write_systemd_unit_creates_a_missing_parent_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let unit_path = tmp
+            .path()
+            .join("nested")
+            .join("user")
+            .join("canopy.service");
+        write_systemd_unit(std::path::Path::new("/new/canopy"), 4177, &unit_path).unwrap();
+        assert!(unit_path.exists());
+    }
+
+    #[test]
+    fn systemd_unit_path_ends_with_the_user_unit_name() {
+        let path = systemd_unit_path().unwrap();
+        assert!(path.ends_with(".config/systemd/user/canopy.service"));
     }
 }

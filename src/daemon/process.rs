@@ -463,6 +463,12 @@ fn parse_launchctl_pid(text: &str) -> Option<u32> {
 pub(crate) trait CommandRunner {
     /// Run `prog` with `args`; `true` iff it exited successfully.
     fn run(&self, prog: &str, args: &[&str]) -> bool;
+
+    /// CB75: run `prog` with `args` and return its stdout as a lossy
+    /// `String`, or `None` when it could not be spawned or exited non-zero.
+    /// Required, not defaulted: a fake that forgets it must fail to compile
+    /// rather than shell out to the real `systemctl`.
+    fn run_capture(&self, prog: &str, args: &[&str]) -> Option<String>;
 }
 
 /// The production [`CommandRunner`]: really executes the command.
@@ -475,6 +481,14 @@ impl CommandRunner for RealRunner {
             .status()
             .map(|s| s.success())
             .unwrap_or(false)
+    }
+
+    fn run_capture(&self, prog: &str, args: &[&str]) -> Option<String> {
+        let output = std::process::Command::new(prog).args(args).output().ok()?;
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
     }
 }
 
