@@ -41,11 +41,20 @@ if [ -n "${VERSION:-}" ]; then
   TAG="v$VERSION"
   info "version" "$TAG (pinned)"
 else
-  # Get latest stable release (exclude prerelease)
-  TAG=$(curl -fsSL "https://api.github.com/repos/$REPO/releases" | grep -i '"tag_name"' | grep -v 'prerelease.*true' | head -1 | cut -d'"' -f4)
+  # Prefer the releases/latest redirect (not rate-limited; GitHub resolves
+  # it to the newest non-draft, non-prerelease tag). api.github.com is only
+  # a fallback (60 anonymous requests/hour per IP). Every curl below is
+  # silent (2>/dev/null) so no `curl: (22)` line ever reaches the user.
+  TAG=$(curl -fsSL -o /dev/null -w '%{url_effective}' "https://github.com/$REPO/releases/latest" 2>/dev/null | rev | cut -d'/' -f1 | rev)
   if [ -z "$TAG" ]; then
-    # Fallback to latest if no stable found
-    TAG=$(curl -fsSL -o /dev/null -w '%{url_effective}' "https://github.com/$REPO/releases/latest" | rev | cut -d'/' -f1 | rev)
+    API_JSON="$TMPDIR/releases.json"
+    if HTTP_CODE=$(curl -fSL -w '%{http_code}' -o "$API_JSON" "https://api.github.com/repos/$REPO/releases" 2>/dev/null); then
+      TAG=$(grep -i '"tag_name"' "$API_JSON" | grep -v 'prerelease.*true' | head -1 | cut -d'"' -f4)
+    elif [ "$HTTP_CODE" = "403" ]; then
+      error "GitHub rate limit reached — try again in an hour"
+    else
+      error "Could not reach GitHub to resolve the latest release (HTTP ${HTTP_CODE:-000})"
+    fi
   fi
   [ -z "$TAG" ] && error "Could not resolve latest stable release"
   info "version" "$TAG (latest stable)"

@@ -36,6 +36,12 @@ pub struct GitHubRelease {
 /// Injectable release JSON lookup used by the update core and TUI notice.
 pub trait ReleaseFetcher {
     fn get(&self, url: &str) -> Result<String>;
+    /// Newest stable tag via the `releases/latest` redirect, or `None` on
+    /// any failure (caller falls back to the API). Default `None` so
+    /// existing test fakes keep compiling untouched.
+    fn resolve_latest_redirect(&self, _url: &str) -> Option<String> {
+        None
+    }
 }
 
 /// Production release lookup.  All network and HTTP-status handling lives
@@ -51,11 +57,33 @@ impl ReleaseFetcher for RealFetcher {
             .context("failed to fetch GitHub releases")?;
         let status = response.status();
         if !status.is_success() {
-            bail!("GitHub releases request failed: HTTP {status}");
+            let reset = response
+                .headers()
+                .get("x-ratelimit-reset")
+                .and_then(|v| v.to_str().ok());
+            bail!("{}", api_error_message(status.as_u16(), reset));
         }
         response
             .text()
             .context("failed to read GitHub releases response")
+    }
+
+    fn resolve_latest_redirect(&self, url: &str) -> Option<String> {
+        let response = reqwest::blocking::Client::new()
+            .get(url)
+            .header("User-Agent", "canopy-update")
+            .send()
+            .ok()?;
+        if !response.status().is_success() {
+            return None;
+        }
+        // reqwest follows redirects by default; url() is the FINAL url:
+        // .../releases/tag/<TAG>. 404 (no releases) lands here as None.
+        let tag = response.url().path_segments()?.next_back()?;
+        if tag.is_empty() {
+            return None;
+        }
+        Some(tag.to_string())
     }
 }
 
@@ -112,7 +140,7 @@ pub struct UpdateDeps<'a> {
 /// binary in the downloaded archive.
 pub fn run_update(check: bool, yes: bool) -> Result<i32> {
     let current = current_version();
-    let releases = fetch_releases_with(&RealFetcher)?;
+    let releases = fetch_releases_for_update(&RealFetcher, current)?;
 
     // The first pass is intentionally limited to the network result.  The
     // same hermetic core below owns all user-visible output and consent, so
@@ -258,7 +286,7 @@ pub fn check_and_update_notice_with(
     fetcher: &dyn ReleaseFetcher,
     _downloader: &dyn BinaryDownloader,
 ) -> Option<String> {
-    let latest = fetch_latest_stable_with(fetcher, current_version())
+    let latest = resolve_latest_stable_with(fetcher, current_version())
         .ok()
         .flatten();
     if let Some(tag) = latest.as_deref() {
@@ -330,6 +358,71 @@ fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
         }
     }
     std::cmp::Ordering::Equal
+}
+
+/// User-facing message for a GitHub API failure. Pure function of the
+/// status code and the raw `X-RateLimit-Reset` header value, so unit tests
+/// cover every branch with no network.
+fn api_error_message(status: u16, reset: Option<&str>) -> String {
+    if status == 403 {
+        match reset
+            .and_then(|v| v.trim().parse::<i64>().ok())
+            .map(format_reset_local)
+        {
+            Some(when) => format!("GitHub rate limit reached; resets at {when}"),
+            None => "GitHub rate limit reached — try again in an hour".to_string(),
+        }
+    } else {
+        format!("GitHub releases request failed: HTTP {status}")
+    }
+}
+
+/// Epoch seconds → local `HH:MM` via chrono (already a dependency).
+fn format_reset_local(reset_epoch: i64) -> String {
+    chrono::DateTime::from_timestamp(reset_epoch, 0)
+        .map(|utc| {
+            utc.with_timezone(&chrono::Local)
+                .format("%H:%M")
+                .to_string()
+        })
+        .unwrap_or_else(|| "unknown time".to_string())
+}
+
+fn redirect_url() -> String {
+    format!("https://github.com/{GITHUB_REPO}/releases/latest")
+}
+
+/// Redirect first, API only as fallback. Returns the newest stable tag
+/// strictly newer than `current`, or `None` when up to date.
+pub fn resolve_latest_stable_with(
+    fetcher: &dyn ReleaseFetcher,
+    current: &str,
+) -> Result<Option<String>> {
+    if let Some(tag) = fetcher.resolve_latest_redirect(&redirect_url()) {
+        if is_stable_version(&tag) {
+            if compare_versions(&tag, current).is_gt() {
+                return Ok(Some(tag));
+            }
+            return Ok(None);
+        }
+    }
+    fetch_latest_stable_with(fetcher, current)
+}
+
+/// `run_update`'s network step: redirect-first, same `Vec<GitHubRelease>`
+/// shape the hermetic core already consumes.
+fn fetch_releases_for_update(
+    fetcher: &dyn ReleaseFetcher,
+    current: &str,
+) -> Result<Vec<GitHubRelease>> {
+    match resolve_latest_stable_with(fetcher, current)? {
+        Some(tag) => Ok(vec![GitHubRelease {
+            tag_name: tag,
+            prerelease: false,
+            draft: false,
+        }]),
+        None => Ok(Vec::new()),
+    }
 }
 
 /// Select the newest stable release strictly newer than `current`.

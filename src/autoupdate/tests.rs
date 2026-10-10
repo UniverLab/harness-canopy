@@ -616,6 +616,27 @@ impl super::ReleaseFetcher for FailingFetcher {
     }
 }
 
+struct RedirectFake {
+    redirect: Option<String>,
+    api_calls: Cell<usize>,
+    body: String,
+    api_error: Option<String>,
+}
+
+impl super::ReleaseFetcher for RedirectFake {
+    fn get(&self, _url: &str) -> anyhow::Result<String> {
+        self.api_calls.set(self.api_calls.get() + 1);
+        match &self.api_error {
+            Some(e) => Err(anyhow::anyhow!("{e}")),
+            None => Ok(self.body.clone()),
+        }
+    }
+
+    fn resolve_latest_redirect(&self, _url: &str) -> Option<String> {
+        self.redirect.clone()
+    }
+}
+
 #[test]
 fn tui_notice_is_quiet_without_network() {
     crate::autoupdate::notice::clear_update_tag_for_tests();
@@ -662,5 +683,153 @@ fn select_latest_picks_max_stable() {
     assert_eq!(
         super::select_latest_stable(&releases, "3.0.0"),
         Some("v3.0.2".to_string())
+    );
+}
+
+#[test]
+fn redirect_tag_wins_and_api_never_called() {
+    let fake = RedirectFake {
+        redirect: Some("v3.0.1".to_string()),
+        api_calls: Cell::new(0),
+        body: String::new(),
+        api_error: None,
+    };
+    let result = super::resolve_latest_stable_with(&fake, "3.0.0").unwrap();
+    assert_eq!(result, Some("v3.0.1".to_string()));
+    assert_eq!(fake.api_calls.get(), 0);
+}
+
+#[test]
+fn redirect_up_to_date_skips_api() {
+    let fake = RedirectFake {
+        redirect: Some("v3.0.0".to_string()),
+        api_calls: Cell::new(0),
+        body: String::new(),
+        api_error: None,
+    };
+    let result = super::resolve_latest_stable_with(&fake, "3.0.0").unwrap();
+    assert_eq!(result, None);
+    assert_eq!(fake.api_calls.get(), 0);
+}
+
+#[test]
+fn redirect_failure_falls_back_to_api() {
+    let fake = RedirectFake {
+        redirect: None,
+        api_calls: Cell::new(0),
+        body: r#"[{"tag_name":"v3.0.1","prerelease":false,"draft":false}]"#.to_string(),
+        api_error: None,
+    };
+    let result = super::resolve_latest_stable_with(&fake, "3.0.0").unwrap();
+    assert_eq!(result, Some("v3.0.1".to_string()));
+    assert_eq!(fake.api_calls.get(), 1);
+}
+
+#[test]
+fn api_403_message_names_local_reset() {
+    let with_time = super::api_error_message(403, Some("1700000000"));
+    assert!(
+        with_time.starts_with("GitHub rate limit reached; resets at "),
+        "message should name reset time: {with_time}"
+    );
+    let suffix = with_time
+        .strip_prefix("GitHub rate limit reached; resets at ")
+        .unwrap();
+    assert_eq!(suffix.len(), 5, "HH:MM is 5 chars");
+    let bytes: Vec<u8> = suffix.bytes().collect();
+    assert_eq!(bytes[2], b':');
+    for (i, b) in bytes.iter().enumerate() {
+        if i != 2 {
+            assert!(b.is_ascii_digit(), "non-colon char must be digit");
+        }
+    }
+    assert!(!with_time.contains("HTTP 403"));
+    assert_eq!(
+        super::api_error_message(403, None),
+        "GitHub rate limit reached — try again in an hour"
+    );
+    let other = super::api_error_message(500, None);
+    assert!(other.contains("HTTP 500"), "non-403 should show HTTP code");
+}
+
+#[test]
+fn rate_limit_error_surfaces_through_resolver() {
+    let msg = super::api_error_message(403, Some("1700000000"));
+    let fake = RedirectFake {
+        redirect: None,
+        api_calls: Cell::new(0),
+        body: String::new(),
+        api_error: Some(msg),
+    };
+    let err = super::resolve_latest_stable_with(&fake, "3.0.0").unwrap_err();
+    assert!(
+        err.to_string().contains("resets at"),
+        "error should contain 'resets at': {}",
+        err
+    );
+}
+
+#[test]
+fn tui_notice_silent_on_rate_limit() {
+    crate::autoupdate::notice::clear_update_tag_for_tests();
+    let msg = super::api_error_message(403, Some("1700000000"));
+    let fake = RedirectFake {
+        redirect: None,
+        api_calls: Cell::new(0),
+        body: String::new(),
+        api_error: Some(msg),
+    };
+    let downloader = RecordingDownloader {
+        called: Cell::new(false),
+        bytes: Vec::new(),
+    };
+    let notice = super::check_and_update_notice_with(&fake, &downloader);
+    assert_eq!(notice, None);
+    assert!(!downloader.called.get());
+    crate::autoupdate::notice::clear_update_tag_for_tests();
+}
+
+#[test]
+fn install_script_silent_on_api_403() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    let stub_path = bin_dir.join("curl");
+    let stub = "#!/bin/sh\nif echo \"$*\" | grep -q releases/latest; then echo \"https://github.com/UniverLab/harness-canopy/releases/tag/v9.9.9\"; elif echo \"$*\" | grep -q api.github.com; then echo \"curl: (22) The requested URL returned error: 403\" >&2; exit 22; else exit 1; fi".to_string();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(&stub_path, stub).unwrap();
+        std::fs::set_permissions(&stub_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(&stub_path, stub).unwrap();
+    }
+    let script = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/install.sh");
+    let real_path = std::env::var("PATH").unwrap_or_default();
+    let output = std::process::Command::new("sh")
+        .arg(script)
+        .env("PATH", format!("{}:{}", bin_dir.display(), real_path))
+        .env("HOME", tmp.path())
+        .output()
+        .expect("failed to run install script");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("curl:"),
+        "stderr must not contain 'curl:': {stderr}"
+    );
+    assert!(
+        stdout.contains("v9.9.9"),
+        "stdout must contain resolved version: {stdout}"
+    );
+    assert!(
+        stderr.contains("Download failed"),
+        "resolution must succeed past both lookups, then download fails: {stderr}"
+    );
+    assert!(
+        !output.status.success(),
+        "script should exit nonzero (download 404)"
     );
 }
