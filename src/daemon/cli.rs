@@ -335,23 +335,27 @@ async fn handle_restart(port_override: Option<u16>) -> Result<()> {
     // re-rendered and reloaded before a restart can mean anything.
     service_reconcile::reconcile_unit_binary_live(&exe, port);
 
-    // CB75 FR2: with an installed unit this is one daemon-reload + restart
-    // and a wait for the port, not the stop-then-start pair below — a failed
-    // unit never recovers from being stopped and started again.
-    if restart_daemon_live(port)? {
-        println!("Daemon restarted on port {port} (managed by systemd/launchd)");
-        return Ok(());
-    }
-
-    // CB75 D5: an orphan holding the port would otherwise survive the unit
-    // restart (same CB72 predicate `handle_start` uses), and the restart
-    // would report success while the orphan keeps serving.
+    // CB72 orphan rule (FR2), in the same position `handle_start` uses it and
+    // *before* the unit is restarted: an orphan holding the port would
+    // otherwise survive `systemctl --user restart` — the new unit process
+    // cannot bind while the orphan holds the port, so the restart waits out
+    // its 10s and fails, and this kill (now unreachable) never runs.
+    // Never fires without an installed unit, and never against the managed
+    // daemon (occupant == MainPID).
     if orphan_needs_kill(
         service_unit_installed(),
         service_manager_facts().and_then(|m| m.pid),
         resolve_port_pid(port),
     ) {
         kill_port_occupant(port);
+    }
+
+    // CB75 FR2: with an installed unit this is one daemon-reload + restart
+    // and a wait for the port, not the stop-then-start pair below — a failed
+    // unit never recovers from being stopped and started again.
+    if restart_daemon_live(port)? {
+        println!("Daemon restarted on port {port} (managed by systemd/launchd)");
+        return Ok(());
     }
 
     let stop_result = Box::pin(handle_daemon_action(DaemonAction::Stop, port_override)).await;

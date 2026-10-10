@@ -88,6 +88,20 @@ is a percentage of the machine's physical memory, so the unit stays portable.
 (the systemd default for a unit written before this), naming the reinstall
 that fixes it.
 
+`canopy daemon start` and `canopy daemon restart` compare the unit's
+`ExecStart` with the `canopy` binary running the command. When it names a
+different or already-removed binary — a unit left behind by an older
+`cargo install`, or one the installer moved — the unit is re-rendered for the
+current binary, keeping the `PATH` and `BROWSER`/`DISPLAY`/`WAYLAND_DISPLAY`
+values it already carries, followed by `systemctl --user daemon-reload` and
+`systemctl --user reset-failed`. `canopy daemon restart` then restarts the
+installed unit with a single `systemctl --user restart`.
+
+When the daemon still never answers its port, the error names the unit's state
+rather than only pointing at the logs: an `ExecMainStatus` of `203` reports
+`ExecStart binary not executable or missing`, and any other value reports
+`ActiveState`, `SubState`, `ExecMainStatus` and `Result` verbatim.
+
 ## Data directory
 
 All state lives under `~/.canopy/`:

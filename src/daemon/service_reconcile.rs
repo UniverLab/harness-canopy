@@ -55,6 +55,20 @@ pub(crate) struct UnitReconcile {
     pub(crate) new: PathBuf,
 }
 
+/// CB75 FR1's user-visible line. Pure so the exact wording the spec asks for
+/// is testable — the `println!` in [`reconcile_unit_binary`] prints this and
+/// nothing else.
+pub(crate) fn reconcile_message(old: Option<&Path>, new: &Path) -> String {
+    let old_label = match old {
+        Some(old) => old.display().to_string(),
+        None => "no ExecStart line".to_string(),
+    };
+    format!(
+        "service unit pointed at {old_label}; updated to {}",
+        new.display()
+    )
+}
+
 /// CB75 FR1: make the unit at `unit_path` point at `exe`.
 ///
 /// `Some(..)` when the unit was rewritten (and the manager reloaded and its
@@ -90,18 +104,12 @@ pub(crate) fn reconcile_unit_binary(
         old: named,
         new: exe.to_path_buf(),
     };
-    // Built as a struct and printed *from* the struct (rather than from the
-    // locals above) so both fields are read in production code: a field that
-    // is only ever read by `#[cfg(test)]` code trips `dead_code` in the
-    // non-test target that `clippy --all-targets` also compiles.
-    let old_label = outcome
-        .old
-        .as_deref()
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|| "no ExecStart line".to_string());
+    // Both fields are read here in production code, not only by tests: a
+    // field only `#[cfg(test)]` code reads trips `dead_code` in the
+    // non-test target `clippy --all-targets` also compiles.
     println!(
-        "service unit pointed at {old_label}; updated to {}",
-        outcome.new.display()
+        "{}",
+        reconcile_message(outcome.old.as_deref(), &outcome.new)
     );
     Ok(Some(outcome))
 }
@@ -198,8 +206,8 @@ pub(crate) fn describe_start_failure(show: Option<&str>, unit_binary: Option<&Pa
 /// the named cause, then the journalctl hint that used to be all there was.
 pub(crate) fn start_failure_message(port: u16, info: &StartFailureInfo) -> String {
     format!(
-        "service manager start did not open port {port} within 10s — {} \
-         Check logs: journalctl --user -u {SYSTEMD_UNIT_NAME} (or ~/Library logs on macOS)",
+        "service manager start did not open port {port} within 10s — {}; \
+         check logs: journalctl --user -u {SYSTEMD_UNIT_NAME} (or ~/Library logs on macOS)",
         describe_start_failure(info.show.as_deref(), info.unit_binary.as_deref())
     )
 }
@@ -320,6 +328,21 @@ mod tests {
             Some(Path::new("/gone/canopy")),
             &current
         ));
+    }
+
+    #[test]
+    fn reconcile_message_names_the_old_and_new_binaries() {
+        assert_eq!(
+            reconcile_message(
+                Some(Path::new("/home/lina/.cargo/bin/canopy")),
+                Path::new("/home/lina/.local/bin/canopy")
+            ),
+            "service unit pointed at /home/lina/.cargo/bin/canopy; updated to /home/lina/.local/bin/canopy"
+        );
+        assert_eq!(
+            reconcile_message(None, Path::new("/home/lina/.local/bin/canopy")),
+            "service unit pointed at no ExecStart line; updated to /home/lina/.local/bin/canopy"
+        );
     }
 
     #[cfg(target_os = "linux")]
