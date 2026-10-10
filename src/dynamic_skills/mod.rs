@@ -12,6 +12,7 @@ mod metadata;
 mod source;
 
 pub use source::GitSource;
+pub use source::SkillFetchError;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -26,6 +27,7 @@ pub struct SkillListEntry {
     pub description: String,
     pub source_url: String,
     pub installed: bool,
+    pub orphaned: bool,
 }
 
 /// One reference file belonging to a skill, alongside its instructions.
@@ -116,9 +118,16 @@ impl SkillStore {
         let now = (self.now)();
         let mut by_name: std::collections::BTreeMap<String, SkillListEntry> =
             std::collections::BTreeMap::new();
+        let mut catalog_names_by_source: std::collections::HashMap<
+            String,
+            std::collections::HashSet<String>,
+        > = std::collections::HashMap::new();
 
         for source in &self.sources {
-            for entry in catalog_cache::catalog_for(&self.store_dir, source, self.ttl, now) {
+            let catalog = catalog_cache::catalog_for(&self.store_dir, source, self.ttl, now);
+            let names: std::collections::HashSet<String> =
+                catalog.iter().map(|e| e.name.clone()).collect();
+            for entry in catalog {
                 by_name.insert(
                     entry.name.clone(),
                     SkillListEntry {
@@ -126,9 +135,11 @@ impl SkillStore {
                         description: entry.description,
                         source_url: source.url.clone(),
                         installed: false,
+                        orphaned: false,
                     },
                 );
             }
+            catalog_names_by_source.insert(source.url.clone(), names);
         }
 
         for name in crate::skills_module::list_skill_dirs(&self.store_dir) {
@@ -140,6 +151,16 @@ impl SkillStore {
             let source_url = SkillMetadata::load(&dir)
                 .map(|m| m.source_url)
                 .unwrap_or_default();
+            let orphaned = !source_url.is_empty()
+                && catalog_names_by_source
+                    .get(&source_url)
+                    .map(|set| !set.contains(&name))
+                    .unwrap_or(false);
+            let description = if orphaned {
+                format!("[removed upstream] {description}")
+            } else {
+                description
+            };
             by_name.insert(
                 name.clone(),
                 SkillListEntry {
@@ -147,6 +168,7 @@ impl SkillStore {
                     description,
                     source_url,
                     installed: true,
+                    orphaned,
                 },
             );
         }
@@ -198,7 +220,27 @@ impl SkillStore {
                     last_checked: now,
                 }
                 .save(dir),
-                Err(e) => {
+                Err(SkillFetchError::NotInSource {
+                    name,
+                    source_url,
+                    head,
+                }) => {
+                    let short_head = &head[..std::cmp::min(7, head.len())];
+                    let catalog =
+                        catalog_cache::catalog_for(&self.store_dir, &source, self.ttl, now);
+                    let available: Vec<&str> = catalog.iter().map(|e| e.name.as_str()).collect();
+                    if let Err(e) = std::fs::remove_dir_all(dir) {
+                        tracing::warn!(
+                            "dynamic_skills: failed to remove orphan store dir {}: {e}",
+                            dir.display()
+                        );
+                    }
+                    anyhow::bail!(
+                        "skill '{name}' no longer exists in {source_url} (head {short_head}); it was removed from the local store. Available skills: {}",
+                        available.join(", ")
+                    )
+                }
+                Err(SkillFetchError::Other(e)) => {
                     tracing::warn!(
                         "dynamic_skills: update fetch failed for '{name}' \
                          (source head {head} vs stored {}): {e}; serving stale copy",
@@ -593,5 +635,112 @@ mod tests {
         // fetch_fresh should also prefer the later (shadowing) source.
         let content = store.get("shared").unwrap();
         assert_eq!(content.source_url, registry_b.path().to_string_lossy());
+    }
+
+    #[test]
+    fn skill_removed_upstream_past_ttl_is_purged() {
+        let registry = TempDir::new().unwrap();
+        make_registry(registry.path(), &[("alpha", "Alpha skill.")]);
+
+        let store_dir = TempDir::new().unwrap();
+        let start = Utc::now();
+        let (clock, now_fn) = fake_clock(start);
+        let store = SkillStore::with_clock(
+            store_dir.path().to_path_buf(),
+            vec![GitSource::new(
+                registry.path().to_string_lossy().to_string(),
+                None,
+            )],
+            15,
+            now_fn,
+        );
+
+        store.get("alpha").unwrap();
+
+        std::fs::remove_dir_all(registry.path().join("alpha")).unwrap();
+        commit_all(registry.path(), "remove alpha");
+        *clock.lock().unwrap() = start + chrono::Duration::minutes(20);
+
+        let err = store.get("alpha").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no longer exists"),
+            "unexpected message: {msg}"
+        );
+        assert!(
+            msg.contains("removed from the local store"),
+            "unexpected message: {msg}"
+        );
+        assert!(
+            msg.contains("Available skills:"),
+            "unexpected message: {msg}"
+        );
+        assert!(!store_dir.path().join("alpha").exists());
+    }
+
+    #[test]
+    fn source_unreachable_past_ttl_keeps_serving_stale_copy() {
+        let registry = TempDir::new().unwrap();
+        make_registry(registry.path(), &[("alpha", "Alpha skill.")]);
+
+        let store_dir = TempDir::new().unwrap();
+        let start = Utc::now();
+        let (clock, now_fn) = fake_clock(start);
+        let store = SkillStore::with_clock(
+            store_dir.path().to_path_buf(),
+            vec![GitSource::new(
+                registry.path().to_string_lossy().to_string(),
+                None,
+            )],
+            15,
+            now_fn,
+        );
+
+        store.get("alpha").unwrap();
+
+        let moved = registry.path().with_extension("moved");
+        std::fs::rename(registry.path(), &moved).unwrap();
+        *clock.lock().unwrap() = start + chrono::Duration::minutes(20);
+
+        let content = store.get("alpha").expect("stale copy must still be served");
+        assert!(content.instructions.contains("Alpha skill"));
+
+        std::fs::rename(&moved, registry.path()).unwrap();
+    }
+
+    #[test]
+    fn list_flags_orphan_and_present() {
+        let registry = TempDir::new().unwrap();
+        make_registry(
+            registry.path(),
+            &[("alpha", "Alpha skill."), ("beta", "Beta skill.")],
+        );
+
+        let store_dir = TempDir::new().unwrap();
+        let store = SkillStore::new(
+            store_dir.path().to_path_buf(),
+            vec![GitSource::new(
+                registry.path().to_string_lossy().to_string(),
+                None,
+            )],
+            15,
+        );
+
+        store.get("alpha").unwrap();
+        store.get("beta").unwrap();
+
+        std::fs::remove_dir_all(registry.path().join("alpha")).unwrap();
+        commit_all(registry.path(), "remove alpha");
+
+        let entries = store.list();
+        let alpha = entries.iter().find(|e| e.name == "alpha").unwrap();
+        assert!(alpha.orphaned);
+        assert!(
+            alpha.description.starts_with("[removed upstream]"),
+            "unexpected description: {}",
+            alpha.description
+        );
+        let beta = entries.iter().find(|e| e.name == "beta").unwrap();
+        assert!(!beta.orphaned);
     }
 }
