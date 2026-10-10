@@ -36,6 +36,10 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
     crate::domain::notification::clear_stale_notifications();
     init_tracing();
 
+    // CB83: one instant per daemon process; every MCP session's handler
+    // inherits it so `agent_status` Uptime is the daemon's age.
+    let daemon_start = std::time::Instant::now();
+
     let port = crate::resolve_port(port_override);
     let data_dir = crate::ensure_data_dir()?;
     let _daemon_lock = acquire_daemon_lock(&data_dir)?;
@@ -105,6 +109,7 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
             sync_manager: Arc::clone(&sync_manager),
             ingestion: Arc::clone(&ingestion),
             dynamic_skills: Arc::clone(&dynamic_skills),
+            start_time: daemon_start,
             port,
         },
         &ct,
@@ -257,6 +262,7 @@ fn build_mcp_router(deps: HandlerDeps, ct: &tokio_util::sync::CancellationToken)
         sync_manager: handler_sync_manager,
         ingestion: handler_ingestion,
         dynamic_skills: handler_dynamic_skills,
+        start_time,
         port,
     } = deps;
 
@@ -272,6 +278,7 @@ fn build_mcp_router(deps: HandlerDeps, ct: &tokio_util::sync::CancellationToken)
                 sync_manager: Arc::clone(&handler_sync_manager),
                 ingestion: Arc::clone(&handler_ingestion),
                 dynamic_skills: Arc::clone(&handler_dynamic_skills),
+                start_time,
                 port,
             }))
         },
@@ -483,6 +490,7 @@ fn build_stdio_handler(db: &Arc<Database>, startup: &StdioServerStartup) -> Task
         sync_manager: Arc::clone(&startup.sync_manager),
         ingestion: Arc::clone(&startup.ingestion),
         dynamic_skills: Arc::clone(&startup.dynamic_skills),
+        start_time: startup.start_time,
         port: 0,
     })
 }
@@ -529,6 +537,10 @@ struct StdioServerStartup {
     graph_engine: Arc<GraphEngine>,
     ingestion: Arc<IngestionManager>,
     dynamic_skills: Arc<crate::dynamic_skills::SkillStore>,
+    /// CB83: captured in `stdio_server_startup`, when this stdio server
+    /// process starts — shared by the handler so `agent_status` Uptime
+    /// matches the process, not a late-built session.
+    start_time: std::time::Instant,
     cron_scheduler: Arc<CronScheduler>,
     scheduler_notify: Arc<tokio::sync::Notify>,
     _ingestion_cancel: tokio_util::sync::CancellationToken,
@@ -601,6 +613,7 @@ async fn stdio_server_startup(db: Arc<Database>, data_dir: &std::path::Path) -> 
         graph_engine,
         ingestion,
         dynamic_skills,
+        start_time: std::time::Instant::now(),
         cron_scheduler,
         scheduler_notify,
         _ingestion_cancel: ingestion_cancel,
@@ -767,6 +780,7 @@ mod hang_repro {
                     sync_manager: Arc::clone(&handler_sync_manager),
                     ingestion: Arc::clone(&handler_ingestion),
                     dynamic_skills: Arc::clone(&handler_dynamic_skills),
+                    start_time: std::time::Instant::now(),
                     port: 0,
                 }))
             },

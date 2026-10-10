@@ -240,6 +240,11 @@ pub struct HandlerDeps {
     pub sync_manager: Arc<SyncManager>,
     pub ingestion: Arc<crate::rag::ingestion::IngestionManager>,
     pub dynamic_skills: Arc<crate::dynamic_skills::SkillStore>,
+    /// CB83: the daemon process start instant, captured once when the
+    /// daemon starts (see `run_http_server` / `stdio_server_startup` in
+    /// `server.rs`) and handed to every handler. `agent_status` `Uptime`
+    /// must report the daemon's age, not the MCP session's.
+    pub start_time: std::time::Instant,
     pub port: u16,
 }
 
@@ -255,6 +260,7 @@ impl TaskTriggerHandler {
             sync_manager,
             ingestion,
             dynamic_skills,
+            start_time,
             port,
         } = deps;
 
@@ -269,7 +275,7 @@ impl TaskTriggerHandler {
             ingestion,
             rag_limiters: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             dynamic_skills,
-            start_time: std::time::Instant::now(),
+            start_time,
             port,
             tool_router: Self::tool_router(),
         }
@@ -2139,6 +2145,7 @@ mod tests {
             sync_manager,
             ingestion,
             dynamic_skills,
+            start_time: std::time::Instant::now(),
             port: 0,
         });
         (dir, db, handler)
@@ -8889,6 +8896,7 @@ mod endpoint_tests {
             sync_manager,
             ingestion,
             dynamic_skills,
+            start_time: std::time::Instant::now(),
             port: 0,
         });
         (dir, db, handler)
@@ -8943,6 +8951,7 @@ mod endpoint_tests {
             sync_manager: Arc::clone(&sync_manager),
             ingestion: Arc::clone(&ingestion),
             dynamic_skills: Arc::clone(&dynamic_skills),
+            start_time: std::time::Instant::now(),
             port: 0,
         };
         let via_deps = TaskTriggerHandler::with_deps(deps);
@@ -8961,6 +8970,91 @@ mod endpoint_tests {
             .map(|t| t.name.to_string())
             .collect();
         assert!(!deps_names.is_empty());
+    }
+
+    /// CB83: handlers built from the same daemon start instant report the
+    /// same uptime however late they are created — `agent_status` `Uptime`
+    /// must be the daemon's age, not the MCP session's.
+    #[test]
+    fn daemon_start_instant_is_shared_by_every_handler() {
+        use crate::application::notification_service::{
+            DefaultNotificationService, NotificationService,
+        };
+        use crate::daemon::handler::HandlerDeps;
+        use crate::daemon::handler_formatting::format_uptime;
+        use crate::executor::Executor;
+        use crate::graph_engine::GraphEngine;
+        use crate::rag::ingestion::IngestionManager;
+        use crate::sync_manager::SyncManager;
+        use crate::watchers::WatcherEngine;
+        use std::sync::Arc;
+        use tokio::sync::Notify;
+
+        let dir = tempdir().unwrap();
+        let db = Arc::new(Database::new(&dir.path().join("test.db")).unwrap());
+        let notif: Arc<dyn NotificationService> = Arc::new(DefaultNotificationService);
+        let executor = Arc::new(Executor::new(Arc::clone(&db), Arc::clone(&notif)));
+        let sync_manager = Arc::new(SyncManager::new(Arc::clone(&db)));
+        let graph_engine = Arc::new(GraphEngine::new(Arc::clone(&db), Arc::clone(&notif)));
+        let watcher_engine = Arc::new(WatcherEngine::new(
+            Arc::clone(&db),
+            Arc::clone(&executor),
+            Arc::clone(&graph_engine),
+        ));
+        let ingestion = Arc::new(IngestionManager::new(
+            Arc::clone(&db),
+            dir.path().to_path_buf(),
+        ));
+        let dynamic_skills = Arc::new(crate::dynamic_skills::SkillStore::new(
+            dir.path().join("skills"),
+            Vec::new(),
+            15,
+        ));
+        let scheduler_notify = Arc::new(Notify::new());
+
+        // A daemon start instant in the past — the value the daemon hands
+        // to every handler it builds. `Instant` is `Copy`, so the same
+        // value goes into both handlers.
+        let daemon_start = std::time::Instant::now() - std::time::Duration::from_secs(120);
+
+        let first = TaskTriggerHandler::with_deps(HandlerDeps {
+            db: Arc::clone(&db),
+            executor: Arc::clone(&executor),
+            watcher_engine: Arc::clone(&watcher_engine),
+            scheduler_notify: Arc::clone(&scheduler_notify),
+            graph_engine: Arc::clone(&graph_engine),
+            notification_service: Arc::clone(&notif),
+            sync_manager: Arc::clone(&sync_manager),
+            ingestion: Arc::clone(&ingestion),
+            dynamic_skills: Arc::clone(&dynamic_skills),
+            start_time: daemon_start,
+            port: 0,
+        });
+
+        // The second handler is created later, the way Streamable HTTP
+        // builds one handler per MCP session. The wait must exceed
+        // `format_uptime`'s one-second granularity: a handler that stamped
+        // its own start time would otherwise format to the same string.
+        std::thread::sleep(std::time::Duration::from_secs(2));
+
+        let second = TaskTriggerHandler::with_deps(HandlerDeps {
+            db: Arc::clone(&db),
+            executor: Arc::clone(&executor),
+            watcher_engine: Arc::clone(&watcher_engine),
+            scheduler_notify: Arc::clone(&scheduler_notify),
+            graph_engine: Arc::clone(&graph_engine),
+            notification_service: Arc::clone(&notif),
+            sync_manager: Arc::clone(&sync_manager),
+            ingestion: Arc::clone(&ingestion),
+            dynamic_skills: Arc::clone(&dynamic_skills),
+            start_time: daemon_start,
+            port: 0,
+        });
+
+        assert_eq!(
+            format_uptime(first.start_time.elapsed().as_secs()),
+            format_uptime(second.start_time.elapsed().as_secs()),
+        );
     }
 
     fn text(result: &CallToolResult) -> String {
