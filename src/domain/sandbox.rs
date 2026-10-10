@@ -49,7 +49,7 @@ pub fn canopy_protocol_block() -> &'static str {
      and the PASS/FAIL result.\n\
      - When you learn a durable fact or reusable pattern: intelligence_upsert \
      (kind=\"fact\"|\"pattern\") — never leave knowledge only in chat history.\n\
-     - Session end: get_tools(scope=\"close_session\") — upsert a kind=\"session\" \
+     - Session end: get_tools(scope=\"close_session\") — upsert a kind=\"fact\" \
      summary and sync_report_status. The daemon closes missions automatically.\n\
      - Scheduled tasks: report progress with agent_report.\n\
      Prefer Canopy's native intelligence/sync tools over ad-hoc shell when both can do \

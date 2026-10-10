@@ -578,14 +578,14 @@ pub(crate) fn build_get_tools_response(scope: &str) -> serde_json::Value {
             "scope": "close_session",
             "risk": "low",
             "protocol": [
-                "1. Call intelligence_upsert(kind=\"session\", title=\"<mission>\", body=\"<what was done>\", \
-                   metadata={workdir, summary, ...}) — store session summary in project context.",
+                "1. Call intelligence_upsert(kind=\"fact\", title=\"Session summary: <mission>\", body=\"<what was done>\", \
+                   metadata={\"type\": \"session_summary\", workdir, summary, ...}) — store the session summary in project context.",
                 "2. Call sync_report_status(status=\"stable\", message=\"Mission complete: <summary>\") \
                    — the daemon closes your mission automatically on exit.",
                 "3. Do NOT manually call any close/shutdown tool — daemon handles it."
             ],
             "tools": [
-                "intelligence_upsert — persist session summary as a 'session' node in project context",
+                "intelligence_upsert — persist the session summary as a 'fact' node with metadata.type = \"session_summary\"",
                 "sync_report_status — leave a clean 'stable' marker for the next agent"
             ]
         }),
@@ -617,4 +617,50 @@ pub(crate) fn rag_result_json(r: &crate::rag::vector_store::SearchResult) -> ser
         "content": r.content,
         "distance": r.distance,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_get_tools_response;
+
+    /// Every `intelligence_upsert(kind="…")` named in any get_tools protocol
+    /// string must be accepted by the same validation `intelligence_upsert`
+    /// runs, so the protocol text and the intelligence schema can never drift
+    /// apart again. Kinds are pulled from the serialized protocol JSON by regex.
+    #[test]
+    fn every_protocol_intelligence_kind_is_accepted_by_upsert_validation() {
+        let scopes = [
+            "session_start",
+            "file_write",
+            "test_run",
+            "close_session",
+            "multi_agent",
+        ];
+        // `serde_json::to_string` escapes the protocol string's `"` into `\"`,
+        // so the text is `intelligence_upsert(kind=\"fact\"`; match the backslash
+        // before each quote. Anchored on `intelligence_upsert(kind=` so a
+        // `sync_broadcast(kind="info")` is never captured.
+        let re = regex::Regex::new(r#"intelligence_upsert\(kind=\\"([a-z]+)"#)
+            .expect("static regex is valid");
+        let mut kinds: Vec<String> = Vec::new();
+        for scope in scopes {
+            let json = build_get_tools_response(scope);
+            let serialized = serde_json::to_string(&json).expect("protocol serializes to JSON");
+            for cap in re.captures_iter(&serialized) {
+                kinds.push(cap[1].to_string());
+            }
+        }
+        assert!(
+            !kinds.is_empty(),
+            "no intelligence_upsert(kind=\"…\") found in any get_tools protocol — \
+             the drift regex matched nothing; check the regex escaping"
+        );
+        for kind in &kinds {
+            assert!(
+                crate::db::intelligence::validate_knowledge_kind(kind).is_ok(),
+                "get_tools protocol names intelligence kind {kind:?}, which \
+                 intelligence_upsert rejects — fix the protocol string (CB89)"
+            );
+        }
+    }
 }
