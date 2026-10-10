@@ -23,6 +23,16 @@ Graph
   - `check` — executes a shell command.
   - `gate` — validates previous output (e.g. `output_contains`).
   - `router` — classifies and routes by token matching with fallback.
+    With `"decision": true` in its config, a router instead asks the
+    platform's decision model (a fast typed-choice classifier such as
+    `typesafe/jev`, invoked in print mode with the request JSON on stdin)
+    which declared route to take — no agent is spawned. Routes map onto the
+    model's `criteria` as label/description pairs; the rendered
+    `prompt_template` (with `{{previous_output}}` also available) becomes
+    the request state, and an optional `"min_confidence"` (0–1, default 0)
+    sends low-confidence answers to the declared fallback. The platform must
+    declare a decision-model invocation (`decision_args`) in the registry or
+    the node is refused.
   - `quorum` — engine-managed node that closes an
     [ensemble](#ensembles), never created directly.
 - **Edges** — connect nodes with routing conditions: `pass`, `fail`,
