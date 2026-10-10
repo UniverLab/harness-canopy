@@ -36,6 +36,28 @@ pub(crate) struct StepSelection {
     pub(crate) edge_condition: GraphEdgeCondition,
 }
 
+/// Cursor for a single matching edge, which normally steps to its target as
+/// `SpecCursor::Node`. When that target is a member of an ensemble, the engine
+/// must fan out through `execute_ensemble` instead: a 1-member
+/// cascade/round_robin ensemble is a legal configuration
+/// (`validate_ensemble_members` allows min 1) whose entry node has exactly one
+/// outgoing edge — the one to its sole member. Resolving that edge to a bare
+/// node would bypass the ensemble entirely, and the member's own edge into the
+/// `Join` node would then be dispatched as an ordinary node, which the engine
+/// refuses ("Quorum node '...' cannot execute directly").
+fn cursor_for_single_target(ensembles: &[EnsembleDetails], to_node: &str) -> SpecCursor {
+    for details in ensembles {
+        if details
+            .members
+            .iter()
+            .any(|member| member.node_id == to_node)
+        {
+            return SpecCursor::Ensemble(details.ensemble.id.clone());
+        }
+    }
+    SpecCursor::Node(to_node.to_string())
+}
+
 /// Resolve the next graph step from `from_node`'s outgoing edges matching
 /// `status`. Ordinarily a single matching edge (or several identical-target
 /// edges) resolves to [`SpecCursor::Node`]. Multiple *distinct* targets are
@@ -68,7 +90,7 @@ pub(crate) fn select_next_step(
     match matching.as_slice() {
         [] => Ok(None),
         [edge] => Ok(Some(StepSelection {
-            cursor: SpecCursor::Node(edge.to_node.clone()),
+            cursor: cursor_for_single_target(ensembles, &edge.to_node),
             edge_condition: edge.condition.clone(),
         })),
         _ => {
@@ -120,7 +142,7 @@ pub(crate) fn select_next_step_with_condition(
     match matching.as_slice() {
         [] => Ok(None),
         [edge] => Ok(Some(StepSelection {
-            cursor: SpecCursor::Node(edge.to_node.clone()),
+            cursor: cursor_for_single_target(ensembles, &edge.to_node),
             edge_condition: edge.condition.clone(),
         })),
         _ => {

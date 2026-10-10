@@ -6972,6 +6972,72 @@ echo done
         assert_eq!(sel.cursor, SpecCursor::Ensemble("ens2".to_string()));
     }
 
+    #[test]
+    fn select_next_step_resolves_single_member_ensemble_from_lone_edge() {
+        // C30: a 1-member cascade/round_robin ensemble's entry node has one
+        // outgoing edge — to its sole member. That lone edge must resolve to
+        // the ensemble, not be dispatched as a bare node.
+        let edges = vec![GraphEdge {
+            id: "e1".to_string(),
+            spec_id: Some("spec".to_string()),
+            graph_id: None,
+            from_node: "kickoff".to_string(),
+            to_node: "m1".to_string(),
+            condition: GraphEdgeCondition::Always,
+        }];
+        let ensembles = vec![ensemble_details_fixture("ens1", "join1", &["m1"])];
+
+        let next = select_next_step(&edges, &ensembles, "kickoff", GraphRunStatus::Pass).unwrap();
+
+        let sel = next.unwrap();
+        assert_eq!(sel.cursor, SpecCursor::Ensemble("ens1".to_string()));
+        assert_eq!(sel.edge_condition, GraphEdgeCondition::Always);
+    }
+
+    #[test]
+    fn select_next_step_with_condition_resolves_single_member_ensemble_from_lone_edge() {
+        let edges = vec![GraphEdge {
+            id: "e1".to_string(),
+            spec_id: Some("spec".to_string()),
+            graph_id: None,
+            from_node: "kickoff".to_string(),
+            to_node: "m1".to_string(),
+            condition: GraphEdgeCondition::Error,
+        }];
+        let ensembles = vec![ensemble_details_fixture("ens1", "join1", &["m1"])];
+
+        let next = select_next_step_with_condition(
+            &edges,
+            &ensembles,
+            "kickoff",
+            &GraphEdgeCondition::Error,
+        )
+        .unwrap();
+
+        let sel = next.unwrap();
+        assert_eq!(sel.cursor, SpecCursor::Ensemble("ens1".to_string()));
+    }
+
+    #[test]
+    fn select_next_step_leaves_a_non_member_lone_edge_as_a_node() {
+        // Requirement 3: a lone edge to a node that is NOT any ensemble's
+        // member must still resolve to `SpecCursor::Node`.
+        let edges = vec![GraphEdge {
+            id: "e1".to_string(),
+            spec_id: Some("spec".to_string()),
+            graph_id: None,
+            from_node: "kickoff".to_string(),
+            to_node: "deploy".to_string(),
+            condition: GraphEdgeCondition::Always,
+        }];
+        let ensembles = vec![ensemble_details_fixture("ens1", "join1", &["m1"])];
+
+        let next = select_next_step(&edges, &ensembles, "kickoff", GraphRunStatus::Pass).unwrap();
+
+        let sel = next.unwrap();
+        assert_eq!(sel.cursor, SpecCursor::Node("deploy".to_string()));
+    }
+
     fn ensemble_details_fixture(
         ensemble_id: &str,
         join_node_id: &str,
@@ -22263,6 +22329,121 @@ exit 0
                 .iter()
                 .any(|r| r.status == GraphRunStatus::Pass),
             "a passing ensemble join must route on its Pass edge to on_pass_to"
+        );
+    }
+
+    /// C30: a cascade ensemble with exactly ONE member is legal
+    /// (`validate_ensemble_members` allows min 1), and its `kickoff` node has
+    /// exactly one outgoing edge — to that sole member. The lone edge must
+    /// resolve to the ensemble (so the member runs via `execute_ensemble` and
+    /// the join settles), not be dispatched as a bare node (which would then
+    /// dispatch `join1` as an ordinary node and error out).
+    #[tokio::test]
+    async fn ensemble_single_member_cascade_runs_end_to_end() {
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+        let db_path = dir.path().join(TEST_DB_FILENAME);
+        let ok_path = write_self_reporting_member_script(
+            dir.path(),
+            "casc-ok.sh",
+            "sleep 1",
+            &db_path,
+            "casc-ok",
+            "pass",
+            None,
+        );
+        let fake_home = setup_multi_cli_home(&[("casc-ok", ok_path.as_str())]);
+        insert_kind_ensemble(
+            &db,
+            &spec_id,
+            crate::domain::graphs::EnsembleKind::Cascade,
+            &[("casc-ok", "casc-ok")],
+        );
+
+        let _home = HomeGuard::set(fake_home.path());
+        engine
+            .run_graph(graph_id, None, None, None, None, None)
+            .await
+            .unwrap();
+        drop(_home);
+
+        let join = join_run(&db, &spec_id, "join1");
+        assert_eq!(
+            join.status,
+            GraphRunStatus::Pass,
+            "a 1-member cascade must fan out via the ensemble and settle the join as Pass"
+        );
+        assert_eq!(
+            join.output.as_ref().unwrap()["kind"],
+            "cascade",
+            "the join output may only carry `kind` when it came from execute_ensemble_cascade — \
+             a bare node never writes a join run at all"
+        );
+        assert!(
+            member_runs(&db, &spec_id, "casc-ok")
+                .iter()
+                .any(|r| r.status == GraphRunStatus::Pass),
+            "the sole member must be recorded as an ensemble member run that passed"
+        );
+        assert!(
+            member_runs(&db, &spec_id, "done-pass")
+                .iter()
+                .any(|r| r.status == GraphRunStatus::Pass),
+            "the passing join must route onward on its Pass edge"
+        );
+    }
+
+    /// C30 (round_robin half): the identical contract for a 1-member
+    /// round-robin ensemble.
+    #[tokio::test]
+    async fn ensemble_single_member_round_robin_runs_end_to_end() {
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+        let db_path = dir.path().join(TEST_DB_FILENAME);
+        let ok_path = write_self_reporting_member_script(
+            dir.path(),
+            "rr-ok.sh",
+            "sleep 1",
+            &db_path,
+            "rr-ok",
+            "pass",
+            None,
+        );
+        let fake_home = setup_multi_cli_home(&[("rr-ok", ok_path.as_str())]);
+        insert_kind_ensemble(
+            &db,
+            &spec_id,
+            crate::domain::graphs::EnsembleKind::RoundRobin,
+            &[("rr-ok", "rr-ok")],
+        );
+
+        let _home = HomeGuard::set(fake_home.path());
+        engine
+            .run_graph(graph_id, None, None, None, None, None)
+            .await
+            .unwrap();
+        drop(_home);
+
+        let join = join_run(&db, &spec_id, "join1");
+        assert_eq!(
+            join.status,
+            GraphRunStatus::Pass,
+            "a 1-member round-robin must fan out via the ensemble and settle the join as Pass"
+        );
+        assert_eq!(
+            join.output.as_ref().unwrap()["kind"],
+            "round_robin",
+            "the join output may only carry `kind` when it came from execute_ensemble_round_robin"
+        );
+        assert!(
+            member_runs(&db, &spec_id, "rr-ok")
+                .iter()
+                .any(|r| r.status == GraphRunStatus::Pass),
+            "the sole member must be recorded as an ensemble member run that passed"
+        );
+        assert!(
+            member_runs(&db, &spec_id, "done-pass")
+                .iter()
+                .any(|r| r.status == GraphRunStatus::Pass),
+            "the passing join must route onward on its Pass edge"
         );
     }
 
