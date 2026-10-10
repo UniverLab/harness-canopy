@@ -14,7 +14,9 @@ mod hooks;
 mod statuses;
 mod topology;
 
-pub use ensembles::{Ensemble, EnsembleDetails, EnsembleKind, EnsembleMember, EnsembleMemberSpec};
+pub use ensembles::{
+    member_bounds, Ensemble, EnsembleDetails, EnsembleKind, EnsembleMember, EnsembleMemberSpec,
+};
 pub use hooks::{GraphCompletionHook, GraphCompletionHookRun, GraphHookEvent};
 pub use statuses::{
     ArchiveGraphOutcome, GraphResetOutcome, GraphRunStatus, GraphSpecStatus, GraphStatus,

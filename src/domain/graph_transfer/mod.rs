@@ -28,8 +28,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::domain::graphs::{
-    Ensemble, EnsembleDetails, EnsembleKind, EnsembleMember, Graph, GraphEdge, GraphEdgeCondition,
-    GraphNode, GraphNodeKind,
+    member_bounds, Ensemble, EnsembleDetails, EnsembleKind, EnsembleMember, Graph, GraphEdge,
+    GraphEdgeCondition, GraphNode, GraphNodeKind,
 };
 use crate::domain::validation::{
     validate_ensemble_min_pass, validate_ensembles_in_graph, validate_graph, GraphEdgeView,
@@ -50,13 +50,9 @@ pub use validation::*;
 /// refusal, never a best-effort parse (decision 6).
 pub const GRAPH_EXPORT_FORMAT_VERSION: i64 = 4;
 
-/// Ensemble member count bounds — mirrors `daemon::handler`'s
-/// `ENSEMBLE_MIN_MEMBERS`/`ENSEMBLE_MAX_MEMBERS` (`graph_add_ensemble`'s own
-/// authoring-time bounds). Duplicated rather than shared across the
-/// domain/daemon boundary: the two numbers are part of the ensemble
-/// contract itself, not an implementation detail either side owns alone.
-const ENSEMBLE_MIN_MEMBERS: usize = 2;
-const ENSEMBLE_MAX_MEMBERS: usize = 8;
+// Ensemble member count bounds live in `member_bounds` (the single shared
+// definition both this domain layer and the daemon's authoring-time
+// validators call), so the two layers can never drift.
 
 /// A graph's design, portable across machines/installations. Key order is
 /// deliberate (struct field order) — see `docs/graphs.md` for the documented,
@@ -1645,6 +1641,73 @@ mod tests {
         assert!(err.contains("2-8 members"));
     }
 
+    /// CM36: a minimal valid document whose single ensemble carries 12
+    /// members, so the per-kind ceiling can be exercised at import.
+    fn make_twelve_member_doc(kind: Option<&str>) -> GraphExportDocument {
+        GraphExportDocument {
+            format_version: 1,
+            name: "x".to_string(),
+            description: None,
+            nodes: vec![
+                GraphExportNode {
+                    name: "kickoff".to_string(),
+                    kind: GraphNodeKind::Check,
+                    position: 1,
+                    config: serde_json::json!({"command": "true"}),
+                },
+                GraphExportNode {
+                    name: "next".to_string(),
+                    kind: GraphNodeKind::Check,
+                    position: 2,
+                    config: serde_json::json!({"command": "true"}),
+                },
+            ],
+            edges: vec![],
+            ensembles: vec![GraphExportEnsemble {
+                commit_rights: false,
+                name: "team".to_string(),
+                kind: kind.map(str::to_string),
+                prompt_template: "go".to_string(),
+                entry_from_node: GraphExportEnsembleTarget::Node("kickoff".to_string()),
+                entry_condition: GraphEdgeCondition::Always,
+                extra_entry_sources: vec![],
+                on_pass_to: GraphExportEnsembleTarget::Node("next".to_string()),
+                on_fail_to: None,
+                min_pass: 1,
+                timeout_minutes: 30,
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
+                members: (0..12)
+                    .map(|_| GraphExportEnsembleMember {
+                        platform: Some("claude".to_string()),
+                        model: None,
+                        prompt_override: None,
+                        timeout_minutes: None,
+                    })
+                    .collect(),
+            }],
+            infra_node: None,
+        }
+    }
+
+    /// CM36: a round_robin ensemble dispatches one member at a time, so 12
+    /// members import fine (the parallel 8 cap must not apply to it).
+    #[test]
+    fn import_round_robin_accepts_12_members() {
+        let doc = make_twelve_member_doc(Some("round_robin"));
+        build_import_plan(&doc, "g").expect("round_robin accepts 12 members");
+    }
+
+    /// CM36: parallel still caps at 8 — the same shape with kind parallel is
+    /// refused once it exceeds 8 members.
+    #[test]
+    fn import_parallel_rejects_9_members() {
+        let mut doc = make_twelve_member_doc(Some("parallel"));
+        doc.ensembles[0].members.truncate(9);
+        let err = build_import_plan(&doc, "g").unwrap_err();
+        assert!(err.contains("2-8 members"), "{err}");
+    }
+
     /// CM24: a negative `quorum_grace_minutes` is refused on import with the
     /// same wording pattern as the existing `straggler_timeout_minutes`
     /// check — while `0` (terminate immediately) imports fine.
@@ -2108,32 +2171,39 @@ mod tests {
                 6,
             ),
             make_node(
+                "bm2",
+                "Beta [2]",
+                GraphNodeKind::Agent,
+                serde_json::json!({"platform": "claude", "prompt_template": "review", "timeout_minutes": 30}),
+                7,
+            ),
+            make_node(
                 "bj",
                 "Beta (quorum)",
                 GraphNodeKind::Join,
                 serde_json::json!({"ensemble_id": "ens2"}),
-                7,
+                8,
             ),
             make_node(
                 "cm",
                 "Gamma [1]",
                 GraphNodeKind::Agent,
                 serde_json::json!({"platform": "claude", "prompt_template": "check", "timeout_minutes": 20}),
-                8,
+                9,
             ),
             make_node(
                 "cn",
                 "Gamma [2]",
                 GraphNodeKind::Agent,
                 serde_json::json!({"platform": "copilot", "prompt_template": "check", "timeout_minutes": 20}),
-                9,
+                10,
             ),
             make_node(
                 "cj",
                 "Gamma (quorum)",
                 GraphNodeKind::Join,
                 serde_json::json!({"ensemble_id": "ens3"}),
-                10,
+                11,
             ),
         ];
         let edges = vec![
@@ -2149,7 +2219,10 @@ mod tests {
             // have TWO entry sources (kickoff's always + Alpha's pass), the
             // "multiple entry sources" shape.
             make_edge("e7", "kickoff", "bm1", GraphEdgeCondition::Always),
+            make_edge("e7b", "kickoff", "bm2", GraphEdgeCondition::Always),
             make_edge("e8", "bm1", "bj", GraphEdgeCondition::Always),
+            make_edge("e8b", "bm2", "bj", GraphEdgeCondition::Always),
+            make_edge("e5b", "aj", "bm2", GraphEdgeCondition::Pass),
             // Beta passes into Gamma (chained fan-out to both Gamma members).
             make_edge("e9", "bj", "cm", GraphEdgeCondition::Pass),
             make_edge("e10", "bj", "cn", GraphEdgeCondition::Pass),
@@ -2176,8 +2249,8 @@ mod tests {
         alpha.members[0].timeout_minutes = Some(15);
         alpha.members[1].platform = "opencode".to_string();
         alpha.members[1].model = None;
-        // Beta: round_robin, 1 member (import allows 1-8 for RR/cascade).
-        let mut beta = make_ensemble_details("ens2", "bj", "kickoff", "cj", &["bm1"]);
+        // Beta: round_robin, 2 members (the per-kind minimum).
+        let mut beta = make_ensemble_details("ens2", "bj", "kickoff", "cj", &["bm1", "bm2"]);
         beta.ensemble.name = "Beta".to_string();
         beta.ensemble.prompt_template = "review".to_string();
         beta.ensemble.kind = EnsembleKind::RoundRobin;
@@ -2186,6 +2259,8 @@ mod tests {
         beta.ensemble.straggler_timeout_minutes = Some(5);
         beta.members[0].platform = "claude".to_string();
         beta.members[0].model = Some("sonnet".to_string());
+        beta.members[1].platform = "claude".to_string();
+        beta.members[1].model = None;
         // Gamma: parallel, grace field (parallel-only) exercised.
         let mut gamma = make_ensemble_details("ens3", "cj", "kickoff", "final", &["cm", "cn"]);
         gamma.ensemble.name = "Gamma".to_string();

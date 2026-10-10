@@ -102,8 +102,10 @@ a concurrent commit from outside this run isn't a concern.
 
 ## Ensembles
 
-An **ensemble** is a group of 2-8 `agent` nodes that receive the same
-prompt in parallel, plus a quorum that waits for every member
+An **ensemble** is a group of 2–8 `agent` nodes in parallel (2–16 for the
+sequential `cascade`/`round_robin` kinds, whose members run one at a time)
+that receive the same
+prompt, plus a quorum that waits for every member
 before routing onward. It replaces what would otherwise be N member
 nodes, N prompts, and 2N+2 edges wired by hand — `graph_add_ensemble`
 creates the whole unit in one call:

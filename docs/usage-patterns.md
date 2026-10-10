@@ -122,8 +122,9 @@ window.
 
 ## 4. Draft ensemble — Proven
 
-An ensemble is 2–8 agent nodes that get the same prompt in parallel, plus a
-quorum that waits for all of them. The canonical use spends the expensive
+An ensemble is 2–8 agent nodes (2–16 for the sequential `cascade`/`round_robin`
+kinds) that get the same prompt, plus a quorum (parallel) or single dispatch
+(cascade/round_robin). The canonical use spends the expensive
 model once, on a pre-digested problem.
 
 ```mermaid

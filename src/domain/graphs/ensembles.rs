@@ -53,6 +53,20 @@ impl EnsembleKind {
     }
 }
 
+/// Every ensemble kind requires at least two members.
+pub const ENSEMBLE_MIN_MEMBERS: usize = 2;
+
+/// Per-kind member-count bounds. `parallel` runs every member concurrently,
+/// so it stays at 2–8; `cascade` and `round_robin` dispatch one member at a
+/// time, so a longer list only adds rotation/fallback depth (not concurrency
+/// or cost) and they allow 2–16.
+pub fn member_bounds(kind: EnsembleKind) -> (usize, usize) {
+    match kind {
+        EnsembleKind::Parallel => (ENSEMBLE_MIN_MEMBERS, 8),
+        EnsembleKind::Cascade | EnsembleKind::RoundRobin => (ENSEMBLE_MIN_MEMBERS, 16),
+    }
+}
+
 /// Exactly one of `spec_id`/`graph_id` is set — same invariant as
 /// [`GraphNode`]/[`GraphEdge`].
 #[derive(Debug, Clone, Serialize, Deserialize)]

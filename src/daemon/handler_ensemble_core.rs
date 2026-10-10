@@ -28,7 +28,7 @@ pub(crate) use crate::daemon::handler_ensemble_plan::{
 impl TaskTriggerHandler {
     #[tool(
         name = "graph_add_ensemble",
-        description = "Create an ensemble in ONE call: N (2-8) parallel agent-node members sharing one prompt by default, plus the quorum that waits for all of them, consolidates their outputs (attributed per member), and routes onward. Set `commit_rights: true` to make this ensemble the graph's designated committer (B37) — whichever member the running strategy dispatches becomes the committer for that run. Members differ by platform/model, and each may set its own prompt_override to review the same input from a different angle instead of sharing the template. Each member may also set its own timeout_minutes, overriding the ensemble's shared value for that member only. Each member (and the ensemble as a whole) may also set `infra_retry_limit`/`infra_crash_max_seconds`/`infra_backoff_seconds`, overriding the platform's config.toml value (then the engine default 2/60/30) for the infra-crash retry budget — member wins over ensemble. (Formerly called 'fusion' — retired to avoid colliding with OpenRouter's fusion technology.) on_pass_to/on_fail_to accept a node id or another ensemble's id (chained: the quorum fans out to every member of that ensemble, no intermediate node). Entry rewiring, extra entry sources, and deletion are graph_update_ensemble/graph_delete_ensemble."
+        description = "Create an ensemble in ONE call: N (2–8 parallel, 2–16 cascade/round_robin) agent-node members sharing one prompt by default, plus the quorum that waits for all of them, consolidates their outputs (attributed per member), and routes onward. Set `commit_rights: true` to make this ensemble the graph's designated committer (B37) — whichever member the running strategy dispatches becomes the committer for that run. Members differ by platform/model, and each may set its own prompt_override to review the same input from a different angle instead of sharing the template. Each member may also set its own timeout_minutes, overriding the ensemble's shared value for that member only. Each member (and the ensemble as a whole) may also set `infra_retry_limit`/`infra_crash_max_seconds`/`infra_backoff_seconds`, overriding the platform's config.toml value (then the engine default 2/60/30) for the infra-crash retry budget — member wins over ensemble. (Formerly called 'fusion' — retired to avoid colliding with OpenRouter's fusion technology.) on_pass_to/on_fail_to accept a node id or another ensemble's id (chained: the quorum fans out to every member of that ensemble, no intermediate node). Entry rewiring, extra entry sources, and deletion are graph_update_ensemble/graph_delete_ensemble."
     )]
     pub(crate) async fn graph_add_ensemble(
         &self,
@@ -413,23 +413,16 @@ impl TaskTriggerHandler {
     }
 }
 
-pub(crate) const ENSEMBLE_MIN_MEMBERS: usize = 2;
-
-pub(crate) const ENSEMBLE_MAX_MEMBERS: usize = 8;
-
 pub(crate) const DEFAULT_ENSEMBLE_MEMBER_TIMEOUT_MINUTES: i64 = 30;
 
 pub(crate) fn validate_ensemble_members(
     members: &[EnsembleMemberParams],
     kind: EnsembleKind,
 ) -> Result<Vec<EnsembleMemberSpec>, String> {
-    let min = match kind {
-        EnsembleKind::Parallel => ENSEMBLE_MIN_MEMBERS,
-        EnsembleKind::Cascade | EnsembleKind::RoundRobin => 1,
-    };
-    if members.len() < min || members.len() > ENSEMBLE_MAX_MEMBERS {
+    let (min, max) = crate::domain::graphs::member_bounds(kind);
+    if members.len() < min || members.len() > max {
         return Err(format!(
-            "A {} ensemble must have {min}-{ENSEMBLE_MAX_MEMBERS} members, got {}.",
+            "A {} ensemble must have {min}-{max} members, got {}.",
             kind.as_str(),
             members.len()
         ));

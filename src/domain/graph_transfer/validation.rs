@@ -51,14 +51,10 @@ pub(super) fn validate_import_ensemble_shape(
     doc_ensemble: &GraphExportEnsemble,
     import_kind: EnsembleKind,
 ) -> Result<(), String> {
-    let min_members = match import_kind {
-        EnsembleKind::Parallel => ENSEMBLE_MIN_MEMBERS,
-        EnsembleKind::Cascade | EnsembleKind::RoundRobin => 1,
-    };
-    if doc_ensemble.members.len() < min_members || doc_ensemble.members.len() > ENSEMBLE_MAX_MEMBERS
-    {
+    let (min_members, max_members) = member_bounds(import_kind);
+    if doc_ensemble.members.len() < min_members || doc_ensemble.members.len() > max_members {
         return Err(format!(
-            "Ensemble '{}' must have {min_members}-{ENSEMBLE_MAX_MEMBERS} members, got {}.",
+            "Ensemble '{}' must have {min_members}-{max_members} members, got {}.",
             doc_ensemble.name,
             doc_ensemble.members.len()
         ));

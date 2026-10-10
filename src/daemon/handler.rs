@@ -682,14 +682,14 @@ mod tests {
                 "get_identity|21d80d3a69d9719487bc498958b5600e86bf36519e229d270d2c2ae338383f72|efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
                 "get_tools|ea4c08804bf3a96c7e2e9f9be825feedb18ce038998f953065423576f6783beb|d81bd1699af6df84ec62ca38e6e360f6bae3c9d7f38fa307061f4eff5f84ba6f",
                 "graph_add_edge|0368038fcdc6790d79f1558cf8c5e66aae12d6c475c616849c217670707ec5f7|237b62884bf39b63f372273414288ea9179b392cb42bbb94315978049564986d",
-                "graph_add_ensemble|fcc6d04b6f0110d9f0cf798932a64014b85d3624dab3597b3f80349dfa64eee3|7a926a02e205ec84094636fc51763fb003ce246b58eb131a609c75d9089887aa",
+                "graph_add_ensemble|e7ea79b81a64feee135595c0756c25f8a79beb8f9d44ddba811a601da496100c|9e304dcc249546884473f68d2cfa5e731ebdc119cd6860e6c16196a947077400",
                 "graph_add_node|bc25e20a5d0a610f849de0481d4182916f31895fb16bb8ca007dceaee3e33232|7759661982738bea7c283e567107e2b53e38f778bbbf898afbfcec7dcf704a75",
                 "graph_add_spec|d054dce21de8cb570c402ef4081ebbec27391f28052aaae6b7636b75a6135343|4ca4c5b48737acddab29e888155a58a248bbb7ed0659f1ea56ef5c7620575c0c",
                 "graph_archive|86c62c25726d635c29691b8d1e90acbd2af55efafbf4b2acf866d82146fe9dc2|78e636b08231391ec48053bde18a790e2aede74da54003618003f2febe327bea",
                 "graph_audit_node_configs|be2716e66df14f94162057f5919f89bf87cab3b84d7f90ba6c2614e90b4ec749|efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
                 "graph_complete_node|dd79817c0bd15c7fb324ee65bbf0b920c4d36f7958595932ab728a1d4418c76c|9fbd77387cb892656f3c66e396327bd2d66023f67f9cdae7c808091cac32cf9c",
                 "graph_continue|0b6466413a10ef19b9a929d94e662a4279c523d9b2904fc5e1208fc9a9d07edb|4c6d787abe1add21babc503b93b6ca04c35161ee5c0104ea44e28ed7a7d81770",
-                "graph_copy_ensemble|be5468502eeb1d5ac7e731194b9c052bb7969814aac59c41ae8d95b4fbc6742b|4b299e225f9117c00f10837d84ff727eb9bd6848468dfb34269a499c2cefe5f5",
+                "graph_copy_ensemble|84fa10199406a21732121a5efcb531a8b635de720b9ced9ad23c9d21b442804b|81e6123364f5ffa77f6389270cf7cec410a5fc66bec93fd60631e66b85abc488",
                 "graph_copy_node|00f28a0220fed92a866e7e9489c5c6d0796b61f125ba83d7f2e4528ed8089d75|7aa9c075d640d2f792c386c0a0ca8d999bbaa223ea9787e40a52ab7471a2c8fc",
                 "graph_create|6f4749b2ffabdacfded946e01630ea558cefcf18110801fab0bb31c7fec79769|5f326cdb2c1ff3d7cca2cf25bf7fec5acc828bf70fe9e5e8e3d6423cb7de4a96",
                 "graph_delete_edge|515e60718a86a111f77da9caab9a8f1a420c8a8cedea9c759dd3061efe54bcab|05d5202f073aea27378f794577e989b9636bad6d72397887d82887ad1d549d2f",
@@ -712,7 +712,7 @@ mod tests {
                 "graph_schedule_continue|1a383d649dbb9963e8ef76d698b9293b1a517205b3f61cd48d6c484f0c009c35|ab6b9783dd0a4ddb3cbcbe23c4ccaefa955cdffecead28d2a4ee758c21e27a55",
                 "graph_update|27c9d848836295967b3588395ddf8a8038ef4b881b7402fb4b9bcccf430d4da8|e3d416ecd679f65c07b3885c2b787b2cfc8b2f8aa820dfa6ea251aa90f0e21ae",
                 "graph_update_edge|ec07b87be17723f5212d8024e8bca2e2f44c215a417140898e1bab2539b832f5|51dafc02acbe8f4df24d69e44b6afcba2b381c212cfe426dcdbdde3a6196b6da",
-                "graph_update_ensemble|997fcc3e308ab97906249ed356455e45e09f0dbd28e8187b04537aa3a8674e82|bfa346fe6e512a20b7e50beb43c92c36f8643a0baf87195b772bbb75354c1461",
+                "graph_update_ensemble|997fcc3e308ab97906249ed356455e45e09f0dbd28e8187b04537aa3a8674e82|057345c979b33231a8aeeb98ff24fc58fba0286db865da227911bbc87da633fe",
                 "graph_update_node|350486ce4efc1576750cbf28074916804495e2f90c4879103863a7f324042e36|13a30ea327b630709e99b78a98a12c210dc32034db31fad6595d4833a2a9697a",
                 "graph_update_spec|cc242e8d96c9fa9c957a7ca885258947ab54337e4a9e1b9f2ddc66eb6ae06b6d|e8c2e945b5f6f1080c5fe54b38f36e0c75e1716e61f80db812c32547d30e8264",
                 "intelligence_delete_node|b70ce24d59d2619e275cb40397037d7748f3ebca64ac5ffdc85eae6ee65bb1af|318c60c03fd6f5012a88be52de9aea7e9f372081ac1a378f5ee033b024ce229b",
@@ -821,6 +821,27 @@ mod tests {
         assert!(validate_ensemble_members(&eight, EnsembleKind::Parallel).is_ok());
     }
 
+    /// CM36: a sequential kind dispatches one member at a time, so its list
+    /// may be longer than parallel's 8 — 12 round_robin members are accepted.
+    #[test]
+    fn validate_ensemble_members_round_robin_accepts_12() {
+        let m: Vec<_> = (0..12)
+            .map(|i| ensemble_member_params(&format!("p{i}")))
+            .collect();
+        assert!(validate_ensemble_members(&m, EnsembleKind::RoundRobin).is_ok());
+    }
+
+    /// CM36: the sequential ceiling is 16, and the error names the kind.
+    #[test]
+    fn validate_ensemble_members_cascade_rejects_17() {
+        let m: Vec<_> = (0..17)
+            .map(|i| ensemble_member_params(&format!("p{i}")))
+            .collect();
+        let err = validate_ensemble_members(&m, EnsembleKind::Cascade).unwrap_err();
+        assert!(err.contains("cascade"), "{err}");
+        assert!(err.contains("2-16 members"), "{err}");
+    }
+
     #[test]
     fn validate_ensemble_members_rejects_empty_platform() {
         let members = vec![
@@ -854,22 +875,28 @@ mod tests {
     /// timeout.
     #[test]
     fn validate_ensemble_members_rejects_negative_member_timeout() {
-        let members = vec![{
-            let mut m = ensemble_member_params("claude");
-            m.timeout_minutes = Some(-1);
-            m
-        }];
+        let members = vec![
+            {
+                let mut m = ensemble_member_params("claude");
+                m.timeout_minutes = Some(-1);
+                m
+            },
+            ensemble_member_params("openrouter"),
+        ];
         let err = validate_ensemble_members(&members, EnsembleKind::Cascade).unwrap_err();
         assert!(err.contains("timeout_minutes"), "{err}");
     }
 
     #[test]
     fn validate_ensemble_members_accepts_zero_member_timeout() {
-        let members = vec![{
-            let mut m = ensemble_member_params("claude");
-            m.timeout_minutes = Some(0);
-            m
-        }];
+        let members = vec![
+            {
+                let mut m = ensemble_member_params("claude");
+                m.timeout_minutes = Some(0);
+                m
+            },
+            ensemble_member_params("openrouter"),
+        ];
         let result = validate_ensemble_members(&members, EnsembleKind::Cascade).unwrap();
         assert_eq!(result[0].3, Some(0));
     }
@@ -21853,7 +21880,7 @@ mod endpoint_tests {
     }
 
     #[tokio::test]
-    async fn graph_add_ensemble_with_cascade_kind_creates_single_member_ensemble() {
+    async fn graph_add_ensemble_with_cascade_kind_rejects_single_member() {
         let (dir, db, handler) = endpoint_test_handler();
         let lp = insert_test_graph(&db, dir.path());
         let spec = insert_test_spec(&db, &lp.id, 1);
@@ -21893,9 +21920,14 @@ mod endpoint_tests {
             .await
             .unwrap();
         assert!(
-            !is_err(&result),
-            "cascade ensemble with 1 member should succeed: {:?}",
+            is_err(&result),
+            "cascade ensemble with 1 member must now be refused: {:?}",
             result
+        );
+        assert!(
+            text(&result).contains("2-16") && text(&result).contains("cascade"),
+            "error must name the sequential bound and the kind: {}",
+            text(&result)
         );
     }
 
@@ -21961,15 +21993,26 @@ mod endpoint_tests {
                 name: "Cascade".to_string(),
                 kind: Some("cascade".to_string()),
                 prompt_template: Some("do it".to_string()),
-                members: Some(vec![EnsembleMemberParams {
-                    platform: "claude".to_string(),
-                    model: None,
-                    prompt_override: None,
-                    timeout_minutes: None,
-                    infra_retry_limit: None,
-                    infra_crash_max_seconds: None,
-                    infra_backoff_seconds: None,
-                }]),
+                members: Some(vec![
+                    EnsembleMemberParams {
+                        platform: "claude".to_string(),
+                        model: None,
+                        prompt_override: None,
+                        timeout_minutes: None,
+                        infra_retry_limit: None,
+                        infra_crash_max_seconds: None,
+                        infra_backoff_seconds: None,
+                    },
+                    EnsembleMemberParams {
+                        platform: "openrouter".to_string(),
+                        model: None,
+                        prompt_override: None,
+                        timeout_minutes: None,
+                        infra_retry_limit: None,
+                        infra_crash_max_seconds: None,
+                        infra_backoff_seconds: None,
+                    },
+                ]),
                 blueprint: None,
                 from_node: entry.clone(),
                 condition: "always".to_string(),
@@ -22265,6 +22308,79 @@ mod endpoint_tests {
 
         let details = db.get_ensemble_details(&ensemble_id).unwrap().unwrap();
         assert_eq!(details.ensemble.kind, EnsembleKind::Cascade);
+    }
+
+    /// CM36 FR3: a 12-member round_robin cannot be switched to parallel
+    /// (which caps at 8) — refused with a message naming both counts, and the
+    /// ensemble's kind is left untouched.
+    #[tokio::test]
+    async fn graph_update_ensemble_refuses_round_robin_to_parallel_above_eight() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let lp = insert_test_graph(&db, dir.path());
+        let spec = insert_test_spec(&db, &lp.id, 1);
+        let entry = add_agent_node(&handler, &spec.id, "Entry").await;
+        let arbiter = add_agent_node(&handler, &spec.id, "Arbiter").await;
+
+        let members: Vec<EnsembleMemberParams> = (0..12)
+            .map(|_| EnsembleMemberParams {
+                platform: "claude".to_string(),
+                model: None,
+                prompt_override: None,
+                timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
+            })
+            .collect();
+        let created = handler
+            .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                commit_rights: None,
+                spec_id: Some(spec.id.clone()),
+                graph_id: None,
+                name: "Wide".to_string(),
+                kind: Some("round_robin".to_string()),
+                prompt_template: Some("do it".to_string()),
+                members: Some(members),
+                blueprint: None,
+                from_node: entry.clone(),
+                condition: "always".to_string(),
+                min_pass: None,
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
+                timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
+                on_pass_to: arbiter.clone(),
+                on_fail_to: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&created), "{}", text(&created));
+        let ensemble_id = extract_id(&created, "ensemble_id");
+
+        let updated = handler
+            .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+                kind: Some("parallel".to_string()),
+                ..blank_ensemble_update(&ensemble_id)
+            }))
+            .await
+            .unwrap();
+        assert!(
+            is_err(&updated),
+            "switching 12 members to parallel must be refused: {:?}",
+            updated
+        );
+        let msg = text(&updated);
+        assert!(msg.contains("parallel"), "{msg}");
+        assert!(msg.contains("2-8") && msg.contains("12"), "{msg}");
+
+        let details = db.get_ensemble_details(&ensemble_id).unwrap().unwrap();
+        assert_eq!(
+            details.ensemble.kind,
+            EnsembleKind::RoundRobin,
+            "a refused kind change must write nothing"
+        );
     }
 
     #[tokio::test]

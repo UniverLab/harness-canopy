@@ -40,8 +40,8 @@ pub struct GraphImportPlan {
 ///
 /// Returns `Err` (with nothing to persist) on: an unsupported/missing
 /// `format_version`, a duplicate node name, an edge or ensemble field naming
-/// a node absent from `document.nodes`, an ensemble with 2-8 members
-/// violated, or `min_pass`/timeout fields out of range.
+/// a node absent from `document.nodes`, an ensemble that violates its
+/// kind's member-count bounds, or `min_pass`/timeout fields out of range.
 pub fn build_import_plan(
     document: &GraphExportDocument,
     graph_id: &str,

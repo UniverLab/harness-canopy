@@ -87,6 +87,21 @@ impl TaskTriggerHandler {
         };
         let effective_kind = new_kind.unwrap_or(details.ensemble.kind);
 
+        // FR3: a kind change may tighten the member-count ceiling (only
+        // switching TO parallel, max 8, can). Refuse before any write so a
+        // 12-member round_robin cannot silently become an over-cap parallel
+        // ensemble that only misbehaves at dispatch time. The minimum is
+        // enforced at creation, so it is not re-checked here.
+        let (min_for_effective, max_for_effective) =
+            crate::domain::graphs::member_bounds(effective_kind);
+        if details.members.len() > max_for_effective {
+            return Ok(error_result(&format!(
+                "A {} ensemble must have {min_for_effective}-{max_for_effective} members, got {}.",
+                effective_kind.as_str(),
+                details.members.len()
+            )));
+        }
+
         if let Err(e) = refuse_ensemble_kind_change(&params, effective_kind) {
             return Ok(error_result(&e));
         }

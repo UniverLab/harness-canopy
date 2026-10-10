@@ -420,7 +420,8 @@ pub struct GraphAddEnsembleParams {
     /// placeholders as an agent node's `prompt_template`. Required unless
     /// `blueprint` supplies one.
     pub prompt_template: Option<String>,
-    /// 2-8 members: parallel proposer/reviewer variants that differ by
+    /// Members (2–8 for parallel, 2–16 for cascade/round_robin): proposer/
+    /// reviewer variants that differ by
     /// platform/model and, optionally, per-member `prompt_override`. Required
     /// unless `blueprint` supplies them.
     pub members: Option<Vec<EnsembleMemberParams>>,
@@ -476,7 +477,8 @@ pub struct GraphUpdateEnsembleParams {
     pub kind: Option<String>,
     /// New shared prompt, propagated to every current member.
     pub prompt_template: Option<String>,
-    /// Replacement member list (2-8 entries) — added/removed/replaced by
+    /// Replacement member list (2–8 for parallel, 2–16 for cascade/round_robin)
+    /// — added/removed/replaced by
     /// position, always the full list (there is no way to patch a single
     /// member in place). Each entry may set its own `prompt_override`; a
     /// member without one uses the (possibly also-updated) shared
@@ -584,7 +586,8 @@ pub struct GraphCopyEnsembleParams {
     /// New shared prompt for every member — e.g. swap a proposer prompt for a
     /// review prompt. Defaults to the source's prompt.
     pub prompt_template: Option<String>,
-    /// Replacement member list (2-8). Defaults to the source's members.
+    /// Replacement member list (2–8 parallel, 2–16 cascade/round_robin).
+    /// Defaults to the source's members.
     pub members: Option<Vec<EnsembleMemberParams>>,
     /// New pass threshold. Defaults to the source's (clamped to the member
     /// count).
