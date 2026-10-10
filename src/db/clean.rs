@@ -258,7 +258,7 @@ impl Database {
         // Wait out a brief writer instead of failing instantly on
         // `SQLITE_BUSY` — a short in-flight write (e.g. the TUI recording a
         // session event) shouldn't abort the whole reclaim.
-        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        conn.busy_timeout(crate::db::DB_BUSY_TIMEOUT)?;
         conn.execute_batch("VACUUM; PRAGMA wal_checkpoint(TRUNCATE);")?;
         Ok(())
     }

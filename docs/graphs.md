@@ -598,6 +598,13 @@ name it used. The same two operations exist as MCP tools,
 `graph_import { document, workdir?, name? }`, so a graph is drivable end
 to end through MCP as well as the CLI.
 
+Every daemon database connection waits up to 5 s for a concurrent writer
+before giving up, so imports normally queue behind a busy database rather
+than failing. If the wait still expires, `graph_import` returns
+`graph_import: database busy after 5 s — nothing was written, retry`:
+the import is all-or-nothing, nothing partial is left behind, and the
+call is safe to retry as-is.
+
 What the file **excludes** is deliberate: no ids (edges reference
 nodes by `name`, which is what makes the file reviewable and
 hand-editable — node names must therefore be unique within an exported

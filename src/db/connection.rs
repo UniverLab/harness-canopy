@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Error, Result};
 use rusqlite::Connection;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -20,6 +20,10 @@ impl Database {
     fn open_connection_with_pragmas(db_path: &PathBuf) -> Result<Connection> {
         let conn = Connection::open(db_path)?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+        // FR1: wait out a concurrent writer instead of failing immediately with
+        // SQLITE_BUSY. The driver's busy timeout is the mechanism; there is no
+        // retry loop around individual statements (constraint).
+        conn.busy_timeout(super::DB_BUSY_TIMEOUT)?;
         Ok(conn)
     }
 
@@ -86,12 +90,80 @@ impl Database {
     /// daemon.
     pub fn new_safe(db_path: &PathBuf, data_dir: &std::path::Path) -> Result<Self> {
         if crate::daemon::process::other_instance_may_be_running(data_dir) {
-            let conn = Connection::open(db_path)?;
-            conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+            let conn = Self::open_connection_with_pragmas(db_path)?;
             return Ok(Database {
                 conn: Arc::new(Mutex::new(conn)),
             });
         }
         Database::new(db_path)
+    }
+}
+
+/// True when `error` is (or wraps) a SQLite `SQLITE_BUSY` / `SQLITE_LOCKED`
+/// failure — the "database is locked" a write hits when it outlives the busy
+/// timeout. Walks the whole anyhow chain, so a busy error wrapped in context is
+/// still caught (FR2).
+pub(crate) fn is_busy_error(error: &Error) -> bool {
+    error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<rusqlite::Error>(),
+            Some(rusqlite::Error::SqliteFailure(err, _))
+                if matches!(
+                    err.code,
+                    rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                )
+        )
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    /// FR3: two connections to one temp database; a write transaction held on
+    /// `writer` for 500 ms must NOT make a write on `other` fail with "database
+    /// is locked" — the busy timeout makes the second write wait and succeed.
+    #[test]
+    fn write_waits_for_concurrent_writer_instead_of_failing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("busy.db");
+
+        let mut writer = Database::open_connection_with_pragmas(&path).unwrap();
+        writer
+            .execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+            .unwrap();
+        // Opened before `writer` takes the lock, so no open-time pragma races it.
+        let other = Database::open_connection_with_pragmas(&path).unwrap();
+
+        let (locked_tx, locked_rx) = mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let tx = writer
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .unwrap();
+            tx.execute("INSERT INTO t (id) VALUES (1)", []).unwrap();
+            locked_tx.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(500));
+            tx.commit().unwrap();
+        });
+
+        locked_rx.recv().unwrap(); // writer now holds the write lock
+
+        let started = Instant::now();
+        other
+            .execute("INSERT INTO t (id) VALUES (2)", [])
+            .expect("write must wait for the busy writer, not fail");
+        let waited = started.elapsed();
+        handle.join().unwrap();
+
+        assert!(
+            waited >= Duration::from_millis(300),
+            "second write should have waited for the ~500 ms writer, waited {waited:?}"
+        );
+        let rows: i64 = other
+            .query_row("SELECT COUNT(*) FROM t", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 2, "both writes must be committed");
     }
 }

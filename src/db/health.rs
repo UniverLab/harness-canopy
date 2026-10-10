@@ -81,6 +81,7 @@ impl Database {
 /// previous one, and (in tests) to assert a backup file's health directly.
 pub fn integrity_check_file(path: &Path) -> Result<String> {
     let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    conn.busy_timeout(crate::db::DB_BUSY_TIMEOUT)?;
     let mut stmt = conn.prepare("PRAGMA integrity_check")?;
     let rows: Vec<String> = stmt
         .query_map([], |row| row.get::<_, String>(0))?

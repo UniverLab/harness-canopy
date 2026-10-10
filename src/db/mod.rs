@@ -17,6 +17,12 @@ use std::sync::{Arc, Mutex};
 /// `migrate_activity_attribution_prefix` (CB63).
 const SCHEMA_VERSION: i64 = 7;
 
+/// CM40: how long every daemon SQLite connection waits for a concurrent writer
+/// before failing with `SQLITE_BUSY`. Applied once, at open, in
+/// `db::connection`; the `graph_import` busy message renders this same value so
+/// the timeout and the message can never disagree.
+pub(crate) const DB_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Thread-safe `SQLite` database wrapper.
 ///
 /// Uses an `Arc<Mutex<Connection>>` so the handle can be cheaply cloned and
@@ -648,7 +654,7 @@ pub mod activity_log;
 pub mod agent;
 pub mod blueprints;
 pub mod clean;
-mod connection;
+pub(crate) mod connection;
 pub mod ensembles;
 pub mod gamification;
 pub mod graph_transfer;

@@ -5,6 +5,7 @@ use rmcp::ErrorData as McpError;
 use crate::application::ports::{AgentRepository, RunRepository};
 use crate::daemon::helpers::{data_dir, filter_log_line, success_result};
 use crate::db::Database;
+use crate::db::{connection::is_busy_error, DB_BUSY_TIMEOUT};
 use crate::domain::models::{Agent, RunLog, Trigger};
 
 pub(crate) fn format_uptime(secs: u64) -> String {
@@ -213,6 +214,29 @@ pub(crate) fn make_log_path(id: &str) -> Result<String, McpError> {
 
 pub(crate) fn internal_error(error: impl std::fmt::Display) -> McpError {
     McpError::internal_error(error.to_string(), None)
+}
+
+/// Map a failed write to the MCP error the caller sees. A `SQLITE_BUSY` that
+/// outlived the busy timeout is transient — nothing was committed — so the
+/// message names `operation` and says to retry, logged once at warn (FR2).
+/// Every other error keeps the generic internal-error shape, byte for byte.
+pub(crate) fn write_error(operation: &str, error: &anyhow::Error) -> McpError {
+    internal_error(write_error_message(operation, error))
+}
+
+/// The busy message `write_error` wraps — also usable by the tool-level
+/// `error_result` channel, which carries a `String`, not an `McpError`.
+pub(crate) fn write_error_message(operation: &str, error: &anyhow::Error) -> String {
+    if is_busy_error(error) {
+        let message = format!(
+            "{operation}: database busy after {} s — nothing was written, retry",
+            DB_BUSY_TIMEOUT.as_secs()
+        );
+        tracing::warn!("{message}");
+        message
+    } else {
+        error.to_string()
+    }
 }
 
 pub(crate) fn format_temporal_agents(agents: &[Agent]) -> String {
@@ -1317,6 +1341,44 @@ mod model_listing_tests {
         assert_eq!(
             out1, out2,
             "two consecutive calls must produce identical output"
+        );
+    }
+
+    fn busy_anyhow() -> anyhow::Error {
+        anyhow::Error::new(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: rusqlite::ErrorCode::DatabaseBusy,
+                extended_code: 5,
+            },
+            None,
+        ))
+    }
+
+    #[test]
+    fn write_error_busy_names_operation_and_says_retry() {
+        let mcp = write_error("graph_import", &busy_anyhow());
+        assert_eq!(mcp.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
+        assert_eq!(
+            mcp.message.to_string(),
+            "graph_import: database busy after 5 s — nothing was written, retry"
+        );
+    }
+
+    #[test]
+    fn write_error_non_busy_passes_through_unchanged() {
+        let mcp = write_error("graph_import", &anyhow::anyhow!("disk full"));
+        assert_eq!(mcp.message.to_string(), "disk full");
+    }
+
+    #[test]
+    fn write_error_message_busy_and_plain() {
+        assert_eq!(
+            write_error_message("graph_import", &busy_anyhow()),
+            "graph_import: database busy after 5 s — nothing was written, retry"
+        );
+        assert_eq!(
+            write_error_message("graph_import", &anyhow::anyhow!("disk full")),
+            "disk full"
         );
     }
 }

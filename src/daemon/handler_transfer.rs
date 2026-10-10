@@ -2,7 +2,7 @@
 //! Moved verbatim; tool names, schemas, and behaviour unchanged.
 
 use crate::daemon::handler::TaskTriggerHandler;
-use crate::daemon::handler_formatting::{build_json_result, internal_error};
+use crate::daemon::handler_formatting::{build_json_result, internal_error, write_error};
 use crate::daemon::handler_nodes::validate_known_config_keys;
 use crate::daemon::handler_validate::{
     resolve_prefix_or_error, validate_absolute_dir, validate_non_empty,
@@ -148,7 +148,9 @@ impl TaskTriggerHandler {
             hooks: std::collections::BTreeMap::new(),
         };
 
-        self.db.import_graph(&lp, &plan).map_err(internal_error)?;
+        self.db
+            .import_graph(&lp, &plan)
+            .map_err(|e| write_error("graph_import", &e))?;
         if crate::domain::project::should_auto_register(std::path::Path::new(workdir)) {
             if let Err(error) = self.db.register_project_path(std::path::Path::new(workdir)) {
                 tracing::debug!(
