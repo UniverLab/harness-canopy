@@ -607,6 +607,7 @@ fn platforms_differ(old: &Platform, new: &Platform) -> bool {
         || old.server_extras != new.server_extras
         || old.skills_dir != new.skills_dir
         || old.instruction_file != new.instruction_file
+        || old.instruction_precedence != new.instruction_precedence
 }
 
 /// Merges one CLI's registry-owned fields into `local`, field by field: a
@@ -680,6 +681,7 @@ mod tests {
             server_extras: std::collections::HashMap::new(),
             skills_dir: None,
             instruction_file: None,
+            instruction_precedence: vec![],
             cli: Some(cli_json),
 
             provider: None,
@@ -1158,6 +1160,7 @@ mod tests {
             server_extras: std::collections::HashMap::new(),
             skills_dir: None,
             instruction_file: None,
+            instruction_precedence: vec![],
             cli: Some(serde_json::json!({"binary": "ls", "headless_mode": "--headless"})),
 
             provider: None,
@@ -1187,6 +1190,7 @@ mod tests {
             server_extras: std::collections::HashMap::new(),
             skills_dir: None,
             instruction_file: None,
+            instruction_precedence: vec![],
             cli: Some(serde_json::json!({"binary": "ls", "headless_mode": "--headless"})),
 
             provider: None,
@@ -1228,6 +1232,7 @@ mod tests {
             server_extras: std::collections::HashMap::new(),
             skills_dir: None,
             instruction_file: None,
+            instruction_precedence: vec![],
             cli: Some(serde_json::json!({"binary": "ls", "headless_mode": "--headless"})),
 
             provider: None,
@@ -1282,6 +1287,7 @@ mod tests {
             server_extras: std::collections::HashMap::new(),
             skills_dir: None,
             instruction_file: None,
+            instruction_precedence: vec![],
             cli: Some(serde_json::json!({"binary": "ls", "headless_mode": "--headless"})),
 
             provider: None,
@@ -1316,6 +1322,7 @@ mod tests {
             server_extras: std::collections::HashMap::new(),
             skills_dir: None,
             instruction_file: None,
+            instruction_precedence: vec![],
             cli: Some(serde_json::json!({"binary": "ls"})),
 
             provider: None,
@@ -1357,6 +1364,7 @@ mod tests {
             server_extras: std::collections::HashMap::new(),
             skills_dir: None,
             instruction_file: None,
+            instruction_precedence: vec![],
             cli: Some(serde_json::json!({"binary": "ls"})),
 
             provider: None,
@@ -1386,6 +1394,7 @@ mod tests {
             server_extras: std::collections::HashMap::new(),
             skills_dir: None,
             instruction_file: None,
+            instruction_precedence: vec![],
             cli: Some(serde_json::json!({"binary": "ls"})),
 
             provider: None,

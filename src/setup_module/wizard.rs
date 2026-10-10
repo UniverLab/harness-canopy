@@ -925,6 +925,7 @@ mod tests {
             server_extras: std::collections::HashMap::new(),
             skills_dir: None,
             instruction_file: None,
+            instruction_precedence: vec![],
             provider: provider.map(str::to_string),
             tool_name: tool.map(str::to_string),
             cli: None,

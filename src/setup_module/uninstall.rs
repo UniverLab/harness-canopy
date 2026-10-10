@@ -394,6 +394,7 @@ pub fn execute_uninstall(plan: &UninstallPlan, purge_data: bool) -> Result<()> {
             server_extras: Default::default(),
             skills_dir: None,
             instruction_file: None,
+            instruction_precedence: vec![],
             cli: None,
 
             provider: None,
@@ -556,6 +557,7 @@ mod tests {
             server_extras: HashMap::new(),
             skills_dir: None,
             instruction_file: None,
+            instruction_precedence: vec![],
             cli: None,
 
             provider: None,
@@ -578,6 +580,7 @@ mod tests {
             server_extras: HashMap::new(),
             skills_dir: None,
             instruction_file: None,
+            instruction_precedence: vec![],
             cli: None,
 
             provider: None,
@@ -600,6 +603,7 @@ mod tests {
             server_extras: HashMap::new(),
             skills_dir: None,
             instruction_file: None,
+            instruction_precedence: vec![],
             cli: None,
 
             provider: None,

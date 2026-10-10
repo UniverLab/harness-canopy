@@ -44,9 +44,9 @@ identities. When you select "Plant New Seed" in the TUI, Canopy creates
 a temporary directory containing:
 
 - A draft `identity.toml` with empty/default fields.
-- An instruction file (`CLAUDE.md`, `AGENTS.md`, etc.) with gardener
-  instructions that guide the selected CLI to interview the user about
-  the seed's name, directives, and traits.
+- An instruction file (`AGENTS.md`, `GEMINI.md`, etc., per the platform
+  registry) with gardener instructions that guide the selected CLI to
+  interview the user about the seed's name, directives, and traits.
 
 Once the agent finishes the interview and writes the final
 `identity.toml`, the nursery validates it (name uniqueness, field

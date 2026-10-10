@@ -302,6 +302,7 @@ mod tests {
             server_extras: std::collections::HashMap::new(),
             skills_dir: None,
             instruction_file: None,
+            instruction_precedence: vec![],
             cli: None,
 
             provider: None,
@@ -324,6 +325,7 @@ mod tests {
             server_extras: std::collections::HashMap::new(),
             skills_dir: None,
             instruction_file: None,
+            instruction_precedence: vec![],
             cli: None,
 
             provider: None,

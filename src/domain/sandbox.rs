@@ -102,28 +102,14 @@ pub async fn create_sandbox(
         bail!("git worktree add failed: {stderr}");
     }
 
-    let instr_filename = crate::domain::nursery::instruction_file_for_cli(cli_name);
-    let instr_path = worktree_path.join(instr_filename);
-
-    if let Some(parent) = instr_path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| {
-            format!(
-                "Failed to create instruction parent dir: {}",
-                parent.display()
-            )
-        })?;
-    }
-
-    std::fs::write(&instr_path, protocol_content)
-        .with_context(|| format!("Failed to write instruction file: {}", instr_path.display()))?;
-
-    // Deliberately NOT committed and NOT `git add`ed. The harness reads its
-    // instruction file straight off disk, so an untracked file is enough — and
-    // it is the only thing that keeps the protocol out of the merge and out of
-    // the user's repository (the whole point of CM6). A per-worktree
-    // `info/exclude` entry keeps a broad `git add -A` in a graph node from
-    // sweeping it into a commit.
-    exclude_from_worktree(&worktree_path, instr_filename).await;
+    // The protocol is an idempotent amend of the harness's instruction file
+    // (see domain::instruction_file): the project's own instructions are never
+    // rewritten, and the target is kept out of git — a tracked file is
+    // skip-worktree'd so no `git add` in a graph node carries the protocol into
+    // a commit (defect 1), an untracked one is info/excluded as before.
+    let spec = crate::domain::instruction_file::instruction_spec_for_cli(cli_name);
+    crate::domain::instruction_file::write_protocol_file(&worktree_path, &spec, protocol_content)
+        .await?;
 
     Ok(Sandbox {
         id: sandbox_id.to_string(),
@@ -236,40 +222,6 @@ pub async fn merge_sandbox(sandbox: &Sandbox) -> Result<MergeOutcome> {
         }
     } else {
         Ok(MergeOutcome::MergeFailed(stderr.to_string()))
-    }
-}
-
-/// Append `pattern` to the worktree's git exclude file so a broad `git add`
-/// in a graph/session node cannot pull the (uncommitted) instruction file into
-/// a commit. Best-effort: a failure here just loses that one safeguard.
-async fn exclude_from_worktree(worktree_path: &std::path::Path, pattern: &str) {
-    let Ok(output) = tokio::process::Command::new("git")
-        .args(["rev-parse", "--git-path", "info/exclude"])
-        .current_dir(worktree_path)
-        .output()
-        .await
-    else {
-        return;
-    };
-    if !output.status.success() {
-        return;
-    }
-    let rel = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if rel.is_empty() {
-        return;
-    }
-    let exclude_path = worktree_path.join(rel);
-    if let Some(parent) = exclude_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let mut existing = std::fs::read_to_string(&exclude_path).unwrap_or_default();
-    if !existing.lines().any(|l| l.trim() == pattern) {
-        if !existing.is_empty() && !existing.ends_with('\n') {
-            existing.push('\n');
-        }
-        existing.push_str(pattern);
-        existing.push('\n');
-        let _ = std::fs::write(&exclude_path, existing);
     }
 }
 
@@ -771,7 +723,10 @@ mod tests {
         assert!(sandbox.worktree_path.join("AGENTS.md").exists());
         let instr_content =
             std::fs::read_to_string(sandbox.worktree_path.join("AGENTS.md")).unwrap();
-        assert_eq!(instr_content, "PROTOCOL_CONTENT");
+        assert_eq!(
+            instr_content,
+            crate::domain::instruction_file::amend_with_protocol("", "PROTOCOL_CONTENT")
+        );
         assert!(sandbox.sandbox_branch.starts_with("canopy/sandbox-"));
         assert_eq!(sandbox.base_branch, "main");
         assert_eq!(sandbox.cli_name, "opencode");
@@ -796,7 +751,7 @@ mod tests {
         let sb_claude = create_sandbox(&repo_path, "claude", "CLAUDE_PROTOCOL")
             .await
             .expect("create claude sandbox");
-        assert!(sb_claude.worktree_path.join("CLAUDE.md").exists());
+        assert!(sb_claude.worktree_path.join("AGENTS.md").exists());
         remove_sandbox(&sb_claude).await.ok();
 
         let sb_gemini = create_sandbox(&repo_path, "gemini", "GEMINI_PROTOCOL")
@@ -1136,5 +1091,166 @@ mod tests {
             err.contains("failed: boom"),
             "error must name reason: {err}"
         );
+    }
+
+    // ── CB80: instruction file is an idempotent amend of the registry target ──
+
+    fn git_stdout(dir: &std::path::Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@test.com")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@test.com")
+            .output()
+            .expect("git command");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).to_string()
+    }
+
+    #[tokio::test]
+    async fn tracked_claude_md_is_amended_and_skip_worktree() {
+        use crate::domain::instruction_file::amend_with_protocol;
+
+        let repo = init_test_repo();
+        commit_file(repo.path(), "CLAUDE.md", "# Project rules\n", "add claude");
+        commit_file(repo.path(), "AGENTS.md", "# Agents\n", "add agents");
+        let repo_path = repo.path().to_string_lossy().to_string();
+
+        let sandbox = create_sandbox(&repo_path, "claude", "PROTOCOL")
+            .await
+            .expect("create sandbox");
+        let wt = &sandbox.worktree_path;
+
+        assert_eq!(
+            std::fs::read_to_string(wt.join("CLAUDE.md")).unwrap(),
+            amend_with_protocol("# Project rules\n", "PROTOCOL")
+        );
+        assert_eq!(
+            std::fs::read_to_string(wt.join("AGENTS.md")).unwrap(),
+            "# Agents\n"
+        );
+
+        let status = git_stdout(wt, &["status", "--porcelain"]);
+        assert!(
+            status.trim().is_empty(),
+            "worktree status not clean: {status}"
+        );
+
+        run_git(wt, &["add", "-A"]);
+        let staged = git_stdout(wt, &["diff", "--cached", "--name-only"]);
+        assert!(staged.trim().is_empty(), "protocol got staged: {staged}");
+
+        remove_sandbox(&sandbox).await.ok();
+    }
+
+    #[tokio::test]
+    async fn claude_sandbox_amends_agents_md_when_no_claude_file() {
+        use crate::domain::instruction_file::amend_with_protocol;
+
+        let repo = init_test_repo();
+        commit_file(repo.path(), "AGENTS.md", "# Agents\n", "add agents");
+        let repo_path = repo.path().to_string_lossy().to_string();
+
+        let sandbox = create_sandbox(&repo_path, "claude", "PROTOCOL")
+            .await
+            .expect("create sandbox");
+        let wt = &sandbox.worktree_path;
+
+        assert_eq!(
+            std::fs::read_to_string(wt.join("AGENTS.md")).unwrap(),
+            amend_with_protocol("# Agents\n", "PROTOCOL")
+        );
+        assert!(!wt.join("CLAUDE.md").exists());
+
+        remove_sandbox(&sandbox).await.ok();
+    }
+
+    #[tokio::test]
+    async fn codex_sandbox_creates_and_excludes_agents_md() {
+        use crate::domain::instruction_file::amend_with_protocol;
+
+        let repo = init_test_repo();
+        let repo_path = repo.path().to_string_lossy().to_string();
+
+        let sandbox = create_sandbox(&repo_path, "codex", "PROTOCOL")
+            .await
+            .expect("create sandbox");
+        let wt = &sandbox.worktree_path;
+
+        assert_eq!(
+            std::fs::read_to_string(wt.join("AGENTS.md")).unwrap(),
+            amend_with_protocol("", "PROTOCOL")
+        );
+
+        let status = git_stdout(wt, &["status", "--porcelain"]);
+        assert!(
+            !status.contains("AGENTS.md"),
+            "created AGENTS.md is not excluded: {status}"
+        );
+
+        run_git(wt, &["add", "-A"]);
+        let staged = git_stdout(wt, &["diff", "--cached", "--name-only"]);
+        assert!(
+            staged.trim().is_empty(),
+            "created file got staged: {staged}"
+        );
+
+        remove_sandbox(&sandbox).await.ok();
+    }
+
+    #[tokio::test]
+    async fn running_the_write_twice_leaves_target_identical() {
+        use crate::domain::instruction_file::{
+            instruction_spec_for_cli, write_protocol_file, PROTOCOL_BEGIN,
+        };
+
+        let repo = init_test_repo();
+        commit_file(repo.path(), "CLAUDE.md", "# Rules\n", "add claude");
+        let repo_path = repo.path().to_string_lossy().to_string();
+
+        let sandbox = create_sandbox(&repo_path, "claude", "PROTOCOL")
+            .await
+            .expect("create sandbox");
+        let wt = &sandbox.worktree_path;
+        let c1 = std::fs::read_to_string(wt.join("CLAUDE.md")).unwrap();
+
+        let spec = instruction_spec_for_cli("claude");
+        write_protocol_file(wt, &spec, "PROTOCOL")
+            .await
+            .expect("second write");
+        let c2 = std::fs::read_to_string(wt.join("CLAUDE.md")).unwrap();
+
+        assert_eq!(c1, c2);
+        assert_eq!(c1.matches(PROTOCOL_BEGIN).count(), 1);
+
+        remove_sandbox(&sandbox).await.ok();
+    }
+
+    #[tokio::test]
+    async fn stale_protocol_block_is_replaced_not_duplicated() {
+        use crate::domain::instruction_file::{amend_with_protocol, PROTOCOL_BEGIN};
+
+        let repo = init_test_repo();
+        let stale = amend_with_protocol("# Rules\n", "OLD_PROTOCOL");
+        commit_file(repo.path(), "CLAUDE.md", &stale, "add stale claude");
+        let repo_path = repo.path().to_string_lossy().to_string();
+
+        let sandbox = create_sandbox(&repo_path, "claude", "NEW_PROTOCOL")
+            .await
+            .expect("create sandbox");
+        let wt = &sandbox.worktree_path;
+
+        let content = std::fs::read_to_string(wt.join("CLAUDE.md")).unwrap();
+        assert_eq!(content, amend_with_protocol("# Rules\n", "NEW_PROTOCOL"));
+        assert_eq!(content.matches(PROTOCOL_BEGIN).count(), 1);
+
+        remove_sandbox(&sandbox).await.ok();
     }
 }

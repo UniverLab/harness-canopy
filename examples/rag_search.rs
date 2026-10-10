@@ -89,6 +89,8 @@ mod setup_module {
             #[serde(default)]
             pub instruction_file: Option<String>,
             #[serde(default)]
+            pub instruction_precedence: Vec<String>,
+            #[serde(default)]
             pub cli: Option<serde_json::Value>,
         }
 
