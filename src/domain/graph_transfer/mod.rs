@@ -1699,13 +1699,33 @@ mod tests {
     }
 
     /// CM36: parallel still caps at 8 — the same shape with kind parallel is
-    /// refused once it exceeds 8 members.
+    /// refused once it exceeds 8 members, and the error names the kind.
     #[test]
     fn import_parallel_rejects_9_members() {
         let mut doc = make_twelve_member_doc(Some("parallel"));
         doc.ensembles[0].members.truncate(9);
         let err = build_import_plan(&doc, "g").unwrap_err();
         assert!(err.contains("2-8 members"), "{err}");
+        assert!(err.contains("parallel"), "{err}");
+    }
+
+    /// CM36 FR2: a sequential import refusal names the kind, e.g. a 17-member
+    /// round_robin is refused with `2-16` and `round_robin` in the message.
+    #[test]
+    fn import_round_robin_names_kind_when_over_16() {
+        let mut doc = make_twelve_member_doc(Some("round_robin"));
+        doc.ensembles[0]
+            .members
+            .extend((0..5).map(|_| GraphExportEnsembleMember {
+                platform: Some("claude".to_string()),
+                model: None,
+                prompt_override: None,
+                timeout_minutes: None,
+            }));
+        let err = build_import_plan(&doc, "g").unwrap_err();
+        assert!(err.contains("2-16 members"), "{err}");
+        assert!(err.contains("round_robin"), "{err}");
+        assert!(err.contains("17"), "{err}");
     }
 
     /// CM24: a negative `quorum_grace_minutes` is refused on import with the

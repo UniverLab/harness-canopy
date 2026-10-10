@@ -54,8 +54,9 @@ pub(super) fn validate_import_ensemble_shape(
     let (min_members, max_members) = member_bounds(import_kind);
     if doc_ensemble.members.len() < min_members || doc_ensemble.members.len() > max_members {
         return Err(format!(
-            "Ensemble '{}' must have {min_members}-{max_members} members, got {}.",
+            "Ensemble '{}' (kind {}) must have {min_members}-{max_members} members, got {}.",
             doc_ensemble.name,
+            import_kind.as_str(),
             doc_ensemble.members.len()
         ));
     }

@@ -90,15 +90,26 @@ impl TaskTriggerHandler {
         // FR3: a kind change may tighten the member-count ceiling (only
         // switching TO parallel, max 8, can). Refuse before any write so a
         // 12-member round_robin cannot silently become an over-cap parallel
-        // ensemble that only misbehaves at dispatch time. The minimum is
-        // enforced at creation, so it is not re-checked here.
+        // ensemble that only misbehaves at dispatch time. This checks the
+        // RESULTING member count (params.members when the call also resizes,
+        // else the stored count) against the effective kind — a combined
+        // shrink-to-8 plus switch-to-parallel is accepted, only an over-cap
+        // result is refused. A kind-only switch that leaves an over-cap
+        // count is refused here; a members-only resize to an over-cap count
+        // is refused below in `replace_ensemble_member_set` with the same
+        // message form.
+        let resulting_member_count = params
+            .members
+            .as_ref()
+            .map(|m| m.len())
+            .unwrap_or(details.members.len());
         let (min_for_effective, max_for_effective) =
             crate::domain::graphs::member_bounds(effective_kind);
-        if details.members.len() > max_for_effective {
+        if resulting_member_count > max_for_effective {
             return Ok(error_result(&format!(
                 "A {} ensemble must have {min_for_effective}-{max_for_effective} members, got {}.",
                 effective_kind.as_str(),
-                details.members.len()
+                resulting_member_count
             )));
         }
 

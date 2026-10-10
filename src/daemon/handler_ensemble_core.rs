@@ -103,6 +103,20 @@ impl TaskTriggerHandler {
                 }
             },
         };
+        // Blueprint-supplied members bypass `validate_ensemble_members` above
+        // (they are already `EnsembleMemberSpec`), so enforce the requested
+        // kind's bounds here for both paths — a 12-member blueprint used
+        // with kind parallel is refused exactly like 12 explicit members.
+        {
+            let (min, max) = crate::domain::graphs::member_bounds(kind);
+            if members.len() < min || members.len() > max {
+                return Ok(error_result(&format!(
+                    "A {} ensemble must have {min}-{max} members, got {}.",
+                    kind.as_str(),
+                    members.len()
+                )));
+            }
+        }
         let condition = match validate_edge_condition(params.condition.trim()) {
             Ok(c) => c,
             Err(e) => return Ok(error_result(&e)),
