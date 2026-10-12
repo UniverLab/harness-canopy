@@ -790,12 +790,23 @@ fn tui_notice_silent_on_rate_limit() {
 }
 
 #[test]
-fn install_script_silent_on_api_403() {
+fn redirect_garbage_tag_falls_back_to_api() {
+    let fake = RedirectFake {
+        redirect: Some("nightly".to_string()),
+        api_calls: Cell::new(0),
+        body: r#"[{"tag_name":"v3.0.1","prerelease":false,"draft":false}]"#.to_string(),
+        api_error: None,
+    };
+    let result = super::resolve_latest_stable_with(&fake, "3.0.0").unwrap();
+    assert_eq!(result, Some("v3.0.1".to_string()));
+    assert_eq!(fake.api_calls.get(), 1);
+}
+
+fn run_install_script_with_curl_stub(stub: &str) -> (std::process::Output, String) {
     let tmp = tempfile::tempdir().unwrap();
     let bin_dir = tmp.path().join("bin");
     std::fs::create_dir_all(&bin_dir).unwrap();
     let stub_path = bin_dir.join("curl");
-    let stub = "#!/bin/sh\nif echo \"$*\" | grep -q releases/latest; then echo \"https://github.com/UniverLab/harness-canopy/releases/tag/v9.9.9\"; elif echo \"$*\" | grep -q api.github.com; then echo \"curl: (22) The requested URL returned error: 403\" >&2; exit 22; else exit 1; fi".to_string();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -806,14 +817,24 @@ fn install_script_silent_on_api_403() {
     {
         std::fs::write(&stub_path, stub).unwrap();
     }
+    let log_path = tmp.path().join("curl.log");
     let script = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/install.sh");
     let real_path = std::env::var("PATH").unwrap_or_default();
     let output = std::process::Command::new("sh")
         .arg(script)
         .env("PATH", format!("{}:{}", bin_dir.display(), real_path))
         .env("HOME", tmp.path())
+        .env("CURL_LOG", &log_path)
         .output()
         .expect("failed to run install script");
+    let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+    (output, log)
+}
+
+#[test]
+fn install_script_redirect_first_api_never_called() {
+    let stub = "#!/bin/sh\necho \"$*\" >> \"$CURL_LOG\"\nif echo \"$*\" | grep -q releases/latest; then echo \"https://github.com/UniverLab/harness-canopy/releases/tag/v9.9.9\"; elif echo \"$*\" | grep -q api.github.com; then echo \"curl: (22) The requested URL returned error: 403\" >&2; exit 22; else exit 1; fi";
+    let (output, log) = run_install_script_with_curl_stub(stub);
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -825,11 +846,55 @@ fn install_script_silent_on_api_403() {
         "stdout must contain resolved version: {stdout}"
     );
     assert!(
+        !log.contains("api.github.com"),
+        "API fallback must never be called when the redirect works: {log}"
+    );
+    assert!(
+        log.contains("releases/latest"),
+        "redirect must be tried first: {log}"
+    );
+    assert!(
         stderr.contains("Download failed"),
-        "resolution must succeed past both lookups, then download fails: {stderr}"
+        "resolution must succeed, then download fails: {stderr}"
     );
     assert!(
         !output.status.success(),
         "script should exit nonzero (download 404)"
+    );
+}
+
+#[test]
+fn install_script_silent_on_api_403() {
+    // Redirect fails, API answers 403 (noisy stderr like real curl, and a
+    // `-w %{http_code}` style "403" on stdout with a failing exit).
+    let stub = "#!/bin/sh\necho \"$*\" >> \"$CURL_LOG\"\nif echo \"$*\" | grep -q releases/latest; then echo \"curl: (22) The requested URL returned error: 404\" >&2; exit 22; elif echo \"$*\" | grep -q api.github.com; then echo \"403\"; echo \"curl: (22) The requested URL returned error: 403\" >&2; exit 22; else exit 1; fi";
+    let (output, log) = run_install_script_with_curl_stub(stub);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("curl:"),
+        "stderr must not contain 'curl:': {stderr}"
+    );
+    assert!(
+        stderr.contains("GitHub rate limit reached"),
+        "403 must name the rate limit: {stderr}"
+    );
+    assert!(
+        !output.status.success(),
+        "script should exit nonzero (rate limited)"
+    );
+    let lines: Vec<&str> = log.lines().collect();
+    assert_eq!(lines.len(), 2, "redirect then API, nothing else: {log}");
+    assert!(
+        lines[0].contains("releases/latest"),
+        "redirect must be tried first: {log}"
+    );
+    assert!(
+        lines[1].contains("api.github.com"),
+        "API must be the fallback: {log}"
+    );
+    assert!(
+        !stdout.contains("latest stable"),
+        "no version may be resolved on 403: {stdout}"
     );
 }
