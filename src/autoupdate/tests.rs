@@ -608,6 +608,67 @@ fn install_with_unsupported_target_errors_before_downloading() {
     assert!(!downloader.called.get());
 }
 
+#[test]
+fn check_exit_2_on_lookup_failure() {
+    let downloader = RecordingDownloader {
+        called: Cell::new(false),
+        bytes: Vec::new(),
+    };
+    let daemon = FakeDaemon {
+        running: false,
+        managed: false,
+        restarted: Cell::new(false),
+        stopped: Cell::new(false),
+        started: Cell::new(false),
+    };
+    let deps = super::UpdateDeps {
+        current: "3.0.0",
+        releases: Err("network is down".to_string()),
+        exe: Path::new("/tmp/canopy-update-test/canopy"),
+        cargo_bin: Path::new("/tmp/canopy-update-test/not-cargo"),
+        target: Ok("x86_64-unknown-linux-gnu"),
+        downloader: &downloader,
+        confirm: &|| panic!("check must not prompt"),
+        daemon: &daemon,
+        graph_running: false,
+        confirm_restart: &|| panic!("check must not prompt"),
+    };
+    assert_eq!(super::run_update_with(true, false, &deps).unwrap(), 2);
+    assert!(!downloader.called.get());
+}
+
+#[test]
+fn install_exit_2_on_lookup_failure() {
+    let downloader = RecordingDownloader {
+        called: Cell::new(false),
+        bytes: Vec::new(),
+    };
+    let daemon = FakeDaemon {
+        running: true,
+        managed: false,
+        restarted: Cell::new(false),
+        stopped: Cell::new(false),
+        started: Cell::new(false),
+    };
+    let deps = super::UpdateDeps {
+        current: "3.0.0",
+        releases: Err("network is down".to_string()),
+        exe: Path::new("/tmp/canopy-update-test/canopy"),
+        cargo_bin: Path::new("/tmp/canopy-update-test/not-cargo"),
+        target: Ok("x86_64-unknown-linux-gnu"),
+        downloader: &downloader,
+        confirm: &|| panic!("failed lookup must not prompt"),
+        daemon: &daemon,
+        graph_running: false,
+        confirm_restart: &|| panic!("failed lookup must not prompt"),
+    };
+    assert_eq!(super::run_update_with(false, true, &deps).unwrap(), 2);
+    assert!(!downloader.called.get());
+    assert!(!daemon.stopped.get());
+    assert!(!daemon.started.get());
+    assert!(!daemon.restarted.get());
+}
+
 struct FailingFetcher;
 
 impl super::ReleaseFetcher for FailingFetcher {

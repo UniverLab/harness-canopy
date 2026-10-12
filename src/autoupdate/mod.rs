@@ -135,12 +135,19 @@ pub struct UpdateDeps<'a> {
 /// Check for and, after consent, install the latest stable release.
 ///
 /// The returned integer is the process exit code: `0` means no update was
-/// installed (including a declined prompt or a cargo-installed binary), and
-/// `1` is reserved for an available update in `--check` mode or a missing
-/// binary in the downloaded archive.
+/// installed (including a declined prompt or a cargo-installed binary),
+/// `1` means an update is available in `--check` mode (or a missing binary
+/// in the downloaded archive), and `2` means the release lookup could not
+/// complete (network, DNS, TLS, HTTP error, or unparsable response).
 pub fn run_update(check: bool, yes: bool) -> Result<i32> {
     let current = current_version();
-    let releases = fetch_releases_for_update(&RealFetcher, current)?;
+    let releases = match fetch_releases_for_update(&RealFetcher, current) {
+        Ok(releases) => releases,
+        Err(error) => {
+            eprintln!("canopy update: unable to check for updates: {error:#}");
+            return Ok(2);
+        }
+    };
 
     // The first pass is intentionally limited to the network result.  The
     // same hermetic core below owns all user-visible output and consent, so
@@ -220,10 +227,13 @@ fn run_update_core(
     record_check_after_replace: bool,
 ) -> Result<i32> {
     let current = deps.current;
-    let releases = deps
-        .releases
-        .as_ref()
-        .map_err(|error| anyhow!("release lookup failed: {error}"))?;
+    let releases = match deps.releases.as_ref() {
+        Ok(releases) => releases,
+        Err(error) => {
+            eprintln!("canopy update: unable to check for updates: release lookup failed: {error}");
+            return Ok(2);
+        }
+    };
     let latest = select_latest_stable(releases, current);
 
     let Some(latest) = latest else {

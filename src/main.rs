@@ -66,7 +66,7 @@ enum Commands {
     },
     /// Check for a newer stable release and install it (asks first; refuses cargo installs).
     Update {
-        /// Only print whether an update exists; exit 1 when one does, 0 otherwise. Changes nothing.
+        /// Only print whether an update exists; exit 0 up to date, 1 update available, 2 check failed. Changes nothing.
         #[arg(long)]
         check: bool,
         /// Skip the confirmation prompt.

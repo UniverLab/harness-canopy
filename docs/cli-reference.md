@@ -31,7 +31,7 @@ to install)).
 | Command | Description |
 |---|---|
 | `canopy update` | Check the latest stable release, ask `Update to <tag>? [y/N]` (default no), and install it atomically; prints `canopy <current> → <latest>` or `canopy <current> is up to date` |
-| `canopy update --check` | Print the update status without changing anything; exits 1 when an update exists and 0 when up to date |
+| `canopy update --check` | Print the update status without changing anything; exits 0 when up to date, 1 when an update exists, and 2 when the check could not complete (network, DNS, TLS, HTTP error, or unparsable response — one stderr line names the cause) |
 | `canopy update --yes` | Install without the confirmation prompt |
 
 A cargo-installed binary is never overwritten: `canopy update` prints
@@ -41,6 +41,8 @@ with `systemctl --user restart canopy.service`; an unmanaged daemon uses the
 normal `canopy daemon stop/start` path. If a graph is running, update asks
 before restarting and otherwise leaves the daemon untouched and prints the
 command to run later.
+
+Plain `canopy update` exits 2 on the same lookup errors.
 
 ## Setup & diagnostics
 
