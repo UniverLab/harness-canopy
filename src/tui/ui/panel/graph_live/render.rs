@@ -43,7 +43,9 @@ pub(super) fn render_graph_live_view(
         Style::default().fg(ctx.theme.dim_text),
     )));
     let graph_start_line = lines.len() as u16;
-    let graph_offset = push_graph_lines(&mut lines, state, ctx, area.width).flatten();
+    let (graph_offset, graph_span) = push_graph_lines(&mut lines, state, ctx, area.width).unzip();
+    let graph_offset = graph_offset.flatten();
+    let graph_span = graph_span.flatten();
     lines.push(Line::from(""));
     lines.extend(footer_lines(
         state,
@@ -64,6 +66,7 @@ pub(super) fn render_graph_live_view(
         graph_start_line,
         clamped_from_input,
         area.height,
+        graph_span,
     );
     let clamped_scroll = scroll.min(max_scroll);
 
@@ -106,7 +109,7 @@ fn push_graph_lines(
     state: &GraphLiveState,
     ctx: &LiveViewContext,
     area_width: u16,
-) -> Option<Option<u16>> {
+) -> Option<(Option<u16>, Option<u16>)> {
     if state.effective_nodes.is_empty() {
         lines.push(Line::from(Span::styled(
             "  (no nodes yet)",
@@ -122,8 +125,9 @@ fn push_graph_lines(
         ctx.theme,
     );
     let offset = result.highlighted_offset;
+    let span = result.highlighted_span;
     lines.extend(result.lines);
-    Some(offset)
+    Some((offset, span))
 }
 
 /// CT8: who owns the scroll.
@@ -145,29 +149,44 @@ fn live_view_scroll(
     graph_start_line: u16,
     clamped_from_input: u16,
     area_height: u16,
+    graph_span: Option<u16>,
 ) -> (u16, Option<String>) {
-    let recenter = |offset: Option<u16>| match offset {
-        Some(offset) => ensure_visible(
-            graph_start_line + offset,
-            3,
-            clamped_from_input,
-            area_height,
-        ),
-        None => clamped_from_input,
-    };
+    let span = graph_span.unwrap_or(3);
     if ctx.follow {
         let node_changed = ctx.highlighted_node_id != ctx.follow_anchor;
         let scroll = if node_changed {
-            recenter(graph_offset)
+            match graph_offset {
+                Some(offset) => centre_on(graph_start_line + offset, span, area_height),
+                None => clamped_from_input,
+            }
         } else {
             clamped_from_input
         };
         return (scroll, ctx.highlighted_node_id.map(str::to_string));
     }
     (
-        recenter(graph_offset),
+        match graph_offset {
+            Some(offset) => ensure_visible(
+                graph_start_line + offset,
+                span,
+                clamped_from_input,
+                area_height,
+            ),
+            None => clamped_from_input,
+        },
         ctx.follow_anchor.map(str::to_string),
     )
+}
+
+fn centre_on(start: u16, span: u16, height: u16) -> u16 {
+    if height == 0 {
+        return start;
+    }
+    if span <= height {
+        start.saturating_add(span / 2).saturating_sub(height / 2)
+    } else {
+        start.saturating_sub(1)
+    }
 }
 
 fn ensure_visible(start: u16, span: u16, scroll: u16, height: u16) -> u16 {
@@ -569,4 +588,184 @@ fn footer_lines(
     }
 
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::graphs::{GraphNode, GraphNodeKind, GraphStatus};
+    use crate::tui::app::graph_live_state::{EnsembleLiveInfo, EnsembleMemberLiveInfo};
+    use serde_json::json;
+
+    fn blank_state() -> GraphLiveState {
+        GraphLiveState {
+            graph_id: String::new(),
+            graph_name: String::new(),
+            graph_status: GraphStatus::Running,
+            workdir: String::new(),
+            trigger_type: "manual".to_string(),
+            schedule_expr: None,
+            watch_path: None,
+            autorun_at: None,
+            spec_queue: Vec::new(),
+            done_count: 0,
+            total_count: 0,
+            current_spec_id: None,
+            effective_nodes: Vec::new(),
+            effective_edges: Vec::new(),
+            ensembles: Vec::new(),
+            router_taken_routes: std::collections::HashMap::new(),
+            current_node_id: None,
+            current_node_status: None,
+            current_node_started_at: None,
+            current_node_iteration: None,
+            current_node_output_tail: None,
+        }
+    }
+
+    fn scroll_ctx<'a>(
+        state: &'a GraphLiveState,
+        node_info: &'a NodeRunInfo,
+        theme: &'a Theme,
+        follow: bool,
+        highlighted_node_id: Option<&'a str>,
+        follow_anchor: Option<&'a str>,
+        scroll: u16,
+    ) -> LiveViewContext<'a> {
+        LiveViewContext {
+            state,
+            follow,
+            follow_anchor,
+            highlighted_node_id,
+            node_info,
+            blocked: false,
+            now: Utc::now(),
+            theme,
+            selected_spec_id: None,
+            spec_scroll: 0,
+            scroll,
+        }
+    }
+
+    fn agent_node(id: &str, position: i64) -> GraphNode {
+        GraphNode {
+            id: id.to_string(),
+            spec_id: Some("spec-1".to_string()),
+            graph_id: None,
+            name: id.to_string(),
+            kind: GraphNodeKind::Agent,
+            config: json!({}),
+            position,
+            created_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn auto_follow_centres_tall_box_in_panel() {
+        // (a) Forward transition to a 10-line box in a 20-line panel: the
+        // box's middle line must sit on panel row 10 ± 1.
+        let state = blank_state();
+        let info = NodeRunInfo::default();
+        let theme = Theme::classic();
+        let ctx = scroll_ctx(&state, &info, &theme, true, Some("new"), Some("old"), 0);
+        let (scroll, anchor) = live_view_scroll(&ctx, Some(10), 0, 0, 20, Some(10));
+        assert_eq!(scroll, 5);
+        assert_eq!(anchor.as_deref(), Some("new"));
+        for middle in [14u16, 15u16] {
+            let row = middle - scroll;
+            assert!(
+                (9..=11).contains(&row),
+                "box middle line {middle} lands on panel row {row}, expected 10 ± 1"
+            );
+        }
+    }
+    // Breaks if: auto-follow keeps the old span-3 `ensure_visible` (which
+    // would leave scroll at 0 and the box hanging off the bottom edge).
+
+    #[test]
+    fn centre_on_taller_than_panel_anchors_top_border() {
+        // (b) A 30-line box in a 20-line panel: top border on row 0 or 1.
+        assert_eq!(centre_on(5, 30, 20), 4);
+        assert_eq!(5 - centre_on(5, 30, 20), 1);
+        assert_eq!(centre_on(0, 30, 20), 0);
+    }
+    // Breaks if: `centre_on` uses `start` instead of `start.saturating_sub(1)`
+    // for the taller-than-panel case.
+
+    #[test]
+    fn auto_follow_near_end_of_content_clamps_without_overscroll() {
+        // (c) A box near the end of the content: the centred scroll is
+        // clamped to `max_scroll`, exactly as `render_graph_live_view` does.
+        let state = blank_state();
+        let info = NodeRunInfo::default();
+        let theme = Theme::classic();
+        let ctx = scroll_ctx(&state, &info, &theme, true, Some("last"), Some("prev"), 0);
+        let (scroll, _) = live_view_scroll(&ctx, Some(35), 0, 0, 20, Some(5));
+        assert_eq!(scroll, 27);
+        assert_eq!(scroll.min(20), 20);
+    }
+    // Breaks if: the centred scroll overshoots past `max_scroll`.
+
+    #[test]
+    fn auto_follow_keeps_user_scroll_when_node_unchanged() {
+        // (d) CT8 regression: a redraw without a node change keeps the
+        // user's own scroll.
+        let state = blank_state();
+        let info = NodeRunInfo::default();
+        let theme = Theme::classic();
+        let ctx = scroll_ctx(&state, &info, &theme, true, Some("m1"), Some("m1"), 12);
+        let (scroll, anchor) = live_view_scroll(&ctx, Some(5), 3, 12, 20, Some(10));
+        assert_eq!(scroll, 12);
+        assert_eq!(anchor.as_deref(), Some("m1"));
+    }
+    // Breaks if: the `node_changed` guard is removed and auto-follow
+    // re-centres every frame again.
+
+    #[test]
+    fn manual_selection_brings_whole_tall_box_into_view() {
+        // (e) Manual selection of a 10-line box below the viewport: all 10
+        // lines end up visible.
+        let state = blank_state();
+        let info = NodeRunInfo::default();
+        let theme = Theme::classic();
+        let ctx = scroll_ctx(&state, &info, &theme, false, Some("big"), None, 0);
+        let (scroll, _) = live_view_scroll(&ctx, Some(30), 3, 0, 20, Some(10));
+        assert_eq!(scroll, 23);
+        assert!(
+            33 >= scroll && 43 <= scroll + 20,
+            "box lines 33..43 must sit inside viewport {scroll}..{}",
+            scroll + 20
+        );
+    }
+    // Breaks if: the manual branch falls back to the hardcoded span of 3
+    // (which would scroll to 16 and leave most of the box cut off).
+
+    #[test]
+    fn highlighted_span_measures_plain_and_ensemble_boxes() {
+        let theme = Theme::classic();
+        let mut state = blank_state();
+        state.effective_nodes = vec![agent_node("n", 0)];
+        let plain = graph_lines(&state, Some("n"), true, 80, &theme);
+        assert_eq!(plain.highlighted_offset, Some(0));
+        assert_eq!(plain.highlighted_span, Some(3));
+
+        state.effective_nodes = vec![agent_node("m0", 0), agent_node("j", 1)];
+        state.ensembles = vec![EnsembleLiveInfo {
+            ensemble_id: "ens".to_string(),
+            name: "Designer".to_string(),
+            join_node_id: "j".to_string(),
+            members: vec![EnsembleMemberLiveInfo {
+                node_id: "m0".to_string(),
+                label: "m0".to_string(),
+                status: None,
+            }],
+            straggler_timeout_minutes: None,
+            quorum_grace_minutes: None,
+        }];
+        let collapsed = graph_lines(&state, Some("m0"), true, 80, &theme);
+        assert_eq!(collapsed.highlighted_offset, Some(0));
+        assert_eq!(collapsed.highlighted_span, Some(4));
+    }
+    // Breaks if: `highlighted_span` is not measured after `dfs_push_box`
+    // (plain box 3 lines, 1-member ensemble box 4 lines).
 }

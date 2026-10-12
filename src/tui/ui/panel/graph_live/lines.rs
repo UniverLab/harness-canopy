@@ -215,6 +215,7 @@ fn ensemble_member_status_tag(
 pub(super) struct GraphLinesResult<'a> {
     pub(super) lines: Vec<Line<'a>>,
     pub(super) highlighted_offset: Option<u16>,
+    pub(super) highlighted_span: Option<u16>,
 }
 
 /// A collapsed box entry: either a plain node or a whole ensemble.
@@ -257,6 +258,7 @@ pub(super) fn graph_lines(
         return GraphLinesResult {
             lines: Vec::new(),
             highlighted_offset: None,
+            highlighted_span: None,
         };
     }
 
@@ -274,6 +276,7 @@ pub(super) fn graph_lines(
 
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut highlighted_offset: Option<u16> = None;
+    let mut highlighted_span: Option<u16> = None;
     let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // Start DFS from entry
@@ -283,6 +286,7 @@ pub(super) fn graph_lines(
         &ctx,
         &mut lines,
         &mut highlighted_offset,
+        &mut highlighted_span,
         &mut visited,
     );
     // Visit any disconnected components not reached from entry
@@ -299,6 +303,7 @@ pub(super) fn graph_lines(
             &ctx,
             &mut lines,
             &mut highlighted_offset,
+            &mut highlighted_span,
             &mut visited,
         );
     }
@@ -309,6 +314,7 @@ pub(super) fn graph_lines(
     GraphLinesResult {
         lines,
         highlighted_offset,
+        highlighted_span,
     }
 }
 
@@ -455,6 +461,7 @@ fn dfs_visit(
     ctx: &DfsCtx,
     lines: &mut Vec<Line<'static>>,
     highlighted_offset: &mut Option<u16>,
+    highlighted_span: &mut Option<u16>,
     visited: &mut std::collections::HashSet<String>,
 ) {
     if visited.contains(key) {
@@ -463,13 +470,17 @@ fn dfs_visit(
     visited.insert(key.to_string());
     let depth_clamped = depth.min(3);
     let is_hl = dfs_is_highlighted(ctx, key);
+    let box_start = lines.len();
     if is_hl && highlighted_offset.is_none() {
-        *highlighted_offset = Some(lines.len() as u16);
+        *highlighted_offset = Some(box_start as u16);
     }
     let Some(entry) = ctx.nodes.get(key) else {
         return;
     };
     dfs_push_box(lines, ctx, entry, depth_clamped, is_hl);
+    if is_hl && highlighted_span.is_none() {
+        *highlighted_span = Some((lines.len() - box_start) as u16);
+    }
     let Some(edges) = ctx.edges.get(key) else {
         // leaf node still needs spacing before next sibling at same depth
         // Only add blank if not last overall? DFS already pushes blanks per node with edges;
@@ -481,7 +492,15 @@ fn dfs_visit(
     dfs_edge_lines(lines, ctx, key, depth_clamped, edges, visited);
     lines.push(Line::from(""));
     // Recurse into unvisited children in priority order
-    dfs_recurse_children(lines, ctx, depth, edges, highlighted_offset, visited);
+    dfs_recurse_children(
+        lines,
+        ctx,
+        depth,
+        edges,
+        highlighted_offset,
+        highlighted_span,
+        visited,
+    );
 }
 
 /// Whether this entry is the highlighted node (or holds it as a member/join).
@@ -616,12 +635,21 @@ fn dfs_recurse_children(
     depth: usize,
     edges: &[(String, GraphEdgeCondition)],
     highlighted_offset: &mut Option<u16>,
+    highlighted_span: &mut Option<u16>,
     visited: &mut std::collections::HashSet<String>,
 ) {
     for (to_key, _) in edges {
         if visited.contains(to_key.as_str()) {
             continue;
         }
-        dfs_visit(to_key, depth + 1, ctx, lines, highlighted_offset, visited);
+        dfs_visit(
+            to_key,
+            depth + 1,
+            ctx,
+            lines,
+            highlighted_offset,
+            highlighted_span,
+            visited,
+        );
     }
 }
