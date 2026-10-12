@@ -302,7 +302,7 @@ reads the cascade's join output (which names the winner or records "no member pr
 passing verdict") and routes `route:broken` back to the ensemble's entry, `route:exhausted`
 to a scheduler, `route:transient` to a resilience step. The members themselves stay in
 the cascade; only the exits are reworked. See pattern 6's "Routing on why a member failed"
-subsection for the router prompt shape.
+subsection for the full variant.
 
 ### The honest limitation
 
