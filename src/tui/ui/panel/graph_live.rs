@@ -1986,6 +1986,168 @@ mod tests {
     // node-change branch always returns `clamped_from_input`).
 
     #[test]
+    fn ct27_auto_follow_centres_a_tall_ensemble_box_in_the_panel() {
+        // The 2026-10-08 regression, replayed: on the transition
+        // "Lock repo + clear scratch" -> "Designer [8 models]" the panel
+        // scrolled just far enough to park the box's first three lines on the
+        // last visible rows, leaving the remaining six members below the
+        // bottom edge. Auto-follow must bring the whole box into view.
+        let mut state = running_state();
+        state.effective_nodes = vec![
+            GraphNode {
+                id: "kickoff".to_string(),
+                spec_id: Some("spec-1".to_string()),
+                graph_id: None,
+                name: "Lock repo + clear scratch".to_string(),
+                kind: GraphNodeKind::Agent,
+                config: json!({}),
+                position: 0,
+                created_at: Utc::now(),
+            },
+            GraphNode {
+                id: "join1".to_string(),
+                spec_id: Some("spec-1".to_string()),
+                graph_id: None,
+                name: "Designer (quorum)".to_string(),
+                kind: GraphNodeKind::Join,
+                config: json!({}),
+                position: 9,
+                created_at: Utc::now(),
+            },
+            GraphNode {
+                id: "arbiter".to_string(),
+                spec_id: Some("spec-1".to_string()),
+                graph_id: None,
+                name: "Arbiter".to_string(),
+                kind: GraphNodeKind::Agent,
+                config: json!({}),
+                position: 10,
+                created_at: Utc::now(),
+            },
+        ]
+        .into_iter()
+        .chain((0..8).map(|i| GraphNode {
+            id: format!("m{i}"),
+            spec_id: Some("spec-1".to_string()),
+            graph_id: None,
+            name: format!("Designer [{i}]"),
+            kind: GraphNodeKind::Agent,
+            config: json!({}),
+            position: i + 1,
+            created_at: Utc::now(),
+        }))
+        .collect();
+        let mut edges: Vec<GraphEdge> = (0..8)
+            .flat_map(|i| {
+                [
+                    (
+                        "kickoff".to_string(),
+                        format!("m{i}"),
+                        GraphEdgeCondition::Always,
+                    ),
+                    (
+                        format!("m{i}"),
+                        "join1".to_string(),
+                        GraphEdgeCondition::Always,
+                    ),
+                ]
+            })
+            .enumerate()
+            .map(|(i, (from, to, condition))| GraphEdge {
+                id: format!("ee{i}"),
+                spec_id: Some("spec-1".to_string()),
+                graph_id: None,
+                from_node: from,
+                to_node: to,
+                condition,
+            })
+            .collect();
+        edges.push(GraphEdge {
+            id: "ee16".to_string(),
+            spec_id: Some("spec-1".to_string()),
+            graph_id: None,
+            from_node: "join1".to_string(),
+            to_node: "arbiter".to_string(),
+            condition: GraphEdgeCondition::Pass,
+        });
+        state.effective_edges = edges;
+        state.ensembles = vec![ensemble_fixture_with_labels(&[
+            "openrouter/deepseek",
+            "openrouter/qwen",
+            "openrouter/llama",
+            "openrouter/mistral",
+            "openrouter/gemma",
+            "openrouter/phi",
+            "openrouter/yi",
+            "openrouter/grok",
+        ])];
+        state.current_node_id = Some("m0".to_string());
+
+        let text = render_to_text(80, 20, |frame, area| {
+            render_graph_live_view(
+                frame,
+                area,
+                &LiveViewContext {
+                    state: &state,
+                    follow: true,
+                    // The engine just moved off the previous node, so this
+                    // frame is a node change and must re-centre.
+                    follow_anchor: Some("kickoff"),
+                    highlighted_node_id: Some("m0"),
+                    node_info: &NodeRunInfo::default(),
+                    blocked: false,
+                    now: Utc::now(),
+                    theme: &Theme::classic(),
+                    selected_spec_id: None,
+                    spec_scroll: 0,
+                    scroll: 0,
+                },
+            );
+        });
+
+        // The collapsed box is titled with its member count...
+        assert!(
+            text.contains("Implementer [8 models]"),
+            "ensemble box title missing in:\n{text}"
+        );
+        // ...and EVERY member row is on screen, not only the first three.
+        for label in [
+            "openrouter/deepseek",
+            "openrouter/qwen",
+            "openrouter/llama",
+            "openrouter/mistral",
+            "openrouter/gemma",
+            "openrouter/phi",
+            "openrouter/yi",
+            "openrouter/grok",
+        ] {
+            assert!(
+                text.contains(label),
+                "member {label} of the followed ensemble is below the bottom edge:\n{text}"
+            );
+        }
+        // The box is complete on screen: its closing border renders directly
+        // under the last member row, and the node that follows it is visible
+        // below that border.
+        let rows: Vec<&str> = text.lines().collect();
+        let last_member_row = rows
+            .iter()
+            .position(|row| row.contains("openrouter/grok"))
+            .expect("last member row must be on screen");
+        assert!(
+            rows[last_member_row + 1].contains('└'),
+            "ensemble box bottom border must sit under the last member row:\n{text}"
+        );
+        assert!(
+            text.contains("Arbiter"),
+            "the node after the followed ensemble must be visible below it:\n{text}"
+        );
+    }
+    // Breaks if: auto-follow returns to the span-3 `ensure_visible` (only the
+    // title and the first two member rows would be on the last visible
+    // lines), or if `highlighted_span` stops measuring the ensemble box.
+
+    #[test]
     fn ct8_auto_follow_ignores_status_or_elapsed_change_for_same_node() {
         let mut state = running_state();
         state.effective_nodes = many_nodes(30);

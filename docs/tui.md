@@ -35,8 +35,11 @@ The dialog includes a CLI picker, model picker, seed identity selector
   temperatures with amber/red alert thresholds. Under WSL, metrics come
   from the Windows host via PowerShell.
 - **Live graph view** — real-time graph rendering of the running graph's
-  current spec, auto-following the active node. Manual node inspection
-  shows per-node run info (status, elapsed time, output tail, iteration).
+  current spec, auto-following the active node. When the engine moves to a
+  new node, the view centres that node's whole box (a tall collapsed
+  ensemble included) in the panel; your own scroll is left alone until the
+  next node change. Manual node inspection shows per-node run info (status,
+  elapsed time, output tail, iteration).
   `Esc` toggles between auto-follow and manual mode.
 - **Idle visuals** — Brian's Brain cellular automaton and animated
   kaomoji status messages (whimsg).

@@ -66,6 +66,7 @@ pub(super) fn render_graph_live_view(
         graph_start_line,
         clamped_from_input,
         area.height,
+        max_scroll,
         graph_span,
     );
     let clamped_scroll = scroll.min(max_scroll);
@@ -149,6 +150,7 @@ fn live_view_scroll(
     graph_start_line: u16,
     clamped_from_input: u16,
     area_height: u16,
+    max_scroll: u16,
     graph_span: Option<u16>,
 ) -> (u16, Option<String>) {
     let span = graph_span.unwrap_or(3);
@@ -156,7 +158,7 @@ fn live_view_scroll(
         let node_changed = ctx.highlighted_node_id != ctx.follow_anchor;
         let scroll = if node_changed {
             match graph_offset {
-                Some(offset) => centre_on(graph_start_line + offset, span, area_height),
+                Some(offset) => centre_on(graph_start_line + offset, span, area_height, max_scroll),
                 None => clamped_from_input,
             }
         } else {
@@ -178,15 +180,22 @@ fn live_view_scroll(
     )
 }
 
-fn centre_on(start: u16, span: u16, height: u16) -> u16 {
+/// CT27: place the highlighted box of `span` lines, starting at absolute
+/// line `start`, in the middle of a panel of `height` lines. A box that
+/// fits gets its middle line on the panel's middle line; a box taller than
+/// the panel gets its top border on the first or second visible line so at
+/// least its head is readable. Always clamped to `max_scroll` so it never
+/// scrolls past the content.
+fn centre_on(start: u16, span: u16, height: u16, max_scroll: u16) -> u16 {
     if height == 0 {
-        return start;
+        return start.min(max_scroll);
     }
-    if span <= height {
+    let scroll = if span <= height {
         start.saturating_add(span / 2).saturating_sub(height / 2)
     } else {
         start.saturating_sub(1)
-    }
+    };
+    scroll.min(max_scroll)
 }
 
 fn ensure_visible(start: u16, span: u16, scroll: u16, height: u16) -> u16 {
@@ -668,7 +677,7 @@ mod tests {
         let info = NodeRunInfo::default();
         let theme = Theme::classic();
         let ctx = scroll_ctx(&state, &info, &theme, true, Some("new"), Some("old"), 0);
-        let (scroll, anchor) = live_view_scroll(&ctx, Some(10), 0, 0, 20, Some(10));
+        let (scroll, anchor) = live_view_scroll(&ctx, Some(10), 0, 0, 20, u16::MAX, Some(10));
         assert_eq!(scroll, 5);
         assert_eq!(anchor.as_deref(), Some("new"));
         for middle in [14u16, 15u16] {
@@ -685,9 +694,9 @@ mod tests {
     #[test]
     fn centre_on_taller_than_panel_anchors_top_border() {
         // (b) A 30-line box in a 20-line panel: top border on row 0 or 1.
-        assert_eq!(centre_on(5, 30, 20), 4);
-        assert_eq!(5 - centre_on(5, 30, 20), 1);
-        assert_eq!(centre_on(0, 30, 20), 0);
+        assert_eq!(centre_on(5, 30, 20, u16::MAX), 4);
+        assert_eq!(5 - centre_on(5, 30, 20, u16::MAX), 1);
+        assert_eq!(centre_on(0, 30, 20, u16::MAX), 0);
     }
     // Breaks if: `centre_on` uses `start` instead of `start.saturating_sub(1)`
     // for the taller-than-panel case.
@@ -695,16 +704,24 @@ mod tests {
     #[test]
     fn auto_follow_near_end_of_content_clamps_without_overscroll() {
         // (c) A box near the end of the content: the centred scroll is
-        // clamped to `max_scroll`, exactly as `render_graph_live_view` does.
+        // clamped to `max_scroll` inside `centre_on`, so the view never
+        // scrolls past the content.
         let state = blank_state();
         let info = NodeRunInfo::default();
         let theme = Theme::classic();
         let ctx = scroll_ctx(&state, &info, &theme, true, Some("last"), Some("prev"), 0);
-        let (scroll, _) = live_view_scroll(&ctx, Some(35), 0, 0, 20, Some(5));
-        assert_eq!(scroll, 27);
-        assert_eq!(scroll.min(20), 20);
+        // centre_on(35, 5, 20) = 35 + 2 - 10 = 27, but only 20 lines of
+        // content follow row 0, so it must clamp to 20.
+        assert_eq!(centre_on(35, 5, 20, u16::MAX), 27);
+        let (scroll, _) = live_view_scroll(&ctx, Some(35), 0, 0, 20, 20, Some(5));
+        assert_eq!(scroll, 20, "centred scroll must clamp to max_scroll");
+        assert!(
+            scroll <= 20,
+            "scroll {scroll} overscrolls past max_scroll 20"
+        );
     }
-    // Breaks if: the centred scroll overshoots past `max_scroll`.
+    // Breaks if: `centre_on` drops its `max_scroll` clamp (the unclamped
+    // value 27 would be returned and scroll past the content).
 
     #[test]
     fn auto_follow_keeps_user_scroll_when_node_unchanged() {
@@ -714,7 +731,7 @@ mod tests {
         let info = NodeRunInfo::default();
         let theme = Theme::classic();
         let ctx = scroll_ctx(&state, &info, &theme, true, Some("m1"), Some("m1"), 12);
-        let (scroll, anchor) = live_view_scroll(&ctx, Some(5), 3, 12, 20, Some(10));
+        let (scroll, anchor) = live_view_scroll(&ctx, Some(5), 3, 12, 20, u16::MAX, Some(10));
         assert_eq!(scroll, 12);
         assert_eq!(anchor.as_deref(), Some("m1"));
     }
@@ -729,7 +746,7 @@ mod tests {
         let info = NodeRunInfo::default();
         let theme = Theme::classic();
         let ctx = scroll_ctx(&state, &info, &theme, false, Some("big"), None, 0);
-        let (scroll, _) = live_view_scroll(&ctx, Some(30), 3, 0, 20, Some(10));
+        let (scroll, _) = live_view_scroll(&ctx, Some(30), 3, 0, 20, u16::MAX, Some(10));
         assert_eq!(scroll, 23);
         assert!(
             33 >= scroll && 43 <= scroll + 20,
