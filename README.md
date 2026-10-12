@@ -104,6 +104,10 @@ Full documentation lives in [`docs/`](docs/): installation, quick start, the
 TUI, agents and seed identities, intelligence & sync, graphs, the RAG
 pipeline, all 83 MCP tools, and the complete CLI reference.
 
+## Contributing
+
+docs/ is published at univerlab.org/canopy/docs and holds user documentation only; design records are kept outside the repository.
+
 ---
 
 
