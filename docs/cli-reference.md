@@ -92,6 +92,7 @@ missing.
 | `canopy graph reset <id-or-name>` | Reset a completed/failed graph back to pending (prompts for confirmation) |
 | `canopy graph reset <id-or-name> --specs <id>...` | Reset specific spec ids, even if already completed |
 | `canopy graph reset <id-or-name> --yes` | Skip the confirmation prompt |
+| `canopy graph reset <id-or-name> --clear-notes` | Also delete the reset specs' spec notes (default keeps them) |
 | `canopy graph autorun <id-or-name> --at <iso8601>` | Schedule a one-shot resume at a future time |
 | `canopy graph autorun <id-or-name> --quota-reset-message <text>` | Schedule a resume from a raw CLI quota-limit message |
 | `canopy graph autorun <id-or-name> --cancel` | Cancel a pending autorun schedule |

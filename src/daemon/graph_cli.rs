@@ -138,6 +138,10 @@ pub(crate) enum GraphAction {
         /// reset every non-completed spec, leaving completed ones untouched.
         #[arg(long)]
         specs: Vec<String>,
+        /// Delete the reset specs' spec notes. Default false preserves them
+        /// (notes are keyed by spec, not run, and survive a reset).
+        #[arg(long)]
+        clear_notes: bool,
         /// Skip the confirmation prompt.
         #[arg(long)]
         yes: bool,
@@ -229,8 +233,9 @@ pub(crate) async fn handle_graph_action(
         GraphAction::Reset {
             id_or_name,
             specs,
+            clear_notes,
             yes,
-        } => handle_graph_reset(&db, port_override, &id_or_name, &specs, yes),
+        } => handle_graph_reset(&db, port_override, &id_or_name, &specs, clear_notes, yes),
         GraphAction::Autorun {
             id_or_name,
             at,
@@ -501,6 +506,7 @@ fn handle_graph_reset(
     port_override: Option<u16>,
     id_or_name: &str,
     specs: &[String],
+    clear_notes: bool,
     yes: bool,
 ) -> Result<()> {
     let graphs = db.list_graphs(None, true)?;
@@ -514,6 +520,9 @@ fn handle_graph_reset(
     let mut args = serde_json::json!({ "graph_id": lp.id });
     if !specs.is_empty() {
         args["specs"] = serde_json::json!(specs);
+    }
+    if clear_notes {
+        args["clear_notes"] = serde_json::json!(true);
     }
 
     println!("{}", call_tool(port_override, "graph_reset", &args)?);
@@ -925,10 +934,12 @@ mod tests {
             GraphAction::Reset {
                 id_or_name,
                 specs,
+                clear_notes,
                 yes,
             } => {
                 assert_eq!(id_or_name, "my-graph");
                 assert_eq!(specs, vec!["a".to_string(), "b".to_string()]);
+                assert!(!clear_notes);
                 assert!(yes);
             }
             other => panic!("expected Reset, got {other:?}"),
@@ -1758,6 +1769,7 @@ mod tests {
             Some(port),
             "graph-1",
             &["spec-a".to_string(), "spec-b".to_string()],
+            false,
             true,
         )
         .expect("reset should succeed");
@@ -1772,6 +1784,22 @@ mod tests {
     }
 
     #[test]
+    fn handle_graph_reset_sends_clear_notes_flag() {
+        let (_dir, db) = db_with_graph("graph-1", "my-graph", GraphStatus::Failed);
+        let fake = spawn_fake_daemon(serde_json::json!({
+            "content": [{"type": "text", "text": "Graph 'graph-1' reset."}],
+            "isError": false
+        }));
+        let port: u16 = fake.port.parse().unwrap();
+
+        handle_graph_reset(&db, Some(port), "graph-1", &[], true, true)
+            .expect("reset should succeed");
+
+        let calls = fake.recorded_calls();
+        assert_eq!(calls[0]["arguments"]["clear_notes"], true);
+    }
+
+    #[test]
     fn handle_graph_reset_omits_specs_field_when_none_given() {
         let (_dir, db) = db_with_graph("graph-1", "my-graph", GraphStatus::Failed);
         let fake = spawn_fake_daemon(serde_json::json!({
@@ -1780,7 +1808,8 @@ mod tests {
         }));
         let port: u16 = fake.port.parse().unwrap();
 
-        handle_graph_reset(&db, Some(port), "graph-1", &[], true).expect("reset should succeed");
+        handle_graph_reset(&db, Some(port), "graph-1", &[], false, true)
+            .expect("reset should succeed");
 
         let calls = fake.recorded_calls();
         assert!(calls[0]["arguments"].get("specs").is_none());
