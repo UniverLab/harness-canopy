@@ -41,7 +41,15 @@ impl IngestionManager {
             "RAG index_file: {source_path} — {} chunk(s) embedded, pushing to vector store",
             vector_chunks.len()
         );
+        // CB91: every insert goes through the daemon's own store handle, so
+        // a maintenance prune can never race an independent connection, and
+        // the manager keeps an accurate "chunks since last compaction" count.
+        let guard = self.shared_store().await;
+        let Some(store) = guard.as_ref() else {
+            anyhow::bail!("RAG vector store unavailable — check model config");
+        };
         sync_vector_store(
+            store,
             &self.db,
             &self.data_dir,
             &config,
@@ -49,6 +57,8 @@ impl IngestionManager {
             &vector_chunks,
         )
         .await?;
+        self.chunks_since_compact
+            .fetch_add(vector_chunks.len(), std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 

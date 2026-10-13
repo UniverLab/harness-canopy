@@ -64,6 +64,18 @@ pub struct VectorStore {
     table: Table,
     schema: Arc<Schema>,
     embedding_dimensions: i32,
+    /// The directory this store lives in — kept so `footprint()` can report
+    /// real bytes on disk (the LanceDB handle itself exposes no such figure).
+    dir: PathBuf,
+}
+
+/// On-disk and version bookkeeping for a vector store: how fragmented the
+/// table is, how many versions it carries, and how much disk it occupies.
+#[derive(Debug, Clone, Copy)]
+pub struct StoreFootprint {
+    pub fragments: usize,
+    pub versions: usize,
+    pub bytes_on_disk: u64,
 }
 
 impl VectorStore {
@@ -106,7 +118,11 @@ impl VectorStore {
         std::fs::create_dir_all(path)
             .with_context(|| format!("Failed to create LanceDB directory at {}", path.display()))?;
 
+        // `Duration::ZERO` (not lancedb's default `None`) so every read
+        // checks out the latest manifest version: a long-lived handle must
+        // see the post-prune state instead of a cached snapshot.
         let connection = connect(&path_to_uri(path)?)
+            .read_consistency_interval(std::time::Duration::ZERO)
             .execute()
             .await
             .with_context(|| format!("Failed to open LanceDB at {}", path.display()))?;
@@ -135,25 +151,88 @@ impl VectorStore {
             table,
             schema,
             embedding_dimensions,
+            dir: path.to_path_buf(),
         })
     }
 
-    pub async fn insert_chunk(&self, chunk: &VectorChunk) -> Result<()> {
-        self.validate_embedding(&chunk.embedding)?;
-        let batch = chunk_batch(
-            self.schema.clone(),
-            std::slice::from_ref(chunk),
-            self.embedding_dimensions,
-        )?;
+    /// Insert many chunks as **one** LanceDB `add` operation: one fragment
+    /// and one version per call, instead of one of each per chunk. Every
+    /// embedding is validated before anything is written, so a batch is
+    /// all-or-nothing — the caller retries the whole file.
+    pub async fn insert_chunks(&self, chunks: &[VectorChunk]) -> Result<()> {
+        if chunks.is_empty() {
+            return Ok(());
+        }
+        for chunk in chunks {
+            self.validate_embedding(&chunk.embedding)?;
+        }
+        let batch = chunk_batch(self.schema.clone(), chunks, self.embedding_dimensions)?;
         self.table.add(batch).execute().await.with_context(|| {
             format!(
-                "LanceDB add() failed for chunk {} (file: {}, embedding_dims={})",
-                chunk.id,
-                chunk.file_path,
-                chunk.embedding.len()
+                "LanceDB add() failed for {} chunk(s) (file: {}, embedding_dims={})",
+                chunks.len(),
+                chunks[0].file_path,
+                chunks[0].embedding.len()
             )
         })?;
         Ok(())
+    }
+
+    /// One-element convenience wrapper around [`Self::insert_chunks`].
+    pub async fn insert_chunk(&self, chunk: &VectorChunk) -> Result<()> {
+        self.insert_chunks(std::slice::from_ref(chunk)).await
+    }
+
+    /// Fragments, versions and bytes on disk as of now.
+    pub async fn footprint(&self) -> Result<StoreFootprint> {
+        let stats = self
+            .table
+            .stats()
+            .await
+            .context("Failed to read LanceDB table statistics")?;
+        Ok(StoreFootprint {
+            fragments: stats.fragment_stats.num_fragments,
+            versions: self
+                .table
+                .list_versions()
+                .await
+                .context("Failed to list LanceDB versions")?
+                .len(),
+            bytes_on_disk: dir_bytes(&self.dir),
+        })
+    }
+
+    /// Merge fragments and prune old versions, in place, on this handle's
+    /// own table. Returns the footprint before and after, logging both at
+    /// INFO. `Prune` never removes the latest version (or anything
+    /// reachable from it); `older_than` keeps an hour of history, and
+    /// `delete_unverified: false` refuses to delete files that might belong
+    /// to an in-progress transaction.
+    pub async fn compact(&self) -> Result<(StoreFootprint, StoreFootprint)> {
+        let before = self.footprint().await?;
+        self.table
+            .optimize(lancedb::table::OptimizeAction::All)
+            .await
+            .context("LanceDB optimize(All) failed")?;
+        self.table
+            .optimize(lancedb::table::OptimizeAction::Prune {
+                older_than: Some(chrono::Duration::hours(1)),
+                delete_unverified: Some(false),
+                error_if_tagged_old_versions: None,
+            })
+            .await
+            .context("LanceDB prune failed")?;
+        let after = self.footprint().await?;
+        tracing::info!(
+            "RAG compact: fragments {} → {}, versions {} → {}, bytes {} → {}",
+            before.fragments,
+            after.fragments,
+            before.versions,
+            after.versions,
+            before.bytes_on_disk,
+            after.bytes_on_disk
+        );
+        Ok((before, after))
     }
 
     pub async fn search_similar(
@@ -424,6 +503,20 @@ fn path_to_uri(path: &Path) -> Result<String> {
         .with_context(|| format!("Failed to canonicalize LanceDB path {}", path.display()))?
         .to_string_lossy()
         .to_string())
+}
+
+/// Recursive sum of regular-file sizes under `dir`. Unreadable entries count
+/// as 0 rather than failing: this feeds health reporting, which must never
+/// disappear because one directory could not be stat'ed.
+fn dir_bytes(dir: &Path) -> u64 {
+    walkdir::WalkDir::new(dir)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_type().is_file())
+        .filter_map(|entry| entry.metadata().ok())
+        .map(|metadata| metadata.len())
+        .sum()
 }
 
 fn chunk_schema(embedding_dimensions: i32) -> Arc<Schema> {
@@ -937,5 +1030,137 @@ mod tests {
 
         assert_eq!(tiny_cache_results, unbounded_results);
         assert_eq!(tiny_cache_results.len(), 10);
+    }
+
+    // ── CB91: batch inserts, footprint, compaction ──────────────────
+
+    /// A distinct unit vector per index: dimension `i % 4` is 1.0 and the
+    /// next one carries `i * 0.001`, so no two chunks share a vector and a
+    /// top-5 ordering is deterministic.
+    fn unit_embedding(i: usize) -> Vec<f32> {
+        let mut v = vec![0.0f32; 4];
+        v[i % 4] = 1.0;
+        v[(i + 1) % 4] = i as f32 * 0.001;
+        v
+    }
+
+    async fn insert_batches(store: &VectorStore) {
+        for f in 0..4 {
+            let chunks: Vec<VectorChunk> = (0..50)
+                .map(|n| {
+                    let i = f * 50 + n;
+                    chunk(
+                        &format!("f{f}-c{n}"),
+                        &format!("/docs/f{f}.md"),
+                        &format!("chunk {i}"),
+                        unit_embedding(i),
+                    )
+                })
+                .collect();
+            store.insert_chunks(&chunks).await.unwrap();
+        }
+    }
+
+    const COMPACT_QUERY: [f32; 4] = [1.0, 0.1, 0.0, 0.0];
+
+    /// FR1: 200 chunks across 4 files must produce at most 4 new versions —
+    /// one per `insert_chunks` call — instead of one per chunk.
+    #[tokio::test]
+    async fn insert_chunks_writes_one_version_per_call() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = VectorStore::open_at(&VectorStore::path_for_tests(temp_dir.path()), 4, None)
+            .await
+            .unwrap();
+        let base = store.footprint().await.unwrap().versions;
+
+        insert_batches(&store).await;
+
+        assert_eq!(store.count_chunks().await.unwrap(), 200);
+        let versions = store.footprint().await.unwrap().versions;
+        assert!(
+            versions - base <= 4,
+            "4 batched inserts must add at most 4 versions, added {}",
+            versions - base
+        );
+    }
+
+    /// FR2: compaction merges fragments and leaves search answers identical.
+    #[tokio::test]
+    async fn compact_reduces_fragments_and_preserves_top5() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = VectorStore::open_at(&VectorStore::path_for_tests(temp_dir.path()), 4, None)
+            .await
+            .unwrap();
+        insert_batches(&store).await;
+
+        let before = store.search_similar(&COMPACT_QUERY, 5).await.unwrap();
+        assert_eq!(before.len(), 5);
+
+        let (_before_footprint, after_footprint) = store.compact().await.unwrap();
+        assert!(
+            after_footprint.fragments <= 2,
+            "compaction must merge fragments, got {}",
+            after_footprint.fragments
+        );
+
+        let after = store.search_similar(&COMPACT_QUERY, 5).await.unwrap();
+        let ids_before: Vec<&str> = before.iter().map(|r| r.id.as_str()).collect();
+        let ids_after: Vec<&str> = after.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(
+            ids_before, ids_after,
+            "compaction must not change top-5 results"
+        );
+    }
+
+    /// FR2/FR4: a handle opened *before* a prune still answers after it —
+    /// the regression `read_consistency_interval(Duration::ZERO)` prevents.
+    #[tokio::test]
+    async fn search_with_pre_prune_handle_succeeds_after_prune() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = VectorStore::path_for_tests(temp_dir.path());
+        let store_a = VectorStore::open_at(&path, 4, None).await.unwrap();
+        for i in 0..5 {
+            store_a
+                .insert_chunk(&chunk(
+                    &format!("c{i}"),
+                    "/docs/a.md",
+                    &format!("c{i}"),
+                    unit_embedding(i),
+                ))
+                .await
+                .unwrap();
+        }
+
+        // A second, independent connection to the same store, opened while
+        // the first still holds its own table handle.
+        let store_b = VectorStore::open_at(&path, 4, None).await.unwrap();
+        let before = store_b.search_similar(&COMPACT_QUERY, 5).await.unwrap();
+        assert_eq!(before.len(), 5);
+
+        store_a.compact().await.unwrap();
+
+        let after = store_b.search_similar(&COMPACT_QUERY, 5).await.unwrap();
+        let ids_before: Vec<&str> = before.iter().map(|r| r.id.as_str()).collect();
+        let ids_after: Vec<&str> = after.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids_before, ids_after);
+    }
+
+    /// `footprint()` reports the store's real presence on disk.
+    #[tokio::test]
+    async fn footprint_reports_bytes() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = VectorStore::open_at(&VectorStore::path_for_tests(temp_dir.path()), 4, None)
+            .await
+            .unwrap();
+        store
+            .insert_chunk(&chunk("a", "/docs/a.md", "alpha", vec![1.0, 0.0, 0.0, 0.0]))
+            .await
+            .unwrap();
+
+        let footprint = store.footprint().await.unwrap();
+        assert!(
+            footprint.bytes_on_disk > 0,
+            "a store with a row must occupy disk"
+        );
     }
 }

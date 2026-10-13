@@ -460,3 +460,76 @@ pub(super) fn report_rag_queue(db_path: &PathBuf, canopy_dir: &Path) {
         println!(" \x1b[33m⚠\x1b[0m Pending queue: {queued} file(s) awaiting indexing");
     }
 }
+
+/// Doctor's vector-store *health* section (CB91): the daemon's last
+/// maintenance verdict, with each reason and its fix command.
+///
+/// Doctor deliberately does not open the store here: the running daemon owns
+/// it, and its own tick is the only process that can truthfully say whether
+/// compaction succeeded. This reads the persisted verdict instead.
+pub(super) fn report_rag_store_health(
+    db_path: &PathBuf,
+    canopy_dir: &Path,
+    config: &crate::domain::canopy_config::CanopyConfig,
+    issues: &mut Vec<String>,
+) {
+    if config.embeddings_model.trim().is_empty() {
+        println!(
+            " \x1b[90m–\x1b[0m RAG store health: not applicable (no embeddings model configured)"
+        );
+        return;
+    }
+
+    let never_checked =
+        " \x1b[90m–\x1b[0m RAG store health: never checked (daemon maintenance runs at startup)";
+    if !db_path.exists() {
+        println!("{never_checked}");
+        return;
+    }
+    let Ok(db) = Database::new_safe(db_path, canopy_dir) else {
+        println!(" \x1b[33m⚠\x1b[0m RAG store health: could not read the database");
+        return;
+    };
+    let health = db
+        .get_state(crate::rag::maintenance::RAG_HEALTH_STATE_KEY)
+        .ok()
+        .flatten()
+        .and_then(|json| serde_json::from_str::<crate::rag::maintenance::RagHealth>(&json).ok());
+    let Some(health) = health else {
+        println!("{never_checked}");
+        return;
+    };
+
+    let checked = health.checked_at.format("%Y-%m-%d %H:%M UTC");
+    match health.status {
+        crate::rag::maintenance::RagHealthStatus::Ok => {
+            success(format!("RAG store health: ok (checked {checked})"));
+        }
+        crate::rag::maintenance::RagHealthStatus::Degraded => {
+            println!(" \x1b[33m⚠\x1b[0m RAG store health: degraded (checked {checked})");
+            for reason in &health.reasons {
+                println!("     {reason}");
+                if reason.contains("canopy rag compact") {
+                    println!("     fix: canopy rag compact");
+                } else if reason.contains("canopy rag auto-index start") {
+                    println!("     fix: canopy rag auto-index start");
+                }
+            }
+            issues.push(format!(
+                "RAG store health degraded — {}",
+                health.reasons.join("; ")
+            ));
+        }
+        crate::rag::maintenance::RagHealthStatus::Broken => {
+            println!(" \x1b[31m✗\x1b[0m RAG store health: broken (checked {checked})");
+            for reason in &health.reasons {
+                println!("     {reason}");
+            }
+            println!("     fix: canopy rag purge");
+            issues.push(format!(
+                "RAG store open failed: {}",
+                health.reasons.join("; ")
+            ));
+        }
+    }
+}

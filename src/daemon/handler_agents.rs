@@ -507,6 +507,14 @@ impl TaskTriggerHandler {
 
         append_temporal_agents_section(&mut status, &agents);
 
+        // CB91: the RAG store's latest computed health, read from memory —
+        // no store scan on a status call.
+        let health = self.ingestion.rag_health();
+        status.push_str(&format!("\nRAG store health: {}", health.status.as_str()));
+        for reason in &health.reasons {
+            status.push_str(&format!("\n  - {reason}"));
+        }
+
         Ok(CallToolResult::success(vec![Content::text(status)]))
     }
 

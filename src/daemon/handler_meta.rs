@@ -319,6 +319,19 @@ impl TaskTriggerHandler {
         )]))
     }
 
+    /// Compact the RAG vector store now: merge fragments and prune old
+    /// versions. Runs on the daemon's own store handle (never a second,
+    /// independent connection) and refuses politely while another
+    /// maintenance pass is in flight.
+    #[tool(
+        name = "rag_compact",
+        description = "Compact the RAG vector store and prune old versions"
+    )]
+    pub(crate) async fn rag_compact(&self) -> Result<CallToolResult, McpError> {
+        let report = self.ingestion.compact_now_report().await;
+        Ok(CallToolResult::success(vec![Content::text(report)]))
+    }
+
     #[tool(
         name = "subagent_spawn",
         description = "Launch an ephemeral subagent. By default returns an ID \

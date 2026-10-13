@@ -16,6 +16,8 @@ pub(crate) enum RagAction {
     },
     /// Show a detailed per-file RAG indexing report.
     Report,
+    /// Compact the vector store: merge fragments and prune old versions.
+    Compact,
     /// Index all configured files not yet in the vector store.
     Backfill,
     /// Delete the entire vector store and reset all RAG state.
@@ -66,6 +68,7 @@ pub(crate) async fn handle_rag_action(action: RagAction) -> Result<()> {
             println!("     Run \x1b[1mcanopy rag auto-index start\x1b[0m to resume.");
         }
         RagAction::Report => handle_rag_report(&data_dir, &db).await?,
+        RagAction::Compact => handle_rag_compact(&data_dir).await?,
         RagAction::Backfill => handle_rag_backfill(&data_dir, &db).await?,
         RagAction::Purge { yes } => {
             if !yes {
@@ -301,24 +304,21 @@ pub(crate) fn categorize_rag_files(
 async fn handle_rag_report(data_dir: &std::path::Path, db: &Database) -> Result<()> {
     let config = crate::domain::canopy_config::CanopyConfig::load(data_dir);
 
-    let chunk_counts: std::collections::HashMap<String, usize> =
-        if config.embeddings_model.trim().is_empty() {
-            std::collections::HashMap::new()
-        } else {
-            let dims =
-                crate::rag::embedding_client::model_dimensions(config.embeddings_model.trim())
-                    .unwrap_or(384);
-            match crate::rag::vector_store::VectorStore::open_at(
-                &crate::rag::vector_store::VectorStore::default_lancedb_path()?,
-                dims,
-                Some(config.rag_vector_cache_entries),
-            )
-            .await
-            {
-                Ok(store) => store.count_chunks_per_file().await.unwrap_or_default(),
-                Err(_) => std::collections::HashMap::new(),
+    let (store, mut store_error) = open_report_store(&config).await?;
+    let chunk_counts: std::collections::HashMap<String, usize> = match &store {
+        Some(store) => store.count_chunks_per_file().await.unwrap_or_default(),
+        None => std::collections::HashMap::new(),
+    };
+    let footprint = match &store {
+        Some(store) => match store.footprint().await {
+            Ok(footprint) => Some(footprint),
+            Err(error) => {
+                store_error = Some(format!("{error:#}"));
+                None
             }
-        };
+        },
+        None => None,
+    };
 
     let queue_items = db.list_rag_queue(10_000).unwrap_or_default();
 
@@ -385,6 +385,8 @@ async fn handle_rag_report(data_dir: &std::path::Path, db: &Database) -> Result<
         indexable_on_disk: size_scan.indexable_files.len(),
         oversize_on_disk: size_scan.oversize_files.len(),
         max_bytes,
+        footprint,
+        store_error,
     };
 
     print_rag_report_summary(db, &report)?;
@@ -426,6 +428,8 @@ struct RagReportData<'a> {
     indexable_on_disk: usize,
     oversize_on_disk: usize,
     max_bytes: u64,
+    footprint: Option<crate::rag::vector_store::StoreFootprint>,
+    store_error: Option<String>,
 }
 
 /// Section: the report header — model, live status, counts, limit,
@@ -525,6 +529,120 @@ fn print_rag_report_summary(db: &Database, report: &RagReportData<'_>) -> Result
             .count();
         println!(" Queue:  {} queued, {} indexing", queued, processing_items);
     }
+    print_rag_store_block(report);
+    print_rag_health(db);
+    Ok(())
+}
+
+/// Section: the vector store's footprint and its latest computed health.
+/// The footprint comes from the store the report already opened; health is
+/// read from the daemon's persisted last tick (`rag_health_json`), never
+/// recomputed here — a read-only report must not maintain anything.
+fn print_rag_store_block(report: &RagReportData<'_>) {
+    match &report.footprint {
+        Some(footprint) => {
+            println!(
+                " Store:  {} fragment(s), {} version(s), {:.1} MB on disk",
+                footprint.fragments,
+                footprint.versions,
+                footprint.bytes_on_disk as f64 / (1024.0 * 1024.0)
+            );
+        }
+        None => match &report.store_error {
+            Some(error) => println!(" Store:  \x1b[33m⚠\x1b[0m unavailable ({error})"),
+            None => println!(" Store:  unavailable"),
+        },
+    }
+}
+
+fn print_rag_health(db: &Database) {
+    let health = db
+        .get_state(crate::rag::maintenance::RAG_HEALTH_STATE_KEY)
+        .ok()
+        .flatten()
+        .and_then(|json| serde_json::from_str::<crate::rag::maintenance::RagHealth>(&json).ok());
+    let Some(health) = health else {
+        println!(" Health: not checked yet");
+        return;
+    };
+    println!(
+        " Health: \x1b[1m{}\x1b[0m (checked {})",
+        health.status.as_str(),
+        health.checked_at.format("%Y-%m-%d %H:%M UTC")
+    );
+    for reason in &health.reasons {
+        println!("         \x1b[33m⚠\x1b[0m {reason}");
+    }
+}
+
+/// Open the vector store for a read-only report: `None` plus the reason when
+/// there is no model configured, the model's dimensions are unknown, or the
+/// store cannot be opened. Never recreates the table on an unknown model —
+/// guessing dimensions could drop the real store's schema.
+async fn open_report_store(
+    config: &crate::domain::canopy_config::CanopyConfig,
+) -> Result<(
+    Option<crate::rag::vector_store::VectorStore>,
+    Option<String>,
+)> {
+    let model = config.embeddings_model.trim();
+    if model.is_empty() {
+        return Ok((None, Some("no embeddings model configured".to_string())));
+    }
+    let dimensions = match crate::rag::embedding_client::model_dimensions(model) {
+        Ok(dimensions) => dimensions,
+        Err(error) => return Ok((None, Some(format!("unknown model dimensions: {error}")))),
+    };
+    match crate::rag::vector_store::VectorStore::open_at(
+        &crate::rag::vector_store::VectorStore::default_lancedb_path()?,
+        dimensions,
+        Some(config.rag_vector_cache_entries),
+    )
+    .await
+    {
+        Ok(store) => Ok((Some(store), None)),
+        Err(error) => Ok((None, Some(format!("{error:#}")))),
+    }
+}
+
+/// `canopy rag compact`: ask the running daemon to compact (its own handle
+/// does the work), or — daemon down — compact with this process's own store
+/// handle. Prints the before/after footprint either way.
+async fn handle_rag_compact(data_dir: &std::path::Path) -> Result<()> {
+    if crate::daemon::process::read_pid(data_dir)
+        .is_some_and(crate::daemon::process::is_process_running)
+    {
+        let text =
+            crate::daemon::cli_daemon::call_tool(None, "rag_compact", &serde_json::json!({}))?;
+        println!("{text}");
+        return Ok(());
+    }
+
+    let config = crate::domain::canopy_config::CanopyConfig::load(data_dir);
+    let model = config.embeddings_model.trim();
+    if model.is_empty() {
+        println!("\x1b[33m⚠\x1b[0m  No embeddings model configured — nothing to compact.");
+        return Ok(());
+    }
+    let dimensions = crate::rag::embedding_client::model_dimensions(model)
+        .map_err(|e| anyhow::anyhow!("Cannot compact: unknown embedding model dimensions: {e}"))?;
+    let store = crate::rag::vector_store::VectorStore::open_at(
+        &crate::rag::vector_store::VectorStore::default_lancedb_path()?,
+        dimensions,
+        Some(config.rag_vector_cache_entries),
+    )
+    .await?;
+
+    let (before, after) = store.compact().await?;
+    println!("\n\x1b[1m── RAG Compact ───────────────────────────────────────────────\x1b[0m");
+    println!(" Fragments: {} → {}", before.fragments, after.fragments);
+    println!(" Versions:  {} → {}", before.versions, after.versions);
+    println!(
+        " On disk:   {:.1} MB → {:.1} MB",
+        before.bytes_on_disk as f64 / (1024.0 * 1024.0),
+        after.bytes_on_disk as f64 / (1024.0 * 1024.0)
+    );
+    println!();
     Ok(())
 }
 
@@ -1237,6 +1355,12 @@ mod tests {
             indexable_on_disk: 2,
             oversize_on_disk: 1,
             max_bytes: 10 * 1024 * 1024,
+            footprint: Some(crate::rag::vector_store::StoreFootprint {
+                fragments: 3,
+                versions: 7,
+                bytes_on_disk: 1024 * 1024,
+            }),
+            store_error: None,
         };
 
         let cap = StdoutCapture::start();
@@ -1295,5 +1419,77 @@ mod tests {
             "queue detail missing: {out:?}"
         );
         assert!(out.contains("error"), "error detail missing: {out:?}");
+        assert!(
+            out.contains(" Store:  3 fragment(s), 7 version(s), 1.0 MB on disk"),
+            "store footprint line missing: {out:?}"
+        );
+        assert!(
+            out.contains(" Health: not checked yet"),
+            "health line missing: {out:?}"
+        );
+    }
+
+    /// CB91: `canopy rag compact` is a real subcommand.
+    #[test]
+    fn compact_parses_as_canopy_rag_compact() {
+        let cli = TestCli::try_parse_from(["test", "compact"]).expect("'compact' should parse");
+        assert!(matches!(cli.action, RagAction::Compact));
+    }
+
+    /// The report's store opener refuses early — without touching the real
+    /// store — when there is nothing to open it with.
+    #[tokio::test]
+    async fn open_report_store_reports_no_model_without_opening_a_store() {
+        let (store, error) =
+            open_report_store(&crate::domain::canopy_config::CanopyConfig::default())
+                .await
+                .unwrap();
+        assert!(store.is_none());
+        assert!(
+            error.unwrap().contains("no embeddings model configured"),
+            "expected a model-configuration reason"
+        );
+    }
+
+    /// An unknown model must never open (and could otherwise recreate) the
+    /// real store with guessed dimensions.
+    #[tokio::test]
+    async fn open_report_store_reports_unknown_model_dimensions() {
+        let config = crate::domain::canopy_config::CanopyConfig {
+            embeddings_model: "not/a-real-model".to_string(),
+            ..Default::default()
+        };
+        let (store, error) = open_report_store(&config).await.unwrap();
+        assert!(store.is_none());
+        assert!(
+            error.unwrap().contains("unknown model dimensions"),
+            "expected an unknown-model reason"
+        );
+    }
+
+    /// The persisted health reaches `canopy rag report` verbatim, reasons
+    /// included — the report never recomputes it.
+    #[tokio::test]
+    async fn report_prints_persisted_health_with_reasons() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::new(&dir.path().join("test.db")).unwrap();
+        let health = crate::rag::maintenance::RagHealth {
+            status: crate::rag::maintenance::RagHealthStatus::Degraded,
+            reasons: vec!["store needs compaction: 120 fragments — canopy rag compact".to_string()],
+            checked_at: chrono::Utc::now(),
+        };
+        db.set_state(
+            crate::rag::maintenance::RAG_HEALTH_STATE_KEY,
+            &serde_json::to_string(&health).unwrap(),
+        )
+        .unwrap();
+
+        let cap = StdoutCapture::start();
+        print_rag_health(&db);
+        let out = cap.stop();
+
+        assert!(out.contains(" Health: "), "{out:?}");
+        assert!(out.contains("degraded"), "{out:?}");
+        assert!(out.contains("store needs compaction"), "{out:?}");
     }
 }

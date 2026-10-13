@@ -227,6 +227,7 @@ pub(crate) async fn run_doctor() -> Result<()> {
     report_ragignore(&canopy_dir);
     report_vector_store(&config, &mut issues).await;
     report_rag_queue(&db_path, &canopy_dir);
+    report_rag_store_health(&db_path, &canopy_dir, &config, &mut issues);
     print_doctor_suggestions(&issues);
 
     Ok(())

@@ -132,7 +132,8 @@ Read-only inspection of registered agents, served from the local database
 |---|---|
 | `canopy rag auto-index start` | Resume automatic indexing (default state) |
 | `canopy rag auto-index stop` | Pause indexing without losing the queue |
-| `canopy rag report` | Detailed per-file indexing report |
+| `canopy rag report` | Detailed per-file indexing report, store footprint and health |
+| `canopy rag compact` | Merge store fragments and prune old versions (daemon does it, or this process when the daemon is down) |
 
 ## Plumbing
 

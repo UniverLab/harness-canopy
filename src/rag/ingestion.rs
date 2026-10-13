@@ -7,7 +7,7 @@
 use std::collections::{HashSet, VecDeque};
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -43,6 +43,19 @@ const MODEL_ACQUISITION_CHECK_INTERVAL: Duration = Duration::from_secs(15);
 /// Max number of recorded `"error"` events before a file is given up on
 /// permanently, even if the error message doesn't match a known-fatal pattern.
 const MAX_RAG_ATTEMPTS: i64 = 3;
+/// CB91: chunks inserted between in-drain compactions during a long backfill.
+const COMPACT_AFTER_CHUNKS: usize = 500;
+
+/// Clears `IngestionManager::draining` on every exit path — including the
+/// paused-cancel early return — so a finished drain never leaves the
+/// maintenance tick believing indexing is still running.
+struct DrainingGuard<'a>(&'a AtomicBool);
+
+impl Drop for DrainingGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Relaxed);
+    }
+}
 
 /// Returns true when an indexing error is non-transient (retrying will never help).
 fn is_permanent_rag_error(msg: &str) -> bool {
@@ -109,6 +122,28 @@ pub struct IngestionManager {
     /// Dropped after `embeddings_idle_unload_secs` of inactivity (see
     /// `idle_unload_graph`) and reloaded transparently on next use.
     cached_client: Mutex<Option<CachedClient>>,
+    /// The daemon's own store handle: inserts AND compaction go through it,
+    /// so a prune can never surprise an independent connection (CB91).
+    pub(crate) vector_store: Mutex<Option<VectorStore>>,
+    /// Set while `drain_queue` is actively indexing — the maintenance tick
+    /// skips compaction then (the drain compacts at its end).
+    pub(crate) draining: AtomicBool,
+    /// Chunks inserted since the last compaction; the drain compacts every
+    /// 500, so a long backfill never runs to completion as 10k fragments.
+    pub(crate) chunks_since_compact: AtomicUsize,
+    /// Latest computed health — surfaces read this without re-scanning.
+    pub(crate) health: std::sync::Mutex<crate::rag::maintenance::RagHealth>,
+    /// The last compaction failure, quoted by health once degradation
+    /// persists across two ticks.
+    pub(crate) last_compact_error: std::sync::Mutex<Option<String>>,
+    /// Consecutive ticks whose health flagged "needs compaction".
+    pub(crate) degraded_ticks: AtomicUsize,
+    /// Serializes maintenance: a tick already running makes the next one
+    /// skip (`try_lock`) instead of queueing behind it.
+    pub(crate) maintenance_lock: Mutex<()>,
+    /// Test-only seam: redirects every store open from this manager away
+    /// from the real home-dir store. Always `None` in production.
+    pub(crate) store_path_override: Option<PathBuf>,
 }
 
 impl IngestionManager {
@@ -152,6 +187,14 @@ impl IngestionManager {
             notify: Arc::new(Notify::new()),
             _personal_watcher: std::sync::Mutex::new(None),
             cached_client: Mutex::new(None),
+            vector_store: Mutex::new(None),
+            draining: AtomicBool::new(false),
+            chunks_since_compact: AtomicUsize::new(0),
+            health: std::sync::Mutex::new(crate::rag::maintenance::RagHealth::initial()),
+            last_compact_error: std::sync::Mutex::new(None),
+            degraded_ticks: AtomicUsize::new(0),
+            maintenance_lock: Mutex::new(()),
+            store_path_override: None,
         }
     }
 
@@ -185,6 +228,18 @@ impl IngestionManager {
     /// Expose the underlying database for state queries (e.g. model change checks).
     pub(crate) fn db(&self) -> &Arc<Database> {
         &self.db
+    }
+
+    /// Root directory this manager's config and store live under.
+    pub(crate) fn data_dir(&self) -> &Path {
+        &self.data_dir
+    }
+
+    /// Test seam: redirect this manager's vector store to a scratch path so
+    /// no test ever opens (or prunes) the real `~/.canopy/rag` store.
+    #[cfg(test)]
+    pub(crate) fn set_store_path_for_tests(&mut self, path: PathBuf) {
+        self.store_path_override = Some(path);
     }
 
     pub fn db_pending_queue(&self) -> anyhow::Result<Vec<String>> {
@@ -267,6 +322,12 @@ impl IngestionManager {
         tokio::spawn(async move {
             mgr_acquire.model_acquisition_graph(ct_acquire).await;
         });
+
+        // CB91: the periodic store-maintenance tick. It sleeps first — the
+        // startup pass is called explicitly (and awaited) by the daemon.
+        let ct_maintenance = ct.child_token();
+        let mgr_maintenance = Arc::clone(&self);
+        mgr_maintenance.maintenance_loop(ct_maintenance);
 
         ct
     }
@@ -444,11 +505,14 @@ impl IngestionManager {
         }
     }
 
-    fn is_paused(&self) -> bool {
+    pub(crate) fn is_paused(&self) -> bool {
         self.db.get_state("rag_paused").ok().flatten().as_deref() == Some("1")
     }
 
     async fn drain_queue(&self, ct: &tokio_util::sync::CancellationToken) {
+        self.draining.store(true, Ordering::Relaxed);
+        let _draining_guard = DrainingGuard(&self.draining);
+
         let initial_count = self.queue.lock().await.len();
         if initial_count > 0 {
             crate::domain::notification::send_notification(
@@ -486,6 +550,12 @@ impl IngestionManager {
                         None,
                         chrono::Utc::now().timestamp(),
                     );
+                    // CB91: a long backfill compacts in bands of 500 chunks,
+                    // so the store never waits until the whole queue drains.
+                    if self.chunks_since_compact.load(Ordering::Relaxed) >= COMPACT_AFTER_CHUNKS {
+                        self.compact_shared_store("every 500 chunks during backfill")
+                            .await;
+                    }
                 }
                 Err(e) => {
                     tracing::error!("RAG index error {source_path}: {e:#}");
@@ -495,6 +565,12 @@ impl IngestionManager {
                     self.record_queued_file_failure(&source_path, &error_detail);
                 }
             }
+        }
+
+        // CB91: the end of a drain is the natural compaction point — after
+        // this, indexing may not run again for days.
+        if processed > 0 {
+            self.compact_shared_store("end of indexing drain").await;
         }
 
         Self::report_drain_queue_outcome(processed, skipped, &indexed_paths);
@@ -1248,10 +1324,11 @@ mod tests {
         assert_eq!(orphan_purge_reason(&file, &[]), None);
     }
 
-    /// The insert loop used to live inline in `sync_vector_store`; pin its
-    /// ok/fail accounting against a real store.
+    /// CB91: a file's chunks go in as ONE batch, so a bad embedding fails the
+    /// whole insert (all-or-nothing) and a good batch reports every chunk as
+    /// inserted — there is no per-chunk partial credit any more.
     #[tokio::test]
-    async fn insert_chunks_into_store_counts_ok_and_failed_chunks() {
+    async fn insert_chunks_into_store_inserts_one_batch_or_nothing() {
         let temp_dir = tempfile::tempdir().unwrap();
         let store = VectorStore::open_at(&VectorStore::path_for_tests(temp_dir.path()), 4, None)
             .await
@@ -1271,8 +1348,25 @@ mod tests {
             created_at: 1,
         };
 
-        let (ok, fail) = insert_chunks_into_store(&store, "/docs/a.md", &[good, bad]).await;
-        assert_eq!((ok, fail), (1, 1));
+        // One invalid embedding invalidates the batch before anything is
+        // written — nothing lands in the store.
+        let (ok, fail) = insert_chunks_into_store(&store, "/docs/a.md", &[good.clone(), bad]).await;
+        assert_eq!((ok, fail), (0, 2));
+        assert_eq!(store.count_chunks().await.unwrap(), 0);
+
+        // A valid batch reports every chunk and writes them in one version.
+        let base = store.footprint().await.unwrap().versions;
+        let second = VectorChunk {
+            id: "second".to_string(),
+            file_path: "/docs/a.md".to_string(),
+            content: "also ok".to_string(),
+            embedding: vec![1.0, 0.0, 0.0, 0.0],
+            created_at: 1,
+        };
+        let (ok, fail) = insert_chunks_into_store(&store, "/docs/a.md", &[good, second]).await;
+        assert_eq!((ok, fail), (2, 0));
+        assert_eq!(store.count_chunks().await.unwrap(), 2);
+        assert_eq!(store.footprint().await.unwrap().versions - base, 1);
     }
 
     /// The watcher callback's routing used to be buried in the notify closure;

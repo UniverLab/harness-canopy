@@ -92,6 +92,9 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
     capture_interrupted_state(&graph_engine, &watcher_engine).await;
 
     startup_personal_rag(Arc::clone(&ingestion), &data_dir).await;
+    // CB91: one maintenance pass at startup, after the reconciliations that
+    // `startup_personal_rag` runs; the periodic tick continues from `start()`.
+    ingestion.run_rag_maintenance().await;
 
     let background = start_background_tasks(
         &db,
@@ -594,6 +597,8 @@ async fn stdio_server_startup(db: Arc<Database>, data_dir: &std::path::Path) -> 
     // No announcements client here: this is a stdio MCP server, not the
     // daemon, and the announcements WebSocket is a daemon-only background task.
     startup_personal_rag(Arc::clone(&ingestion), data_dir).await;
+    // CB91: startup maintenance pass — see `run_http_server`'s identical call.
+    ingestion.run_rag_maintenance().await;
 
     if let Err(e) = watcher_engine.reload_from_db().await {
         tracing::error!("Failed to reload watchers: {}", e);

@@ -8,7 +8,7 @@ impl IngestionManager {
     ///  - a previous RAG root path that the user changed via `canopy setup`.
     pub async fn reconcile_orphan_chunks(&self) {
         let config = crate::domain::canopy_config::CanopyConfig::load(&self.data_dir);
-        let Some(store) = open_vector_store(&config, &self.db).await else {
+        let Some(store) = self.open_store(&config).await else {
             return;
         };
         let paths = match store.list_unique_paths().await {
@@ -116,7 +116,7 @@ impl IngestionManager {
     /// was detected and handled.
     pub async fn reconcile_ledger_with_store(&self) -> bool {
         let store_chunk_count = self.store_chunk_count().await;
-        let lancedb_path = match VectorStore::default_lancedb_path() {
+        let lancedb_path = match self.lancedb_store_path() {
             Ok(path) => path,
             Err(e) => {
                 tracing::error!("RAG reconcile: cannot determine LanceDB path: {e:#}");
@@ -125,6 +125,43 @@ impl IngestionManager {
         };
         self.reconcile_ledger_with_store_chunk_count_at(store_chunk_count, &lancedb_path)
             .await
+    }
+
+    /// Path this manager's vector store lives at: the real home-dir store in
+    /// production, a scratch path under test.
+    pub(crate) fn lancedb_store_path(&self) -> anyhow::Result<PathBuf> {
+        match &self.store_path_override {
+            Some(path) => Ok(path.clone()),
+            None => VectorStore::default_lancedb_path(),
+        }
+    }
+
+    /// Open this manager's vector store. Production behavior is unchanged:
+    /// with no override it delegates to `open_vector_store` (including its
+    /// one-shot corruption recovery); tests pass an override so no test ever
+    /// opens, prunes, or recreates the real `~/.canopy/rag` store.
+    pub(crate) async fn open_store(
+        &self,
+        config: &crate::domain::canopy_config::CanopyConfig,
+    ) -> Option<VectorStore> {
+        let Some(path) = &self.store_path_override else {
+            return open_vector_store(config, &self.db).await;
+        };
+        let model = config.embeddings_model.trim();
+        if model.is_empty() {
+            return None;
+        }
+        let dimensions = model_dimensions_for_store(model)?;
+        match VectorStore::open_at(path, dimensions, Some(config.rag_vector_cache_entries)).await {
+            Ok(store) => Some(store),
+            Err(error) => {
+                tracing::warn!(
+                    "RAG: could not open test-overridden store at {}: {error:#}",
+                    path.display()
+                );
+                None
+            }
+        }
     }
 
     /// Core of `reconcile_ledger_with_store`, taking the store's chunk count
@@ -165,7 +202,7 @@ impl IngestionManager {
     /// (no model configured, or a genuine — not transient — open failure).
     pub(super) async fn store_chunk_count(&self) -> Option<i64> {
         let config = crate::domain::canopy_config::CanopyConfig::load(&self.data_dir);
-        let store = open_vector_store(&config, &self.db).await?;
+        let store = self.open_store(&config).await?;
         match store.count_chunks().await {
             Ok(count) => Some(count),
             Err(e) => {
@@ -177,6 +214,7 @@ impl IngestionManager {
 }
 
 pub(super) async fn sync_vector_store(
+    store: &VectorStore,
     db: &Database,
     data_dir: &Path,
     config: &crate::domain::canopy_config::CanopyConfig,
@@ -186,16 +224,12 @@ pub(super) async fn sync_vector_store(
     let model = config.embeddings_model.trim();
     trace_sync_vector_store_start(chunks, source_path, model);
 
-    let Some(store) = open_vector_store(config, db).await else {
-        anyhow::bail!("RAG vector store unavailable — check model config");
-    };
-
     if let Err(error) = store.delete_by_path(source_path).await {
         tracing::warn!("RAG vector cleanup error {source_path}: {error:#}");
         // Non-fatal — continue inserting fresh chunks even if delete failed.
     }
 
-    let (ok, fail) = insert_chunks_into_store(&store, source_path, chunks).await;
+    let (ok, fail) = insert_chunks_into_store(store, source_path, chunks).await;
 
     tracing::info!("RAG sync_vector_store: {source_path} — {ok} inserted, {fail} failed");
 
@@ -221,28 +255,28 @@ pub(super) fn trace_sync_vector_store_start(
     );
 }
 
-/// Insert every chunk into the store, logging each failure individually;
+/// Insert every chunk of one file as a single LanceDB batch (CB91): one
+/// fragment and one version per file instead of one per chunk. All embedding
+/// validation happens before the write, so the batch is all-or-nothing;
 /// returns `(inserted, failed)` counts.
 pub(super) async fn insert_chunks_into_store(
     store: &VectorStore,
     source_path: &str,
     chunks: &[VectorChunk],
 ) -> (usize, usize) {
-    let mut ok = 0usize;
-    let mut fail = 0usize;
-    for chunk in chunks {
-        match store.insert_chunk(chunk).await {
-            Ok(()) => ok += 1,
-            Err(error) => {
-                tracing::error!(
-                    "RAG insert failed for {source_path} chunk {}: {error:#}",
-                    chunk.id
-                );
-                fail += 1;
-            }
+    if chunks.is_empty() {
+        return (0, 0);
+    }
+    match store.insert_chunks(chunks).await {
+        Ok(()) => (chunks.len(), 0),
+        Err(error) => {
+            tracing::error!(
+                "RAG insert failed for {source_path} ({} chunk(s)): {error:#}",
+                chunks.len()
+            );
+            (0, chunks.len())
         }
     }
-    (ok, fail)
 }
 
 pub(super) async fn purge_vector_chunks(

@@ -1,12 +1,12 @@
 ---
 title: MCP Tools
-description: All 96 MCP tools exposed by the canopy daemon, by category.
+description: All 98 MCP tools exposed by the canopy daemon, by category.
 order: 11
 ---
 
 # MCP Tools
 
-The daemon exposes **96 MCP tools** over Streamable HTTP (port 7755) and
+The daemon exposes **98 MCP tools** over Streamable HTTP (port 7755) and
 stdio. Connect any MCP-capable AI CLI with `canopy mcp`.
 
 ## Agent management (18)
@@ -118,7 +118,7 @@ See [Graphs](graphs.md).
 
 Kept callable for the whole 3.x line, but excluded from tool listings
 (`tools/list`) so nothing new adopts them — call the 3.x name instead. Not
-counted in the 96 tools above.
+counted in the 98 tools above.
 
 | Deprecated name | Renamed to (3.0.0) |
 |---|---|
@@ -203,11 +203,12 @@ readable until `spec_convert` migrates them.
 | `project_remap` | Remap a moved/renamed workdir instead of orphaning history |
 | `project_register` | Explicitly register a project directory (no marker file needed) |
 
-## RAG (1)
+## RAG (2)
 
 | Tool | Description |
 |---|---|
 | `rag_search` | Semantic search over indexed documents (rate-limited) |
+| `rag_compact` | Compact the vector store now: merge fragments and prune old versions |
 
 ## Protocol (1)
 
