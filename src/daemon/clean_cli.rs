@@ -10,7 +10,7 @@
 //! and prompts before deleting each orphan (and every row that references
 //! it) unless `--yes` or `--dry-run` is set.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
@@ -235,7 +235,19 @@ fn build_clean_plan(
         });
     }
     let sandbox_removals = clean::plan_sandbox_cleanup(&sandbox_candidates);
-    let sandbox_untracked = super::sandbox_cli::scan_untracked_sandbox_dirs(db);
+    // CB92: derive the worktrees root from the injected `data_dir` (equal to
+    // `canopy_dir()` in production) — never the real home — and split the
+    // untracked leaves into proven leaks (dangling gitdir + older than 2 h,
+    // deleted) and the rest (still reported, never touched).
+    let worktrees_base = data_dir.join("worktrees");
+    let untracked_paths = super::sandbox_cli::scan_untracked_sandbox_dirs_in(db, &worktrees_base);
+    let leak_facts = scans::scan_untracked_leak_facts(&untracked_paths);
+    let untracked_leaks = clean::plan_leaked_untracked(&leak_facts, now_ts);
+    let leaked_set: std::collections::HashSet<&PathBuf> = untracked_leaks.iter().collect();
+    let sandbox_untracked: Vec<PathBuf> = untracked_paths
+        .into_iter()
+        .filter(|p| !leaked_set.contains(p))
+        .collect();
 
     Ok(CleanPlan {
         session_ids,
@@ -245,6 +257,7 @@ fn build_clean_plan(
         orphaned_projects,
         sandbox_removals,
         sandbox_untracked,
+        untracked_leaks,
     })
 }
 
@@ -298,6 +311,15 @@ fn execute_plan(db: &Database, plan: &CleanPlan) -> Result<()> {
             }
         }
     }
+    // CB92: delete only the leaf of each proven leak — the parent `<hash>/`
+    // dir is deliberately left alone (pruning it would race with a
+    // concurrent run creating the same project dir).
+    for p in &plan.untracked_leaks {
+        println!("Will remove leaked untracked sandbox dir {}", p.display());
+        if let Err(e) = std::fs::remove_dir_all(p) {
+            eprintln!(" Failed to remove leaked dir {}: {e:#}", p.display());
+        }
+    }
     Ok(())
 }
 
@@ -327,6 +349,10 @@ fn print_summary(plan: &CleanPlan, retention_days: u64, dry_run: bool) {
     for t in &plan.sandbox_removals {
         println!("   {} ({}, branch {})", t.id, t.path.display(), t.branch);
     }
+    println!(
+        " {verb} {} leaked untracked sandbox dir(s) (dangling gitdir, older than 2 h)",
+        plan.untracked_leaks.len()
+    );
     if !plan.sandbox_untracked.is_empty() {
         println!(
             " Skipped {} untracked sandbox dir(s) (no sandbox run record; left untouched):",
@@ -1622,5 +1648,61 @@ mod tests {
             .current_dir(repo_dir.path())
             .output()
             .unwrap();
+    }
+
+    // ── CB92: leaked untracked dirs ────────────────────────────────────
+
+    #[test]
+    fn clean_removes_dangling_old_untracked_and_keeps_live() {
+        let dir = tempdir().unwrap();
+        let data_dir = dir.path();
+        let db = test_db(data_dir);
+
+        // A leaked leaf: `.git` points at a gitdir that no longer exists
+        // (the shape the 693 real leaks are in — tempdir repo is gone).
+        let leak_path = data_dir.join("worktrees/hash-a/leak-id");
+        std::fs::create_dir_all(&leak_path).unwrap();
+        std::fs::write(
+            leak_path.join(".git"),
+            format!(
+                "gitdir: /definitely/does/not/exist-{}/x\n",
+                std::process::id()
+            ),
+        )
+        .unwrap();
+
+        // A live leaf: `.git` points at a real dir that stays alive for the
+        // whole test, so its gitdir exists.
+        let live_gitdir = tempdir().unwrap();
+        let live_path = data_dir.join("worktrees/hash-b/live-id");
+        std::fs::create_dir_all(&live_path).unwrap();
+        std::fs::write(
+            live_path.join(".git"),
+            format!("gitdir: {}\n", live_gitdir.path().display()),
+        )
+        .unwrap();
+
+        // Empty test DB → no sandbox rows → both leaves are untracked.
+        // Capture "now" AFTER creating the leaves so their mtimes are never
+        // in the future relative to the injected clock.
+        let now = chrono::Utc::now().timestamp();
+
+        // Too fresh (age ≈ 0 < 2 h): the age gate keeps both, dry run only
+        // projects that decision.
+        let plan = run_clean(data_dir, &db, true, 7, now).unwrap();
+        assert!(
+            plan.untracked_leaks.is_empty(),
+            "fresh dirs must not be leaks: {:?}",
+            plan.untracked_leaks
+        );
+        assert!(leak_path.exists() && live_path.exists());
+
+        // 5 h later: the dangling leaf is a proven leak — deleted in a real
+        // run; the live-gitdir leaf is still reported, never touched.
+        let plan = run_clean(data_dir, &db, false, 7, now + 5 * 3600).unwrap();
+        assert_eq!(plan.untracked_leaks, vec![leak_path.clone()]);
+        assert!(!leak_path.exists(), "dangling old leak must be removed");
+        assert!(live_path.exists(), "live-gitdir dir must be kept");
+        assert!(plan.sandbox_untracked.contains(&live_path));
     }
 }

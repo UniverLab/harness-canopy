@@ -1,8 +1,8 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-use crate::domain::clean::FileCandidate;
+use crate::domain::clean::{FileCandidate, UntrackedLeakCandidate};
 
 pub(super) fn scan_log_files(data_dir: &Path) -> Result<Vec<FileCandidate>> {
     let dir = data_dir.join("logs");
@@ -98,6 +98,40 @@ fn mtime_unix(meta: &std::fs::Metadata) -> i64 {
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+/// Gather the leak facts for untracked worktree leaves: whether the leaf's
+/// `.git` file names a gitdir that still exists, plus the leaf's mtime.
+/// A leaf whose metadata cannot be read is skipped entirely — never
+/// reported with an invented ancient mtime that would read as deletable.
+pub(super) fn scan_untracked_leak_facts(paths: &[PathBuf]) -> Vec<UntrackedLeakCandidate> {
+    let mut out = Vec::new();
+    for path in paths {
+        let Ok(meta) = std::fs::metadata(path) else {
+            continue;
+        };
+        out.push(UntrackedLeakCandidate {
+            path: path.clone(),
+            gitdir_exists: !dangling_gitdir(path),
+            mtime: mtime_unix(&meta),
+        });
+    }
+    out
+}
+
+/// True only when the leaf's `.git` is a FILE that parses as
+/// `gitdir: <path>` and `<path>` no longer exists. Safety default: read
+/// failure, missing `.git`, a Dir-type `.git`, or unparseable content all
+/// yield false (keep + report) — only a parseable pointer at a missing path
+/// counts as dangling.
+fn dangling_gitdir(leaf: &Path) -> bool {
+    let Ok(content) = std::fs::read_to_string(leaf.join(".git")) else {
+        return false;
+    };
+    let Some(gitdir) = content.trim().strip_prefix("gitdir: ") else {
+        return false;
+    };
+    !Path::new(gitdir.trim()).exists()
 }
 
 pub(super) fn format_bytes(bytes: u64) -> String {

@@ -250,6 +250,33 @@ pub fn plan_sandbox_cleanup(candidates: &[SandboxCandidate]) -> Vec<SandboxClean
         .collect()
 }
 
+/// A worktree leaf dir with no `sandbox_runs` row, as input to
+/// [`plan_leaked_untracked`].
+#[derive(Debug, Clone)]
+pub struct UntrackedLeakCandidate {
+    pub path: PathBuf,
+    /// False when the leaf's `.git` file names a gitdir that no longer exists.
+    pub gitdir_exists: bool,
+    pub mtime: i64,
+}
+
+/// Max age of an untracked dir we still keep: 2 h. A live run's worktree is
+/// minutes old; the 693 leaked dirs are days old.
+pub const LEAK_MAX_AGE_SECS: i64 = 2 * 3600;
+
+/// Which untracked dirs `canopy clean` (soft mode) may delete: the `.git`
+/// pointer is dangling AND the dir is strictly older than 2 h (same strict
+/// `>` semantics as `cutoff_timestamp` consumers — exactly-2 h-old is kept).
+/// A dir whose gitdir exists stays untouched and keeps being reported.
+pub fn plan_leaked_untracked(candidates: &[UntrackedLeakCandidate], now_ts: i64) -> Vec<PathBuf> {
+    candidates
+        .iter()
+        .filter(|c| !c.gitdir_exists)
+        .filter(|c| c.mtime < now_ts - LEAK_MAX_AGE_SECS)
+        .map(|c| c.path.clone())
+        .collect()
+}
+
 /// Everything a `canopy clean` run decided to do (or, under `--dry-run`,
 /// decided it *would* do).
 #[derive(Debug, Clone, Default)]
@@ -264,6 +291,9 @@ pub struct CleanPlan {
     /// Anonymous worktree directories with no run record. Reported as
     /// skipped — never removed.
     pub sandbox_untracked: Vec<PathBuf>,
+    /// Anonymous leaked dirs proven safe: dangling gitdir + older than 2 h —
+    /// deleted in soft mode.
+    pub untracked_leaks: Vec<PathBuf>,
 }
 
 impl CleanPlan {
@@ -298,6 +328,7 @@ impl CleanPlan {
             && self.terminal_dirs.is_empty()
             && self.rag_residue_files.is_empty()
             && self.sandbox_removals.is_empty()
+            && self.untracked_leaks.is_empty()
     }
 }
 
@@ -763,6 +794,7 @@ mod tests {
             orphaned_projects: vec![],
             sandbox_removals: vec![],
             sandbox_untracked: vec![],
+            untracked_leaks: vec![],
         };
         assert_eq!(plan.reclaimed_bytes(), 600);
     }
@@ -782,6 +814,7 @@ mod tests {
             }],
             sandbox_removals: vec![],
             sandbox_untracked: vec![],
+            untracked_leaks: vec![],
         };
         assert_eq!(plan.reclaimed_bytes(), 0);
     }
@@ -798,6 +831,7 @@ mod tests {
             orphaned_projects: vec![],
             sandbox_removals: vec![],
             sandbox_untracked: vec![],
+            untracked_leaks: vec![],
         };
         assert!(!plan.is_empty());
     }
@@ -817,6 +851,7 @@ mod tests {
             orphaned_projects: vec![],
             sandbox_removals: vec![],
             sandbox_untracked: vec![],
+            untracked_leaks: vec![],
         };
         assert!(!plan.is_empty());
     }
@@ -836,6 +871,7 @@ mod tests {
             orphaned_projects: vec![],
             sandbox_removals: vec![],
             sandbox_untracked: vec![],
+            untracked_leaks: vec![],
         };
         assert!(!plan.is_empty());
     }
@@ -1234,6 +1270,7 @@ mod tests {
             orphaned_projects: vec![],
             sandbox_removals: vec![],
             sandbox_untracked: vec![],
+            untracked_leaks: vec![],
         };
         // Bytes from log_files must never leak into the row count.
         assert_eq!(plan.deleted_row_count(), 3);
@@ -1296,5 +1333,34 @@ mod tests {
     fn plan_sandbox_cleanup_empty() {
         let plan = plan_sandbox_cleanup(&[]);
         assert!(plan.is_empty());
+    }
+
+    // ── CB92: plan_leaked_untracked ────────────────────────────────────
+
+    fn leak_candidate(path: &str, gitdir_exists: bool, mtime: i64) -> UntrackedLeakCandidate {
+        UntrackedLeakCandidate {
+            path: PathBuf::from(path),
+            gitdir_exists,
+            mtime,
+        }
+    }
+
+    #[test]
+    fn plan_leaked_untracked_removes_only_dangling_and_old() {
+        let now = 1_000_000_i64;
+        let three_hours_ago = now - 3 * 3600;
+        let candidates = vec![
+            leak_candidate("/wt/dangling-old", false, three_hours_ago),
+            leak_candidate("/wt/dangling-fresh", false, now - 3600),
+            leak_candidate("/wt/live-old", true, three_hours_ago),
+            // Exactly 2 h old: age == LEAK_MAX_AGE_SECS, must be kept
+            // (strict `>` semantics, same as cutoff_timestamp consumers).
+            leak_candidate("/wt/dangling-boundary", false, now - LEAK_MAX_AGE_SECS),
+        ];
+        let plan = plan_leaked_untracked(&candidates, now);
+        assert_eq!(plan, vec![PathBuf::from("/wt/dangling-old")]);
+
+        // Empty input → empty plan.
+        assert!(plan_leaked_untracked(&[], now).is_empty());
     }
 }

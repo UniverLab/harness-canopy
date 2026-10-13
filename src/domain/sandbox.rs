@@ -10,6 +10,10 @@ use crate::domain::project::workdir_hash;
 use crate::domain::prompts::canopy_dir;
 
 pub fn worktrees_base_dir() -> PathBuf {
+    #[cfg(test)]
+    if std::env::var_os("CANOPY_HOME_OVERRIDE").is_none() {
+        panic!("test reached the real ~/.canopy/worktrees; use the _in variant with a temp root");
+    }
     canopy_dir().join("worktrees")
 }
 
@@ -65,7 +69,8 @@ pub fn canopy_protocol_block() -> &'static str {
      truth, not this summary."
 }
 
-pub async fn create_sandbox(
+pub async fn create_sandbox_in(
+    base: &Path,
     original_workdir: &str,
     cli_name: &str,
     protocol_content: &str,
@@ -75,7 +80,7 @@ pub async fn create_sandbox(
     let short_id = &sandbox_id.to_string()[..8];
     let sandbox_branch = format!("canopy/sandbox-{short_id}");
 
-    let base = worktrees_base_dir().join(&project_hash);
+    let base = base.join(&project_hash);
     std::fs::create_dir_all(&base)
         .with_context(|| format!("Failed to create worktrees base dir: {}", base.display()))?;
 
@@ -123,7 +128,24 @@ pub async fn create_sandbox(
     })
 }
 
-pub async fn remove_sandbox(sandbox: &Sandbox) -> Result<()> {
+/// Production entry point: sandbox under the real `~/.canopy/worktrees`.
+/// Tests must call [`create_sandbox_in`] with a temp root instead (the
+/// `worktrees_base_dir` guard enforces this).
+pub async fn create_sandbox(
+    original_workdir: &str,
+    cli_name: &str,
+    protocol_content: &str,
+) -> Result<Sandbox> {
+    create_sandbox_in(
+        &worktrees_base_dir(),
+        original_workdir,
+        cli_name,
+        protocol_content,
+    )
+    .await
+}
+
+pub async fn remove_sandbox_in(base: &Path, sandbox: &Sandbox) -> Result<()> {
     // `--force`: the worktree always has at least the uncommitted instruction
     // file (and whatever build artifacts a run left), so a plain `remove`
     // would refuse. It only ever deletes the sandbox worktree and its admin
@@ -157,19 +179,23 @@ pub async fn remove_sandbox(sandbox: &Sandbox) -> Result<()> {
         tracing::warn!("git branch -D failed (non-fatal): {stderr}");
     }
 
-    let project_dir = worktrees_base_dir().join(&sandbox.project_hash);
-    if project_dir.exists() {
-        if let Ok(entries) = std::fs::read_dir(&project_dir) {
-            if entries.count() == 0 {
-                let _ = std::fs::remove_dir(&project_dir);
-            }
-        }
-    }
+    prune_empty_project_dir_in(base, &sandbox.project_hash);
 
     Ok(())
 }
 
-pub async fn merge_sandbox(sandbox: &Sandbox) -> Result<MergeOutcome> {
+/// Production entry point: prune against the real `~/.canopy/worktrees`.
+// Kept per spec FR1 ("keep the existing public function as the wrapper"):
+// every current call site reaches removal through a `_in` variant with an
+// explicit root, so nothing in-crate calls this anymore — it stays as the
+// public real-root wrapper rather than being deleted out from under the
+// spec.
+#[allow(dead_code)]
+pub async fn remove_sandbox(sandbox: &Sandbox) -> Result<()> {
+    remove_sandbox_in(&worktrees_base_dir(), sandbox).await
+}
+
+pub async fn merge_sandbox_in(base: &Path, sandbox: &Sandbox) -> Result<MergeOutcome> {
     // The merge lands on the branch the sandbox was created from, in the
     // user's own checkout. Only proceed if that checkout is actually on that
     // branch and has nothing uncommitted — otherwise `git merge` would either
@@ -197,7 +223,7 @@ pub async fn merge_sandbox(sandbox: &Sandbox) -> Result<MergeOutcome> {
         .context("Failed to execute git merge")?;
 
     if output.status.success() {
-        remove_sandbox(sandbox).await?;
+        remove_sandbox_in(base, sandbox).await?;
         return Ok(MergeOutcome::CleanMerge);
     }
 
@@ -207,7 +233,7 @@ pub async fn merge_sandbox(sandbox: &Sandbox) -> Result<MergeOutcome> {
     if stderr.contains("CONFLICT") || stdout.contains("CONFLICT") {
         match resolve_merge_conflicts(sandbox).await {
             Ok(()) => {
-                remove_sandbox(sandbox).await?;
+                remove_sandbox_in(base, sandbox).await?;
                 Ok(MergeOutcome::ConflictResolution)
             }
             Err(e) => {
@@ -223,6 +249,11 @@ pub async fn merge_sandbox(sandbox: &Sandbox) -> Result<MergeOutcome> {
     } else {
         Ok(MergeOutcome::MergeFailed(stderr.to_string()))
     }
+}
+
+/// Production entry point: land against the real `~/.canopy/worktrees`.
+pub async fn merge_sandbox(sandbox: &Sandbox) -> Result<MergeOutcome> {
+    merge_sandbox_in(&worktrees_base_dir(), sandbox).await
 }
 
 async fn working_tree_clean(workdir: &str) -> Result<bool> {
@@ -354,9 +385,18 @@ pub enum DiscardOutcome {
 /// Safety guard: only paths under canopy's own worktrees root, on a
 /// `canopy/sandbox-*` branch, are ever touched. Called first by every
 /// mutating function below.
+// Kept per spec FR1 ("keep the existing public function as the wrapper"):
+// the mutating functions below guard through `guard_is_managed_in` with an
+// explicit root, so nothing in-crate calls this real-root form anymore.
+#[allow(dead_code)]
 pub fn guard_is_managed(path: &Path, branch: &str) -> Result<()> {
-    let base = worktrees_base_dir();
-    if !path.starts_with(&base) {
+    guard_is_managed_in(&worktrees_base_dir(), path, branch)
+}
+
+/// [`guard_is_managed`] against an explicit worktrees root, so tests (and
+/// any caller with its own root) never consult the real `~/.canopy`.
+pub fn guard_is_managed_in(base: &Path, path: &Path, branch: &str) -> Result<()> {
+    if !path.starts_with(base) {
         bail!(
             "refusing: worktree path '{}' is outside canopy's worktrees root '{}'",
             path.display(),
@@ -482,8 +522,8 @@ fn delete_branch_blocking(run: &SandboxRun, force: bool) -> Result<()> {
     Ok(())
 }
 
-fn prune_empty_project_dir(project_hash: &str) {
-    let project_dir = worktrees_base_dir().join(project_hash);
+fn prune_empty_project_dir_in(base: &Path, project_hash: &str) {
+    let project_dir = base.join(project_hash);
     if project_dir.exists() {
         if let Ok(entries) = std::fs::read_dir(&project_dir) {
             if entries.count() == 0 {
@@ -501,7 +541,13 @@ fn prune_empty_project_dir(project_hash: &str) {
 /// Row updates are the caller's job (`merged` on [`LandOutcome::Landed`]);
 /// a refusal leaves the row untouched.
 pub fn land_sandbox_blocking(run: &SandboxRun) -> Result<LandOutcome> {
-    guard_is_managed(Path::new(&run.worktree_path), &run.sandbox_branch)?;
+    land_sandbox_blocking_in(&worktrees_base_dir(), run)
+}
+
+/// [`land_sandbox_blocking`] against an explicit worktrees root (the guard
+/// checks the path prefix against `base` instead of the real `~/.canopy`).
+pub fn land_sandbox_blocking_in(base: &Path, run: &SandboxRun) -> Result<LandOutcome> {
+    guard_is_managed_in(base, Path::new(&run.worktree_path), &run.sandbox_branch)?;
     let current = get_current_branch(&run.original_workdir)?;
     if current != run.base_branch {
         return Ok(LandOutcome::RefusedWrongBranch(format!(
@@ -557,6 +603,14 @@ pub async fn land_sandbox(run: &SandboxRun) -> Result<LandOutcome> {
     land_sandbox_blocking(run)
 }
 
+/// [`land_sandbox`] against an explicit worktrees root. Test-only: the
+/// production entry (`land_sandbox`) goes through `land_sandbox_blocking`
+/// as before; this async mirror exists so migrated tests share one shape.
+#[cfg(test)]
+pub async fn land_sandbox_in(base: &Path, run: &SandboxRun) -> Result<LandOutcome> {
+    land_sandbox_blocking_in(base, run)
+}
+
 /// Discard one sandbox: worktree removed via git's own machinery, branch
 /// deleted, row update left to the caller (`discarded` on
 /// [`DiscardOutcome::Discarded`]).
@@ -565,7 +619,17 @@ pub async fn land_sandbox(run: &SandboxRun) -> Result<LandOutcome> {
 /// nowhere else (or when that is uncertain), unless `force` was passed
 /// explicitly in this call.
 pub fn discard_sandbox_blocking(run: &SandboxRun, force: bool) -> Result<DiscardOutcome> {
-    guard_is_managed(Path::new(&run.worktree_path), &run.sandbox_branch)?;
+    discard_sandbox_blocking_in(&worktrees_base_dir(), run, force)
+}
+
+/// [`discard_sandbox_blocking`] against an explicit worktrees root (guard
+/// and prune both use `base` instead of the real `~/.canopy`).
+pub fn discard_sandbox_blocking_in(
+    base: &Path,
+    run: &SandboxRun,
+    force: bool,
+) -> Result<DiscardOutcome> {
+    guard_is_managed_in(base, Path::new(&run.worktree_path), &run.sandbox_branch)?;
     match has_unique_commits(run) {
         Some(true) if !force => return Ok(DiscardOutcome::RefusedUniqueCommits),
         // Uncertain = keep: tidiness never outranks possibly-unique work.
@@ -576,12 +640,25 @@ pub fn discard_sandbox_blocking(run: &SandboxRun, force: bool) -> Result<Discard
         remove_worktree_blocking(run)?;
     }
     delete_branch_blocking(run, force)?;
-    prune_empty_project_dir(&run.project_hash);
+    prune_empty_project_dir_in(base, &run.project_hash);
     Ok(DiscardOutcome::Discarded)
 }
 
 pub async fn discard_sandbox(run: &SandboxRun, force: bool) -> Result<DiscardOutcome> {
     discard_sandbox_blocking(run, force)
+}
+
+/// [`discard_sandbox`] against an explicit worktrees root. Test-only: the
+/// production entry (`discard_sandbox`) goes through
+/// `discard_sandbox_blocking` as before; this async mirror exists so
+/// migrated tests share one shape.
+#[cfg(test)]
+pub async fn discard_sandbox_in(
+    base: &Path,
+    run: &SandboxRun,
+    force: bool,
+) -> Result<DiscardOutcome> {
+    discard_sandbox_blocking_in(base, run, force)
 }
 
 /// End-of-run teardown. Never returns `Err`: every failure is recorded on
@@ -596,10 +673,21 @@ pub async fn teardown_sandbox_at_end(
     run: &crate::db::sandbox::SandboxRun,
     reason: &str,
 ) {
+    teardown_sandbox_at_end_in(&worktrees_base_dir(), db, run, reason).await;
+}
+
+/// [`teardown_sandbox_at_end`] against an explicit worktrees root (guard
+/// and prune both use `base` instead of the real `~/.canopy`).
+pub async fn teardown_sandbox_at_end_in(
+    base: &Path,
+    db: &crate::db::Database,
+    run: &crate::db::sandbox::SandboxRun,
+    reason: &str,
+) {
     // Same dual guard as land/discard (constraint: only canopy's own
     // sandboxes are ever touched). A row that fails it is kept and the
     // refusal recorded — never acted on, never silent.
-    if let Err(e) = guard_is_managed(Path::new(&run.worktree_path), &run.sandbox_branch) {
+    if let Err(e) = guard_is_managed_in(base, Path::new(&run.worktree_path), &run.sandbox_branch) {
         let _ = db.update_sandbox_run_status(&run.id, "cleanup_failed");
         let _ = db.set_sandbox_cleanup_error(
             &run.id,
@@ -628,7 +716,7 @@ pub async fn teardown_sandbox_at_end(
             }
             match detail {
                 None => {
-                    prune_empty_project_dir(&run.project_hash);
+                    prune_empty_project_dir_in(base, &run.project_hash);
                     let _ = db.update_sandbox_run_status(&run.id, "cleaned");
                 }
                 Some(detail) => {
@@ -657,11 +745,95 @@ pub async fn teardown_sandbox_at_end(
 mod tests {
     use super::*;
 
+    /// Serializes this module's tests that touch `CANOPY_HOME_OVERRIDE`
+    /// (process-wide env var) against each other — same pattern as
+    /// `daemon::server`'s `HOME_LOCK` and `graph_engine`'s
+    /// `HOME_OVERRIDE_LOCK`.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn test_worktrees_base_dir_uses_canopy_home() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let home = tempfile::tempdir().expect("temp home");
+        let prev = std::env::var_os("CANOPY_HOME_OVERRIDE");
+        unsafe { std::env::set_var("CANOPY_HOME_OVERRIDE", home.path()) };
         let dir = worktrees_base_dir();
-        assert!(dir.ends_with("worktrees"));
-        assert!(dir.to_string_lossy().contains(".canopy"));
+        match prev {
+            Some(v) => unsafe { std::env::set_var("CANOPY_HOME_OVERRIDE", v) },
+            None => unsafe { std::env::remove_var("CANOPY_HOME_OVERRIDE") },
+        }
+        assert_eq!(dir, home.path().join(".canopy").join("worktrees"));
+    }
+
+    #[test]
+    fn worktrees_base_dir_guard_panics_without_override() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let prev = std::env::var_os("CANOPY_HOME_OVERRIDE");
+        unsafe { std::env::remove_var("CANOPY_HOME_OVERRIDE") };
+        let result = std::panic::catch_unwind(worktrees_base_dir);
+        match prev {
+            Some(v) => unsafe { std::env::set_var("CANOPY_HOME_OVERRIDE", v) },
+            None => unsafe { std::env::remove_var("CANOPY_HOME_OVERRIDE") },
+        }
+        let payload =
+            result.expect_err("worktrees_base_dir must panic in tests without the override");
+        let msg = payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .unwrap_or_default();
+        assert!(
+            msg.contains("_in variant with a temp root"),
+            "unexpected panic message: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_sandbox_in_uses_given_root_only() {
+        let repo = init_test_repo();
+        let repo_path = repo.path().to_string_lossy().to_string();
+        let root = tempfile::tempdir().expect("worktrees root");
+        let base = root.path().join("worktrees");
+
+        let sandbox = create_sandbox_in(&base, &repo_path, "opencode", "P")
+            .await
+            .expect("create sandbox in given root");
+
+        assert!(
+            sandbox.worktree_path.starts_with(&base),
+            "worktree {} not under the given root {}",
+            sandbox.worktree_path.display(),
+            base.display()
+        );
+        assert_eq!(
+            std::fs::read_to_string(sandbox.worktree_path.join("AGENTS.md")).unwrap(),
+            crate::domain::instruction_file::amend_with_protocol("", "P")
+        );
+
+        // The real root (under a *different* home override) must not be a
+        // prefix of the worktree: nothing may land under the real
+        // `~/.canopy/worktrees` — or under another home entirely.
+        let other_home = tempfile::tempdir().expect("other home");
+        let real_root = {
+            let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+            let prev = std::env::var_os("CANOPY_HOME_OVERRIDE");
+            unsafe { std::env::set_var("CANOPY_HOME_OVERRIDE", other_home.path()) };
+            let real_root = worktrees_base_dir();
+            match prev {
+                Some(v) => unsafe { std::env::set_var("CANOPY_HOME_OVERRIDE", v) },
+                None => unsafe { std::env::remove_var("CANOPY_HOME_OVERRIDE") },
+            }
+            real_root
+        };
+        assert_ne!(real_root, base);
+        assert!(
+            !sandbox.worktree_path.starts_with(&real_root),
+            "worktree {} leaked under {}",
+            sandbox.worktree_path.display(),
+            real_root.display()
+        );
+
+        remove_sandbox_in(&base, &sandbox).await.ok();
     }
 
     #[test]
@@ -714,8 +886,10 @@ mod tests {
     async fn test_create_sandbox_creates_worktree_and_instruction_file() {
         let repo = init_test_repo();
         let repo_path = repo.path().to_string_lossy().to_string();
+        let root = tempfile::tempdir().expect("worktrees root");
+        let base = root.path().join("worktrees");
 
-        let sandbox = create_sandbox(&repo_path, "opencode", "PROTOCOL_CONTENT")
+        let sandbox = create_sandbox_in(&base, &repo_path, "opencode", "PROTOCOL_CONTENT")
             .await
             .expect("create sandbox");
 
@@ -740,33 +914,37 @@ mod tests {
         let branch_list = String::from_utf8_lossy(&branch_exists.stdout);
         assert!(branch_list.contains(&sandbox.sandbox_branch));
 
-        remove_sandbox(&sandbox).await.ok();
+        remove_sandbox_in(&base, &sandbox).await.ok();
     }
 
     #[tokio::test]
     async fn test_create_sandbox_uses_correct_instruction_file_per_cli() {
         let repo = init_test_repo();
         let repo_path = repo.path().to_string_lossy().to_string();
+        let root = tempfile::tempdir().expect("worktrees root");
+        let base = root.path().join("worktrees");
 
-        let sb_claude = create_sandbox(&repo_path, "claude", "CLAUDE_PROTOCOL")
+        let sb_claude = create_sandbox_in(&base, &repo_path, "claude", "CLAUDE_PROTOCOL")
             .await
             .expect("create claude sandbox");
         assert!(sb_claude.worktree_path.join("AGENTS.md").exists());
-        remove_sandbox(&sb_claude).await.ok();
+        remove_sandbox_in(&base, &sb_claude).await.ok();
 
-        let sb_gemini = create_sandbox(&repo_path, "gemini", "GEMINI_PROTOCOL")
+        let sb_gemini = create_sandbox_in(&base, &repo_path, "gemini", "GEMINI_PROTOCOL")
             .await
             .expect("create gemini sandbox");
         assert!(sb_gemini.worktree_path.join("GEMINI.md").exists());
-        remove_sandbox(&sb_gemini).await.ok();
+        remove_sandbox_in(&base, &sb_gemini).await.ok();
     }
 
     #[tokio::test]
     async fn test_merge_sandbox_clean_path() {
         let repo = init_test_repo();
         let repo_path = repo.path().to_string_lossy().to_string();
+        let root = tempfile::tempdir().expect("worktrees root");
+        let base = root.path().join("worktrees");
 
-        let sandbox = create_sandbox(&repo_path, "opencode", "protocol")
+        let sandbox = create_sandbox_in(&base, &repo_path, "opencode", "protocol")
             .await
             .expect("create sandbox");
 
@@ -786,7 +964,9 @@ mod tests {
         run_git(&["add", "."]);
         run_git(&["commit", "-m", "add new file"]);
 
-        let outcome = merge_sandbox(&sandbox).await.expect("merge sandbox");
+        let outcome = merge_sandbox_in(&base, &sandbox)
+            .await
+            .expect("merge sandbox");
         assert_eq!(outcome, MergeOutcome::CleanMerge);
 
         assert!(repo.path().join("new_file.txt").exists());
@@ -817,34 +997,42 @@ mod tests {
     async fn test_merge_sandbox_refuses_dirty_workdir() {
         let repo = init_test_repo();
         let repo_path = repo.path().to_string_lossy().to_string();
+        let root = tempfile::tempdir().expect("worktrees root");
+        let base = root.path().join("worktrees");
 
-        let sandbox = create_sandbox(&repo_path, "opencode", "protocol")
+        let sandbox = create_sandbox_in(&base, &repo_path, "opencode", "protocol")
             .await
             .expect("create sandbox");
 
         std::fs::write(repo.path().join("dirty.txt"), "uncommitted").unwrap();
 
-        let outcome = merge_sandbox(&sandbox).await.expect("merge sandbox");
+        let outcome = merge_sandbox_in(&base, &sandbox)
+            .await
+            .expect("merge sandbox");
         assert!(matches!(outcome, MergeOutcome::MergeFailed(_)));
 
         assert!(sandbox.worktree_path.exists());
 
         std::fs::remove_file(repo.path().join("dirty.txt")).ok();
-        remove_sandbox(&sandbox).await.ok();
+        remove_sandbox_in(&base, &sandbox).await.ok();
     }
 
     #[tokio::test]
     async fn test_remove_sandbox_cleans_up_worktree_and_branch() {
         let repo = init_test_repo();
         let repo_path = repo.path().to_string_lossy().to_string();
+        let root = tempfile::tempdir().expect("worktrees root");
+        let base = root.path().join("worktrees");
 
-        let sandbox = create_sandbox(&repo_path, "opencode", "protocol")
+        let sandbox = create_sandbox_in(&base, &repo_path, "opencode", "protocol")
             .await
             .expect("create sandbox");
         let worktree_path = sandbox.worktree_path.clone();
         let branch = sandbox.sandbox_branch.clone();
 
-        remove_sandbox(&sandbox).await.expect("remove sandbox");
+        remove_sandbox_in(&base, &sandbox)
+            .await
+            .expect("remove sandbox");
 
         assert!(!worktree_path.exists());
 
@@ -914,7 +1102,9 @@ mod tests {
     async fn teardown_no_unique_commits_removes_worktree_and_branch() {
         let repo = init_test_repo();
         let repo_path = repo.path().to_string_lossy().to_string();
-        let sandbox = create_sandbox(&repo_path, "opencode", "protocol")
+        let root = tempfile::tempdir().expect("worktrees root");
+        let base = root.path().join("worktrees");
+        let sandbox = create_sandbox_in(&base, &repo_path, "opencode", "protocol")
             .await
             .expect("create sandbox");
 
@@ -922,7 +1112,7 @@ mod tests {
         let row = insert_test_row(&db, &sandbox, "graph-1");
         assert_eq!(has_unique_commits(&row), Some(false));
 
-        teardown_sandbox_at_end(&db, &row, "completed").await;
+        teardown_sandbox_at_end_in(&base, &db, &row, "completed").await;
 
         let row = db.get_sandbox_run(&sandbox.id).unwrap().unwrap();
         assert_eq!(row.status, "cleaned");
@@ -944,7 +1134,9 @@ mod tests {
     async fn teardown_unique_commits_keeps_both_and_records_path() {
         let repo = init_test_repo();
         let repo_path = repo.path().to_string_lossy().to_string();
-        let sandbox = create_sandbox(&repo_path, "opencode", "protocol")
+        let root = tempfile::tempdir().expect("worktrees root");
+        let base = root.path().join("worktrees");
+        let sandbox = create_sandbox_in(&base, &repo_path, "opencode", "protocol")
             .await
             .expect("create sandbox");
         commit_file(
@@ -958,7 +1150,7 @@ mod tests {
         let row = insert_test_row(&db, &sandbox, "graph-2");
         assert_eq!(has_unique_commits(&row), Some(true));
 
-        teardown_sandbox_at_end(&db, &row, "completed").await;
+        teardown_sandbox_at_end_in(&base, &db, &row, "completed").await;
 
         let row = db.get_sandbox_run(&sandbox.id).unwrap().unwrap();
         assert_eq!(row.status, "kept");
@@ -966,15 +1158,17 @@ mod tests {
         assert!(sandbox.worktree_path.exists());
         assert!(branch_exists(repo.path(), &sandbox.sandbox_branch));
 
-        remove_sandbox(&sandbox).await.ok();
+        remove_sandbox_in(&base, &sandbox).await.ok();
     }
 
     #[tokio::test]
     async fn listing_reports_unique_state_both_ways() {
         let repo = init_test_repo();
         let repo_path = repo.path().to_string_lossy().to_string();
+        let root = tempfile::tempdir().expect("worktrees root");
+        let base = root.path().join("worktrees");
 
-        let clean_sb = create_sandbox(&repo_path, "opencode", "protocol")
+        let clean_sb = create_sandbox_in(&base, &repo_path, "opencode", "protocol")
             .await
             .expect("create clean sandbox");
         let (_dbdir, db) = test_db();
@@ -982,7 +1176,7 @@ mod tests {
         assert_eq!(has_unique_commits(&clean_row), Some(false));
         assert_eq!(behind_count(&clean_row), Some(0));
 
-        let work_sb = create_sandbox(&repo_path, "opencode", "protocol")
+        let work_sb = create_sandbox_in(&base, &repo_path, "opencode", "protocol")
             .await
             .expect("create work sandbox");
         commit_file(
@@ -995,8 +1189,8 @@ mod tests {
         assert_eq!(has_unique_commits(&work_row), Some(true));
         assert!(behind_count(&work_row).is_some());
 
-        remove_sandbox(&clean_sb).await.ok();
-        remove_sandbox(&work_sb).await.ok();
+        remove_sandbox_in(&base, &clean_sb).await.ok();
+        remove_sandbox_in(&base, &work_sb).await.ok();
     }
 
     #[tokio::test]
@@ -1004,8 +1198,10 @@ mod tests {
         let repo = init_test_repo();
         commit_file(repo.path(), "file.txt", "line1\n", "add file");
         let repo_path = repo.path().to_string_lossy().to_string();
+        let root = tempfile::tempdir().expect("worktrees root");
+        let base = root.path().join("worktrees");
 
-        let sandbox = create_sandbox(&repo_path, "opencode", "protocol")
+        let sandbox = create_sandbox_in(&base, &repo_path, "opencode", "protocol")
             .await
             .expect("create sandbox");
         commit_file(
@@ -1019,7 +1215,7 @@ mod tests {
         let (_dbdir, db) = test_db();
         let row = insert_test_row(&db, &sandbox, "graph-land");
 
-        let outcome = land_sandbox(&row).await.expect("land sandbox");
+        let outcome = land_sandbox_in(&base, &row).await.expect("land sandbox");
         match outcome {
             LandOutcome::RefusedConflict(paths) => {
                 assert!(
@@ -1036,14 +1232,16 @@ mod tests {
         );
         assert!(branch_exists(repo.path(), &sandbox.sandbox_branch));
 
-        remove_sandbox(&sandbox).await.ok();
+        remove_sandbox_in(&base, &sandbox).await.ok();
     }
 
     #[tokio::test]
     async fn discard_refuses_unique_unless_explicit() {
         let repo = init_test_repo();
         let repo_path = repo.path().to_string_lossy().to_string();
-        let sandbox = create_sandbox(&repo_path, "opencode", "protocol")
+        let root = tempfile::tempdir().expect("worktrees root");
+        let base = root.path().join("worktrees");
+        let sandbox = create_sandbox_in(&base, &repo_path, "opencode", "protocol")
             .await
             .expect("create sandbox");
         commit_file(
@@ -1056,12 +1254,16 @@ mod tests {
         let (_dbdir, db) = test_db();
         let row = insert_test_row(&db, &sandbox, "graph-discard");
 
-        let outcome = discard_sandbox(&row, false).await.expect("discard");
+        let outcome = discard_sandbox_in(&base, &row, false)
+            .await
+            .expect("discard");
         assert_eq!(outcome, DiscardOutcome::RefusedUniqueCommits);
         assert!(sandbox.worktree_path.exists());
         assert!(branch_exists(repo.path(), &sandbox.sandbox_branch));
 
-        let outcome = discard_sandbox(&row, true).await.expect("discard force");
+        let outcome = discard_sandbox_in(&base, &row, true)
+            .await
+            .expect("discard force");
         assert_eq!(outcome, DiscardOutcome::Discarded);
         assert!(!sandbox.worktree_path.exists());
         assert!(!branch_exists(repo.path(), &sandbox.sandbox_branch));
@@ -1071,7 +1273,9 @@ mod tests {
     async fn failed_cleanup_records_reason() {
         let repo = init_test_repo();
         let repo_path = repo.path().to_string_lossy().to_string();
-        let sandbox = create_sandbox(&repo_path, "opencode", "protocol")
+        let root = tempfile::tempdir().expect("worktrees root");
+        let base = root.path().join("worktrees");
+        let sandbox = create_sandbox_in(&base, &repo_path, "opencode", "protocol")
             .await
             .expect("create sandbox");
         let worktree_path = sandbox.worktree_path.to_string_lossy().to_string();
@@ -1081,7 +1285,7 @@ mod tests {
 
         std::fs::remove_dir_all(repo.path()).expect("delete original workdir");
 
-        teardown_sandbox_at_end(&db, &row, "failed: boom").await;
+        teardown_sandbox_at_end_in(&base, &db, &row, "failed: boom").await;
 
         let row = db.get_sandbox_run(&sandbox.id).unwrap().unwrap();
         assert_eq!(row.status, "cleanup_failed");
@@ -1122,8 +1326,10 @@ mod tests {
         commit_file(repo.path(), "CLAUDE.md", "# Project rules\n", "add claude");
         commit_file(repo.path(), "AGENTS.md", "# Agents\n", "add agents");
         let repo_path = repo.path().to_string_lossy().to_string();
+        let root = tempfile::tempdir().expect("worktrees root");
+        let base = root.path().join("worktrees");
 
-        let sandbox = create_sandbox(&repo_path, "claude", "PROTOCOL")
+        let sandbox = create_sandbox_in(&base, &repo_path, "claude", "PROTOCOL")
             .await
             .expect("create sandbox");
         let wt = &sandbox.worktree_path;
@@ -1147,7 +1353,7 @@ mod tests {
         let staged = git_stdout(wt, &["diff", "--cached", "--name-only"]);
         assert!(staged.trim().is_empty(), "protocol got staged: {staged}");
 
-        remove_sandbox(&sandbox).await.ok();
+        remove_sandbox_in(&base, &sandbox).await.ok();
     }
 
     #[tokio::test]
@@ -1157,8 +1363,10 @@ mod tests {
         let repo = init_test_repo();
         commit_file(repo.path(), "AGENTS.md", "# Agents\n", "add agents");
         let repo_path = repo.path().to_string_lossy().to_string();
+        let root = tempfile::tempdir().expect("worktrees root");
+        let base = root.path().join("worktrees");
 
-        let sandbox = create_sandbox(&repo_path, "claude", "PROTOCOL")
+        let sandbox = create_sandbox_in(&base, &repo_path, "claude", "PROTOCOL")
             .await
             .expect("create sandbox");
         let wt = &sandbox.worktree_path;
@@ -1169,7 +1377,7 @@ mod tests {
         );
         assert!(!wt.join("CLAUDE.md").exists());
 
-        remove_sandbox(&sandbox).await.ok();
+        remove_sandbox_in(&base, &sandbox).await.ok();
     }
 
     #[tokio::test]
@@ -1178,8 +1386,10 @@ mod tests {
 
         let repo = init_test_repo();
         let repo_path = repo.path().to_string_lossy().to_string();
+        let root = tempfile::tempdir().expect("worktrees root");
+        let base = root.path().join("worktrees");
 
-        let sandbox = create_sandbox(&repo_path, "codex", "PROTOCOL")
+        let sandbox = create_sandbox_in(&base, &repo_path, "codex", "PROTOCOL")
             .await
             .expect("create sandbox");
         let wt = &sandbox.worktree_path;
@@ -1202,7 +1412,7 @@ mod tests {
             "created file got staged: {staged}"
         );
 
-        remove_sandbox(&sandbox).await.ok();
+        remove_sandbox_in(&base, &sandbox).await.ok();
     }
 
     #[tokio::test]
@@ -1214,8 +1424,10 @@ mod tests {
         let repo = init_test_repo();
         commit_file(repo.path(), "CLAUDE.md", "# Rules\n", "add claude");
         let repo_path = repo.path().to_string_lossy().to_string();
+        let root = tempfile::tempdir().expect("worktrees root");
+        let base = root.path().join("worktrees");
 
-        let sandbox = create_sandbox(&repo_path, "claude", "PROTOCOL")
+        let sandbox = create_sandbox_in(&base, &repo_path, "claude", "PROTOCOL")
             .await
             .expect("create sandbox");
         let wt = &sandbox.worktree_path;
@@ -1230,7 +1442,7 @@ mod tests {
         assert_eq!(c1, c2);
         assert_eq!(c1.matches(PROTOCOL_BEGIN).count(), 1);
 
-        remove_sandbox(&sandbox).await.ok();
+        remove_sandbox_in(&base, &sandbox).await.ok();
     }
 
     #[tokio::test]
@@ -1241,8 +1453,10 @@ mod tests {
         let stale = amend_with_protocol("# Rules\n", "OLD_PROTOCOL");
         commit_file(repo.path(), "CLAUDE.md", &stale, "add stale claude");
         let repo_path = repo.path().to_string_lossy().to_string();
+        let root = tempfile::tempdir().expect("worktrees root");
+        let base = root.path().join("worktrees");
 
-        let sandbox = create_sandbox(&repo_path, "claude", "NEW_PROTOCOL")
+        let sandbox = create_sandbox_in(&base, &repo_path, "claude", "NEW_PROTOCOL")
             .await
             .expect("create sandbox");
         let wt = &sandbox.worktree_path;
@@ -1251,6 +1465,6 @@ mod tests {
         assert_eq!(content, amend_with_protocol("# Rules\n", "NEW_PROTOCOL"));
         assert_eq!(content.matches(PROTOCOL_BEGIN).count(), 1);
 
-        remove_sandbox(&sandbox).await.ok();
+        remove_sandbox_in(&base, &sandbox).await.ok();
     }
 }
