@@ -19,7 +19,20 @@ impl GraphEngine {
                 iteration_value as i64,
             )?;
             self.db.complete_pause(&ctx.lp.id)?;
-            activity::publish(&self.db, ctx.workdir, &ctx.lp.id, &ctx.lp.name, "Paused.");
+            activity::record(
+                &self.db,
+                activity::GraphEvent {
+                    graph_id: &ctx.lp.id,
+                    graph_name: &ctx.lp.name,
+                    workdir: ctx.workdir,
+                    spec_id: None,
+                    node_id: None,
+                    run_id: None,
+                    kind: activity::GraphEventKind::GraphPaused,
+                    message: "Paused.".to_string(),
+                    payload: None,
+                },
+            );
             return Ok(Some(SpecExecutionOutcome::Paused));
         }
         if self.is_paused(&ctx.lp.id)? {
@@ -42,18 +55,25 @@ impl GraphEngine {
         )?;
         self.record_spec_end_dirty(&ctx.spec.id, ctx.workdir).await;
         self.notify_spec_completed(ctx.lp, ctx.spec, ctx.queue_id)?;
-        activity::publish(
+        activity::record(
             &self.db,
-            ctx.workdir,
-            &ctx.lp.id,
-            &ctx.lp.name,
-            match &state.spec_committed_head {
-                Some(head) => format!(
-                    "Spec '{}' completed (committed {}).",
-                    ctx.spec.name,
-                    &head[..head.len().min(7)]
-                ),
-                None => format!("Spec '{}' completed.", ctx.spec.name),
+            activity::GraphEvent {
+                graph_id: &ctx.lp.id,
+                graph_name: &ctx.lp.name,
+                workdir: ctx.workdir,
+                spec_id: Some(&ctx.spec.id),
+                node_id: None,
+                run_id: None,
+                kind: activity::GraphEventKind::SpecCompleted,
+                message: match &state.spec_committed_head {
+                    Some(head) => format!(
+                        "Spec '{}' completed (committed {}).",
+                        ctx.spec.name,
+                        &head[..head.len().min(7)]
+                    ),
+                    None => format!("Spec '{}' completed.", ctx.spec.name),
+                },
+                payload: None,
             },
         );
         Ok(SpecExecutionOutcome::Completed {
@@ -362,18 +382,25 @@ impl GraphEngine {
         )?;
         self.record_spec_end_dirty(&ctx.spec.id, ctx.workdir).await;
         self.notify_spec_completed(ctx.lp, ctx.spec, ctx.queue_id)?;
-        activity::publish(
+        activity::record(
             &self.db,
-            ctx.workdir,
-            &ctx.lp.id,
-            &ctx.lp.name,
-            match &state.spec_committed_head {
-                Some(head) => format!(
-                    "Spec '{}' completed (committed {}).",
-                    ctx.spec.name,
-                    &head[..head.len().min(7)]
-                ),
-                None => format!("Spec '{}' completed.", ctx.spec.name),
+            activity::GraphEvent {
+                graph_id: &ctx.lp.id,
+                graph_name: &ctx.lp.name,
+                workdir: ctx.workdir,
+                spec_id: Some(&ctx.spec.id),
+                node_id: None,
+                run_id: None,
+                kind: activity::GraphEventKind::SpecCompleted,
+                message: match &state.spec_committed_head {
+                    Some(head) => format!(
+                        "Spec '{}' completed (committed {}).",
+                        ctx.spec.name,
+                        &head[..head.len().min(7)]
+                    ),
+                    None => format!("Spec '{}' completed.", ctx.spec.name),
+                },
+                payload: None,
             },
         );
         Ok(SpecExecutionOutcome::Completed {

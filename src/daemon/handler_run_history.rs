@@ -8,12 +8,35 @@ use crate::daemon::handler_validate::resolve_prefix_or_error;
 use crate::daemon::helpers::error_result;
 use crate::daemon::params::*;
 use crate::daemon::params_extract::Parameters;
+use crate::db::graphs::events::GraphEventRow;
 use crate::db::Database;
 use crate::domain::graphs::GraphNodeRun;
 use rmcp::model::{CallToolResult, Content};
 use rmcp::tool;
 use rmcp::tool_router;
 use rmcp::ErrorData as McpError;
+use std::collections::HashMap;
+
+/// CM46: the event `kind` vocabulary the `graph_events` table enforces —
+/// validated here too so a bad filter fails with a clear message instead of
+/// an empty page.
+const GRAPH_EVENT_KINDS: &[&str] = &[
+    "graph_started",
+    "graph_paused",
+    "graph_resumed",
+    "graph_completed",
+    "graph_failed",
+    "graph_blocked",
+    "spec_started",
+    "spec_completed",
+    "spec_failed",
+    "spec_skipped",
+    "node_started",
+    "node_finished",
+    "hook_fired",
+    "config_changed",
+    "note",
+];
 
 #[tool_router(router = tool_router_run_history, vis = "pub(crate)")]
 impl TaskTriggerHandler {
@@ -163,6 +186,146 @@ impl TaskTriggerHandler {
                 resumed_from_run_id.as_deref(),
             ))
             .unwrap_or_default(),
+        )]))
+    }
+
+    #[tool(
+        name = "graph_events",
+        description = "Read one graph's durable event log — the engine's own history for that graph, which the activity stream (pruned per workdir) and `graph_get` (bound specs only) cannot serve. Events are returned oldest-first. Filter with `since_id` (a paging cursor — pass the previous page's `next_since_id`), `spec_id`, or `kinds`. `include_payload: true` adds each event's structured `payload` (e.g. a node's `verdict`/`duration_s`, a hook's `event`/`ok`). CM46."
+    )]
+    pub(crate) async fn graph_events(
+        &self,
+        Parameters(params): Parameters<GraphEventsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let graph_id = match resolve_prefix_or_error(
+            &self.db,
+            params.graph_id.trim(),
+            Database::resolve_graph_id_by_prefix,
+            "graph",
+        ) {
+            Ok(id) => id,
+            Err(e) => return Ok(e),
+        };
+        if self
+            .db
+            .get_graph(&graph_id)
+            .map_err(internal_error)?
+            .is_none()
+        {
+            return Ok(error_result(&format!("Graph '{}' not found.", graph_id)));
+        }
+        if let Some(kinds) = params.kinds.as_deref() {
+            for kind in kinds {
+                if !GRAPH_EVENT_KINDS.contains(&kind.as_str()) {
+                    return Ok(error_result(&format!("Unknown event kind '{kind}'.")));
+                }
+            }
+        }
+        let resolved_spec_id = match &params.spec_id {
+            Some(sid) => {
+                match resolve_prefix_or_error(
+                    &self.db,
+                    sid.trim(),
+                    Database::resolve_spec_id_by_prefix,
+                    "spec",
+                ) {
+                    Ok(id) => Some(id),
+                    Err(e) => return Ok(e),
+                }
+            }
+            None => None,
+        };
+
+        let limit = params.limit.unwrap_or(200).clamp(1, 200) as usize;
+        // CM46: `--since <RFC3339>` is translated to the numeric cursor the
+        // list query speaks. An unknown/unparsable timestamp yields no events.
+        let since_id = match (params.since_id, params.since_ts.as_deref()) {
+            (Some(id), _) => Some(id),
+            (None, Some(ts)) => {
+                match self
+                    .db
+                    .first_graph_event_id_at_or_after(&graph_id, ts)
+                    .map_err(internal_error)?
+                {
+                    Some(id) => Some(id - 1),
+                    None => Some(i64::MAX),
+                }
+            }
+            (None, None) => None,
+        };
+        let rows: Vec<GraphEventRow> = self
+            .db
+            .list_graph_events(
+                &graph_id,
+                since_id,
+                resolved_spec_id.as_deref(),
+                params.kinds.as_deref(),
+                limit,
+            )
+            .map_err(internal_error)?;
+
+        // Batched name maps (one query each), never a lookup per row.
+        let spec_names: HashMap<String, String> = self
+            .db
+            .list_graph_specs(&graph_id)
+            .map_err(internal_error)?
+            .into_iter()
+            .map(|spec| (spec.id, spec.name))
+            .collect();
+        let node_names: HashMap<String, String> = self
+            .db
+            .list_graph_nodes_for_graph(&graph_id)
+            .map_err(internal_error)?
+            .into_iter()
+            .map(|node| (node.id, node.name))
+            .collect();
+
+        let include_payload = params.include_payload.unwrap_or(false);
+        let events: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|row| {
+                let spec_name = row
+                    .spec_id
+                    .as_ref()
+                    .and_then(|id| spec_names.get(id))
+                    .cloned();
+                let node_name = row
+                    .node_id
+                    .as_ref()
+                    .and_then(|id| node_names.get(id))
+                    .cloned();
+                let mut obj = serde_json::Map::from_iter([
+                    ("id".to_string(), serde_json::json!(row.id)),
+                    ("created_at".to_string(), serde_json::json!(row.created_at)),
+                    ("kind".to_string(), serde_json::json!(row.kind)),
+                    ("spec_name".to_string(), serde_json::json!(spec_name)),
+                    ("node_name".to_string(), serde_json::json!(node_name)),
+                    ("message".to_string(), serde_json::json!(row.message)),
+                ]);
+                if include_payload {
+                    let payload = row
+                        .payload
+                        .as_deref()
+                        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                        .unwrap_or(serde_json::Value::Null);
+                    obj.insert("payload".to_string(), payload);
+                }
+                serde_json::Value::Object(obj)
+            })
+            .collect();
+
+        let next_since_id = if rows.len() == limit {
+            rows.last().map(|row| row.id)
+        } else {
+            None
+        };
+        let body = serde_json::json!({
+            "graph_id": graph_id,
+            "events": events,
+            "next_since_id": next_since_id,
+        });
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&body).unwrap_or_default(),
         )]))
     }
 }

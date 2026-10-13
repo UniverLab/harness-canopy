@@ -28,14 +28,14 @@ mod scans;
 use hard_cascade::{build_hard_cascade_plan, projected_hard_cascade_rows, run_hard_cascade};
 use reclaim::{
     confirm_stop_daemon, print_dry_run_reclaim_window, reclaim_if_warranted,
-    run_reclaim_window_and_report,
+    run_reclaim_window_and_report, ReclaimOptions,
 };
 use scans::{format_bytes, scan_log_files, scan_rag_residue, scan_terminal_dirs};
 
 #[cfg(test)]
 use reclaim::{
     restoration_feasible_from_facts, run_reclaim_window, DaemonOps, DaemonOwnerKind,
-    ReclaimOptions, ReclaimWindowOutcome,
+    ReclaimWindowOutcome,
 };
 #[cfg(test)]
 use std::sync::Mutex;
@@ -53,13 +53,15 @@ pub async fn handle_clean_action(
     let db = Database::new_safe(&db_path, &data_dir)?;
     let config = CanopyConfig::load(&data_dir);
     let retention_days = older_than.unwrap_or(config.clean.retention_days);
+    let graph_event_days = older_than.unwrap_or(config.graph_event_retention_days);
     let now_ts = chrono::Utc::now().timestamp();
 
     // Project (read-only, no execution) what a real run would delete, so we
     // only ever consider the stop-daemon reclaim window when it's actually
     // warranted — stopping the daemon to reclaim a handful of rows would
     // just be downtime for nothing.
-    let projected_plan = build_clean_plan(&data_dir, &db, retention_days, now_ts)?;
+    let projected_plan =
+        build_clean_plan(&data_dir, &db, retention_days, graph_event_days, now_ts)?;
     let mut projected_rows = projected_plan.deleted_row_count() as u64;
     if hard {
         projected_rows += projected_hard_cascade_rows(&build_hard_cascade_plan(&db)?);
@@ -75,6 +77,7 @@ pub async fn handle_clean_action(
             hard,
             yes,
             retention_days,
+            graph_event_days,
             now_ts,
             no_reclaim,
         );
@@ -103,6 +106,7 @@ pub async fn handle_clean_action(
                 hard,
                 yes,
                 retention_days,
+                graph_event_days,
                 now_ts,
                 no_reclaim,
             );
@@ -112,10 +116,13 @@ pub async fn handle_clean_action(
     run_reclaim_window_and_report(
         &data_dir,
         &db_path,
-        retention_days,
-        now_ts,
-        hard,
-        yes,
+        ReclaimOptions {
+            retention_days,
+            graph_event_retention_days: graph_event_days,
+            now_ts,
+            hard,
+            yes,
+        },
         daemon_pid,
     )
     .await
@@ -136,10 +143,18 @@ fn run_clean_without_window(
     hard: bool,
     yes: bool,
     retention_days: u64,
+    graph_event_days: u64,
     now_ts: i64,
     no_reclaim: bool,
 ) -> Result<()> {
-    let plan = run_clean(data_dir, db, dry_run, retention_days, now_ts)?;
+    let plan = run_clean(
+        data_dir,
+        db,
+        dry_run,
+        retention_days,
+        graph_event_days,
+        now_ts,
+    )?;
     print_summary(&plan, retention_days, dry_run);
 
     let mut rows_deleted = plan.deleted_row_count() as u64;
@@ -161,9 +176,10 @@ fn run_clean(
     db: &Database,
     dry_run: bool,
     retention_days: u64,
+    graph_event_days: u64,
     now_ts: i64,
 ) -> Result<CleanPlan> {
-    let plan = build_clean_plan(data_dir, db, retention_days, now_ts)?;
+    let plan = build_clean_plan(data_dir, db, retention_days, graph_event_days, now_ts)?;
     if !dry_run {
         execute_plan(db, &plan)?;
     }
@@ -180,6 +196,7 @@ fn build_clean_plan(
     data_dir: &Path,
     db: &Database,
     retention_days: u64,
+    graph_event_days: u64,
     now_ts: i64,
 ) -> Result<CleanPlan> {
     let cutoff_ts = clean::cutoff_timestamp(now_ts, retention_days);
@@ -249,6 +266,15 @@ fn build_clean_plan(
         .filter(|p| !leaked_set.contains(p))
         .collect();
 
+    // CM46: aged-out durable graph events, for graphs that are not running.
+    let graph_event_cutoff = clean::cutoff_timestamp(now_ts, graph_event_days);
+    let graph_event_cutoff = chrono::DateTime::from_timestamp(graph_event_cutoff, 0)
+        .map(|at| at.to_rfc3339())
+        .unwrap_or_default();
+    let running_graph_ids = db.list_running_graph_ids()?;
+    let graph_event_deletions =
+        db.count_pruneable_graph_events(&graph_event_cutoff, &running_graph_ids)?;
+
     Ok(CleanPlan {
         session_ids,
         log_files: orphan_logs,
@@ -258,12 +284,18 @@ fn build_clean_plan(
         sandbox_removals,
         sandbox_untracked,
         untracked_leaks,
+        graph_event_deletions,
+        graph_event_cutoff,
     })
 }
 
 fn execute_plan(db: &Database, plan: &CleanPlan) -> Result<()> {
     if !plan.session_ids.is_empty() {
         db.delete_interactive_sessions(&plan.session_ids)?;
+    }
+    if plan.graph_event_deletions > 0 {
+        let running_graph_ids = db.list_running_graph_ids()?;
+        db.prune_graph_events(&plan.graph_event_cutoff, &running_graph_ids)?;
     }
     for f in &plan.log_files {
         let _ = std::fs::remove_file(&f.path);
@@ -333,6 +365,12 @@ fn print_summary(plan: &CleanPlan, retention_days: u64, dry_run: bool) {
         " {verb} {} stale interactive session(s) (database rows)",
         plan.session_ids.len()
     );
+    if plan.graph_event_deletions > 0 {
+        println!(
+            " {verb} {} graph event(s) (database rows)",
+            plan.graph_event_deletions
+        );
+    }
     println!(" {verb} {} orphaned log file(s)", plan.log_files.len());
     println!(
         " {verb} {} orphaned terminal history dir(s)",
@@ -444,7 +482,7 @@ mod tests {
         // Push the clock far enough forward that everything looks old
         // without needing to backdate real file mtimes.
         let now_ts = chrono::Utc::now().timestamp() + 30 * 86_400;
-        let plan = run_clean(data_dir, &db, true, 7, now_ts).unwrap();
+        let plan = run_clean(data_dir, &db, true, 7, 90, now_ts).unwrap();
 
         assert_eq!(plan.session_ids, vec!["s-old".to_string()]);
         assert_eq!(plan.log_files.len(), 1);
@@ -476,7 +514,7 @@ mod tests {
         touch(&data_dir.join("logs/agent-gone.log"), "log contents");
 
         let now_ts = chrono::Utc::now().timestamp() + 30 * 86_400;
-        let plan = run_clean(data_dir, &db, false, 7, now_ts).unwrap();
+        let plan = run_clean(data_dir, &db, false, 7, 90, now_ts).unwrap();
 
         assert_eq!(plan.session_ids.len(), 1);
         assert_eq!(db.count_interactive_sessions().unwrap(), 0);
@@ -502,7 +540,7 @@ mod tests {
         .unwrap();
 
         let now_ts = chrono::Utc::now().timestamp() + 3650 * 86_400;
-        run_clean(data_dir, &db, false, 7, now_ts).unwrap();
+        run_clean(data_dir, &db, false, 7, 90, now_ts).unwrap();
 
         assert_eq!(
             db.get_interactive_session_status("s-active").unwrap(),
@@ -545,7 +583,7 @@ mod tests {
         touch(&data_dir.join("logs/agent-keep.log"), "keep me");
 
         let now_ts = chrono::Utc::now().timestamp() + 30 * 86_400;
-        run_clean(data_dir, &db, false, 7, now_ts).unwrap();
+        run_clean(data_dir, &db, false, 7, 90, now_ts).unwrap();
 
         assert!(data_dir.join("logs/agent-keep.log").exists());
     }
@@ -562,7 +600,7 @@ mod tests {
         );
 
         let now_ts = chrono::Utc::now().timestamp() + 30 * 86_400;
-        let plan = run_clean(data_dir, &db, false, 7, now_ts).unwrap();
+        let plan = run_clean(data_dir, &db, false, 7, 90, now_ts).unwrap();
 
         assert_eq!(plan.terminal_dirs.len(), 1);
         assert!(!data_dir.join("terminals/stray-term").exists());
@@ -582,7 +620,7 @@ mod tests {
         );
 
         let now_ts = chrono::Utc::now().timestamp() + 30 * 86_400;
-        run_clean(data_dir, &db, false, 7, now_ts).unwrap();
+        run_clean(data_dir, &db, false, 7, 90, now_ts).unwrap();
 
         assert!(data_dir.join("terminals/kept-term").exists());
     }
@@ -618,7 +656,7 @@ mod tests {
         .unwrap();
 
         let now_ts = chrono::Utc::now().timestamp();
-        let plan = run_clean(data_dir, &db, false, 7, now_ts).unwrap();
+        let plan = run_clean(data_dir, &db, false, 7, 90, now_ts).unwrap();
 
         assert_eq!(plan.orphaned_projects.len(), 1);
         assert_eq!(plan.orphaned_projects[0].hash, "hash-missing");
@@ -639,7 +677,7 @@ mod tests {
         );
 
         let now_ts = chrono::Utc::now().timestamp() + 30 * 86_400;
-        let plan = run_clean(data_dir, &db, false, 7, now_ts).unwrap();
+        let plan = run_clean(data_dir, &db, false, 7, 90, now_ts).unwrap();
 
         assert_eq!(plan.rag_residue_files.len(), 1);
         assert!(!data_dir.join("rag/leftover.tmp").exists());
@@ -1093,6 +1131,7 @@ mod tests {
             &db_path,
             ReclaimOptions {
                 retention_days: 7,
+                graph_event_retention_days: 90,
                 now_ts: chrono::Utc::now().timestamp(),
                 hard: false,
                 yes: true,
@@ -1141,6 +1180,7 @@ mod tests {
             &db_path,
             ReclaimOptions {
                 retention_days: 7,
+                graph_event_retention_days: 90,
                 now_ts: chrono::Utc::now().timestamp(),
                 hard: false,
                 yes: true,
@@ -1188,6 +1228,7 @@ mod tests {
             &db_path,
             ReclaimOptions {
                 retention_days: 7,
+                graph_event_retention_days: 90,
                 now_ts,
                 hard: false,
                 yes: true,
@@ -1228,6 +1269,7 @@ mod tests {
             &db_path,
             ReclaimOptions {
                 retention_days: 7,
+                graph_event_retention_days: 90,
                 now_ts: chrono::Utc::now().timestamp(),
                 hard: false,
                 yes: true,
@@ -1296,6 +1338,7 @@ mod tests {
             &db_path,
             ReclaimOptions {
                 retention_days: 7,
+                graph_event_retention_days: 90,
                 now_ts,
                 hard: false,
                 yes: true,
@@ -1342,6 +1385,7 @@ mod tests {
                 &db_path,
                 ReclaimOptions {
                     retention_days: 7,
+                    graph_event_retention_days: 90,
                     now_ts,
                     hard: false,
                     yes: true,
@@ -1398,6 +1442,7 @@ mod tests {
             &db_path,
             ReclaimOptions {
                 retention_days: 7,
+                graph_event_retention_days: 90,
                 now_ts: chrono::Utc::now().timestamp(),
                 hard: false,
                 yes: true,
@@ -1501,7 +1546,7 @@ mod tests {
 
         let now_ts = chrono::Utc::now().timestamp() + 30 * 86_400;
         run_clean_without_window(
-            &db, data_dir, &db_path, false, false, true, 7, now_ts, false,
+            &db, data_dir, &db_path, false, false, true, 7, 90, now_ts, false,
         )
         .unwrap();
 
@@ -1536,14 +1581,14 @@ mod tests {
 
         let now_ts = chrono::Utc::now().timestamp() + 30 * 86_400;
 
-        let projected_plan = build_clean_plan(data_dir, &db, 7, now_ts).unwrap();
+        let projected_plan = build_clean_plan(data_dir, &db, 7, 90, now_ts).unwrap();
         let projected_hard = projected_hard_cascade_rows(&build_hard_cascade_plan(&db).unwrap());
         assert_eq!(projected_plan.session_ids.len(), 1);
         assert!(projected_hard > 0);
 
         // A dry run of the soft plan must not touch anything, regardless of
         // whether the projected total would warrant a reclaim window.
-        let dry_plan = run_clean(data_dir, &db, true, 7, now_ts).unwrap();
+        let dry_plan = run_clean(data_dir, &db, true, 7, 90, now_ts).unwrap();
         assert_eq!(dry_plan.session_ids, projected_plan.session_ids);
         assert_eq!(db.count_interactive_sessions().unwrap(), 1);
         assert!(
@@ -1620,7 +1665,7 @@ mod tests {
         db.update_sandbox_run_status(&sandbox.id, "kept").unwrap();
 
         let now_ts = chrono::Utc::now().timestamp();
-        let plan = build_clean_plan(data_dir, &db, 7, now_ts).unwrap();
+        let plan = build_clean_plan(data_dir, &db, 7, 90, now_ts).unwrap();
         // The finished, provably-empty sandbox is named as a removal target.
         assert!(
             plan.sandbox_removals
@@ -1632,7 +1677,7 @@ mod tests {
 
         // A dry run removes nothing: branch, worktree path state, and row
         // are all exactly as before.
-        let dry = run_clean(data_dir, &db, true, 7, now_ts).unwrap();
+        let dry = run_clean(data_dir, &db, true, 7, 90, now_ts).unwrap();
         assert!(dry.sandbox_removals.iter().any(|t| t.id == sandbox.id));
         assert!(git_branch_exists(
             repo_dir.path(),
@@ -1689,7 +1734,7 @@ mod tests {
 
         // Too fresh (age ≈ 0 < 2 h): the age gate keeps both, dry run only
         // projects that decision.
-        let plan = run_clean(data_dir, &db, true, 7, now).unwrap();
+        let plan = run_clean(data_dir, &db, true, 7, 90, now).unwrap();
         assert!(
             plan.untracked_leaks.is_empty(),
             "fresh dirs must not be leaks: {:?}",
@@ -1699,7 +1744,7 @@ mod tests {
 
         // 5 h later: the dangling leaf is a proven leak — deleted in a real
         // run; the live-gitdir leaf is still reported, never touched.
-        let plan = run_clean(data_dir, &db, false, 7, now + 5 * 3600).unwrap();
+        let plan = run_clean(data_dir, &db, false, 7, 90, now + 5 * 3600).unwrap();
         assert_eq!(plan.untracked_leaks, vec![leak_path.clone()]);
         assert!(!leak_path.exists(), "dangling old leak must be removed");
         assert!(live_path.exists(), "live-gitdir dir must be kept");

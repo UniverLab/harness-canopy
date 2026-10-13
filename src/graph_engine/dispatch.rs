@@ -202,15 +202,26 @@ impl GraphEngine {
             resumed,
             first_pending.as_deref(),
         );
-        activity::publish(
+        activity::record(
             &self.db,
-            workdir,
-            graph_id,
-            &lp.name,
-            if resumed {
-                format!("Resumed ({total_specs} spec(s), {done} done).")
-            } else {
-                format!("Started ({total_specs} spec(s) pending).")
+            activity::GraphEvent {
+                graph_id,
+                graph_name: &lp.name,
+                workdir,
+                spec_id: None,
+                node_id: None,
+                run_id: None,
+                kind: if resumed {
+                    activity::GraphEventKind::GraphResumed
+                } else {
+                    activity::GraphEventKind::GraphStarted
+                },
+                message: if resumed {
+                    format!("Resumed ({total_specs} spec(s), {done} done).")
+                } else {
+                    format!("Started ({total_specs} spec(s) pending).")
+                },
+                payload: None,
             },
         );
         Ok(())
@@ -387,6 +398,23 @@ impl GraphEngine {
             if let Some(target) = ctx.directed {
                 if !reached_directed {
                     if spec.id != target.spec_id {
+                        activity::record(
+                            &self.db,
+                            activity::GraphEvent {
+                                graph_id: ctx.graph_id,
+                                graph_name: &ctx.lp.name,
+                                workdir: ctx.workdir,
+                                spec_id: Some(&spec.id),
+                                node_id: None,
+                                run_id: None,
+                                kind: activity::GraphEventKind::SpecSkipped,
+                                message: format!(
+                                    "Spec '{}' skipped (directed run starts later).",
+                                    spec.name
+                                ),
+                                payload: None,
+                            },
+                        );
                         continue; // specs before the directed target are not run
                     }
                     reached_directed = true;
@@ -395,6 +423,20 @@ impl GraphEngine {
                 spec.status,
                 GraphSpecStatus::Completed | GraphSpecStatus::Skipped
             ) {
+                activity::record(
+                    &self.db,
+                    activity::GraphEvent {
+                        graph_id: ctx.graph_id,
+                        graph_name: &ctx.lp.name,
+                        workdir: ctx.workdir,
+                        spec_id: Some(&spec.id),
+                        node_id: None,
+                        run_id: None,
+                        kind: activity::GraphEventKind::SpecSkipped,
+                        message: format!("Spec '{}' already completed; skipping.", spec.name),
+                        payload: None,
+                    },
+                );
                 continue;
             }
             let outcome = self
@@ -461,12 +503,19 @@ impl GraphEngine {
             Some(chrono::Utc::now()),
         )?;
         let (done, total) = self.spec_progress(ctx.graph_id, queue_id)?;
-        activity::publish(
+        activity::record(
             &self.db,
-            ctx.workdir,
-            ctx.graph_id,
-            &ctx.lp.name,
-            format!("Completed ({done}/{total} specs)."),
+            activity::GraphEvent {
+                graph_id: ctx.graph_id,
+                graph_name: &ctx.lp.name,
+                workdir: ctx.workdir,
+                spec_id: None,
+                node_id: None,
+                run_id: None,
+                kind: activity::GraphEventKind::GraphCompleted,
+                message: format!("Completed ({done}/{total} specs)."),
+                payload: None,
+            },
         );
         let executed_any_spec = !completed_specs.is_empty();
         let hook_launched = executed_any_spec

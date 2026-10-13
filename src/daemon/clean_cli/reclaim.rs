@@ -309,6 +309,8 @@ fn spawn_detached_daemon(data_dir: &Path, port: u16) -> Result<()> {
 #[derive(Debug, Clone, Copy)]
 pub(super) struct ReclaimOptions {
     pub retention_days: u64,
+    /// CM46: days a graph's event log is kept (independent of `retention_days`).
+    pub graph_event_retention_days: u64,
     pub now_ts: i64,
     pub hard: bool,
     pub yes: bool,
@@ -386,6 +388,7 @@ pub(super) fn run_reclaim_window(
 ) -> Result<ReclaimWindowOutcome> {
     let ReclaimOptions {
         retention_days,
+        graph_event_retention_days,
         now_ts,
         hard,
         yes,
@@ -445,7 +448,13 @@ pub(super) fn run_reclaim_window(
         });
     }
 
-    let plan = build_clean_plan(data_dir, db, retention_days, now_ts)?;
+    let plan = build_clean_plan(
+        data_dir,
+        db,
+        retention_days,
+        graph_event_retention_days,
+        now_ts,
+    )?;
     execute_plan(db, &plan)?;
     let hard_rows = if hard {
         run_hard_cascade(db, false, yes)?
@@ -551,10 +560,7 @@ fn print_reclaim_window_outcome(outcome: &ReclaimWindowOutcome) {
 pub(super) async fn run_reclaim_window_and_report(
     data_dir: &Path,
     db_path: &Path,
-    retention_days: u64,
-    now_ts: i64,
-    hard: bool,
-    yes: bool,
+    options: ReclaimOptions,
     daemon_pid: Option<u32>,
 ) -> Result<()> {
     let port = crate::daemon::cli::configured_port(data_dir);
@@ -594,12 +600,7 @@ pub(super) async fn run_reclaim_window_and_report(
                 &db,
                 &db_dir_owned,
                 &db_owned,
-                ReclaimOptions {
-                    retention_days,
-                    now_ts,
-                    hard,
-                    yes,
-                },
+                options,
                 daemon_pid,
                 blocking_ops.as_ref(),
                 &blocking_restored,

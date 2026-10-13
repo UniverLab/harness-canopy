@@ -11,6 +11,7 @@ use crate::daemon::handler_ensemble_plan::{
     EnsembleMemberDefaults,
 };
 use crate::daemon::handler_formatting::internal_error;
+use crate::daemon::handler_helpers::record_config_change_if_running;
 use crate::daemon::handler_validate::{
     resolve_prefix_or_error, validate_non_empty, validate_topology_mutation_allowed,
 };
@@ -186,6 +187,15 @@ impl TaskTriggerHandler {
         } else {
             String::new()
         };
+        // CM46: an ensemble edit on a running graph is narratable history.
+        record_config_change_if_running(
+            &self.db,
+            details.ensemble.graph_id.as_deref(),
+            details.ensemble.spec_id.as_deref(),
+            None,
+            "ensemble",
+            format!("Ensemble '{}' config updated.", details.ensemble.name),
+        );
         Ok(success_result(&format!(
             "Ensemble '{ensemble_id}' updated.{note}"
         )))

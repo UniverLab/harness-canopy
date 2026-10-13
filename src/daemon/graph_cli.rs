@@ -165,6 +165,24 @@ pub(crate) enum GraphAction {
         /// Spec ID (or unambiguous prefix) to unbind.
         spec_id: String,
     },
+    /// Print a graph's durable event log, one line per event.
+    Log {
+        /// Full graph id, an unambiguous id prefix, or the exact graph name.
+        id_or_name: String,
+        /// Start from this event id, or from events at/after an RFC3339
+        /// timestamp.
+        #[arg(long)]
+        since: Option<String>,
+        /// Only events of this kind (repeatable), e.g. `--kind node_finished`.
+        #[arg(long = "kind")]
+        kind: Vec<String>,
+        /// Only this spec's events (id or prefix).
+        #[arg(long)]
+        spec: Option<String>,
+        /// Poll the daemon every 2 s and print new events until Ctrl+C.
+        #[arg(long)]
+        follow: bool,
+    },
 }
 
 pub(crate) async fn handle_graph_action(
@@ -230,7 +248,127 @@ pub(crate) async fn handle_graph_action(
             id_or_name,
             spec_id,
         } => handle_graph_remove_spec(&db, port_override, &id_or_name, &spec_id),
+        GraphAction::Log {
+            id_or_name,
+            since,
+            kind,
+            spec,
+            follow,
+        } => handle_graph_log(&db, port_override, &id_or_name, since, kind, spec, follow).await,
     }
+}
+
+/// One line of `canopy graph log`:
+/// `<created_at> <KIND> spec=<name> node=<name> <message>`, with the
+/// `spec=`/`node=` segments omitted when the event has no such id.
+fn format_event_line(event: &serde_json::Value) -> String {
+    let created_at = event["created_at"].as_str().unwrap_or_default();
+    let kind = event["kind"].as_str().unwrap_or_default().to_uppercase();
+    let mut line = format!("{created_at} {kind}");
+    if let Some(spec) = event["spec_name"].as_str() {
+        line.push_str(&format!(" spec={spec}"));
+    }
+    if let Some(node) = event["node_name"].as_str() {
+        line.push_str(&format!(" node={node}"));
+    }
+    let message = event["message"].as_str().unwrap_or_default();
+    line.push(' ');
+    line.push_str(message);
+    line
+}
+
+/// Ask the daemon for one page of `graph_events`.
+fn query_graph_events(
+    port_override: Option<u16>,
+    graph_id: &str,
+    since_id: Option<i64>,
+    since_ts: Option<&str>,
+    kinds: &[String],
+    spec: Option<&str>,
+) -> Result<Vec<serde_json::Value>> {
+    let mut args = serde_json::json!({ "graph_id": graph_id, "limit": 200 });
+    if let Some(id) = since_id {
+        args["since_id"] = serde_json::json!(id);
+    }
+    if let Some(ts) = since_ts {
+        args["since_ts"] = serde_json::json!(ts);
+    }
+    if !kinds.is_empty() {
+        args["kinds"] = serde_json::json!(kinds);
+    }
+    if let Some(spec) = spec {
+        args["spec_id"] = serde_json::json!(spec);
+    }
+    let text = call_tool(port_override, "graph_events", &args)?;
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .with_context(|| format!("unexpected graph_events response: {text}"))?;
+    Ok(value["events"].as_array().cloned().unwrap_or_default())
+}
+
+/// Print the events a page returned and return the id of the last one, if any.
+fn print_event_page(events: &[serde_json::Value]) -> Option<i64> {
+    for event in events {
+        println!("{}", format_event_line(event));
+    }
+    events.last().and_then(|event| event["id"].as_i64())
+}
+
+async fn handle_graph_log(
+    db: &Database,
+    port_override: Option<u16>,
+    id_or_name: &str,
+    since: Option<String>,
+    kinds: Vec<String>,
+    spec: Option<String>,
+    follow: bool,
+) -> Result<()> {
+    let graphs = db.list_graphs(None, true)?;
+    let lp = resolve_graph(&graphs, id_or_name)?;
+
+    // `--since` is either an integer event id or an RFC3339 timestamp.
+    let (mut since_id, since_ts): (Option<i64>, Option<String>) = match since {
+        Some(value) => match value.parse::<i64>() {
+            Ok(id) => (Some(id), None),
+            Err(_) => (None, Some(value)),
+        },
+        None => (None, None),
+    };
+
+    let events = query_graph_events(
+        port_override,
+        &lp.id,
+        since_id,
+        since_ts.as_deref(),
+        &kinds,
+        spec.as_deref(),
+    )?;
+    if let Some(last) = print_event_page(&events) {
+        since_id = Some(last);
+    }
+
+    if !follow {
+        return Ok(());
+    }
+
+    loop {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => break,
+            _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {
+                let events = query_graph_events(
+                    port_override,
+                    &lp.id,
+                    since_id,
+                    None,
+                    &kinds,
+                    spec.as_deref(),
+                )?;
+                if let Some(last) = print_event_page(&events) {
+                    since_id = Some(last);
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn handle_graph_run(

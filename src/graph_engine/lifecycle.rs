@@ -80,7 +80,20 @@ impl GraphEngine {
                         self.db
                             .update_graph_status(graph_id, GraphStatus::Paused, None, None);
                     if matches!(result, Ok(true)) {
-                        activity::publish(&self.db, &lp.workdir, graph_id, &lp.name, "Paused.");
+                        activity::record(
+                            &self.db,
+                            activity::GraphEvent {
+                                graph_id,
+                                graph_name: &lp.name,
+                                workdir: &lp.workdir,
+                                spec_id: None,
+                                node_id: None,
+                                run_id: None,
+                                kind: activity::GraphEventKind::GraphPaused,
+                                message: "Paused.".to_string(),
+                                payload: None,
+                            },
+                        );
                     }
                     for run in self
                         .db
@@ -102,7 +115,20 @@ impl GraphEngine {
                         self.db
                             .update_graph_status(graph_id, GraphStatus::Paused, None, None);
                     if matches!(result, Ok(true)) {
-                        activity::publish(&self.db, &lp.workdir, graph_id, &lp.name, "Paused.");
+                        activity::record(
+                            &self.db,
+                            activity::GraphEvent {
+                                graph_id,
+                                graph_name: &lp.name,
+                                workdir: &lp.workdir,
+                                spec_id: None,
+                                node_id: None,
+                                run_id: None,
+                                kind: activity::GraphEventKind::GraphPaused,
+                                message: "Paused.".to_string(),
+                                payload: None,
+                            },
+                        );
                     }
                     result
                 } else {
@@ -126,7 +152,20 @@ impl GraphEngine {
                         self.db
                             .update_graph_status(graph_id, GraphStatus::Paused, None, None);
                     if matches!(result, Ok(true)) {
-                        activity::publish(&self.db, &lp.workdir, graph_id, &lp.name, "Paused.");
+                        activity::record(
+                            &self.db,
+                            activity::GraphEvent {
+                                graph_id,
+                                graph_name: &lp.name,
+                                workdir: &lp.workdir,
+                                spec_id: None,
+                                node_id: None,
+                                run_id: None,
+                                kind: activity::GraphEventKind::GraphPaused,
+                                message: "Paused.".to_string(),
+                                payload: None,
+                            },
+                        );
                     }
                     result
                 } else {

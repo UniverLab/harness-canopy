@@ -590,6 +590,7 @@ mod tests {
         "graph_delete_edge",
         "graph_delete_ensemble",
         "graph_delete_node",
+        "graph_events",
         "graph_export",
         "graph_get",
         "graph_import",
@@ -696,6 +697,7 @@ mod tests {
                 "graph_delete_edge|515e60718a86a111f77da9caab9a8f1a420c8a8cedea9c759dd3061efe54bcab|05d5202f073aea27378f794577e989b9636bad6d72397887d82887ad1d549d2f",
                 "graph_delete_ensemble|a1de1cf8f4d4a23060cbe860ac4eb31995cb9a166c99da92d209d5f18758940d|93fdb4962aa14f5b7921af9435ab70339df060c397464a3cc4e514bd83cc720b",
                 "graph_delete_node|82e65603faf2df8e3ff9ada9b0cb11f8470db786d91b32fa5ce0f9c3f9afbded|d9668a40560f1659b0e0d6e83a66825f8bb0e36729220f69f27f08bf81a4418f",
+                "graph_events|677db9851982f4cd2d3d0323deed764eb78d7467382b08b0601c4aa1be418857|17b52b076584af5ee1dcf2ef11a7ddcdadb23cbea710303d0972bc7e94c88f8a",
                 "graph_export|9bd5614ab5d34f674cf481e66eeb77578a374934045710faa049689dffdf63f4|7321f3e8e4a31cc2e83e859854951f755aa5f62b8ae46b3151183247f19f458a",
                 "graph_get|8307f64e41f067c8c502c2c431c24e3a4bfe3f9b609c44f62b4688fe37b851d0|df9a23578a82d3e67a8e963f14dfe8435035ab3ce659002aa35d330d6e9976b4",
                 "graph_import|179e8ea66969268fc8c88777eeaadca8e3aac01cb9347b8897b734f2de34a3fe|ddf8cb9f351263109c144f91e08487b7f779d3afaf8b16c2971270b8e78e86ff",
@@ -13486,6 +13488,71 @@ mod endpoint_tests {
             Some("claude"),
             "a rejected update must not reach the DB"
         );
+    }
+
+    /// CM46 req 7: `graph_update_node` records a `config_changed` event for a
+    /// RUNNING graph and none for an idle one.
+    #[tokio::test]
+    async fn graph_update_node_records_config_changed_only_for_running_graph() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let lp = insert_test_graph(&db, dir.path());
+        let spec = insert_test_spec(&db, &lp.id, 1);
+        let added = handler
+            .graph_add_node(Parameters(GraphAddNodeParams {
+                spec_id: Some(spec.id.clone()),
+                graph_id: None,
+                name: "Implementer".to_string(),
+                kind: Some("agent".to_string()),
+                config: Some(agent_node_config("claude")),
+                blueprint: None,
+                config_overrides: None,
+            }))
+            .await
+            .unwrap();
+        let node_id = extract_id(&added, "node_id");
+
+        // Idle (Draft) graph: an edit is recorded nowhere.
+        handler
+            .graph_update_node(Parameters(GraphUpdateNodeParams {
+                node_id: node_id.clone(),
+                name: None,
+                kind: None,
+                config: Some(agent_node_config("claude")),
+                config_replace: None,
+                position: None,
+            }))
+            .await
+            .unwrap();
+        assert!(
+            db.list_graph_events(&lp.id, None, None, None, 200)
+                .unwrap()
+                .is_empty(),
+            "an idle graph's edit must not produce a config_changed event"
+        );
+
+        // Running graph: the same edit now records exactly one event.
+        db.update_graph_status(&lp.id, GraphStatus::Running, None, None)
+            .unwrap();
+        handler
+            .graph_update_node(Parameters(GraphUpdateNodeParams {
+                node_id: node_id.clone(),
+                name: Some("Renamed".to_string()),
+                kind: None,
+                config: None,
+                config_replace: None,
+                position: None,
+            }))
+            .await
+            .unwrap();
+
+        let events = db.list_graph_events(&lp.id, None, None, None, 200).unwrap();
+        assert_eq!(events.len(), 1, "got: {events:?}");
+        assert_eq!(events[0].kind, "config_changed");
+        assert_eq!(events[0].node_id.as_deref(), Some(node_id.as_str()));
+        assert_eq!(events[0].spec_id.as_deref(), Some(spec.id.as_str()));
+        let payload: serde_json::Value =
+            serde_json::from_str(events[0].payload.as_deref().unwrap()).unwrap();
+        assert_eq!(payload["change"], "node");
     }
 
     #[tokio::test]

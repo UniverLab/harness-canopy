@@ -104,6 +104,7 @@ stdio. Connect any MCP-capable AI CLI with `canopy mcp`.
 | `graph_restore` | Restore an archived graph |
 | `graph_node_runs_list` | List a graph's node run history |
 | `graph_node_run_get` | Fetch a graph node run's full input and output |
+| `graph_events` | Read a graph's durable event log (oldest-first, with `since_id` paging) |
 | `graph_copy_node` | Copy a graph node configuration |
 | `graph_copy_ensemble` | Copy an ensemble configuration |
 | `graph_audit_node_configs` | Audit graph node configurations |

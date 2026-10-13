@@ -55,6 +55,7 @@ impl GraphEngine {
         let run_id = uuid::Uuid::new_v4().to_string();
         // CB43: member run — resolved from the node config at dispatch.
         let (executed_platform, executed_model) = executed_pair_for_node(node);
+        let (event_platform, event_model) = (executed_platform.clone(), executed_model.clone());
         self.db.insert_graph_run(&GraphNodeRun {
             id: run_id.clone(),
             graph_id: lp.id.clone(),
@@ -74,6 +75,22 @@ impl GraphEngine {
         })?;
 
         let (retry_limit, crash_max_secs, backoff_secs) = read_infra_config(node);
+        let member_run_id = run_id.clone();
+        // CM46: one `node_started` per member dispatch, before it spawns.
+        activity::record(
+            &self.db,
+            activity::GraphEvent {
+                graph_id: &lp.id,
+                graph_name: &lp.name,
+                workdir,
+                spec_id: Some(&spec.id),
+                node_id: Some(&node.id),
+                run_id: Some(&member_run_id),
+                kind: activity::GraphEventKind::NodeStarted,
+                message: format!("Node '{}' started.", node.name),
+                payload: None,
+            },
+        );
         let ctx = EnsembleMemberContext {
             db: Arc::clone(&self.db),
             lp: lp.clone(),
@@ -104,18 +121,30 @@ impl GraphEngine {
             resumable_sessions.remove(&node.id);
         }
 
-        activity::publish(
+        activity::record(
             &self.db,
-            workdir,
-            &lp.id,
-            &lp.name,
-            match result.status {
-                GraphRunStatus::Pass => format!("Ensemble member '{}' passed.", node.name),
-                _ => format!(
-                    "Ensemble member '{}' failed: {}",
-                    node.name,
-                    failure_reason_text(&result.output, &result.summary).unwrap_or_default()
-                ),
+            activity::GraphEvent {
+                graph_id: &lp.id,
+                graph_name: &lp.name,
+                workdir,
+                spec_id: Some(&spec.id),
+                node_id: Some(&node.id),
+                run_id: Some(&member_run_id),
+                kind: activity::GraphEventKind::NodeFinished,
+                message: match result.status {
+                    GraphRunStatus::Pass => format!("Ensemble member '{}' passed.", node.name),
+                    _ => format!(
+                        "Ensemble member '{}' failed: {}",
+                        node.name,
+                        failure_reason_text(&result.output, &result.summary).unwrap_or_default()
+                    ),
+                },
+                payload: Some(serde_json::json!({
+                    "verdict": result.status.as_str(),
+                    "platform": event_platform,
+                    "model": event_model,
+                    "duration_s": Value::Null,
+                })),
             },
         );
 
@@ -614,12 +643,24 @@ impl GraphEngine {
             executed_platform: None,
             executed_model: None,
         })?;
-        activity::publish(
+        activity::record(
             &self.db,
-            ctx.workdir,
-            &ctx.lp.id,
-            &ctx.lp.name,
-            execution.summary.clone(),
+            activity::GraphEvent {
+                graph_id: &ctx.lp.id,
+                graph_name: &ctx.lp.name,
+                workdir: ctx.workdir,
+                spec_id: Some(&ctx.spec.id),
+                node_id: Some(ctx.join_node_id),
+                run_id: Some(&join_run_id),
+                kind: activity::GraphEventKind::NodeFinished,
+                message: execution.summary.clone(),
+                payload: Some(serde_json::json!({
+                    "verdict": execution.status.as_str(),
+                    "platform": Value::Null,
+                    "model": Value::Null,
+                    "duration_s": Value::Null,
+                })),
+            },
         );
         Ok(join_run_id)
     }

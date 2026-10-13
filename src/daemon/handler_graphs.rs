@@ -5,6 +5,7 @@ use crate::daemon::handler::TaskTriggerHandler;
 use crate::daemon::handler_formatting::{
     build_graph_update_response, build_id_result, internal_error,
 };
+use crate::daemon::handler_helpers::record_config_change_if_running;
 use crate::daemon::handler_run_exec::find_in_flight_run;
 use crate::daemon::handler_specs::validate_at_least_one_bool;
 use crate::daemon::handler_validate::{
@@ -246,6 +247,7 @@ impl TaskTriggerHandler {
                 .map_err(internal_error)?;
         }
 
+        let infra_node_changed = new_infra_node_id.is_some();
         if let Some(infra_node_id) = new_infra_node_id {
             self.db
                 .update_graph_infra_node_id(&graph_id, infra_node_id.as_deref())
@@ -263,6 +265,27 @@ impl TaskTriggerHandler {
         } else {
             None
         };
+        // CM46: hooks / infra wiring / allow_dirty_start edits on a RUNNING
+        // graph are narratable config changes. A pure name/description edit is
+        // not.
+        if hooks_changed || infra_node_changed || params.allow_dirty_start.is_some() {
+            let graph_name = self
+                .db
+                .get_graph(&graph_id)
+                .ok()
+                .flatten()
+                .map(|graph| graph.name)
+                .unwrap_or_else(|| graph_id.clone());
+            let change = if hooks_changed { "hook" } else { "metadata" };
+            record_config_change_if_running(
+                &self.db,
+                Some(&graph_id),
+                None,
+                None,
+                change,
+                format!("Graph '{}' config updated.", graph_name),
+            );
+        }
         Ok(build_graph_update_response(
             &graph_id,
             active_run_note.as_deref(),

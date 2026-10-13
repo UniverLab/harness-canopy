@@ -25,6 +25,26 @@ pub struct GraphNodeRunGetParams {
     pub run_id: String,
 }
 
+/// CM46: read one graph's durable event log.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GraphEventsParams {
+    /// Graph ID (or unambiguous id prefix) whose events to read.
+    pub graph_id: String,
+    /// Only events with `id` strictly greater than this — the paging cursor.
+    pub since_id: Option<i64>,
+    /// Only events at/after this RFC3339 timestamp. Used by `canopy graph log
+    /// --since <RFC3339>`; `since_id` wins when both are given.
+    pub since_ts: Option<String>,
+    /// Narrow to one spec's events (id or prefix).
+    pub spec_id: Option<String>,
+    /// Narrow to these event kinds (e.g. `["node_finished","hook_fired"]`).
+    pub kinds: Option<Vec<String>>,
+    /// Maximum events to return, oldest first. Defaults to 200, capped at 200.
+    pub limit: Option<u32>,
+    /// When true, each event also carries its parsed `payload` JSON.
+    pub include_payload: Option<bool>,
+}
+
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GraphPreflightReviewer {
     /// CLI platform to run the reviewer with (e.g. "opencode", "claude").

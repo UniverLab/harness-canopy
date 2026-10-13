@@ -321,6 +321,26 @@ impl Database {
             .map_err(Into::into)
     }
 
+    /// CM46: resolve a spec's id from its name within one graph. Used to fill
+    /// `graph_events.spec_id` for an event whose only handle was the name.
+    pub fn resolve_spec_id_by_name(
+        &self,
+        graph_id: &str,
+        spec_name: &str,
+    ) -> Result<Option<String>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        conn.query_row(
+            "SELECT id FROM graph_specs WHERE graph_id = ?1 AND name = ?2 LIMIT 1",
+            params![graph_id, spec_name],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     /// A single spec's own graph (nodes/edges), resolved by spec id alone —
     /// independent of whether the spec is bound to a graph (`graph_specs.graph_id`)
     /// or a standalone queue member. Lets the graph engine drive a queue spec

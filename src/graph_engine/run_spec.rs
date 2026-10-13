@@ -18,12 +18,19 @@ impl GraphEngine {
         queue_id: Option<&str>,
         directed: Option<&DirectedStart>,
     ) -> Result<SpecExecutionOutcome> {
-        activity::publish(
+        activity::record(
             &self.db,
-            workdir,
-            &lp.id,
-            &lp.name,
-            format!("Spec '{}' started.", spec.name),
+            activity::GraphEvent {
+                graph_id: &lp.id,
+                graph_name: &lp.name,
+                workdir,
+                spec_id: Some(&spec.id),
+                node_id: None,
+                run_id: None,
+                kind: activity::GraphEventKind::SpecStarted,
+                message: format!("Spec '{}' started.", spec.name),
+                payload: None,
+            },
         );
         let spec_details = self
             .db
@@ -91,19 +98,26 @@ impl GraphEngine {
                         .collect::<Vec<_>>()
                         .join(", ")
                 };
-                activity::publish(
+                activity::record(
                     &self.db,
-                    workdir,
-                    &lp.id,
-                    &lp.name,
-                    format!(
-                        "Directed run: spec '{}' starts at {}; skipped {} node(s){}; \
-                         reused outputs: {reused}; iteration counters restarted at 1.",
-                        spec.name,
-                        target.label,
-                        target.skipped_nodes.len(),
-                        skipped
-                    ),
+                    activity::GraphEvent {
+                        graph_id: &lp.id,
+                        graph_name: &lp.name,
+                        workdir,
+                        spec_id: Some(&spec.id),
+                        node_id: None,
+                        run_id: None,
+                        kind: activity::GraphEventKind::SpecStarted,
+                        message: format!(
+                            "Directed run: spec '{}' starts at {}; skipped {} node(s){}; \
+                             reused outputs: {reused}; iteration counters restarted at 1.",
+                            spec.name,
+                            target.label,
+                            target.skipped_nodes.len(),
+                            skipped
+                        ),
+                        payload: None,
+                    },
                 );
             }
         }
@@ -231,6 +245,20 @@ impl GraphEngine {
             )
             .await?;
         let node = &attempt_setup.node;
+        activity::record(
+            &self.db,
+            activity::GraphEvent {
+                graph_id: &ctx.lp.id,
+                graph_name: &ctx.lp.name,
+                workdir: ctx.workdir,
+                spec_id: Some(&ctx.spec.id),
+                node_id: Some(&node.id),
+                run_id: Some(&attempt_setup.run_id),
+                kind: activity::GraphEventKind::NodeStarted,
+                message: format!("Node '{}' started.", node.name),
+                payload: None,
+            },
+        );
         let mut retry = NodeRetryCtx {
             node,
             previous_output,
@@ -314,7 +342,7 @@ impl GraphEngine {
             )
             .await?;
 
-        self.publish_node_outcome(ctx, node, &execution);
+        self.publish_node_outcome(ctx, node, &execution, &run_id);
 
         // CB31: a wait-for-completion pause was requested while this
         // node was running. It ran to its own completion and its
@@ -553,16 +581,45 @@ impl GraphEngine {
         ctx: &SpecStepCtx<'_>,
         node: &GraphNode,
         execution: &NodeExecution,
+        run_id: &str,
     ) {
         match node.kind {
-            GraphNodeKind::Agent => self.publish_agent_node_outcome(ctx, node, execution),
+            GraphNodeKind::Agent => {
+                self.publish_agent_node_outcome(ctx, node, execution, run_id);
+            }
             GraphNodeKind::Check | GraphNodeKind::Gate
                 if execution.status != GraphRunStatus::Pass =>
             {
-                self.publish_check_node_outcome(ctx, node, execution);
+                self.publish_check_node_outcome(ctx, node, execution, run_id);
             }
             _ => {}
         }
+    }
+
+    /// CM46: the `node_finished` payload — verdict, executed platform/model and
+    /// wall-clock duration, the fields a reader scans for.
+    fn node_finished_payload(
+        &self,
+        node: &GraphNode,
+        execution: &NodeExecution,
+        run_id: &str,
+    ) -> Value {
+        let (platform, model) = executed_pair_for_node(node);
+        let duration_s = self
+            .db
+            .get_graph_run(run_id)
+            .ok()
+            .flatten()
+            .and_then(|run| {
+                run.completed_at
+                    .map(|done| (done - run.started_at).num_seconds())
+            });
+        serde_json::json!({
+            "verdict": execution.status.as_str(),
+            "platform": platform,
+            "model": model,
+            "duration_s": duration_s,
+        })
     }
 
     pub(crate) fn publish_agent_node_outcome(
@@ -570,21 +627,29 @@ impl GraphEngine {
         ctx: &SpecStepCtx<'_>,
         node: &GraphNode,
         execution: &NodeExecution,
+        run_id: &str,
     ) {
         let reason = if execution.status == GraphRunStatus::Pass {
             None
         } else {
             failure_reason_text(&execution.output, &execution.summary)
         };
-        activity::publish(
+        activity::record(
             &self.db,
-            ctx.workdir,
-            &ctx.lp.id,
-            &ctx.lp.name,
-            match (execution.status, &reason) {
-                (GraphRunStatus::Pass, _) => format!("Node '{}' passed.", node.name),
-                (_, Some(reason)) => format!("Node '{}' failed: {reason}", node.name),
-                (_, None) => format!("Node '{}' failed.", node.name),
+            activity::GraphEvent {
+                graph_id: &ctx.lp.id,
+                graph_name: &ctx.lp.name,
+                workdir: ctx.workdir,
+                spec_id: Some(&ctx.spec.id),
+                node_id: Some(&node.id),
+                run_id: Some(run_id),
+                kind: activity::GraphEventKind::NodeFinished,
+                message: match (execution.status, &reason) {
+                    (GraphRunStatus::Pass, _) => format!("Node '{}' passed.", node.name),
+                    (_, Some(reason)) => format!("Node '{}' failed: {reason}", node.name),
+                    (_, None) => format!("Node '{}' failed.", node.name),
+                },
+                payload: Some(self.node_finished_payload(node, execution, run_id)),
             },
         );
     }
@@ -594,23 +659,31 @@ impl GraphEngine {
         ctx: &SpecStepCtx<'_>,
         node: &GraphNode,
         execution: &NodeExecution,
+        run_id: &str,
     ) {
         let exit_code = execution
             .output
             .get("exit_code")
             .and_then(serde_json::Value::as_i64);
-        activity::publish(
+        activity::record(
             &self.db,
-            ctx.workdir,
-            &ctx.lp.id,
-            &ctx.lp.name,
-            match exit_code {
-                Some(code) => format!(
-                    "Node '{}' ({}) failed: exit {code}.",
-                    node.name,
-                    node.kind.as_str()
-                ),
-                None => format!("Node '{}' ({}) failed.", node.name, node.kind.as_str()),
+            activity::GraphEvent {
+                graph_id: &ctx.lp.id,
+                graph_name: &ctx.lp.name,
+                workdir: ctx.workdir,
+                spec_id: Some(&ctx.spec.id),
+                node_id: Some(&node.id),
+                run_id: Some(run_id),
+                kind: activity::GraphEventKind::NodeFinished,
+                message: match exit_code {
+                    Some(code) => format!(
+                        "Node '{}' ({}) failed: exit {code}.",
+                        node.name,
+                        node.kind.as_str()
+                    ),
+                    None => format!("Node '{}' ({}) failed.", node.name, node.kind.as_str()),
+                },
+                payload: Some(self.node_finished_payload(node, execution, run_id)),
             },
         );
     }

@@ -6,6 +6,7 @@ use crate::daemon::handler_edges::{resolve_graph_target, GraphTarget};
 use crate::daemon::handler_formatting::{
     build_id_result, build_node_update_response_with_changes, internal_error,
 };
+use crate::daemon::handler_helpers::record_config_change_if_running;
 use crate::daemon::handler_specs::validate_at_least_one_bool;
 use crate::daemon::handler_validate::{
     json_value_kind_name, parse_router_routes, resolve_prefix_or_error, validate_node_exists,
@@ -282,6 +283,25 @@ impl TaskTriggerHandler {
         self.db
             .update_graph_node_details(&node_id, name, kind, config_to_store, params.position)
             .map_err(internal_error)?;
+
+        // CM46: a node edit on a running graph is narratable engine history.
+        let owning_graph_id = node.graph_id.clone().or_else(|| {
+            node.spec_id.as_deref().and_then(|sid| {
+                self.db
+                    .get_graph_spec(sid)
+                    .ok()
+                    .flatten()
+                    .and_then(|spec| spec.graph_id)
+            })
+        });
+        record_config_change_if_running(
+            &self.db,
+            owning_graph_id.as_deref(),
+            node.spec_id.as_deref(),
+            Some(&node_id),
+            "node",
+            format!("Node '{}' config updated.", name.unwrap_or(&node.name)),
+        );
 
         Ok(build_node_update_response_with_changes(
             &node_id,

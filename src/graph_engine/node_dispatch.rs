@@ -171,21 +171,43 @@ impl GraphEngine {
             Some(chrono::Utc::now()),
         )?;
         if let Ok(Some(lp)) = self.db.get_graph(graph_id) {
+            let spec_id = spec_id.map(str::to_string).or_else(|| {
+                spec_name.and_then(|name| {
+                    self.db
+                        .resolve_spec_id_by_name(graph_id, name)
+                        .ok()
+                        .flatten()
+                })
+            });
             if let Some(spec_name) = spec_name {
-                activity::publish(
+                activity::record(
                     &self.db,
-                    &lp.workdir,
-                    graph_id,
-                    &lp.name,
-                    format!("Spec '{spec_name}' failed: {summary}"),
+                    activity::GraphEvent {
+                        graph_id,
+                        graph_name: &lp.name,
+                        workdir: &lp.workdir,
+                        spec_id: spec_id.as_deref(),
+                        node_id: None,
+                        run_id: None,
+                        kind: activity::GraphEventKind::SpecFailed,
+                        message: format!("Spec '{spec_name}' failed: {summary}"),
+                        payload: None,
+                    },
                 );
             }
-            activity::publish(
+            activity::record(
                 &self.db,
-                &lp.workdir,
-                graph_id,
-                &lp.name,
-                format!("Failed: {summary}"),
+                activity::GraphEvent {
+                    graph_id,
+                    graph_name: &lp.name,
+                    workdir: &lp.workdir,
+                    spec_id: None,
+                    node_id: None,
+                    run_id: None,
+                    kind: activity::GraphEventKind::GraphFailed,
+                    message: format!("Failed: {summary}"),
+                    payload: None,
+                },
             );
         }
         // Resolve the human-readable ending node name BEFORE sweeping the
@@ -297,12 +319,19 @@ impl GraphEngine {
         self.db
             .update_graph_status(graph_id, GraphStatus::Paused, None, None)?;
         if let Ok(Some(lp)) = self.db.get_graph(graph_id) {
-            activity::publish(
+            activity::record(
                 &self.db,
-                &lp.workdir,
-                graph_id,
-                &lp.name,
-                format!("Blocked: {blocker}"),
+                activity::GraphEvent {
+                    graph_id,
+                    graph_name: &lp.name,
+                    workdir: &lp.workdir,
+                    spec_id: None,
+                    node_id: None,
+                    run_id: None,
+                    kind: activity::GraphEventKind::GraphBlocked,
+                    message: format!("Blocked: {blocker}"),
+                    payload: None,
+                },
             );
         }
         for run in self

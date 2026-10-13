@@ -55,12 +55,19 @@ pub(super) async fn launch_due_autorun(
     }
 
     tracing::info!("Graph '{}' reached its autorun_at time; launching", lp.id);
-    activity::publish(
+    activity::record(
         db,
-        &lp.workdir,
-        &lp.id,
-        &lp.name,
-        "Autorun fired; resuming.",
+        activity::GraphEvent {
+            graph_id: &lp.id,
+            graph_name: &lp.name,
+            workdir: &lp.workdir,
+            spec_id: None,
+            node_id: None,
+            run_id: None,
+            kind: activity::GraphEventKind::GraphResumed,
+            message: "Autorun fired; resuming.".to_string(),
+            payload: None,
+        },
     );
 
     let next_spec_preview = graph_engine

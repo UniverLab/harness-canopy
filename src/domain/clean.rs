@@ -294,6 +294,12 @@ pub struct CleanPlan {
     /// Anonymous leaked dirs proven safe: dangling gitdir + older than 2 h —
     /// deleted in soft mode.
     pub untracked_leaks: Vec<PathBuf>,
+    /// CM46: `graph_events` rows older than the graph-event retention window,
+    /// for graphs that are not running.
+    pub graph_event_deletions: usize,
+    /// CM46: the RFC3339 cutoff the `graph_event_deletions` count was computed
+    /// against, so `execute_plan` deletes exactly what was planned.
+    pub graph_event_cutoff: String,
 }
 
 impl CleanPlan {
@@ -312,11 +318,12 @@ impl CleanPlan {
             .sum()
     }
 
-    /// Database rows this plan removes (currently just `interactive_sessions`
-    /// — soft mode's only row-level deletion; `--hard`'s cascade counts are
-    /// tracked separately in [`HardCascadeTarget::counts`]).
+    /// Database rows this plan removes: `interactive_sessions` (soft mode's
+    /// original row-level deletion) plus CM46's aged-out `graph_events`.
+    /// `--hard`'s cascade counts are tracked separately in
+    /// [`HardCascadeTarget::counts`].
     pub fn deleted_row_count(&self) -> usize {
-        self.session_ids.len()
+        self.session_ids.len() + self.graph_event_deletions
     }
 
     /// Whether the plan deletes anything at all (orphaned-project *reports*
@@ -329,6 +336,7 @@ impl CleanPlan {
             && self.rag_residue_files.is_empty()
             && self.sandbox_removals.is_empty()
             && self.untracked_leaks.is_empty()
+            && self.graph_event_deletions == 0
     }
 }
 
@@ -795,6 +803,8 @@ mod tests {
             sandbox_removals: vec![],
             sandbox_untracked: vec![],
             untracked_leaks: vec![],
+            graph_event_deletions: 0,
+            graph_event_cutoff: String::new(),
         };
         assert_eq!(plan.reclaimed_bytes(), 600);
     }
@@ -815,6 +825,8 @@ mod tests {
             sandbox_removals: vec![],
             sandbox_untracked: vec![],
             untracked_leaks: vec![],
+            graph_event_deletions: 0,
+            graph_event_cutoff: String::new(),
         };
         assert_eq!(plan.reclaimed_bytes(), 0);
     }
@@ -832,6 +844,8 @@ mod tests {
             sandbox_removals: vec![],
             sandbox_untracked: vec![],
             untracked_leaks: vec![],
+            graph_event_deletions: 0,
+            graph_event_cutoff: String::new(),
         };
         assert!(!plan.is_empty());
     }
@@ -852,6 +866,8 @@ mod tests {
             sandbox_removals: vec![],
             sandbox_untracked: vec![],
             untracked_leaks: vec![],
+            graph_event_deletions: 0,
+            graph_event_cutoff: String::new(),
         };
         assert!(!plan.is_empty());
     }
@@ -872,6 +888,8 @@ mod tests {
             sandbox_removals: vec![],
             sandbox_untracked: vec![],
             untracked_leaks: vec![],
+            graph_event_deletions: 0,
+            graph_event_cutoff: String::new(),
         };
         assert!(!plan.is_empty());
     }
@@ -1271,6 +1289,8 @@ mod tests {
             sandbox_removals: vec![],
             sandbox_untracked: vec![],
             untracked_leaks: vec![],
+            graph_event_deletions: 0,
+            graph_event_cutoff: String::new(),
         };
         // Bytes from log_files must never leak into the row count.
         assert_eq!(plan.deleted_row_count(), 3);

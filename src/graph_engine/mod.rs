@@ -3720,6 +3720,123 @@ mod tests {
         );
     }
 
+    /// CM46 req 7: a two-spec graph whose first node fails produces the
+    /// expected durable event sequence, in order — and the activity stream
+    /// for the same run is unchanged (CM25 regression, the neighbouring
+    /// `activity_publishes_*` tests are the byte-exact net for that).
+    #[tokio::test]
+    async fn graph_events_records_ordered_history_for_failing_spec() {
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+        // Spec 1: a check node that fails, with no fail edge.
+        db.insert_graph_node(&GraphNode {
+            id: "node-fail".to_string(),
+            spec_id: Some(spec_id.clone()),
+            graph_id: None,
+            name: "check".to_string(),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({"command": "exit 1", "success_condition": "exit_code_0"}),
+            position: 1,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+        // Spec 2: never reached, because spec 1 fails first.
+        db.insert_graph_spec(&GraphSpec {
+            id: "spec-two".to_string(),
+            graph_id: Some(graph_id.clone()),
+            name: "Spec Two".to_string(),
+            description: None,
+            position: 2,
+            parallelizable: false,
+            status: GraphSpecStatus::Pending,
+            started_at: None,
+            completed_at: None,
+            spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
+            spec_committed_head: None,
+            workdir: None,
+            completed_via: None,
+            completed_via_reason: None,
+            completed_via_at: None,
+        })
+        .unwrap();
+        // An `on_failed` command hook that itself fails, so the recorded
+        // `hook_fired` payload carries `ok: false`.
+        let hook = GraphCompletionHook {
+            platform: None,
+            model: None,
+            effort: None,
+            prompt: None,
+            command: Some("exit 1".to_string()),
+            target_session_id: None,
+            target_session_name: None,
+            timeout_minutes: Some(1),
+            target_graph_id: None,
+            queue_id: None,
+            workdir_override: None,
+            idea: None,
+        };
+        let mut hooks = std::collections::BTreeMap::new();
+        hooks.insert(GraphHookEvent::OnFailed, vec![hook]);
+        db.update_graph_hooks(&graph_id, &hooks).unwrap();
+
+        engine
+            .run_graph(graph_id.clone(), None, None, None, None, None)
+            .await
+            .unwrap();
+
+        let events = db
+            .list_graph_events(&graph_id, None, None, None, 200)
+            .unwrap();
+        let kinds: Vec<&str> = events.iter().map(|event| event.kind.as_str()).collect();
+        let pos = |kind: &str| {
+            kinds
+                .iter()
+                .position(|candidate| *candidate == kind)
+                .unwrap_or_else(|| panic!("expected a '{kind}' event in {kinds:?}"))
+        };
+        assert!(pos("graph_started") < pos("spec_started"), "{kinds:?}");
+        assert!(pos("spec_started") < pos("node_started"), "{kinds:?}");
+        assert!(pos("node_started") < pos("node_finished"), "{kinds:?}");
+        assert!(pos("node_finished") < pos("spec_failed"), "{kinds:?}");
+        assert!(pos("spec_failed") < pos("hook_fired"), "{kinds:?}");
+
+        let hook_event = events
+            .iter()
+            .find(|event| event.kind == "hook_fired")
+            .expect("hook_fired event");
+        let payload: serde_json::Value =
+            serde_json::from_str(hook_event.payload.as_deref().unwrap()).unwrap();
+        assert_eq!(payload["event"], "on_failed");
+        assert_eq!(payload["ok"], false);
+        assert_eq!(payload["mode"], "command");
+
+        // CM25 regression: the same human-readable lines reached the activity
+        // stream, unchanged.
+        let workdir = dir.path().to_string_lossy().to_string();
+        let messages: Vec<String> = db
+            .list_activity_log_entries(&workdir, 50)
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.message)
+            .collect();
+        assert!(
+            messages.iter().any(|m| m == "Started (2 spec(s) pending)."),
+            "got: {messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.starts_with("Spec 'Spec' failed:")),
+            "got: {messages:?}"
+        );
+        assert!(
+            messages.iter().any(|m| m.starts_with("Failed:")),
+            "got: {messages:?}"
+        );
+    }
+
     #[test]
     fn resolve_spec_start_retries_last_running_node() {
         let spec = GraphSpec {

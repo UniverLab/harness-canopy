@@ -139,6 +139,13 @@ pub struct CanopyConfig {
     /// `PanelFace` enum — so this domain crate never depends on the TUI.
     #[serde(default)]
     pub pinned_panel_face: Option<String>,
+
+    /// CM46: how long a graph's durable event log (`graph_events`) is kept
+    /// before `canopy clean` prunes it, in days. Separate from
+    /// `clean.retention_days` (which governs sessions and files) so the two
+    /// histories age independently.
+    #[serde(default = "default_graph_event_retention_days")]
+    pub graph_event_retention_days: u64,
 }
 
 /// Highest per-file indexing cap a user may configure, in MB. Text/PDF
@@ -336,6 +343,10 @@ fn default_spec_attempt_limit() -> usize {
     3
 }
 
+fn default_graph_event_retention_days() -> u64 {
+    90
+}
+
 fn default_theme() -> String {
     "classic".to_string()
 }
@@ -437,6 +448,7 @@ impl Default for CanopyConfig {
             rag_vector_cache_entries: default_rag_vector_cache_entries(),
             announcements_enabled: default_announcements_enabled(),
             pinned_panel_face: None,
+            graph_event_retention_days: default_graph_event_retention_days(),
         }
     }
 }

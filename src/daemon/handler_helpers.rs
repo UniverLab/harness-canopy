@@ -4,8 +4,46 @@ use rmcp::model::CallToolResult;
 use crate::application::ports::{AgentRepository, RunRepository};
 use crate::daemon::helpers::{error_result, success_result};
 use crate::daemon::params::*;
+use crate::domain::activity::{self, GraphEvent, GraphEventKind};
+use crate::domain::graphs::GraphStatus;
 use crate::domain::models::{Agent, Cli, RunLog, RunStatus, Trigger, WatchEvent};
 use crate::domain::validation::{validate_id, validate_prompt, validate_watch_path};
+
+/// CM46: record a `config_changed` event for a mid-run edit. A no-op when the
+/// graph can't be resolved or is not `running` — edits to an idle graph are
+/// not "changes made while the graph runs", which is what this narrates.
+pub(crate) fn record_config_change_if_running(
+    db: &Database,
+    graph_id: Option<&str>,
+    spec_id: Option<&str>,
+    node_id: Option<&str>,
+    change: &str,
+    message: String,
+) {
+    let Some(graph_id) = graph_id else {
+        return;
+    };
+    let Ok(Some(graph)) = db.get_graph(graph_id) else {
+        return;
+    };
+    if graph.status != GraphStatus::Running {
+        return;
+    }
+    activity::record(
+        db,
+        GraphEvent {
+            graph_id,
+            graph_name: &graph.name,
+            workdir: &graph.workdir,
+            spec_id,
+            node_id,
+            run_id: None,
+            kind: GraphEventKind::ConfigChanged,
+            message,
+            payload: Some(serde_json::json!({ "change": change })),
+        },
+    );
+}
 
 pub(crate) struct PreparedCronTask {
     pub cli: Cli,

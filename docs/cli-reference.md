@@ -95,6 +95,15 @@ missing.
 | `canopy graph autorun <id-or-name> --at <iso8601>` | Schedule a one-shot resume at a future time |
 | `canopy graph autorun <id-or-name> --quota-reset-message <text>` | Schedule a resume from a raw CLI quota-limit message |
 | `canopy graph autorun <id-or-name> --cancel` | Cancel a pending autorun schedule |
+| `canopy graph log <id-or-name>` | Print the graph's durable event log, one line per event |
+| `canopy graph log <id-or-name> --since <id\|RFC3339>` | Start from an event id or a timestamp |
+| `canopy graph log <id-or-name> --kind <k>` | Only events of this kind (repeatable) |
+| `canopy graph log <id-or-name> --spec <id>` | Only this spec's events |
+| `canopy graph log <id-or-name> --follow` | Poll every 2 s and print new events until Ctrl+C |
+
+`canopy graph log` prints `<created_at> <KIND> spec=<name> node=<name> <message>`
+and goes through the daemon like the other `graph` subcommands. See the
+[Event log](graphs.md#event-log) section.
 
 ## Agents
 

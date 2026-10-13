@@ -355,6 +355,16 @@ impl Database {
         }
         Ok(None)
     }
+
+    /// CM46: ids of every graph currently `running`, so `canopy clean` can
+    /// keep a live graph's event history even when it is older than the
+    /// retention window.
+    pub fn list_running_graph_ids(&self) -> Result<Vec<String>> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let mut stmt = conn.prepare("SELECT id FROM graphs WHERE status = 'running'")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        Ok(rows.filter_map(|row| row.ok()).collect())
+    }
 }
 
 /// Shared counting logic for [`Database::project_hard_cascade_counts`] (the

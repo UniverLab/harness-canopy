@@ -27,6 +27,12 @@ a shape that exists only in a diagram deserve different levels of trust:
 | **Designed** | The engine supports it today; we have not run it. |
 | **Blocked** | Needs something the engine does not have yet, named below. |
 
+**Per-graph logging is built in.** You no longer need a `printf … >> file`
+command hook on `on_completed`/`on_failed` to keep a per-graph log — the
+engine records that history itself. Read it with `canopy graph log <graph-id>`
+(or the `graph_events` MCP tool). See the
+[Event log](graphs.md#event-log) section.
+
 ---
 
 ## 1. Gated implement — Proven

@@ -604,13 +604,13 @@ Queue membership is unaffected by `graph_run` — specs stay standalone.
 The `graph info` CLI and `graph_get` MCP tool show queue-driven progress
 by reconstructing what ran from the run history.
 
-## The 32 MCP tools
+## The 33 MCP tools
 
 | Stage | Tools |
 |---|---|
 | Authoring | `graph_create`, `graph_update`, `graph_add_spec`, `graph_update_spec`, `graph_add_node`, `graph_update_node`, `graph_add_edge`, `graph_update_edge`, `graph_delete_edge`, `graph_delete_node`, `graph_add_ensemble`, `graph_update_ensemble`, `graph_delete_ensemble`, `graph_copy_node`, `graph_copy_ensemble`, `graph_audit_node_configs` |
 | Sharing | `graph_export`, `graph_import`, `graph_archive`, `graph_restore` |
-| Inspection | `graph_get`, `graph_list`, `graph_node_runs_list`, `graph_node_run_get` |
+| Inspection | `graph_get`, `graph_list`, `graph_node_runs_list`, `graph_node_run_get`, `graph_events` |
 | Runtime | `graph_run`, `graph_reset`, `graph_schedule_autorun`, `graph_schedule_continue`, `graph_pause`, `graph_continue`, `graph_complete_node`, `graph_report_blocker`, `graph_preflight` |
 
 Graphs can be authored programmatically by agents through these tools,
@@ -802,6 +802,40 @@ boundary.
 This is the second step of failure diagnosis: list to find the
 offending run, then fetch its output here — the exact stderr/stdout/
 reported_output the engine recorded.
+
+## Event log
+
+Every graph keeps its own durable, structured history in the `graph_events`
+table — the engine writes one row per event as the run happens:
+
+| Group | Kinds |
+|---|---|
+| Graph | `graph_started`, `graph_paused`, `graph_resumed`, `graph_completed`, `graph_failed`, `graph_blocked` |
+| Spec | `spec_started`, `spec_completed`, `spec_failed`, `spec_skipped` |
+| Node | `node_started`, `node_finished` (payload: `verdict`, `platform`, `model`, `duration_s`) |
+| Hooks | `hook_fired` (payload: `event`, `mode`, `ok`, `error`) |
+| Config | `config_changed` (a node, ensemble or hook edit made while the graph runs) |
+
+Read it from the CLI:
+
+```
+canopy graph log <graph-id-or-name> [--since <id|RFC3339>] [--kind <k>] [--spec <id>] [--follow]
+```
+
+Each line is `<created_at> <KIND> spec=<name> node=<name> <message>`.
+`--follow` polls the daemon every 2 s and prints new events until Ctrl+C.
+Over MCP, `graph_events { graph_id, since_id?, spec_id?, kinds?, limit?,
+include_payload? }` returns events oldest-first with `next_since_id` for
+paging.
+
+**This replaces the `printf … >> file` logging-hook pattern.** You no longer
+need a command hook that appends to a per-graph log file on `on_completed` /
+`on_failed` — the engine records that history itself, intact and queryable.
+Ordinary logging hooks keep working; they simply stop being necessary.
+
+Unlike the shared activity stream (bounded per workdir, free text), this log
+is never pruned by count. `canopy clean` removes events older than
+`graph_event_retention_days` (default 90) for graphs that are not running.
 
 ## Node blueprints
 

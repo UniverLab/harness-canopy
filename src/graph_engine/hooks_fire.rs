@@ -278,16 +278,29 @@ impl GraphEngine {
     pub(crate) fn publish_hook_outcome(&self, fire: &HookFireCtx<'_>, execution: &HookExecution) {
         let kind_label = Self::hook_kind_label(fire.hook);
         let outcome_text = Self::hook_outcome_text(execution);
-        activity::publish(
+        let ok = execution.status == GraphRunStatus::Pass;
+        activity::record(
             &self.db,
-            fire.ctx.workdir,
-            &fire.lp.id,
-            &fire.lp.name,
-            format!(
-                "Hook {}[{}] ({kind_label}) {outcome_text}.",
-                fire.event.as_str(),
-                fire.idx
-            ),
+            activity::GraphEvent {
+                graph_id: &fire.lp.id,
+                graph_name: &fire.lp.name,
+                workdir: fire.ctx.workdir,
+                spec_id: None,
+                node_id: None,
+                run_id: Some(fire.run_id),
+                kind: activity::GraphEventKind::HookFired,
+                message: format!(
+                    "Hook {}[{}] ({kind_label}) {outcome_text}.",
+                    fire.event.as_str(),
+                    fire.idx
+                ),
+                payload: Some(serde_json::json!({
+                    "event": fire.event.as_str(),
+                    "mode": kind_label,
+                    "ok": ok,
+                    "error": if ok { Value::Null } else { Value::String(execution.summary.clone()) },
+                })),
+            },
         );
     }
 

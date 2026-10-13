@@ -15,7 +15,9 @@ use std::sync::{Arc, Mutex};
 /// Version 7 rewrites `activity_log.source` rows that carry the retired
 /// `loop:` attribution prefix to `graph:` — see
 /// `migrate_activity_attribution_prefix` (CB63).
-const SCHEMA_VERSION: i64 = 7;
+/// Version 8 adds the `graph_events` durable per-graph event log — see
+/// `migrate_graph_events_table` (CM46).
+const SCHEMA_VERSION: i64 = 8;
 
 /// CM40: how long every daemon SQLite connection waits for a concurrent writer
 /// before failing with `SQLITE_BUSY`. Applied once, at open, in
@@ -610,6 +612,7 @@ impl Database {
         Self::migrate_hook_launch_tracking(&conn)?;
         Self::migrate_executed_platform_columns(&conn)?;
         Self::migrate_ensemble_infra_columns(&conn)?;
+        Self::migrate_graph_events_table(&conn)?;
 
         Self::set_schema_version(&conn)?;
 

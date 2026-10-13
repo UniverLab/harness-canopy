@@ -305,12 +305,24 @@ impl GraphEngine {
                     true,
                 ),
             );
-            activity::publish(
+            activity::record(
                 &self.db,
-                ctx.workdir,
-                &ctx.lp.id,
-                &ctx.lp.name,
-                format!("Ensemble member '{node_name}' failed: quorum met."),
+                activity::GraphEvent {
+                    graph_id: &ctx.lp.id,
+                    graph_name: &ctx.lp.name,
+                    workdir: ctx.workdir,
+                    spec_id: None,
+                    node_id: Some(&member.node_id),
+                    run_id: None,
+                    kind: activity::GraphEventKind::NodeFinished,
+                    message: format!("Ensemble member '{node_name}' failed: quorum met."),
+                    payload: Some(serde_json::json!({
+                        "verdict": GraphRunStatus::Fail.as_str(),
+                        "platform": Value::Null,
+                        "model": Value::Null,
+                        "duration_s": Value::Null,
+                    })),
+                },
             );
         }
         terminated_any
@@ -336,8 +348,9 @@ impl GraphEngine {
             &ctx.ensemble.join_node_id,
         )
         .await;
+        let join_run_id = uuid::Uuid::new_v4().to_string();
         self.db.insert_graph_run(&GraphNodeRun {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: join_run_id.clone(),
             graph_id: ctx.lp.id.clone(),
             spec_id: ctx.spec.id.clone(),
             node_id: ctx.ensemble.join_node_id.clone(),
@@ -353,17 +366,29 @@ impl GraphEngine {
             executed_platform: None,
             executed_model: None,
         })?;
-        activity::publish(
+        activity::record(
             &self.db,
-            ctx.workdir,
-            &ctx.lp.id,
-            &ctx.lp.name,
-            format!(
-                "Ensemble '{}' produced no verdict ({}/{} members, all infrastructure failures).",
-                ctx.ensemble.name,
-                ctx.details.members.len(),
-                ctx.details.members.len()
-            ),
+            activity::GraphEvent {
+                graph_id: &ctx.lp.id,
+                graph_name: &ctx.lp.name,
+                workdir: ctx.workdir,
+                spec_id: Some(&ctx.spec.id),
+                node_id: Some(&ctx.ensemble.join_node_id),
+                run_id: Some(&join_run_id),
+                kind: activity::GraphEventKind::NodeFinished,
+                message: format!(
+                    "Ensemble '{}' produced no verdict ({}/{} members, all infrastructure failures).",
+                    ctx.ensemble.name,
+                    ctx.details.members.len(),
+                    ctx.details.members.len()
+                ),
+                payload: Some(serde_json::json!({
+                    "verdict": execution.status.as_str(),
+                    "platform": Value::Null,
+                    "model": Value::Null,
+                    "duration_s": Value::Null,
+                })),
+            },
         );
         Ok(execution)
     }

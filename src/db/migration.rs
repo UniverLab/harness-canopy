@@ -428,6 +428,38 @@ impl Database {
         Ok(())
     }
 
+    /// CM46: durable per-graph event log. A brand-new table, so a guarded
+    /// `CREATE TABLE IF NOT EXISTS` batch matches `migrate_graph_run_output_tails`
+    /// and `migrate_hook_launch_tracking` rather than an `ALTER`. The CHECK
+    /// constraint pins `kind` to the published vocabulary at the DB level.
+    pub(super) fn migrate_graph_events_table(conn: &Connection) -> Result<()> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS graph_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                graph_id TEXT NOT NULL,
+                spec_id TEXT,
+                node_id TEXT,
+                run_id TEXT,
+                kind TEXT NOT NULL
+                    CHECK (kind IN (
+                        'graph_started','graph_paused','graph_resumed','graph_completed','graph_failed','graph_blocked',
+                        'spec_started','spec_completed','spec_failed','spec_skipped',
+                        'node_started','node_finished',
+                        'hook_fired',
+                        'config_changed',
+                        'note'
+                    )),
+                message TEXT NOT NULL,
+                payload TEXT,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_graph_events_graph_id_id ON graph_events(graph_id, id);
+            ",
+        )
+        .map_err(|e| anyhow::anyhow!("graph_events schema migration failed: {e}"))?;
+        Ok(())
+    }
+
     /// Fail the migration when any foreign-key violation remains, naming the
     /// step in the message (observable via `canopy doctor`).
     fn assert_no_foreign_key_violations(conn: &Connection, migration_label: &str) -> Result<()> {

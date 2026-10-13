@@ -339,18 +339,31 @@ pub(crate) fn publish_parallel_member_outcome(
     task: &ParallelMemberTask,
     execution: &NodeExecution,
 ) {
-    activity::publish(
+    let (platform, model) = executed_pair_for_node(&task.node);
+    activity::record(
         db,
-        &task.workdir,
-        &task.lp.id,
-        &task.lp.name,
-        match execution.status {
-            GraphRunStatus::Pass => format!("Ensemble member '{}' passed.", task.node.name),
-            _ => format!(
-                "Ensemble member '{}' failed: {}",
-                task.node.name,
-                failure_reason_text(&execution.output, &execution.summary).unwrap_or_default()
-            ),
+        activity::GraphEvent {
+            graph_id: &task.lp.id,
+            graph_name: &task.lp.name,
+            workdir: &task.workdir,
+            spec_id: Some(&task.spec.id),
+            node_id: Some(&task.node.id),
+            run_id: Some(&task.run_id),
+            kind: activity::GraphEventKind::NodeFinished,
+            message: match execution.status {
+                GraphRunStatus::Pass => format!("Ensemble member '{}' passed.", task.node.name),
+                _ => format!(
+                    "Ensemble member '{}' failed: {}",
+                    task.node.name,
+                    failure_reason_text(&execution.output, &execution.summary).unwrap_or_default()
+                ),
+            },
+            payload: Some(serde_json::json!({
+                "verdict": execution.status.as_str(),
+                "platform": platform,
+                "model": model,
+                "duration_s": Value::Null,
+            })),
         },
     );
 }

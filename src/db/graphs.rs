@@ -15,6 +15,7 @@ use crate::domain::graphs::{
 use crate::domain::models::Trigger;
 
 mod crud;
+pub mod events;
 mod hooks;
 mod queue;
 mod reconcile;
