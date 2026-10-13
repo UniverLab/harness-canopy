@@ -606,6 +606,44 @@ mod tests {
         );
     }
 
+    /// FR3: while a drain is actively indexing the tick must NOT compact —
+    /// the drain compacts at its own end, and the two must never run at once.
+    #[tokio::test]
+    async fn tick_skips_compaction_while_draining() {
+        let dir = TempDir::new().unwrap();
+        let (mgr, store_path) = test_manager_with_store(&dir);
+
+        let store = VectorStore::open_at(&store_path, TEST_DIMS, None)
+            .await
+            .unwrap();
+        for i in 0..120 {
+            let file_path = scratch_file(&dir, i);
+            store
+                .insert_chunk(&VectorChunk {
+                    id: format!("chunk-{i}"),
+                    file_path,
+                    content: format!("chunk {i}"),
+                    embedding: big_embedding(i),
+                    created_at: 1_700_000_000,
+                })
+                .await
+                .unwrap();
+        }
+        drop(store);
+
+        // Pretend a drain is mid-flight (it would compact itself at the end).
+        mgr.draining.store(true, Ordering::Relaxed);
+        mgr.run_rag_maintenance().await;
+
+        let store = VectorStore::open_at(&store_path, TEST_DIMS, None)
+            .await
+            .unwrap();
+        assert!(
+            store.footprint().await.unwrap().fragments > 50,
+            "the tick must leave compaction to an active drain"
+        );
+    }
+
     /// Spec test: paused indexing with a 25 h old item reports degraded — and
     /// maintenance never resumes it.
     #[tokio::test]

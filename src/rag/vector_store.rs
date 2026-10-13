@@ -1139,6 +1139,16 @@ mod tests {
 
         store_a.compact().await.unwrap();
 
+        // The stale handle must observe the compaction, not its cached
+        // pre-compaction snapshot. With LanceDB's default (`None`) the
+        // wrapper is `Lazy` and would keep reporting the five original
+        // fragments here; only an explicit `Duration::ZERO` (Strong) makes
+        // this read check out the new manifest.
+        assert!(
+            store_b.footprint().await.unwrap().fragments <= 2,
+            "a handle opened before compaction must read the new manifest"
+        );
+
         let after = store_b.search_similar(&COMPACT_QUERY, 5).await.unwrap();
         let ids_before: Vec<&str> = before.iter().map(|r| r.id.as_str()).collect();
         let ids_after: Vec<&str> = after.iter().map(|r| r.id.as_str()).collect();
