@@ -1927,6 +1927,39 @@ mod preview_key_tests {
     }
 
     #[test]
+    fn manual_enter_toggles_pane_on_selected_node() {
+        // CT28 req 6: Enter in manual mode toggles the pane on the selected
+        // node (follow mode keeps CT24's enter-manual behaviour — covered by
+        // manual_down_moves_selection_and_pane_follows).
+        let mut app = app_on_graph(crate::domain::graphs::GraphStatus::Running);
+        seed_live_graph(&app.db, &["n1"]);
+        insert_live_run(
+            &app.db,
+            "run-n1",
+            "n1",
+            crate::domain::graphs::GraphRunStatus::Running,
+            Utc::now(),
+        );
+        let mut state = running_live_state();
+        state.current_spec_id = Some("s1".to_string());
+        state.current_node_id = Some("n1".to_string());
+        app.graph_live_state = Some(state);
+        app.graph_live_follow = false;
+        app.graph_live_selected_node = Some("n1".to_string());
+
+        handle_preview_key(&mut app, KeyCode::Enter, KeyModifiers::NONE).unwrap();
+        assert!(app.node_tail_dialog_active(), "Enter must open the pane");
+        assert_eq!(
+            app.node_tail_dialog.as_ref().unwrap().run_id.as_deref(),
+            Some("run-n1"),
+            "the pane must bind to the selected node's run"
+        );
+
+        handle_preview_key(&mut app, KeyCode::Enter, KeyModifiers::NONE).unwrap();
+        assert!(!app.node_tail_dialog_active(), "Enter must close the pane");
+    }
+
+    #[test]
     fn manual_down_moves_selection_and_pane_follows() {
         let mut app = app_on_graph(crate::domain::graphs::GraphStatus::Running);
         seed_live_graph(&app.db, &["n1", "n2"]);

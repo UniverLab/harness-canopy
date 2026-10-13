@@ -14,46 +14,44 @@ use crate::tui::app::dialog::NodeTailDialog;
 use crate::tui::ui::theme::Theme;
 
 /// Strip CSI/OSC ANSI escape sequences from a line (render-time only).
+/// Walks chars, not bytes, so multi-byte UTF-8 text survives untouched —
+/// agent CLI output regularly carries box-drawing/emoji/accented characters.
 pub(crate) fn strip_ansi(line: &str) -> String {
     let mut out = String::with_capacity(line.len());
-    let bytes = line.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == 0x1b && i + 1 < bytes.len() {
-            let next = bytes[i + 1];
-            if next == b'[' {
-                // CSI: skip until a byte in 0x40..=0x7e (@ A-Z [ \ ] ^ _ ` a-z { | } ~)
-                i += 2;
-                while i < bytes.len() && bytes[i] < 0x40 {
-                    i += 1;
-                }
-                if i < bytes.len() {
-                    i += 1; // consume the final byte
-                }
-                continue;
-            } else if next == b']' {
-                // OSC: skip until BEL (0x07) or ST (ESC \)
-                i += 2;
-                while i < bytes.len() {
-                    if bytes[i] == 0x07 {
-                        i += 1;
-                        break;
-                    }
-                    if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'\\' {
-                        i += 2;
-                        break;
-                    }
-                    i += 1;
-                }
-                continue;
-            } else {
-                // ESC + single char: skip both
-                i += 2;
-                continue;
-            }
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
         }
-        out.push(bytes[i] as char);
-        i += 1;
+        match chars.next() {
+            // CSI: skip until a final byte in 0x40..=0x7e ('@'..='~').
+            Some('[') => {
+                for final_byte in chars.by_ref() {
+                    if ('@'..='~').contains(&final_byte) {
+                        break;
+                    }
+                }
+            }
+            // OSC: skip until BEL (0x07) or ST (ESC \).
+            Some(']') => loop {
+                match chars.next() {
+                    Some('\u{7}') => break,
+                    // ESC \ ends the sequence; a bare ESC mid-OSC is dropped
+                    // with the char that follows it, same as the byte walk.
+                    Some('\u{1b}') => {
+                        if chars.next() == Some('\\') {
+                            break;
+                        }
+                    }
+                    Some(_) => {}
+                    None => break,
+                }
+            },
+            // ESC + single char (or a trailing ESC): drop both.
+            Some(_) => {}
+            None => {}
+        }
     }
     out
 }
@@ -177,7 +175,8 @@ pub(crate) fn draw_node_tail_pane(
         return;
     }
 
-    // Header (status) + footer (hints) reserve 2 rows; the rest is body.
+    // Header (status) reserves 1 row; 1 more of headroom so the body never
+    // paints over the block's bottom border while scrolled.
     let max_body = inner.height.saturating_sub(2) as usize;
 
     let mut lines: Vec<Line<'static>> = Vec::new();
@@ -255,6 +254,20 @@ mod tests {
     #[test]
     fn strip_ansi_plain_text_unchanged() {
         assert_eq!(strip_ansi("hello world"), "hello world");
+    }
+
+    #[test]
+    fn strip_ansi_preserves_multibyte_utf8() {
+        // Regression: the stripper once walked bytes and pushed each one as a
+        // char, mojibake-ing every multi-byte character. Real harness output
+        // carries box-drawing, emoji and accented text.
+        assert_eq!(strip_ansi("héllo — wörld ✓"), "héllo — wörld ✓");
+        assert_eq!(strip_ansi("\x1b[32m⠋ working…\x1b[0m"), "⠋ working…");
+    }
+
+    #[test]
+    fn strip_ansi_osc_ends_with_string_terminator() {
+        assert_eq!(strip_ansi("a\x1b]0;title\x1b\\b"), "ab");
     }
 
     #[test]

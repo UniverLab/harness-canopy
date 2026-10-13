@@ -358,10 +358,11 @@ fn build_spec_queue(db: &Database, lp: &crate::domain::graphs::Graph) -> Vec<Spe
 
 /// Reason a spec ended up `Failed`/`Skipped`, for the marker strip's detail
 /// view: the admin-recorded reason (`completed_via_reason`, set only for
-/// administrative transitions) if present, else the output tail of its last
-/// run — the best available proxy for an engine-driven failure, which
-/// doesn't persist a reason on the spec row itself. `None` for every other
-/// status, and when neither source has anything.
+/// administrative transitions) if present, else the last run's self-reported
+/// `summary`/`error`/`blocker` — the best available proxy for an
+/// engine-driven failure, which doesn't persist a reason on the spec row
+/// itself. `None` for every other status, and when neither source has
+/// anything.
 fn spec_failure_reason(db: &Database, spec: &crate::domain::graphs::GraphSpec) -> Option<String> {
     if !matches!(
         spec.status,

@@ -25331,6 +25331,44 @@ binary = "{}"
 
         let cli = Cli::new("test-cli");
         let strategy = sample_strategy(&script);
+
+        // The pre-CT28 contract: `wait_with_output`, converted and trimmed in
+        // one shot — what every downstream parser received before CT28. Run
+        // the same fixture through the no-tee path for a real baseline.
+        let baseline = match crate::graph_engine::agent_spawn::spawn_and_wait_cli_process(
+            &strategy,
+            "prompt",
+            None,
+            None,
+            "/tmp",
+            1,
+            None,
+            None,
+            false,
+            None,
+            |_pid| {},
+            None,
+        )
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => panic!("no-tee baseline must spawn: {}", error.message),
+        };
+        let (old_stdout, old_stderr) = match baseline {
+            crate::graph_engine::agent_spawn::CliProcessOutcome::Finished {
+                stdout,
+                stderr,
+                ..
+            } => (stdout, stderr),
+            crate::graph_engine::agent_spawn::CliProcessOutcome::TimedOut => {
+                panic!("the fixture exits immediately; it must not time out")
+            }
+        };
+
+        // CT28: the same fixture streamed through `spawn_output_reader` into
+        // the buffers, then trimmed. Must be byte-identical to the baseline —
+        // this is the assertion that fails if the streamed path trims (or
+        // accumulates) differently from `wait_with_output`.
         let execution = crate::graph_engine::agent_spawn::run_agent_process(
             &db,
             "run-agent-trim",
@@ -25347,10 +25385,19 @@ binary = "{}"
         .await
         .unwrap();
 
-        let stdout = execution.output.get("stdout").unwrap().as_str().unwrap();
         assert_eq!(
-            stdout, "hello",
-            "stdout must be trimmed exactly like wait_with_output"
+            execution.output.get("stdout").unwrap().as_str().unwrap(),
+            old_stdout,
+            "streamed stdout must equal the old wait_with_output result"
+        );
+        assert_eq!(
+            execution.output.get("stderr").unwrap().as_str().unwrap(),
+            old_stderr,
+            "streamed stderr must equal the old wait_with_output result"
+        );
+        assert_eq!(
+            old_stdout, "hello",
+            "trailing whitespace is trimmed, as before"
         );
     }
 }

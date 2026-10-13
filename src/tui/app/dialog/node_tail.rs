@@ -125,6 +125,11 @@ impl App {
     /// Refresh the pane from the DB every tick: resolve the run, reset
     /// scroll/cursor on a genuine transition, then fetch the tail.
     pub(crate) fn poll_node_tail_dialog(&mut self) {
+        // CT28: the pane adds reads to the refresh tick ONLY while it is open.
+        // Guard before resolving so a closed pane costs no `list_graph_runs_for_spec`.
+        if self.node_tail_dialog.is_none() {
+            return;
+        }
         // Phase 1 (immutable &self): resolve the highlighted node, fetch the
         // full run + tail into owned locals.
         let resolved = self.resolve_for_poll();
@@ -235,10 +240,14 @@ impl App {
                     .map(|d| d.member_cursor.min(runs.len().saturating_sub(1)))
                     .unwrap_or(0);
                 let run = &runs[cursor];
+                // `runs` is the candidate list, which can be longer than the
+                // member list: a retried member contributes one run per
+                // attempt (node_attempt inserts a fresh row), and `,`/`.`
+                // must be able to reach every candidate.
                 self.make_show(
                     run,
                     node_name_of(&run.node_id),
-                    Some((cursor + 1, ens.members.len())),
+                    Some((cursor + 1, runs.len())),
                 )
             }
             None => {
@@ -761,6 +770,92 @@ mod tests {
             Some("run-m1"),
             "the member cursor wraps back to the running member"
         );
+    }
+
+    /// CT28: a retried member contributes one run per attempt, so the
+    /// candidate list can be longer than the member list — `,`/`.` must wrap
+    /// within the *candidates*, not the member count, or the older attempts
+    /// are unreachable.
+    #[test]
+    fn member_step_wraps_within_candidates_not_members() {
+        let db = test_db();
+        seed_pane_graph(&db, "spec-pane", &["m1", "m2", "m3", "j1"]);
+        let base = Utc::now();
+        // m1 ran once (finished, oldest), then was retried and is running now.
+        insert_pane_run(
+            &db,
+            "spec-pane",
+            "run-m1-old",
+            "m1",
+            GraphRunStatus::Fail,
+            base,
+        );
+        insert_pane_run(
+            &db,
+            "spec-pane",
+            "run-m1-new",
+            "m1",
+            GraphRunStatus::Running,
+            base + chrono::Duration::seconds(5),
+        );
+        insert_pane_run(
+            &db,
+            "spec-pane",
+            "run-m2",
+            "m2",
+            GraphRunStatus::Pass,
+            base + chrono::Duration::seconds(2),
+        );
+        insert_pane_run(
+            &db,
+            "spec-pane",
+            "run-m3",
+            "m3",
+            GraphRunStatus::Pass,
+            base + chrono::Duration::seconds(1),
+        );
+
+        let mut app = test_app(Arc::clone(&db));
+        let mut state = pane_state("spec-pane", "j1");
+        state.ensembles = vec![crate::tui::app::graph_live_state::EnsembleLiveInfo {
+            ensemble_id: "e1".to_string(),
+            name: "Ensemble".to_string(),
+            join_node_id: "j1".to_string(),
+            members: vec![member("m1"), member("m2"), member("m3")],
+            straggler_timeout_minutes: None,
+            quorum_grace_minutes: None,
+        }];
+        app.graph_live_state = Some(state);
+        app.graph_live_follow = true;
+
+        app.open_node_tail_pane();
+        assert_eq!(
+            app.node_tail_dialog.as_ref().unwrap().run_id.as_deref(),
+            Some("run-m1-new"),
+            "candidate 0 is the running retry"
+        );
+        assert_eq!(
+            app.node_tail_dialog.as_ref().unwrap().member_pos,
+            Some((1, 4)),
+            "the count is the candidate count (4 runs), not the member count (3)"
+        );
+
+        // Step through every candidate: m1-new → m2 → m3 → m1-old → wrap.
+        for expected in ["run-m2", "run-m3", "run-m1-old", "run-m1-new"] {
+            app.node_tail_member_step(1);
+            app.poll_node_tail_dialog();
+            assert_eq!(
+                app.node_tail_dialog.as_ref().unwrap().run_id.as_deref(),
+                Some(expected),
+                "`.` must reach every candidate, got {}",
+                app.node_tail_dialog
+                    .as_ref()
+                    .unwrap()
+                    .run_id
+                    .as_deref()
+                    .unwrap()
+            );
+        }
     }
 
     /// CT28 req 3: a highlighted ensemble node (join or member) with no member
