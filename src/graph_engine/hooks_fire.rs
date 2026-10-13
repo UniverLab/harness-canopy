@@ -1,4 +1,5 @@
 use super::*;
+use chrono::Utc;
 
 pub(crate) struct HookFireCtx<'a> {
     pub(crate) lp: &'a Graph,
@@ -225,6 +226,29 @@ impl GraphEngine {
     }
 
     pub(crate) async fn execute_agent_hook(&self, fire: &HookFireCtx<'_>) -> HookExecution {
+        // CM48: an agent hook whose pair is declared unavailable never spawns;
+        // its run is recorded as failed with the availability message and it
+        // is not retried.
+        if let Some(platform) = fire.hook.platform.as_deref() {
+            let avail = self.availability_for(platform, fire.hook.model.as_deref(), &Utc::now());
+            if !avail.available {
+                let reason = avail.reason.as_deref().unwrap_or("no reason");
+                return Self::hook_failure(
+                    serde_json::json!({
+                        "platform": fire.hook.platform,
+                        "model": fire.hook.model,
+                        "error": "unavailable",
+                        "reason": reason,
+                    }),
+                    node_unavailable_blocker(
+                        fire.event.as_str(),
+                        platform,
+                        fire.hook.model.as_deref(),
+                        reason,
+                    ),
+                );
+            }
+        }
         let cli = match Cli::resolve(fire.hook.platform.as_deref()) {
             Ok(cli) => cli,
             Err(error) => {

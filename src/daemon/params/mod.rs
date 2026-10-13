@@ -13,6 +13,8 @@ mod graph_core;
 pub use graph_core::*;
 mod graph_access;
 pub use graph_access::*;
+mod roster;
+pub use roster::*;
 
 #[cfg(test)]
 mod tests {

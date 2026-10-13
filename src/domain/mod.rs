@@ -24,6 +24,7 @@ pub mod prompts;
 pub mod queues;
 pub mod quota_reset;
 pub mod registry_baseline;
+pub mod roster;
 pub mod sandbox;
 pub mod seeds;
 pub mod specs;

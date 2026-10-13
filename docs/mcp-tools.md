@@ -157,6 +157,25 @@ for how name resolution and its failure modes work. `session_list` remains
 the way to see both the names and ids of every live session a hook can
 target.
 
+## Availability roster (4)
+
+The roster declares which platform/model pairs may run. The engine consults
+it at dispatch — an unavailable member is skipped, an unavailable single node
+or agent hook blocks the spec — and never infers availability from failures,
+exit codes or quota messages. Only these tools (and the CLI, which calls them)
+write the table.
+
+| Tool | Description |
+|---|---|
+| `roster_set` | Declare one `platform`/`model_pattern` pair `available` or `unavailable`. `model_pattern` is omitted for every model of the platform, or an exact model id, or a prefix ending in `*` (e.g. `opencode-go/*`). `until` (RFC 3339 UTC) is accepted only with `unavailable` and must be in the future |
+| `roster_clear` | Delete one entry (idempotent); omit `model_pattern` for the platform-wide entry |
+| `roster_list` | Every entry, filterable by `platform`, each with its effective state now |
+| `roster_check` | The effective availability of one `platform`/`model` pair, naming the entry that decided it |
+
+The most specific entry wins: exact model, then the longest `*` prefix, then the
+platform-wide entry. An `unavailable` entry past its `until` reads as available
+(expired) — expiry is evaluated at read time, never by a timer.
+
 ## Spec backlog (9)
 
 | Tool | Description |

@@ -17,7 +17,9 @@ use std::sync::{Arc, Mutex};
 /// `migrate_activity_attribution_prefix` (CB63).
 /// Version 8 adds the `graph_events` durable per-graph event log — see
 /// `migrate_graph_events_table` (CM46).
-const SCHEMA_VERSION: i64 = 8;
+/// Version 9 adds the `roster_entries` availability roster — see
+/// `migrate_roster_entries_table` (CM48).
+const SCHEMA_VERSION: i64 = 9;
 
 /// CM40: how long every daemon SQLite connection waits for a concurrent writer
 /// before failing with `SQLITE_BUSY`. Applied once, at open, in
@@ -564,7 +566,27 @@ const BASE_SCHEMA_BATCHES: &[&str] = &[
                 created_at TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'active',
                 cleanup_error TEXT
-            );",
+            );
+
+            -- CM48: the availability roster. A person or an agent declares
+            -- which platform/model pairs can run; the engine skips a pair that
+            -- is effectively unavailable when it dispatches a member, node or
+            -- hook. `model_pattern` is NULL (every model of the platform), an
+            -- exact model id, or a prefix ending in `*`. `until` (RFC3339 UTC)
+            -- is evaluated at read time, never by a timer, so a daemon restart
+            -- cannot lose an expiry.
+            CREATE TABLE IF NOT EXISTS roster_entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                platform TEXT NOT NULL,
+                model_pattern TEXT,
+                state TEXT NOT NULL CHECK(state IN ('available','unavailable')),
+                reason TEXT,
+                until TEXT,
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                UNIQUE(platform, model_pattern)
+            );
+            CREATE INDEX IF NOT EXISTS idx_roster_entries_platform
+                ON roster_entries(platform);",
 ];
 
 impl Database {
@@ -614,6 +636,7 @@ impl Database {
         Self::migrate_ensemble_infra_columns(&conn)?;
         Self::migrate_graph_events_table(&conn)?;
         Self::migrate_spec_notes_table(&conn)?;
+        Self::migrate_roster_entries_table(&conn)?;
 
         Self::set_schema_version(&conn)?;
 
@@ -670,6 +693,7 @@ pub mod last_prompts;
 mod migration;
 pub mod project;
 pub mod queues;
+pub(crate) mod roster_entries;
 pub mod run;
 pub mod sandbox;
 pub mod scheduled_sends;

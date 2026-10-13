@@ -129,6 +129,21 @@ Read-only inspection of registered agents, served from the local database
 | `canopy spec reopen <spec-id> --reason <text>` | Reopen a completed/skipped spec back to pending |
 | `canopy spec convert` | Migrate legacy heading-format spec bodies to the tagged `<spec>` format (skips tagged and running specs; prints a report) |
 
+## Availability roster
+
+| Command | Description |
+|---|---|
+| `canopy roster list [--platform <platform>]` | List roster entries with their effective state now |
+| `canopy roster set <platform> [<model_pattern>] --unavailable [--reason <text>] [--until <rfc3339>]` | Declare a platform/model pair unavailable; `until` must be a future RFC 3339 UTC instant |
+| `canopy roster set <platform> [<model_pattern>] --available` | Declare it available |
+| `canopy roster clear <platform> [<model_pattern>]` | Delete one entry (idempotent) |
+| `canopy roster check <platform> [<model>]` | Show the effective availability of one pair |
+
+Omitting `<model_pattern>` addresses every model of the platform; a pattern
+ending in `*` (e.g. `opencode-go/*`) addresses a prefix. The engine skips
+effectively-unavailable members at dispatch and blocks a single unavailable
+agent node or hook — it never edits a graph.
+
 ## Spec queues
 
 | Command | Description |

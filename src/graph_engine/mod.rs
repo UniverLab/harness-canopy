@@ -44,6 +44,7 @@ mod node_dispatch;
 mod output_tee;
 mod progress;
 mod prompts;
+mod roster_filter;
 mod routing;
 mod run_spec;
 mod shell_utils;
@@ -81,6 +82,7 @@ pub(crate) use node_dispatch::*;
 #[allow(unused_imports)]
 pub(crate) use progress::*;
 pub(crate) use prompts::*;
+pub(crate) use roster_filter::*;
 pub(crate) use routing::*;
 #[allow(unused_imports)]
 pub(crate) use run_spec::*;

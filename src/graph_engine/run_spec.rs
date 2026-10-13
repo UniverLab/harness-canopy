@@ -235,6 +235,15 @@ impl GraphEngine {
         previous_output: Option<&Value>,
         iteration_value: usize,
     ) -> Result<SpecStepFlow> {
+        // CM48: a single agent node whose pair is declared unavailable blocks
+        // here, before any run row is inserted or attempt counted — the
+        // existing `block_graph` path (via `SpecExecutionOutcome::Blocked`)
+        // pauses the graph and fires the `on_blocked` hooks.
+        if let Some(node) = self.db.get_graph_node(node_id)? {
+            if let Some(blocker) = self.node_availability_blocker(&node) {
+                return Ok(SpecStepFlow::Done(SpecExecutionOutcome::Blocked(blocker)));
+            }
+        }
         let attempt_setup = self
             .prepare_node_attempt(
                 ctx,
@@ -393,6 +402,16 @@ impl GraphEngine {
             .get_ensemble_details(ensemble_id)
             .map_err(|e| anyhow!("Ensemble '{}' lookup failed: {e}", ensemble_id))?
             .ok_or_else(|| anyhow!("Ensemble '{}' not found in graph.", ensemble_id))?;
+        // CM48: resolve availability now, at dispatch — an unavailable member
+        // is skipped, and an ensemble with no available member (or a parallel
+        // one below `min_pass`) blocks the spec before any member runs. No
+        // member is edited; availability is a filter, not a rewrite.
+        let details_fresh = match self.resolve_ensemble_roster(&details_fresh) {
+            EnsembleRoster::Blocked(blocker) => {
+                return Ok(SpecStepFlow::Done(SpecExecutionOutcome::Blocked(blocker)));
+            }
+            EnsembleRoster::Ready(details) => *details,
+        };
         let details = &details_fresh;
         let execution = self
             .execute_ensemble(

@@ -612,4 +612,28 @@ impl Database {
         }
         Ok(())
     }
+
+    /// CM48: create the `roster_entries` availability roster. Guarded
+    /// `CREATE TABLE IF NOT EXISTS` — a no-op on a fresh database (the table
+    /// is already in `BASE_SCHEMA_BATCHES`) and on an already-migrated one,
+    /// and the thing that adds the table to a database created before it
+    /// existed.
+    pub(in crate::db) fn migrate_roster_entries_table(conn: &Connection) -> Result<()> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS roster_entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                platform TEXT NOT NULL,
+                model_pattern TEXT,
+                state TEXT NOT NULL CHECK(state IN ('available','unavailable')),
+                reason TEXT,
+                until TEXT,
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                UNIQUE(platform, model_pattern)
+            );
+            CREATE INDEX IF NOT EXISTS idx_roster_entries_platform
+                ON roster_entries(platform);",
+        )
+        .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
+        Ok(())
+    }
 }

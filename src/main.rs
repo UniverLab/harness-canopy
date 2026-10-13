@@ -41,6 +41,7 @@ use daemon::project_cli::{handle_project_action, ProjectAction};
 use daemon::prompts_cli::{handle_prompts_action, PromptsAction};
 use daemon::queue_cli::{handle_queue_action, QueueAction};
 use daemon::rag_cli::{handle_rag_action, RagAction};
+use daemon::roster_cli::{handle_roster_action, RosterAction};
 use daemon::sandbox_cli::{handle_sandbox_action, SandboxAction};
 use daemon::server::{run_http_server, run_stdio_server};
 use daemon::spec_cli::{handle_spec_action, SpecAction};
@@ -133,6 +134,11 @@ enum Commands {
     Spec {
         #[command(subcommand)]
         action: SpecAction,
+    },
+    /// Declare platform/model availability for graph dispatch.
+    Roster {
+        #[command(subcommand)]
+        action: RosterAction,
     },
     /// Manage spec queues.
     Queue {
@@ -262,6 +268,7 @@ async fn main() -> Result<()> {
         Some(Commands::Graph { action }) => handle_graph_action(action, cli.port).await,
         Some(Commands::Agent { action }) => handle_agent_action(action).await,
         Some(Commands::Spec { action }) => handle_spec_action(action, cli.port).await,
+        Some(Commands::Roster { action }) => handle_roster_action(action, cli.port).await,
         Some(Commands::Queue { action }) => handle_queue_action(action, cli.port).await,
         Some(Commands::Models { action }) => handle_models_action(action).await,
         Some(Commands::Project { action }) => handle_project_action(action).await,

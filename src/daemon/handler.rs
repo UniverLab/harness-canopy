@@ -299,6 +299,7 @@ impl TaskTriggerHandler {
         router.merge(TaskTriggerHandler::tool_router_queues());
         router.merge(TaskTriggerHandler::tool_router_nodes());
         router.merge(TaskTriggerHandler::tool_router_notes());
+        router.merge(TaskTriggerHandler::tool_router_roster());
         router.merge(TaskTriggerHandler::tool_router_edges());
         router.merge(TaskTriggerHandler::tool_router_ensemble_core());
         router.merge(TaskTriggerHandler::tool_router_copy());
@@ -637,6 +638,10 @@ mod tests {
         "rag_compact",
         "rag_search",
         "remove_seed",
+        "roster_check",
+        "roster_clear",
+        "roster_list",
+        "roster_set",
         "scheduled_send_cancel",
         "scheduled_send_create",
         "scheduled_send_list",
@@ -746,6 +751,10 @@ mod tests {
                 "rag_compact|5d48c58fffa0c215e2b2fdcfafeb530f3fa62584e05f76bb5d6d99bd59897e84|efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
                 "rag_search|8a1f6386074319d1c99700410f884ba9ed3a3f0f91276a50766cf677bf1b26cd|84c021f51349dfecbea78f5ebe89887d0f3e1e764ac91540bc20bc7e2d13ba45",
                 "remove_seed|b24cd25a52f13d1714cd1a02c3156317166b33f19df049dc99326685750fc374|44f5accf3bb686511aa4445599a499601592df037d84886e46a92dccb6924c69",
+                "roster_check|80d72258ccfc8cbb6509168ff6197f0c073adc5600e7a50e9815172a65313387|86e91783cad72828f1d84fc73a2430d3a17c02833f1b448a00ba5616dabe0577",
+                "roster_clear|31c4ac456165d42a5b18c6f8ca8f37e05aafeba98ee44488bf6cfa1fbecf1720|d294066722284d29107550a44758682259c3f13cedc1d188da98d041e6eeb1cb",
+                "roster_list|99f9cd3cdad9f30fe335f61cb51bdeb618ee0a743d3c0decdce04c8a9572af68|276db5b4a3f990897ee3a03ea73cc40be04234716117cf4c861c70ca9c23d411",
+                "roster_set|4a5445a5af19460e4fcc5a4bff5c9d32174fa64373b922d74392bfc7178a8e0c|bdfc24fbbb05b5331e4bed218ad806a7e11faf8afd0b0c57f4612b3cde7086d2",
                 "scheduled_send_cancel|e97ad927d1c1d8778e0e7862e7ac4df954098bd847329a5cac398d19177d47e8|31cd20154b502bce97777d5d0b780d65ae849538b776016a121ba608bb227b9c",
                 "scheduled_send_create|e6defc41d6d01fe133056562efc3aba3b50b6d1e2a06fe278894cbbbcb65a165|75bdf795b390451ff08f87c147f0f353f69b5f25ff2219f02c7e8901fff30ca6",
                 "scheduled_send_list|946cdf95ebf54570fe9566aa69f8f5e7a18f08ea7b29a6be390bd9ce66a4df63|6ade068b88c489253907d5a691508969588e152e77aee3c2eeccd8ac385e8aab",

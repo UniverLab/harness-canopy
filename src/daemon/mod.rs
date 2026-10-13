@@ -32,6 +32,7 @@ pub(crate) mod handler_notes;
 pub(crate) mod handler_preflight;
 pub(crate) mod handler_queues;
 pub(crate) mod handler_read;
+pub(crate) mod handler_roster;
 pub(crate) mod handler_run_exec;
 pub(crate) mod handler_run_history;
 pub(crate) mod handler_run_lifecycle;
@@ -53,6 +54,7 @@ pub(crate) mod prompts_cli;
 pub(crate) mod queue_cli;
 pub(crate) mod rag_cli;
 
+pub(crate) mod roster_cli;
 pub(crate) mod sandbox_cli;
 pub(crate) mod server;
 pub(crate) mod service_install;
