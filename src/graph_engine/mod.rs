@@ -41,6 +41,7 @@ mod launch_check;
 mod lifecycle;
 mod node_attempt;
 mod node_dispatch;
+mod output_tee;
 mod progress;
 mod prompts;
 mod routing;
@@ -25068,6 +25069,288 @@ binary = "{}"
         assert!(
             execution.output.get("mode").is_none(),
             "agent-mode router output must not carry a 'mode' key"
+        );
+    }
+
+    // ── CT28: agent nodes stream; snapshot-then-delete ───────────────
+
+    /// CT28: an agent node whose fake CLI prints 3 lines with 200ms sleeps
+    /// between them has ≥ 1 `graph_run_output` row before it exits, and after
+    /// it exits the run carries the snapshot and zero chunk rows.
+    #[tokio::test]
+    async fn agent_node_streams_output_to_live_tail() {
+        let (dir, db, _engine, graph_id, _spec_id) = graph_fixture().unwrap();
+        let script = write_member_script(
+            dir.path(),
+            "agent-stream.sh",
+            "#!/bin/sh\n\
+             printf 'line one\\n'\n\
+             sleep 0.2\n\
+             printf 'line two\\n'\n\
+             sleep 0.2\n\
+             printf 'line three\\n'\n\
+             exit 0\n",
+        );
+        let node = GraphNode {
+            id: "node-agent-stream".to_string(),
+            spec_id: Some("spec-test".to_string()),
+            graph_id: None,
+            name: "stream-agent".to_string(),
+            kind: GraphNodeKind::Agent,
+            config: serde_json::json!({}),
+            position: 1,
+            created_at: chrono::Utc::now(),
+        };
+        db.insert_graph_node(&node).unwrap();
+        db.insert_graph_run(&GraphNodeRun {
+            id: "run-agent-stream".to_string(),
+            graph_id: graph_id.clone(),
+            spec_id: "spec-test".to_string(),
+            node_id: node.id.clone(),
+            status: GraphRunStatus::Running,
+            input: None,
+            output: None,
+            started_at: chrono::Utc::now(),
+            completed_at: None,
+            iteration: 1,
+            pid: None,
+            boot_id: None,
+            session_id: None,
+            executed_platform: None,
+            executed_model: None,
+        })
+        .unwrap();
+        // A chunk that predates the child. Completion must delete it; the
+        // snapshot must carry only the streamed bytes, never this sentinel.
+        db.append_graph_run_output("run-agent-stream", "stdout", "PRE-EXISTING-CHUNK\n")
+            .unwrap();
+
+        let cli = Cli::new("test-cli");
+        let strategy = sample_strategy(&script);
+        let run_fut = crate::graph_engine::agent_spawn::run_agent_process(
+            &db,
+            "run-agent-stream",
+            &cli,
+            &strategy,
+            &node,
+            "prompt",
+            None,
+            None,
+            "/tmp",
+            1,
+            None,
+        );
+        tokio::pin!(run_fut);
+
+        let mut saw_chunk = false;
+        for _ in 0..100 {
+            if tokio::time::timeout(std::time::Duration::from_millis(100), &mut run_fut)
+                .await
+                .is_ok()
+            {
+                break;
+            }
+            let (stdout, _) = db.get_graph_run_tail("run-agent-stream", 1000).unwrap();
+            if stdout.contains("line one") {
+                saw_chunk = true;
+                break;
+            }
+        }
+        assert!(
+            saw_chunk,
+            "agent node must stream output to graph_run_output while running"
+        );
+        let execution = run_fut.await.unwrap();
+
+        // CM13: an agent node with no self-report is a Fail regardless of exit
+        // code — but the streaming path must still have captured every byte.
+        assert_eq!(execution.status, GraphRunStatus::Fail);
+
+        // After completion: the run carries the snapshot and zero chunk rows.
+        // The raw count is asserted rather than inferred from
+        // `get_graph_run_tail`, which serves the same text from leftover
+        // chunks — this assertion fails if the tee path never snapshots or
+        // never deletes.
+        let chunks = db
+            .count_graph_run_output_chunks("run-agent-stream")
+            .unwrap();
+        assert_eq!(
+            chunks, 0,
+            "completion must delete the run's graph_run_output chunk rows"
+        );
+        // With zero chunk rows, `get_graph_run_tail` can only be served by the
+        // snapshot columns written at completion.
+        let (stdout, _) = db.get_graph_run_tail("run-agent-stream", 1000).unwrap();
+        assert!(
+            stdout.contains("line three"),
+            "snapshot tail must serve completed output: {stdout}"
+        );
+        assert!(
+            !stdout.contains("PRE-EXISTING-CHUNK"),
+            "snapshot must carry only the streamed bytes, not stale chunks: {stdout}"
+        );
+
+        // The execution output carries stdout/stderr; the streaming path must
+        // not have lost any bytes vs. the old wait_with_output contract.
+        let stdout = execution.output.get("stdout").unwrap().as_str().unwrap();
+        assert_eq!(stdout, "line one\nline two\nline three");
+    }
+
+    /// CT28: a timed-out agent node still yields TimedOut, and its partial
+    /// output is in the snapshot.
+    #[tokio::test]
+    async fn agent_node_timeout_snapshots_partial_output() {
+        let (dir, db, _engine, graph_id, _spec_id) = graph_fixture().unwrap();
+        let script = write_member_script(
+            dir.path(),
+            "agent-sleeper.sh",
+            "#!/bin/sh\n\
+             printf 'partial before timeout\\n'\n\
+             sleep 600\n",
+        );
+        let node = GraphNode {
+            id: "node-agent-timeout".to_string(),
+            spec_id: Some("spec-test".to_string()),
+            graph_id: None,
+            name: "timeout-agent".to_string(),
+            kind: GraphNodeKind::Agent,
+            config: serde_json::json!({}),
+            position: 1,
+            created_at: chrono::Utc::now(),
+        };
+        db.insert_graph_node(&node).unwrap();
+        db.insert_graph_run(&GraphNodeRun {
+            id: "run-agent-timeout".to_string(),
+            graph_id: graph_id.clone(),
+            spec_id: "spec-test".to_string(),
+            node_id: node.id.clone(),
+            status: GraphRunStatus::Running,
+            input: None,
+            output: None,
+            started_at: chrono::Utc::now(),
+            completed_at: None,
+            iteration: 1,
+            pid: None,
+            boot_id: None,
+            session_id: None,
+            executed_platform: None,
+            executed_model: None,
+        })
+        .unwrap();
+        // A chunk that predates the child; the timeout path must delete it and
+        // snapshot only the partial streamed bytes.
+        db.append_graph_run_output("run-agent-timeout", "stdout", "PRE-EXISTING-CHUNK\n")
+            .unwrap();
+
+        let cli = Cli::new("test-cli");
+        let strategy = sample_strategy(&script);
+        let execution = crate::graph_engine::agent_spawn::run_agent_process(
+            &db,
+            "run-agent-timeout",
+            &cli,
+            &strategy,
+            &node,
+            "prompt",
+            None,
+            None,
+            "/tmp",
+            1,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(execution.status, GraphRunStatus::Fail);
+        assert!(
+            execution.summary.contains("timed out"),
+            "summary: {}",
+            execution.summary
+        );
+
+        // Partial output is in the snapshot, and the chunks are gone: the raw
+        // count fails if the timeout path neither snapshots nor deletes.
+        let chunks = db
+            .count_graph_run_output_chunks("run-agent-timeout")
+            .unwrap();
+        assert_eq!(
+            chunks, 0,
+            "timeout must delete the run's graph_run_output chunk rows"
+        );
+        let (stdout, _) = db.get_graph_run_tail("run-agent-timeout", 1000).unwrap();
+        assert!(
+            stdout.contains("partial before timeout"),
+            "timeout snapshot must carry partial output: {stdout}"
+        );
+        assert!(
+            !stdout.contains("PRE-EXISTING-CHUNK"),
+            "timeout snapshot must carry only the streamed bytes: {stdout}"
+        );
+    }
+
+    /// CT28: `CliProcessOutcome::Finished.stdout` equals the old
+    /// `wait_with_output` result for a fixture with trailing whitespace.
+    #[tokio::test]
+    async fn agent_stdout_trim_matches_previous_semantics() {
+        let (dir, db, _engine, graph_id, _spec_id) = graph_fixture().unwrap();
+        let script = write_member_script(
+            dir.path(),
+            "agent-trim.sh",
+            "#!/bin/sh\n\
+             printf 'hello   \\n\\n'\n\
+             exit 0\n",
+        );
+        let node = GraphNode {
+            id: "node-agent-trim".to_string(),
+            spec_id: Some("spec-test".to_string()),
+            graph_id: None,
+            name: "trim-agent".to_string(),
+            kind: GraphNodeKind::Agent,
+            config: serde_json::json!({}),
+            position: 1,
+            created_at: chrono::Utc::now(),
+        };
+        db.insert_graph_node(&node).unwrap();
+        db.insert_graph_run(&GraphNodeRun {
+            id: "run-agent-trim".to_string(),
+            graph_id: graph_id.clone(),
+            spec_id: "spec-test".to_string(),
+            node_id: node.id.clone(),
+            status: GraphRunStatus::Running,
+            input: None,
+            output: None,
+            started_at: chrono::Utc::now(),
+            completed_at: None,
+            iteration: 1,
+            pid: None,
+            boot_id: None,
+            session_id: None,
+            executed_platform: None,
+            executed_model: None,
+        })
+        .unwrap();
+
+        let cli = Cli::new("test-cli");
+        let strategy = sample_strategy(&script);
+        let execution = crate::graph_engine::agent_spawn::run_agent_process(
+            &db,
+            "run-agent-trim",
+            &cli,
+            &strategy,
+            &node,
+            "prompt",
+            None,
+            None,
+            "/tmp",
+            1,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let stdout = execution.output.get("stdout").unwrap().as_str().unwrap();
+        assert_eq!(
+            stdout, "hello",
+            "stdout must be trimmed exactly like wait_with_output"
         );
     }
 }

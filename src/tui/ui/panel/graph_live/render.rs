@@ -586,16 +586,6 @@ fn footer_lines(
     }
     lines.push(Line::from(meta));
 
-    if let Some(tail) = node_info.output_tail.as_deref() {
-        lines.push(Line::from(""));
-        for line in tail.lines() {
-            lines.push(Line::from(Span::styled(
-                line.to_string(),
-                Style::default().fg(theme.text_primary),
-            )));
-        }
-    }
-
     lines
 }
 
@@ -628,7 +618,6 @@ mod tests {
             current_node_status: None,
             current_node_started_at: None,
             current_node_iteration: None,
-            current_node_output_tail: None,
         }
     }
 

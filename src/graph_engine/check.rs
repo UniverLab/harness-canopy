@@ -6,7 +6,7 @@ use super::*;
 pub(crate) struct ShellCommandResult {
     pub(crate) status: GraphRunStatus,
     /// Check-shaped output JSON, with `stdout`/`stderr` already truncated to
-    /// [`CHECK_OUTPUT_MAX_BYTES`] for storage (CB5 contract).
+    /// [`RUN_OUTPUT_TAIL_BYTES`] for storage (CB5 contract).
     pub(crate) output: Value,
     pub(crate) summary: String,
     /// The command's *full*, untruncated stdout / stderr as it emitted them.
@@ -99,14 +99,14 @@ pub(crate) fn spawn_shell_command(
     let stderr_pipe = child.stderr.take().expect("shell_command pipes stderr");
     let stdout_buf = Arc::new(std::sync::Mutex::new(String::new()));
     let stderr_buf = Arc::new(std::sync::Mutex::new(String::new()));
-    let stdout_handle = spawn_check_output_reader(
+    let stdout_handle = spawn_output_reader(
         stdout_pipe,
         run_id.to_string(),
         "stdout",
         db.clone(),
         stdout_buf.clone(),
     );
-    let stderr_handle = spawn_check_output_reader(
+    let stderr_handle = spawn_output_reader(
         stderr_pipe,
         run_id.to_string(),
         "stderr",
@@ -177,7 +177,7 @@ pub(crate) fn handle_timeout(
     let partial_stderr = lock_string(stderr_buf);
     let (stdout_snap, _) = truncate_check_output(partial_stdout.trim().to_string());
     let (stderr_snap, _) = truncate_check_output(partial_stderr.trim().to_string());
-    let _ = db.set_graph_run_tail_snapshot(run_id, Some(&stdout_snap), Some(&stderr_snap));
+    let _ = db.finish_graph_run_output(run_id, Some(&stdout_snap), Some(&stderr_snap));
     let output = serde_json::json!({
         "kind": "check",
         "command": command,
@@ -230,7 +230,7 @@ pub(crate) fn handle_completion(
         output_json["truncated"] = serde_json::Value::Bool(true);
     }
 
-    let _ = db.set_graph_run_tail_snapshot(run_id, Some(&stdout), Some(&stderr));
+    let _ = db.finish_graph_run_output(run_id, Some(&stdout), Some(&stderr));
 
     let status = if exit_code == 0 {
         GraphRunStatus::Pass

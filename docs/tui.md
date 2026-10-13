@@ -39,8 +39,18 @@ The dialog includes a CLI picker, model picker, seed identity selector
   new node, the view centres that node's whole box (a tall collapsed
   ensemble included) in the panel; your own scroll is left alone until the
   next node change. Manual node inspection shows per-node run info (status,
-  elapsed time, output tail, iteration).
+  elapsed time, iteration).
   `Esc` toggles between auto-follow and manual mode.
+- **Output pane** — `t` opens a read-only viewer beside the live graph that
+  streams the highlighted node's stdout/stderr as the engine writes it (agent
+  nodes and check nodes alike). In auto-follow the pane retargets node by
+  node as the graph advances; in manual mode it shows whichever node you
+  select. `Enter` in manual mode toggles the pane on the selected node (in
+  auto-follow `Enter` still enters manual mode). The layout tiles at 140
+  columns or wider (graph left, pane right) and stacks below that.
+  `PageUp`/`PageDown` scroll by half a screen, `End` returns to the live
+  edge, and `,`/`.` step through an ensemble's members. Opening, closing or
+  switching the pane never writes to a run.
 - **Idle visuals** — Brian's Brain cellular automaton and animated
   kaomoji status messages (whimsg).
 

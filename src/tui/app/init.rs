@@ -86,6 +86,7 @@ macro_rules! app_new_fields {
             graph_live_view_total_lines: 0,
             graph_autorun_dialog: None,
             node_tail_dialog: None,
+            node_tail_pane_body_height: 0,
             graph_action_pending: false,
             graph_action_rx: None,
             graph_action_message: None,

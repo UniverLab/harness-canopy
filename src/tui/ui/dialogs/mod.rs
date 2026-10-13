@@ -29,7 +29,7 @@ pub use graph_form::draw_graph_form_dialog;
 pub use knowledge_dialog::draw_knowledge_dialog;
 pub use launchpad::draw_launchpad_dialog;
 pub use new_agent_dialog::draw_new_agent_dialog;
-pub(crate) use node_tail::draw_node_tail_dialog;
+pub(crate) use node_tail::draw_node_tail_pane;
 pub use pickers::{draw_split_picker, draw_suggestion_picker};
 pub use rag_transfer::draw_rag_transfer_modal;
 pub use simple_modals::{

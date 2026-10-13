@@ -324,6 +324,9 @@ pub struct App {
     /// reads, so dismissing it can never affect execution. `Some` while
     /// open (including after the node finishes, showing the final banner).
     pub(crate) node_tail_dialog: Option<crate::tui::app::dialog::NodeTailDialog>,
+    /// CT28: usable body height (rows) of the tail pane on the last frame —
+    /// the layout sets it so key handlers can page by half-height.
+    pub(crate) node_tail_pane_body_height: usize,
     /// True while a graph-control dispatch (`graph_run`/`graph_pause`/
     /// `graph_continue`/`graph_reset`/`graph_schedule_autorun`) is in flight on
     /// `graph_action_rx` — guards against a second dispatch racing the first.

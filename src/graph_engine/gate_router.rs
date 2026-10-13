@@ -513,6 +513,7 @@ pub(crate) async fn run_completion_hook_process(
                 crate::system::boot_id().as_deref(),
             );
         },
+        None,
     )
     .await;
 

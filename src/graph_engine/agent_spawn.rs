@@ -1,3 +1,4 @@
+use super::output_tee::{spawn_and_wait_tee, OutputTee};
 use super::*;
 
 /// A failure to build or spawn the child process, classified by whether it
@@ -126,6 +127,7 @@ pub(crate) async fn spawn_and_wait_cli_process(
     trust_workdir: bool,
     run_id: Option<&str>,
     on_pid: impl FnOnce(u32),
+    tee: Option<OutputTee>,
 ) -> Result<CliProcessOutcome, SpawnError> {
     // CB85: identity check before anything is spawned. Cached per
     // path+mtime, so this is a hashmap hit after the first check for a
@@ -163,38 +165,83 @@ pub(crate) async fn spawn_and_wait_cli_process(
     command.stdout(std::process::Stdio::piped());
     command.stderr(std::process::Stdio::piped());
 
-    let child = command
+    let mut child = command
         .spawn()
         .map_err(|error| SpawnError::from_io(&error))?;
-    // Captured before `wait_with_output` below takes ownership of `child`.
+    // Captured before the wait path takes ownership of `child`.
     let pid = child.id();
     if let Some(pid) = pid {
         on_pid(pid);
     }
 
-    let timeout_result = tokio::time::timeout(
-        std::time::Duration::from_secs(timeout_minutes * 60),
-        child.wait_with_output(),
-    )
-    .await;
+    // CT28: when the caller wants live output, split the pipes into reader
+    // tasks before waiting. When `tee` is None the old behaviour is
+    // preserved byte-for-byte.
+    let stdout_buf = Arc::new(std::sync::Mutex::new(String::new()));
+    let stderr_buf = Arc::new(std::sync::Mutex::new(String::new()));
+    let readers = tee.as_ref().map(|tee| {
+        let out = child.stdout.take().expect("stdout piped");
+        let err = child.stderr.take().expect("stderr piped");
+        (
+            crate::graph_engine::shell_utils::spawn_output_reader(
+                out,
+                tee.run_id.clone(),
+                "stdout",
+                tee.db.clone(),
+                Arc::clone(&stdout_buf),
+            ),
+            crate::graph_engine::shell_utils::spawn_output_reader(
+                err,
+                tee.run_id.clone(),
+                "stderr",
+                tee.db.clone(),
+                Arc::clone(&stderr_buf),
+            ),
+        )
+    });
 
-    match timeout_result {
-        Ok(Ok(output)) => {
-            let exit_code = output.status.code().unwrap_or(-1);
-            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            Ok(CliProcessOutcome::Finished {
-                exit_code,
-                stdout,
-                stderr,
-            })
+    match readers {
+        Some((stdout_reader, stderr_reader)) => {
+            spawn_and_wait_tee(
+                child,
+                pid,
+                stdout_reader,
+                stderr_reader,
+                &stdout_buf,
+                &stderr_buf,
+                tee.unwrap(),
+                timeout_minutes,
+            )
+            .await
         }
-        Ok(Err(error)) => Err(SpawnError::transient(error.to_string())),
-        Err(_elapsed) => {
-            if let Some(pid) = pid {
-                crate::daemon::process::terminate_process_group_async(pid as i64, KILL_GRACE);
+        None => {
+            let timeout_result = tokio::time::timeout(
+                std::time::Duration::from_secs(timeout_minutes * 60),
+                child.wait_with_output(),
+            )
+            .await;
+
+            match timeout_result {
+                Ok(Ok(output)) => {
+                    let exit_code = output.status.code().unwrap_or(-1);
+                    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                    Ok(CliProcessOutcome::Finished {
+                        exit_code,
+                        stdout,
+                        stderr,
+                    })
+                }
+                Ok(Err(error)) => Err(SpawnError::transient(error.to_string())),
+                Err(_elapsed) => {
+                    if let Some(pid) = pid {
+                        crate::daemon::process::terminate_process_group_async(
+                            pid as i64, KILL_GRACE,
+                        );
+                    }
+                    Ok(CliProcessOutcome::TimedOut)
+                }
             }
-            Ok(CliProcessOutcome::TimedOut)
         }
     }
 }
@@ -373,6 +420,11 @@ pub(crate) async fn run_agent_process(
         |pid| {
             let _ = db.set_graph_run_pid(run_id, pid as i64, crate::system::boot_id().as_deref());
         },
+        // CT28: stream the agent's live output and snapshot it at completion.
+        Some(OutputTee {
+            db: db.clone(),
+            run_id: run_id.to_string(),
+        }),
     )
     .await;
 

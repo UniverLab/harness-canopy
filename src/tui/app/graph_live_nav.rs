@@ -471,7 +471,6 @@ impl App {
                 status: state.current_node_status,
                 started_at: state.current_node_started_at,
                 iteration: state.current_node_iteration,
-                output_tail: state.current_node_output_tail.clone(),
                 chosen_route: highlighted.and_then(|id| state.router_taken_routes.get(id).cloned()),
             };
         }

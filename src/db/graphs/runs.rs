@@ -489,9 +489,72 @@ impl Database {
         ))
     }
 
+    /// CT28: terminal bookkeeping for a run's live output, in one write
+    /// transaction: cache the truncated per-stream tails on the run row (the
+    /// post-completion fallback `get_graph_run_tail` already reads), then
+    /// delete the run's `graph_run_output` chunks so the table never grows
+    /// without bound. Supersedes `set_graph_run_tail_snapshot` for engine
+    /// completion paths.
+    pub fn finish_graph_run_output(
+        &self,
+        run_id: &str,
+        stdout_tail: Option<&str>,
+        stderr_tail: Option<&str>,
+    ) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE graph_runs SET stdout_tail = ?1, stderr_tail = ?2 WHERE id = ?3",
+            params![stdout_tail, stderr_tail, run_id],
+        )?;
+        tx.execute(
+            "DELETE FROM graph_run_output WHERE run_id = ?1",
+            params![run_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// CT28: raw `graph_run_output` row count for a run. Exists so engine
+    /// tests can assert that completion paths actually deleted the chunks
+    /// (`get_graph_run_tail` cannot tell: it serves the same text from the
+    /// snapshot fallback whether or not the rows are gone).
+    #[cfg(test)]
+    pub(crate) fn count_graph_run_output_chunks(&self, run_id: &str) -> Result<i64> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM graph_run_output WHERE run_id = ?1",
+            params![run_id],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
+    /// CT28: delete live-output chunks whose run has finished — leftovers from
+    /// a crash, since completion paths delete their own chunks. Returns the
+    /// number of chunk rows removed.
+    pub fn delete_graph_run_output_for_non_running(&self) -> Result<usize> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let rows = conn.execute(
+            "DELETE FROM graph_run_output WHERE run_id IN (SELECT id FROM graph_runs WHERE status <> 'running')",
+            [],
+        )?;
+        Ok(rows)
+    }
+
     /// CT3: cache the final truncated per-stream tails on the run row at
     /// completion, so the dialog can show post-completion output without
-    /// scanning the chunk table.
+    /// scanning the chunk table. Kept for its DB test.
+    #[allow(dead_code)]
     pub fn set_graph_run_tail_snapshot(
         &self,
         run_id: &str,

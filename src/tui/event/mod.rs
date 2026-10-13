@@ -1123,7 +1123,6 @@ mod graph_live_panel_mouse_tests {
             current_node_status: None,
             current_node_started_at: None,
             current_node_iteration: None,
-            current_node_output_tail: None,
         });
 
         app.last_panel_x = 0;

@@ -2625,7 +2625,6 @@ mod tests {
         .expect("create app");
         let info = app.graph_live_highlighted_node_run_info();
         assert!(info.status.is_none());
-        assert!(info.output_tail.is_none());
     }
 
     fn spec_queue_entry(id: &str, status: GraphSpecStatus) -> SpecQueueEntry {
@@ -2670,7 +2669,6 @@ mod tests {
             current_node_status: None,
             current_node_started_at: None,
             current_node_iteration: None,
-            current_node_output_tail: None,
         });
         app
     }
@@ -3569,7 +3567,6 @@ mod tests {
             current_node_status: None,
             current_node_started_at: None,
             current_node_iteration: None,
-            current_node_output_tail: None,
         }
     }
 
@@ -3780,7 +3777,6 @@ mod tests {
             current_node_status: None,
             current_node_started_at: None,
             current_node_iteration: None,
-            current_node_output_tail: None,
         };
         app.graph_live_state = Some(state);
         app.graph_live_follow = false;
@@ -4252,7 +4248,6 @@ mod tests {
             current_node_status: None,
             current_node_started_at: None,
             current_node_iteration: None,
-            current_node_output_tail: None,
         };
         app.graph_live_state = Some(state);
 
@@ -4348,7 +4343,6 @@ mod tests {
             current_node_status: None,
             current_node_started_at: None,
             current_node_iteration: None,
-            current_node_output_tail: None,
         };
 
         let collapsed = App::collapse_nodes(&state);

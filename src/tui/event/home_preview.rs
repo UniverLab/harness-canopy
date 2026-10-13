@@ -96,7 +96,7 @@ pub fn handle_preview_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers)
     if preview_plain_scroll_key(app, code, on_graph) {
         return Ok(());
     }
-    if preview_tail_scroll_key(app, code, on_graph) {
+    if preview_tail_pane_key(app, code, on_graph) {
         return Ok(());
     }
     if preview_tail_toggle_key(app, code, on_graph, modifiers) {
@@ -286,10 +286,7 @@ fn preview_graph_autorun_dialog_key(
 }
 
 fn graph_view_owns_plain_arrows(app: &App, on_graph: bool) -> bool {
-    on_graph
-        && app.graph_live_focus == GraphLiveFocus::Graph
-        && !app.graph_live_follow
-        && !app.node_tail_dialog_active()
+    on_graph && app.graph_live_focus == GraphLiveFocus::Graph && !app.graph_live_follow
 }
 
 fn preview_frame_shift_nav_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
@@ -338,7 +335,16 @@ fn preview_esc_home_key(app: &mut App, code: KeyCode) -> bool {
 
 fn preview_enter_key(app: &mut App, code: KeyCode, on_graph: bool) -> bool {
     if code == KeyCode::Enter && on_graph {
-        app.graph_live_enter();
+        // CT28: Enter in follow mode enters manual mode (CT24). Enter in
+        // manual mode with the pane open closes it; otherwise opens the pane
+        // on the highlighted node.
+        if app.graph_live_follow {
+            app.graph_live_enter();
+        } else if app.node_tail_dialog_active() {
+            app.close_node_tail_dialog();
+        } else {
+            app.open_node_tail_pane();
+        }
         return true;
     }
     if !matches!(code, KeyCode::Enter | KeyCode::Char('l')) {
@@ -379,11 +385,6 @@ fn preview_plain_scroll_key(app: &mut App, code: KeyCode, on_graph: bool) -> boo
     ) {
         return false;
     }
-    if on_graph && app.node_tail_dialog_active() {
-        // The tail dialog owns Up/Down (scrolled by its own group); j/k are
-        // inert while it is open, matching the original guard.
-        return false;
-    }
     if graph_view_owns_plain_arrows(app, on_graph) {
         match code {
             KeyCode::Down | KeyCode::Char('j') => app.graph_live_navigate_sibling(true),
@@ -400,22 +401,6 @@ fn preview_plain_scroll_key(app: &mut App, code: KeyCode, on_graph: bool) -> boo
     true
 }
 
-fn preview_tail_scroll_key(app: &mut App, code: KeyCode, on_graph: bool) -> bool {
-    if !on_graph || !app.node_tail_dialog_active() {
-        return false;
-    }
-    match code {
-        KeyCode::Down => {
-            app.node_tail_scroll(true);
-        }
-        KeyCode::Up => {
-            app.node_tail_scroll(false);
-        }
-        _ => return false,
-    }
-    true
-}
-
 fn preview_tail_toggle_key(
     app: &mut App,
     code: KeyCode,
@@ -428,10 +413,44 @@ fn preview_tail_toggle_key(
     }
     if app.node_tail_dialog_active() {
         app.close_node_tail_dialog();
-    } else if let Some(node_id) = app.graph_live_highlighted_node_id().map(str::to_string) {
-        let _ = app.open_node_tail_dialog(&node_id);
+    } else {
+        app.open_node_tail_pane();
     }
     true
+}
+
+/// CT28: pane-specific keys while the pane is open on the graph view.
+/// `PageUp`/`PageDown` scroll by half the body height, `End` returns to the
+/// live edge, `,`/`.` move the ensemble member cursor.
+fn preview_tail_pane_key(app: &mut App, code: KeyCode, on_graph: bool) -> bool {
+    if !on_graph || !app.node_tail_dialog_active() {
+        return false;
+    }
+    match code {
+        KeyCode::PageUp => {
+            let half = app.node_tail_pane_body_height / 2;
+            app.node_tail_scroll_by(-(half as isize));
+            true
+        }
+        KeyCode::PageDown => {
+            let half = app.node_tail_pane_body_height / 2;
+            app.node_tail_scroll_by(half as isize);
+            true
+        }
+        KeyCode::End => {
+            app.node_tail_scroll_to_live();
+            true
+        }
+        KeyCode::Char(',') => {
+            app.node_tail_member_step(-1);
+            true
+        }
+        KeyCode::Char('.') => {
+            app.node_tail_member_step(1);
+            true
+        }
+        _ => false,
+    }
 }
 
 fn preview_manual_nav_key(app: &mut App, code: KeyCode, on_graph: bool) -> bool {
@@ -1620,7 +1639,6 @@ mod preview_key_tests {
             current_node_status: None,
             current_node_started_at: None,
             current_node_iteration: None,
-            current_node_output_tail: None,
         }
     }
 
@@ -1695,15 +1713,21 @@ mod preview_key_tests {
     fn app_with_open_tail() -> App {
         let mut app = app_on_graph(crate::domain::graphs::GraphStatus::Running);
         app.node_tail_dialog = Some(crate::tui::app::dialog::NodeTailDialog {
-            run_id: "run1".to_string(),
-            node_id: "node1".to_string(),
+            run_id: Some("run1".to_string()),
             node_name: "Node node1".to_string(),
             stdout_lines: vec!["out".to_string()],
             stderr_lines: Vec::new(),
-            status: crate::domain::graphs::GraphRunStatus::Running,
+            status: Some(crate::domain::graphs::GraphRunStatus::Running),
             timed_out: false,
-            started_at: chrono::Utc::now(),
+            started_at: Some(chrono::Utc::now()),
             scroll: 0,
+            member_pos: None,
+            platform: None,
+            model: None,
+            member_cursor: 0,
+            member_count: 0,
+            no_run_spec_name: None,
+            last_resolved: None,
         });
         app
     }
@@ -1723,10 +1747,13 @@ mod preview_key_tests {
     }
 
     #[test]
-    fn preview_t_with_no_highlighted_node_is_a_noop() {
-        // No live state, so nothing is highlighted: `t` must not open a
-        // dialog, panic, or disturb the graph view.
+    fn preview_t_with_no_highlighted_node_opens_the_pane() {
+        // CT28: `t` toggles the pane in both modes. With nothing highlighted it
+        // still opens (showing the waiting line), superseding CT3 decision 3
+        // which refused non-running nodes.
         let mut app = app_on_graph(crate::domain::graphs::GraphStatus::Running);
+        handle_preview_key(&mut app, KeyCode::Char('t'), KeyModifiers::NONE).unwrap();
+        assert!(app.node_tail_dialog_active());
         handle_preview_key(&mut app, KeyCode::Char('t'), KeyModifiers::NONE).unwrap();
         assert!(!app.node_tail_dialog_active());
     }
@@ -1743,12 +1770,311 @@ mod preview_key_tests {
     }
 
     #[test]
-    fn preview_up_down_scroll_open_tail_instead_of_graph() {
+    fn preview_page_up_down_scroll_open_tail_pane() {
+        // CT28: Up/Down keep their graph meaning while the pane is open;
+        // PageUp/PageDown scroll the pane body by half its height.
         let mut app = app_with_open_tail();
-        handle_preview_key(&mut app, KeyCode::Up, KeyModifiers::NONE).unwrap();
-        assert_eq!(app.node_tail_dialog.as_ref().unwrap().scroll, 3);
+        app.node_tail_pane_body_height = 20;
+        let before = app.node_tail_dialog.as_ref().unwrap().scroll;
+        handle_preview_key(&mut app, KeyCode::PageUp, KeyModifiers::NONE).unwrap();
+        assert_eq!(
+            app.node_tail_dialog.as_ref().unwrap().scroll,
+            before + 10,
+            "PageUp should scroll the pane body back by half height"
+        );
+        handle_preview_key(&mut app, KeyCode::PageDown, KeyModifiers::NONE).unwrap();
+        assert_eq!(
+            app.node_tail_dialog.as_ref().unwrap().scroll,
+            before,
+            "PageDown should scroll forward by half height"
+        );
+    }
+
+    // ── CT28: pane follows the highlight ───────────────────────────
+
+    /// Seed graph `lp1` + spec `s1` + the given Agent nodes so the pane has
+    /// runs to resolve (the temp DB the test App holds is otherwise empty).
+    fn seed_live_graph(db: &Database, node_ids: &[&str]) {
+        db.insert_graph(&crate::domain::graphs::Graph {
+            archived: false,
+            paused_by_reconciliation: false,
+            allow_dirty_start: false,
+            infra_node_id: None,
+            id: "lp1".to_string(),
+            name: "Nightly review".to_string(),
+            description: None,
+            workdir: "/tmp".to_string(),
+            status: crate::domain::graphs::GraphStatus::Running,
+            trigger: None,
+            created_at: Utc::now(),
+            started_at: None,
+            completed_at: None,
+            autorun_at: None,
+            auto_continue_at: None,
+            auto_continue_action: None,
+            active_run_queue_id: None,
+            hooks: std::collections::BTreeMap::new(),
+        })
+        .unwrap();
+        db.insert_graph_spec(&crate::domain::graphs::GraphSpec {
+            id: "s1".to_string(),
+            graph_id: Some("lp1".to_string()),
+            name: "Spec".to_string(),
+            description: None,
+            position: 0,
+            parallelizable: false,
+            status: crate::domain::graphs::GraphSpecStatus::Running,
+            started_at: None,
+            completed_at: None,
+            spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
+            spec_committed_head: None,
+            workdir: None,
+            completed_via: None,
+            completed_via_reason: None,
+            completed_via_at: None,
+        })
+        .unwrap();
+        for (i, id) in node_ids.iter().enumerate() {
+            db.insert_graph_node(&crate::domain::graphs::GraphNode {
+                id: id.to_string(),
+                spec_id: Some("s1".to_string()),
+                graph_id: None,
+                name: format!("Node {id}"),
+                kind: crate::domain::graphs::GraphNodeKind::Agent,
+                config: serde_json::json!({}),
+                position: i as i64,
+                created_at: Utc::now(),
+            })
+            .unwrap();
+        }
+    }
+
+    fn insert_live_run(
+        db: &Database,
+        run_id: &str,
+        node_id: &str,
+        status: crate::domain::graphs::GraphRunStatus,
+        started_at: chrono::DateTime<Utc>,
+    ) {
+        db.insert_graph_run(&crate::domain::graphs::GraphNodeRun {
+            id: run_id.to_string(),
+            graph_id: "lp1".to_string(),
+            spec_id: "s1".to_string(),
+            node_id: node_id.to_string(),
+            status,
+            input: None,
+            output: None,
+            started_at,
+            completed_at: None,
+            iteration: 1,
+            pid: None,
+            boot_id: None,
+            session_id: None,
+            executed_platform: None,
+            executed_model: None,
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn follow_mode_node_transition_switches_pane_run_and_resets_scroll() {
+        let mut app = app_on_graph(crate::domain::graphs::GraphStatus::Running);
+        seed_live_graph(&app.db, &["n1", "n2"]);
+        insert_live_run(
+            &app.db,
+            "run-n1",
+            "n1",
+            crate::domain::graphs::GraphRunStatus::Running,
+            Utc::now(),
+        );
+        insert_live_run(
+            &app.db,
+            "run-n2",
+            "n2",
+            crate::domain::graphs::GraphRunStatus::Running,
+            Utc::now(),
+        );
+        let mut state = running_live_state();
+        state.current_spec_id = Some("s1".to_string());
+        state.current_node_id = Some("n1".to_string());
+        app.graph_live_state = Some(state);
+        app.graph_live_follow = true;
+
+        app.open_node_tail_pane();
+        assert_eq!(
+            app.node_tail_dialog.as_ref().unwrap().run_id.as_deref(),
+            Some("run-n1")
+        );
+        app.node_tail_scroll_by(-7);
+        assert_eq!(app.node_tail_dialog.as_ref().unwrap().scroll, 7);
+
+        // The engine moves to the next node: auto-follow retargets the pane.
+        app.graph_live_state.as_mut().unwrap().current_node_id = Some("n2".to_string());
+        app.poll_node_tail_dialog();
+        let dialog = app.node_tail_dialog.as_ref().unwrap();
+        assert_eq!(
+            dialog.run_id.as_deref(),
+            Some("run-n2"),
+            "the pane must follow the run to the next node"
+        );
+        assert_eq!(
+            dialog.scroll, 0,
+            "a node transition returns the pane to the live edge"
+        );
+    }
+
+    #[test]
+    fn manual_down_moves_selection_and_pane_follows() {
+        let mut app = app_on_graph(crate::domain::graphs::GraphStatus::Running);
+        seed_live_graph(&app.db, &["n1", "n2"]);
+        insert_live_run(
+            &app.db,
+            "run-n1",
+            "n1",
+            crate::domain::graphs::GraphRunStatus::Running,
+            Utc::now(),
+        );
+        insert_live_run(
+            &app.db,
+            "run-n2",
+            "n2",
+            crate::domain::graphs::GraphRunStatus::Running,
+            Utc::now(),
+        );
+        let mut state = running_live_state();
+        state.current_spec_id = Some("s1".to_string());
+        state.current_node_id = Some("n1".to_string());
+        app.graph_live_state = Some(state);
+        app.graph_live_follow = true;
+
+        // Enter -> manual mode, seeded at the current node n1.
+        handle_preview_key(&mut app, KeyCode::Enter, KeyModifiers::NONE).unwrap();
+        assert!(!app.graph_live_follow);
+        app.open_node_tail_pane();
+        assert_eq!(
+            app.node_tail_dialog.as_ref().unwrap().run_id.as_deref(),
+            Some("run-n1")
+        );
+
+        // Down moves the manual selection; the pane follows on the next poll.
         handle_preview_key(&mut app, KeyCode::Down, KeyModifiers::NONE).unwrap();
-        assert_eq!(app.node_tail_dialog.as_ref().unwrap().scroll, 0);
+        assert_eq!(app.graph_live_selected_node.as_deref(), Some("n2"));
+        app.poll_node_tail_dialog();
+        assert_eq!(
+            app.node_tail_dialog.as_ref().unwrap().run_id.as_deref(),
+            Some("run-n2"),
+            "in manual mode the pane shows the selected node's run"
+        );
+    }
+
+    #[test]
+    fn ensemble_dot_cycles_through_all_three_members() {
+        let mut app = app_on_graph(crate::domain::graphs::GraphStatus::Running);
+        seed_live_graph(&app.db, &["m1", "m2", "m3", "j1"]);
+        let base = Utc::now();
+        insert_live_run(
+            &app.db,
+            "run-m1",
+            "m1",
+            crate::domain::graphs::GraphRunStatus::Running,
+            base,
+        );
+        insert_live_run(
+            &app.db,
+            "run-m2",
+            "m2",
+            crate::domain::graphs::GraphRunStatus::Pass,
+            base + chrono::Duration::seconds(9),
+        );
+        insert_live_run(
+            &app.db,
+            "run-m3",
+            "m3",
+            crate::domain::graphs::GraphRunStatus::Pass,
+            base + chrono::Duration::seconds(2),
+        );
+
+        let mut state = running_live_state();
+        state.current_spec_id = Some("s1".to_string());
+        state.current_node_id = Some("m1".to_string());
+        state.effective_nodes = ["m1", "m2", "m3", "j1"]
+            .iter()
+            .enumerate()
+            .map(|(i, id)| crate::domain::graphs::GraphNode {
+                id: id.to_string(),
+                spec_id: Some("s1".to_string()),
+                graph_id: None,
+                name: format!("Node {id}"),
+                kind: crate::domain::graphs::GraphNodeKind::Agent,
+                config: serde_json::json!({}),
+                position: i as i64,
+                created_at: Utc::now(),
+            })
+            .collect();
+        state.effective_edges = ["m1", "m2", "m3"]
+            .iter()
+            .map(|m| crate::domain::graphs::GraphEdge {
+                id: format!("e-{m}"),
+                spec_id: None,
+                graph_id: Some("lp1".to_string()),
+                from_node: (*m).to_string(),
+                to_node: "j1".to_string(),
+                condition: crate::domain::graphs::GraphEdgeCondition::Always,
+            })
+            .collect();
+        state.ensembles = vec![crate::tui::app::graph_live_state::EnsembleLiveInfo {
+            ensemble_id: "e1".to_string(),
+            name: "Ensemble".to_string(),
+            join_node_id: "j1".to_string(),
+            members: ["m1", "m2", "m3"]
+                .iter()
+                .map(
+                    |m| crate::tui::app::graph_live_state::EnsembleMemberLiveInfo {
+                        node_id: (*m).to_string(),
+                        label: (*m).to_string(),
+                        status: None,
+                    },
+                )
+                .collect(),
+            straggler_timeout_minutes: None,
+            quorum_grace_minutes: None,
+        }];
+        app.graph_live_state = Some(state);
+        app.graph_live_follow = true;
+
+        app.open_node_tail_pane();
+        assert_eq!(
+            app.node_tail_dialog.as_ref().unwrap().run_id.as_deref(),
+            Some("run-m1"),
+            "the running member is shown first"
+        );
+
+        handle_preview_key(&mut app, KeyCode::Char('.'), KeyModifiers::NONE).unwrap();
+        app.poll_node_tail_dialog();
+        assert_eq!(
+            app.node_tail_dialog.as_ref().unwrap().run_id.as_deref(),
+            Some("run-m2"),
+            "`.` steps to the newest finished member"
+        );
+
+        handle_preview_key(&mut app, KeyCode::Char('.'), KeyModifiers::NONE).unwrap();
+        app.poll_node_tail_dialog();
+        assert_eq!(
+            app.node_tail_dialog.as_ref().unwrap().run_id.as_deref(),
+            Some("run-m3"),
+            "`.` steps to the older finished member"
+        );
+
+        handle_preview_key(&mut app, KeyCode::Char('.'), KeyModifiers::NONE).unwrap();
+        app.poll_node_tail_dialog();
+        assert_eq!(
+            app.node_tail_dialog.as_ref().unwrap().run_id.as_deref(),
+            Some("run-m1"),
+            "`.` wraps back to the running member"
+        );
     }
 
     #[test]
@@ -1917,7 +2243,6 @@ mod preview_key_tests {
             current_node_status: None,
             current_node_started_at: None,
             current_node_iteration: None,
-            current_node_output_tail: None,
         });
 
         assert!(app.graph_live_follow);
@@ -2095,7 +2420,6 @@ mod preview_key_tests {
             current_node_status: None,
             current_node_started_at: None,
             current_node_iteration: None,
-            current_node_output_tail: None,
         });
         app.graph_live_follow = true;
         app.graph_live_selected_node = None;
@@ -2181,7 +2505,6 @@ mod preview_key_tests {
             current_node_status: None,
             current_node_started_at: None,
             current_node_iteration: None,
-            current_node_output_tail: None,
         });
         app.graph_live_follow = true;
         app.graph_live_selected_node = None;

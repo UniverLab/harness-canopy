@@ -6,7 +6,7 @@
 //! to [`render_graph_live_view`].
 
 use chrono::{DateTime, Utc};
-use ratatui::layout::Rect;
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
@@ -56,9 +56,17 @@ pub(crate) fn draw_graph_live_view(frame: &mut Frame, area: Rect, app: &mut App,
     let selected_spec_id = app.graph_spec_strip_selected.clone();
     let spec_scroll = app.graph_spec_strip_scroll;
 
+    // CT28: split the area when the tail pane is open — graph on the left
+    // (≥140 cols) or top (<140), pane taking the rest.
+    let (graph_area, pane_area) = if app.node_tail_dialog_active() {
+        tail_pane_split(area)
+    } else {
+        (area, Rect::default())
+    };
+
     let result = render_graph_live_view(
         frame,
-        area,
+        graph_area,
         &LiveViewContext {
             state,
             follow: app.graph_live_follow,
@@ -80,10 +88,24 @@ pub(crate) fn draw_graph_live_view(frame: &mut Frame, area: Rect, app: &mut App,
     app.graph_live_view_scroll = result.clamped_scroll;
     app.graph_live_follow_anchor = result.follow_anchor;
 
-    // CT3: live-tail overlay renders last so it sits above the graph and
-    // detail content. Viewer only — no input state is touched here.
+    // CT28: live-tail pane renders beside the graph. Read-only viewer.
     if let Some(dialog) = app.node_tail_dialog.as_ref() {
-        super::super::dialogs::draw_node_tail_dialog(frame, area, dialog, theme, Utc::now());
+        super::super::dialogs::draw_node_tail_pane(frame, pane_area, dialog, theme, Utc::now());
+    }
+    app.node_tail_pane_body_height = pane_area.height.saturating_sub(2) as usize;
+}
+
+/// CT28: split `area` into (graph, pane). Width ≥ 140 → horizontal (50/50);
+/// otherwise vertical (graph 40%, ≥ 8 rows, pane below).
+fn tail_pane_split(area: Rect) -> (Rect, Rect) {
+    if area.width >= 140 {
+        let cols = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(area);
+        (cols[0], cols[1])
+    } else {
+        let graph_h = ((area.height * 40) / 100).max(8).min(area.height);
+        let rows = Layout::vertical([Constraint::Length(graph_h), Constraint::Min(0)]).split(area);
+        (rows[0], rows[1])
     }
 }
 
@@ -254,7 +276,6 @@ mod tests {
             current_node_status: Some(GraphRunStatus::Running),
             current_node_started_at: Some(Utc::now() - chrono::Duration::seconds(75)),
             current_node_iteration: Some(2),
-            current_node_output_tail: Some("implementing the graph render...".to_string()),
         }
     }
 
@@ -265,7 +286,6 @@ mod tests {
             status: state.current_node_status,
             started_at: state.current_node_started_at,
             iteration: state.current_node_iteration,
-            output_tail: state.current_node_output_tail.clone(),
             chosen_route: None,
         };
 
@@ -314,7 +334,6 @@ mod tests {
         // Footer.
         assert!(text.contains("iter 2"), "{text}");
         assert!(text.contains("elapsed"), "{text}");
-        assert!(text.contains("implementing the graph render"), "{text}");
     }
 
     #[test]
@@ -325,7 +344,6 @@ mod tests {
             status: Some(GraphRunStatus::Pass),
             started_at: Some(Utc::now() - chrono::Duration::seconds(10)),
             iteration: Some(1),
-            output_tail: Some("reviewed and committed".to_string()),
             chosen_route: None,
         };
         let text = render_to_text(80, 40, |frame, area| {
@@ -349,7 +367,6 @@ mod tests {
         });
 
         assert!(text.contains("manual"), "{text}");
-        assert!(text.contains("reviewed and committed"), "{text}");
         // Manual pick uses the `›` marker, not the follow `●`.
         assert!(text.contains('›'), "expected manual marker in:\n{text}");
     }
@@ -734,7 +751,6 @@ mod tests {
             status: state.current_node_status,
             started_at: state.current_node_started_at,
             iteration: state.current_node_iteration,
-            output_tail: state.current_node_output_tail.clone(),
             chosen_route: None,
         };
 
@@ -2351,4 +2367,41 @@ mod tests {
     }
     // Breaks if: the strip is re-added to the live view instead of
     // the border title.
+}
+
+#[cfg(test)]
+mod tail_pane_split_tests {
+    use super::tail_pane_split;
+    use ratatui::layout::Rect;
+
+    #[test]
+    fn split_horizontal_at_160x40() {
+        let area = Rect::new(0, 0, 160, 40);
+        let (graph, pane) = tail_pane_split(area);
+        assert_eq!(graph.width, 80);
+        assert_eq!(pane.width, 80);
+        assert_eq!(graph.height, 40);
+        assert_eq!(pane.height, 40);
+        assert_eq!(graph.x, 0);
+        assert_eq!(pane.x, 80);
+    }
+
+    #[test]
+    fn split_vertical_at_100x40() {
+        let area = Rect::new(0, 0, 100, 40);
+        let (graph, pane) = tail_pane_split(area);
+        assert_eq!(graph.height, 16); // 40 * 40% = 16
+        assert_eq!(graph.y, 0);
+        assert_eq!(pane.y, 16);
+        assert_eq!(graph.width, 100);
+        assert_eq!(pane.width, 100);
+    }
+
+    #[test]
+    fn split_vertical_minimum_8_rows() {
+        let area = Rect::new(0, 0, 80, 10);
+        let (graph, _) = tail_pane_split(area);
+        // 10 * 40% = 4, clamped to min 8
+        assert_eq!(graph.height, 8);
+    }
 }

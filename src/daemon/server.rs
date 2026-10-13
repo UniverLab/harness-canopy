@@ -84,6 +84,11 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
 
     reconcile_orphaned_graphs_on_startup(&db, &data_dir);
     reconcile_stranded_queue_specs_on_startup(&db);
+    // CT28: drop live-output chunks whose run is finished — leftovers from a
+    // crash, since completion paths delete their own chunks.
+    if let Err(e) = db.delete_graph_run_output_for_non_running() {
+        tracing::error!("Failed to clean stale graph_run_output chunks: {}", e);
+    }
     capture_interrupted_state(&graph_engine, &watcher_engine).await;
 
     startup_personal_rag(Arc::clone(&ingestion), &data_dir).await;

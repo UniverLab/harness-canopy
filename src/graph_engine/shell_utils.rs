@@ -43,12 +43,12 @@ pub(crate) fn shell_command(command: &str) -> Command {
     process
 }
 
-/// CT3: background reader for one piped check-node stream. Appends every
-/// chunk to `graph_run_output` (the TUI tail dialog polls it) and mirrors it
+/// CT3/CT28: background reader for one piped check/agent stream. Appends every
+/// chunk to `graph_run_output` (the TUI tail pane polls it) and mirrors it
 /// into `buffer` so the completion path can evaluate the success condition
 /// and snapshot the tails without a DB round-trip. Ends when the child
 /// closes the pipe; I/O or DB errors end this task, never the node.
-pub(crate) fn spawn_check_output_reader(
+pub(crate) fn spawn_output_reader(
     stream: impl tokio::io::AsyncRead + Unpin + Send + 'static,
     run_id: String,
     stream_name: &'static str,
@@ -75,13 +75,13 @@ pub(crate) fn spawn_check_output_reader(
     })
 }
 
-pub(crate) const CHECK_OUTPUT_MAX_BYTES: usize = 64 * 1024;
+pub(crate) const RUN_OUTPUT_TAIL_BYTES: usize = 64 * 1024;
 
 pub(crate) fn truncate_check_output(s: String) -> (String, bool) {
-    if s.len() <= CHECK_OUTPUT_MAX_BYTES {
+    if s.len() <= RUN_OUTPUT_TAIL_BYTES {
         return (s, false);
     }
-    let mut start = s.len() - CHECK_OUTPUT_MAX_BYTES;
+    let mut start = s.len() - RUN_OUTPUT_TAIL_BYTES;
     while start < s.len() && !s.is_char_boundary(start) {
         start += 1;
     }
@@ -89,7 +89,7 @@ pub(crate) fn truncate_check_output(s: String) -> (String, bool) {
     (
         format!(
             "[...truncated, keeping last {} bytes...]\n{}",
-            CHECK_OUTPUT_MAX_BYTES, tail
+            RUN_OUTPUT_TAIL_BYTES, tail
         ),
         true,
     )

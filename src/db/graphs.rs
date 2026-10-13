@@ -975,6 +975,89 @@ mod tests {
         .unwrap();
     }
 
+    /// Like [`tail_test_run`] but with explicit ids so two fixtures can live
+    /// in the same DB without colliding on `tail-graph`.
+    fn insert_tail_graph(
+        db: &Database,
+        graph_id: &str,
+        spec_id: &str,
+        node_id: &str,
+        run_id: &str,
+    ) {
+        use crate::domain::graphs::GraphRunStatus;
+        db.insert_graph(&Graph {
+            archived: false,
+            paused_by_reconciliation: false,
+            allow_dirty_start: false,
+            infra_node_id: None,
+            id: graph_id.to_string(),
+            name: format!("Graph {graph_id}"),
+            description: None,
+            workdir: "/tmp/test".to_string(),
+            status: GraphStatus::Draft,
+            trigger: None,
+            created_at: Utc::now(),
+            started_at: None,
+            completed_at: None,
+            autorun_at: None,
+            auto_continue_at: None,
+            auto_continue_action: None,
+            active_run_queue_id: None,
+            hooks: BTreeMap::new(),
+        })
+        .unwrap();
+        db.insert_graph_spec(&crate::domain::graphs::GraphSpec {
+            id: spec_id.to_string(),
+            graph_id: Some(graph_id.to_string()),
+            name: "Tail spec".to_string(),
+            description: None,
+            position: 0,
+            parallelizable: false,
+            status: crate::domain::graphs::GraphSpecStatus::Running,
+            started_at: None,
+            completed_at: None,
+            spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
+            spec_committed_head: None,
+            workdir: None,
+            completed_via: None,
+            completed_via_reason: None,
+            completed_via_at: None,
+        })
+        .unwrap();
+        db.insert_graph_node(&crate::domain::graphs::GraphNode {
+            id: node_id.to_string(),
+            spec_id: Some(spec_id.to_string()),
+            graph_id: None,
+            name: "Tail node".to_string(),
+            kind: crate::domain::graphs::GraphNodeKind::Check,
+            config: serde_json::json!({"command": "true"}),
+            position: 0,
+            created_at: Utc::now(),
+        })
+        .unwrap();
+        db.insert_graph_run(&crate::domain::graphs::GraphNodeRun {
+            id: run_id.to_string(),
+            graph_id: graph_id.to_string(),
+            spec_id: spec_id.to_string(),
+            node_id: node_id.to_string(),
+            status: GraphRunStatus::Running,
+            input: None,
+            output: None,
+            started_at: Utc::now(),
+            completed_at: None,
+            iteration: 1,
+            pid: None,
+            boot_id: None,
+            session_id: None,
+            executed_platform: None,
+            executed_model: None,
+        })
+        .unwrap();
+    }
+
     #[test]
     fn append_and_get_graph_run_tail_returns_chunks_in_order() {
         let db = test_db();
@@ -1014,6 +1097,88 @@ mod tests {
         let (stdout, stderr) = db.get_graph_run_tail("run-tail-3", 1000).unwrap();
         assert_eq!(stdout, "final out");
         assert_eq!(stderr, "");
+    }
+
+    #[test]
+    fn finish_graph_run_output_snapshots_and_deletes() {
+        let db = test_db();
+        tail_test_run(&db, "run-fin-1");
+        db.append_graph_run_output("run-fin-1", "stdout", "chunk-a\n")
+            .unwrap();
+        db.append_graph_run_output("run-fin-1", "stdout", "chunk-b\n")
+            .unwrap();
+        db.append_graph_run_output("run-fin-1", "stderr", "err-x\n")
+            .unwrap();
+
+        db.finish_graph_run_output("run-fin-1", Some("FINAL_OUT"), Some("FINAL_ERR"))
+            .unwrap();
+
+        // Snapshot serves the tail now.
+        let (stdout, stderr) = db.get_graph_run_tail("run-fin-1", 1000).unwrap();
+        assert_eq!(stdout, "FINAL_OUT");
+        assert_eq!(stderr, "FINAL_ERR");
+
+        // Chunks deleted.
+        let count: i64 = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM graph_run_output WHERE run_id = ?1",
+                ["run-fin-1"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0, "finish must delete the run's chunk rows");
+    }
+
+    #[test]
+    fn delete_graph_run_output_for_non_running_removes_finished_only() {
+        let db = test_db();
+        insert_tail_graph(&db, "live-graph", "live-spec", "live-node", "run-live");
+        insert_tail_graph(&db, "dead-graph", "dead-spec", "dead-node", "run-dead");
+        db.append_graph_run_output("run-live", "stdout", "live chunk\n")
+            .unwrap();
+        db.append_graph_run_output("run-dead", "stdout", "dead chunk\n")
+            .unwrap();
+
+        // Mark the second run as finished.
+        db.update_graph_run_result(
+            "run-dead",
+            crate::domain::graphs::GraphRunStatus::Pass,
+            None,
+            Some(Utc::now()),
+        )
+        .unwrap();
+
+        let removed = db.delete_graph_run_output_for_non_running().unwrap();
+        assert!(removed >= 1, "should remove the finished run's chunks");
+
+        // Running run's chunks survive.
+        let count: i64 = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM graph_run_output WHERE run_id = ?1",
+                ["run-live"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "running run's chunks must survive the sweep");
+
+        // Finished run's chunks are gone.
+        let count: i64 = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM graph_run_output WHERE run_id = ?1",
+                ["run-dead"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0, "finished run's chunks must be deleted");
     }
 
     #[test]
