@@ -208,6 +208,7 @@ pub(crate) fn render_agent_prompt(
     run_id: &str,
     node_outputs: &HashMap<String, Value>,
     all_node_names: &[String],
+    spec_notes_section: &str,
 ) -> Result<String> {
     refuse_unbindable_template(
         &node.name,
@@ -263,8 +264,16 @@ pub(crate) fn render_agent_prompt(
     // agent that ignores its own termination and calls the tool anyway) would
     // otherwise be matched to "whatever's currently active for this node_id"
     // and silently corrupt a newer, unrelated run.
+    // CM47: engine-owned `[SPEC NOTES]` travels with every cold-start prompt,
+    // like `[REPORTING]` — no template placeholder needed. Pre-built by the
+    // caller (which has DB access); `""` for previews that skip notes.
+    let spec_notes_block = if spec_notes_section.trim().is_empty() {
+        String::new()
+    } else {
+        format!("{}\n\n", spec_notes_section.trim_end())
+    };
     Ok(format!(
-        "# [GRAPH CONTEXT]\n<graph>\n  <name>{}</name>\n  <spec>{}</spec>\n  <node>{}</node>\n  <workdir>{}</workdir>\n</graph>\n{}\n# [SPEC]\n{}\n\n# [PREVIOUS FEEDBACK]\n{}\n\n# [REPORTING]\nWhen you finish this node, call graph_complete_node with run_id=\"{}\", node_id=\"{}\", status=\"pass\"|\"fail\", a concise summary, and your output.\nIf you are blocked and need human intervention, call graph_report_blocker with run_id=\"{}\", node_id=\"{}\" and the blocker description.\n",
+        "# [GRAPH CONTEXT]\n<graph>\n  <name>{}</name>\n  <spec>{}</spec>\n  <node>{}</node>\n  <workdir>{}</workdir>\n</graph>\n{}\n# [SPEC]\n{}\n\n# [PREVIOUS FEEDBACK]\n{}\n\n{}# [REPORTING]\nWhen you finish this node, call graph_complete_node with run_id=\"{}\", node_id=\"{}\", status=\"pass\"|\"fail\", a concise summary, and your output.\nIf you are blocked and need human intervention, call graph_report_blocker with run_id=\"{}\", node_id=\"{}\" and the blocker description.\n",
         lp.name,
         spec.name,
         node.name,
@@ -272,6 +281,7 @@ pub(crate) fn render_agent_prompt(
         continuation_notice,
         prompt,
         previous_feedback,
+        spec_notes_block,
         run_id,
         node.id,
         run_id,
@@ -642,4 +652,282 @@ pub(crate) fn render_hook_idea(
             _ => None,
         },
     ))
+}
+
+/// CM47: budget for the `[SPEC NOTES]` prompt section, in characters.
+pub(crate) const SPEC_NOTES_CHAR_BUDGET: usize = 5_000;
+
+/// CM47: fixed instructions closing every `[SPEC NOTES]` section.
+pub(crate) const SPEC_NOTES_FOOTER: &str = "Write your note with spec_note_write(run_id, body); it replaces your previous note; keep it at most 2 500 characters; write it as you go (what you did, what is left, decisions a successor must not redo), not only at the end.";
+
+/// CM47: one note's already-fetched fields for [`compose_spec_notes_section`].
+/// A view (not the DB row) so the composer never touches the DB and the
+/// ordering/budget logic is unit-testable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SpecNoteView<'a> {
+    pub owner_kind: &'a str,
+    pub owner_id: &'a str,
+    pub owner_name: &'a str,
+    pub body: &'a str,
+    pub updated_at: &'a str,
+}
+
+fn spec_note_stub(note: &SpecNoteView<'_>) -> String {
+    format!(
+        "{}: {} chars, updated {} — read with spec_notes_get\n",
+        note.owner_name,
+        note.body.chars().count(),
+        note.updated_at
+    )
+}
+
+/// CM47: build the `[SPEC NOTES]` section body (header included). `caller` is
+/// the owner of the node being prompted; `designer` is the owner of the
+/// graph's first agent node or ensemble after Start, in DFS order (see
+/// [`resolve_designer_owner`]). `notes` is the spec's notes, newest-first.
+///
+/// Order: the caller's own note first, then the Designer's, then the rest
+/// newest-first. Each note is included whole or as a stub — never truncated —
+/// so the same notes always give the same section bytes (prompt caching
+/// holds). With no notes, the section is the header plus the instructions.
+pub(crate) fn compose_spec_notes_section(
+    notes: &[SpecNoteView<'_>],
+    caller: Option<(&str, &str)>,
+    designer: Option<(&str, &str)>,
+) -> String {
+    let mut out = String::from("# [SPEC NOTES]\n\n");
+    // The 5 000-character budget covers note bodies only — the fixed footer
+    // is instructions, not notes, so bodies of 2400 + 2400 fit it whole.
+    let mut budget = SPEC_NOTES_CHAR_BUDGET;
+
+    let is_caller = |note: &SpecNoteView<'_>| match caller {
+        Some((kind, id)) => note.owner_kind == kind && note.owner_id == id,
+        None => false,
+    };
+    let is_designer = |note: &SpecNoteView<'_>| match designer {
+        Some((kind, id)) => note.owner_kind == kind && note.owner_id == id,
+        None => false,
+    };
+    let caller_note = notes.iter().find(|note| is_caller(note));
+    let designer_note = notes
+        .iter()
+        .find(|note| is_designer(note) && Some(**note) != caller_note.copied());
+    let mut sequence: Vec<&SpecNoteView<'_>> = Vec::new();
+    if let Some(note) = caller_note {
+        sequence.push(note);
+    }
+    if let Some(note) = designer_note {
+        sequence.push(note);
+    }
+    for note in notes {
+        if !sequence.contains(&note) {
+            sequence.push(note);
+        }
+    }
+
+    for note in sequence {
+        // The budget counts note bodies only: `## <name>` framing is a few
+        // fixed bytes the composer itself emits, so bodies of 2400 + 2400 fit
+        // a 5000 budget and the 900-char third note becomes the stub.
+        let len = note.body.chars().count();
+        if len <= budget {
+            out.push_str(&format!("## {}\n{}\n", note.owner_name, note.body));
+            budget -= len;
+        } else {
+            let stub = spec_note_stub(note);
+            let stub_len = stub.chars().count();
+            if stub_len > budget {
+                break;
+            }
+            out.push_str(&stub);
+            budget -= stub_len;
+        }
+    }
+    out.push_str(SPEC_NOTES_FOOTER);
+    out.push('\n');
+    out
+}
+
+/// CM47: the Designer is the owner of the graph's first agent node or
+/// ensemble after Start, in DFS order (following `pass`/`always` edges).
+/// Works over already-fetched `nodes`/`edges` plus a member→ensemble map, so
+/// the call site never pays a DB round trip per prompt. Returns the
+/// `(kind, id)` owner pair for [`compose_spec_notes_section`].
+pub(crate) fn resolve_designer_owner(
+    nodes: &[GraphNode],
+    edges: &[GraphEdge],
+    member_to_ensemble: &HashMap<String, String>,
+) -> Option<(String, String)> {
+    let entry = routing::find_entry_node(nodes, edges, "designer").ok()?;
+    let mut outgoing: HashMap<&str, Vec<&str>> = HashMap::new();
+    for edge in edges {
+        if matches!(
+            edge.condition,
+            GraphEdgeCondition::Pass | GraphEdgeCondition::Always
+        ) {
+            outgoing
+                .entry(edge.from_node.as_str())
+                .or_default()
+                .push(edge.to_node.as_str());
+        }
+    }
+    let by_id: HashMap<&str, &GraphNode> =
+        nodes.iter().map(|node| (node.id.as_str(), node)).collect();
+    let mut visited: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut stack = vec![entry.as_str()];
+    while let Some(node_id) = stack.pop() {
+        if !visited.insert(node_id) {
+            continue;
+        }
+        if node_id != entry.as_str() {
+            if let Some(ensemble_id) = member_to_ensemble.get(node_id) {
+                return Some(("ensemble".to_string(), ensemble_id.clone()));
+            }
+            if let Some(node) = by_id.get(node_id) {
+                if node.kind == GraphNodeKind::Agent {
+                    return Some(("node".to_string(), node.id.clone()));
+                }
+            }
+        }
+        if let Some(next) = outgoing.get(node_id) {
+            for target in next.iter().rev() {
+                stack.push(target);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod spec_notes_tests {
+    use super::*;
+
+    fn view<'a>(kind: &'a str, id: &'a str, name: &'a str, body: &'a str) -> SpecNoteView<'a> {
+        SpecNoteView {
+            owner_kind: kind,
+            owner_id: id,
+            owner_name: name,
+            body,
+            updated_at: "2026-10-08T00:00:00Z",
+        }
+    }
+
+    #[test]
+    fn empty_notes_give_instructions_only() {
+        let section = compose_spec_notes_section(&[], None, None);
+        assert!(section.starts_with("# [SPEC NOTES]"));
+        assert!(section.contains(SPEC_NOTES_FOOTER));
+        assert!(!section.contains("## "));
+    }
+
+    #[test]
+    fn caller_first_then_designer_then_newest() {
+        let impl_body = "implementer progress";
+        let designer_body = "designer plan";
+        let other_body = "other context";
+        let notes = vec![
+            view("node", "other", "Other", other_body),
+            view("node", "designer", "Designer", designer_body),
+            view("node", "impl", "Implementer", impl_body),
+        ];
+        let section =
+            compose_spec_notes_section(&notes, Some(("node", "impl")), Some(("node", "designer")));
+        let impl_pos = section.find("## Implementer").unwrap();
+        let designer_pos = section.find("## Designer").unwrap();
+        let other_pos = section.find("## Other").unwrap();
+        assert!(
+            impl_pos < designer_pos && designer_pos < other_pos,
+            "caller, then Designer, then the rest newest-first"
+        );
+        assert!(section.contains(impl_body));
+        assert!(section.contains(designer_body));
+        assert!(section.contains(other_body));
+    }
+
+    #[test]
+    fn oversized_third_note_becomes_stub() {
+        let caller_body = "x".repeat(2400);
+        let designer_body = "y".repeat(2400);
+        let other_body = "z".repeat(900);
+        let caller = view("node", "impl", "Implementer", &caller_body);
+        let designer = view("node", "designer", "Designer", &designer_body);
+        let other = view("node", "other", "Other", &other_body);
+        let notes = vec![other, designer, caller];
+        let section =
+            compose_spec_notes_section(&notes, Some(("node", "impl")), Some(("node", "designer")));
+        assert!(
+            section.contains(&caller_body),
+            "caller's 2400-char note must be whole"
+        );
+        assert!(
+            section.contains(&designer_body),
+            "Designer's 2400-char note must be whole"
+        );
+        assert!(
+            !section.contains(&other_body),
+            "the 900-char note must not fit whole after caller + Designer"
+        );
+        assert!(
+            section.contains("Other: 900 chars, updated"),
+            "overflow becomes a stub naming owner, size and time"
+        );
+        assert!(section.contains("read with spec_notes_get"));
+    }
+
+    fn topo_node(id: &str, name: &str, kind: GraphNodeKind) -> GraphNode {
+        GraphNode {
+            id: id.to_string(),
+            spec_id: Some("spec".to_string()),
+            graph_id: None,
+            name: name.to_string(),
+            kind,
+            config: serde_json::json!({}),
+            position: 0,
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    fn topo_edge(id: &str, from: &str, to: &str) -> GraphEdge {
+        GraphEdge {
+            id: id.to_string(),
+            spec_id: Some("spec".to_string()),
+            graph_id: None,
+            from_node: from.to_string(),
+            to_node: to.to_string(),
+            condition: GraphEdgeCondition::Always,
+        }
+    }
+
+    #[test]
+    fn designer_is_first_agent_after_start() {
+        let nodes = vec![
+            topo_node("start", "Start", GraphNodeKind::Check),
+            topo_node("designer", "Designer", GraphNodeKind::Agent),
+            topo_node("impl", "Implementer", GraphNodeKind::Agent),
+        ];
+        let edges = vec![
+            topo_edge("e1", "start", "designer"),
+            topo_edge("e2", "designer", "impl"),
+        ];
+        let map = HashMap::new();
+        assert_eq!(
+            resolve_designer_owner(&nodes, &edges, &map),
+            Some(("node".to_string(), "designer".to_string()))
+        );
+    }
+
+    #[test]
+    fn designer_is_ensemble_when_member_comes_first() {
+        let nodes = vec![
+            topo_node("start", "Start", GraphNodeKind::Check),
+            topo_node("m1", "Member", GraphNodeKind::Agent),
+        ];
+        let edges = vec![topo_edge("e1", "start", "m1")];
+        let mut map = HashMap::new();
+        map.insert("m1".to_string(), "ens-1".to_string());
+        assert_eq!(
+            resolve_designer_owner(&nodes, &edges, &map),
+            Some(("ensemble".to_string(), "ens-1".to_string()))
+        );
+    }
 }

@@ -838,6 +838,45 @@ Unlike the shared activity stream (bounded per workdir, free text), this log
 is never pruned by count. `canopy clean` removes events older than
 `graph_event_retention_days` (default 90) for graphs that are not running.
 
+## Spec notes
+
+Every spec carries one working-memory note per owner: a short document a
+node writes while it works, and that every later node, model and iteration
+of the same spec receives in its prompt. Notes are working memory for the
+next agent, not a log — the history of changes lives in the event log's
+`note` rows above.
+
+**Ownership.** The owner of a note is the node that wrote it — except when
+the writer is an ensemble member, in which case the owner is the ensemble,
+so every member shares the one note and a replacing member continues where
+the cut one left off. Each spec has at most one note per owner, plus one
+`operator` note written by people and orchestrators without a run. A node
+can only write its own note: `spec_note_write` takes no owner argument.
+
+**Writing and reading.** An agent writes with `spec_note_write(run_id,
+body)` — the engine resolves the owner from the active run and refuses a
+`run_id` that is no longer running. The body is at most 2 500 characters;
+longer writes are refused naming the limit. `spec_note_write(spec_id, body)`
+without a `run_id` writes the `operator` note. Read with
+`spec_notes_get(spec_id)` (newest first), or `canopy spec notes <spec-id>`.
+
+**Prompt injection.** Every agent-node prompt gets a `[SPEC NOTES]` section
+before `[REPORTING]` with a 5 000-character budget: the caller's own note
+first, then the Designer's note (the owner of the graph's first agent node
+or ensemble after Start), then the rest newest-first. A note is included
+whole or as a stub naming its owner, size and time — never truncated — so
+the same notes always give the same section bytes.
+
+**Lifetime.** Notes survive bounces, resumes, `graph_continue` and node
+retries of the same spec. `graph_reset` keeps them unless called with
+`clear_notes: true`. Deleting the spec deletes its notes.
+
+**Check nodes.** Before a check node's command runs, the engine writes the
+spec's notes to a temp file — one `## <owner_name>` section per note — and
+exports its path as `CANOPY_SPEC_NOTES_FILE`. A presence check like
+`grep -q '^## Designer' "$CANOPY_SPEC_NOTES_FILE"` needs no `canopy`
+binary inside a check command.
+
 ## Node blueprints
 
 Rather than pasting a full `config` into every `graph_add_node` call, a

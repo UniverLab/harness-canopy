@@ -62,6 +62,11 @@ pub enum SpecAction {
     },
     /// Convert all legacy heading-format specs to the tagged `<spec>` format.
     Convert,
+    /// Print a spec's notes.
+    Notes {
+        /// Spec ID whose notes to print.
+        spec_id: String,
+    },
 }
 
 pub async fn handle_spec_action(action: SpecAction, port_override: Option<u16>) -> Result<()> {
@@ -90,6 +95,7 @@ pub async fn handle_spec_action(action: SpecAction, port_override: Option<u16>) 
             group.as_deref(),
         ),
         SpecAction::Convert => convert_specs(port_override),
+        SpecAction::Notes { spec_id } => print_notes(port_override, &spec_id),
     }
 }
 
@@ -143,6 +149,39 @@ fn create_spec(
 fn convert_specs(port_override: Option<u16>) -> Result<()> {
     let text = call_tool(port_override, "spec_convert", &serde_json::json!({}))?;
     println!("{text}");
+    Ok(())
+}
+
+/// CM47: read-only print of `spec_notes_get` — one `[kind] name (updated at)`
+/// header plus the body per note, separated by `---`.
+fn print_notes(port_override: Option<u16>, spec_id: &str) -> Result<()> {
+    let text = call_tool(
+        port_override,
+        "spec_notes_get",
+        &serde_json::json!({ "spec_id": spec_id }),
+    )?;
+    let notes: Vec<serde_json::Value> = serde_json::from_str(&text)
+        .map_err(|_| anyhow!("Unexpected response from spec_notes_get: {text}"))?;
+    if notes.is_empty() {
+        println!("No notes for spec '{spec_id}'.");
+        return Ok(());
+    }
+    for note in &notes {
+        let kind = note
+            .get("owner_kind")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
+        let name = note
+            .get("owner_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
+        let updated = note
+            .get("updated_at")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
+        let body = note.get("body").and_then(|v| v.as_str()).unwrap_or("");
+        println!("[{kind}] {name}  (updated {updated})\n{body}\n---");
+    }
     Ok(())
 }
 

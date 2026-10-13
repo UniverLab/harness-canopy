@@ -172,6 +172,10 @@ pub struct GraphResetParams {
     /// Omit to reset every spec that isn't already completed, leaving
     /// completed specs untouched so graph_run resumes at the first pending one.
     pub specs: Option<Vec<String>>,
+    /// When true, delete every spec_note of the reset specs. Default false
+    /// preserves notes across a reset (they are keyed by spec, not run).
+    #[serde(default)]
+    pub clear_notes: bool,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -263,4 +267,25 @@ pub struct GraphReportBlockerParams {
     pub node_id: String,
     /// Human-readable blocker description.
     pub description: String,
+}
+
+/// CM47: write or replace one spec note. Exactly one of `run_id` / `spec_id`
+/// must be present: `run_id` resolves the owner from the active run (the
+/// node, or that node's ensemble), `spec_id` alone writes the `operator` note.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SpecNoteWriteParams {
+    /// The active run's id (from the [REPORTING] block). Refused when the run
+    /// is no longer running. Mutually exclusive with `spec_id`.
+    pub run_id: Option<String>,
+    /// Spec id for the `operator` note (no run). Mutually exclusive with `run_id`.
+    pub spec_id: Option<String>,
+    /// Note body, at most 2500 characters. Replaces the caller's previous note.
+    pub body: String,
+}
+
+/// CM47: read every note of one spec, newest first.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SpecNotesGetParams {
+    /// Spec ID (or unambiguous id prefix) whose notes to read.
+    pub spec_id: String,
 }

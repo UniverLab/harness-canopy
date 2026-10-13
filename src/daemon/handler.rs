@@ -298,6 +298,7 @@ impl TaskTriggerHandler {
         router.merge(TaskTriggerHandler::tool_router_blueprints());
         router.merge(TaskTriggerHandler::tool_router_queues());
         router.merge(TaskTriggerHandler::tool_router_nodes());
+        router.merge(TaskTriggerHandler::tool_router_notes());
         router.merge(TaskTriggerHandler::tool_router_edges());
         router.merge(TaskTriggerHandler::tool_router_ensemble_core());
         router.merge(TaskTriggerHandler::tool_router_copy());
@@ -646,6 +647,8 @@ mod tests {
         "spec_create",
         "spec_delete",
         "spec_list",
+        "spec_note_write",
+        "spec_notes_get",
         "spec_section_get",
         "spec_set_status",
         "spec_update",
@@ -708,7 +711,7 @@ mod tests {
                 "graph_preflight|e322fc728e4eef3943934049c3291baf119a1a4f96a1c3b1d2f17d4f934e4dec|3425a799605c1b3b15ac19b666d4ed6580d61fddfa653caa8cf573061b648615",
                 "graph_remove_spec|4ff8c80f3cd7d5fa1c2752f82a8eac04f93342355ff9789da4fc5f4ebd474fef|bdf4ae3b6449289652a28e7e04276b7d6d74eec7b4e35a85cbd45a11061eea33",
                 "graph_report_blocker|e8b03ebc2341ed1dcec92b824650173db7d164d076ff501b3c460682c81f072c|666b976ef1b6f73603515e223da6b187b911606572b2bbba0377f4b5ca2798e7",
-                "graph_reset|5fb36ec5cb4ed11594d06fb11f2be62ef911f5c9bc25c24b7e41e72d9f739a07|5122a2e0495a5d21d911c8571ab1440741434cfc3003d072c862a411ffec8914",
+                "graph_reset|5fb36ec5cb4ed11594d06fb11f2be62ef911f5c9bc25c24b7e41e72d9f739a07|77f3a37a64867d8e50c5e5cf4f491918381089ade6fc20fce8edd93dd2f8e16b",
                 "graph_restore|40e6e59ed7d4000db2dc48187e28d916ee02c7ee0a8fa7e2e6c07d9251988044|31a70644d3c87bb210f308e6aa19a31d08b38440498374efbac531b3f7bcb242",
                 "graph_run|fa3db2dcec66808c55e2a5fe3623346e459ae74d796a4f54d478b85ac51636cc|9e084a80601932dc3d7241700eff51bb77c2764b1c886c8d1631cd8bfab52a27",
                 "graph_schedule_autorun|9981ca74a4d734696c604599f06ea45c74621f5931d9ac344c31f14a9cb3a5f4|7961251cc9060f411c0b3065833a2afe07a1c1ba27fb8ec57780eec33945b70a",
@@ -753,6 +756,8 @@ mod tests {
                 "spec_create|7dd9a69253452c11b113743c3c5118f35cf4bf029c3380bcb9777254e41fd2eb|f9c780c473de2cac1bef89874ad42c7948a27ee448d423fa9732e5849bcd0b64",
                 "spec_delete|cd48e914d536c1e203436b9694cc93ba0b107b488b0383537716107c02537df8|e2f8bf96018973b702208f786b228eeaf8970d19822323251941c3c2b58c6bd9",
                 "spec_list|9e42d06f6900ae06546a88a713f3e67e4fe3467a06561f1187f684b5d3579657|bcfbca658cfaeae86232022f6285d7f9a7f43357158f4d693e0fbba1a4a1a020",
+                "spec_note_write|5864f496a2db355ac435a64b0fb172d0162b75eb50b84aba7913f43d89a0cecc|e299fd114d786af663d4e9f20a9673234f36f51815bf46fbbd9f00704ae276f7",
+                "spec_notes_get|c0a4e526752166f5544538fcbb039c03b03cfbaa2f57aa3aa1fbb8abf0c7bccb|fc547a4dcb686939788c1b51b1b076e9385f63ae9470cbb8534eb46e0328fc5d",
                 "spec_section_get|f2e7ae92e46d096fb4c5f1a3ce635e171dcd884e3f746ae936dfcb649e0aca22|c920c422e75f2d5dde9b2624d65af2613831ad217fd31d00bd00d7e34342f51e",
                 "spec_set_status|1a8612df16827c55d054df32ed3d585f33a14068c8c6737db584b918727ff5ab|313d1242ae0bb189c86b7cce07fdc51fe07588dac444491f089283e985db30f8",
                 "spec_update|4b63bd53115202d8c35c0e347ecc43491b5080564306c1fa643657d40790ba14|e7e35a41c1c50d14cc52e36b13a28342077e365683587e9207dd0ced2e28b0fa",
@@ -1202,7 +1207,7 @@ mod tests {
         ))
         .unwrap();
 
-        let result = perform_graph_reset(&db, &graph_id, None).unwrap();
+        let result = perform_graph_reset(&db, &graph_id, None, false).unwrap();
         assert!(!result.is_error.unwrap_or(false));
 
         let lp = db.get_graph(&graph_id).unwrap().unwrap();
@@ -1216,6 +1221,42 @@ mod tests {
         assert!(failed.completed_at.is_none());
         // Completed specs are preserved when `specs` isn't given explicitly.
         assert_eq!(done.status, GraphSpecStatus::Completed);
+    }
+
+    /// CM47: notes are keyed by spec, not run — a plain reset keeps them,
+    /// and only `clear_notes: true` removes them.
+    #[test]
+    fn graph_reset_preserves_notes_unless_clear_notes() {
+        use crate::db::graphs::notes::NewSpecNote;
+        let (_dir, db, graph_id) = graph_reset_fixture(GraphStatus::Failed);
+        db.insert_graph_spec(&spec_with_status(
+            &graph_id,
+            "spec-failed",
+            1,
+            GraphSpecStatus::Failed,
+        ))
+        .unwrap();
+        db.spec_note_write(NewSpecNote {
+            spec_id: "spec-failed",
+            owner_kind: "node",
+            owner_id: "impl",
+            owner_name: "Implementer",
+            body: "halfway there",
+            author_platform: None,
+            author_model: None,
+        })
+        .unwrap();
+
+        let result = perform_graph_reset(&db, &graph_id, None, false).unwrap();
+        assert!(!result.is_error.unwrap_or(false));
+        assert_eq!(db.spec_notes_get("spec-failed").unwrap().len(), 1);
+
+        let result = perform_graph_reset(&db, &graph_id, None, true).unwrap();
+        assert!(!result.is_error.unwrap_or(false));
+        assert!(
+            db.spec_notes_get("spec-failed").unwrap().is_empty(),
+            "clear_notes: true must remove the reset specs' notes"
+        );
     }
 
     /// `Interrupted` is treated like any other non-completed status: a plain
@@ -1233,7 +1274,7 @@ mod tests {
         ))
         .unwrap();
 
-        let result = perform_graph_reset(&db, &graph_id, None).unwrap();
+        let result = perform_graph_reset(&db, &graph_id, None, false).unwrap();
         assert!(!result.is_error.unwrap_or(false));
 
         let specs = db.list_graph_specs(&graph_id).unwrap();
@@ -1254,7 +1295,8 @@ mod tests {
         ))
         .unwrap();
 
-        let result = perform_graph_reset(&db, &graph_id, Some(&["spec-done".to_string()])).unwrap();
+        let result =
+            perform_graph_reset(&db, &graph_id, Some(&["spec-done".to_string()]), false).unwrap();
         assert!(!result.is_error.unwrap_or(false));
 
         let spec = db.get_graph_spec("spec-done").unwrap().unwrap();
@@ -1295,7 +1337,7 @@ mod tests {
         ))
         .unwrap();
 
-        let result = perform_graph_reset(&db, &graph_id, None).unwrap();
+        let result = perform_graph_reset(&db, &graph_id, None, false).unwrap();
         assert!(!result.is_error.unwrap_or(false));
 
         let specs = db.list_graph_specs(&graph_id).unwrap();
@@ -1325,7 +1367,7 @@ mod tests {
         ))
         .unwrap();
 
-        let result = perform_graph_reset(&db, &graph_id, None).unwrap();
+        let result = perform_graph_reset(&db, &graph_id, None, false).unwrap();
         assert!(!result.is_error.unwrap_or(false));
 
         let spec = db.get_graph_spec("spec-engine-skipped").unwrap().unwrap();
@@ -1368,8 +1410,13 @@ mod tests {
         })
         .unwrap();
 
-        let result =
-            perform_graph_reset(&db, &graph_id, Some(&["spec-admin-skipped".to_string()])).unwrap();
+        let result = perform_graph_reset(
+            &db,
+            &graph_id,
+            Some(&["spec-admin-skipped".to_string()]),
+            false,
+        )
+        .unwrap();
         assert!(!result.is_error.unwrap_or(false));
 
         let spec = db.get_graph_spec("spec-admin-skipped").unwrap().unwrap();
@@ -1403,7 +1450,7 @@ mod tests {
         ))
         .unwrap();
 
-        let result = perform_graph_reset(&db, &graph_id, None).unwrap();
+        let result = perform_graph_reset(&db, &graph_id, None, false).unwrap();
         let text = format!("{:?}", result.content);
         assert!(text.contains("1 spec(s) reset"), "{text}");
         assert!(
@@ -1481,7 +1528,7 @@ mod tests {
             db.append_queue_member("queue-1", spec_id, None).unwrap();
         }
 
-        let result = perform_graph_reset(&db, &graph_id, None).unwrap();
+        let result = perform_graph_reset(&db, &graph_id, None, false).unwrap();
         assert!(!result.is_error.unwrap_or(false));
         let text = format!("{:?}", result.content);
         assert!(text.contains("2 spec(s) reset"), "{text}");
@@ -1513,7 +1560,7 @@ mod tests {
     fn graph_reset_allows_running_status_graph_with_no_in_flight_run() {
         let (_dir, db, graph_id) = graph_reset_fixture(GraphStatus::Running);
 
-        let result = perform_graph_reset(&db, &graph_id, None).unwrap();
+        let result = perform_graph_reset(&db, &graph_id, None, false).unwrap();
         assert!(!result.is_error.unwrap_or(false));
 
         let lp = db.get_graph(&graph_id).unwrap().unwrap();
@@ -1568,7 +1615,7 @@ mod tests {
         })
         .unwrap();
 
-        let result = perform_graph_reset(&db, &graph_id, None).unwrap();
+        let result = perform_graph_reset(&db, &graph_id, None, false).unwrap();
         assert!(result.is_error.unwrap_or(false));
         let text = format!("{:?}", result.content);
         assert!(text.contains("resilience"), "{text}");
@@ -1588,7 +1635,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let db = Database::new(&dir.path().join("test.db")).unwrap();
 
-        let result = perform_graph_reset(&db, "does-not-exist", None).unwrap();
+        let result = perform_graph_reset(&db, "does-not-exist", None, false).unwrap();
         assert!(result.is_error.unwrap_or(false));
         let text = format!("{:?}", result.content);
         assert!(text.contains("not found"), "{text}");

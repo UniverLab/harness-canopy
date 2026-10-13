@@ -210,6 +210,12 @@ arithmetic scheduled its wake-up for 6am *the next day* — a 23-hour stall.
 Let the engine parse the message; let the model only decide which message it
 is looking at.
 
+If this recipe grows a Designer node ahead of implement, have it write the
+plan with `spec_note_write(run_id, body)` rather than a file in the repo —
+the implementer's and reviewer's prompts already carry every note, and a
+verify check reads `grep -q '^## Designer' "$CANOPY_SPEC_NOTES_FILE"`.
+See [Spec notes](graphs.md#spec-notes).
+
 ### Running it
 
 ```json

@@ -99,6 +99,9 @@ pub(crate) async fn execute_agent_node(
         node,
         &crate::domain::prompts::prompts_dir(&crate::domain::prompts::canopy_dir()),
     );
+    // CM47: the spec's working-memory notes travel with every cold start,
+    // before `[REPORTING]`.
+    let spec_notes_section = build_spec_notes_section(db, lp, spec, node);
     let prompt = match render_agent_prompt(
         lp,
         spec,
@@ -109,6 +112,7 @@ pub(crate) async fn execute_agent_node(
         run_id,
         node_outputs,
         all_node_names,
+        &spec_notes_section,
     ) {
         Ok(p) => p,
         Err(e) => {
@@ -143,6 +147,86 @@ pub(crate) async fn execute_agent_node(
         return Ok(reported);
     }
     Ok(execution)
+}
+
+/// CM47: build the `[SPEC NOTES]` section for a cold-start prompt. Fetches
+/// the spec's notes, resolves the caller's owner (ensemble when the node is
+/// a member, else the node — the same `daemon::handler_notes` ownership the
+/// write path enforces) and the Designer, then composes the section. A
+/// notes-fetch failure degrades to notes-free (instructions-only) rather
+/// than failing the node — notes are working memory, not a gate.
+pub(crate) fn build_spec_notes_section(
+    db: &Arc<Database>,
+    lp: &crate::domain::graphs::Graph,
+    spec: &GraphSpec,
+    node: &GraphNode,
+) -> String {
+    let notes = db.spec_notes_get(&spec.id).unwrap_or_default();
+    let views: Vec<SpecNoteView<'_>> = notes
+        .iter()
+        .map(|note| SpecNoteView {
+            owner_kind: note.owner_kind.as_str(),
+            owner_id: note.owner_id.as_str(),
+            owner_name: note.owner_name.as_str(),
+            body: note.body.as_str(),
+            updated_at: note.updated_at.as_str(),
+        })
+        .collect();
+    let caller = crate::daemon::handler_notes::resolve_owner(db, &node.id)
+        .ok()
+        .flatten()
+        .map(|owner| (owner.kind, owner.id));
+    let designer = designer_owner_for_prompt(db, lp, spec);
+    let caller_ref = caller.as_ref().map(|(kind, id)| (*kind, id.as_str()));
+    let designer_ref = designer
+        .as_ref()
+        .map(|(kind, id)| (kind.as_str(), id.as_str()));
+    compose_spec_notes_section(&views, caller_ref, designer_ref)
+}
+
+/// CM47: the spec's own graph when it has one, else the top-level graph —
+/// the same precedence `GraphEngine::load_spec_graph` uses. Returns the
+/// nodes/edges the Designer's DFS walks, plus member→ensemble ids.
+type SpecGraphScope = (Vec<GraphNode>, Vec<GraphEdge>, HashMap<String, String>);
+
+fn spec_graph_scope(
+    db: &Arc<Database>,
+    lp: &crate::domain::graphs::Graph,
+    spec: &GraphSpec,
+) -> Option<SpecGraphScope> {
+    let spec_nodes = db.list_graph_nodes(&spec.id).ok()?;
+    let use_top_level = spec_nodes.is_empty();
+    let nodes = if use_top_level {
+        db.list_graph_nodes_for_graph(&lp.id).ok()?
+    } else {
+        spec_nodes
+    };
+    let edges = if use_top_level {
+        db.list_graph_edges_for_graph(&lp.id).ok()?
+    } else {
+        db.list_graph_edges(&spec.id).ok()?
+    };
+    let ensembles = if use_top_level {
+        db.list_ensembles_for_graph(&lp.id).ok()?
+    } else {
+        db.list_ensembles_for_spec(&spec.id).ok()?
+    };
+    let mut member_to_ensemble = HashMap::new();
+    for details in &ensembles {
+        for member in &details.members {
+            member_to_ensemble.insert(member.node_id.clone(), details.ensemble.id.clone());
+        }
+    }
+    Some((nodes, edges, member_to_ensemble))
+}
+
+fn designer_owner_for_prompt(
+    db: &Arc<Database>,
+    lp: &crate::domain::graphs::Graph,
+    spec: &GraphSpec,
+) -> Option<(String, String)> {
+    let (nodes, edges, member_to_ensemble) = spec_graph_scope(db, lp, spec)?;
+    resolve_designer_owner(&nodes, &edges, &member_to_ensemble)
 }
 
 /// Invariant inputs of an agent node's RS2 resume attempt, gathered once by
@@ -483,5 +567,193 @@ pub(crate) fn agent_spawn_failure(
             "Agent node '{}' failed to spawn: {}",
             node.name, error.message
         ),
+    }
+}
+
+#[cfg(test)]
+mod spec_notes_prompt_tests {
+    use super::*;
+    use crate::daemon::handler_notes::spec_note_write_from_run;
+    use crate::domain::graphs::{
+        Ensemble, EnsembleKind, EnsembleMember, Graph, GraphEdgeCondition, GraphNode,
+        GraphNodeKind, GraphNodeRun, GraphRunStatus, GraphSpec, GraphSpecStatus, GraphStatus,
+    };
+
+    fn test_db() -> Database {
+        let dir = tempfile::tempdir().unwrap();
+        Database::new(&dir.path().join("test.db")).unwrap()
+    }
+
+    fn seed_graph(db: &Database) {
+        db.insert_graph(&Graph {
+            archived: false,
+            paused_by_reconciliation: false,
+            allow_dirty_start: false,
+            infra_node_id: None,
+            id: "g".to_string(),
+            name: "Graph".to_string(),
+            description: None,
+            workdir: "/tmp/test".to_string(),
+            status: GraphStatus::Running,
+            trigger: None,
+            created_at: chrono::Utc::now(),
+            started_at: None,
+            completed_at: None,
+            autorun_at: None,
+            auto_continue_at: None,
+            auto_continue_action: None,
+            active_run_queue_id: None,
+            hooks: std::collections::BTreeMap::new(),
+        })
+        .unwrap();
+    }
+
+    fn spec(id: &str) -> GraphSpec {
+        GraphSpec {
+            id: id.to_string(),
+            graph_id: None,
+            name: id.to_string(),
+            description: None,
+            position: 0,
+            parallelizable: false,
+            status: GraphSpecStatus::Pending,
+            started_at: None,
+            completed_at: None,
+            spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
+            spec_committed_head: None,
+            workdir: None,
+            completed_via: None,
+            completed_via_reason: None,
+            completed_via_at: None,
+        }
+    }
+
+    fn agent_node_at(id: &str, spec_id: &str, name: &str, position: i64) -> GraphNode {
+        GraphNode {
+            id: id.to_string(),
+            spec_id: Some(spec_id.to_string()),
+            graph_id: None,
+            name: name.to_string(),
+            kind: GraphNodeKind::Agent,
+            config: serde_json::json!({"platform": "claude"}),
+            position,
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    fn running_run(id: &str, spec_id: &str, node_id: &str) -> GraphNodeRun {
+        GraphNodeRun {
+            id: id.to_string(),
+            graph_id: "g".to_string(),
+            spec_id: spec_id.to_string(),
+            node_id: node_id.to_string(),
+            status: GraphRunStatus::Running,
+            input: None,
+            output: None,
+            started_at: chrono::Utc::now(),
+            completed_at: None,
+            iteration: 1,
+            pid: None,
+            boot_id: None,
+            session_id: None,
+            executed_platform: Some("claude".to_string()),
+            executed_model: Some("opus".to_string()),
+        }
+    }
+
+    /// T1: a member of a round_robin ensemble writes a note, its run is cut
+    /// (timeout), and the next member's prompt contains that note under the
+    /// ensemble's name (req 9.1).
+    #[test]
+    fn replacing_member_prompt_carrys_ensemble_note() {
+        let db = std::sync::Arc::new(test_db());
+        seed_graph(&db);
+        db.insert_graph_spec(&spec("spec-1")).unwrap();
+        db.insert_graph_node(&agent_node_at("entry", "spec-1", "Entry", 0))
+            .unwrap();
+        let member = |node_id: &str, position: i64| EnsembleMember {
+            ensemble_id: "ens-1".to_string(),
+            node_id: node_id.to_string(),
+            position,
+            platform: "claude".to_string(),
+            model: None,
+            prompt_override: None,
+            timeout_minutes: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
+        };
+        db.insert_ensemble_unit(
+            &Ensemble {
+                id: "ens-1".to_string(),
+                spec_id: Some("spec-1".to_string()),
+                graph_id: None,
+                name: "Implementer".to_string(),
+                prompt_template: "{{spec_content}}".to_string(),
+                join_node_id: "join".to_string(),
+                entry_from_node: "entry".to_string(),
+                entry_condition: GraphEdgeCondition::Always,
+                min_pass: 1,
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
+                timeout_minutes: 30,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
+                on_pass_to: "entry".to_string(),
+                on_fail_to: None,
+                kind: EnsembleKind::RoundRobin,
+                round_robin_index: Some(0),
+                commit_rights: false,
+                created_at: chrono::Utc::now(),
+            },
+            &[member("m1", 0), member("m2", 1)],
+            &[
+                agent_node_at("m1", "spec-1", "Member 1", 1),
+                agent_node_at("m2", "spec-1", "Member 2", 2),
+            ],
+            &{
+                let mut join = agent_node_at("join", "spec-1", "Join", 3);
+                join.kind = GraphNodeKind::Join;
+                join
+            },
+            &[],
+        )
+        .unwrap();
+
+        // Member 1 starts and writes its note.
+        db.insert_graph_run(&running_run("run-m1", "spec-1", "m1"))
+            .unwrap();
+        spec_note_write_from_run(&db, "run-m1", "halfway: schema done").unwrap();
+
+        // Cut member 1: Fail is the honest "not running" terminal (there is
+        // no Timeout GraphRunStatus).
+        db.update_graph_run_result(
+            "run-m1",
+            GraphRunStatus::Fail,
+            None,
+            Some(chrono::Utc::now()),
+        )
+        .unwrap();
+
+        // Member 2 starts; its cold-start prompt must carry the ensemble's note.
+        db.insert_graph_run(&running_run("run-m2", "spec-1", "m2"))
+            .unwrap();
+        let lp = db.get_graph("g").unwrap().unwrap();
+        let spec = db.get_graph_spec("spec-1").unwrap().unwrap();
+        let node = db.get_graph_node("m2").unwrap().unwrap();
+
+        let section = build_spec_notes_section(&db, &lp, &spec, &node);
+        assert!(
+            section.contains("## Implementer"),
+            "section must carry the ensemble's note heading, got: {section}"
+        );
+        assert!(
+            section.contains("halfway: schema done"),
+            "section must carry the ensemble's note body, got: {section}"
+        );
     }
 }

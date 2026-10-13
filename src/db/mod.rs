@@ -613,6 +613,7 @@ impl Database {
         Self::migrate_executed_platform_columns(&conn)?;
         Self::migrate_ensemble_infra_columns(&conn)?;
         Self::migrate_graph_events_table(&conn)?;
+        Self::migrate_spec_notes_table(&conn)?;
 
         Self::set_schema_version(&conn)?;
 

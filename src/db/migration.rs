@@ -460,6 +460,32 @@ impl Database {
         Ok(())
     }
 
+    /// CM47: one working-memory note per spec owner. The `body` CHECK is a
+    /// hard backstop; the application layer refuses long bodies with the
+    /// named message the spec requires. Deleting the spec deletes its notes
+    /// via `ON DELETE CASCADE` (`PRAGMA foreign_keys=ON` is set per
+    /// connection), so `delete_graph_spec` needs no change.
+    pub(super) fn migrate_spec_notes_table(conn: &Connection) -> Result<()> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS spec_notes (
+                spec_id TEXT NOT NULL REFERENCES graph_specs(id) ON DELETE CASCADE,
+                owner_kind TEXT NOT NULL
+                    CHECK (owner_kind IN ('node','ensemble','operator')),
+                owner_id TEXT NOT NULL,
+                owner_name TEXT NOT NULL,
+                body TEXT NOT NULL CHECK (length(body) <= 2500),
+                author_platform TEXT,
+                author_model TEXT,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (spec_id, owner_kind, owner_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_spec_notes_spec
+                ON spec_notes(spec_id);",
+        )
+        .map_err(|e| anyhow::anyhow!("spec_notes schema migration failed: {e}"))?;
+        Ok(())
+    }
+
     /// Fail the migration when any foreign-key violation remains, naming the
     /// step in the message (observable via `canopy doctor`).
     fn assert_no_foreign_key_violations(conn: &Connection, migration_label: &str) -> Result<()> {

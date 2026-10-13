@@ -17,6 +17,7 @@ use crate::domain::models::Trigger;
 mod crud;
 pub mod events;
 mod hooks;
+pub mod notes;
 mod queue;
 mod reconcile;
 mod runs;

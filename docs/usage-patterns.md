@@ -65,6 +65,13 @@ the run's status, not on its prose.
 rewrites, not `cargo fmt --check`, which fails. Only genuine breakage should
 route back to implement.
 
+**Hand plans through spec notes, not files.** A Designer node writes its
+plan with `spec_note_write(run_id, body)` instead of a temp file no later
+node can find, and the verify step reads
+`grep -q '^## Designer' "$CANOPY_SPEC_NOTES_FILE"` — every agent prompt
+already carries the notes, so nothing needs deleting and nothing goes stale.
+See [Spec notes](graphs.md#spec-notes).
+
 Use it for: essentially everything. Start here and add shape only when a
 specific failure justifies it.
 

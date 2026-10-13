@@ -367,6 +367,7 @@ pub(crate) fn check_command_marker_error(
 pub(crate) fn check_command_env_vars(
     ctx: &CheckCommandCtx<'_>,
     spec_file: &str,
+    spec_notes_file: &str,
 ) -> Vec<(String, String)> {
     [
         ("CANOPY_SPEC_ID", ctx.spec_id),
@@ -375,6 +376,7 @@ pub(crate) fn check_command_env_vars(
         ("CANOPY_GRAPH_NAME", ctx.graph_name),
         ("CANOPY_SPEC_START_HEAD", ctx.spec_start_head.unwrap_or("")),
         ("CANOPY_SPEC_FILE", spec_file),
+        ("CANOPY_SPEC_NOTES_FILE", spec_notes_file),
     ]
     .into_iter()
     .map(|(key, value)| (key.to_string(), value.to_string()))
@@ -402,6 +404,38 @@ fn write_check_spec_file(
     std::fs::write(&path, spec.description.as_deref().unwrap_or("")).with_context(|| {
         format!(
             "Failed to write the spec file for check node '{}'.",
+            node.name
+        )
+    })?;
+    Ok((scratch, path.display().to_string()))
+}
+
+/// Write the spec's notes (CM47) to `spec-notes.md` inside a fresh scratch
+/// dir for this node execution, and return the dir handle with the file's
+/// absolute path. One `## <owner_name>` section per note, newest first. An
+/// empty file when there are no notes, so `CANOPY_SPEC_NOTES_FILE` is always
+/// set and a `grep -q '^## Designer'` check correctly fails when there is no
+/// Designer note. Mirrors [`write_check_spec_file`]'s lifetime contract.
+fn write_check_notes_file(
+    db: &Database,
+    node: &GraphNode,
+    spec: &GraphSpec,
+) -> Result<(tempfile::TempDir, String)> {
+    let scratch = tempfile::tempdir().with_context(|| {
+        format!(
+            "Failed to create scratch dir for check node '{}'.",
+            node.name
+        )
+    })?;
+    let path = scratch.path().join("spec-notes.md");
+    let notes = db.spec_notes_get(&spec.id).unwrap_or_default();
+    let mut out = String::new();
+    for note in &notes {
+        out.push_str(&format!("## {}\n{}\n\n", note.owner_name, note.body));
+    }
+    std::fs::write(&path, out).with_context(|| {
+        format!(
+            "Failed to write the notes file for check node '{}'.",
             node.name
         )
     })?;
@@ -469,7 +503,10 @@ pub(crate) async fn execute_check_node(
     // held until this function returns, which removes the file once the
     // node has finished (pass, fail and timeout paths alike).
     let (_spec_scratch, spec_file) = write_check_spec_file(node, spec)?;
-    let env_vars = check_command_env_vars(&ctx, &spec_file);
+    // CM47: notes ride in a sibling scratch file — never an env var's text —
+    // so several 2500-char notes can never hit an env size limit.
+    let (_notes_scratch, notes_file) = write_check_notes_file(db, node, spec)?;
+    let env_vars = check_command_env_vars(&ctx, &spec_file, &notes_file);
     let result =
         execute_shell_command(db, run_id, &command, workdir, timeout_seconds, &env_vars).await?;
 
@@ -812,7 +849,11 @@ mod check_command_tests {
 
     #[test]
     fn check_command_env_vars_lists_every_variable() {
-        let vars = check_command_env_vars(&ctx("a b", Some("abc")), "/scratch/spec.md");
+        let vars = check_command_env_vars(
+            &ctx("a b", Some("abc")),
+            "/scratch/spec.md",
+            "/scratch/spec-notes.md",
+        );
         let pairs: Vec<(String, String)> = [
             ("CANOPY_SPEC_ID", "spec-test"),
             ("CANOPY_SPEC_NAME", "a b"),
@@ -820,11 +861,83 @@ mod check_command_tests {
             ("CANOPY_GRAPH_NAME", "Graph"),
             ("CANOPY_SPEC_START_HEAD", "abc"),
             ("CANOPY_SPEC_FILE", "/scratch/spec.md"),
+            ("CANOPY_SPEC_NOTES_FILE", "/scratch/spec-notes.md"),
         ]
         .into_iter()
         .map(|(key, value)| (key.to_string(), value.to_string()))
         .collect();
         assert_eq!(vars, pairs);
+    }
+
+    #[test]
+    fn check_notes_file_names_designer_section() {
+        use crate::db::graphs::notes::NewSpecNote;
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::new(&dir.path().join("test.db")).unwrap();
+        db.insert_graph_spec(&GraphSpec {
+            id: "s".to_string(),
+            graph_id: None,
+            name: "Spec".to_string(),
+            description: None,
+            position: 1,
+            parallelizable: false,
+            status: GraphSpecStatus::Pending,
+            started_at: None,
+            completed_at: None,
+            spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
+            spec_committed_head: None,
+            workdir: None,
+            completed_via: None,
+            completed_via_reason: None,
+            completed_via_at: None,
+        })
+        .unwrap();
+        let node = GraphNode {
+            id: "n".to_string(),
+            spec_id: None,
+            graph_id: None,
+            name: "check".to_string(),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({}),
+            position: 1,
+            created_at: chrono::Utc::now(),
+        };
+        let spec = db.get_graph_spec("s").unwrap().unwrap();
+        db.spec_note_write(NewSpecNote {
+            spec_id: "s",
+            owner_kind: "node",
+            owner_id: "designer",
+            owner_name: "Designer",
+            body: "the plan",
+            author_platform: None,
+            author_model: None,
+        })
+        .unwrap();
+        let (_scratch, path) = write_check_notes_file(&db, &node, &spec).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("## Designer\nthe plan"),
+            "check file must carry the Designer section, got: {text}"
+        );
+
+        // A real check-command read of the file sees the Designer section —
+        // `PLAN_PRESENT` becomes `grep -q '^## Designer' "$CANOPY_SPEC_NOTES_FILE"`.
+        #[cfg(unix)]
+        {
+            let status = std::process::Command::new("grep")
+                .arg("-q")
+                .arg("^## Designer")
+                .arg(&path)
+                .status()
+                .unwrap();
+            assert!(
+                status.success(),
+                "a check command reading $CANOPY_SPEC_NOTES_FILE must see the Designer section"
+            );
+        }
     }
 
     #[test]

@@ -4343,6 +4343,7 @@ mod tests {
             "run-1",
             &HashMap::new(),
             &[],
+            "",
         )
         .unwrap();
 
@@ -4351,6 +4352,85 @@ mod tests {
         assert!(prompt.contains("run_id=\"run-1\""));
         assert!(prompt.contains("Do the thing"));
         assert!(prompt.contains("\"feedback\": \"ok\""));
+    }
+
+    /// CM47: `[SPEC NOTES]` is placed before `[REPORTING]` in the agent prompt
+    /// (req 5). A non-empty notes section must precede the reporting contract.
+    #[test]
+    fn render_agent_prompt_places_spec_notes_before_reporting() {
+        let lp = crate::domain::graphs::Graph {
+            archived: false,
+            paused_by_reconciliation: false,
+            allow_dirty_start: false,
+            infra_node_id: None,
+            id: "wf".to_string(),
+            name: "Graph".to_string(),
+            description: None,
+            workdir: "/tmp/project".to_string(),
+            status: GraphStatus::Draft,
+            trigger: None,
+            created_at: chrono::Utc::now(),
+            started_at: None,
+            completed_at: None,
+            autorun_at: None,
+            auto_continue_at: None,
+            auto_continue_action: None,
+            active_run_queue_id: None,
+            hooks: std::collections::BTreeMap::new(),
+        };
+        let spec = GraphSpec {
+            id: "spec".to_string(),
+            graph_id: Some("wf".to_string()),
+            name: "Spec".to_string(),
+            description: Some("Do the thing".to_string()),
+            position: 1,
+            parallelizable: false,
+            status: GraphSpecStatus::Pending,
+            started_at: None,
+            completed_at: None,
+            spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
+            spec_committed_head: None,
+            workdir: None,
+            completed_via: None,
+            completed_via_reason: None,
+            completed_via_at: None,
+        };
+        let node = GraphNode {
+            id: "node-1".to_string(),
+            spec_id: Some("spec".to_string()),
+            graph_id: None,
+            name: "Agent".to_string(),
+            kind: GraphNodeKind::Agent,
+            config: serde_json::json!({}),
+            position: 1,
+            created_at: chrono::Utc::now(),
+        };
+
+        let prompt = render_agent_prompt(
+            &lp,
+            &spec,
+            &node,
+            "{{spec_content}}",
+            Some(&serde_json::json!({"feedback":"ok"})),
+            &lp.workdir,
+            "run-1",
+            &HashMap::new(),
+            &[],
+            "# [SPEC NOTES]\n\n## Designer\nthe plan\nwrite your note.\n",
+        )
+        .unwrap();
+
+        let notes_at = prompt
+            .find("[SPEC NOTES]")
+            .expect("SPEC NOTES section must be present");
+        let reporting_at = prompt
+            .find("[REPORTING]")
+            .expect("REPORTING section must be present");
+        assert!(notes_at < reporting_at, "SPEC NOTES must precede REPORTING");
+        assert!(prompt.contains("## Designer\nthe plan"));
     }
 
     /// A spec picked up `Interrupted` gets an explicit continuation notice
@@ -4422,6 +4502,7 @@ mod tests {
             "run-1",
             &HashMap::new(),
             &[],
+            "",
         )
         .unwrap();
         assert!(!pending_prompt.contains("[CONTINUATION]"));
@@ -4437,6 +4518,7 @@ mod tests {
             "run-1",
             &HashMap::new(),
             &[],
+            "",
         )
         .unwrap();
         assert!(interrupted_prompt.contains("[CONTINUATION]"));
@@ -4617,6 +4699,7 @@ mod tests {
             "run-1",
             &HashMap::new(),
             &[],
+            "",
         )
         .unwrap();
 
@@ -8938,6 +9021,7 @@ echo done
             "run-1",
             &HashMap::new(),
             &[],
+            "",
         )
         .unwrap();
         assert!(
@@ -9078,6 +9162,100 @@ echo done
 
         let review_run = runs.iter().find(|r| r.node_id == "node-review").unwrap();
         assert_eq!(review_run.status, GraphRunStatus::Pass);
+    }
+
+    /// CM47: notes survive a fail-edge bounce (req 9.5, second half). A gate
+    /// fails once (bouncing back to a worker via a fail edge) then passes;
+    /// the note written before the run must survive the bounce.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spec_notes_survive_a_fail_edge_bounce() {
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+
+        // worker: always passes.
+        db.insert_graph_node(&GraphNode {
+            id: "worker".into(),
+            spec_id: Some(spec_id.clone()),
+            graph_id: None,
+            name: "worker".into(),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({"command":"exit 0","success_condition":"exit_code_0"}),
+            position: 1,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+
+        // gate: fails on the 1st run, passes on the 2nd (a counter file in `dir`).
+        let counter = dir.path().join("gate-counter");
+        db.insert_graph_node(&GraphNode {
+            id: "gate".into(),
+            spec_id: Some(spec_id.clone()),
+            graph_id: None,
+            name: "gate".into(),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({
+                "command": format!(
+                    "n=$(cat \"{c}\" 2>/dev/null || echo 0); n=$((n+1)); echo $n > \"{c}\"; [ \"$n\" -ge 2 ]",
+                    c = counter.display()
+                ),
+                "success_condition": "exit_code_0"
+            }),
+            position: 2,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+
+        // worker --Pass--> gate ; gate --Fail--> worker  (the bounce).
+        db.insert_graph_edge(&GraphEdge {
+            id: "e-w-g".into(),
+            spec_id: Some(spec_id.clone()),
+            graph_id: None,
+            from_node: "worker".into(),
+            to_node: "gate".into(),
+            condition: GraphEdgeCondition::Pass,
+        })
+        .unwrap();
+        db.insert_graph_edge(&GraphEdge {
+            id: "e-g-w".into(),
+            spec_id: Some(spec_id.clone()),
+            graph_id: None,
+            from_node: "gate".into(),
+            to_node: "worker".into(),
+            condition: GraphEdgeCondition::Fail,
+        })
+        .unwrap();
+
+        // A note already written for this spec, before the run.
+        db.spec_note_write(crate::db::graphs::notes::NewSpecNote {
+            spec_id: &spec_id,
+            owner_kind: "node",
+            owner_id: "worker",
+            owner_name: "Worker",
+            body: "keep me across the bounce",
+            author_platform: None,
+            author_model: None,
+        })
+        .unwrap();
+
+        engine
+            .run_graph(graph_id.clone(), None, None, None, None, None)
+            .await
+            .unwrap();
+
+        // gate bounced once (fail) then passed: the note must survive.
+        let notes = db.spec_notes_get(&spec_id).unwrap();
+        assert_eq!(notes.len(), 1, "the bounce must not delete notes");
+        assert_eq!(notes[0].body, "keep me across the bounce");
+        let gate_runs = db
+            .list_graph_runs_for_spec(&spec_id)
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.node_id == "gate")
+            .count();
+        assert_eq!(
+            gate_runs, 2,
+            "gate must fail once and bounce back to worker"
+        );
     }
 
     // ── B42: a superseded run is terminal and silent ─────────────────────
@@ -20514,6 +20692,7 @@ echo done
             "run-1",
             &HashMap::new(),
             &[],
+            "",
         );
 
         assert!(
@@ -20596,6 +20775,7 @@ echo done
             "run-1",
             &HashMap::new(),
             &[],
+            "",
         )
         .unwrap();
 
@@ -20676,6 +20856,7 @@ echo done
             "run-1",
             &HashMap::new(),
             &[],
+            "",
         )
         .unwrap();
 
@@ -20765,6 +20946,7 @@ echo done
             "run-1",
             &node_outputs,
             &all_nodes,
+            "",
         )
         .unwrap();
         assert!(
@@ -20898,6 +21080,7 @@ echo done
             "run-1",
             &node_outputs,
             &all_nodes,
+            "",
         )
         .unwrap();
 
@@ -20976,6 +21159,7 @@ echo done
             "run-1",
             &HashMap::new(),
             &all_nodes,
+            "",
         );
 
         assert!(
@@ -21049,6 +21233,7 @@ echo done
             "run-1",
             &HashMap::new(),
             &[],
+            "",
         )
         .unwrap();
 
@@ -21455,6 +21640,7 @@ exit 0
             "run-1",
             &HashMap::new(),
             &[],
+            "",
         )
         .unwrap();
 

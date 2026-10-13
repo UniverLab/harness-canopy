@@ -157,7 +157,7 @@ for how name resolution and its failure modes work. `session_list` remains
 the way to see both the names and ids of every live session a hook can
 target.
 
-## Spec backlog (7)
+## Spec backlog (9)
 
 | Tool | Description |
 |---|---|
@@ -168,6 +168,8 @@ target.
 | `spec_set_status` | Admin transition: complete, skip, or reopen a standalone spec |
 | `spec_section_get` | Extract one canonical section (`<objective>`, `<constraints>`, …) from a spec body |
 | `spec_convert` | Convert legacy heading-format spec bodies to the tagged `<spec>` format (skips tagged and running specs) |
+| `spec_note_write` | Write or replace the caller's note for the current spec: `run_id` + `body` resolves the owner from the active run (node, or its ensemble when a member) and refuses a finished run; `spec_id` + `body` with no `run_id` writes the `operator` note. Body ≤ 2 500 chars |
+| `spec_notes_get` | Read every note of a spec (`spec_id`), newest first, with owner, author model, `updated_at` and body |
 
 Spec bodies use the tagged `<spec>` format with all seven canonical section
 tags — `<objective>`, `<functional_requirements>`,

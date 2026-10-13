@@ -47,7 +47,12 @@ impl TaskTriggerHandler {
             Ok(id) => id,
             Err(e) => return Ok(e),
         };
-        perform_graph_reset(&self.db, &graph_id, params.specs.as_deref())
+        perform_graph_reset(
+            &self.db,
+            &graph_id,
+            params.specs.as_deref(),
+            params.clear_notes,
+        )
     }
 
     /// Schedule a one-shot future resume for a graph (e.g. a graph that failed
@@ -675,6 +680,7 @@ pub(crate) fn perform_graph_reset(
     db: &Database,
     graph_id: &str,
     specs: Option<&[String]>,
+    clear_notes: bool,
 ) -> Result<CallToolResult, McpError> {
     match db.reset_graph(graph_id, specs).map_err(internal_error)? {
         GraphResetOutcome::NotFound => Ok(error_result(&format!("Graph '{graph_id}' not found."))),
@@ -695,13 +701,34 @@ pub(crate) fn perform_graph_reset(
             spec_count,
             skipped_count,
         } => {
+            // CM47: notes are keyed by spec, not run, so they survive a reset
+            // by default. Only an explicit `clear_notes: true` removes them —
+            // named specs when `specs` is given, the graph's bound specs plus
+            // its active queue's members on a blanket reset.
+            let notes_note = if clear_notes {
+                let removed = match specs {
+                    Some(ids) => {
+                        let mut removed = 0;
+                        for spec_id in ids {
+                            removed += db.clear_spec_notes(spec_id).map_err(internal_error)?;
+                        }
+                        removed
+                    }
+                    None => db
+                        .clear_spec_notes_for_graph(graph_id)
+                        .map_err(internal_error)?,
+                };
+                format!(" {removed} note(s) cleared.")
+            } else {
+                String::new()
+            };
             let skipped_note = if skipped_count > 0 {
                 format!(" {skipped_count} skipped spec(s) preserved.")
             } else {
                 String::new()
             };
             Ok(success_result(&format!(
-                "Graph '{graph_id}' reset to pending; {spec_count} spec(s) reset.{skipped_note}"
+                "Graph '{graph_id}' reset to pending; {spec_count} spec(s) reset.{skipped_note}{notes_note}"
             )))
         }
     }
