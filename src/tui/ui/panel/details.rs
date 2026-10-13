@@ -26,7 +26,7 @@ pub fn draw_group_details(
         .is_some_and(|id| id == group.id);
 
     let header_color = if is_active {
-        Color::Green
+        theme.success
     } else {
         Color::Rgb(150, 150, 200)
     };
@@ -41,7 +41,7 @@ pub fn draw_group_details(
                     .add_modifier(Modifier::BOLD),
             ),
             if is_active {
-                Span::styled("● active", Style::default().fg(Color::Green))
+                Span::styled("● active", Style::default().fg(theme.success))
             } else {
                 Span::styled("○ inactive", Style::default().fg(theme.dim_text))
             },

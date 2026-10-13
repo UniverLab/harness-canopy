@@ -464,7 +464,7 @@ impl NewAgentDialog {
             .and_then(|c| c.as_ref())
             .and_then(|c| c.accent_color)
             .map(|[r, g, b]| Color::Rgb(r, g, b))
-            .unwrap_or(Color::Rgb(102, 187, 106))
+            .unwrap_or(crate::tui::ui::INTERACTIVE_COLOR)
     }
 
     pub fn set_cli_index(&mut self, idx: usize) {
@@ -1833,7 +1833,7 @@ mod tests {
         let theme = Theme::classic();
         assert_eq!(
             dialog.selected_accent_color(&theme),
-            Color::Rgb(102, 187, 106)
+            crate::tui::ui::INTERACTIVE_COLOR
         );
     }
 

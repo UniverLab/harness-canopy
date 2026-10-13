@@ -33,7 +33,7 @@ pub fn draw_split_picker(frame: &mut Frame, app: &App, theme: &Theme) {
     let block = Block::default()
         .title(" Split con... ")
         .borders(crate::tui::ui::dialog_borders_for(theme))
-        .border_style(Style::default().fg(Color::Green))
+        .border_style(Style::default().fg(theme.success))
         .style(Style::default().bg(theme.dialog_bg));
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -64,7 +64,7 @@ pub fn draw_split_picker(frame: &mut Frame, app: &App, theme: &Theme) {
         let style = if selected {
             Style::default()
                 .fg(Color::Black)
-                .bg(Color::Green)
+                .bg(theme.success)
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::White)

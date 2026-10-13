@@ -1,9 +1,21 @@
 use crate::shared::banner::BANNER_GRADIENT;
 use crate::tui::app::types::App;
 use crate::tui::brians_brain::{BriansBrain, CellState};
+use crate::tui::ui::brand::{rgb, ESSENCE};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::Frame;
+
+/// Fire colour blend over the area background — the terminal-legible
+/// equivalent of the web's `0.26` canvas alpha (see `brain.ts`).
+pub(crate) const BRAIN_FIRE_MIX: f64 = 0.50;
+/// Dying colour blend over the area background — the terminal-legible
+/// equivalent of the web's `0.07` canvas alpha.
+pub(crate) const BRAIN_DYING_MIX: f64 = 0.15;
+
+/// Sub-cell → Braille dot bit, indexed `[row 0..3][col 0..1]`. Same table as
+/// the web's `brain.ts`.
+const BRAILLE_DOT: [[u8; 2]; 4] = [[0x01, 0x08], [0x02, 0x10], [0x04, 0x20], [0x40, 0x80]];
 
 pub(super) fn draw_canopy_banner_animation(frame: &mut Frame, area: Rect, app: &App) {
     let banner = crate::shared::banner::BANNER.trim_matches('\n');
@@ -89,42 +101,185 @@ fn sample_mirrored_gradient(phase: f32) -> (u8, u8, u8) {
     (lerp(r0, r1), lerp(g0, g1), lerp(b0, b1))
 }
 
-pub(crate) fn draw_brians_brain(frame: &mut Frame, area: Rect, brain: &BriansBrain) {
-    const BRAIN_ON_GLYPHS: [&str; 5] = ["⠆", "⠒", "⠶", "⡷", "⣿"];
-    const BRAIN_DYING_GLYPHS: [&str; 4] = ["⠖", "⠒", "⠂", "·"];
+/// Pack the 2×4 sub-cell block whose top-left sub-cell is `(bx*2, by*4)` into
+/// `(fire_mask, dying_mask)`, using the web's Braille dot table.
+fn braille_block_masks(brain: &BriansBrain, by: usize, bx: usize) -> (u8, u8) {
+    let mut fire = 0u8;
+    let mut dying = 0u8;
+    for (r, dots) in BRAILLE_DOT.iter().enumerate() {
+        for (col, dot) in dots.iter().enumerate() {
+            let x = bx * 2 + col;
+            let y = by * 4 + r;
+            match brain.grid[y * brain.gw + x] {
+                CellState::On => fire |= dot,
+                CellState::Dying => dying |= dot,
+                CellState::Off => {}
+            }
+        }
+    }
+    (fire, dying)
+}
+
+/// Blend a brand token over the area's background at strength `t`.
+fn blend(foreground: (u8, u8, u8), background: Color, t: f64) -> Color {
+    let Color::Rgb(br, bg, bb) = background else {
+        return rgb(foreground);
+    };
+    let mix = |f: u8, b: u8| (f as f64 * t + b as f64 * (1.0 - t)).round() as u8;
+    Color::Rgb(
+        mix(foreground.0, br),
+        mix(foreground.1, bg),
+        mix(foreground.2, bb),
+    )
+}
+
+/// Draw the automaton: one Braille glyph per character cell, each packing a
+/// 2×4 block of sub-cells. A block with any firing dot draws its firing mask in
+/// the fire colour; otherwise the dying mask draws in the dying colour.
+pub(crate) fn draw_brians_brain(
+    frame: &mut Frame,
+    area: Rect,
+    brain: &BriansBrain,
+    area_bg: Color,
+) {
+    let fire_color = blend(ESSENCE, area_bg, BRAIN_FIRE_MIX);
+    let dying_color = blend(ESSENCE, area_bg, BRAIN_DYING_MIX);
     let buf = frame.buffer_mut();
 
-    for (r, row) in brain.grid.iter().enumerate() {
-        if r as u16 >= area.height {
+    for by in 0..brain.braille_rows() {
+        if by as u16 >= area.height {
             break;
         }
-        for (c, cell) in row.iter().enumerate() {
-            if c as u16 >= area.width {
+        for bx in 0..brain.braille_cols() {
+            if bx as u16 >= area.width {
                 break;
             }
-            let x = area.x + c as u16;
-            let y = area.y + r as u16;
-            let g = brain.green_grid[r][c];
-            let (ch, color) = match cell {
-                CellState::On => {
-                    let idx = ((g as usize * (BRAIN_ON_GLYPHS.len() - 1)) / 255)
-                        .min(BRAIN_ON_GLYPHS.len() - 1);
-                    (BRAIN_ON_GLYPHS[idx], Color::Rgb(0, g, 0))
-                }
-                CellState::Dying => {
-                    let dim_g = (g as u16 * 6 / 10) as u8;
-                    let idx = ((dim_g as usize * (BRAIN_DYING_GLYPHS.len() - 1)) / 255)
-                        .min(BRAIN_DYING_GLYPHS.len() - 1);
-                    (
-                        BRAIN_DYING_GLYPHS[idx],
-                        Color::Rgb(dim_g / 3, dim_g, dim_g / 3),
-                    )
-                }
-                CellState::Off => (" ", Color::Reset),
+            let (fire, dying) = braille_block_masks(brain, by, bx);
+            if fire == 0 && dying == 0 {
+                continue;
+            }
+            let (mask, color) = if fire != 0 {
+                (fire, fire_color)
+            } else {
+                (dying, dying_color)
             };
-            let buf_cell = &mut buf[(x, y)];
-            buf_cell.set_symbol(ch);
+            let glyph = char::from_u32(0x2800 | mask as u32)
+                .expect("Braille mask is always a valid code point");
+            let buf_cell = &mut buf[(area.x + bx as u16, area.y + by as u16)];
+            buf_cell.set_symbol(&glyph.to_string());
             buf_cell.set_style(Style::default().fg(color));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    /// A brain with every sub-cell explicitly Off.
+    fn off_brain(rows: usize, cols: usize) -> BriansBrain {
+        let mut brain = BriansBrain::new(rows, cols);
+        for cell in brain.grid.iter_mut() {
+            *cell = CellState::Off;
+        }
+        brain
+    }
+
+    fn render_brain(brain: &BriansBrain, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                draw_brians_brain(frame, area, brain, Color::Rgb(0, 0, 0));
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let mut text = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                text.push_str(buffer[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+        text
+    }
+
+    #[test]
+    fn full_2x4_firing_block_renders_braille_ff() {
+        let mut brain = off_brain(2, 2);
+        let gw = brain.gw;
+        for r in 0..4 {
+            for col in 0..2 {
+                brain.grid[r * gw + col] = CellState::On;
+            }
+        }
+        assert_eq!(braille_block_masks(&brain, 0, 0), (0xFF, 0x00));
+        let text = render_brain(&brain, 4, 4);
+        assert!(
+            text.contains('\u{28ff}'),
+            "a full firing block must render ⣿\n{text}"
+        );
+    }
+
+    #[test]
+    fn firing_mask_wins_over_dying_mask() {
+        let mut brain = off_brain(2, 2);
+        let gw = brain.gw;
+        brain.grid[0] = CellState::On; // (sub 0,0) → fire dot 0x01
+        brain.grid[gw] = CellState::Dying; // (sub 0,1) → dying dot 0x02
+        assert_eq!(braille_block_masks(&brain, 0, 0), (0x01, 0x02));
+        let text = render_brain(&brain, 4, 4);
+        assert!(
+            text.contains('\u{2801}'),
+            "any firing dot draws the firing mask\n{text}"
+        );
+        assert!(
+            !text.contains('\u{2803}'),
+            "the dying mask must not be unioned into the firing glyph\n{text}"
+        );
+    }
+
+    #[test]
+    fn dying_only_block_renders_dying_mask() {
+        let mut brain = off_brain(2, 2);
+        let gw = brain.gw;
+        brain.grid[gw] = CellState::Dying; // (sub 0,1) → dying dot 0x02
+        assert_eq!(braille_block_masks(&brain, 0, 0), (0x00, 0x02));
+        let text = render_brain(&brain, 4, 4);
+        assert!(
+            text.contains('\u{2802}'),
+            "a block without firing dots draws the dying mask\n{text}"
+        );
+    }
+
+    #[test]
+    fn empty_block_renders_nothing() {
+        let brain = off_brain(2, 2);
+        assert_eq!(braille_block_masks(&brain, 0, 0), (0, 0));
+        let text = render_brain(&brain, 4, 4);
+        assert!(
+            !text.contains('\u{2800}') && !text.contains('\u{28ff}'),
+            "an empty block must draw no glyph\n{text}"
+        );
+        assert!(text.trim().is_empty(), "nothing should be drawn");
+    }
+
+    #[test]
+    fn fire_color_uses_fire_mix() {
+        assert_eq!(
+            blend(ESSENCE, Color::Rgb(0, 0, 0), BRAIN_FIRE_MIX),
+            Color::Rgb(0, 85, 80)
+        );
+    }
+
+    #[test]
+    fn dying_color_uses_dying_mix() {
+        assert_eq!(
+            blend(ESSENCE, Color::Rgb(0, 0, 0), BRAIN_DYING_MIX),
+            Color::Rgb(0, 25, 24)
+        );
     }
 }

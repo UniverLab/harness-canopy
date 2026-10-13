@@ -89,12 +89,28 @@ pub(super) fn log_terminal_exit(name: &str, shell: &str, code: i32, output_snipp
 }
 
 impl App {
-    pub fn notify_mouse_move(&mut self) {
-        if let Some(ref mut brain) = self.home_brain {
-            brain.notify_mouse();
+    /// Seed Brian's Brain from a pointer move at absolute cell `(col, row)`.
+    /// Each brain seeds only when the position is inside the rect where it was
+    /// last drawn; otherwise its trail is reset so a re-entry plants a fresh
+    /// cluster instead of a line across the field.
+    pub fn notify_mouse_move(&mut self, col: u16, row: u16) {
+        if let Some(rect) = self.home_brain_rect {
+            if let Some(ref mut brain) = self.home_brain {
+                if rect_contains(rect, col, row) {
+                    brain.seed_pointer((col - rect.x) as usize, (row - rect.y) as usize);
+                } else {
+                    brain.reset_trail();
+                }
+            }
         }
-        if let Some(ref mut brain) = self.sidebar_brain {
-            brain.notify_mouse();
+        if let Some(rect) = self.sidebar_brain_rect {
+            if let Some(ref mut brain) = self.sidebar_brain {
+                if rect_contains(rect, col, row) {
+                    brain.seed_pointer((col - rect.x) as usize, (row - rect.y) as usize);
+                } else {
+                    brain.reset_trail();
+                }
+            }
         }
     }
 
@@ -145,7 +161,7 @@ impl App {
         }
 
         if brain_needs_reinit(&self.home_brain, rows, cols) {
-            self.home_brain = Some(make_brain(rows, cols, 80));
+            self.home_brain = Some(make_brain(rows, cols));
         }
     }
 
@@ -161,7 +177,7 @@ impl App {
         }
 
         if brain_needs_reinit(&self.sidebar_brain, rows, cols) {
-            self.sidebar_brain = Some(make_brain(rows, cols, 60));
+            self.sidebar_brain = Some(make_brain(rows, cols));
         }
 
         if let Some(ref mut brain) = self.sidebar_brain {
@@ -171,7 +187,7 @@ impl App {
 
     pub fn dismiss_brain(&mut self) {
         if let Some(ref mut brain) = self.home_brain {
-            *brain = super::super::brians_brain::BriansBrain::new(brain.rows, brain.cols, 80);
+            *brain = super::super::brians_brain::BriansBrain::new(brain.rows, brain.cols);
         }
     }
 
@@ -498,11 +514,13 @@ mod session_close;
 
 // ── Brain helpers ─────────────────────────────────────────────────
 
-fn make_brain(rows: usize, cols: usize, density: u64) -> super::super::brians_brain::BriansBrain {
-    let mut brain = super::super::brians_brain::BriansBrain::new(rows, cols, density);
-    brain.last_step =
-        std::time::Instant::now() - std::time::Duration::from_millis(brain.step_interval_ms);
-    brain
+fn make_brain(rows: usize, cols: usize) -> super::super::brians_brain::BriansBrain {
+    super::super::brians_brain::BriansBrain::new(rows, cols)
+}
+
+/// Whether `(x, y)` sits inside `rect` (half-open on the far edges).
+fn rect_contains(rect: ratatui::layout::Rect, x: u16, y: u16) -> bool {
+    x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height
 }
 
 fn brain_needs_reinit(
@@ -653,25 +671,25 @@ mod tests {
 
     #[test]
     fn brain_needs_reinit_matching_dims() {
-        let brain = make_brain(10, 10, 3);
+        let brain = make_brain(10, 10);
         assert!(!brain_needs_reinit(&Some(brain), 10, 10));
     }
 
     #[test]
     fn brain_needs_reinit_different_dims() {
-        let brain = make_brain(10, 10, 3);
+        let brain = make_brain(10, 10);
         assert!(brain_needs_reinit(&Some(brain), 20, 20));
     }
 
     #[test]
     fn brain_needs_reinit_different_rows() {
-        let brain = make_brain(10, 10, 3);
+        let brain = make_brain(10, 10);
         assert!(brain_needs_reinit(&Some(brain), 20, 10));
     }
 
     #[test]
     fn brain_needs_reinit_different_cols() {
-        let brain = make_brain(10, 10, 3);
+        let brain = make_brain(10, 10);
         assert!(brain_needs_reinit(&Some(brain), 10, 20));
     }
 
@@ -755,7 +773,7 @@ mod tests {
 
     #[test]
     fn brain_needs_reinit_exact_match_no_reinit() {
-        let brain = make_brain(15, 25, 10);
+        let brain = make_brain(15, 25);
         assert!(!brain_needs_reinit(&Some(brain), 15, 25));
     }
 

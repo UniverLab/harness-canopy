@@ -49,6 +49,8 @@ macro_rules! app_new_fields {
             graph_reset_confirm: false,
             sidebar_brain: None,
             home_brain: None,
+            home_brain_rect: None,
+            sidebar_brain_rect: None,
             sidebar_click_map: Vec::new(),
             hovered_row: None,
             sidebar_scroll_offset: 0,

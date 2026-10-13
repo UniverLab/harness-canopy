@@ -135,14 +135,17 @@ pub(super) fn scroll_state_with_offset(
     }
 }
 
-pub(super) fn render_brain_if_visible(frame: &mut Frame, area: Rect, app: &App) {
+pub(super) fn render_brain_if_visible(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     if area.height < 3 || area.width < 6 {
         return;
     }
-    let Some(brain) = app.sidebar_brain.as_ref() else {
+    if app.sidebar_brain.is_none() {
         return;
-    };
-    crate::tui::ui::panel::draw_brians_brain(frame, area, brain);
+    }
+    app.sidebar_brain_rect = Some(area);
+    if let Some(brain) = app.sidebar_brain.as_ref() {
+        crate::tui::ui::panel::draw_brians_brain(frame, area, brain, theme.sidebar_bg);
+    }
 }
 
 pub(super) fn render_dashboard_if_present(
@@ -246,7 +249,7 @@ pub(super) fn graph_has_content(edge_count: usize, is_knowledge_tab: bool) -> bo
 pub(super) fn render_brain_or_graph(
     frame: &mut Frame,
     area: Rect,
-    app: &App,
+    app: &mut App,
     theme: &Theme,
     _is_knowledge_tab: bool,
 ) {
@@ -258,11 +261,11 @@ pub(super) fn render_brain_or_graph(
             render_graph_panel(frame, graph_area, app, theme);
         }
         BrainOrGraphLayout::BrainOnly(brain_area) => {
-            render_brain_if_visible(frame, brain_area, app);
+            render_brain_if_visible(frame, brain_area, app, theme);
         }
         BrainOrGraphLayout::Both { graph, brain } => {
             render_graph_panel(frame, graph, app, theme);
-            render_brain_if_visible(frame, brain, app);
+            render_brain_if_visible(frame, brain, app, theme);
         }
     }
 }

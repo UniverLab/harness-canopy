@@ -182,7 +182,7 @@ docs/ is published at univerlab.org/canopy/docs and holds user documentation onl
 - **Graph Editor** — Inline node config JSON editing with validation.
 - **RAG Transfer Modal** — Send semantic search results to other agents as injected context.
 - **Context Transfer** — Two-step modal (preview → agent picker) to inject conversation context between sessions.
-- **Brian's Brain** — 3-state cellular automaton with auto-noise for idle state visualization.
+- **Brian's Brain** — 3-state cellular automaton drawn as Braille glyphs; the cursor seeds clusters along its path at a fixed step rate.
 - **Whimsg** — Animated kaomoji status messages with typing effects.
 - **Gamification** — 28 achievement-style missions across 6 categories (Environment, Intelligence, Projects, Graph, Seeds, SysInfo) tracked automatically during normal TUI operation.
 

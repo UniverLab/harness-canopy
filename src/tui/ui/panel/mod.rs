@@ -318,9 +318,10 @@ fn show_home_fallback(app: &App) -> bool {
         )
 }
 
-fn draw_home_panel(frame: &mut Frame, area: Rect, app: &App) {
+fn draw_home_panel(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
+    app.home_brain_rect = Some(area);
     if let Some(brain) = app.home_brain.as_ref() {
-        draw_brians_brain(frame, area, brain);
+        draw_brians_brain(frame, area, brain, theme.panel_bg);
     }
     draw_canopy_banner_animation(frame, area, app);
 }
@@ -381,8 +382,9 @@ pub(super) fn draw_log_panel(frame: &mut Frame, area: Rect, app: &mut App, theme
     app.last_panel_x = inner.x;
     app.last_panel_y = inner.y;
 
+    app.home_brain_rect = None;
     if show_home_fallback(app) {
-        draw_home_panel(frame, inner, app);
+        draw_home_panel(frame, inner, app, theme);
         render_focus_indicator(frame, area, inner, app, theme, indicator_label);
         return;
     }
@@ -1199,18 +1201,19 @@ mod tests {
         std::mem::forget(tmp);
         let db = Arc::new(crate::db::Database::new(&path).unwrap());
         let data_dir = tempfile::tempdir().unwrap();
-        let app = App::new(
+        let mut app = App::new(
             db,
             data_dir.path(),
             &crate::domain::canopy_config::CanopyConfig::default(),
         )
         .unwrap();
+        let theme = Theme::classic();
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|frame| {
                 let area = frame.area();
-                draw_home_panel(frame, area, &app);
+                draw_home_panel(frame, area, &mut app, &theme);
             })
             .unwrap();
     }
@@ -1220,7 +1223,7 @@ mod tests {
         let theme = Theme::classic();
         let (icon, color) = rag_file_icon_and_color("indexed", &theme);
         assert_eq!(icon, "✓");
-        assert_eq!(color, Color::Green);
+        assert_eq!(color, theme.success);
     }
 
     #[test]

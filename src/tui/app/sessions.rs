@@ -28,7 +28,7 @@ impl App {
         cli_config
             .and_then(|config| config.accent_color)
             .map(|[r, g, b]| ratatui::style::Color::Rgb(r, g, b))
-            .unwrap_or(ratatui::style::Color::Rgb(102, 187, 106))
+            .unwrap_or(crate::tui::ui::INTERACTIVE_COLOR)
     }
 
     pub(crate) fn resume_interactive_session(

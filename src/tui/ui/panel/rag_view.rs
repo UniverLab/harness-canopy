@@ -144,7 +144,7 @@ pub(super) fn draw_rag_info_overview(frame: &mut Frame, area: Rect, app: &App, t
 
 pub(super) fn rag_file_icon_and_color(event_type: &str, theme: &Theme) -> (&'static str, Color) {
     match event_type {
-        "indexed" => ("✓", Color::Green),
+        "indexed" => ("✓", theme.success),
         "deleted" => ("○", theme.dim_text),
         _ => ("✗", Color::Red),
     }

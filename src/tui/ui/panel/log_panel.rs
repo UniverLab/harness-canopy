@@ -8,7 +8,7 @@ pub(super) fn draw_log_panel_focus(
 ) -> bool {
     match app.focus {
         Focus::Home => {
-            draw_home_panel(frame, area, app);
+            draw_home_panel(frame, area, app, theme);
             true
         }
         Focus::Preview => draw_preview_panel(frame, area, app, theme),
@@ -17,7 +17,7 @@ pub(super) fn draw_log_panel_focus(
             true
         }
         Focus::Agent => draw_agent_panel(frame, area, app, theme),
-        Focus::NewAgentDialog => draw_new_agent_dialog_background(frame, area, app),
+        Focus::NewAgentDialog => draw_new_agent_dialog_background(frame, area, app, theme),
         Focus::LaunchpadDialog
         | Focus::KnowledgeDialog
         | Focus::ContextTransfer
@@ -289,13 +289,18 @@ pub(super) fn draw_terminal_warp_mode(
     app.last_panel_y = pty_area.y;
 }
 
-pub(super) fn draw_new_agent_dialog_background(frame: &mut Frame, area: Rect, app: &App) -> bool {
+pub(super) fn draw_new_agent_dialog_background(
+    frame: &mut Frame,
+    area: Rect,
+    app: &mut App,
+    theme: &Theme,
+) -> bool {
     let previous_focus = app
         .new_agent_dialog
         .as_ref()
         .and_then(|dialog| dialog.prev_focus);
     if matches!(previous_focus, Some(Focus::Home) | None) {
-        draw_home_panel(frame, area, app);
+        draw_home_panel(frame, area, app, theme);
         return true;
     }
 

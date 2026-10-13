@@ -223,16 +223,9 @@ mod tests {
     /// of depending on the automaton's random seed.
     fn solid_brain(rows: usize, cols: usize) -> crate::tui::brians_brain::BriansBrain {
         use crate::tui::brians_brain::CellState;
-        let mut brain = crate::tui::brians_brain::BriansBrain::new(rows, cols, 60);
-        for row in brain.grid.iter_mut() {
-            for cell in row.iter_mut() {
-                *cell = CellState::On;
-            }
-        }
-        for row in brain.green_grid.iter_mut() {
-            for green in row.iter_mut() {
-                *green = 255;
-            }
+        let mut brain = crate::tui::brians_brain::BriansBrain::new(rows, cols);
+        for cell in brain.grid.iter_mut() {
+            *cell = CellState::On;
         }
         brain
     }
@@ -1523,7 +1516,7 @@ mod tests {
         assert_eq!(style.bg, theme.selected_bg);
         assert_eq!(style.fg, theme.header_color);
         assert!(style.modifier.contains(Modifier::BOLD));
-        assert_eq!(style.prefix_color, Color::Green);
+        assert_eq!(style.prefix_color, theme.success);
         assert_eq!(style.active_tag, " ●");
     }
 
@@ -1532,7 +1525,7 @@ mod tests {
         let theme = Theme::classic();
         let style = group_row_style(false, false, &theme);
         assert_eq!(style.bg, Color::Reset);
-        assert_eq!(style.fg, Color::White);
+        assert_eq!(style.fg, theme.text_primary);
         assert!(style.modifier.is_empty());
         assert_eq!(style.prefix_color, theme.dim_text);
         assert_eq!(style.active_tag, "");
@@ -1552,7 +1545,7 @@ mod tests {
         let theme = Theme::classic();
         let style = group_row_style(false, true, &theme);
         assert_eq!(style.bg, Color::Reset);
-        assert_eq!(style.fg, Color::Green);
+        assert_eq!(style.fg, theme.success);
         assert!(style.modifier.contains(Modifier::BOLD));
     }
 
@@ -1561,7 +1554,7 @@ mod tests {
         let theme = Theme::classic();
         let style = project_title_style(true, true, &theme);
         assert_eq!(style.bg, Some(theme.header_color));
-        assert_eq!(style.fg, Some(Color::Black));
+        assert_eq!(style.fg, Some(theme.accent_fg));
     }
 
     #[test]
@@ -1569,7 +1562,7 @@ mod tests {
         let theme = Theme::classic();
         let style = project_title_style(true, false, &theme);
         assert_eq!(style.bg, Some(theme.selected_bg));
-        assert_eq!(style.fg, Some(Color::White));
+        assert_eq!(style.fg, Some(theme.text_primary));
     }
 
     #[test]
@@ -1584,7 +1577,7 @@ mod tests {
     fn project_meta_style_selected() {
         let theme = Theme::classic();
         let style = project_meta_style(true, &theme);
-        assert_eq!(style.fg, Some(Color::White));
+        assert_eq!(style.fg, Some(theme.text_primary));
         assert_eq!(style.bg, Some(theme.selected_bg));
     }
 

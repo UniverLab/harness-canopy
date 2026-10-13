@@ -205,6 +205,11 @@ pub struct App {
     pub(crate) sidebar_brain: Option<crate::tui::brians_brain::BriansBrain>,
     // Brian's Brain for home banner background
     pub(crate) home_brain: Option<crate::tui::brians_brain::BriansBrain>,
+    /// Rect where the home brain was last drawn; pointer seeding is scoped to
+    /// it so a mouse move elsewhere never plants cells.
+    pub(crate) home_brain_rect: Option<ratatui::layout::Rect>,
+    /// Rect where the sidebar brain was last drawn.
+    pub(crate) sidebar_brain_rect: Option<ratatui::layout::Rect>,
 
     // System monitoring (updated asynchronously to avoid UI freezes)
     pub(crate) system_info: crate::system::SystemInfo,
