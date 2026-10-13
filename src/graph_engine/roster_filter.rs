@@ -49,9 +49,8 @@ impl UnavailablePair {
 /// roster.
 pub(crate) enum EnsembleRoster {
     /// Dispatch these members (the available subset; all of them when the
-    /// roster is empty). Boxed so this variant stays close in size to the
-    /// blocker message.
-    Ready(Box<EnsembleDetails>),
+    /// roster is empty).
+    Ready(Vec<EnsembleMember>),
     /// Do not dispatch; block the spec with this message.
     Blocked(String),
 }
@@ -82,31 +81,16 @@ impl GraphEngine {
         &self,
         details: &EnsembleDetails,
     ) -> (Vec<EnsembleMember>, Vec<UnavailablePair>) {
-        let now = Utc::now();
-        let mut cache: HashMap<String, Vec<RosterEntry>> = HashMap::new();
-        let mut available = Vec::new();
-        let mut unavailable = Vec::new();
-        for member in &details.members {
-            let entries = cache
-                .entry(member.platform.clone())
-                .or_insert_with(|| self.roster_for_platform(&member.platform));
-            let avail = effective_state(entries, &member.platform, member.model.as_deref(), &now);
-            if avail.available {
-                available.push(member.clone());
-            } else {
-                unavailable.push(UnavailablePair {
-                    platform: member.platform.clone(),
-                    model: member.model.clone(),
-                    reason: avail.reason,
-                    until: avail.until,
-                });
-            }
-        }
-        (available, unavailable)
+        partition_members_by_availability(&self.db, &details.members, &Utc::now())
     }
 
     /// Resolve one ensemble dispatch against the roster: ready with the
     /// available members, or blocked with the required message.
+    ///
+    /// The available subset is what a dispatch runs; the caller keeps the
+    /// full member list, because `round_robin_index` lives in the full list's
+    /// index space (a compressed one would silently renumber the rotation
+    /// every time a member goes unavailable).
     pub(crate) fn resolve_ensemble_roster(&self, details: &EnsembleDetails) -> EnsembleRoster {
         let (available, unavailable) = self.partition_ensemble_members(details);
         match ensemble_roster_decision(
@@ -115,12 +99,7 @@ impl GraphEngine {
             available,
             &unavailable,
         ) {
-            EnsembleRosterDecision::Ready(members) => {
-                EnsembleRoster::Ready(Box::new(EnsembleDetails {
-                    ensemble: details.ensemble.clone(),
-                    members,
-                }))
-            }
+            EnsembleRosterDecision::Ready(members) => EnsembleRoster::Ready(members),
             EnsembleRosterDecision::Blocked(blocker) => EnsembleRoster::Blocked(blocker),
         }
     }
@@ -183,6 +162,60 @@ pub(crate) fn ensemble_roster_decision(
         ));
     }
     EnsembleRosterDecision::Ready(available)
+}
+
+/// Partition `members` by their pair's effective availability at `now`,
+/// querying each distinct platform at most once. A free function rather than
+/// a `GraphEngine` method so the engine's dispatch and `graph_preflight`
+/// partition through one code path.
+pub(crate) fn partition_members_by_availability(
+    db: &Database,
+    members: &[EnsembleMember],
+    now: &DateTime<Utc>,
+) -> (Vec<EnsembleMember>, Vec<UnavailablePair>) {
+    let mut cache: HashMap<String, Vec<RosterEntry>> = HashMap::new();
+    let mut available = Vec::new();
+    let mut unavailable = Vec::new();
+    for member in members {
+        let entries = cache.entry(member.platform.clone()).or_insert_with(|| {
+            db.roster_list_for_platform(&member.platform)
+                .unwrap_or_default()
+        });
+        let avail = effective_state(entries, &member.platform, member.model.as_deref(), now);
+        if avail.available {
+            available.push(member.clone());
+        } else {
+            unavailable.push(UnavailablePair {
+                platform: member.platform.clone(),
+                model: member.model.clone(),
+                reason: avail.reason,
+                until: avail.until,
+            });
+        }
+    }
+    (available, unavailable)
+}
+
+/// Whether an ensemble would block at dispatch right now — requirement 5's
+/// rule evaluated read-only: no available member at all, or a `parallel`
+/// ensemble with fewer available members than `min_pass`. The engine's
+/// dispatch and `graph_preflight` share it, so the two can never disagree
+/// about which ensembles the roster makes unrunnable.
+pub(crate) fn ensemble_would_block(
+    db: &Database,
+    details: &EnsembleDetails,
+    now: &DateTime<Utc>,
+) -> bool {
+    let (available, unavailable) = partition_members_by_availability(db, &details.members, now);
+    matches!(
+        ensemble_roster_decision(
+            &details.ensemble,
+            details.members.len(),
+            available,
+            &unavailable
+        ),
+        EnsembleRosterDecision::Blocked(_)
+    )
 }
 
 fn unavailable_list(unavailable: &[UnavailablePair]) -> String {
@@ -315,9 +348,9 @@ mod tests {
             ],
         };
         match engine.resolve_ensemble_roster(&details) {
-            EnsembleRoster::Ready(ready) => {
-                assert_eq!(ready.members.len(), 1);
-                assert_eq!(ready.members[0].node_id, "m1");
+            EnsembleRoster::Ready(members) => {
+                assert_eq!(members.len(), 1);
+                assert_eq!(members[0].node_id, "m1");
             }
             EnsembleRoster::Blocked(message) => panic!("expected a dispatch, got block: {message}"),
         }
@@ -464,5 +497,86 @@ mod tests {
             ),
             "node 'Implementer': opencode-go/opencode-go/claude unavailable — quota"
         );
+    }
+
+    /// The dispatch rule `graph_preflight` also consults: an ensemble with no
+    /// available member would block at dispatch.
+    #[test]
+    fn ensemble_with_no_available_member_would_block() {
+        let (_dir, db, _engine) = engine_with_db();
+        mark_unavailable(&db, "opencode-go");
+        let details = EnsembleDetails {
+            ensemble: ensemble(EnsembleKind::RoundRobin, 1),
+            members: vec![
+                member("m1", "opencode-go", None),
+                member("m2", "opencode-go", None),
+            ],
+        };
+        assert!(ensemble_would_block(&db, &details, &Utc::now()));
+    }
+
+    /// A `parallel` ensemble below `min_pass` would block, while the same
+    /// member set does not block a sequential kind.
+    #[test]
+    fn parallel_below_min_pass_would_block_but_sequential_does_not() {
+        let (_dir, db, _engine) = engine_with_db();
+        mark_unavailable(&db, "opencode-go");
+        let members = vec![
+            member("m1", "claude", None),
+            member("m2", "opencode-go", None),
+        ];
+        let now = Utc::now();
+        assert!(ensemble_would_block(
+            &db,
+            &EnsembleDetails {
+                ensemble: ensemble(EnsembleKind::Parallel, 2),
+                members: members.clone(),
+            },
+            &now
+        ));
+        assert!(!ensemble_would_block(
+            &db,
+            &EnsembleDetails {
+                ensemble: ensemble(EnsembleKind::RoundRobin, 2),
+                members,
+            },
+            &now
+        ));
+    }
+
+    /// An empty roster leaves every ensemble runnable.
+    #[test]
+    fn empty_roster_never_would_block() {
+        let (_dir, db, _engine) = engine_with_db();
+        let details = EnsembleDetails {
+            ensemble: ensemble(EnsembleKind::Parallel, 2),
+            members: vec![member("m1", "claude", None), member("m2", "claude", None)],
+        };
+        assert!(!ensemble_would_block(&db, &details, &Utc::now()));
+    }
+
+    /// The shared partition queries each distinct platform once and splits in
+    /// member order.
+    #[test]
+    fn partition_members_by_availability_splits_in_order() {
+        let (_dir, db, _engine) = engine_with_db();
+        mark_unavailable(&db, "opencode-go");
+        let members = vec![
+            member("m1", "claude", None),
+            member("m2", "opencode-go", Some("opencode-go/claude")),
+            member("m3", "claude", Some("opus")),
+        ];
+        let (available, unavailable) =
+            partition_members_by_availability(&db, &members, &Utc::now());
+        assert_eq!(
+            available
+                .iter()
+                .map(|m| m.node_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["m1", "m3"]
+        );
+        assert_eq!(unavailable.len(), 1);
+        assert_eq!(unavailable[0].platform, "opencode-go");
+        assert_eq!(unavailable[0].model.as_deref(), Some("opencode-go/claude"));
     }
 }

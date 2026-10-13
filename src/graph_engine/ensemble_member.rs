@@ -447,6 +447,7 @@ impl GraphEngine {
         lp: &crate::domain::graphs::Graph,
         spec: &GraphSpec,
         details: &EnsembleDetails,
+        available_members: &[EnsembleMember],
         previous_output: Option<&Value>,
         iteration: usize,
         workdir: &str,
@@ -457,6 +458,10 @@ impl GraphEngine {
         round_robin_pins: &mut HashMap<String, i64>,
     ) -> Result<NodeExecution> {
         let ensemble = &details.ensemble;
+        // CM48: the FULL member list is the rotation's index space. A member
+        // that is unavailable now is stepped over inside the walk, so the
+        // stored `round_robin_index` keeps naming the same member whatever
+        // the roster says today.
         let member_count = details.members.len() as i64;
         if member_count == 0 {
             return Err(anyhow!(
@@ -464,6 +469,10 @@ impl GraphEngine {
                 ensemble.id
             ));
         }
+        let available_members: HashSet<&str> = available_members
+            .iter()
+            .map(|member| member.node_id.as_str())
+            .collect();
         let (start_index, initial_resume_candidate, next_index) = self.resolve_round_robin_start(
             details,
             member_count,
@@ -484,9 +493,21 @@ impl GraphEngine {
             input: previous_output_owned.as_ref(),
         };
         let mut tried_no_verdict: Vec<(String, String, Value, String)> = Vec::new();
+        let mut members_ran: i64 = 0;
         for offset in 0..member_count {
             let current_index = (start_index + offset).rem_euclid(member_count);
             let member = &details.members[current_index as usize];
+            // CM48: the rotation advances past an unavailable member without
+            // running it and without counting it as a verdict-less attempt.
+            if !available_members.contains(member.node_id.as_str()) {
+                continue;
+            }
+            members_ran += 1;
+            // The rotation cursor is the member that actually ran. Without
+            // this, a member stepped over as unavailable leaves the cursor on
+            // the member before it, and the next dispatch replays the skipped
+            // members again (starving the ones that did run).
+            round_robin_pins.insert(ensemble.id.clone(), current_index);
             // CB82: start no further round-robin member during shutdown —
             // settle the member's active run if any, return interrupted with
             // no join row (`push_round_robin_no_verdict` not called).
@@ -534,8 +555,19 @@ impl GraphEngine {
                 );
                 continue;
             }
+            // The rotation's next start is the one after the member that
+            // actually ran — skipped members are not a position of their own.
+            let next_after_winner = (current_index + 1).rem_euclid(member_count);
             let join_execution = round_robin_winner_execution(
-                ensemble, details, member, &node, &execution, offset, next_index,
+                ensemble,
+                details,
+                member,
+                &node,
+                &execution,
+                // The members actually run so far, minus this one — a member
+                // stepped over as unavailable above is not "tried".
+                members_ran - 1,
+                next_after_winner,
             );
             let join_execution = apply_round_robin_commit_watch(
                 join_execution,

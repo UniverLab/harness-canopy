@@ -79,7 +79,9 @@ pub(crate) fn round_robin_no_verdict_execution(
         "no_verdict": true,
         "members": members,
         "next_index": next_index,
-        "members_tried": details.members.len(),
+        // CM48: the members actually tried — a member stepped over as
+        // unavailable never ran and must not be counted as tried.
+        "members_tried": tried_no_verdict.len(),
         "members_total": details.members.len(),
     });
     NodeExecution {

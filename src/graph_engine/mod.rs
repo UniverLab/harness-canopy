@@ -17179,6 +17179,410 @@ echo done
         );
     }
 
+    /// CM48: declare one of an ensemble's member platforms unavailable.
+    fn mark_member_platform_unavailable(db: &Database, platform: &str) {
+        db.roster_upsert(crate::db::roster_entries::NewRosterEntry {
+            platform,
+            model_pattern: None,
+            state: crate::db::roster_entries::RosterState::Unavailable,
+            reason: Some("quota"),
+            until: None,
+        })
+        .unwrap();
+    }
+
+    /// CM48: an unavailable member never runs. The rotation advances past it
+    /// to the next available member, the join reports the rotation space it
+    /// walked (3 total) against the members it actually tried (2), and the
+    /// stored rotation index still advances by exactly one.
+    #[tokio::test]
+    async fn round_robin_skips_unavailable_member_and_keeps_rotation_space() {
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+        let fake_home = setup_multi_cli_home(&[
+            (
+                "rr-a",
+                &write_member_script(dir.path(), "a.sh", "printf ok"),
+            ),
+            (
+                "rr-b",
+                &write_member_script(dir.path(), "b.sh", "printf ok"),
+            ),
+            (
+                "rr-c",
+                &write_member_script(dir.path(), "c.sh", "printf ok"),
+            ),
+        ]);
+        insert_kind_ensemble(
+            &db,
+            &spec_id,
+            crate::domain::graphs::EnsembleKind::RoundRobin,
+            &[("rr-a", "rr-a"), ("rr-b", "rr-b"), ("rr-c", "rr-c")],
+        );
+        mark_member_platform_unavailable(&db, "rr-b");
+
+        let _home = HomeGuard::set(fake_home.path());
+        engine
+            .run_graph(graph_id.clone(), None, None, None, None, None)
+            .await
+            .unwrap();
+        drop(_home);
+
+        assert!(
+            member_runs(&db, &spec_id, "rr-b").is_empty(),
+            "an unavailable member must never run"
+        );
+        assert!(
+            !member_runs(&db, &spec_id, "rr-a").is_empty(),
+            "the first available member runs"
+        );
+        assert!(
+            !member_runs(&db, &spec_id, "rr-c").is_empty(),
+            "the rotation advances past the unavailable member"
+        );
+
+        let join = join_run(&db, &spec_id, "join1");
+        assert_eq!(join.status, GraphRunStatus::Error);
+        let out = join.output.as_ref().unwrap();
+        assert_eq!(out["kind"], "round_robin");
+        assert_eq!(
+            out["members_tried"], 2,
+            "only the members that actually ran count as tried"
+        );
+        assert_eq!(
+            out["members_total"], 3,
+            "the rotation space stays the full member list"
+        );
+
+        let ens = db.get_ensemble("ens1").unwrap().unwrap();
+        assert_eq!(
+            ens.round_robin_index,
+            Some(1),
+            "the index still advances by exactly one"
+        );
+    }
+
+    /// CM48: the stored rotation cursor is the index of the member that
+    /// actually ran — when the walk's first member is unavailable, the cursor
+    /// pins index 1 in the FULL member list, not a compressed position.
+    #[tokio::test]
+    async fn round_robin_pins_the_member_actually_used_not_the_skipped_one() {
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+        let fake_home = setup_multi_cli_home(&[
+            (
+                "rr-p1",
+                &write_member_script(dir.path(), "p1.sh", "printf ok"),
+            ),
+            (
+                "rr-p2",
+                &write_member_script(dir.path(), "p2.sh", "printf ok"),
+            ),
+        ]);
+        insert_kind_ensemble(
+            &db,
+            &spec_id,
+            crate::domain::graphs::EnsembleKind::RoundRobin,
+            &[("rr-p1", "rr-p1"), ("rr-p2", "rr-p2")],
+        );
+        mark_member_platform_unavailable(&db, "rr-p1");
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        let spec = db.get_graph_spec(&spec_id).unwrap().unwrap();
+        let details = db.get_ensemble_details("ens1").unwrap().unwrap();
+        let available = match engine.resolve_ensemble_roster(&details) {
+            EnsembleRoster::Ready(members) => members,
+            EnsembleRoster::Blocked(blocker) => {
+                panic!("one available member must dispatch: {blocker}")
+            }
+        };
+        assert_eq!(available.len(), 1, "only the available member dispatches");
+
+        let mut resumable_sessions = HashMap::new();
+        let mut round_robin_pins = HashMap::new();
+        let _home = HomeGuard::set(fake_home.path());
+        let execution = engine
+            .execute_ensemble_round_robin(
+                &lp,
+                &spec,
+                &details,
+                &available,
+                None,
+                1,
+                &lp.workdir,
+                false,
+                &HashMap::new(),
+                &[],
+                &mut resumable_sessions,
+                &mut round_robin_pins,
+            )
+            .await
+            .unwrap();
+        drop(_home);
+
+        assert!(
+            member_runs(&db, &spec_id, "rr-p1").is_empty(),
+            "the unavailable member never runs"
+        );
+        assert!(
+            !member_runs(&db, &spec_id, "rr-p2").is_empty(),
+            "the rotation advances to the available member"
+        );
+        assert_eq!(
+            round_robin_pins.get("ens1").copied(),
+            Some(1),
+            "the pinned cursor is the member actually used (index 1 of the full list)"
+        );
+        assert_eq!(
+            execution
+                .output
+                .get("members_tried")
+                .and_then(|v| v.as_u64()),
+            Some(1),
+            "only the member that ran counts as tried"
+        );
+    }
+
+    /// CM48: a cascade steps over an unavailable member in order — the
+    /// no-verdict report names the member that actually ran and never the
+    /// skipped one.
+    #[tokio::test]
+    async fn cascade_skips_unavailable_member_in_order() {
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+        let fake_home = setup_multi_cli_home(&[
+            (
+                "ca-out",
+                &write_member_script(dir.path(), "out.sh", "printf ok"),
+            ),
+            (
+                "ca-ok",
+                &write_member_script(dir.path(), "ok.sh", "printf ok"),
+            ),
+        ]);
+        insert_kind_ensemble(
+            &db,
+            &spec_id,
+            crate::domain::graphs::EnsembleKind::Cascade,
+            &[("ca-out", "ca-out"), ("ca-ok", "ca-ok")],
+        );
+        mark_member_platform_unavailable(&db, "ca-out");
+
+        let _home = HomeGuard::set(fake_home.path());
+        engine
+            .run_graph(graph_id.clone(), None, None, None, None, None)
+            .await
+            .unwrap();
+        drop(_home);
+
+        assert!(
+            member_runs(&db, &spec_id, "ca-out").is_empty(),
+            "an unavailable member must never run"
+        );
+        assert!(
+            !member_runs(&db, &spec_id, "ca-ok").is_empty(),
+            "the cascade falls through to the available member"
+        );
+
+        let join = join_run(&db, &spec_id, "join1");
+        let out = join.output.as_ref().unwrap();
+        assert_eq!(out["kind"], "cascade");
+        assert_eq!(out["members_tried"], 1);
+        let members = out["members"].as_array().expect("no-verdict lists members");
+        assert_eq!(members.len(), 1, "the skipped member is never reported");
+        assert_eq!(members[0]["platform"], "ca-ok");
+    }
+
+    /// CM48: a parallel ensemble runs only its available members.
+    #[tokio::test]
+    async fn parallel_skips_unavailable_member_at_dispatch() {
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+        let fake_home = setup_multi_cli_home(&[
+            (
+                "pa-out",
+                &write_member_script(dir.path(), "out.sh", "printf ok"),
+            ),
+            (
+                "pa-ok",
+                &write_member_script(dir.path(), "ok.sh", "printf ok"),
+            ),
+        ]);
+        insert_kind_ensemble(
+            &db,
+            &spec_id,
+            crate::domain::graphs::EnsembleKind::Parallel,
+            &[("pa-out", "pa-out"), ("pa-ok", "pa-ok")],
+        );
+        mark_member_platform_unavailable(&db, "pa-out");
+
+        let _home = HomeGuard::set(fake_home.path());
+        engine
+            .run_graph(graph_id.clone(), None, None, None, None, None)
+            .await
+            .unwrap();
+        drop(_home);
+
+        assert!(
+            member_runs(&db, &spec_id, "pa-out").is_empty(),
+            "an unavailable member must never run"
+        );
+        assert!(
+            !member_runs(&db, &spec_id, "pa-ok").is_empty(),
+            "the available member runs"
+        );
+        let join = join_run(&db, &spec_id, "join1");
+        assert_eq!(join.output.as_ref().unwrap()["kind"], "quorum");
+    }
+
+    /// CM48: when fewer than `min_pass` members are available the ensemble
+    /// does not dispatch at all — the spec blocks with the required message
+    /// and no member runs.
+    #[tokio::test]
+    async fn parallel_below_min_pass_blocks_the_spec_before_dispatch() {
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+        let fake_home = setup_multi_cli_home(&[
+            (
+                "pb-ok",
+                &write_member_script(dir.path(), "ok.sh", "printf ok"),
+            ),
+            (
+                "pb-out",
+                &write_member_script(dir.path(), "out.sh", "printf ok"),
+            ),
+        ]);
+        insert_kind_ensemble(
+            &db,
+            &spec_id,
+            crate::domain::graphs::EnsembleKind::Parallel,
+            &[("pb-ok", "pb-ok"), ("pb-out", "pb-out")],
+        );
+        db.update_ensemble_join_config("ens1", Some(2), None, None, None, None, None, None)
+            .unwrap();
+        mark_member_platform_unavailable(&db, "pb-out");
+
+        let _home = HomeGuard::set(fake_home.path());
+        engine
+            .run_graph(graph_id.clone(), None, None, None, None, None)
+            .await
+            .unwrap();
+        drop(_home);
+
+        for m in ["pb-ok", "pb-out"] {
+            assert!(
+                member_runs(&db, &spec_id, m).is_empty(),
+                "a blocked ensemble dispatches nothing: {m} has runs"
+            );
+        }
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        assert_eq!(
+            lp.status,
+            GraphStatus::Paused,
+            "the ensemble that cannot dispatch blocks the spec"
+        );
+        let events = db
+            .list_graph_events(
+                &graph_id,
+                None,
+                None,
+                Some(&["graph_blocked".to_string()]),
+                50,
+            )
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "exactly one graph_blocked event, got {events:?}"
+        );
+        assert_eq!(
+            events[0].message,
+            "Blocked: ensemble 'Switched Ensemble': 1 of 2 members available, min_pass 2 \
+             (unavailable: pb-out/(default) — quota)"
+        );
+    }
+
+    /// CM48: a single agent node whose pair is unavailable blocks the spec
+    /// before any attempt is counted — no run row exists — and the block
+    /// fires the graph's `on_blocked` hook.
+    #[tokio::test]
+    async fn unavailable_agent_node_blocks_the_spec_without_an_attempt() {
+        use crate::domain::graphs::GraphCompletionHook;
+
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+        db.insert_graph_node(&GraphNode {
+            id: "impl".to_string(),
+            spec_id: Some(spec_id.clone()),
+            graph_id: None,
+            name: "impl".to_string(),
+            kind: GraphNodeKind::Agent,
+            config: serde_json::json!({
+                "platform": "opencode-go",
+                "model": "opencode-go/claude",
+                "prompt_template": "do the work",
+                "timeout_minutes": 5,
+            }),
+            position: 1,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+        mark_member_platform_unavailable(&db, "opencode-go");
+
+        let blocked_file = dir.path().join("blocked.txt");
+        let mut hooks = std::collections::BTreeMap::new();
+        hooks.insert(
+            GraphHookEvent::OnBlocked,
+            vec![GraphCompletionHook {
+                platform: None,
+                model: None,
+                effort: None,
+                prompt: None,
+                command: Some(format!("printf blocked > {}", blocked_file.display())),
+                target_session_id: None,
+                target_session_name: None,
+                timeout_minutes: Some(1),
+                target_graph_id: None,
+                queue_id: None,
+                workdir_override: None,
+                idea: None,
+            }],
+        );
+        db.update_graph_hooks(&graph_id, &hooks).unwrap();
+
+        engine
+            .run_graph(graph_id.clone(), None, None, None, None, None)
+            .await
+            .unwrap();
+
+        assert!(
+            db.list_graph_runs_for_spec(&spec_id).unwrap().is_empty(),
+            "an availability block counts no attempt: no run row may exist"
+        );
+        let lp = db.get_graph(&graph_id).unwrap().unwrap();
+        assert_eq!(
+            lp.status,
+            GraphStatus::Paused,
+            "the unavailable node blocks the spec"
+        );
+        let events = db
+            .list_graph_events(
+                &graph_id,
+                None,
+                None,
+                Some(&["graph_blocked".to_string()]),
+                50,
+            )
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "exactly one graph_blocked event, got {events:?}"
+        );
+        assert_eq!(
+            events[0].message,
+            "Blocked: node 'impl': opencode-go/opencode-go/claude unavailable — quota"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&blocked_file).unwrap_or_default(),
+            "blocked",
+            "the block must fire the existing on_blocked hook path"
+        );
+    }
+
     /// CM3: the fallthrough walk wraps. Starting at the last member in the
     /// rotation, a no-verdict there continues at index 0.
     #[tokio::test]
@@ -24368,11 +24772,13 @@ exit 0
         let mut round_robin_pins = HashMap::new();
         let node_outputs = HashMap::new();
         let all_node_names: Vec<String> = Vec::new();
+        let available = details.members.clone();
         let execution = engine
             .execute_ensemble_round_robin(
                 &lp,
                 &spec,
                 &details,
+                &available,
                 None,
                 1,
                 &lp.workdir,

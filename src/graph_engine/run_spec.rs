@@ -405,12 +405,15 @@ impl GraphEngine {
         // CM48: resolve availability now, at dispatch — an unavailable member
         // is skipped, and an ensemble with no available member (or a parallel
         // one below `min_pass`) blocks the spec before any member runs. No
-        // member is edited; availability is a filter, not a rewrite.
-        let details_fresh = match self.resolve_ensemble_roster(&details_fresh) {
+        // member is edited; availability is a filter, not a rewrite. The full
+        // member list still drives the dispatch: `round_robin_index` indexes
+        // it, so the rotation keeps naming the same members whatever the
+        // roster says today.
+        let available_members = match self.resolve_ensemble_roster(&details_fresh) {
             EnsembleRoster::Blocked(blocker) => {
                 return Ok(SpecStepFlow::Done(SpecExecutionOutcome::Blocked(blocker)));
             }
-            EnsembleRoster::Ready(details) => *details,
+            EnsembleRoster::Ready(members) => members,
         };
         let details = &details_fresh;
         let execution = self
@@ -418,6 +421,7 @@ impl GraphEngine {
                 ctx.lp,
                 ctx.spec,
                 details,
+                &available_members,
                 previous_output,
                 iteration_value,
                 ctx.workdir,

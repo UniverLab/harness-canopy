@@ -532,38 +532,23 @@ impl TaskTriggerHandler {
         let config = crate::domain::canopy_config::CanopyConfig::load(&home.join(".canopy"));
 
         let timeout_secs = clamp_probe_timeout(params.timeout_seconds);
-        // CM48: split targets by roster availability. An unavailable pair is
-        // NOT probed (no quota spent on a pair the engine will skip anyway)
-        // and is reported in `skipped_unavailable` instead.
+        // CM48: an unavailable pair is NOT probed (no quota spent on a pair
+        // the engine will skip anyway) and is reported in
+        // `skipped_unavailable` instead; an ensemble the roster would stop at
+        // dispatch counts as `would_fail`.
         let now = chrono::Utc::now();
-        let mut skipped_unavailable: Vec<serde_json::Value> = Vec::new();
-        let mut probe_pairs: Vec<(crate::daemon::probe::ProbeTarget, Vec<String>)> = Vec::new();
-        for gt in &graph_targets {
-            let entries = self
-                .db
-                .roster_list_for_platform(&gt.target.platform)
-                .unwrap_or_default();
-            let avail = crate::domain::roster::effective_state(
-                &entries,
-                &gt.target.platform,
-                gt.target.model.as_deref(),
+        let (probe_pairs, skipped_unavailable) =
+            crate::daemon::handler_preflight_roster::split_targets_by_availability(
+                &self.db,
+                &graph_targets,
                 &now,
             );
-            if avail.available {
-                probe_pairs.push((gt.target.clone(), gt.used_by.clone()));
-            } else {
-                skipped_unavailable.push(serde_json::json!({
-                    "platform": gt.target.platform,
-                    "model": gt.target.model,
-                    "reason": avail.reason,
-                    "until": avail.until,
-                    "used_by": gt.used_by,
-                }));
-            }
-        }
-        // CM48: an ensemble that would block under the dispatch rules counts
-        // as `would_fail` — the roster makes it unrunnable without editing it.
-        let roster_would_fail = self.roster_blocked_ensemble_count(&details.lp.id, &now);
+        let roster_would_fail =
+            crate::daemon::handler_preflight_roster::roster_blocked_ensemble_count(
+                &self.db,
+                &details.lp.id,
+                &now,
+            );
         let targets: Vec<crate::daemon::probe::ProbeTarget> = probe_pairs
             .iter()
             .map(|(target, _)| target.clone())
@@ -665,49 +650,6 @@ impl TaskTriggerHandler {
             .unwrap_or_default(),
         )]))
     }
-
-    /// CM48: how many of a graph's ensembles would block at dispatch because
-    /// too few members are available right now. Read-only; never probes.
-    pub(crate) fn roster_blocked_ensemble_count(
-        &self,
-        graph_id: &str,
-        now: &chrono::DateTime<chrono::Utc>,
-    ) -> usize {
-        self.db
-            .list_ensembles_for_graph(graph_id)
-            .unwrap_or_default()
-            .iter()
-            .filter(|details| ensemble_would_block(&self.db, details, now))
-            .count()
-    }
-}
-
-/// CM48: an ensemble blocks when it has no available member, or is `parallel`
-/// with fewer than `min_pass` members available — the same rule the engine
-/// applies at dispatch.
-fn ensemble_would_block(
-    db: &crate::db::Database,
-    details: &crate::domain::graphs::EnsembleDetails,
-    now: &chrono::DateTime<chrono::Utc>,
-) -> bool {
-    let mut available = 0usize;
-    for member in &details.members {
-        let entries = db
-            .roster_list_for_platform(&member.platform)
-            .unwrap_or_default();
-        let avail = crate::domain::roster::effective_state(
-            &entries,
-            &member.platform,
-            member.model.as_deref(),
-            now,
-        );
-        if avail.available {
-            available += 1;
-        }
-    }
-    available == 0
-        || (details.ensemble.kind == crate::domain::graphs::EnsembleKind::Parallel
-            && (available as i64) < details.ensemble.min_pass)
 }
 
 /// (CB25) Build the design-review prompt for a `graph_preflight` reviewer.
@@ -849,126 +791,5 @@ pub(crate) async fn spawn_preflight_reviewer(
             "pair": pair,
             "note": format!("Reviewer could not start ({join_err}); probes above are unaffected."),
         }),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::db::roster_entries::{NewRosterEntry, RosterState};
-    use crate::db::Database;
-    use crate::domain::graphs::{
-        Ensemble, EnsembleDetails, EnsembleKind, EnsembleMember, GraphEdgeCondition,
-    };
-
-    fn member(node_id: &str, platform: &str, model: Option<&str>) -> EnsembleMember {
-        EnsembleMember {
-            ensemble_id: "ens".to_string(),
-            node_id: node_id.to_string(),
-            position: 0,
-            platform: platform.to_string(),
-            model: model.map(str::to_string),
-            prompt_override: None,
-            timeout_minutes: None,
-            infra_retry_limit: None,
-            infra_crash_max_seconds: None,
-            infra_backoff_seconds: None,
-        }
-    }
-
-    fn details(kind: EnsembleKind, min_pass: i64, members: Vec<EnsembleMember>) -> EnsembleDetails {
-        EnsembleDetails {
-            ensemble: Ensemble {
-                id: "ens".to_string(),
-                spec_id: Some("spec".to_string()),
-                graph_id: None,
-                name: "Implementer".to_string(),
-                prompt_template: "{{spec_content}}".to_string(),
-                join_node_id: "join".to_string(),
-                entry_from_node: "entry".to_string(),
-                entry_condition: GraphEdgeCondition::Always,
-                min_pass,
-                straggler_timeout_minutes: None,
-                quorum_grace_minutes: None,
-                timeout_minutes: 30,
-                infra_retry_limit: None,
-                infra_crash_max_seconds: None,
-                infra_backoff_seconds: None,
-                on_pass_to: "entry".to_string(),
-                on_fail_to: None,
-                kind,
-                round_robin_index: Some(0),
-                commit_rights: false,
-                created_at: chrono::Utc::now(),
-            },
-            members,
-        }
-    }
-
-    fn test_db() -> Database {
-        let dir = tempfile::tempdir().unwrap();
-        Database::new(&dir.path().join("t.db")).unwrap()
-    }
-
-    fn mark_unavailable(db: &Database, platform: &str) {
-        db.roster_upsert(NewRosterEntry {
-            platform,
-            model_pattern: None,
-            state: RosterState::Unavailable,
-            reason: Some("quota"),
-            until: None,
-        })
-        .unwrap();
-    }
-
-    /// CM48: an ensemble with no available member counts as `would_fail`.
-    #[test]
-    fn ensemble_with_no_available_member_would_block() {
-        let db = test_db();
-        mark_unavailable(&db, "opencode-go");
-        let d = details(
-            EnsembleKind::RoundRobin,
-            1,
-            vec![
-                member("m1", "opencode-go", None),
-                member("m2", "opencode-go", None),
-            ],
-        );
-        assert!(ensemble_would_block(&db, &d, &chrono::Utc::now()));
-    }
-
-    /// CM48: a `parallel` ensemble below `min_pass` counts as `would_fail`,
-    /// while the same member set does not block a sequential kind.
-    #[test]
-    fn parallel_below_min_pass_would_block_but_sequential_does_not() {
-        let db = test_db();
-        mark_unavailable(&db, "opencode-go");
-        let members = vec![
-            member("m1", "claude", None),
-            member("m2", "opencode-go", None),
-        ];
-        let now = chrono::Utc::now();
-        assert!(ensemble_would_block(
-            &db,
-            &details(EnsembleKind::Parallel, 2, members.clone()),
-            &now
-        ));
-        assert!(!ensemble_would_block(
-            &db,
-            &details(EnsembleKind::RoundRobin, 2, members),
-            &now
-        ));
-    }
-
-    /// CM48: an empty roster leaves every ensemble runnable.
-    #[test]
-    fn empty_roster_never_would_block() {
-        let db = test_db();
-        let d = details(
-            EnsembleKind::Parallel,
-            2,
-            vec![member("m1", "claude", None), member("m2", "claude", None)],
-        );
-        assert!(!ensemble_would_block(&db, &d, &chrono::Utc::now()));
     }
 }

@@ -30,6 +30,7 @@ pub(crate) mod handler_models_probes;
 pub(crate) mod handler_nodes;
 pub(crate) mod handler_notes;
 pub(crate) mod handler_preflight;
+pub(crate) mod handler_preflight_roster;
 pub(crate) mod handler_queues;
 pub(crate) mod handler_read;
 pub(crate) mod handler_roster;

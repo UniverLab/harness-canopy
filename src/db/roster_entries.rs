@@ -82,20 +82,24 @@ fn read_roster_entry_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RosterEntr
 impl Database {
     /// Insert or replace the one entry for `(platform, model_pattern)`.
     /// `until` is refreshed so an update that drops it stores NULL.
+    ///
+    /// Implemented as UPDATE-then-INSERT rather than `ON CONFLICT`: SQLite
+    /// treats NULLs as distinct in a `UNIQUE(platform, model_pattern)`
+    /// constraint, so the conflict target never fires for the platform-wide
+    /// (`model_pattern IS NULL`) entry and a second upsert would duplicate
+    /// it instead of replacing it. The `IS ?2` comparison matches NULL
+    /// correctly, and the single connection lock held across both statements
+    /// keeps the pair atomic against concurrent roster writers.
     pub fn roster_upsert(&self, entry: NewRosterEntry<'_>) -> Result<()> {
         let conn = self
             .conn
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
-        conn.execute(
-            "INSERT INTO roster_entries
-                 (platform, model_pattern, state, reason, until, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
-             ON CONFLICT(platform, model_pattern) DO UPDATE SET
-                 state = excluded.state,
-                 reason = excluded.reason,
-                 until = excluded.until,
-                 updated_at = excluded.updated_at",
+        let updated = conn.execute(
+            "UPDATE roster_entries
+              SET state = ?3, reason = ?4, until = ?5,
+                  updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+              WHERE platform = ?1 AND model_pattern IS ?2",
             params![
                 entry.platform,
                 entry.model_pattern,
@@ -104,6 +108,20 @@ impl Database {
                 entry.until,
             ],
         )?;
+        if updated == 0 {
+            conn.execute(
+                "INSERT INTO roster_entries
+                  (platform, model_pattern, state, reason, until, updated_at)
+              VALUES (?1, ?2, ?3, ?4, ?5, strftime('%Y-%m-%dT%H:%M:%SZ','now'))",
+                params![
+                    entry.platform,
+                    entry.model_pattern,
+                    entry.state.as_str(),
+                    entry.reason,
+                    entry.until,
+                ],
+            )?;
+        }
         Ok(())
     }
 
@@ -204,6 +222,38 @@ mod tests {
         let rows = db.roster_list(None).unwrap();
         assert_eq!(rows.len(), 1, "same key must keep exactly one row");
         assert_eq!(rows[0].state, RosterState::Available);
+    }
+
+    /// A second platform-wide (`model_pattern IS NULL`) upsert must REPLACE
+    /// the row, not add one: SQLite's UNIQUE treats NULLs as distinct, so the
+    /// UPDATE-then-INSERT shape is what keeps the platform-wide entry a
+    /// single row. Breaks if the upsert reverts to a bare
+    /// `ON CONFLICT(platform, model_pattern)` (which never fires for a NULL
+    /// target and leaves two rows).
+    #[test]
+    fn upsert_overwrites_platform_wide_null_pattern() {
+        let db = test_db();
+        db.roster_upsert(entry("claude", None, RosterState::Unavailable))
+            .unwrap();
+        db.roster_upsert(NewRosterEntry {
+            platform: "claude",
+            model_pattern: None,
+            state: RosterState::Available,
+            reason: None,
+            until: None,
+        })
+        .unwrap();
+        let rows = db.roster_list(None).unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "the platform-wide entry must stay exactly one row"
+        );
+        assert_eq!(rows[0].state, RosterState::Available);
+        assert_eq!(
+            rows[0].reason, None,
+            "an update that drops the reason must clear it"
+        );
     }
 
     #[test]

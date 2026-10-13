@@ -20,6 +20,12 @@ impl GraphEngine {
     /// them to terminate (pass, fail, or straggler timeout — never early),
     /// and consolidate their outputs into the join's own [`NodeExecution`].
     ///
+    /// `available_members` is the roster verdict for this dispatch (CM48):
+    /// the members whose platform/model pair is effectively unavailable right
+    /// now. `parallel` and `cascade` dispatch only those; `round_robin` walks
+    /// the full `details` list and steps over the rest, so the rotation's
+    /// index space never changes with availability.
+    ///
     /// Every member receives the exact same `previous_output` (the same
     /// input, in parallel — the defining shape of an ensemble). Concurrency
     /// is bounded by `self.ensemble_concurrency`, a semaphore shared across
@@ -31,6 +37,7 @@ impl GraphEngine {
         lp: &crate::domain::graphs::Graph,
         spec: &GraphSpec,
         details: &EnsembleDetails,
+        available_members: &[EnsembleMember],
         previous_output: Option<&Value>,
         iteration: usize,
         workdir: &str,
@@ -44,11 +51,17 @@ impl GraphEngine {
         match ensemble.kind {
             EnsembleKind::Parallel => {}
             EnsembleKind::Cascade => {
+                // CM48: the cascade walks only the available members, in
+                // member order.
+                let dispatch = EnsembleDetails {
+                    ensemble: details.ensemble.clone(),
+                    members: available_members.to_vec(),
+                };
                 return self
                     .execute_ensemble_cascade(
                         lp,
                         spec,
-                        details,
+                        &dispatch,
                         previous_output,
                         iteration,
                         workdir,
@@ -65,6 +78,7 @@ impl GraphEngine {
                         lp,
                         spec,
                         details,
+                        available_members,
                         previous_output,
                         iteration,
                         workdir,
@@ -77,6 +91,12 @@ impl GraphEngine {
                     .await;
             }
         }
+        // CM48: the parallel quorum spawns only the available members.
+        let dispatch = EnsembleDetails {
+            ensemble: details.ensemble.clone(),
+            members: available_members.to_vec(),
+        };
+        let details = &dispatch;
         // 0 is a legitimate value (mirrors `run_agent_process`'s own
         // `timeout_minutes`) — minute-granular timeouts otherwise have no way
         // to force an immediate one in a fast test.

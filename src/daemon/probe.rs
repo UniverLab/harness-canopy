@@ -40,6 +40,7 @@ mod targets;
 
 pub(crate) use targets::{
     distinct_targets_for_graph, group_recent_usage, probe_targets, unknown_count, would_fail_count,
+    GraphProbeTarget,
 };
 
 /// Default bound on how long a single probe waits for a response — this is a

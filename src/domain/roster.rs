@@ -17,6 +17,10 @@ pub struct Availability {
     pub reason: Option<String>,
     pub until: Option<String>,
     pub matched_entry_id: Option<i64>,
+    /// The matched entry is an `unavailable` one whose `until` is already in
+    /// the past, so the pair reads as available with the expiry visible —
+    /// the read surfaces report this rather than silently re-listing it.
+    pub expired: bool,
 }
 
 impl Availability {
@@ -27,6 +31,7 @@ impl Availability {
             reason: None,
             until: None,
             matched_entry_id: None,
+            expired: false,
         }
     }
 
@@ -42,6 +47,7 @@ impl Availability {
             reason: entry.reason.clone(),
             until: entry.until.clone(),
             matched_entry_id: Some(entry.id),
+            expired,
         }
     }
 }
@@ -181,6 +187,7 @@ mod tests {
         )];
         let got = effective_state(&entries, "opencode-go", None, &now());
         assert!(got.available, "expired entry reads as available");
+        assert!(got.expired, "the expiry must be reported, not swallowed");
         assert_eq!(got.matched_entry_id, Some(1));
         assert_eq!(got.until.as_deref(), Some("2026-05-01T00:00:00Z"));
     }

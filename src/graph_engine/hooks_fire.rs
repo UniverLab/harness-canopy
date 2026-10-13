@@ -373,3 +373,106 @@ impl GraphEngine {
         self.fire_hooks(lp, GraphHookEvent::OnCompleted, &ctx).await;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_graph() -> Graph {
+        Graph {
+            id: "g1".to_string(),
+            name: "Graph".to_string(),
+            description: None,
+            workdir: "/tmp".to_string(),
+            status: crate::domain::graphs::GraphStatus::Running,
+            trigger: None,
+            created_at: chrono::Utc::now(),
+            started_at: None,
+            completed_at: None,
+            autorun_at: None,
+            auto_continue_at: None,
+            auto_continue_action: None,
+            active_run_queue_id: None,
+            hooks: std::collections::BTreeMap::new(),
+            archived: false,
+            paused_by_reconciliation: false,
+            infra_node_id: None,
+            allow_dirty_start: false,
+        }
+    }
+
+    fn agent_hook(platform: &str) -> GraphCompletionHook {
+        GraphCompletionHook {
+            platform: Some(platform.to_string()),
+            model: Some(format!("{platform}/claude")),
+            effort: None,
+            prompt: Some("hello".to_string()),
+            command: None,
+            target_session_id: None,
+            target_session_name: None,
+            timeout_minutes: Some(1),
+            target_graph_id: None,
+            queue_id: None,
+            workdir_override: None,
+            idea: None,
+        }
+    }
+
+    fn engine_with_roster(platform: &str) -> (tempfile::TempDir, GraphEngine) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::new(&dir.path().join("t.db")).unwrap());
+        db.roster_upsert(crate::db::roster_entries::NewRosterEntry {
+            platform,
+            model_pattern: None,
+            state: crate::db::roster_entries::RosterState::Unavailable,
+            reason: Some("quota"),
+            until: None,
+        })
+        .unwrap();
+        let engine = GraphEngine::new(
+            Arc::clone(&db),
+            Arc::new(crate::application::notification_service::DefaultNotificationService),
+        );
+        (dir, engine)
+    }
+
+    /// CM48: an agent hook whose pair is declared unavailable never spawns —
+    /// its run is recorded as failed with the availability message. Remove the
+    /// guard and this hook would fall through to `Cli::resolve` (failing with
+    /// a different message, or actually spawning), so the exact summary is the
+    /// assertion that pins the behaviour.
+    #[tokio::test]
+    async fn unavailable_agent_hook_is_recorded_failed_without_spawning() {
+        let (_dir, engine) = engine_with_roster("opencode-go");
+        let lp = test_graph();
+        let hook = agent_hook("opencode-go");
+        let ctx = HookContext {
+            graph_name: &lp.name,
+            workdir: &lp.workdir,
+            completed_specs: &[],
+            spec_name: None,
+            spec_id: None,
+            blocker: None,
+            node_name: None,
+        };
+        let fire = HookFireCtx {
+            lp: &lp,
+            hook: &hook,
+            event: &GraphHookEvent::OnCompleted,
+            ctx: &ctx,
+            run_id: "run1",
+            idx: 0,
+        };
+
+        let execution = engine.execute_agent_hook(&fire).await;
+        assert_eq!(execution.status, GraphRunStatus::Fail);
+        assert_eq!(
+            execution.output.get("error").and_then(Value::as_str),
+            Some("unavailable")
+        );
+        assert_eq!(
+            execution.summary,
+            "node 'on_completed': opencode-go/opencode-go/claude unavailable — quota"
+        );
+    }
+}

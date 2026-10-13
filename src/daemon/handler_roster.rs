@@ -174,6 +174,7 @@ impl TaskTriggerHandler {
                 "available": avail.available,
                 "reason": avail.reason,
                 "until": avail.until,
+                "expired": avail.expired,
                 "matched_entry_id": avail.matched_entry_id,
             }))
             .unwrap_or_default(),
