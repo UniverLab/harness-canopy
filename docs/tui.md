@@ -26,7 +26,7 @@ The dialog includes a CLI picker, model picker, seed identity selector
 
 ## Monitoring
 
-- **Agent status colors** — green for working (recent output), blue for
+- **Agent status colors** — teal for working (recent output), blue for
   idle, red for failed, gray for exited. The sidebar shows a colored
   gutter bar per agent.
 - **Split groups** — side-by-side horizontal/vertical views to watch
@@ -51,7 +51,8 @@ The dialog includes a CLI picker, model picker, seed identity selector
   `PageUp`/`PageDown` scroll by half a screen, `End` returns to the live
   edge, and `,`/`.` step through an ensemble's members. Opening, closing or
   switching the pane never writes to a run.
-- **Idle visuals** — Brian's Brain cellular automaton and animated
+- **Idle visuals** — Brian's Brain cellular automaton, drawn as Braille
+  glyphs and seeded by the cursor at a fixed step rate, plus animated
   kaomoji status messages (whimsg).
 
 ## Gamification

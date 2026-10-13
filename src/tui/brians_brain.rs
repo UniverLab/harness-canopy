@@ -56,7 +56,10 @@ pub struct BriansBrain {
     /// Last seeded character cell, `-1` when no trail is being walked.
     trail_last_col: i32,
     trail_last_row: i32,
-    /// Last pointer move, for the idle window. `None` until the first seed.
+    /// Last pointer move, for the idle window. Set at construction: the web
+    /// stamps `lastMoveT` on its first frame, so stillness is measured from
+    /// load — a field the cursor never touches still goes ultra-sparse after
+    /// [`IDLE_AFTER_MS`], instead of running revival batches forever.
     last_move: Option<Instant>,
     /// Next lone idle cluster; `None` while not idle.
     idle_next_seed: Option<Instant>,
@@ -87,7 +90,11 @@ impl BriansBrain {
             last_seed: now - Duration::from_millis(SEED_EVERY_MS),
             trail_last_col: -1,
             trail_last_row: -1,
-            last_move: None,
+            // The web stamps `lastMoveT` on its first frame (`if (lastMoveT
+            // < 0) lastMoveT = t`), so stillness is measured from load: a
+            // field the cursor never touches goes ultra-sparse 8 s in,
+            // instead of running revival batches forever.
+            last_move: Some(now),
             idle_next_seed: None,
             last_revive: None,
         }
@@ -351,5 +358,28 @@ mod tests {
         brain.reset_trail();
         assert_eq!(brain.trail_last_col, -1);
         assert_eq!(brain.trail_last_row, -1);
+    }
+
+    #[test]
+    fn untouched_field_goes_idle_instead_of_reviving_forever() {
+        // The web stamps lastMoveT on its first frame, so stillness is
+        // measured from load: a field the cursor never touches must reach
+        // the ultra-sparse idle branch, not run revival batches forever.
+        let mut brain = off_brain(6, 6);
+        brain.last_move = Some(Instant::now() - Duration::from_millis(IDLE_AFTER_MS + 1_000));
+        assert!(brain.step());
+        assert!(
+            brain.idle_next_seed.is_some(),
+            "stillness past the idle window must arm the lone-cluster timer"
+        );
+        assert!(
+            brain.last_revive.is_none(),
+            "the idle branch must never run a revival batch"
+        );
+        assert_eq!(
+            count_on(&brain),
+            0,
+            "arming the idle timer must not seed immediately"
+        );
     }
 }
