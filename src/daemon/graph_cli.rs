@@ -354,11 +354,15 @@ async fn handle_graph_log(
         tokio::select! {
             _ = tokio::signal::ctrl_c() => break,
             _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {
+                // `since_ts` is passed on every poll: with an empty first
+                // page (e.g. `--since` in the future) no cursor id exists
+                // yet, and dropping the timestamp would dump the whole log
+                // retroactively on the next poll.
                 let events = query_graph_events(
                     port_override,
                     &lp.id,
                     since_id,
-                    None,
+                    since_ts.as_deref(),
                     &kinds,
                     spec.as_deref(),
                 )?;

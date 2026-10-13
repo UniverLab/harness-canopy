@@ -521,6 +521,56 @@ mod tests {
         assert!(!data_dir.join("logs/agent-gone.log").exists());
     }
 
+    /// CM46 req 7: soft `canopy clean` deletes a 91-day-old graph event and
+    /// keeps a 1-day-old one (retention window: `graph_event_retention_days`).
+    #[test]
+    fn real_run_prunes_graph_events_older_than_the_retention_window() {
+        let dir = tempdir().unwrap();
+        let data_dir = dir.path();
+        let db = test_db(data_dir);
+
+        let seed = |graph_id: &str, message: &str| {
+            db.insert_graph_event(&crate::domain::activity::GraphEventRecord {
+                graph_id: graph_id.to_string(),
+                spec_id: None,
+                node_id: None,
+                run_id: None,
+                kind: "graph_started".to_string(),
+                message: message.to_string(),
+                payload: None,
+            })
+            .unwrap()
+        };
+        let old = seed("g-old", "91 days old");
+        seed("g-new", "1 day old");
+        let aged = (chrono::Utc::now() - chrono::Duration::days(91)).to_rfc3339();
+        db.exec_test_sql(&format!(
+            "UPDATE graph_events SET created_at = '{aged}' WHERE id = {old};"
+        ))
+        .unwrap();
+
+        let now_ts = chrono::Utc::now().timestamp();
+        let plan = run_clean(data_dir, &db, false, 7, 90, now_ts).unwrap();
+
+        assert_eq!(
+            plan.graph_event_deletions, 1,
+            "only the 91-day-old event is a deletion candidate"
+        );
+        assert!(
+            db.list_graph_events("g-old", None, None, None, 10)
+                .unwrap()
+                .is_empty(),
+            "the 91-day-old event must be deleted by clean"
+        );
+        assert_eq!(
+            db.list_graph_events("g-new", None, None, None, 10)
+                .unwrap()
+                .len(),
+            1,
+            "the 1-day-old event must survive"
+        );
+    }
+
     #[test]
     fn active_session_survives_a_real_run_even_when_ancient() {
         let dir = tempdir().unwrap();

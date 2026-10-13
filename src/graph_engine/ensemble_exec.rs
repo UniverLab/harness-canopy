@@ -156,6 +156,24 @@ impl GraphEngine {
                 ensemble_id: &ctx.details.ensemble.id,
             };
             let run_id = self.insert_ensemble_member_run(&run_spec)?;
+            // CM46: parallel members record `node_started` here, so every
+            // `node_finished` they later produce (normal finish, quorum kill,
+            // straggler timeout) has its start in the log — the sequential
+            // path records its start in `run_ensemble_member`.
+            activity::record(
+                &self.db,
+                activity::GraphEvent {
+                    graph_id: &ctx.lp.id,
+                    graph_name: &ctx.lp.name,
+                    workdir: ctx.workdir,
+                    spec_id: Some(&ctx.spec.id),
+                    node_id: Some(&node.id),
+                    run_id: Some(&run_id),
+                    kind: activity::GraphEventKind::NodeStarted,
+                    message: format!("Node '{}' started.", node.name),
+                    payload: None,
+                },
+            );
             let task = ParallelMemberTask {
                 db: Arc::clone(&self.db),
                 lp: ctx.lp.clone(),

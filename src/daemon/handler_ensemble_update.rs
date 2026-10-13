@@ -188,9 +188,21 @@ impl TaskTriggerHandler {
             String::new()
         };
         // CM46: an ensemble edit on a running graph is narratable history.
+        // A spec-owned ensemble carries no graph_id of its own — resolve the
+        // owning graph through its spec, the way node edits do, or the edit
+        // on a running graph's spec-owned ensemble would go unrecorded.
+        let owning_graph_id = details.ensemble.graph_id.clone().or_else(|| {
+            details.ensemble.spec_id.as_deref().and_then(|sid| {
+                self.db
+                    .get_graph_spec(sid)
+                    .ok()
+                    .flatten()
+                    .and_then(|spec| spec.graph_id)
+            })
+        });
         record_config_change_if_running(
             &self.db,
-            details.ensemble.graph_id.as_deref(),
+            owning_graph_id.as_deref(),
             details.ensemble.spec_id.as_deref(),
             None,
             "ensemble",
