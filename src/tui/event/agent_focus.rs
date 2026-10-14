@@ -17,7 +17,7 @@ mod input;
 use input::{forward_key_to_focused_agent, handle_target_input, reset_scroll_on_input};
 
 #[derive(Clone, Copy)]
-enum FocusedAgent {
+pub(super) enum FocusedAgent {
     Interactive(usize),
     Terminal(usize),
 }
@@ -1905,6 +1905,156 @@ mod focus_shortcuts_keyboard_claim_tests {
             KeyCode::Down,
             KeyModifiers::SHIFT
         ));
+        app.interactive_agents[0].kill();
+    }
+
+    // ── CT26: the copy-reflex Ctrl+C guard ─────────────────────────────
+
+    /// An app whose single interactive session runs on `platform`, with the
+    /// platform's registry `ctrl_c_exits` flag reflected in
+    /// `App::ctrl_c_exits_clis` exactly the way `App::new` derives it.
+    fn app_with_platform(agent: InteractiveAgent, platform: &str, exits: bool) -> App {
+        let mut app = app_with_interactive_agent(agent);
+        app.interactive_agents[0].cli = crate::domain::models::Cli::new(platform);
+        if exits {
+            app.ctrl_c_exits_clis.insert(platform.to_string());
+        }
+        app
+    }
+
+    fn press_ctrl_c(app: &mut App) {
+        handle_agent_key(app, KeyCode::Char('c'), KeyModifiers::CONTROL).expect("ctrl+c");
+    }
+
+    #[test]
+    fn first_ctrl_c_on_an_exiting_platform_is_swallowed_with_a_confirm_hint() {
+        // FR1 (guideline a, first half): opencode exits on a single Ctrl+C, so
+        // the first one is NOT forwarded — the pane shows the confirm hint and
+        // the confirm window is armed.
+        let agent = spawn_cat_agent("opencode-guard");
+        let mut app = app_with_platform(agent, "opencode", true);
+        assert!(!app.ctrl_c.armed());
+
+        press_ctrl_c(&mut app);
+
+        assert!(app.ctrl_c.armed(), "the confirm window must be armed");
+        assert_eq!(
+            app.ctrl_c.notice(),
+            Some("Ctrl+C again within 1 s to send it to opencode"),
+            "the pane must say how to actually send it"
+        );
+        app.interactive_agents[0].kill();
+    }
+
+    #[test]
+    fn second_ctrl_c_within_one_second_is_forwarded() {
+        // FR1 (guideline a, second half): a second Ctrl+C inside the confirm
+        // window is forwarded, so a deliberate interrupt still works.
+        let agent = spawn_cat_agent("opencode-forward");
+        let mut app = app_with_platform(agent, "opencode", true);
+
+        press_ctrl_c(&mut app);
+        assert!(app.ctrl_c.armed());
+        press_ctrl_c(&mut app);
+
+        assert!(!app.ctrl_c.armed(), "the second Ctrl+C must be forwarded");
+        app.interactive_agents[0].kill();
+    }
+
+    #[test]
+    fn a_late_second_ctrl_c_re_arms_instead_of_forwarding() {
+        // FR1: "otherwise nothing is sent" — a second press that arrived after
+        // the window closed is swallowed like the first one.
+        let agent = spawn_cat_agent("opencode-late");
+        let mut app = app_with_platform(agent, "opencode", true);
+
+        press_ctrl_c(&mut app);
+        app.ctrl_c.armed_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(2));
+        press_ctrl_c(&mut app);
+
+        assert!(
+            app.ctrl_c.armed(),
+            "a late second press must re-arm, not forward"
+        );
+        app.interactive_agents[0].kill();
+    }
+
+    #[test]
+    fn ctrl_c_on_an_ordinary_platform_is_forwarded_as_today() {
+        // FR1 (guideline b): claude needs two Ctrl+C presses to exit, so one is
+        // forwarded exactly as before — no swallow, no hint, no window.
+        let agent = spawn_cat_agent("claude-forward");
+        let mut app = app_with_platform(agent, "claude", false);
+
+        press_ctrl_c(&mut app);
+
+        assert!(!app.ctrl_c.armed(), "an ordinary platform keeps forwarding");
+        assert_eq!(app.ctrl_c.notice(), None);
+        app.interactive_agents[0].kill();
+    }
+
+    #[test]
+    fn ctrl_c_within_three_seconds_of_a_copy_is_swallowed_as_already_copied() {
+        // FR2 (guideline c): the drag copy already put the selection on the
+        // clipboard, so the Ctrl+C that follows it is the reflex, not an
+        // interrupt — swallowed on every platform, showing `already copied`.
+        let agent = spawn_cat_agent("copy-reflex");
+        let mut app = app_with_platform(agent, "claude", false);
+        app.copied_at = std::time::Instant::now();
+
+        press_ctrl_c(&mut app);
+
+        assert!(!app.ctrl_c.armed());
+        assert_eq!(app.ctrl_c.notice(), Some("already copied"));
+        app.interactive_agents[0].kill();
+    }
+
+    #[test]
+    fn ctrl_c_after_the_copy_window_is_forwarded_again() {
+        // FR2's window is 3 s, not forever: a deliberate interrupt a moment
+        // later still reaches the session.
+        let agent = spawn_cat_agent("copy-window-passed");
+        let mut app = app_with_platform(agent, "claude", false);
+        app.copied_at = std::time::Instant::now() - std::time::Duration::from_secs(4);
+
+        press_ctrl_c(&mut app);
+
+        assert_eq!(app.ctrl_c.notice(), None);
+        assert!(!app.ctrl_c.armed());
+        app.interactive_agents[0].kill();
+    }
+
+    #[test]
+    fn ctrl_c_on_a_terminal_session_is_never_swallowed() {
+        // FR4 plus the guard's scope decision: a shell's Ctrl+C is not fatal
+        // and never closes the session, so it is left alone entirely — even
+        // right after a copy.
+        let agent = spawn_cat_terminal("term-ctrl-c");
+        let mut app = app_with_terminal_agent(agent);
+        app.copied_at = std::time::Instant::now();
+
+        press_ctrl_c(&mut app);
+
+        assert_eq!(app.ctrl_c.notice(), None);
+        assert!(!app.ctrl_c.armed());
+        app.terminal_agents[0].kill();
+    }
+
+    #[test]
+    fn ordinary_keys_still_reach_the_session_after_a_swallowed_ctrl_c() {
+        // FR4: the guard swallows exactly one key (Ctrl+C) on exactly one agent
+        // kind (interactive). A printable key right after a swallow still lands
+        // in the input buffer and reaches the PTY.
+        let agent = spawn_cat_agent("ordinary-keys");
+        let mut app = app_with_platform(agent, "opencode", true);
+
+        press_ctrl_c(&mut app);
+        handle_agent_key(&mut app, KeyCode::Char('x'), KeyModifiers::NONE).expect("key");
+
+        {
+            let buffer = app.interactive_agents[0].input_buffer.lock().expect("lock");
+            assert_eq!(buffer.as_str(), "x");
+        }
         app.interactive_agents[0].kill();
     }
 }

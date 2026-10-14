@@ -72,6 +72,7 @@ pub mod utils;
 pub(crate) use session_resume::build_resumed_session_args;
 pub use terminal_search::TerminalSearch;
 pub(crate) use types::ContextTransferSource;
+pub(crate) use types::CtrlCState;
 pub(crate) use types::GraphLiveFocus;
 pub use types::{
     AgentEntry, AgentSectionFocus, App, AutomationKind, Focus, PanelFace, ProjectTab, SidebarLayer,

@@ -108,6 +108,8 @@ macro_rules! app_new_fields {
             legend_selected: 0,
             show_copied: false,
             copied_at: std::time::Instant::now() - std::time::Duration::from_secs(10),
+            ctrl_c: CtrlCState::initial(),
+            ctrl_c_exits_clis: crate::tui::app::types::ctrl_c_exits_clis($canopy_config),
             last_scroll_at: std::time::Instant::now() - std::time::Duration::from_secs(999),
             last_panel_inner: (0, 0),
             last_panel_x: 0,

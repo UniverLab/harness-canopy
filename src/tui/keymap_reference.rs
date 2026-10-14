@@ -448,6 +448,12 @@ pub static KEY_REFS: &[KeyRef] = &[
         action: "kill / close",
         code: "Char('x')",
     },
+    KeyRef {
+        key: "Ctrl+C",
+        context: "Agent focus",
+        action: "interrupt the session — on opencode, press twice to send",
+        code: "Char('c')",
+    },
     // ── Dialogs ───────────────────────────────────────────────────
     KeyRef {
         key: "d",

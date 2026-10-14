@@ -177,6 +177,12 @@ pub(super) fn forward_key_to_focused_agent(
     code: KeyCode,
     modifiers: KeyModifiers,
 ) {
+    // CT26: swallow a copy-reflex Ctrl+C before it becomes a byte on the PTY
+    // (see `event::ctrl_c`). Every other key, and every terminal pane, falls
+    // through to today's forwarding unchanged.
+    if super::super::ctrl_c::handle_ctrl_c(app, target, code, modifiers) {
+        return;
+    }
     let bytes = key_to_bytes(code, modifiers);
     if bytes.is_empty() {
         return;

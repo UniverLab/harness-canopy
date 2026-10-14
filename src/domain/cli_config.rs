@@ -24,6 +24,13 @@ pub struct CliConfig {
     /// unchanged.
     #[serde(default = "default_headless")]
     pub headless: bool,
+    /// CT26: true marks a platform whose default keybinding exits the app on a
+    /// SINGLE Ctrl+C (opencode; claude needs two). For such a platform the TUI
+    /// swallows the first Ctrl+C of an interactive session and shows a confirm
+    /// hint instead — see `tui::event::ctrl_c`. Defaults to false so every
+    /// registry entry that never mentions it keeps today's forwarding.
+    #[serde(default = "default_ctrl_c_exits")]
+    pub ctrl_c_exits: bool,
     #[serde(default)]
     pub model_flag: Option<String>,
     #[serde(default)]
@@ -265,6 +272,7 @@ impl Default for CliConfig {
             binary: String::new(),
             headless_mode: String::new(),
             headless: true,
+            ctrl_c_exits: false,
             model_flag: None,
             supports_working_dir: false,
             working_dir_flag: None,
@@ -422,6 +430,13 @@ pub fn interactive_only_reason(platform: &str) -> String {
 /// absence leaves every existing platform's behaviour unchanged.
 fn default_headless() -> bool {
     true
+}
+
+/// serde default for [`CliConfig::ctrl_c_exits`]: a platform exits on a single
+/// Ctrl+C only when its registry entry says so, so the field's absence leaves
+/// every existing platform's forwarding unchanged.
+fn default_ctrl_c_exits() -> bool {
+    false
 }
 
 fn default_paste_submit_presses() -> u8 {
@@ -612,6 +627,7 @@ mod tests {
             binary: "opencode".to_string(),
             headless_mode: "--headless".to_string(),
             headless: true,
+            ctrl_c_exits: false,
             model_flag: Some("--model".to_string()),
             supports_working_dir: true,
             working_dir_flag: Some("--dir".to_string()),
@@ -1263,5 +1279,37 @@ mod tests {
             back.identity_pattern.as_deref(),
             Some("(?i)blackbox ai|blackboxai")
         );
+    }
+
+    /// CT26: the field's absence is the common case and must mean "keep
+    /// forwarding Ctrl+C", so a registry entry that never mentions it cannot
+    /// change any existing platform's behaviour.
+    #[test]
+    fn ctrl_c_exits_defaults_to_false_when_absent() {
+        let config: CliConfig = serde_json::from_value(serde_json::json!({"binary": "x"})).unwrap();
+        assert!(!config.ctrl_c_exits);
+    }
+
+    /// CT26: `ctrl_c_exits = true` parses and round-trips — the value the
+    /// opencode registry entry (canopy-registry ad52a0c) sets.
+    #[test]
+    fn ctrl_c_exits_true_parses_and_roundtrips() {
+        let config: CliConfig = serde_json::from_value(serde_json::json!({
+            "binary": "x",
+            "ctrl_c_exits": true,
+        }))
+        .unwrap();
+        assert!(config.ctrl_c_exits);
+        let json = serde_json::to_string(&config).unwrap();
+        let back: CliConfig = serde_json::from_str(&json).unwrap();
+        assert!(back.ctrl_c_exits);
+    }
+
+    /// CT26: the hand-written `Default` must agree with the serde default, so a
+    /// default-built platform is never mistaken for one that exits on a single
+    /// Ctrl+C (same rule as `headless`).
+    #[test]
+    fn ctrl_c_exits_default_matches_serde_default() {
+        assert!(!CliConfig::default().ctrl_c_exits);
     }
 }

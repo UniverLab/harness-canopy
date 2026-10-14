@@ -299,6 +299,10 @@ fn footer_hints_agent_pty(
     if matches!(app.selected_agent(), Some(AgentEntry::Interactive(_))) {
         h.push(("Ctrl+B", "prompt"));
     }
+    // The plain-drag copy is invisible until you try it. Naming it here is what
+    // keeps the user from reaching for Shift — the terminal's own selection,
+    // which canopy cannot see — and the fatal Ctrl+C that follows it.
+    h.push(("drag", "to copy"));
     if activity_available {
         h.push(("F3", "activity"));
         h.push(("F6", "panel"));
@@ -1167,5 +1171,42 @@ mod tests {
         });
         assert!(text.contains("Esc auto"), "{text}");
         assert!(!text.contains("Enter focus"), "{text}");
+    }
+
+    #[test]
+    fn footer_in_agent_focus_advertises_drag_to_copy() {
+        // CT26 (FR3): the plain-drag copy is discoverable from the session
+        // pane's key-hint row, so the user never has to reach for Shift.
+        let agent = crate::tui::agent::InteractiveAgent::spawn(
+            crate::domain::models::Cli::new("cat"),
+            ".",
+            80,
+            24,
+            None,
+            None,
+            Color::Reset,
+            Some("drag-copy-hint-agent"),
+            &[],
+            None,
+            None,
+            None,
+        )
+        .expect("spawn cat as a stand-in interactive child");
+        let mut app = make_app();
+        app.interactive_agents = vec![agent];
+        app.agents = vec![crate::tui::app::types::AgentEntry::Interactive(0)];
+        app.selected = 0;
+        app.focus = Focus::Agent;
+
+        let theme = Theme::classic();
+        let text = render_footer_to_text(200, 1, |frame, area| {
+            draw_footer(frame, area, &app, &theme);
+        });
+
+        assert!(
+            text.contains("drag to copy"),
+            "agent-focus footer must advertise the plain-drag copy: {text}"
+        );
+        app.interactive_agents[0].kill();
     }
 }

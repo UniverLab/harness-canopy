@@ -93,6 +93,10 @@ impl App {
         self.theme = crate::tui::ui::theme::Theme::resolve(&config.theme);
         self.temperature_unit = config.temperature_unit;
         self.panel_pinned = App::load_panel_pinned_face(&config.pinned_panel_face);
+        // CT26: a registry refresh that flips `ctrl_c_exits` publishes a
+        // revision; re-deriving here means the guard picks it up without a
+        // restart, exactly like theme and the pinned face.
+        self.ctrl_c_exits_clis = crate::tui::app::types::ctrl_c_exits_clis(&config);
         self.tui_settings = config.tui;
     }
 
@@ -809,5 +813,28 @@ mod tests {
         app.poll_settings_revision();
 
         assert_eq!(app.theme, Theme::modern(), "theme hot-applied");
+    }
+
+    /// CT26: `ctrl_c_exits_clis` is derived from the persisted `[[clis]]` table,
+    /// so a platform that sets the flag is guarded and every other platform is
+    /// not — no CLI name is ever inspected.
+    #[test]
+    fn ctrl_c_exits_clis_reads_the_persisted_clis_table() {
+        use crate::domain::cli_config::CliConfig;
+
+        let mut config = crate::domain::canopy_config::CanopyConfig::default();
+        config.clis.push(CliConfig {
+            name: "opencode".to_string(),
+            ctrl_c_exits: true,
+            ..Default::default()
+        });
+        config.clis.push(CliConfig {
+            name: "claude".to_string(),
+            ..Default::default()
+        });
+
+        let slugs = crate::tui::app::types::ctrl_c_exits_clis(&config);
+        assert!(slugs.contains("opencode"));
+        assert!(!slugs.contains("claude"));
     }
 }

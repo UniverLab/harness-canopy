@@ -78,6 +78,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let panel_area = draw_panel_and_sync(frame, app, &theme, body_area);
     draw_split_or_log(frame, app, &theme, panel_area);
     footer::draw_footer(frame, footer_area, app, &theme);
+    draw_ctrl_c_notice(frame, body, app, &theme);
     draw_modal_dialogs(frame, app, &theme);
     draw_picker_overlays(frame, app, &theme, panel_area);
     draw_top_overlays(frame, app, &theme);
@@ -295,6 +296,31 @@ fn draw_copied_badge(frame: &mut Frame, theme: &Theme) {
         );
         frame.render_widget(widget, area);
     }
+}
+
+/// CT26: the copy-reflex guard's one-line sentence, drawn on the pane's bottom
+/// row (directly above the key-hint footer) while its TTL holds. It names the
+/// key the user reflexively pressed, so it belongs in the same eye line as the
+/// hints — and it borrows the `▒ COPIED ▒` badge's styling so a transient TUI
+/// notice always looks the same.
+fn draw_ctrl_c_notice(frame: &mut Frame, body: Rect, app: &App, theme: &Theme) {
+    let Some(notice) = app.ctrl_c.notice() else {
+        return;
+    };
+    if body.height == 0 || body.width == 0 {
+        return;
+    }
+    let text = format!(" {notice} ");
+    let width = (text.chars().count() as u16).min(body.width);
+    let area = Rect::new(body.x, body.y + body.height - 1, width, 1);
+    frame.render_widget(
+        ratatui::widgets::Paragraph::new(text).style(
+            ratatui::style::Style::default()
+                .fg(Color::Black)
+                .bg(theme.header_color),
+        ),
+        area,
+    );
 }
 
 /// CM52: whether the atmosphere scene ticks and draws this frame. False when
@@ -933,5 +959,49 @@ mod tests {
                 "picker must paint the shared dialog background {theme:?}"
             );
         }
+    }
+
+    /// CT26 (FR1/FR2): the notice is drawn on the row just above the footer,
+    /// and nothing is drawn when no notice is set.
+    #[test]
+    fn ctrl_c_notice_is_drawn_on_the_row_above_the_footer() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let (mut app, _data_dir) = picker_test_app();
+        let theme = Theme::classic();
+        app.ctrl_c.set_notice("already copied");
+
+        let backend = TestBackend::new(120, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                draw_ctrl_c_notice(frame, frame.area(), &app, &theme);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let mut row = String::new();
+        for x in 0..buffer.area.width {
+            row.push_str(buffer[(x, 9)].symbol());
+        }
+        assert!(row.contains("already copied"), "notice row: {row}");
+
+        app.ctrl_c.notice = None;
+        let backend = TestBackend::new(120, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                draw_ctrl_c_notice(frame, frame.area(), &app, &theme);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let mut row = String::new();
+        for x in 0..buffer.area.width {
+            row.push_str(buffer[(x, 9)].symbol());
+        }
+        assert!(
+            row.trim().is_empty(),
+            "no notice must draw nothing on that row: {row}"
+        );
     }
 }
