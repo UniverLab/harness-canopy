@@ -21,7 +21,7 @@ use rmcp::ErrorData as McpError;
 impl TaskTriggerHandler {
     #[tool(
         name = "graph_export",
-        description = "Export a graph's design — name, description, nodes, edges, and ensembles — as a portable JSON document, so it can be shared as a file and recreated elsewhere with graph_import. Never includes ids, workdir, specs, or run/status state. Includes platform/model for every agent node and ensemble member, and each ensemble's kind ('cascade'/'round_robin'; omitted for the 'parallel' default); format_version 4. Ensembles carry every entry source: the primary in 'entry_from_node'/'entry_condition' plus 'extra_entry_sources' (node + condition) for sources added with 'add_entry_from' (omitted when there are none)."
+        description = "Export a graph's design — name, description, nodes, edges, and ensembles — as a portable JSON document, so it can be shared as a file and recreated elsewhere with graph_import. Never includes ids, workdir, specs, or run/status state. Includes platform/model for every agent node and ensemble member, and each ensemble's kind ('cascade'/'round_robin'; omitted for the 'parallel' default); format_version 5. A crew-bound ensemble exports its 'crew' name and no members, and a crew-bound agent node exports its 'crew' key. Ensembles carry every entry source: the primary in 'entry_from_node'/'entry_condition' plus 'extra_entry_sources' (node + condition) for sources added with 'add_entry_from' (omitted when there are none)."
     )]
     pub(crate) async fn graph_export(
         &self,
@@ -69,7 +69,7 @@ impl TaskTriggerHandler {
 
     #[tool(
         name = "graph_import",
-        description = "Create a new graph from an exported document (the object graph_export returns). Always creates a new graph — never updates or overwrites an existing one; if the name is already taken in workdir, a numeric suffix is applied and the response says which name was used. Validates the document exactly as graph_add_node/graph_add_edge/graph_add_ensemble would, all-or-nothing: nothing is written if any part is rejected. Accepts format_version 1 (members with no binding, reported as missing a platform), 2 (bindings restored), 3 (graph/error vocabulary), and 4 (every ensemble entry source: 'extra_entry_sources' restores each 'add_entry_from' source with its own condition). Restores each ensemble's kind, commit_rights, timeouts, member overrides, and entry/exit wiring exactly; a document field this build does not know how to restore — including an unknown 'kind' value — is a refusal naming the field, never a silent default. The response lists every agent node left without a platform so the caller knows what to fill in before running the graph."
+        description = "Create a new graph from an exported document (the object graph_export returns). Always creates a new graph — never updates or overwrites an existing one; if the name is already taken in workdir, a numeric suffix is applied and the response says which name was used. Validates the document exactly as graph_add_node/graph_add_edge/graph_add_ensemble would, all-or-nothing: nothing is written if any part is rejected. Accepts format_version 1 (members with no binding, reported as missing a platform), 2 (bindings restored), 3 (graph/error vocabulary), 4 (every ensemble entry source: 'extra_entry_sources' restores each 'add_entry_from' source with its own condition), and 5 (crew-bound ensembles and nodes: 'crew' restores the binding when a crew of that name exists locally, else the response lists it under 'missing_crews' and the ensemble cannot dispatch until the crew is created). Restores each ensemble's kind, commit_rights, timeouts, member overrides, and entry/exit wiring exactly; a document field this build does not know how to restore — including an unknown 'kind' value — is a refusal naming the field, never a silent default. The response lists every agent node left without a platform, and every crew an imported ensemble references that does not exist locally, so the caller knows what to fill in before running the graph."
     )]
     pub(crate) async fn graph_import(
         &self,
@@ -148,7 +148,8 @@ impl TaskTriggerHandler {
             hooks: std::collections::BTreeMap::new(),
         };
 
-        self.db
+        let missing_crews = self
+            .db
             .import_graph(&lp, &plan)
             .map_err(|e| write_error("graph_import", &e))?;
         if crate::domain::project::should_auto_register(std::path::Path::new(workdir)) {
@@ -164,6 +165,7 @@ impl TaskTriggerHandler {
             "graph_id": lp.id,
             "name": lp.name,
             "nodes_missing_platform": missing_platform,
+            "missing_crews": missing_crews,
             "terminals": plan.terminals,
         })))
     }

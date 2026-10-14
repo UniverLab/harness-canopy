@@ -71,7 +71,7 @@ stdio. Connect any MCP-capable AI CLI with `canopy mcp`.
 | `skill_list` | List skills available from the dynamic skill store and configured catalogs |
 | `skill_get` | Fetch a skill's full instructions by name, cloning or refreshing it on demand |
 
-## Graph engine (34)
+## Graph engine (39)
 
 | Tool | Description |
 |---|---|
@@ -89,6 +89,11 @@ stdio. Connect any MCP-capable AI CLI with `canopy mcp`.
 | `graph_add_ensemble` | Add an ensemble to a graph |
 | `graph_update_ensemble` | Update an ensemble |
 | `graph_delete_ensemble` | Delete an ensemble |
+| `crew_list` | List every crew: name, description, version, ordered members, and how many ensembles/nodes/hooks bind it |
+| `crew_get` | Show one crew and every binding of it |
+| `crew_create` | Create a crew from an ordered member list, or seed it from an ensemble's current members |
+| `crew_update` | Update a crew's ordered members, description and/or name; bound ensembles pick it up at their next dispatch |
+| `crew_delete` | Delete a crew (refused while any ensemble, node or hook still binds it) |
 | `graph_get` | Get a graph with its specs, nodes, and edges |
 | `graph_list` | List graphs |
 | `graph_run` | Run a graph (optionally `start_node_id` to start the first spec at a chosen node) |

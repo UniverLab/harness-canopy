@@ -139,6 +139,10 @@ pub(crate) fn build_ensemble_unit(spec: &EnsembleUnitSpec) -> BuiltEnsembleUnit 
         },
         commit_rights: spec.commit_rights,
         created_at: now,
+
+        crew_id: None,
+        crew_name: None,
+        crew_version_applied: None,
     };
 
     BuiltEnsembleUnit {
@@ -395,6 +399,7 @@ pub(crate) fn reject_empty_ensemble_update(
             params.add_entry_condition.is_some(),
             params.remove_entry_from.is_some(),
             params.commit_rights.is_some(),
+            params.crew.is_some(),
         ],
         "graph_update_ensemble",
     )

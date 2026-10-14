@@ -28,7 +28,7 @@ pub(crate) use crate::daemon::handler_ensemble_plan::{
 impl TaskTriggerHandler {
     #[tool(
         name = "graph_add_ensemble",
-        description = "Create an ensemble in ONE call: N (2–8 parallel, 2–16 cascade/round_robin) agent-node members sharing one prompt by default, plus the quorum that waits for all of them, consolidates their outputs (attributed per member), and routes onward. Set `commit_rights: true` to make this ensemble the graph's designated committer (B37) — whichever member the running strategy dispatches becomes the committer for that run. Members differ by platform/model, and each may set its own prompt_override to review the same input from a different angle instead of sharing the template. Each member may also set its own timeout_minutes, overriding the ensemble's shared value for that member only. Each member (and the ensemble as a whole) may also set `infra_retry_limit`/`infra_crash_max_seconds`/`infra_backoff_seconds`, overriding the platform's config.toml value (then the engine default 2/60/30) for the infra-crash retry budget — member wins over ensemble. (Formerly called 'fusion' — retired to avoid colliding with OpenRouter's fusion technology.) on_pass_to/on_fail_to accept a node id or another ensemble's id (chained: the quorum fans out to every member of that ensemble, no intermediate node). Entry rewiring, extra entry sources, and deletion are graph_update_ensemble/graph_delete_ensemble."
+        description = "Create an ensemble in ONE call: N (2–8 parallel, 2–16 cascade/round_robin) agent-node members sharing one prompt by default, plus the quorum that waits for all of them, consolidates their outputs (attributed per member), and routes onward. Set `commit_rights: true` to make this ensemble the graph's designated committer (B37) — whichever member the running strategy dispatches becomes the committer for that run. Members differ by platform/model, and each may set its own prompt_override to review the same input from a different angle instead of sharing the template. Each member may also set its own timeout_minutes, overriding the ensemble's shared value for that member only. Each member (and the ensemble as a whole) may also set `infra_retry_limit`/`infra_crash_max_seconds`/`infra_backoff_seconds`, overriding the platform's config.toml value (then the engine default 2/60/30) for the infra-crash retry budget — member wins over ensemble. (Formerly called 'fusion' — retired to avoid colliding with OpenRouter's fusion technology.) on_pass_to/on_fail_to accept a node id or another ensemble's id (chained: the quorum fans out to every member of that ensemble, no intermediate node). Entry rewiring, extra entry sources, and deletion are graph_update_ensemble/graph_delete_ensemble. Pass `crew` to bind an existing crew's ordered members instead of a literal `members` list (mutually exclusive with `members`/blueprint members); later crew edits reach this ensemble at its next dispatch."
     )]
     pub(crate) async fn graph_add_ensemble(
         &self,
@@ -89,18 +89,55 @@ impl TaskTriggerHandler {
             }
         };
 
-        let members: Vec<EnsembleMemberSpec> = match &params.members {
-            Some(explicit) => match validate_ensemble_members(explicit, kind) {
-                Ok(members) => members,
-                Err(e) => return Ok(error_result(&e)),
-            },
-            None => match &blueprint {
-                Some(bp) => bp.members.clone(),
+        // CM49: a crew binding is mutually exclusive with a literal member
+        // list (explicit or blueprint-supplied). When bound, the crew's
+        // ordered members seed the unit; the binding is stamped after insert.
+        let crew_name = params
+            .crew
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if crew_name.is_some()
+            && (params.members.is_some()
+                || blueprint.as_ref().is_some_and(|bp| !bp.members.is_empty()))
+        {
+            return Ok(error_result("pass crew or members, never both."));
+        }
+        let members: Vec<EnsembleMemberSpec> = match crew_name {
+            Some(name) => match self.db.crew_get(name).map_err(internal_error)? {
+                Some((_crew, crew_members)) => crew_members
+                    .iter()
+                    .map(|member| {
+                        (
+                            member.platform.clone(),
+                            member.model.clone(),
+                            None,
+                            member.timeout_minutes,
+                            member.infra_retry_limit,
+                            member.infra_crash_max_seconds,
+                            member.infra_backoff_seconds,
+                        )
+                    })
+                    .collect(),
                 None => {
-                    return Ok(error_result(
-                        "Provide members, or a blueprint that supplies them.",
-                    ))
+                    return Ok(error_result(&format!(
+                        "crew '{name}' not found. Create it with crew_create first."
+                    )))
                 }
+            },
+            None => match &params.members {
+                Some(explicit) => match validate_ensemble_members(explicit, kind) {
+                    Ok(members) => members,
+                    Err(e) => return Ok(error_result(&e)),
+                },
+                None => match &blueprint {
+                    Some(bp) => bp.members.clone(),
+                    None => {
+                        return Ok(error_result(
+                            "Provide members, or a blueprint that supplies them.",
+                        ))
+                    }
+                },
             },
         };
         // Blueprint-supplied members bypass `validate_ensemble_members` above
@@ -351,6 +388,12 @@ impl TaskTriggerHandler {
                 &built.edges,
             )
             .map_err(internal_error)?;
+
+        if let Some(name) = crew_name {
+            if let Err(e) = self.db.bind_ensemble_to_crew(&built.ensemble.id, name) {
+                return Ok(error_result(&e.to_string()));
+            }
+        }
 
         Ok(build_id_result(&built.ensemble.id, "ensemble_id"))
     }

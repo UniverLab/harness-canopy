@@ -253,6 +253,61 @@ member's own `resume: false` still forces a cold start. The TUI graph view rende
 collapsed as one box (`name [N models]` + quorum) with live per-member
 state while running, expandable on inspect.
 
+### Availability at dispatch
+
+The roster (`roster_set`, or `canopy roster set` — see the
+[CLI reference](cli-reference.md) and [MCP tools](mcp-tools.md)) declares a
+platform/model pair — or a whole platform — out for a while. At dispatch an
+ensemble simply skips members whose pair is effectively unavailable: a
+`parallel` quorum spawns (and counts) only the available members, a
+`cascade` falls through them in order, and a `round_robin` rotation steps
+over them without leaving the full member list's index space, so a member
+that comes back is picked up where the rotation already is. Nothing is
+edited — the member list stays as written, the filter is re-evaluated at
+every dispatch (a pair declared out mid-run is skipped from its next
+dispatch on), and an entry past its `until` simply reads as available
+again.
+
+An ensemble blocks instead of dispatching when the roster leaves it
+unrunnable: every member unavailable (any kind), or a `parallel` ensemble
+with fewer available members than `min_pass`. A single `agent` node or
+agent hook whose pair is unavailable blocks the spec the same way. These
+blocks go through the ordinary blocked path — the graph pauses with a
+blocker naming the pair and its reason, `on_blocked` fires, and no attempt
+is spent, so an availability block never burns the attempt ceiling; clear
+the entry (or wait out its `until`) and relaunch. `graph_preflight` never
+probes an unavailable pair: it lists them under `skipped_unavailable` and
+counts an ensemble the roster would block as `would_fail`.
+
+### Crews
+
+A **crew** is a named, ordered list of members — `(platform, model, timeout,
+infra-retry budget)` — kept in one place, so the same "designer crew" or
+"implementer crew" is written once instead of copied into every graph. The
+tools are `crew_list`, `crew_get`, `crew_create` (`members` or
+`from_ensemble`), `crew_update` and `crew_delete`; the CLI mirrors them as
+`canopy crew list | show | create --from-ensemble | delete` (member editing
+is MCP/TUI only). `from_ensemble` refuses an ensemble whose members carry a
+per-member `prompt_override` — a review panel with its own angles stays
+literal.
+
+An ensemble binds to a crew with `graph_add_ensemble {crew}` or
+`graph_update_ensemble {crew: "name"}`; `crew: null` unbinds and keeps the
+current member rows as literal members. A bound ensemble renders the shared
+`prompt_template` for every member. Binding replaces the member rows through
+the one sync path and clamps `min_pass` to the crew size. Member order is
+meaningful: `cascade` tries it in order, `round_robin` rotates through it,
+and a crew-bound `agent` node takes the first member the roster reports
+available.
+
+Editing a crew reaches every bound ensemble at its next dispatch: the engine
+re-syncs a bound ensemble's members just before it dispatches (never while a
+member is in flight), and `crew_update` also syncs every bound ensemble whose
+graph is not `running`/`pausing` immediately. A node or hook names a crew in
+its config (`{"crew": "name"}`) instead of `platform`; `crew_delete` is
+refused while anything still binds the crew and the error lists every
+binding.
+
 ### No-verdict blocks
 
 A parallel or round-robin ensemble that exits with no verdict and no

@@ -29,7 +29,7 @@ use rmcp::ErrorData as McpError;
 impl TaskTriggerHandler {
     #[tool(
         name = "graph_update_ensemble",
-        description = "Update an ensemble's shared prompt (propagated to every member without its own prompt_override), member list (platform/model/prompt_override/timeout_minutes/infra_retry_limit/infra_crash_max_seconds/infra_backoff_seconds — added/removed/replaced by position), quorum config (min_pass, straggler_timeout_minutes, timeout_minutes, infra_retry_limit, infra_crash_max_seconds, infra_backoff_seconds — clearable with null like straggler_timeout_minutes), entry wiring (from_node/condition replaces every entry; add_entry_from/remove_entry_from add or detach one entry source so several nodes can enter with no relay), and/or exit wiring (on_pass_to/on_fail_to take a node id or another ensemble's id to chain quorums with no intermediate node) — all in one call, without touching individual member nodes directly. `commit_rights` sets whether this ensemble is the graph's designated committer (B37); editable on a running graph, same as prompt/quorum config."
+        description = "Update an ensemble's shared prompt (propagated to every member without its own prompt_override), member list (platform/model/prompt_override/timeout_minutes/infra_retry_limit/infra_crash_max_seconds/infra_backoff_seconds — added/removed/replaced by position), quorum config (min_pass, straggler_timeout_minutes, timeout_minutes, infra_retry_limit, infra_crash_max_seconds, infra_backoff_seconds — clearable with null like straggler_timeout_minutes), entry wiring (from_node/condition replaces every entry; add_entry_from/remove_entry_from add or detach one entry source so several nodes can enter with no relay), and/or exit wiring (on_pass_to/on_fail_to take a node id or another ensemble's id to chain quorums with no intermediate node) — all in one call, without touching individual member nodes directly. `commit_rights` sets whether this ensemble is the graph's designated committer (B37); editable on a running graph, same as prompt/quorum config. `crew` binds this ensemble to a crew by name, or `null` unbinds it (keeping the current members literal) — mutually exclusive with `members`."
     )]
     pub(crate) async fn graph_update_ensemble(
         &self,
@@ -56,6 +56,38 @@ impl TaskTriggerHandler {
 
         if let Err(e) = reject_empty_ensemble_update(&params) {
             return Ok(error_result(&e));
+        }
+
+        // CM49: binding/unbinding a crew is its own operation — never mixed
+        // with a literal member list. `Some(name)` binds, `null` (`Some(None)`)
+        // unbinds and keeps the current rows as literal members.
+        if let Some(crew) = &params.crew {
+            if params.members.is_some() {
+                return Ok(error_result("pass members or crew, never both."));
+            }
+            return match crew {
+                Some(name) => {
+                    if let Err(e) = validate_topology_mutation_allowed(
+                        &self.db,
+                        details.ensemble.spec_id.as_deref(),
+                        details.ensemble.graph_id.as_deref(),
+                    ) {
+                        return Ok(error_result(&e));
+                    }
+                    match self.db.bind_ensemble_to_crew(&ensemble_id, name) {
+                        Ok(_) => Ok(success_result(&format!(
+                            "Ensemble '{ensemble_id}' bound to crew '{name}'."
+                        ))),
+                        Err(e) => Ok(error_result(&e.to_string())),
+                    }
+                }
+                None => match self.db.unbind_ensemble_crew(&ensemble_id) {
+                    Ok(()) => Ok(success_result(&format!(
+                        "Ensemble '{ensemble_id}' unbound; its member rows are literal now."
+                    ))),
+                    Err(e) => Ok(error_result(&e.to_string())),
+                },
+            };
         }
 
         if let Err(e) = validate_ensemble_infra_updates(&params) {

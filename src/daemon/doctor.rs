@@ -2405,6 +2405,8 @@ mod tests {
                 queue_id: None,
                 workdir_override: None,
                 idea: None,
+
+                crew: None,
             }],
         );
         let graph_id = "graph-stale-prompt";
@@ -2501,6 +2503,8 @@ mod tests {
                 queue_id: None,
                 workdir_override: None,
                 idea: None,
+
+                crew: None,
             }],
         );
         append_graph_hook_hits("Resilience Graph", &hooks, &mut hits);
@@ -2528,6 +2532,10 @@ mod tests {
                 round_robin_index: None,
                 commit_rights: false,
                 created_at: chrono::Utc::now(),
+
+                crew_id: None,
+                crew_name: None,
+                crew_version_applied: None,
             },
             members: vec![EnsembleMember {
                 ensemble_id: "ens-reviewers".to_string(),

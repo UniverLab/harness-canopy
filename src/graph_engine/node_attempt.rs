@@ -8,6 +8,11 @@ pub(crate) struct NodeAttemptSetup {
     pub(crate) run_id: String,
     pub(crate) commit_watch: Option<CommitRightsWatch>,
     pub(crate) committer_head_before: Option<String>,
+    /// CM49: the crew this node is bound to, if any, and the index of the
+    /// member resolved at dispatch (the rotation's starting point on an
+    /// infra retry).
+    pub(crate) crew: Option<String>,
+    pub(crate) crew_index: Option<usize>,
 }
 /// Mutable retry state for one node dispatch, borrowed by the retry driver.
 pub(crate) struct NodeRetryCtx<'a> {
@@ -17,6 +22,10 @@ pub(crate) struct NodeRetryCtx<'a> {
     pub(crate) resume_candidate: Option<String>,
     pub(crate) resume_crosses_spec: bool,
     pub(crate) iteration_value: usize,
+    /// CM49: crew binding for this dispatch, and the index last resolved —
+    /// an infra retry rotates past it (wrapping).
+    pub(crate) crew: Option<String>,
+    pub(crate) crew_index: Option<usize>,
 }
 
 impl GraphEngine {
@@ -95,7 +104,36 @@ impl GraphEngine {
             .get_graph_node(node_id)
             .map_err(|e| anyhow!("Graph node '{}' lookup failed: {e}", node_id))?
             .ok_or_else(|| anyhow!("Graph node '{}' not found.", node_id))?;
-        let node = node_fresh;
+        let mut node = node_fresh;
+        // CM49: a crew-bound agent node resolves its (platform, model) from the
+        // crew here, at dispatch, so the run row records the RESOLVED pair
+        // (`executed_pair_for_node` reads this config) and the node never names
+        // a harness. `node_availability_blocker` already refused a missing crew
+        // or one with no available member, so a pair is expected here.
+        let mut crew_bound: Option<(String, usize)> = None;
+        if let Some(crew) = node
+            .config
+            .get("crew")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+        {
+            if let Some((platform, model, index)) = self.db.resolve_crew_pair(&crew, None)? {
+                if let Value::Object(map) = &mut node.config {
+                    map.insert("platform".to_string(), Value::String(platform));
+                    match model {
+                        Some(model) => {
+                            map.insert("model".to_string(), Value::String(model));
+                        }
+                        None => {
+                            map.remove("model");
+                        }
+                    }
+                }
+                crew_bound = Some((crew, index));
+            }
+        }
         let (resume_candidate, resume_crosses_spec) = self
             .resolve_node_resume(ctx, resumable_sessions, node_id)
             .await?;
@@ -164,6 +202,10 @@ impl GraphEngine {
             None
         };
 
+        let (crew, crew_index) = match crew_bound {
+            Some((crew, index)) => (Some(crew), Some(index)),
+            None => (None, None),
+        };
         Ok(NodeAttemptSetup {
             node,
             resume_candidate,
@@ -171,7 +213,32 @@ impl GraphEngine {
             run_id,
             commit_watch,
             committer_head_before,
+            crew,
+            crew_index,
         })
+    }
+
+    /// A clone of `base` with the resolved crew pair injected (`platform` +
+    /// `model`), used to run a crew-bound node on a specific member.
+    fn crew_node_with_pair(
+        &self,
+        base: &GraphNode,
+        platform: String,
+        model: Option<String>,
+    ) -> GraphNode {
+        let mut clone = base.clone();
+        if let Value::Object(map) = &mut clone.config {
+            map.insert("platform".to_string(), Value::String(platform));
+            match model {
+                Some(model) => {
+                    map.insert("model".to_string(), Value::String(model));
+                }
+                None => {
+                    map.remove("model");
+                }
+            }
+        }
+        clone
     }
 
     pub(crate) async fn run_node_with_infra_retries(
@@ -182,12 +249,54 @@ impl GraphEngine {
     ) -> Result<(NodeExecution, GraphNodeRun, bool)> {
         let (retry_limit, crash_max_secs, backoff_secs) = read_infra_config(retry.node);
         let mut attempt: u32 = 0;
+        // CM49: for a crew-bound node the pair for the NEXT attempt is chosen
+        // as soon as the current attempt infra-fails, so the retry run row
+        // records the member it will actually run. Cached here and consumed at
+        // the top of the next iteration. A crew with no available member stops
+        // the retries and surfaces the block naming the crew.
+        let mut pending: Option<GraphNode> = None;
         loop {
+            let node_owned: Option<GraphNode>;
+            let node: &GraphNode = match retry.crew.clone() {
+                Some(crew) => {
+                    let resolved = match pending.take() {
+                        Some(next) => Some(next),
+                        None => {
+                            let after = if attempt == 0 { None } else { retry.crew_index };
+                            match self.db.resolve_crew_pair(&crew, after)? {
+                                Some((platform, model, index)) => {
+                                    retry.crew_index = Some(index);
+                                    Some(self.crew_node_with_pair(retry.node, platform, model))
+                                }
+                                None => None,
+                            }
+                        }
+                    };
+                    match resolved {
+                        Some(next) => {
+                            node_owned = Some(next);
+                            node_owned.as_ref().unwrap()
+                        }
+                        None => {
+                            let owner = format!("node '{}'", retry.node.name);
+                            let run = self.db.get_graph_run(&retry.run_id)?.ok_or_else(|| {
+                                anyhow!("Graph run '{}' not found after execution.", retry.run_id)
+                            })?;
+                            return Ok((
+                                super::crew_resolve::crew_exhausted_execution(&owner, &crew),
+                                run,
+                                true,
+                            ));
+                        }
+                    }
+                }
+                None => retry.node,
+            };
             let execution = self
                 .execute_node(
                     ctx.lp,
                     ctx.spec,
-                    retry.node,
+                    node,
                     retry.previous_output,
                     ctx.spec_start_head,
                     state.spec_committed_head.as_deref(),
@@ -203,14 +312,7 @@ impl GraphEngine {
                 anyhow!("Graph run '{}' not found after execution.", retry.run_id)
             })?;
 
-            if is_infra_crash(
-                retry.node,
-                &execution,
-                &run,
-                attempt,
-                retry_limit,
-                crash_max_secs,
-            ) {
+            if is_infra_crash(node, &execution, &run, attempt, retry_limit, crash_max_secs) {
                 // CB82: a shutdown kill must take no edge at all (via the
                 // run_spec/spec_step guards) — never the `Error` edge. Settle
                 // the attempt as interrupted without inserting a new retry row.
@@ -227,7 +329,7 @@ impl GraphEngine {
                     return Ok((
                         interrupted_execution(format!(
                             "Node '{}' interrupted: daemon shutdown.",
-                            retry.node.name
+                            node.name
                         )),
                         run,
                         false,
@@ -250,11 +352,22 @@ impl GraphEngine {
                     && new_candidate.is_some()
                     && new_candidate == retry.resume_candidate;
                 retry.resume_candidate = new_candidate;
+                // CM49: pick the next crew member for the retry now, so the
+                // retry run row records the pair it will run.
+                if let Some(crew) = retry.crew.clone() {
+                    if let Some((platform, model, index)) =
+                        self.db.resolve_crew_pair(&crew, retry.crew_index)?
+                    {
+                        retry.crew_index = Some(index);
+                        pending = Some(self.crew_node_with_pair(retry.node, platform, model));
+                    }
+                }
+                let retry_node = pending.as_ref().unwrap_or(node);
                 retry.run_id = begin_infra_retry(
                     &self.db,
                     ctx.lp,
                     ctx.spec,
-                    retry.node,
+                    retry_node,
                     retry.previous_output,
                     retry.iteration_value as i64,
                     &retry.run_id,
@@ -277,7 +390,7 @@ impl GraphEngine {
             let had_infra_crash = finalize_infra_crash_shape(
                 &self.db,
                 &retry.run_id,
-                retry.node,
+                node,
                 &mut execution,
                 &mut run,
                 attempt,

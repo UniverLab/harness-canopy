@@ -1248,6 +1248,10 @@ mod tests {
             kind: crate::domain::graphs::EnsembleKind::Parallel,
             round_robin_index: None,
             created_at: Utc::now(),
+
+            crew_id: None,
+            crew_name: None,
+            crew_version_applied: None,
         };
         let members: Vec<EnsembleMember> = member_nodes
             .iter()

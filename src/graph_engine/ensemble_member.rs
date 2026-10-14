@@ -494,20 +494,26 @@ impl GraphEngine {
         };
         let mut tried_no_verdict: Vec<(String, String, Value, String)> = Vec::new();
         let mut members_ran: i64 = 0;
+        let mut skipped_unavailable = false;
         for offset in 0..member_count {
             let current_index = (start_index + offset).rem_euclid(member_count);
             let member = &details.members[current_index as usize];
             // CM48: the rotation advances past an unavailable member without
             // running it and without counting it as a verdict-less attempt.
             if !available_members.contains(member.node_id.as_str()) {
+                skipped_unavailable = true;
                 continue;
             }
             members_ran += 1;
             // The rotation cursor is the member that actually ran. Without
             // this, a member stepped over as unavailable leaves the cursor on
-            // the member before it, and the next dispatch replays the skipped
-            // members again (starving the ones that did run).
-            round_robin_pins.insert(ensemble.id.clone(), current_index);
+            // the member before it, and a bounce back into the ensemble
+            // replays the skipped members instead of continuing. Only the
+            // roster's own skips move the cursor here — an empty roster skips
+            // nothing, and its cursor discipline stays exactly as before.
+            if skipped_unavailable {
+                round_robin_pins.insert(ensemble.id.clone(), current_index);
+            }
             // CB82: start no further round-robin member during shutdown —
             // settle the member's active run if any, return interrupted with
             // no join row (`push_round_robin_no_verdict` not called).
@@ -558,6 +564,23 @@ impl GraphEngine {
             // The rotation's next start is the one after the member that
             // actually ran — skipped members are not a position of their own.
             let next_after_winner = (current_index + 1).rem_euclid(member_count);
+            // CM48: `round_robin_index` is stored as the index actually used.
+            // The eager walk-start write (`start + 1`) predicts the member
+            // after the first one tried; once the walk has stepped over
+            // unavailable members that prediction no longer names the member
+            // after the one that won — it can point at the winner itself
+            // (dispatching it twice in a row) or at a member that never ran.
+            // Re-store it from the member that actually won, so the next
+            // dispatch's rotation continues after it and the stored index
+            // agrees with the join output. An empty roster skips nothing,
+            // so the stored index is exactly today's.
+            let next_reported = if skipped_unavailable {
+                self.db
+                    .update_ensemble_kind(&ensemble.id, None, Some(Some(next_after_winner)))?;
+                next_after_winner
+            } else {
+                next_index
+            };
             let join_execution = round_robin_winner_execution(
                 ensemble,
                 details,
@@ -567,7 +590,7 @@ impl GraphEngine {
                 // The members actually run so far, minus this one — a member
                 // stepped over as unavailable above is not "tried".
                 members_ran - 1,
-                next_after_winner,
+                next_reported,
             );
             let join_execution = apply_round_robin_commit_watch(
                 join_execution,

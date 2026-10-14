@@ -124,6 +124,19 @@ pub struct Ensemble {
     /// the role (the ensemble), not to whichever CLI happens to fill it.
     pub commit_rights: bool,
     pub created_at: DateTime<Utc>,
+    /// CM49: the crew this ensemble is bound to, by id — the join key every
+    /// binding query uses. `None` means literal members (or a pending import
+    /// that named a crew not yet created locally, see `crew_name`).
+    pub crew_id: Option<String>,
+    /// CM49: the binding's crew name. Persisted so a pending import (a bound
+    /// ensemble whose crew does not exist locally yet) keeps the name it must
+    /// dispatch against once the crew is created; kept current on rename for
+    /// display.
+    pub crew_name: Option<String>,
+    /// CM49: the crew version whose members are currently materialized in
+    /// `ensemble_members`. The lazy sync rewrites the rows and advances this
+    /// when it is behind the crew's `version`.
+    pub crew_version_applied: Option<i64>,
 }
 
 impl Ensemble {

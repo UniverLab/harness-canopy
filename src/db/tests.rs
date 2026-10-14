@@ -6962,6 +6962,8 @@ mod hooks_tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         }
     }
 

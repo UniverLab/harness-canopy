@@ -618,6 +618,10 @@ mod tests {
             kind: super::EnsembleKind::Parallel,
             round_robin_index: None,
             created_at: chrono::Utc::now(),
+
+            crew_id: None,
+            crew_name: None,
+            crew_version_applied: None,
         };
         assert_eq!(ensemble.effective_straggler_timeout_minutes(), 30);
 
@@ -652,6 +656,10 @@ mod tests {
             kind: super::EnsembleKind::Parallel,
             round_robin_index: None,
             created_at: chrono::Utc::now(),
+
+            crew_id: None,
+            crew_name: None,
+            crew_version_applied: None,
         };
         assert_eq!(ensemble.quorum_grace_minutes, None);
 

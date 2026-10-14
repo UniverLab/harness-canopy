@@ -24,6 +24,7 @@ use crate::domain::sandbox::Sandbox;
 mod agent_exec;
 mod agent_spawn;
 mod check;
+mod crew_resolve;
 mod decision;
 mod directed;
 mod dirty_commit;
@@ -496,6 +497,8 @@ mod tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let mut hooks = std::collections::BTreeMap::new();
         hooks.insert(GraphHookEvent::OnCompleted, vec![hook_v1]);
@@ -517,6 +520,8 @@ mod tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let mut hooks = std::collections::BTreeMap::new();
         hooks.insert(GraphHookEvent::OnCompleted, vec![hook_v2.clone()]);
@@ -564,6 +569,8 @@ mod tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let mut hooks = std::collections::BTreeMap::new();
         hooks.insert(GraphHookEvent::OnSpecCompleted, vec![v1]);
@@ -586,6 +593,8 @@ mod tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let mut hooks = std::collections::BTreeMap::new();
         hooks.insert(GraphHookEvent::OnSpecCompleted, vec![v2.clone()]);
@@ -2432,6 +2441,10 @@ mod tests {
             round_robin_index: None,
             commit_rights: true,
             created_at: chrono::Utc::now(),
+
+            crew_id: None,
+            crew_name: None,
+            crew_version_applied: None,
         };
         let member = EnsembleMember {
             ensemble_id: "ens1".to_string(),
@@ -3703,6 +3716,8 @@ mod tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let mut hooks = std::collections::BTreeMap::new();
         hooks.insert(GraphHookEvent::OnCompleted, vec![hook]);
@@ -3778,6 +3793,8 @@ mod tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let mut hooks = std::collections::BTreeMap::new();
         hooks.insert(GraphHookEvent::OnFailed, vec![hook]);
@@ -7548,6 +7565,10 @@ echo done
                 kind: crate::domain::graphs::EnsembleKind::Parallel,
                 round_robin_index: None,
                 created_at: chrono::Utc::now(),
+
+                crew_id: None,
+                crew_name: None,
+                crew_version_applied: None,
             },
             members: member_node_ids
                 .iter()
@@ -10353,6 +10374,302 @@ echo done
 
     // ── B28: timeout-as-fail routing ────────────────────────────────────
 
+    fn test_crew_member(platform: &str) -> crate::domain::crews::CrewMember {
+        crate::domain::crews::CrewMember {
+            position: 0,
+            platform: platform.to_string(),
+            model: None,
+            timeout_minutes: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
+        }
+    }
+
+    /// A terminal check node the crew-node tests route into on pass, so a
+    /// passing agent node has an outgoing edge and the spec completes.
+    fn insert_crew_done_node(db: &Database, spec_id: &str) {
+        db.insert_graph_node(&GraphNode {
+            id: "node-done".to_string(),
+            spec_id: Some(spec_id.to_string()),
+            graph_id: None,
+            name: "done".to_string(),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({
+                "command": "printf ok",
+                "success_condition": "exit_code_0"
+            }),
+            position: 2,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+        db.insert_graph_edge(&GraphEdge {
+            id: "edge-next".to_string(),
+            spec_id: Some(spec_id.to_string()),
+            graph_id: None,
+            from_node: "node-crew".to_string(),
+            to_node: "node-done".to_string(),
+            condition: GraphEdgeCondition::Always,
+        })
+        .unwrap();
+    }
+
+    /// CM49 req 6: a crew-bound agent node resolves its pair at spawn from the
+    /// crew's order — the first member the roster reports available — and the
+    /// run row records that resolved pair.
+    #[tokio::test]
+    async fn crew_bound_node_picks_first_available_member() {
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+        let db_path = dir.path().join(TEST_DB_FILENAME);
+        let fake_home = setup_multi_cli_home(&[
+            (
+                "crew-a",
+                &write_self_reporting_member_script(
+                    dir.path(),
+                    "crew-a.sh",
+                    "printf ok",
+                    &db_path,
+                    "node-crew",
+                    "pass",
+                    None,
+                ),
+            ),
+            (
+                "crew-b",
+                &write_self_reporting_member_script(
+                    dir.path(),
+                    "crew-b.sh",
+                    "printf ok",
+                    &db_path,
+                    "node-crew",
+                    "pass",
+                    None,
+                ),
+            ),
+        ]);
+        db.crew_create(
+            "impl",
+            None,
+            &[test_crew_member("crew-a"), test_crew_member("crew-b")],
+        )
+        .unwrap();
+        // `crew-a` (the first member) is unavailable on the roster, so the
+        // node must resolve to `crew-b`.
+        db.roster_upsert(crate::db::roster_entries::NewRosterEntry {
+            platform: "crew-a",
+            model_pattern: None,
+            state: crate::db::roster_entries::RosterState::Unavailable,
+            reason: Some("quota"),
+            until: None,
+        })
+        .unwrap();
+
+        db.insert_graph_node(&GraphNode {
+            id: "node-crew".to_string(),
+            spec_id: Some(spec_id.clone()),
+            graph_id: None,
+            name: "crew-agent".to_string(),
+            kind: GraphNodeKind::Agent,
+            config: serde_json::json!({
+                "crew": "impl",
+                "prompt_template": "ignored by the test script",
+                "timeout_minutes": 5,
+            }),
+            position: 1,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+        insert_crew_done_node(&db, &spec_id);
+
+        let _home = HomeGuard::set(fake_home.path());
+        engine
+            .run_graph(graph_id.clone(), None, None, None, None, None)
+            .await
+            .unwrap();
+        drop(_home);
+
+        let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
+        let run = runs.iter().find(|r| r.node_id == "node-crew").unwrap();
+        assert_eq!(run.status, GraphRunStatus::Pass, "{:?}", run.output);
+        assert_eq!(
+            run.executed_platform.as_deref(),
+            Some("crew-b"),
+            "the first AVAILABLE crew member runs, skipping the unavailable one"
+        );
+    }
+
+    /// CM49 req 6: an infra crash on a crew-bound node rotates to the NEXT
+    /// available crew member (wrapping), and the retry's run names it.
+    #[tokio::test]
+    async fn crew_node_infra_retry_rotates_to_next_member() {
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+        let db_path = dir.path().join(TEST_DB_FILENAME);
+        let fake_home = setup_multi_cli_home(&[
+            (
+                "crew-a",
+                &write_member_script(dir.path(), "crew-a.sh", "exit 1"),
+            ),
+            (
+                "crew-b",
+                &write_self_reporting_member_script(
+                    dir.path(),
+                    "crew-b.sh",
+                    "printf ok",
+                    &db_path,
+                    "node-crew",
+                    "pass",
+                    None,
+                ),
+            ),
+        ]);
+        db.crew_create(
+            "impl",
+            None,
+            &[test_crew_member("crew-a"), test_crew_member("crew-b")],
+        )
+        .unwrap();
+        db.insert_graph_node(&GraphNode {
+            id: "node-crew".to_string(),
+            spec_id: Some(spec_id.clone()),
+            graph_id: None,
+            name: "crew-agent".to_string(),
+            kind: GraphNodeKind::Agent,
+            config: serde_json::json!({
+                "crew": "impl",
+                "prompt_template": "ignored by the test script",
+                "timeout_minutes": 5,
+                "infra_retry_limit": 1,
+                "infra_crash_max_seconds": 60,
+                "infra_backoff_seconds": 0,
+            }),
+            position: 1,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+        insert_crew_done_node(&db, &spec_id);
+
+        let _home = HomeGuard::set(fake_home.path());
+        engine
+            .run_graph(graph_id.clone(), None, None, None, None, None)
+            .await
+            .unwrap();
+        drop(_home);
+
+        let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
+        let platforms: Vec<String> = runs
+            .iter()
+            .filter(|r| r.node_id == "node-crew")
+            .filter_map(|r| r.executed_platform.clone())
+            .collect();
+        assert!(
+            platforms.iter().any(|p| p == "crew-a"),
+            "the first attempt ran the first crew member: {platforms:?}"
+        );
+        assert!(
+            platforms.iter().any(|p| p == "crew-b"),
+            "the retry rotated to the next crew member: {platforms:?}"
+        );
+        assert_eq!(
+            db.get_graph_spec(&spec_id).unwrap().unwrap().status,
+            GraphSpecStatus::Completed,
+            "the rotated retry recovered the node"
+        );
+    }
+
+    /// CM49 req 5(a): the engine's lazy sync at ensemble dispatch picks up a
+    /// crew edit made while the graph was running (the eager path did not
+    /// apply it) — the member rows are rewritten before the members run.
+    #[tokio::test]
+    async fn crew_lazy_sync_at_dispatch_picks_up_a_mid_run_edit() {
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+        let db_path = dir.path().join(TEST_DB_FILENAME);
+        let fake_home = setup_multi_cli_home(&[
+            (
+                "seed-a",
+                &write_member_script(dir.path(), "seed-a.sh", "printf ok"),
+            ),
+            (
+                "seed-b",
+                &write_member_script(dir.path(), "seed-b.sh", "printf ok"),
+            ),
+            (
+                "new-a",
+                &write_self_reporting_member_script(
+                    dir.path(),
+                    "new-a.sh",
+                    "printf ok",
+                    &db_path,
+                    "m1",
+                    "pass",
+                    None,
+                ),
+            ),
+            (
+                "new-b",
+                &write_self_reporting_member_script(
+                    dir.path(),
+                    "new-b.sh",
+                    "printf ok",
+                    &db_path,
+                    "m2",
+                    "pass",
+                    None,
+                ),
+            ),
+        ]);
+        // The ensemble starts bound to a crew holding the "seed" pair.
+        insert_kind_ensemble(
+            &db,
+            &spec_id,
+            crate::domain::graphs::EnsembleKind::Parallel,
+            &[("m1", "seed-a"), ("m2", "seed-b")],
+        );
+        db.crew_create(
+            "impl",
+            None,
+            &[test_crew_member("seed-a"), test_crew_member("seed-b")],
+        )
+        .unwrap();
+        db.bind_ensemble_to_crew("ens1", "impl").unwrap();
+
+        // A mid-run crew edit: the DB layer is used directly, so the eager
+        // sync (which lives in the `crew_update` MCP tool) does NOT run —
+        // exactly the state a running graph is left in.
+        db.crew_update(
+            "impl",
+            Some(&[test_crew_member("new-a"), test_crew_member("new-b")]),
+            None,
+            None,
+        )
+        .unwrap();
+        let stale = db.get_ensemble_details("ens1").unwrap().unwrap();
+        assert_eq!(
+            stale.ensemble.crew_version_applied,
+            Some(1),
+            "stale before the dispatch (the edit was not eagerly applied)"
+        );
+
+        let _home = HomeGuard::set(fake_home.path());
+        engine
+            .run_graph(graph_id.clone(), None, None, None, None, None)
+            .await
+            .unwrap();
+        drop(_home);
+
+        let after = db.get_ensemble_details("ens1").unwrap().unwrap();
+        let platforms: Vec<String> = after
+            .members
+            .iter()
+            .map(|member| member.platform.clone())
+            .collect();
+        assert_eq!(
+            platforms,
+            vec!["new-a".to_string(), "new-b".to_string()],
+            "the lazy dispatch sync rewrote the member rows to the crew edit"
+        );
+        assert_eq!(after.ensemble.crew_version_applied, Some(2));
+    }
+
     /// An agent node that times out must resolve as a FAIL that traverses
     /// its fail edge — not abort the whole spec. The fail edge routes to a
     /// recovery node whose marker file only appears if the graph actually
@@ -10906,6 +11223,8 @@ echo done
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         db.update_graph_completion_hook(&graph_id, Some(&hook))
             .unwrap();
@@ -10964,6 +11283,8 @@ echo done
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         db.update_graph_completion_hook(&graph_id, Some(&hook))
             .unwrap();
@@ -11021,6 +11342,8 @@ echo done
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         db.update_graph_completion_hook(&graph_id, Some(&hook))
             .unwrap();
@@ -11946,6 +12269,8 @@ echo done
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         db.update_graph_completion_hook(&graph_id, Some(&hook))
             .unwrap();
@@ -12006,6 +12331,8 @@ echo done
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         db.update_graph_completion_hook(&graph_id, Some(&hook))
             .unwrap();
@@ -12326,6 +12653,8 @@ echo done
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         db.update_graph_completion_hook(&graph_id, Some(&hook))
             .unwrap();
@@ -12386,6 +12715,8 @@ echo done
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let mut hooks = std::collections::BTreeMap::new();
         hooks.insert(
@@ -12452,6 +12783,8 @@ echo done
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let mut hooks = std::collections::BTreeMap::new();
         hooks.insert(
@@ -12525,6 +12858,8 @@ echo done
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let mut hooks = std::collections::BTreeMap::new();
         hooks.insert(crate::domain::graphs::GraphHookEvent::OnFailed, vec![hook]);
@@ -12599,6 +12934,8 @@ echo done
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let mut hooks = std::collections::BTreeMap::new();
         hooks.insert(crate::domain::graphs::GraphHookEvent::OnBlocked, vec![hook]);
@@ -12659,6 +12996,8 @@ echo done
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let passing = crate::domain::graphs::GraphCompletionHook {
             platform: Some("test-cli".to_string()),
@@ -12673,6 +13012,8 @@ echo done
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let mut hooks = std::collections::BTreeMap::new();
         hooks.insert(
@@ -12748,6 +13089,8 @@ echo done
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let mut hooks = std::collections::BTreeMap::new();
         hooks.insert(
@@ -12787,6 +13130,8 @@ echo done
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         }
     }
 
@@ -13036,6 +13381,8 @@ echo done
             workdir_override: None,
             idea: None,
             target_session_name: Some(target_name.to_string()),
+
+            crew: None,
         }
     }
 
@@ -13339,6 +13686,8 @@ echo done
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let mut hooks = std::collections::BTreeMap::new();
         hooks.insert(
@@ -13407,6 +13756,8 @@ echo done
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let mut hooks = std::collections::BTreeMap::new();
         hooks.insert(
@@ -13479,6 +13830,8 @@ echo done
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let mut hooks = std::collections::BTreeMap::new();
         hooks.insert(
@@ -13520,6 +13873,8 @@ echo done
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let mut hooks = std::collections::BTreeMap::new();
         hooks.insert(GraphHookEvent::OnFailed, vec![hook]);
@@ -13588,6 +13943,8 @@ echo done
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let mut hooks = std::collections::BTreeMap::new();
         hooks.insert(GraphHookEvent::OnSpecCompleted, vec![hook]);
@@ -14052,6 +14409,10 @@ echo done
             kind: crate::domain::graphs::EnsembleKind::Parallel,
             round_robin_index: None,
             created_at: now,
+
+            crew_id: None,
+            crew_name: None,
+            crew_version_applied: None,
         };
         let ensemble_members: Vec<EnsembleMember> = members
             .iter()
@@ -14202,6 +14563,10 @@ echo done
             kind,
             round_robin_index,
             created_at: now,
+
+            crew_id: None,
+            crew_name: None,
+            crew_version_applied: None,
         };
         let ensemble_members: Vec<EnsembleMember> = members
             .iter()
@@ -14942,6 +15307,10 @@ echo done
             kind: EnsembleKind::Parallel,
             round_robin_index: None,
             created_at: chrono::Utc::now(),
+
+            crew_id: None,
+            crew_name: None,
+            crew_version_applied: None,
         };
         let ensemble_members = vec![
             EnsembleMember {
@@ -15514,6 +15883,10 @@ echo done
             kind: crate::domain::graphs::EnsembleKind::Parallel,
             round_robin_index: None,
             created_at: now,
+
+            crew_id: None,
+            crew_name: None,
+            crew_version_applied: None,
         };
         let ensemble_members: Vec<EnsembleMember> = overrides
             .iter()
@@ -16074,6 +16447,10 @@ echo done
             kind: crate::domain::graphs::EnsembleKind::Parallel,
             round_robin_index: None,
             created_at: now,
+
+            crew_id: None,
+            crew_name: None,
+            crew_version_applied: None,
         };
         let ensemble_members: Vec<EnsembleMember> = members
             .iter()
@@ -16241,6 +16618,10 @@ echo done
                 None
             },
             created_at: now,
+
+            crew_id: None,
+            crew_name: None,
+            crew_version_applied: None,
         };
         let ensemble_members: Vec<EnsembleMember> = members
             .iter()
@@ -16420,6 +16801,10 @@ echo done
                 None
             },
             created_at: now,
+
+            crew_id: None,
+            crew_name: None,
+            crew_version_applied: None,
         };
         let ensemble_members: Vec<EnsembleMember> = members
             .iter()
@@ -16587,6 +16972,10 @@ echo done
                 None
             },
             created_at: now,
+
+            crew_id: None,
+            crew_name: None,
+            crew_version_applied: None,
         };
         let ensemble_members: Vec<EnsembleMember> = members
             .iter()
@@ -17340,6 +17729,83 @@ echo done
         );
     }
 
+    /// CM48: after a walk that stepped over an unavailable member, the
+    /// stored `round_robin_index` is re-stored from the member that actually
+    /// won. The eager walk-start write (`start + 1`) would otherwise leave
+    /// the cursor pointing at the winner itself — dispatching it twice in a
+    /// row — and disagreeing with the join output's `next_index`.
+    #[tokio::test]
+    async fn round_robin_stores_the_index_from_the_member_that_actually_won() {
+        let (dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+        let db_path = dir.path().join(TEST_DB_FILENAME);
+        let fake_home = setup_multi_cli_home(&[
+            (
+                "rr-nv",
+                &write_member_script(dir.path(), "nv.sh", "printf ok"),
+            ),
+            (
+                "rr-win",
+                &write_self_reporting_member_script(
+                    dir.path(),
+                    "win.sh",
+                    "sleep 1",
+                    &db_path,
+                    "rr-win",
+                    "pass",
+                    None,
+                ),
+            ),
+        ]);
+        // The rotation starts on the no-verdict member, steps over the
+        // unavailable one, and the third member wins.
+        insert_kind_ensemble(
+            &db,
+            &spec_id,
+            crate::domain::graphs::EnsembleKind::RoundRobin,
+            &[
+                ("rr-nv", "rr-nv"),
+                ("rr-out", "rr-out"),
+                ("rr-win", "rr-win"),
+            ],
+        );
+        mark_member_platform_unavailable(&db, "rr-out");
+
+        let _home = HomeGuard::set(fake_home.path());
+        engine
+            .run_graph(graph_id.clone(), None, None, None, None, None)
+            .await
+            .unwrap();
+        drop(_home);
+
+        assert!(
+            member_runs(&db, &spec_id, "rr-out").is_empty(),
+            "an unavailable member must never run"
+        );
+        assert!(
+            !member_runs(&db, &spec_id, "rr-win").is_empty(),
+            "the rotation advanced past the unavailable member to the winner"
+        );
+        let join = join_run(&db, &spec_id, "join1");
+        let out = join.output.as_ref().unwrap();
+        assert_eq!(out["kind"], "round_robin");
+        assert_eq!(out["winner"]["node_id"], "rr-win");
+        assert_eq!(
+            out["members_tried"], 2,
+            "the skipped member is not counted as tried"
+        );
+        assert_eq!(
+            out["next_index"], 0,
+            "the join reports the rotation continuing after the winner"
+        );
+        let ens = db.get_ensemble("ens1").unwrap().unwrap();
+        assert_eq!(
+            ens.round_robin_index,
+            Some(0),
+            "the stored index is re-stored from the member that actually won (the eager \
+             walk-start write leaves Some(1), which would dispatch rr-win twice in a row)"
+        );
+    }
+
     /// CM48: a cascade steps over an unavailable member in order — the
     /// no-verdict report names the member that actually ran and never the
     /// skipped one.
@@ -17539,6 +18005,8 @@ echo done
                 queue_id: None,
                 workdir_override: None,
                 idea: None,
+
+                crew: None,
             }],
         );
         db.update_graph_hooks(&graph_id, &hooks).unwrap();
@@ -22176,6 +22644,8 @@ exit 0
             queue_id: queue_id.map(str::to_string),
             workdir_override: None,
             idea: idea.map(str::to_string),
+
+            crew: None,
         };
         let mut hooks = std::collections::BTreeMap::new();
         hooks.insert(GraphHookEvent::OnCompleted, vec![hook]);
@@ -22435,6 +22905,8 @@ exit 0
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let mut b_hooks = std::collections::BTreeMap::new();
         b_hooks.insert(GraphHookEvent::OnCompleted, vec![b_hook]);
@@ -22803,6 +23275,8 @@ exit 0
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let mut hooks = std::collections::BTreeMap::new();
         hooks.insert(GraphHookEvent::OnCompleted, vec![hook]);
@@ -24377,6 +24851,8 @@ exit 0
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let mut interactive = base();
         interactive.target_session_id = Some("sess".to_string());
@@ -24494,6 +24970,10 @@ exit 0
                 round_robin_index: None,
                 commit_rights: false,
                 created_at: chrono::Utc::now(),
+
+                crew_id: None,
+                crew_name: None,
+                crew_version_applied: None,
             },
             members: vec![EnsembleMember {
                 ensemble_id: "ens-missing".to_string(),

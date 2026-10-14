@@ -521,6 +521,10 @@ mod tests {
                 round_robin_index: None,
                 commit_rights: false,
                 created_at: chrono::Utc::now(),
+
+                crew_id: None,
+                crew_name: None,
+                crew_version_applied: None,
             },
             members: members
                 .iter()

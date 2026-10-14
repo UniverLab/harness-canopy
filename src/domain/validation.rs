@@ -96,6 +96,15 @@ pub fn validate_ensembles_in_graph(
     edges: &[GraphEdge],
 ) -> Result<(), String> {
     for details in ensembles {
+        // CM49: a crew-bound ensemble's members are materialized by the sync
+        // path (which runs before its first dispatch), so its member wiring is
+        // not yet present at import time; its size is the crew's and is
+        // enforced at bind/dispatch. Literature/variable wiring checks
+        // (entry/join/exit targets) still apply.
+        if details.ensemble.crew_id.is_some() || details.ensemble.crew_name.is_some() {
+            ensure_ensemble_wiring_ends(details, ensembles, nodes, edges)?;
+            continue;
+        }
         ensure_ensemble_membership_bounds(details)?;
         ensure_ensemble_wiring_ends(details, ensembles, nodes, edges)?;
         ensure_ensemble_member_edges(details, nodes, edges)?;

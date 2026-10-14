@@ -22,14 +22,14 @@
 //! unknown `kind` value — is a refusal naming the field, never a silent
 //! default (CB62, CB71).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::domain::graphs::{
-    member_bounds, Ensemble, EnsembleDetails, EnsembleKind, EnsembleMember, Graph, GraphEdge,
-    GraphEdgeCondition, GraphNode, GraphNodeKind,
+    member_bounds, Ensemble, EnsembleDetails, EnsembleKind, EnsembleMember, Graph,
+    GraphCompletionHook, GraphEdge, GraphEdgeCondition, GraphHookEvent, GraphNode, GraphNodeKind,
 };
 use crate::domain::validation::{
     validate_ensemble_min_pass, validate_ensembles_in_graph, validate_graph, GraphEdgeView,
@@ -48,7 +48,7 @@ pub use validation::*;
 /// vocabulary, `break` still read as `error` on import), and `4` (current:
 /// every ensemble entry source). An unrecognized or missing version is a
 /// refusal, never a best-effort parse (decision 6).
-pub const GRAPH_EXPORT_FORMAT_VERSION: i64 = 4;
+pub const GRAPH_EXPORT_FORMAT_VERSION: i64 = 5;
 
 // Ensemble member count bounds live in `member_bounds` (the single shared
 // definition both this domain layer and the daemon's authoring-time
@@ -72,6 +72,10 @@ pub struct GraphExportDocument {
     /// by node name (not id) — `None` when the graph has no infra node.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub infra_node: Option<String>,
+    /// CM49: the graph's completion hooks, restored verbatim on import so a
+    /// `crew`-bound agent hook round-trips. Omitted when the graph has none.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub hooks: BTreeMap<GraphHookEvent, Vec<GraphCompletionHook>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -165,6 +169,13 @@ pub struct GraphExportEnsemble {
     pub straggler_timeout_minutes: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quorum_grace_minutes: Option<i64>,
+    /// CM49: the crew this ensemble is bound to, by name. When set, `members`
+    /// is empty — the members live in the crew, shared across graphs. Import
+    /// keeps the reference when a crew of this name exists locally, and
+    /// otherwise leaves the ensemble pending (`missing_crews`) until one is
+    /// created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crew: Option<String>,
     pub members: Vec<GraphExportEnsembleMember>,
 }
 
@@ -422,7 +433,7 @@ mod tests {
         let doc = build_export_document(&lp, &nodes, &edges, &[]).unwrap();
         let raw = serde_json::to_string(&doc).unwrap();
         // struct field order drives serde_json's key order.
-        assert!(raw.starts_with("{\"format_version\":4"));
+        assert!(raw.starts_with("{\"format_version\":5"));
     }
 
     #[test]
@@ -444,8 +455,8 @@ mod tests {
     }
 
     #[test]
-    fn import_accepts_format_versions_1_through_4() {
-        for version in [1, 2, 3, 4] {
+    fn import_accepts_format_versions_1_through_5() {
+        for version in [1, 2, 3, 4, 5] {
             let value = serde_json::json!({
                 "format_version": version, "name": "x", "nodes": [], "edges": [], "ensembles": []
             });
@@ -510,7 +521,7 @@ mod tests {
             ..document
         })
         .unwrap();
-        assert_eq!(exported["format_version"], 4);
+        assert_eq!(exported["format_version"], 5);
         assert_eq!(exported["edges"][0]["condition"], "error");
     }
 
@@ -533,6 +544,8 @@ mod tests {
             }],
             ensembles: vec![],
             infra_node: None,
+
+            hooks: Default::default(),
         };
         let err = build_import_plan(&doc, "new-graph").unwrap_err();
         assert!(err.contains("ghost"));
@@ -553,6 +566,8 @@ mod tests {
             edges: vec![],
             ensembles: vec![],
             infra_node: None,
+
+            hooks: Default::default(),
         };
         let err = build_import_plan(&doc, "new-graph").unwrap_err();
         assert!(err.contains("join"));
@@ -614,6 +629,8 @@ mod tests {
             ],
             ensembles: vec![],
             infra_node: None,
+
+            hooks: Default::default(),
         };
         let plan = build_import_plan(&doc, "graph-2").unwrap();
         let missing = agent_nodes_missing_platform(&plan);
@@ -674,6 +691,9 @@ mod tests {
             kind: EnsembleKind::Parallel,
             round_robin_index: None,
             created_at: Utc::now(),
+            crew_id: None,
+            crew_name: None,
+            crew_version_applied: None,
         };
         let members = member_ids
             .iter()
@@ -1053,8 +1073,12 @@ mod tests {
                         timeout_minutes: None,
                     },
                 ],
+
+                crew: None,
             }],
             infra_node: None,
+
+            hooks: Default::default(),
         };
 
         let error = build_import_plan(&document, "graph-1").unwrap_err();
@@ -1117,8 +1141,12 @@ mod tests {
                         timeout_minutes: None,
                     },
                 ],
+
+                crew: None,
             }],
             infra_node: None,
+
+            hooks: Default::default(),
         };
 
         let error = build_import_plan(&document, "graph-1").unwrap_err();
@@ -1309,8 +1337,12 @@ mod tests {
                         timeout_minutes: None,
                     },
                 ],
+
+                crew: None,
             }],
             infra_node: None,
+
+            hooks: Default::default(),
         };
         let error = build_import_plan(&document, "graph-1").unwrap_err();
         assert!(error.contains("unknown ensemble") && error.contains("Ghost"));
@@ -1461,6 +1493,8 @@ mod tests {
             }],
             ensembles: vec![],
             infra_node: None,
+
+            hooks: Default::default(),
         };
         let plan = build_import_plan(&doc, "new-graph")
             .expect("unconfigured platform must import, not error");
@@ -1634,8 +1668,12 @@ mod tests {
                     prompt_override: None,
                     timeout_minutes: None,
                 }],
+
+                crew: None,
             }],
             infra_node: None,
+
+            hooks: Default::default(),
         };
         let err = build_import_plan(&doc, "new-graph").unwrap_err();
         assert!(err.contains("2-8 members"));
@@ -1685,8 +1723,12 @@ mod tests {
                         timeout_minutes: None,
                     })
                     .collect(),
+
+                crew: None,
             }],
             infra_node: None,
+
+            hooks: Default::default(),
         }
     }
 
@@ -1780,8 +1822,12 @@ mod tests {
                         timeout_minutes: None,
                     },
                 ],
+
+                crew: None,
             }],
             infra_node: None,
+
+            hooks: Default::default(),
         };
         let err = build_import_plan(&doc, "new-graph").unwrap_err();
         assert!(
@@ -1842,8 +1888,12 @@ mod tests {
                         timeout_minutes: None,
                     },
                 ],
+
+                crew: None,
             }],
             infra_node: None,
+
+            hooks: Default::default(),
         };
         let plan = build_import_plan(&doc, "new-graph").unwrap();
         assert_eq!(plan.ensembles[0].ensemble.quorum_grace_minutes, Some(0));
@@ -1902,8 +1952,12 @@ mod tests {
                         timeout_minutes: None,
                     },
                 ],
+
+                crew: None,
             }],
             infra_node: None,
+
+            hooks: Default::default(),
         };
         let plan = build_import_plan(&doc, "new-graph").unwrap();
         let ensemble_plan = &plan.ensembles[0];
@@ -1960,6 +2014,8 @@ mod tests {
             ],
             ensembles: vec![],
             infra_node: None,
+
+            hooks: Default::default(),
         };
         let err = build_import_plan(&doc, "new-graph").unwrap_err();
         assert!(err.contains('C'), "err should name C: {err}");
@@ -2003,6 +2059,8 @@ mod tests {
             }],
             ensembles: vec![],
             infra_node: None,
+
+            hooks: Default::default(),
         };
         let err = build_import_plan(&doc, "new-graph").unwrap_err();
         assert!(err.to_lowercase().contains("entry"), "err: {err}");
@@ -2039,6 +2097,8 @@ mod tests {
             }],
             ensembles: vec![],
             infra_node: None,
+
+            hooks: Default::default(),
         };
         let plan =
             build_import_plan(&doc, "new-graph").expect("missing fail is a terminal, not an error");
@@ -2069,6 +2129,8 @@ mod tests {
             edges: vec![],
             ensembles: vec![],
             infra_node: None,
+
+            hooks: Default::default(),
         };
         let err = build_import_plan(&doc, "new-graph").unwrap_err();
         assert!(
@@ -2130,6 +2192,8 @@ mod tests {
             ],
             ensembles: vec![],
             infra_node: None,
+
+            hooks: Default::default(),
         };
         let result = build_import_plan(&doc, "new-graph");
         assert!(
@@ -2368,8 +2432,12 @@ mod tests {
                         timeout_minutes: None,
                     },
                 ],
+
+                crew: None,
             }],
             infra_node: None,
+
+            hooks: Default::default(),
         };
         build_import_plan(&doc, "new-graph").unwrap()
     }
@@ -2436,8 +2504,12 @@ mod tests {
                         timeout_minutes: None,
                     },
                 ],
+
+                crew: None,
             }],
             infra_node: None,
+
+            hooks: Default::default(),
         };
         let err = build_import_plan(&doc, "new-graph").unwrap_err();
         assert!(err.contains("kind"), "err must name the field: {err}");

@@ -460,6 +460,7 @@ pub(crate) fn build_graph_completion_hook(
         && !modes.target_name
         && params.platform.is_none()
         && params.command.is_none()
+        && !non_blank(params.crew.as_deref())
     {
         return Err(
             "Interactive hook requires exactly one of 'target_session_id' \
@@ -472,20 +473,20 @@ pub(crate) fn build_graph_completion_hook(
         return build_interactive_graph_hook(params, &modes);
     }
 
-    if modes.platform && modes.command {
+    if (modes.platform || modes.crew) && modes.command {
         return Err("Hook cannot have both a 'command' and an agent payload \
-             ('platform'/'prompt'). Configure exactly one."
+             ('platform'/'crew'/'prompt'). Configure exactly one."
             .to_string());
     }
-    if !modes.platform && !modes.command {
+    if !modes.platform && !modes.crew && !modes.command {
         return Err("Hook must have either a 'command', an agent payload \
-             ('platform' + 'prompt'), an interactive payload \
+             ('platform'/'crew' + 'prompt'), an interactive payload \
              ('target_session_id' + 'prompt'), or a graph payload \
              ('target_graph_id'). Configure exactly one."
             .to_string());
     }
 
-    if modes.platform {
+    if modes.platform || modes.crew {
         return build_agent_graph_hook(params);
     }
 
@@ -504,6 +505,8 @@ pub(crate) struct GraphHookModes {
     pub(crate) target_name: bool,
     /// `platform` set — agent payload mode.
     pub(crate) platform: bool,
+    /// CM49: `crew` set — agent payload mode (the alternative to `platform`).
+    pub(crate) crew: bool,
     /// `command` set — shell command mode.
     pub(crate) command: bool,
     /// `prompt` set — the payload text.
@@ -525,6 +528,7 @@ pub(crate) fn graph_hook_modes(params: &GraphCompletionHookParams) -> GraphHookM
         target: non_blank(params.target_session_id.as_deref()),
         target_name: non_blank(params.target_session_name.as_deref()),
         platform: non_blank(params.platform.as_deref()),
+        crew: non_blank(params.crew.as_deref()),
         command: non_blank(params.command.as_deref()),
         prompt: non_blank(params.prompt.as_deref()),
         model: non_blank(params.model.as_deref()),
@@ -540,6 +544,7 @@ pub(crate) fn build_graph_hook_target(
     modes: &GraphHookModes,
 ) -> Result<crate::domain::graphs::GraphCompletionHook, String> {
     if modes.platform
+        || modes.crew
         || modes.command
         || modes.target
         || modes.target_name
@@ -547,7 +552,7 @@ pub(crate) fn build_graph_hook_target(
         || modes.effort
     {
         return Err(
-            "Graph hook ('target_graph_id') must not set 'platform', 'command', \
+            "Graph hook ('target_graph_id') must not set 'platform', 'crew', 'command', \
              'target_session_id', 'target_session_name', 'model', or 'effort'. Configure exactly one hook mode."
                 .to_string(),
         );
@@ -592,6 +597,8 @@ pub(crate) fn build_graph_hook_target(
             .filter(|s| !s.is_empty())
             .map(str::to_string),
         idea,
+
+        crew: None,
     })
 }
 
@@ -602,10 +609,10 @@ pub(crate) fn build_interactive_graph_hook(
     params: &GraphCompletionHookParams,
     modes: &GraphHookModes,
 ) -> Result<crate::domain::graphs::GraphCompletionHook, String> {
-    if modes.platform || modes.command || modes.model || modes.effort {
+    if modes.platform || modes.crew || modes.command || modes.model || modes.effort {
         return Err(
             "Interactive hook ('target_session_id'/'target_session_name' + 'prompt') must not \
-             set 'platform', 'model', 'effort', or 'command'. Configure exactly one hook mode."
+             set 'platform', 'crew', 'model', 'effort', or 'command'. Configure exactly one hook mode."
                 .to_string(),
         );
     }
@@ -652,15 +659,35 @@ pub(crate) fn build_interactive_graph_hook(
         workdir_override: None,
         idea: None,
         target_session_name,
+
+        crew: None,
     })
 }
 
-/// The agent hook: platform + prompt (+ optional model/effort). A prompt
-/// that is empty once trimmed is rejected, not silently dropped.
+/// The agent hook: `platform` or `crew` (exactly one) + prompt (+ optional
+/// model/effort). A prompt that is empty once trimmed is rejected, not
+/// silently dropped.
 pub(crate) fn build_agent_graph_hook(
     params: &GraphCompletionHookParams,
 ) -> Result<crate::domain::graphs::GraphCompletionHook, String> {
-    let platform = params.platform.as_deref().unwrap().trim().to_string();
+    let platform = params
+        .platform
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let crew = params
+        .crew
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    if platform.is_some() && crew.is_some() {
+        return Err("Agent hook must have either 'platform' or 'crew', never both.".to_string());
+    }
+    if platform.is_none() && crew.is_none() {
+        return Err("Agent hook must have a 'platform' or a 'crew'.".to_string());
+    }
     let prompt = params
         .prompt
         .as_deref()
@@ -682,7 +709,8 @@ pub(crate) fn build_agent_graph_hook(
         .map(str::to_string);
 
     Ok(crate::domain::graphs::GraphCompletionHook {
-        platform: Some(platform),
+        platform,
+        crew,
         model,
         effort,
         prompt: Some(prompt),
@@ -716,5 +744,7 @@ pub(crate) fn build_command_graph_hook(
         queue_id: None,
         workdir_override: None,
         idea: None,
+
+        crew: None,
     })
 }

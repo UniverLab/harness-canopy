@@ -23,9 +23,15 @@ use crate::domain::graphs::GraphRunStatus;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GraphCompletionHook {
     /// CLI platform for agent hooks (e.g. "mimo", "claude"). `None` for
-    /// command and interactive hooks.
+    /// command and interactive hooks. Mutually exclusive with `crew`: a hook
+    /// names either a platform or a crew, never both.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub platform: Option<String>,
+    /// CM49: crew name for agent hooks, the alternative to `platform`. The
+    /// hook resolves its pair from the crew at fire time (first member the
+    /// roster reports available). `None` for command/interactive hooks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crew: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
     /// Hook prompt template (agent and interactive hooks). `None` for
@@ -84,7 +90,7 @@ impl GraphCompletionHook {
     /// Whether this is an agent hook (launches a CLI process).
     #[allow(dead_code)]
     pub fn is_agent(&self) -> bool {
-        self.platform.is_some()
+        self.platform.is_some() || self.crew.is_some()
     }
 
     /// Whether this is an interactive hook (enqueues a scheduled send to a

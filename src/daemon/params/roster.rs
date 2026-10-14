@@ -11,7 +11,7 @@ pub struct RosterSetParams {
     pub model_pattern: Option<String>,
     /// `available` or `unavailable`.
     pub state: String,
-    /// Why the pair is unavailable. Ignored for `available`.
+    /// Why the pair is unavailable. Stored on the entry whatever the state.
     pub reason: Option<String>,
     /// RFC 3339 UTC instant the unavailability expires. Only valid with
     /// `state=unavailable`, and must be in the future.

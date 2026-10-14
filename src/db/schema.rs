@@ -636,4 +636,58 @@ impl Database {
         .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
         Ok(())
     }
+
+    /// CM49: create the `crews`/`crew_members` tables and the two binding
+    /// columns on `ensembles`. Guarded `CREATE TABLE IF NOT EXISTS` + a
+    /// pragma-guarded `ALTER TABLE` — a no-op on a fresh database (already in
+    /// `BASE_SCHEMA_BATCHES`) and on an already-migrated one, and the thing
+    /// that adds them to a database created before they existed.
+    pub(in crate::db) fn migrate_crews_tables(conn: &Connection) -> Result<()> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS crews (
+                id TEXT PRIMARY KEY,
+                name TEXT UNIQUE NOT NULL,
+                description TEXT,
+                version INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+            );
+            CREATE TABLE IF NOT EXISTS crew_members (
+                crew_id TEXT NOT NULL REFERENCES crews(id) ON DELETE CASCADE,
+                position INTEGER NOT NULL,
+                platform TEXT NOT NULL,
+                model TEXT,
+                timeout_minutes INTEGER,
+                infra_retry_limit INTEGER,
+                infra_crash_max_seconds INTEGER,
+                infra_backoff_seconds INTEGER,
+                PRIMARY KEY (crew_id, position)
+            );",
+        )
+        .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
+        for (table, column, ddl_type) in [
+            ("ensembles", "crew_id", "TEXT REFERENCES crews(id)"),
+            ("ensembles", "crew_name", "TEXT"),
+            ("ensembles", "crew_version_applied", "INTEGER"),
+        ] {
+            let has_column: bool = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) FROM pragma_table_info('{table}') \
+                         WHERE name = '{column}'"
+                    ),
+                    [],
+                    |row| Ok(row.get::<_, i32>(0)? > 0),
+                )
+                .unwrap_or(false);
+            if !has_column {
+                conn.execute(
+                    &format!("ALTER TABLE {table} ADD COLUMN {column} {ddl_type}"),
+                    [],
+                )
+                .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
+            }
+        }
+        Ok(())
+    }
 }

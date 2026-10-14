@@ -54,16 +54,30 @@ pub(crate) fn split_targets_by_availability(
 }
 
 /// How many of a graph's ensembles would block at dispatch because of the
-/// roster right now. Read-only; never probes and never writes the roster.
+/// roster right now. Covers the graph-level ensembles AND every bound spec's:
+/// both dispatch through the same roster filter, so a spec-level ensemble the
+/// roster stops must count toward `would_fail` exactly like a graph-level
+/// one. Read-only; never probes and never writes the roster.
 pub(crate) fn roster_blocked_ensemble_count(
     db: &Database,
-    graph_id: &str,
+    details: &crate::domain::graphs::GraphDetails,
     now: &DateTime<Utc>,
 ) -> usize {
-    db.list_ensembles_for_graph(graph_id)
-        .unwrap_or_default()
+    let graph_level = db
+        .list_ensembles_for_graph(&details.lp.id)
+        .unwrap_or_default();
+    let spec_level = details
+        .specs
         .iter()
-        .filter(|details| crate::graph_engine::ensemble_would_block(db, details, now))
+        .flat_map(|spec| {
+            db.list_ensembles_for_spec(&spec.spec.id)
+                .unwrap_or_default()
+        })
+        .collect::<Vec<_>>();
+    graph_level
+        .into_iter()
+        .chain(spec_level)
+        .filter(|ensemble| crate::graph_engine::ensemble_would_block(db, ensemble, now))
         .count()
 }
 
@@ -254,6 +268,10 @@ mod tests {
             kind: EnsembleKind::Parallel,
             round_robin_index: None,
             created_at: now_ts,
+
+            crew_id: None,
+            crew_name: None,
+            crew_version_applied: None,
         };
         let member = crate::domain::graphs::EnsembleMember {
             ensemble_id: "ens-dead".to_string(),
@@ -276,21 +294,125 @@ mod tests {
         )
         .unwrap();
 
+        // A spec-level ensemble bound to the same graph: it dispatches
+        // through the same roster filter as the graph-level one, so a
+        // roster that would stop it must count toward `would_fail` too.
+        db.insert_graph_spec(&crate::domain::graphs::GraphSpec {
+            id: "spec-1".to_string(),
+            graph_id: Some("g1".to_string()),
+            name: "Spec One".to_string(),
+            description: None,
+            position: 1,
+            parallelizable: false,
+            status: crate::domain::graphs::GraphSpecStatus::Pending,
+            started_at: None,
+            completed_at: None,
+            spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
+            spec_committed_head: None,
+            workdir: None,
+            completed_via: None,
+            completed_via_reason: None,
+            completed_via_at: None,
+        })
+        .unwrap();
+        let spec_ensemble = Ensemble {
+            commit_rights: false,
+            id: "ens-spec".to_string(),
+            spec_id: Some("spec-1".to_string()),
+            graph_id: None,
+            name: "Spec Ensemble".to_string(),
+            prompt_template: "tmpl".to_string(),
+            join_node_id: "spec-join".to_string(),
+            entry_from_node: "spec-kickoff".to_string(),
+            entry_condition: GraphEdgeCondition::Always,
+            min_pass: 1,
+            straggler_timeout_minutes: None,
+            quorum_grace_minutes: None,
+            timeout_minutes: 30,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
+            on_pass_to: "spec-join".to_string(),
+            on_fail_to: None,
+            kind: EnsembleKind::Parallel,
+            round_robin_index: None,
+            created_at: now_ts,
+
+            crew_id: None,
+            crew_name: None,
+            crew_version_applied: None,
+        };
+        let spec_member = crate::domain::graphs::EnsembleMember {
+            ensemble_id: "ens-spec".to_string(),
+            node_id: "spec-m1".to_string(),
+            position: 0,
+            platform: "spec-out".to_string(),
+            model: None,
+            prompt_override: None,
+            timeout_minutes: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
+        };
+        let spec_kickoff = crate::domain::graphs::GraphNode {
+            id: "spec-kickoff".to_string(),
+            spec_id: Some("spec-1".to_string()),
+            graph_id: None,
+            name: "spec kickoff".to_string(),
+            kind: crate::domain::graphs::GraphNodeKind::Check,
+            config: serde_json::json!({"command": "true", "success_condition": "exit_code_0"}),
+            position: 1,
+            created_at: now_ts,
+        };
+        let spec_member_node = crate::domain::graphs::GraphNode {
+            id: "spec-m1".to_string(),
+            spec_id: Some("spec-1".to_string()),
+            graph_id: None,
+            name: "spec member".to_string(),
+            kind: crate::domain::graphs::GraphNodeKind::Agent,
+            config: serde_json::json!({ "platform": "spec-out" }),
+            position: 2,
+            created_at: now_ts,
+        };
+        let spec_join_node = crate::domain::graphs::GraphNode {
+            id: "spec-join".to_string(),
+            spec_id: Some("spec-1".to_string()),
+            graph_id: None,
+            name: "spec join".to_string(),
+            kind: crate::domain::graphs::GraphNodeKind::Join,
+            config: serde_json::json!({ "ensemble_id": "ens-spec" }),
+            position: 50,
+            created_at: now_ts,
+        };
+        db.insert_ensemble_unit(
+            &spec_ensemble,
+            &[spec_member],
+            &[spec_kickoff, spec_member_node],
+            &spec_join_node,
+            &[],
+        )
+        .unwrap();
+
+        let details = db.get_graph_details("g1").unwrap().unwrap();
         assert_eq!(
-            roster_blocked_ensemble_count(&db, "g1", &now()),
+            roster_blocked_ensemble_count(&db, &details, &now()),
             0,
             "an empty roster blocks nothing"
         );
         mark_unavailable(&db, "opencode-go", None);
         assert_eq!(
-            roster_blocked_ensemble_count(&db, "g1", &now()),
+            roster_blocked_ensemble_count(&db, &details, &now()),
             1,
-            "the ensemble whose only member is unavailable counts as would_fail"
+            "the graph-level ensemble whose only member is unavailable counts as would_fail"
         );
+        mark_unavailable(&db, "spec-out", None);
         assert_eq!(
-            roster_blocked_ensemble_count(&db, "no-such-graph", &now()),
-            0,
-            "an unknown graph blocks nothing"
+            roster_blocked_ensemble_count(&db, &details, &now()),
+            2,
+            "a spec-level ensemble the roster would block counts too"
         );
     }
 }

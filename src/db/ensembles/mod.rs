@@ -95,8 +95,8 @@ impl Database {
         }
 
         tx.execute(
-            "INSERT INTO ensembles (id, spec_id, graph_id, name, prompt_template, join_node_id, entry_from_node, entry_condition, min_pass, straggler_timeout_minutes, quorum_grace_minutes, timeout_minutes, infra_retry_limit, infra_crash_max_seconds, infra_backoff_seconds, on_pass_to, on_fail_to, kind, round_robin_index, commit_rights, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
+            "INSERT INTO ensembles (id, spec_id, graph_id, name, prompt_template, join_node_id, entry_from_node, entry_condition, min_pass, straggler_timeout_minutes, quorum_grace_minutes, timeout_minutes, infra_retry_limit, infra_crash_max_seconds, infra_backoff_seconds, on_pass_to, on_fail_to, kind, round_robin_index, commit_rights, created_at, crew_id, crew_name, crew_version_applied)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
             params![
                 &ensemble.id,
                 &ensemble.spec_id,
@@ -119,6 +119,9 @@ impl Database {
                 ensemble.round_robin_index,
                 ensemble.commit_rights,
                 ensemble.created_at.timestamp(),
+                &ensemble.crew_id,
+                &ensemble.crew_name,
+                ensemble.crew_version_applied,
             ],
         )?;
 
@@ -151,7 +154,7 @@ impl Database {
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, spec_id, graph_id, name, prompt_template, join_node_id, entry_from_node, entry_condition, min_pass, straggler_timeout_minutes, quorum_grace_minutes, timeout_minutes, infra_retry_limit, infra_crash_max_seconds, infra_backoff_seconds, on_pass_to, on_fail_to, kind, round_robin_index, commit_rights, created_at
+            "SELECT id, spec_id, graph_id, name, prompt_template, join_node_id, entry_from_node, entry_condition, min_pass, straggler_timeout_minutes, quorum_grace_minutes, timeout_minutes, infra_retry_limit, infra_crash_max_seconds, infra_backoff_seconds, on_pass_to, on_fail_to, kind, round_robin_index, commit_rights, created_at, crew_id, crew_name, crew_version_applied
              FROM ensembles WHERE id = ?1",
         )?;
         stmt.query_row(params![ensemble_id], map_ensemble_row)
@@ -710,6 +713,9 @@ fn map_ensemble_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Ensemble> {
         round_robin_index: row.get(18)?,
         commit_rights: row.get(19)?,
         created_at: from_timestamp(row.get(20)?)?,
+        crew_id: row.get(21)?,
+        crew_name: row.get(22)?,
+        crew_version_applied: row.get(23)?,
     })
 }
 
@@ -930,6 +936,10 @@ mod tests {
             kind: EnsembleKind::Parallel,
             round_robin_index: None,
             created_at: now,
+
+            crew_id: None,
+            crew_name: None,
+            crew_version_applied: None,
         };
         let members: Vec<EnsembleMember> = member_ids
             .iter()
@@ -1091,6 +1101,10 @@ mod tests {
             kind: EnsembleKind::Parallel,
             round_robin_index: None,
             created_at: now,
+
+            crew_id: None,
+            crew_name: None,
+            crew_version_applied: None,
         };
         let members: Vec<EnsembleMember> = member_ids
             .iter()
@@ -1561,6 +1575,10 @@ mod tests {
             kind: EnsembleKind::Parallel,
             round_robin_index: None,
             created_at: now,
+
+            crew_id: None,
+            crew_name: None,
+            crew_version_applied: None,
         };
         let members = vec![
             EnsembleMember {
@@ -1719,6 +1737,10 @@ mod tests {
             kind: EnsembleKind::Parallel,
             round_robin_index: None,
             created_at: now,
+
+            crew_id: None,
+            crew_name: None,
+            crew_version_applied: None,
         };
         let members = vec![EnsembleMember {
             ensemble_id: "ens1".to_string(),
@@ -1858,6 +1880,10 @@ mod tests {
             kind: EnsembleKind::Parallel,
             round_robin_index: None,
             created_at: now,
+
+            crew_id: None,
+            crew_name: None,
+            crew_version_applied: None,
         };
         let members: Vec<EnsembleMember> = member_ids
             .iter()
@@ -2214,6 +2240,10 @@ mod tests {
             kind: EnsembleKind::Parallel,
             round_robin_index: None,
             created_at: now,
+
+            crew_id: None,
+            crew_name: None,
+            crew_version_applied: None,
         };
         let members = vec![
             EnsembleMember {
@@ -2379,6 +2409,10 @@ mod tests {
             kind: EnsembleKind::Parallel,
             round_robin_index: None,
             created_at: now,
+
+            crew_id: None,
+            crew_name: None,
+            crew_version_applied: None,
         };
         let members = vec![
             EnsembleMember {
@@ -2515,6 +2549,10 @@ mod tests {
             kind: EnsembleKind::Parallel,
             round_robin_index: None,
             created_at: now,
+
+            crew_id: None,
+            crew_name: None,
+            crew_version_applied: None,
         };
         let members = vec![EnsembleMember {
             ensemble_id: "ens1".to_string(),
@@ -2644,6 +2682,10 @@ mod tests {
             kind: EnsembleKind::Parallel,
             round_robin_index: None,
             created_at: now,
+
+            crew_id: None,
+            crew_name: None,
+            crew_version_applied: None,
         };
         let members = vec![EnsembleMember {
             ensemble_id: "ens1".to_string(),
@@ -2813,6 +2855,10 @@ mod tests {
             kind: EnsembleKind::Cascade,
             round_robin_index: None,
             created_at: now,
+
+            crew_id: None,
+            crew_name: None,
+            crew_version_applied: None,
         };
         let members = vec![EnsembleMember {
             ensemble_id: "ens1".to_string(),
@@ -2914,6 +2960,10 @@ mod tests {
             kind: EnsembleKind::RoundRobin,
             round_robin_index: Some(0),
             created_at: now,
+
+            crew_id: None,
+            crew_name: None,
+            crew_version_applied: None,
         };
         let members = vec![EnsembleMember {
             ensemble_id: "ens1".to_string(),
@@ -3015,6 +3065,10 @@ mod tests {
             kind: EnsembleKind::RoundRobin,
             round_robin_index: Some(2),
             created_at: now,
+
+            crew_id: None,
+            crew_name: None,
+            crew_version_applied: None,
         };
         let members = vec![EnsembleMember {
             ensemble_id: "ens1".to_string(),
@@ -3119,6 +3173,10 @@ mod tests {
             kind: EnsembleKind::RoundRobin,
             round_robin_index: Some(0),
             created_at: now,
+
+            crew_id: None,
+            crew_name: None,
+            crew_version_applied: None,
         };
         let members = vec![EnsembleMember {
             ensemble_id: "ens1".to_string(),

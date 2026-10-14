@@ -111,6 +111,31 @@ impl GraphEngine {
         if node.kind != GraphNodeKind::Agent {
             return None;
         }
+        // CM49: a crew-bound agent node names no platform here — it resolves
+        // its pair at spawn. Block when the crew is missing or has no member
+        // available, naming the crew (spec req 6); otherwise let it through.
+        if let Some(crew) = node
+            .config
+            .get("crew")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            let owner = format!("node '{}'", node.name);
+            if self.db.crew_get(crew).ok().flatten().is_none() {
+                return Some(super::crew_resolve::crew_missing_blocker(&owner, crew));
+            }
+            if self
+                .db
+                .resolve_crew_pair(crew, None)
+                .ok()
+                .flatten()
+                .is_none()
+            {
+                return Some(super::crew_resolve::crew_no_member_blocker(&owner, crew));
+            }
+            return None;
+        }
         let platform = node
             .config
             .get("platform")
@@ -310,6 +335,10 @@ mod tests {
             round_robin_index: Some(0),
             commit_rights: false,
             created_at: chrono::Utc::now(),
+
+            crew_id: None,
+            crew_name: None,
+            crew_version_applied: None,
         }
     }
 
@@ -578,5 +607,64 @@ mod tests {
         assert_eq!(unavailable.len(), 1);
         assert_eq!(unavailable[0].platform, "opencode-go");
         assert_eq!(unavailable[0].model.as_deref(), Some("opencode-go/claude"));
+    }
+
+    fn crew_member(platform: &str) -> crate::domain::crews::CrewMember {
+        crate::domain::crews::CrewMember {
+            position: 0,
+            platform: platform.to_string(),
+            model: None,
+            timeout_minutes: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
+        }
+    }
+
+    /// CM49 req 6: the exact method `run_spec_node_step` calls for a
+    /// crew-bound agent node — it blocks naming the crew when the crew is
+    /// missing or has no available member, and lets it through otherwise
+    /// (CM48 `effective_state` decides each member).
+    #[test]
+    fn node_availability_blocker_handles_crew_bound_nodes() {
+        let (_dir, db, engine) = engine_with_db();
+        let node = GraphNode {
+            id: "n1".to_string(),
+            spec_id: None,
+            graph_id: None,
+            name: "Implementer".to_string(),
+            kind: GraphNodeKind::Agent,
+            config: serde_json::json!({ "crew": "impl" }),
+            position: 0,
+            created_at: chrono::Utc::now(),
+        };
+        // Missing crew -> names the crew.
+        assert!(
+            engine
+                .node_availability_blocker(&node)
+                .unwrap()
+                .contains("crew 'impl' does not exist"),
+            "a missing crew blocks naming it"
+        );
+
+        db.crew_create(
+            "impl",
+            None,
+            &[crew_member("opencode-go"), crew_member("claude")],
+        )
+        .unwrap();
+        // `claude` is available -> no block.
+        assert_eq!(engine.node_availability_blocker(&node), None);
+
+        // Every member unavailable -> block naming the crew.
+        mark_unavailable(&db, "opencode-go");
+        mark_unavailable(&db, "claude");
+        assert!(
+            engine
+                .node_availability_blocker(&node)
+                .unwrap()
+                .contains("crew 'impl' has no available member"),
+            "an all-unavailable crew blocks naming it"
+        );
     }
 }

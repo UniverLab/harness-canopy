@@ -144,6 +144,19 @@ ending in `*` (e.g. `opencode-go/*`) addresses a prefix. The engine skips
 effectively-unavailable members at dispatch and blocks a single unavailable
 agent node or hook — it never edits a graph.
 
+## Crews
+
+| Command | Description |
+|---|---|
+| `canopy crew list` | List every crew with its version, members and binding counts |
+| `canopy crew show <name>` | Show one crew and every binding of it |
+| `canopy crew create <name> --from-ensemble <id> [--description <text>]` | Create a crew seeded from an ensemble's current members |
+| `canopy crew delete <name>` | Delete a crew (refused while any ensemble, node or hook binds it) |
+
+A crew is a named, ordered member list ensembles and agent nodes/hooks bind
+to; member editing is MCP/TUI only (see
+[MCP tools](mcp-tools.md)).
+
 ## Spec queues
 
 | Command | Description |

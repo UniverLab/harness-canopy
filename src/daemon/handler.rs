@@ -91,7 +91,7 @@ pub(crate) use crate::daemon::handler_nodes::{
     resolve_node_kind_and_config, unknown_config_keys, validate_blueprint_exists,
 };
 #[cfg(test)]
-pub(crate) use crate::daemon::handler_preflight::{
+pub(crate) use crate::daemon::handler_preflight_review::{
     build_preflight_reviewer_prompt, resolve_reviewer_skill_section,
 };
 #[cfg(test)]
@@ -300,6 +300,7 @@ impl TaskTriggerHandler {
         router.merge(TaskTriggerHandler::tool_router_nodes());
         router.merge(TaskTriggerHandler::tool_router_notes());
         router.merge(TaskTriggerHandler::tool_router_roster());
+        router.merge(TaskTriggerHandler::tool_router_crew());
         router.merge(TaskTriggerHandler::tool_router_edges());
         router.merge(TaskTriggerHandler::tool_router_ensemble_core());
         router.merge(TaskTriggerHandler::tool_router_copy());
@@ -575,6 +576,11 @@ mod tests {
         "blueprint_delete",
         "blueprint_list",
         "create_seed",
+        "crew_create",
+        "crew_delete",
+        "crew_get",
+        "crew_list",
+        "crew_update",
         "evolve_identity",
         "get_identity",
         "get_tools",
@@ -688,11 +694,16 @@ mod tests {
                 "blueprint_delete|1eaa169fb5798e6d4095b44d1784bfb6a390925ec2e8513ca4dbe542119b69fb|12321d76b465455bffa88b83e79d533adc9ea8c854db8a5af7b5a559c93203a7",
                 "blueprint_list|3408d1c0af354e3890676ffa6fff2237a27a130aaa7b49ca3e0e075f95362584|efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
                 "create_seed|ec16a67a00abe30d8410e1720468a039cd4b4c1a85820894e9b766a6ba868701|804d0cbcfaf45bb6e046d219beeeda3d4981abb00893efbcbc22e9d2547db8e6",
+                "crew_create|731ac03f7474a59d939a6acd2e6cb97344805db5dea7dc185c287468f39a6ce3|fee9ee72a0374a920bb6c867d714b832c32af904c5628af9c16d16abf6d090d9",
+                "crew_delete|6ac73732aec72b5596cf240decbc0da64ea177ae39be4e40f77629371bb81f48|c39d718a7b13b7d9432a28814db6f3e555fee5d78ea8ef1be866966fb8e80889",
+                "crew_get|bba530ed5ff6bd401935954f0ccfcaedc979e4c97882bb2d3900396b964531fa|b2a1d8c6ff42aa877b0a58ddd1455838dc2933a7e8d968fa43b1842cc7d85eb5",
+                "crew_list|de5d37159a9000510178aa3147800fdb7166d2feab4fc55b7a66622d0a0c0cec|b2a1d8c6ff42aa877b0a58ddd1455838dc2933a7e8d968fa43b1842cc7d85eb5",
+                "crew_update|ba98471566591039ce23de7339c7b0355f9715bf8ff743e7ede1715319479689|530c5d983133929d9ea3704500d0871f7109e24eb7089f3155ac5f971f46415f",
                 "evolve_identity|cbae994f70163b304935cc28f006ffac2eec8e1bea905dea2c0fb59bd1c66cdc|5def265f8dddb09352b474cd0068aff558d8993ec3711458fe912388888c42a4",
                 "get_identity|21d80d3a69d9719487bc498958b5600e86bf36519e229d270d2c2ae338383f72|efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
                 "get_tools|ea4c08804bf3a96c7e2e9f9be825feedb18ce038998f953065423576f6783beb|d81bd1699af6df84ec62ca38e6e360f6bae3c9d7f38fa307061f4eff5f84ba6f",
                 "graph_add_edge|0368038fcdc6790d79f1558cf8c5e66aae12d6c475c616849c217670707ec5f7|237b62884bf39b63f372273414288ea9179b392cb42bbb94315978049564986d",
-                "graph_add_ensemble|e7ea79b81a64feee135595c0756c25f8a79beb8f9d44ddba811a601da496100c|9e304dcc249546884473f68d2cfa5e731ebdc119cd6860e6c16196a947077400",
+                "graph_add_ensemble|16d7fefa3784ffc61801c1efa5a3087810a30e9c083dd9033e62958a519ac7fa|93fd882b2db54d49cd6479a25a789d4ab3fcedf7914793646b62879a1bf0fadb",
                 "graph_add_node|5361586ae2254b13fea563379c35fff41f5aeddd2c63ec0e0221800dfa202617|7759661982738bea7c283e567107e2b53e38f778bbbf898afbfcec7dcf704a75",
                 "graph_add_spec|d054dce21de8cb570c402ef4081ebbec27391f28052aaae6b7636b75a6135343|4ca4c5b48737acddab29e888155a58a248bbb7ed0659f1ea56ef5c7620575c0c",
                 "graph_archive|86c62c25726d635c29691b8d1e90acbd2af55efafbf4b2acf866d82146fe9dc2|78e636b08231391ec48053bde18a790e2aede74da54003618003f2febe327bea",
@@ -706,9 +717,9 @@ mod tests {
                 "graph_delete_ensemble|a1de1cf8f4d4a23060cbe860ac4eb31995cb9a166c99da92d209d5f18758940d|93fdb4962aa14f5b7921af9435ab70339df060c397464a3cc4e514bd83cc720b",
                 "graph_delete_node|82e65603faf2df8e3ff9ada9b0cb11f8470db786d91b32fa5ce0f9c3f9afbded|d9668a40560f1659b0e0d6e83a66825f8bb0e36729220f69f27f08bf81a4418f",
                 "graph_events|677db9851982f4cd2d3d0323deed764eb78d7467382b08b0601c4aa1be418857|17b52b076584af5ee1dcf2ef11a7ddcdadb23cbea710303d0972bc7e94c88f8a",
-                "graph_export|9bd5614ab5d34f674cf481e66eeb77578a374934045710faa049689dffdf63f4|7321f3e8e4a31cc2e83e859854951f755aa5f62b8ae46b3151183247f19f458a",
+                "graph_export|ecbcb9a42255ea4787502974d9f75d5e71fee34887d7ada9905b569ec26332a0|7321f3e8e4a31cc2e83e859854951f755aa5f62b8ae46b3151183247f19f458a",
                 "graph_get|8307f64e41f067c8c502c2c431c24e3a4bfe3f9b609c44f62b4688fe37b851d0|df9a23578a82d3e67a8e963f14dfe8435035ab3ce659002aa35d330d6e9976b4",
-                "graph_import|179e8ea66969268fc8c88777eeaadca8e3aac01cb9347b8897b734f2de34a3fe|ddf8cb9f351263109c144f91e08487b7f779d3afaf8b16c2971270b8e78e86ff",
+                "graph_import|3fde95a92dfb21be5c47a8cd32140761b05aadbf10e18a198927153fdf8db2b3|ddf8cb9f351263109c144f91e08487b7f779d3afaf8b16c2971270b8e78e86ff",
                 "graph_list|b06ff3bcc3cd8edcb2a8567034184a69561c8f350386f7647be570871fef776d|479e1ab97c37c84fcc3c4947dd99f6d7687bcb91d74682397d93c033b8e6e8b3",
                 "graph_node_run_get|275f0c286c5378b0e0711d396d62695a2f54d0d1506b5c3ad3172b51fc4cf2ec|06fe6be024365e42918fb964eed4293abe33218115a300116d7d8778f4c14dc6",
                 "graph_node_runs_list|9ad9113d90f883f5c739d9241d6012bf02fe59a4638b62730909301f9b93574b|aa2f6bbbff49f2bbfd014a1637f3c2a14afb08157d90fa6a6b58e4d8c6d64653",
@@ -721,9 +732,9 @@ mod tests {
                 "graph_run|fa3db2dcec66808c55e2a5fe3623346e459ae74d796a4f54d478b85ac51636cc|9e084a80601932dc3d7241700eff51bb77c2764b1c886c8d1631cd8bfab52a27",
                 "graph_schedule_autorun|9981ca74a4d734696c604599f06ea45c74621f5931d9ac344c31f14a9cb3a5f4|7961251cc9060f411c0b3065833a2afe07a1c1ba27fb8ec57780eec33945b70a",
                 "graph_schedule_continue|1a383d649dbb9963e8ef76d698b9293b1a517205b3f61cd48d6c484f0c009c35|ab6b9783dd0a4ddb3cbcbe23c4ccaefa955cdffecead28d2a4ee758c21e27a55",
-                "graph_update|27c9d848836295967b3588395ddf8a8038ef4b881b7402fb4b9bcccf430d4da8|e3d416ecd679f65c07b3885c2b787b2cfc8b2f8aa820dfa6ea251aa90f0e21ae",
+                "graph_update|27c9d848836295967b3588395ddf8a8038ef4b881b7402fb4b9bcccf430d4da8|efcd24f3827ffad22568ecfd9627dd856545d98a47d8a5fd4cbecce117be9ea9",
                 "graph_update_edge|ec07b87be17723f5212d8024e8bca2e2f44c215a417140898e1bab2539b832f5|51dafc02acbe8f4df24d69e44b6afcba2b381c212cfe426dcdbdde3a6196b6da",
-                "graph_update_ensemble|997fcc3e308ab97906249ed356455e45e09f0dbd28e8187b04537aa3a8674e82|057345c979b33231a8aeeb98ff24fc58fba0286db865da227911bbc87da633fe",
+                "graph_update_ensemble|d847b49f4550d31047a892df10c93054da01396841ac78af0afe9353221ae671|807ab9ea6fa0a08ea52efc8016c06bfc980732f0900bb99f1081b7f3ceabbce4",
                 "graph_update_node|3d0f3c46a8d6fee1d776385e178662ae2a187e678bb5e3dd899c0bb93010c51e|13a30ea327b630709e99b78a98a12c210dc32034db31fad6595d4833a2a9697a",
                 "graph_update_spec|cc242e8d96c9fa9c957a7ca885258947ab54337e4a9e1b9f2ddc66eb6ae06b6d|e8c2e945b5f6f1080c5fe54b38f36e0c75e1716e61f80db812c32547d30e8264",
                 "intelligence_delete_node|b70ce24d59d2619e275cb40397037d7748f3ebca64ac5ffdc85eae6ee65bb1af|318c60c03fd6f5012a88be52de9aea7e9f372081ac1a378f5ee033b024ce229b",
@@ -754,7 +765,7 @@ mod tests {
                 "roster_check|80d72258ccfc8cbb6509168ff6197f0c073adc5600e7a50e9815172a65313387|86e91783cad72828f1d84fc73a2430d3a17c02833f1b448a00ba5616dabe0577",
                 "roster_clear|31c4ac456165d42a5b18c6f8ca8f37e05aafeba98ee44488bf6cfa1fbecf1720|d294066722284d29107550a44758682259c3f13cedc1d188da98d041e6eeb1cb",
                 "roster_list|99f9cd3cdad9f30fe335f61cb51bdeb618ee0a743d3c0decdce04c8a9572af68|276db5b4a3f990897ee3a03ea73cc40be04234716117cf4c861c70ca9c23d411",
-                "roster_set|4a5445a5af19460e4fcc5a4bff5c9d32174fa64373b922d74392bfc7178a8e0c|bdfc24fbbb05b5331e4bed218ad806a7e11faf8afd0b0c57f4612b3cde7086d2",
+                "roster_set|4a5445a5af19460e4fcc5a4bff5c9d32174fa64373b922d74392bfc7178a8e0c|6cdcbf499a6476ff9bb3daedb89f6adc3a731a5dbc77ce8aba7e60c2c16651ee",
                 "scheduled_send_cancel|e97ad927d1c1d8778e0e7862e7ac4df954098bd847329a5cac398d19177d47e8|31cd20154b502bce97777d5d0b780d65ae849538b776016a121ba608bb227b9c",
                 "scheduled_send_create|e6defc41d6d01fe133056562efc3aba3b50b6d1e2a06fe278894cbbbcb65a165|75bdf795b390451ff08f87c147f0f353f69b5f25ff2219f02c7e8901fff30ca6",
                 "scheduled_send_list|946cdf95ebf54570fe9566aa69f8f5e7a18f08ea7b29a6be390bd9ce66a4df63|6ade068b88c489253907d5a691508969588e152e77aee3c2eeccd8ac385e8aab",
@@ -1078,6 +1089,10 @@ mod tests {
             kind: EnsembleKind::Parallel,
             round_robin_index: None,
             created_at: now,
+
+            crew_id: None,
+            crew_name: None,
+            crew_version_applied: None,
         };
         let members = vec![
             EnsembleMember {
@@ -4438,6 +4453,8 @@ mod tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let err = build_graph_completion_hook(&params).unwrap_err();
         assert!(err.contains("must have either"), "{err}");
@@ -4458,6 +4475,8 @@ mod tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let err = build_graph_completion_hook(&params).unwrap_err();
         assert!(err.contains("must have either"), "{err}");
@@ -4478,6 +4497,8 @@ mod tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let err = build_graph_completion_hook(&params).unwrap_err();
         assert!(err.contains("prompt"), "{err}");
@@ -4498,6 +4519,8 @@ mod tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let err = build_graph_completion_hook(&params).unwrap_err();
         assert!(err.contains("prompt"), "{err}");
@@ -4518,6 +4541,8 @@ mod tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let hook = build_graph_completion_hook(&params).unwrap();
         assert_eq!(hook.platform.as_deref(), Some("claude"));
@@ -4541,6 +4566,8 @@ mod tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let err = build_graph_completion_hook(&params).unwrap_err();
         assert!(err.contains("nodee"), "{err}");
@@ -4564,6 +4591,8 @@ mod tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let hook = build_graph_completion_hook(&params).unwrap();
         assert_eq!(hook.platform.as_deref(), Some("claude"));
@@ -4586,6 +4615,8 @@ mod tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let hook = build_graph_completion_hook(&params).unwrap();
         assert!(hook.model.is_none());
@@ -4608,6 +4639,8 @@ mod tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let err = build_graph_completion_hook(&params).unwrap_err();
         assert!(err.contains("command"), "{err}");
@@ -4629,6 +4662,8 @@ mod tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let err = build_graph_completion_hook(&params).unwrap_err();
         assert!(err.contains("either"), "{err}");
@@ -4649,6 +4684,8 @@ mod tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let hook = build_graph_completion_hook(&params).unwrap();
         assert_eq!(hook.command.as_deref(), Some("echo hello"));
@@ -4672,6 +4709,8 @@ mod tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let hook = build_graph_completion_hook(&params).unwrap();
         assert_eq!(hook.command.as_deref(), Some("echo hello"));
@@ -4692,6 +4731,8 @@ mod tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let hook = build_graph_completion_hook(&params).unwrap();
         assert!(hook.is_interactive());
@@ -4717,6 +4758,8 @@ mod tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         assert!(build_graph_completion_hook(&params).is_err());
 
@@ -4734,6 +4777,8 @@ mod tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         assert!(build_graph_completion_hook(&params).is_err());
 
@@ -4751,6 +4796,8 @@ mod tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         assert!(build_graph_completion_hook(&params).is_err());
 
@@ -4768,6 +4815,8 @@ mod tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         assert!(build_graph_completion_hook(&params).is_err());
 
@@ -4785,6 +4834,8 @@ mod tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let err = build_graph_completion_hook(&params).unwrap_err();
         assert!(err.contains("prompt"), "{err}");
@@ -4805,6 +4856,8 @@ mod tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let hook = build_graph_completion_hook(&params).unwrap();
         assert!(hook.is_interactive());
@@ -4827,6 +4880,8 @@ mod tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let err = build_graph_completion_hook(&params).unwrap_err();
         assert!(err.contains("target_session_id"), "{err}");
@@ -4848,6 +4903,8 @@ mod tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let err = build_graph_completion_hook(&params).unwrap_err();
         assert!(err.contains("target_session_id"), "{err}");
@@ -4869,6 +4926,8 @@ mod tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let err = build_graph_completion_hook(&params).unwrap_err();
         assert!(err.contains("target_session_name"), "{err}");
@@ -6247,6 +6306,8 @@ mod additional_tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let hook = build_graph_completion_hook(&params).unwrap();
         assert!(hook.model.is_none());
@@ -6267,6 +6328,8 @@ mod additional_tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let hook = build_graph_completion_hook(&params).unwrap();
         assert_eq!(hook.timeout_minutes, Some(45));
@@ -7695,6 +7758,10 @@ mod coverage_tests {
                 kind: EnsembleKind::Parallel,
                 round_robin_index: None,
                 created_at: chrono::Utc::now(),
+
+                crew_id: None,
+                crew_name: None,
+                crew_version_applied: None,
             },
             members: vec![
                 EnsembleMember {
@@ -7764,6 +7831,10 @@ mod coverage_tests {
                 kind: EnsembleKind::Parallel,
                 round_robin_index: None,
                 created_at: chrono::Utc::now(),
+
+                crew_id: None,
+                crew_name: None,
+                crew_version_applied: None,
             },
             members: vec![EnsembleMember {
                 ensemble_id: "ens2".into(),
@@ -7800,6 +7871,8 @@ mod coverage_tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let json = super::graph_completion_hook_json(&hook);
         assert_eq!(json["platform"], "claude");
@@ -7822,6 +7895,8 @@ mod coverage_tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let json = super::graph_completion_hook_json(&hook);
         assert!(json["model"].is_null());
@@ -11086,6 +11161,8 @@ mod endpoint_tests {
                     queue_id: None,
                     workdir_override: None,
                     idea: None,
+
+                    crew: None,
                 }],
             );
         }
@@ -11144,6 +11221,8 @@ mod endpoint_tests {
                 queue_id: None,
                 workdir_override: None,
                 idea: None,
+
+                crew: None,
             }],
         );
         let updated = handler
@@ -11197,6 +11276,8 @@ mod endpoint_tests {
                 queue_id: None,
                 workdir_override: None,
                 idea: None,
+
+                crew: None,
             }],
         );
         let updated = handler
@@ -11232,6 +11313,8 @@ mod endpoint_tests {
                 queue_id: None,
                 workdir_override: None,
                 idea: None,
+
+                crew: None,
             }],
         );
         let rejected = handler
@@ -11407,7 +11490,7 @@ mod endpoint_tests {
             .unwrap();
         assert!(!is_err(&exported), "{}", text(&exported));
         let doc: serde_json::Value = serde_json::from_str(&raw_text(&exported)).unwrap();
-        assert_eq!(doc["format_version"], 4);
+        assert_eq!(doc["format_version"], 5);
         let implementer = doc["nodes"]
             .as_array()
             .unwrap()
@@ -11733,6 +11816,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 straggler_timeout_minutes: None,
                 quorum_grace_minutes: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -11903,6 +11988,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: Some(30),
                 straggler_timeout_minutes: None,
                 quorum_grace_minutes: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -11949,6 +12036,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: Some(31),
                 straggler_timeout_minutes: None,
                 quorum_grace_minutes: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -11975,6 +12064,8 @@ mod endpoint_tests {
                 add_entry_condition: None,
                 remove_entry_from: None,
                 commit_rights: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -12124,6 +12215,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 straggler_timeout_minutes: None,
                 quorum_grace_minutes: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -14579,6 +14672,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter.to_string(),
                 on_fail_to: on_fail_to.map(str::to_string),
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -14653,6 +14748,8 @@ mod endpoint_tests {
                 add_entry_condition: None,
                 remove_entry_from: None,
                 commit_rights: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -14771,6 +14868,8 @@ mod endpoint_tests {
                 add_entry_condition: None,
                 remove_entry_from: None,
                 commit_rights: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -14797,6 +14896,8 @@ mod endpoint_tests {
                 add_entry_condition: None,
                 remove_entry_from: Some(entry.clone()),
                 commit_rights: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -15422,6 +15523,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter.clone(),
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -15449,6 +15552,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter.clone(),
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -15476,6 +15581,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter.clone(),
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -15503,6 +15610,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter.clone(),
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -15530,6 +15639,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter,
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -15584,6 +15695,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter,
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -15638,6 +15751,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter.clone(),
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -15669,6 +15784,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter,
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -15718,6 +15835,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter,
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -16868,6 +16987,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter,
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -16978,6 +17099,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter,
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -17111,6 +17234,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter,
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -17137,6 +17262,8 @@ mod endpoint_tests {
                 add_entry_from: Some(alt_entry.clone()),
                 add_entry_condition: None,
                 remove_entry_from: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -17164,6 +17291,8 @@ mod endpoint_tests {
                 add_entry_from: None,
                 add_entry_condition: None,
                 remove_entry_from: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -17192,6 +17321,8 @@ mod endpoint_tests {
                 add_entry_from: None,
                 add_entry_condition: None,
                 remove_entry_from: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -17258,6 +17389,8 @@ mod endpoint_tests {
                 add_entry_from: None,
                 add_entry_condition: None,
                 remove_entry_from: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -17350,6 +17483,8 @@ mod endpoint_tests {
                 add_entry_from: None,
                 add_entry_condition: None,
                 remove_entry_from: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -17394,6 +17529,8 @@ mod endpoint_tests {
                 add_entry_from: None,
                 add_entry_condition: None,
                 remove_entry_from: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -17421,6 +17558,8 @@ mod endpoint_tests {
                 add_entry_from: None,
                 add_entry_condition: None,
                 remove_entry_from: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -17448,6 +17587,8 @@ mod endpoint_tests {
                 add_entry_from: None,
                 add_entry_condition: None,
                 remove_entry_from: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -17477,6 +17618,8 @@ mod endpoint_tests {
                 add_entry_from: None,
                 add_entry_condition: None,
                 remove_entry_from: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -17503,6 +17646,8 @@ mod endpoint_tests {
                 add_entry_from: None,
                 add_entry_condition: None,
                 remove_entry_from: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -17562,6 +17707,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter,
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -17607,6 +17754,8 @@ mod endpoint_tests {
                 add_entry_from: None,
                 add_entry_condition: None,
                 remove_entry_from: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -17724,6 +17873,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter.clone(),
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -17774,6 +17925,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter.clone(),
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -17824,6 +17977,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter,
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -18211,6 +18366,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: on_pass_to.to_string(),
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -18239,6 +18396,8 @@ mod endpoint_tests {
             add_entry_condition: None,
             remove_entry_from: None,
             commit_rights: None,
+
+            crew: None,
         }
     }
 
@@ -18282,6 +18441,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter,
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -18309,6 +18470,8 @@ mod endpoint_tests {
                 add_entry_from: None,
                 add_entry_condition: None,
                 remove_entry_from: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -18361,6 +18524,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter,
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -18388,6 +18553,8 @@ mod endpoint_tests {
                 add_entry_from: None,
                 add_entry_condition: None,
                 remove_entry_from: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -18440,6 +18607,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter,
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -18467,6 +18636,8 @@ mod endpoint_tests {
                 add_entry_from: None,
                 add_entry_condition: None,
                 remove_entry_from: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -18516,6 +18687,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter,
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -18732,6 +18905,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter,
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -18814,6 +18989,8 @@ mod endpoint_tests {
                 queue_id: None,
                 workdir_override: None,
                 idea: None,
+
+                crew: None,
             }],
         );
         db.update_graph_hooks(&lp.id, &hooks).unwrap();
@@ -19086,6 +19263,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter.clone(),
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -19299,6 +19478,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter.clone(),
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -22144,6 +22325,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter.clone(),
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -22196,6 +22379,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter.clone(),
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -22253,6 +22438,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter.clone(),
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -22316,6 +22503,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter.clone(),
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -22342,6 +22531,8 @@ mod endpoint_tests {
                 add_entry_from: None,
                 add_entry_condition: None,
                 remove_entry_from: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -22404,6 +22595,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter.clone(),
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -22430,6 +22623,8 @@ mod endpoint_tests {
                 add_entry_from: None,
                 add_entry_condition: None,
                 remove_entry_from: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -22499,6 +22694,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter.clone(),
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -22525,6 +22722,8 @@ mod endpoint_tests {
                 add_entry_from: None,
                 add_entry_condition: None,
                 remove_entry_from: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -22581,6 +22780,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter.clone(),
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -22659,6 +22860,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter.clone(),
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -22692,6 +22895,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter.clone(),
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -22742,6 +22947,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter.clone(),
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -23695,5 +23902,221 @@ mod endpoint_tests {
         assert!(more, "room remains under the total cap");
         assert_eq!(tagged.len(), 1);
         assert_eq!(tagged[0].1, "ok-hash");
+    }
+
+    fn crew_json_member(model: &str) -> crate::daemon::params::CrewMemberJson {
+        crate::daemon::params::CrewMemberJson {
+            platform: "openrouter".to_string(),
+            model: Some(model.to_string()),
+            timeout_minutes: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
+        }
+    }
+
+    /// Build a graph with a check→ensemble→agent unit whose ensemble is bound
+    /// to the crew `eager`; returns `(graph_id, ensemble_id)`.
+    async fn build_crew_ensemble(
+        handler: &TaskTriggerHandler,
+        workdir: &str,
+        graph_name: &str,
+    ) -> (String, String) {
+        let created = handler
+            .graph_create(Parameters(GraphCreateParams {
+                name: graph_name.to_string(),
+                description: None,
+                workdir: workdir.to_string(),
+                trigger: None,
+                infra_node_id: None,
+                allow_dirty_start: false,
+            }))
+            .await
+            .unwrap();
+        let graph_id = extract_id(&created, "graph_id");
+        let kickoff = handler
+            .graph_add_node(Parameters(GraphAddNodeParams {
+                spec_id: None,
+                graph_id: Some(graph_id.clone()),
+                name: "kickoff".to_string(),
+                kind: Some("check".to_string()),
+                config: Some(check_node_config("true")),
+                blueprint: None,
+                config_overrides: None,
+            }))
+            .await
+            .unwrap();
+        let kickoff_id = extract_id(&kickoff, "node_id");
+        let downstream = handler
+            .graph_add_node(Parameters(GraphAddNodeParams {
+                spec_id: None,
+                graph_id: Some(graph_id.clone()),
+                name: "downstream".to_string(),
+                kind: Some("agent".to_string()),
+                config: Some(agent_node_config("claude")),
+                blueprint: None,
+                config_overrides: None,
+            }))
+            .await
+            .unwrap();
+        let downstream_id = extract_id(&downstream, "node_id");
+        let ensemble = handler
+            .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                commit_rights: None,
+                spec_id: None,
+                graph_id: Some(graph_id.clone()),
+                kind: None,
+                name: "Proposers".to_string(),
+                prompt_template: Some("draft it".to_string()),
+                blueprint: None,
+                members: None,
+                condition: "always".to_string(),
+                from_node: kickoff_id,
+                on_pass_to: downstream_id,
+                on_fail_to: None,
+                min_pass: None,
+                timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
+                crew: Some("eager".to_string()),
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&ensemble), "{}", text(&ensemble));
+        (graph_id, extract_id(&ensemble, "ensemble_id"))
+    }
+
+    /// CM49 req 5(b): `crew_update`'s eager sync skips a bound ensemble whose
+    /// graph is running, leaving its member rows and `crew_version_applied`
+    /// behind — while an identical idle graph is synced.
+    #[tokio::test]
+    async fn crew_update_eager_sync_skips_a_running_graph() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let workdir = dir.path().to_string_lossy().to_string();
+        handler
+            .crew_create(Parameters(CrewCreateParams {
+                name: "eager".to_string(),
+                description: None,
+                members: Some(vec![crew_json_member("a"), crew_json_member("b")]),
+                from_ensemble: None,
+            }))
+            .await
+            .unwrap();
+
+        let (running_graph, running_ens) =
+            build_crew_ensemble(&handler, &workdir, "Running G").await;
+        let (_idle_graph, idle_ens) = build_crew_ensemble(&handler, &workdir, "Idle G").await;
+        db.update_graph_status(&running_graph, GraphStatus::Running, None, None)
+            .unwrap();
+
+        // Grow the crew to three members.
+        handler
+            .crew_update(Parameters(CrewUpdateParams {
+                name: "eager".to_string(),
+                members: Some(vec![
+                    crew_json_member("a"),
+                    crew_json_member("b"),
+                    crew_json_member("c"),
+                ]),
+                description: None,
+                rename: None,
+            }))
+            .await
+            .unwrap();
+
+        let running = db.get_ensemble_details(&running_ens).unwrap().unwrap();
+        assert_eq!(
+            running.members.len(),
+            2,
+            "a running graph's member rows are left behind"
+        );
+        assert_eq!(
+            running.ensemble.crew_version_applied,
+            Some(1),
+            "a running graph's applied version is left behind"
+        );
+
+        let idle = db.get_ensemble_details(&idle_ens).unwrap().unwrap();
+        assert_eq!(idle.members.len(), 3, "an idle graph is synced eagerly");
+        assert_eq!(idle.ensemble.crew_version_applied, Some(2));
+    }
+
+    /// CM49 req 7, end to end through the MCP surface: export a crew-bound
+    /// ensemble as `crew` + no members; import restores the binding when the
+    /// crew exists locally, and still succeeds (reporting `missing_crews`)
+    /// when it does not.
+    #[tokio::test]
+    async fn graph_export_import_round_trip_with_crew() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let workdir = dir.path().to_string_lossy().to_string();
+        handler
+            .crew_create(Parameters(CrewCreateParams {
+                name: "eager".to_string(),
+                description: None,
+                members: Some(vec![crew_json_member("a"), crew_json_member("b")]),
+                from_ensemble: None,
+            }))
+            .await
+            .unwrap();
+        let (graph_id, _ens) = build_crew_ensemble(&handler, &workdir, "Crew G").await;
+
+        let exported = handler
+            .graph_export(Parameters(GraphExportParams {
+                graph_id: graph_id.clone(),
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&exported), "{}", text(&exported));
+        let doc: serde_json::Value = serde_json::from_str(&raw_text(&exported)).unwrap();
+        let ensemble = &doc["ensembles"][0];
+        assert_eq!(ensemble["crew"], "eager");
+        assert_eq!(
+            ensemble["members"].as_array().unwrap().len(),
+            0,
+            "a bound ensemble exports the crew name, not members"
+        );
+
+        // Import WITH the local crew: bound, no missing_crews.
+        let imported = handler
+            .graph_import(Parameters(GraphImportParams {
+                document: doc.clone(),
+                workdir: workdir.clone(),
+                name: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&imported), "{}", text(&imported));
+        let imported_json: serde_json::Value = serde_json::from_str(&raw_text(&imported)).unwrap();
+        assert_eq!(
+            imported_json["missing_crews"].as_array().unwrap().len(),
+            0,
+            "the crew exists locally"
+        );
+        let new_graph_id = imported_json["graph_id"].as_str().unwrap().to_string();
+        let ensembles = db.list_ensembles_for_graph(&new_graph_id).unwrap();
+        assert_eq!(ensembles[0].members.len(), 2, "members materialized");
+        assert_eq!(ensembles[0].ensemble.crew_name.as_deref(), Some("eager"));
+
+        // Import WITHOUT a local crew of that name: still succeeds, reported.
+        let mut doc_ghost = doc.clone();
+        doc_ghost["ensembles"][0]["crew"] = serde_json::json!("ghost");
+        let imported2 = handler
+            .graph_import(Parameters(GraphImportParams {
+                document: doc_ghost,
+                workdir: workdir.clone(),
+                name: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&imported2), "{}", text(&imported2));
+        let imported2_json: serde_json::Value =
+            serde_json::from_str(&raw_text(&imported2)).unwrap();
+        assert_eq!(
+            imported2_json["missing_crews"],
+            serde_json::json!(["ghost"])
+        );
     }
 }

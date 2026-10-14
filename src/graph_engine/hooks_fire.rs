@@ -108,8 +108,20 @@ impl GraphEngine {
         idx: usize,
     ) -> Option<String> {
         let run_id = uuid::Uuid::new_v4().to_string();
-        let (executed_platform, executed_model) =
-            executed_pair_for_platform_model(hook.platform.as_deref(), hook.model.as_deref());
+        // CM49: a crew-bound hook records the pair its crew resolves to now,
+        // so the run row names what actually ran.
+        let resolved = hook
+            .crew
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .and_then(|crew| self.db.resolve_crew_pair(crew, None).ok().flatten())
+            .map(|(platform, model, _index)| (platform, model));
+        let (platform, model) = match &resolved {
+            Some((platform, model)) => (Some(platform.as_str()), model.as_deref()),
+            None => (hook.platform.as_deref(), hook.model.as_deref()),
+        };
+        let (executed_platform, executed_model) = executed_pair_for_platform_model(platform, model);
         if let Err(error) = self
             .db
             .insert_graph_completion_hook_run(&GraphCompletionHookRun {
@@ -226,41 +238,78 @@ impl GraphEngine {
     }
 
     pub(crate) async fn execute_agent_hook(&self, fire: &HookFireCtx<'_>) -> HookExecution {
+        // CM49: a crew-bound hook resolves its (platform, model) from the crew
+        // at fire time. A missing crew, or one with no available member, fails
+        // the hook naming the crew (hooks report failure — they never pause
+        // the graph, only the reason changes).
+        let crew = fire
+            .hook
+            .crew
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let resolved: Option<(String, Option<String>)> = match crew {
+            Some(crew) => match self.db.resolve_crew_pair(crew, None) {
+                Ok(Some((platform, model, _index))) => Some((platform, model)),
+                Ok(None) => {
+                    let owner = format!("{} hook", fire.event.as_str());
+                    let message = if self.db.crew_get(crew).ok().flatten().is_some() {
+                        super::crew_resolve::crew_no_member_blocker(&owner, crew)
+                    } else {
+                        super::crew_resolve::crew_missing_blocker(&owner, crew)
+                    };
+                    return Self::hook_failure(
+                        serde_json::json!({ "crew": crew, "error": "crew_unavailable" }),
+                        message,
+                    );
+                }
+                Err(error) => {
+                    return Self::hook_failure(
+                        serde_json::json!({ "crew": crew, "error": error.to_string() }),
+                        format!("{} hook crew lookup failed: {error}", fire.event.as_str()),
+                    );
+                }
+            },
+            None => None,
+        };
+        let platform = resolved
+            .as_ref()
+            .map(|(platform, _)| platform.as_str())
+            .or(fire.hook.platform.as_deref());
+        let model = resolved
+            .as_ref()
+            .and_then(|(_, model)| model.as_deref())
+            .or(fire.hook.model.as_deref());
         // CM48: an agent hook whose pair is declared unavailable never spawns;
         // its run is recorded as failed with the availability message and it
         // is not retried.
-        if let Some(platform) = fire.hook.platform.as_deref() {
-            let avail = self.availability_for(platform, fire.hook.model.as_deref(), &Utc::now());
+        if let Some(platform) = platform {
+            let avail = self.availability_for(platform, model, &Utc::now());
             if !avail.available {
                 let reason = avail.reason.as_deref().unwrap_or("no reason");
                 return Self::hook_failure(
                     serde_json::json!({
-                        "platform": fire.hook.platform,
-                        "model": fire.hook.model,
+                        "platform": platform,
+                        "model": model,
                         "error": "unavailable",
                         "reason": reason,
                     }),
-                    node_unavailable_blocker(
-                        fire.event.as_str(),
-                        platform,
-                        fire.hook.model.as_deref(),
-                        reason,
-                    ),
+                    node_unavailable_blocker(fire.event.as_str(), platform, model, reason),
                 );
             }
         }
-        let cli = match Cli::resolve(fire.hook.platform.as_deref()) {
+        let cli = match Cli::resolve(platform) {
             Ok(cli) => cli,
             Err(error) => {
                 return Self::hook_failure(
                     serde_json::json!({
-                        "platform": fire.hook.platform,
+                        "platform": platform,
                         "error": error,
                     }),
                     format!(
                         "{} hook has an invalid platform '{}': {error}",
                         fire.event.as_str(),
-                        fire.hook.platform.as_deref().unwrap_or("")
+                        platform.unwrap_or("")
                     ),
                 );
             }
@@ -274,7 +323,7 @@ impl GraphEngine {
             Err(error) => {
                 return Self::hook_failure(
                     serde_json::json!({
-                        "platform": fire.hook.platform,
+                        "platform": platform,
                         "error": error.to_string(),
                     }),
                     format!("{} hook prompt is invalid: {error}", fire.event.as_str()),
@@ -291,7 +340,7 @@ impl GraphEngine {
             &cli,
             &strategy,
             &prompt,
-            fire.hook.model.as_deref(),
+            model,
             fire.hook.effort.as_deref(),
             fire.ctx.workdir,
             fire.hook.timeout_minutes.unwrap_or(30),
@@ -415,6 +464,8 @@ mod tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         }
     }
 

@@ -82,6 +82,7 @@ pub fn build_export_document(
         edges: export_edges,
         ensembles: export_ensembles,
         infra_node,
+        hooks: lp.hooks.clone(),
     })
 }
 
@@ -232,6 +233,11 @@ pub(super) fn export_one_ensemble(
     let extra_entry_sources =
         export_ensemble_entry_sources(details, graph_edges, owned_ids, name_map)?;
 
+    // CM49: a crew-bound ensemble exports the crew NAME and no members — the
+    // design carries the reference, never the crew's contents.
+    let crew = ensemble.crew_name.clone();
+    let members = if crew.is_some() { Vec::new() } else { members };
+
     Ok(GraphExportEnsemble {
         name: ensemble.name.clone(),
         kind: if ensemble.kind == EnsembleKind::Parallel {
@@ -250,6 +256,7 @@ pub(super) fn export_one_ensemble(
         timeout_minutes: ensemble.timeout_minutes,
         straggler_timeout_minutes: ensemble.straggler_timeout_minutes,
         quorum_grace_minutes: ensemble.quorum_grace_minutes,
+        crew,
         members,
     })
 }
@@ -371,7 +378,7 @@ pub(super) fn edge_sort_key(edge: &GraphExportEdge) -> String {
 /// (decision 6).
 pub fn parse_export_document_value(value: &Value) -> Result<GraphExportDocument, String> {
     match value.get("format_version").and_then(Value::as_i64) {
-        Some(1) | Some(2) | Some(3) | Some(4) => {}
+        Some(version) if (1..=5).contains(&version) => {}
         Some(other) => {
             return Err(format!(
                 "Graph export document has format_version {other}, but this build only supports 1 through {GRAPH_EXPORT_FORMAT_VERSION}."

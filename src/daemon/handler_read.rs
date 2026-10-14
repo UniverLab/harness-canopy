@@ -459,6 +459,8 @@ pub(crate) fn ensemble_details_json(
         "on_pass_to": ensemble.on_pass_to,
         "on_fail_to": ensemble.on_fail_to,
         "round_robin_index": ensemble.round_robin_index,
+        "crew": ensemble.crew_name,
+        "crew_version_applied": ensemble.crew_version_applied,
         "created_at": ensemble.created_at.to_rfc3339(),
         "members": details.members.iter().map(|member| serde_json::json!({
             "node_id": member.node_id,
@@ -483,6 +485,7 @@ pub(crate) fn graph_completion_hook_json(
 ) -> serde_json::Value {
     serde_json::json!({
         "platform": hook.platform,
+        "crew": hook.crew,
         "model": hook.model,
         "effort": hook.effort,
         "prompt": hook.prompt,

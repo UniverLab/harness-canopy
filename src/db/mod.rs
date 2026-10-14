@@ -17,9 +17,9 @@ use std::sync::{Arc, Mutex};
 /// `migrate_activity_attribution_prefix` (CB63).
 /// Version 8 adds the `graph_events` durable per-graph event log — see
 /// `migrate_graph_events_table` (CM46).
-/// Version 9 adds the `roster_entries` availability roster — see
-/// `migrate_roster_entries_table` (CM48).
-const SCHEMA_VERSION: i64 = 9;
+/// Version 10 adds the `crews`/`crew_members` tables and the ensemble
+/// binding columns — see `migrate_crews_tables` (CM49).
+const SCHEMA_VERSION: i64 = 10;
 
 /// CM40: how long every daemon SQLite connection waits for a concurrent writer
 /// before failing with `SQLITE_BUSY`. Applied once, at open, in
@@ -587,6 +587,32 @@ const BASE_SCHEMA_BATCHES: &[&str] = &[
             );
             CREATE INDEX IF NOT EXISTS idx_roster_entries_platform
                 ON roster_entries(platform);",
+    "
+            -- CM49: crews — named, ordered member lists that ensembles,
+            -- agent nodes and agent hooks bind to. `crew_members.position`
+            -- is the meaningful order (cascade tries it, round_robin
+            -- rotates through it, a bound agent node takes the first
+            -- available member). `version` bumps on every member-list
+            -- write; bound ensembles record the version they applied.
+            CREATE TABLE IF NOT EXISTS crews (
+                id TEXT PRIMARY KEY,
+                name TEXT UNIQUE NOT NULL,
+                description TEXT,
+                version INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+            );
+            CREATE TABLE IF NOT EXISTS crew_members (
+                crew_id TEXT NOT NULL REFERENCES crews(id) ON DELETE CASCADE,
+                position INTEGER NOT NULL,
+                platform TEXT NOT NULL,
+                model TEXT,
+                timeout_minutes INTEGER,
+                infra_retry_limit INTEGER,
+                infra_crash_max_seconds INTEGER,
+                infra_backoff_seconds INTEGER,
+                PRIMARY KEY (crew_id, position)
+            );",
 ];
 
 impl Database {
@@ -637,6 +663,7 @@ impl Database {
         Self::migrate_graph_events_table(&conn)?;
         Self::migrate_spec_notes_table(&conn)?;
         Self::migrate_roster_entries_table(&conn)?;
+        Self::migrate_crews_tables(&conn)?;
 
         Self::set_schema_version(&conn)?;
 
@@ -682,6 +709,9 @@ pub mod agent;
 pub mod blueprints;
 pub mod clean;
 pub(crate) mod connection;
+pub mod crew_binding;
+pub(crate) mod crew_member_config;
+pub mod crews;
 pub mod ensembles;
 pub mod gamification;
 pub mod graph_transfer;

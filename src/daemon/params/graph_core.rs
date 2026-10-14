@@ -52,8 +52,12 @@ pub struct GraphCreateParams {
 pub struct GraphCompletionHookParams {
     /// CLI platform to run the hook with (e.g. "mimo", "claude").
     /// Required for agent hooks; must be omitted for command and
-    /// interactive hooks.
+    /// interactive hooks. Mutually exclusive with `crew`.
     pub platform: Option<String>,
+    /// CM49: crew name to run the hook with — the alternative to `platform`.
+    /// The hook resolves its pair from the crew at fire time. Mutually
+    /// exclusive with `platform`; agent hooks only.
+    pub crew: Option<String>,
     /// Optional model override (agent hooks only).
     pub model: Option<String>,
     /// Optional effort level (agent hooks only).
@@ -467,6 +471,11 @@ pub struct GraphAddEnsembleParams {
     /// for that dispatch — never set per-member. Defaults to false, same as
     /// an ordinary node with no `commit_rights` key.
     pub commit_rights: Option<bool>,
+    /// CM49: a crew name to bind instead of `members` — mutually exclusive
+    /// with `members`/a blueprint that supplies members. The crew's ordered
+    /// members become this ensemble's members, and later `crew_update` calls
+    /// reach it at its next dispatch.
+    pub crew: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -484,6 +493,12 @@ pub struct GraphUpdateEnsembleParams {
     /// member without one uses the (possibly also-updated) shared
     /// `prompt_template`.
     pub members: Option<Vec<EnsembleMemberParams>>,
+    /// CM49: bind this ensemble to a crew by name (`Some(name)`), or unbind
+    /// it with `null` (`Some(None)`) — absent leaves the binding unchanged.
+    /// Mutually exclusive with `members`. Binding replaces the member rows
+    /// with the crew's and stamps the crew version; `null` keeps the current
+    /// rows as literal members.
+    pub crew: Option<Option<String>>,
     /// New pass threshold.
     pub min_pass: Option<i64>,
     /// New straggler timeout in minutes, or null to fall back to

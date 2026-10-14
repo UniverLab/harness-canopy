@@ -288,14 +288,19 @@ pub(crate) async fn begin_infra_retry(
     let run_id = uuid::Uuid::new_v4().to_string();
     // CB43: the retry is the same dispatch as the crashed attempt — carry
     // its recorded pair (re-resolve from config only if the original has none,
-    // e.g. a pre-migration row).
-    let (executed_platform, executed_model) = db
-        .get_graph_run(crashed_run_id)
-        .ok()
-        .flatten()
-        .map(|run| (run.executed_platform, run.executed_model))
-        .filter(|(platform, _)| platform.is_some())
-        .unwrap_or_else(|| executed_pair_for_node(node));
+    // e.g. a pre-migration row). CM49: a crew-bound node ROTATES to another
+    // member on retry, so its run must record the (already injected) pair of
+    // the node it will actually run, not the crashed attempt's.
+    let (executed_platform, executed_model) = if node.config.get("crew").is_some() {
+        executed_pair_for_node(node)
+    } else {
+        db.get_graph_run(crashed_run_id)
+            .ok()
+            .flatten()
+            .map(|run| (run.executed_platform, run.executed_model))
+            .filter(|(platform, _)| platform.is_some())
+            .unwrap_or_else(|| executed_pair_for_node(node))
+    };
     db.insert_graph_run(&GraphNodeRun {
         id: run_id.clone(),
         graph_id: lp.id.clone(),

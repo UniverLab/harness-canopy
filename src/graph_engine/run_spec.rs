@@ -275,6 +275,8 @@ impl GraphEngine {
             resume_candidate: attempt_setup.resume_candidate.clone(),
             resume_crosses_spec: attempt_setup.resume_crosses_spec,
             iteration_value,
+            crew: attempt_setup.crew.clone(),
+            crew_index: attempt_setup.crew_index,
         };
         let (execution, run, had_infra_crash) = self
             .run_node_with_infra_retries(ctx, state, &mut retry)
@@ -402,6 +404,24 @@ impl GraphEngine {
             .get_ensemble_details(ensemble_id)
             .map_err(|e| anyhow!("Ensemble '{}' lookup failed: {e}", ensemble_id))?
             .ok_or_else(|| anyhow!("Ensemble '{}' not found in graph.", ensemble_id))?;
+        // CM49 req 5a: lazy crew sync at dispatch, BEFORE any member runs this
+        // visit (point (a) holds by construction; the sync's own in-flight
+        // guard is the backstop). A pending binding whose crew does not exist
+        // yet blocks naming the crew instead of dispatching with no members.
+        let details_fresh = match self.db.sync_ensemble_with_crew(ensemble_id)? {
+            crate::db::crews::SyncOutcome::Synced { .. } => self
+                .db
+                .get_ensemble_details(ensemble_id)?
+                .ok_or_else(|| anyhow!("Ensemble '{}' not found in graph.", ensemble_id))?,
+            crate::db::crews::SyncOutcome::MissingCrew => {
+                let crew = details_fresh.ensemble.crew_name.clone().unwrap_or_default();
+                let owner = format!("ensemble '{}'", details_fresh.ensemble.name);
+                return Ok(SpecStepFlow::Done(SpecExecutionOutcome::Blocked(
+                    super::crew_resolve::crew_missing_blocker(&owner, &crew),
+                )));
+            }
+            _ => details_fresh,
+        };
         // CM48: resolve availability now, at dispatch — an unavailable member
         // is skipped, and an ensemble with no available member (or a parallel
         // one below `min_pass`) blocks the spec before any member runs. No

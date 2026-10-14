@@ -34,6 +34,7 @@ use daemon::agent_cli::{handle_agent_action, AgentAction};
 use daemon::bridge::run_bridge;
 use daemon::clean_cli::handle_clean_action;
 use daemon::cli::{handle_daemon_action, DaemonAction};
+use daemon::crew_cli::{handle_crew_action, CrewAction};
 use daemon::doctor::run_doctor;
 use daemon::graph_cli::{handle_graph_action, GraphAction};
 use daemon::models_cli::{handle_models_action, ModelsAction};
@@ -139,6 +140,11 @@ enum Commands {
     Roster {
         #[command(subcommand)]
         action: RosterAction,
+    },
+    /// Manage crews — named, ordered member lists ensembles and nodes bind to.
+    Crew {
+        #[command(subcommand)]
+        action: CrewAction,
     },
     /// Manage spec queues.
     Queue {
@@ -269,6 +275,7 @@ async fn main() -> Result<()> {
         Some(Commands::Agent { action }) => handle_agent_action(action).await,
         Some(Commands::Spec { action }) => handle_spec_action(action, cli.port).await,
         Some(Commands::Roster { action }) => handle_roster_action(action, cli.port).await,
+        Some(Commands::Crew { action }) => handle_crew_action(action, cli.port).await,
         Some(Commands::Queue { action }) => handle_queue_action(action, cli.port).await,
         Some(Commands::Models { action }) => handle_models_action(action).await,
         Some(Commands::Project { action }) => handle_project_action(action).await,

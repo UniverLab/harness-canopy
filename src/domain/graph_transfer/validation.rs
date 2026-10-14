@@ -3,7 +3,7 @@ use super::*;
 /// A missing/unsupported `format_version` is refused with its own clear
 /// message rather than falling through to a generic serde error (decision 6).
 pub(super) fn ensure_import_format_version(document: &GraphExportDocument) -> Result<(), String> {
-    if !matches!(document.format_version, 1..=4) {
+    if !matches!(document.format_version, 1..=5) {
         return Err(format!(
             "Graph export document has format_version {}, but this build only supports 1 through {}.",
             document.format_version, GRAPH_EXPORT_FORMAT_VERSION
@@ -51,20 +51,43 @@ pub(super) fn validate_import_ensemble_shape(
     doc_ensemble: &GraphExportEnsemble,
     import_kind: EnsembleKind,
 ) -> Result<(), String> {
-    let (min_members, max_members) = member_bounds(import_kind);
-    if doc_ensemble.members.len() < min_members || doc_ensemble.members.len() > max_members {
+    // CM49: a crew-bound ensemble carries the crew NAME and no literal
+    // members — its size is the crew's, enforced at bind/dispatch, so the
+    // member-count check is skipped. A doc that sets both is a refusal.
+    let crew = doc_ensemble
+        .crew
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if crew.is_some() && !doc_ensemble.members.is_empty() {
         return Err(format!(
-            "Ensemble '{}' (kind {}) must have {min_members}-{max_members} members, got {}.",
-            doc_ensemble.name,
-            import_kind.as_str(),
-            doc_ensemble.members.len()
+            "Ensemble '{}' sets both 'crew' and 'members'; a bound ensemble carries the crew name only.",
+            doc_ensemble.name
         ));
     }
-    validate_ensemble_min_pass(
-        &doc_ensemble.name,
-        doc_ensemble.min_pass,
-        doc_ensemble.members.len(),
-    )?;
+    if crew.is_some() {
+        if doc_ensemble.min_pass < 1 {
+            return Err(format!(
+                "Ensemble '{}' has an invalid min_pass ({}).",
+                doc_ensemble.name, doc_ensemble.min_pass
+            ));
+        }
+    } else {
+        let (min_members, max_members) = member_bounds(import_kind);
+        if doc_ensemble.members.len() < min_members || doc_ensemble.members.len() > max_members {
+            return Err(format!(
+                "Ensemble '{}' (kind {}) must have {min_members}-{max_members} members, got {}.",
+                doc_ensemble.name,
+                import_kind.as_str(),
+                doc_ensemble.members.len()
+            ));
+        }
+        validate_ensemble_min_pass(
+            &doc_ensemble.name,
+            doc_ensemble.min_pass,
+            doc_ensemble.members.len(),
+        )?;
+    }
     if doc_ensemble.timeout_minutes < 0 {
         return Err(format!(
             "Ensemble '{}' has a negative timeout_minutes.",
@@ -113,7 +136,7 @@ pub fn agent_nodes_missing_platform(plan: &GraphImportPlan) -> Vec<String> {
 }
 
 /// Mirrors `daemon::handler::config_has_agent_harness` by design: an agent
-/// node's config carries a non-empty `platform` or `cli`.
+/// node's config carries a non-empty `platform`, `cli`, or `crew` (CM49).
 pub(super) fn node_config_has_harness(config: &Value) -> bool {
     let has_non_empty_str = |field: &str| {
         config
@@ -121,5 +144,5 @@ pub(super) fn node_config_has_harness(config: &Value) -> bool {
             .and_then(Value::as_str)
             .is_some_and(|s| !s.trim().is_empty())
     };
-    has_non_empty_str("platform") || has_non_empty_str("cli")
+    has_non_empty_str("platform") || has_non_empty_str("cli") || has_non_empty_str("crew")
 }

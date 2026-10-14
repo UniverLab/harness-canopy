@@ -27,6 +27,11 @@ pub struct GraphImportPlan {
     /// CM2: resolved infra node id (from the document's `infra_node` name),
     /// or `None` when the document has no infra node.
     pub infra_node_id: Option<String>,
+    /// CM49: the document's completion hooks, restored verbatim on import.
+    pub hooks: std::collections::BTreeMap<
+        crate::domain::graphs::GraphHookEvent,
+        Vec<crate::domain::graphs::GraphCompletionHook>,
+    >,
 }
 
 /// Build a validated [`GraphImportPlan`] for `graph_id` from a parsed
@@ -98,7 +103,19 @@ pub fn build_import_plan(
     }
     validate_ensembles_in_graph(&ensemble_details, &all_nodes, &edges)?;
 
-    let terminals = collect_import_terminals(&all_nodes, &edges)?;
+    // CM49: a crew-bound ensemble's member wiring (entry fan-out, member→join
+    // fan-in) is materialized later by the sync path, so the pre-materialization
+    // graph has an orphan quorum and the whole-graph entry-point check would
+    // reject it. Skip that check when a crew binding is present; the per-ensemble
+    // wiring-ends check above still applies.
+    let has_crew_binding = ensembles
+        .iter()
+        .any(|plan| plan.ensemble.crew_name.is_some());
+    let terminals = if has_crew_binding {
+        Vec::new()
+    } else {
+        collect_import_terminals(&all_nodes, &edges)?
+    };
 
     let infra_node_id = document
         .infra_node
@@ -112,6 +129,7 @@ pub fn build_import_plan(
         ensembles,
         terminals,
         infra_node_id,
+        hooks: document.hooks.clone(),
     })
 }
 
@@ -643,6 +661,12 @@ pub(super) fn import_ensemble_record(
         },
         commit_rights: doc_ensemble.commit_rights,
         created_at: now,
+
+        // CM49: the crew reference travels by name. `crew_id` and the applied
+        // version are resolved against the local crews at persist time.
+        crew_id: None,
+        crew_name: doc_ensemble.crew.clone(),
+        crew_version_applied: None,
     }
 }
 

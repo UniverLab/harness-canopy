@@ -15,6 +15,8 @@ mod graph_access;
 pub use graph_access::*;
 mod roster;
 pub use roster::*;
+mod crew;
+pub use crew::*;
 
 #[cfg(test)]
 mod tests {

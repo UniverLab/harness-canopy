@@ -11,31 +11,15 @@ use crate::daemon::params::*;
 use crate::daemon::params_extract::Parameters;
 use crate::db::roster_entries::{NewRosterEntry, RosterEntry, RosterState};
 use crate::db::Database;
-use crate::domain::roster::effective_state;
+use crate::domain::roster::{effective_state, entry_expired, parse_until};
 use chrono::{DateTime, Utc};
 use rmcp::model::CallToolResult;
 use rmcp::tool;
 use rmcp::tool_router;
 use rmcp::ErrorData as McpError;
 
-fn parse_until(raw: &str) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(raw)
-        .ok()
-        .map(|dt| dt.with_timezone(&Utc))
-}
-
-/// Whether an entry is an `unavailable` one whose `until` has already passed.
-fn is_expired(entry: &RosterEntry, now: &DateTime<Utc>) -> bool {
-    entry.state == RosterState::Unavailable
-        && entry
-            .until
-            .as_deref()
-            .and_then(parse_until)
-            .is_some_and(|until| until <= *now)
-}
-
 fn entry_json(entry: &RosterEntry, now: &DateTime<Utc>) -> serde_json::Value {
-    let expired = is_expired(entry, now);
+    let expired = entry_expired(entry, now);
     let available = entry.state == RosterState::Available || expired;
     serde_json::json!({
         "id": entry.id,

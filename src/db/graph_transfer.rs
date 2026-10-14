@@ -22,13 +22,70 @@ use crate::db::Database;
 use crate::domain::graph_transfer::GraphImportPlan;
 use crate::domain::graphs::{Graph, GraphEdge, GraphNode};
 
+/// Record `name` once, preserving first-seen order.
+fn record_missing_crew(missing: &mut Vec<String>, name: &str) {
+    if !missing.iter().any(|existing| existing == name) {
+        missing.push(name.to_string());
+    }
+}
+
 impl Database {
-    pub fn import_graph(&self, lp: &Graph, plan: &GraphImportPlan) -> Result<()> {
+    /// Persist an imported plan in one transaction and return the crew names a
+    /// bound ensemble referenced that do not exist locally (`missing_crews`).
+    /// A bound ensemble whose crew exists has its members materialized through
+    /// the one sync path after the transaction commits; one whose crew is
+    /// missing is left pending (`crew_id` NULL, `crew_name` set) and cannot
+    /// dispatch until the crew is created.
+    pub fn import_graph(&self, lp: &Graph, plan: &GraphImportPlan) -> Result<Vec<String>> {
+        // Resolve each bound ensemble's crew BEFORE taking the connection lock
+        // (the transaction below holds it for its whole life).
+        let mut missing_crews: Vec<String> = Vec::new();
+        let mut resolved_crew_ids: Vec<Option<String>> = Vec::with_capacity(plan.ensembles.len());
+        for ensemble_plan in &plan.ensembles {
+            match ensemble_plan.ensemble.crew_name.as_deref() {
+                Some(name) => match self.crew_get(name)? {
+                    Some((crew, _)) => resolved_crew_ids.push(Some(crew.id)),
+                    None => {
+                        record_missing_crew(&mut missing_crews, name);
+                        resolved_crew_ids.push(None);
+                    }
+                },
+                None => resolved_crew_ids.push(None),
+            }
+        }
+        // CM49: a crew-bound plain node or agent hook names a crew too; report
+        // every name that does not exist locally (deduped) so the caller knows
+        // what to create before the graph can run.
+        for node in &plan.nodes {
+            if let Some(name) = node.config.get("crew").and_then(serde_json::Value::as_str) {
+                if self.crew_get(name)?.is_none() {
+                    record_missing_crew(&mut missing_crews, name);
+                }
+            }
+        }
+        for hooks in plan.hooks.values() {
+            for hook in hooks {
+                if let Some(name) = hook.crew.as_deref() {
+                    if self.crew_get(name)?.is_none() {
+                        record_missing_crew(&mut missing_crews, name);
+                    }
+                }
+            }
+        }
+
         let mut conn = self
             .conn
             .lock()
             .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
         let tx = conn.transaction()?;
+
+        // CM49: completion hooks travel in the document and are restored
+        // verbatim (an empty map writes NULL, as before).
+        let hooks_json = if plan.hooks.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(&plan.hooks)?)
+        };
 
         tx.execute(
             "INSERT INTO graphs (id, name, description, workdir, status, trigger_type, trigger_config, created_at, started_at, completed_at, autorun_at, active_run_queue_id, on_completed, auto_continue_at, auto_continue_action, archived, paused_by_reconciliation, infra_node_id, hooks)
@@ -52,7 +109,7 @@ impl Database {
                 lp.archived,
                 lp.paused_by_reconciliation,
                 &lp.infra_node_id,
-                Option::<String>::None,
+                hooks_json,
             ],
         )?;
 
@@ -68,11 +125,11 @@ impl Database {
         for edge in &plan.edges {
             insert_graph_edge_tx(&tx, edge)?;
         }
-        for ensemble_plan in &plan.ensembles {
+        for (index, ensemble_plan) in plan.ensembles.iter().enumerate() {
             let ensemble = &ensemble_plan.ensemble;
             tx.execute(
-                "INSERT INTO ensembles (id, spec_id, graph_id, name, prompt_template, join_node_id, entry_from_node, entry_condition, min_pass, straggler_timeout_minutes, quorum_grace_minutes, timeout_minutes, infra_retry_limit, infra_crash_max_seconds, infra_backoff_seconds, on_pass_to, on_fail_to, kind, round_robin_index, commit_rights, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
+                "INSERT INTO ensembles (id, spec_id, graph_id, name, prompt_template, join_node_id, entry_from_node, entry_condition, min_pass, straggler_timeout_minutes, quorum_grace_minutes, timeout_minutes, infra_retry_limit, infra_crash_max_seconds, infra_backoff_seconds, on_pass_to, on_fail_to, kind, round_robin_index, commit_rights, created_at, crew_id, crew_name, crew_version_applied)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
                 params![
                     &ensemble.id,
                     &ensemble.spec_id,
@@ -95,6 +152,9 @@ impl Database {
                     ensemble.round_robin_index,
                     ensemble.commit_rights,
                     ensemble.created_at.timestamp(),
+                    &resolved_crew_ids[index],
+                    &ensemble.crew_name,
+                    Option::<i64>::None,
                 ],
             )?;
             for member in &ensemble_plan.members {
@@ -118,7 +178,17 @@ impl Database {
         }
 
         tx.commit()?;
-        Ok(())
+        drop(conn);
+
+        // Materialize every bound ensemble whose crew exists locally, through
+        // the one sync path (it creates the member nodes/rows and wires the
+        // fan-out/fan-in, then stamps the applied version).
+        for ensemble_plan in &plan.ensembles {
+            if ensemble_plan.ensemble.crew_name.is_some() {
+                self.sync_ensemble_with_crew(&ensemble_plan.ensemble.id)?;
+            }
+        }
+        Ok(missing_crews)
     }
 }
 
@@ -222,6 +292,8 @@ mod tests {
             }],
             ensembles: vec![],
             infra_node: None,
+
+            hooks: Default::default(),
         }
     }
 
@@ -323,8 +395,12 @@ mod tests {
                         timeout_minutes: None,
                     },
                 ],
+
+                crew: None,
             }],
             infra_node: None,
+
+            hooks: Default::default(),
         };
         let lp = draft_graph("graph-1", "ensemble-graph", "/tmp/project");
         let plan = build_import_plan(&document, &lp.id).unwrap();
@@ -381,6 +457,8 @@ mod tests {
             }],
             ensembles: vec![],
             infra_node: Some("B".to_string()),
+
+            hooks: Default::default(),
         };
         let mut lp = draft_graph("graph-1", "infra-graph", "/tmp/project");
         let plan = build_import_plan(&document, &lp.id).unwrap();
@@ -452,6 +530,8 @@ mod tests {
                     straggler_timeout_minutes: None,
                     quorum_grace_minutes: None,
                     members: vec![member(), member()],
+
+                    crew: None,
                 },
                 GraphExportEnsemble {
                     commit_rights: false,
@@ -468,9 +548,13 @@ mod tests {
                     straggler_timeout_minutes: None,
                     quorum_grace_minutes: None,
                     members: vec![member(), member()],
+
+                    crew: None,
                 },
             ],
             infra_node: None,
+
+            hooks: Default::default(),
         };
         let lp = draft_graph("graph-1", "kinds-graph", "/tmp/project");
         let plan = build_import_plan(&document, &lp.id).unwrap();
@@ -561,8 +645,12 @@ mod tests {
                         timeout_minutes: None,
                     },
                 ],
+
+                crew: None,
             }],
             infra_node: None,
+
+            hooks: Default::default(),
         };
         let lp = draft_graph("graph-1", "cb71-committer", "/tmp/project");
         let plan = build_import_plan(&document, &lp.id).unwrap();
@@ -702,6 +790,8 @@ mod tests {
                             timeout_minutes: None,
                         },
                     ],
+
+                    crew: None,
                 },
                 GraphExportEnsemble {
                     commit_rights: false,
@@ -731,9 +821,13 @@ mod tests {
                             timeout_minutes: Some(9),
                         },
                     ],
+
+                    crew: None,
                 },
             ],
             infra_node: Some("final".to_string()),
+
+            hooks: Default::default(),
         };
         let lp = draft_graph("graph-1", "cb62-full", "/tmp/project");
         let plan = build_import_plan(&doc, &lp.id).unwrap();
@@ -762,5 +856,226 @@ mod tests {
         assert_eq!(first_value["infra_node"], second_value["infra_node"]);
         assert_eq!(first_value["name"], second_value["name"]);
         assert_eq!(first_value["description"], second_value["description"]);
+    }
+
+    /// CM49: a document whose ensemble is bound to a crew that exists locally
+    /// imports bound — its members are materialized from the crew and the
+    /// re-export carries `crew` with no members.
+    #[test]
+    fn import_crew_bound_ensemble_binds_when_crew_exists() {
+        let db = test_db();
+        db.crew_create(
+            "two",
+            None,
+            &[crew_member("openrouter"), crew_member("opencode-go")],
+        )
+        .unwrap();
+        let document = crew_bound_document("two");
+        let lp = draft_graph("graph-1", "crew-graph", "/tmp/project");
+        let plan = build_import_plan(&document, &lp.id).unwrap();
+
+        let missing = db.import_graph(&lp, &plan).unwrap();
+        assert!(missing.is_empty(), "the crew exists locally");
+
+        let ensembles = db.list_ensembles_for_graph("graph-1").unwrap();
+        assert_eq!(ensembles[0].members.len(), 2, "members materialized");
+        assert_eq!(ensembles[0].ensemble.crew_name.as_deref(), Some("two"));
+        assert_eq!(ensembles[0].ensemble.crew_version_applied, Some(1));
+
+        // Re-export must carry the crew name and no members.
+        let graph_nodes = db.list_graph_nodes_for_graph("graph-1").unwrap();
+        let graph_edges = db.list_graph_edges_for_graph("graph-1").unwrap();
+        let lp_row = db.get_graph("graph-1").unwrap().unwrap();
+        let redone =
+            build_export_document(&lp_row, &graph_nodes, &graph_edges, &ensembles).unwrap();
+        assert_eq!(redone.ensembles[0].crew.as_deref(), Some("two"));
+        assert!(redone.ensembles[0].members.is_empty());
+    }
+
+    /// CM49: the same document with no local crew still imports — the
+    /// ensemble is pending (`crew_name` set, no members) and the name is
+    /// reported under `missing_crews`; creating the crew and syncing later
+    /// materializes the members.
+    #[test]
+    fn import_crew_bound_ensemble_without_crew_is_pending() {
+        let db = test_db();
+        let document = crew_bound_document("two");
+        let lp = draft_graph("graph-1", "crew-graph", "/tmp/project");
+        let plan = build_import_plan(&document, &lp.id).unwrap();
+
+        let missing = db.import_graph(&lp, &plan).unwrap();
+        assert_eq!(missing, vec!["two".to_string()]);
+
+        let ensembles = db.list_ensembles_for_graph("graph-1").unwrap();
+        assert!(ensembles[0].members.is_empty(), "pending: no members yet");
+        assert_eq!(ensembles[0].ensemble.crew_id, None);
+        assert_eq!(ensembles[0].ensemble.crew_name.as_deref(), Some("two"));
+        assert_eq!(ensembles[0].ensemble.crew_version_applied, None);
+        assert_eq!(
+            db.sync_ensemble_with_crew(&ensembles[0].ensemble.id)
+                .unwrap(),
+            crate::db::crews::SyncOutcome::MissingCrew
+        );
+
+        // Create the crew; the next sync materializes it.
+        db.crew_create(
+            "two",
+            None,
+            &[crew_member("openrouter"), crew_member("opencode-go")],
+        )
+        .unwrap();
+        db.sync_ensemble_with_crew(&ensembles[0].ensemble.id)
+            .unwrap();
+        let ensembles = db.list_ensembles_for_graph("graph-1").unwrap();
+        assert_eq!(ensembles[0].members.len(), 2);
+    }
+
+    fn crew_member(platform: &str) -> crate::domain::crews::CrewMember {
+        crate::domain::crews::CrewMember {
+            position: 0,
+            platform: platform.to_string(),
+            model: None,
+            timeout_minutes: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
+        }
+    }
+
+    fn crew_bound_document(crew: &str) -> GraphExportDocument {
+        use crate::domain::graph_transfer::{
+            GraphExportEnsemble, GraphExportEnsembleTarget, GraphExportNode,
+        };
+        GraphExportDocument {
+            format_version: 5,
+            name: "crew-graph".to_string(),
+            description: None,
+            nodes: vec![
+                GraphExportNode {
+                    name: "kickoff".to_string(),
+                    kind: GraphNodeKind::Check,
+                    position: 1,
+                    config: serde_json::json!({"command": "true"}),
+                },
+                GraphExportNode {
+                    name: "downstream".to_string(),
+                    kind: GraphNodeKind::Agent,
+                    position: 2,
+                    config: serde_json::json!({"platform": "claude"}),
+                },
+            ],
+            edges: vec![],
+            ensembles: vec![GraphExportEnsemble {
+                commit_rights: false,
+                name: "Proposers".to_string(),
+                kind: None,
+                prompt_template: "draft it".to_string(),
+                entry_from_node: GraphExportEnsembleTarget::Node("kickoff".to_string()),
+                entry_condition: GraphEdgeCondition::Always,
+                extra_entry_sources: vec![],
+                on_pass_to: GraphExportEnsembleTarget::Node("downstream".to_string()),
+                on_fail_to: None,
+                min_pass: 2,
+                timeout_minutes: 30,
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
+                crew: Some(crew.to_string()),
+                members: vec![],
+            }],
+            infra_node: None,
+
+            hooks: Default::default(),
+        }
+    }
+
+    /// A document with a crew-bound agent node AND a crew-bound agent hook.
+    fn crew_hook_document(crew: &str) -> GraphExportDocument {
+        use crate::domain::graph_transfer::{GraphExportEdge, GraphExportNode};
+        use crate::domain::graphs::{GraphCompletionHook, GraphHookEvent};
+        let mut document = simple_document();
+        document.format_version = 5;
+        document.nodes.push(GraphExportNode {
+            name: "crewnode".to_string(),
+            kind: GraphNodeKind::Agent,
+            position: 3,
+            config: serde_json::json!({"crew": crew, "prompt_template": "x"}),
+        });
+        document.edges.push(GraphExportEdge {
+            from_node: "implementer".to_string(),
+            to_node: "crewnode".to_string(),
+            condition: GraphEdgeCondition::Always,
+        });
+        document.hooks.insert(
+            GraphHookEvent::OnCompleted,
+            vec![GraphCompletionHook {
+                platform: None,
+                crew: Some(crew.to_string()),
+                model: None,
+                effort: None,
+                prompt: Some("hi".to_string()),
+                command: None,
+                target_session_id: None,
+                target_session_name: None,
+                timeout_minutes: None,
+                target_graph_id: None,
+                queue_id: None,
+                workdir_override: None,
+                idea: None,
+            }],
+        );
+        document
+    }
+
+    /// CM49 req 7: a crew-bound hook and node survive the round trip — the
+    /// hook is persisted with its `crew` and re-exported, and a crew-bound
+    /// node is NOT reported as missing a platform.
+    #[test]
+    fn crew_bound_hook_and_node_round_trip() {
+        use crate::domain::graphs::GraphHookEvent;
+        let db = test_db();
+        db.crew_create("crewhook", None, &[crew_member("claude")])
+            .unwrap();
+        let document = crew_hook_document("crewhook");
+        let lp = draft_graph("graph-1", "crew-hook-graph", "/tmp/project");
+        let plan = build_import_plan(&document, &lp.id).unwrap();
+        assert!(
+            !crate::domain::graph_transfer::agent_nodes_missing_platform(&plan)
+                .contains(&"crewnode".to_string()),
+            "a crew-bound node names a harness and must not be listed"
+        );
+
+        let missing = db.import_graph(&lp, &plan).unwrap();
+        assert!(missing.is_empty(), "the crew exists locally");
+
+        let stored = db.get_graph("graph-1").unwrap().unwrap();
+        let hook = &stored.hooks.get(&GraphHookEvent::OnCompleted).unwrap()[0];
+        assert_eq!(hook.crew.as_deref(), Some("crewhook"));
+
+        let nodes = db.list_graph_nodes_for_graph("graph-1").unwrap();
+        let edges = db.list_graph_edges_for_graph("graph-1").unwrap();
+        let redone = build_export_document(&stored, &nodes, &edges, &[]).unwrap();
+        assert_eq!(
+            redone.hooks.get(&GraphHookEvent::OnCompleted).unwrap()[0]
+                .crew
+                .as_deref(),
+            Some("crewhook"),
+            "the hook crew binding round-trips through export"
+        );
+    }
+
+    /// CM49 req 7: a crew-bound node/hook whose crew is absent still imports
+    /// and its name is reported under `missing_crews`.
+    #[test]
+    fn crew_bound_hook_without_local_crew_is_reported() {
+        let db = test_db();
+        let document = crew_hook_document("ghost");
+        let lp = draft_graph("graph-1", "crew-hook-graph", "/tmp/project");
+        let plan = build_import_plan(&document, &lp.id).unwrap();
+        let missing = db.import_graph(&lp, &plan).unwrap();
+        assert_eq!(missing, vec!["ghost".to_string()]);
+        assert!(
+            db.get_graph("graph-1").unwrap().is_some(),
+            "import succeeds"
+        );
     }
 }

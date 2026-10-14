@@ -36,12 +36,7 @@ impl Availability {
     }
 
     fn from_entry(entry: &RosterEntry, now: &DateTime<Utc>) -> Self {
-        let expired = entry.state == RosterState::Unavailable
-            && entry
-                .until
-                .as_deref()
-                .and_then(parse_until)
-                .is_some_and(|until| until <= *now);
+        let expired = entry_expired(entry, now);
         Availability {
             available: entry.state == RosterState::Available || expired,
             reason: entry.reason.clone(),
@@ -52,10 +47,27 @@ impl Availability {
     }
 }
 
-fn parse_until(raw: &str) -> Option<DateTime<Utc>> {
+/// Parse an `until` timestamp. RFC 3339, normalised to UTC. Shared by
+/// `effective_state`'s expiry rule and the `roster_set` validation, so the
+/// write edge and the read edge agree about what a valid instant is.
+pub(crate) fn parse_until(raw: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(raw)
         .ok()
         .map(|dt| dt.with_timezone(&Utc))
+}
+
+/// An `unavailable` entry whose `until` is at or before `now`: its pair reads
+/// as available again. The one expiry rule — `effective_state` and the
+/// `roster_list`/`roster_check` read surfaces report it as expired rather
+/// than silently swallowing the entry, and nothing is ever rewritten by a
+/// timer.
+pub fn entry_expired(entry: &RosterEntry, now: &DateTime<Utc>) -> bool {
+    entry.state == RosterState::Unavailable
+        && entry
+            .until
+            .as_deref()
+            .and_then(parse_until)
+            .is_some_and(|until| until <= *now)
 }
 
 /// The prefix a `*`-suffixed `model_pattern` matches on, or `None` when the

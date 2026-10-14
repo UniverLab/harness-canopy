@@ -39,7 +39,7 @@ use crate::domain::graphs::{GraphDetails, GraphNodeKind};
 mod targets;
 
 pub(crate) use targets::{
-    distinct_targets_for_graph, group_recent_usage, probe_targets, unknown_count, would_fail_count,
+    graph_targets_with_crews, group_recent_usage, probe_targets, unknown_count, would_fail_count,
     GraphProbeTarget,
 };
 
@@ -1674,7 +1674,7 @@ mod tests {
             completion_hook_runs: vec![],
         };
 
-        let targets = distinct_targets_for_graph(&details);
+        let targets = targets::distinct_targets_for_graph(&details);
         assert_eq!(targets.len(), 2);
         let claude = targets
             .iter()
@@ -1704,6 +1704,8 @@ mod tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let details = GraphDetails {
             lp: sample_graph(Some(hook)),
@@ -1713,7 +1715,7 @@ mod tests {
             completion_hook_runs: vec![],
         };
 
-        let targets = distinct_targets_for_graph(&details);
+        let targets = targets::distinct_targets_for_graph(&details);
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].target.platform, "mimo");
         assert_eq!(targets[0].used_by, vec!["on_completed hook 0"]);
@@ -1739,6 +1741,8 @@ mod tests {
                 queue_id: None,
                 workdir_override: None,
                 idea: None,
+
+                crew: None,
             }],
         );
         hooks.insert(
@@ -1756,6 +1760,8 @@ mod tests {
                 queue_id: None,
                 workdir_override: None,
                 idea: None,
+
+                crew: None,
             }],
         );
         hooks.insert(
@@ -1773,6 +1779,8 @@ mod tests {
                 queue_id: None,
                 workdir_override: None,
                 idea: None,
+
+                crew: None,
             }],
         );
         let mut lp = sample_graph(None);
@@ -1785,7 +1793,7 @@ mod tests {
             completion_hook_runs: vec![],
         };
 
-        let targets = distinct_targets_for_graph(&details);
+        let targets = targets::distinct_targets_for_graph(&details);
         assert_eq!(targets.len(), 2);
         let mimo = targets
             .iter()
@@ -1816,7 +1824,7 @@ mod tests {
             completion_hook_runs: vec![],
         };
 
-        assert!(distinct_targets_for_graph(&details).is_empty());
+        assert!(targets::distinct_targets_for_graph(&details).is_empty());
     }
 
     fn report(outcome: ProbeOutcome) -> ProbeReport {

@@ -439,7 +439,7 @@ pub(crate) fn config_has_agent_harness(map: &serde_json::Map<String, serde_json:
             .and_then(serde_json::Value::as_str)
             .is_some_and(|s| !s.trim().is_empty())
     };
-    has_non_empty_str("platform") || has_non_empty_str("cli")
+    has_non_empty_str("platform") || has_non_empty_str("cli") || has_non_empty_str("crew")
 }
 
 /// `graph_add_node`/`graph_update_node`'s interactive-only gate (CM35):
@@ -476,6 +476,7 @@ fn reject_interactive_only_platform(config: &serde_json::Value) -> Option<String
 pub(crate) const AGENT_CONFIG_KEYS: &[&str] = &[
     "platform",
     "cli",
+    "crew",
     "model",
     "effort",
     "timeout_minutes",
@@ -626,7 +627,16 @@ pub(crate) fn validate_node_config(
         GraphNodeKind::Agent => {
             if !config_has_agent_harness(map) {
                 return Err(
-                    "Graph node config for kind 'agent' must include a non-empty 'platform' (or 'cli') field.".to_string(),
+                    "Graph node config for kind 'agent' must include a non-empty 'platform' (or 'cli' or 'crew') field.".to_string(),
+                );
+            }
+            // CM49: `crew` names the harness the same way `platform` does —
+            // pass one or the other, never both.
+            if has_non_empty_str("crew")
+                && (has_non_empty_str("platform") || has_non_empty_str("cli"))
+            {
+                return Err(
+                    "Graph node config must pass 'crew' or 'platform', never both.".to_string(),
                 );
             }
             for key in [
