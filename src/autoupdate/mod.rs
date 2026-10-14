@@ -20,8 +20,6 @@ pub use restart::{restart_daemon_after_update, RealUpdateDaemonOps, UpdateDaemon
 
 /// The GitHub repository whose stable releases contain canopy binaries.
 pub const GITHUB_REPO: &str = "UniverLab/harness-canopy";
-/// Auto-check throttle default (24 h); the live value comes from
-/// `update.check_interval_hours` and is passed to `should_check`.
 const LAST_CHECK_FILE: &str = "last_update_check.txt";
 
 /// The release fields needed to select a stable, published binary.

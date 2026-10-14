@@ -145,14 +145,12 @@ impl TaskTriggerHandler {
                 )
                 .graphs,
             );
-        let (min_for_effective, max_for_effective) =
-            crate::domain::graphs::member_bounds(effective_kind, caps);
+        let (_, max_for_effective) = crate::domain::graphs::member_bounds(effective_kind, caps);
         if resulting_member_count > max_for_effective {
-            return Ok(error_result(&format!(
-                "A {} ensemble must have {min_for_effective}-{max_for_effective} members, got {}. Raise {} to allow more.",
-                effective_kind.as_str(),
+            return Ok(error_result(&crate::domain::graphs::member_count_message(
+                effective_kind,
+                caps,
                 resulting_member_count,
-                crate::domain::graphs::member_cap_key(effective_kind)
             )));
         }
 

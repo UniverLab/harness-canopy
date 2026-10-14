@@ -75,13 +75,21 @@ pub(super) fn validate_import_ensemble_shape(
         }
     } else {
         let (min_members, max_members) = member_bounds(import_kind, caps);
-        if doc_ensemble.members.len() < min_members || doc_ensemble.members.len() > max_members {
+        let count = doc_ensemble.members.len();
+        if count < min_members || count > max_members {
+            // Only an over-cap import names the setting that raises the cap.
+            let hint = if count > max_members {
+                format!(
+                    " Raise {} to allow more.",
+                    crate::domain::graphs::member_cap_key(import_kind)
+                )
+            } else {
+                String::new()
+            };
             return Err(format!(
-                "Ensemble '{}' (kind {}) must have {min_members}-{max_members} members, got {}. Raise {} to allow more.",
+                "Ensemble '{}' (kind {}) must have {min_members}-{max_members} members, got {count}.{hint}",
                 doc_ensemble.name,
                 import_kind.as_str(),
-                doc_ensemble.members.len(),
-                crate::domain::graphs::member_cap_key(import_kind)
             ));
         }
         validate_ensemble_min_pass(

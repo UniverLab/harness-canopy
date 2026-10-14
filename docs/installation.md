@@ -65,6 +65,10 @@ The daemon checks GitHub releases for new stable versions every 24 hours,
 downloads the platform-specific binary (linux-musl, macos-darwin;
 x86_64/aarch64) and atomically replaces the running executable.
 
+The check is tunable: `update.check_interval_hours` (default 24) sets the
+interval, and `update.check_enabled = false` turns the check off so no
+request is made. The manual `canopy update` command is not affected.
+
 ## Running as a service
 
 ```bash

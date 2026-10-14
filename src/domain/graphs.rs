@@ -20,8 +20,8 @@ pub use crew::{
     GraphCrewSummary,
 };
 pub use ensembles::{
-    member_bounds, member_cap_key, Ensemble, EnsembleDetails, EnsembleKind, EnsembleMember,
-    EnsembleMemberSpec, MemberCaps,
+    member_bounds, member_cap_key, member_count_message, Ensemble, EnsembleDetails, EnsembleKind,
+    EnsembleMember, EnsembleMemberSpec, MemberCaps,
 };
 pub use hooks::{GraphCompletionHook, GraphCompletionHookRun, GraphHookEvent};
 pub use statuses::{

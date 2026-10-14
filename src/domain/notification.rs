@@ -313,14 +313,6 @@ pub fn clear_notifications_on_exit() {
         .status();
 }
 
-/// Send a desktop notification. Fire-and-forget — spawns a background thread
-/// and never blocks the caller. Failures are silently ignored.
-///
-/// `level` selects a native themed icon and urgency on Linux. On WSL and macOS
-/// the system shows the Canopy app icon, so the level has no visible effect
-/// there — the title (shown prominently) carries the subject and the body the
-/// outcome.
-///
 /// Whether desktop notifications are enabled (`notifications.enabled`).
 pub(crate) fn notifications_enabled() -> bool {
     notifications_enabled_in(&crate::domain::prompts::canopy_dir())
@@ -334,6 +326,15 @@ pub(crate) fn notifications_enabled_in(dir: &std::path::Path) -> bool {
         .enabled
 }
 
+/// Send a desktop notification. Fire-and-forget — spawns a background thread
+/// and never blocks the caller. Failures are silently ignored. Sends nothing
+/// when `notifications.enabled` is false.
+///
+/// `level` selects a native themed icon and urgency on Linux. On WSL and macOS
+/// the system shows the Canopy app icon, so the level has no visible effect
+/// there — the title (shown prominently) carries the subject and the body the
+/// outcome.
+///
 /// On WSL, the title also doubles as the de-dup subject key (see `send_wsl`):
 /// every caller already passes a stable per-subject string as `title` (a task
 /// id, an agent id, a mission name, a graph name), so this needs no extra
@@ -436,6 +437,7 @@ mod tests {
         assert_ne!(tag, tag_for_subject(&other_long_subject));
         assert_eq!(tag, tag_for_subject(&long_subject));
     }
+
     #[test]
     fn test_notifications_enabled_gate() {
         let dir = std::env::temp_dir().join(format!("canopy-notif-{}", std::process::id()));

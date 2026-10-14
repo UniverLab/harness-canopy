@@ -108,6 +108,21 @@ pub fn member_cap_key(kind: EnsembleKind) -> &'static str {
     }
 }
 
+/// Refusal text for a member count outside the kind's bounds. Only an
+/// over-cap count names the setting that raises the cap.
+pub fn member_count_message(kind: EnsembleKind, caps: MemberCaps, count: usize) -> String {
+    let (min, max) = member_bounds(kind, caps);
+    let hint = if count > max {
+        format!(" Raise {} to allow more.", member_cap_key(kind))
+    } else {
+        String::new()
+    };
+    format!(
+        "A {} ensemble must have {min}-{max} members, got {count}.{hint}",
+        kind.as_str()
+    )
+}
+
 /// Exactly one of `spec_id`/`graph_id` is set — same invariant as
 /// [`GraphNode`]/[`GraphEdge`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -294,5 +309,20 @@ mod member_caps_tests {
             member_cap_key(EnsembleKind::RoundRobin),
             "graphs.ensemble_max_members_sequential"
         );
+    }
+
+    #[test]
+    fn member_count_message_names_the_key_only_over_the_cap() {
+        let caps = MemberCaps {
+            parallel: 4,
+            sequential: 3,
+        };
+        let over = member_count_message(EnsembleKind::Parallel, caps, 5);
+        assert_eq!(
+            over,
+            "A parallel ensemble must have 2-4 members, got 5. Raise graphs.ensemble_max_members_parallel to allow more."
+        );
+        let under = member_count_message(EnsembleKind::Cascade, caps, 1);
+        assert_eq!(under, "A cascade ensemble must have 2-3 members, got 1.");
     }
 }

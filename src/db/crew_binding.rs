@@ -120,9 +120,8 @@ fn check_bindable(details: &EnsembleDetails, crew_len: usize) -> Result<()> {
     let (min, max) = member_bounds(details.ensemble.kind, caps);
     if crew_len < min || crew_len > max {
         anyhow::bail!(
-            "A {} ensemble must have {min}-{max} members, got {crew_len}. Raise {} to allow more.",
-            details.ensemble.kind.as_str(),
-            crate::domain::graphs::member_cap_key(details.ensemble.kind)
+            "{}",
+            crate::domain::graphs::member_count_message(details.ensemble.kind, caps, crew_len)
         );
     }
     Ok(())

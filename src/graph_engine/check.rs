@@ -6,7 +6,7 @@ use super::*;
 pub(crate) struct ShellCommandResult {
     pub(crate) status: GraphRunStatus,
     /// Check-shaped output JSON, with `stdout`/`stderr` already truncated to
-    /// [`graphs.check_output_max_kib`] tail (CB5 contract).
+    /// tail of `graphs.check_output_max_kib` KiB (CB5 contract).
     pub(crate) output: Value,
     pub(crate) summary: String,
     /// The command's *full*, untruncated stdout / stderr as it emitted them.

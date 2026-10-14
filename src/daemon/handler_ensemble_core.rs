@@ -151,11 +151,10 @@ impl TaskTriggerHandler {
         {
             let (min, max) = crate::domain::graphs::member_bounds(kind, caps);
             if members.len() < min || members.len() > max {
-                return Ok(error_result(&format!(
-                    "A {} ensemble must have {min}-{max} members, got {}. Raise {} to allow more.",
-                    kind.as_str(),
+                return Ok(error_result(&crate::domain::graphs::member_count_message(
+                    kind,
+                    caps,
                     members.len(),
-                    crate::domain::graphs::member_cap_key(kind)
                 )));
             }
         }
@@ -487,11 +486,10 @@ pub(crate) fn validate_ensemble_members(
 ) -> Result<Vec<EnsembleMemberSpec>, String> {
     let (min, max) = crate::domain::graphs::member_bounds(kind, caps);
     if members.len() < min || members.len() > max {
-        return Err(format!(
-            "A {} ensemble must have {min}-{max} members, got {}. Raise {} to allow more.",
-            kind.as_str(),
+        return Err(crate::domain::graphs::member_count_message(
+            kind,
+            caps,
             members.len(),
-            crate::domain::graphs::member_cap_key(kind)
         ));
     }
     members

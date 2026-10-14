@@ -108,7 +108,7 @@ pub(crate) fn truncate_check_output_with(s: String, max_bytes: usize) -> (String
 
 #[cfg(test)]
 mod shell_utils_settings_tests {
-    use super::{check_output_max_bytes, truncate_check_output_with};
+    use super::truncate_check_output_with;
 
     #[test]
     fn check_output_cut_at_16_kib() {
@@ -128,13 +128,13 @@ mod shell_utils_settings_tests {
     }
 
     #[test]
-    fn check_output_max_bytes_default_is_64_kib() {
-        // Default registry value: 64 KiB. Only asserts when no user config
-        // overrides it; a local config.toml with a custom value skips.
-        let v = check_output_max_bytes();
-        let graphs =
-            crate::domain::canopy_config::CanopyConfig::load(&crate::domain::prompts::canopy_dir())
-                .graphs;
-        assert_eq!(v, graphs.check_output_max_kib as usize * 1024);
+    fn check_output_default_registry_value_is_64_kib() {
+        // Pins the registry default, so the no-config behaviour stays 64 KiB.
+        // The live read goes through `check_output_max_bytes`, which the cut
+        // tests above exercise via `truncate_check_output_with`.
+        assert_eq!(
+            crate::domain::settings::default_int("graphs.check_output_max_kib") as usize * 1024,
+            64 * 1024
+        );
     }
 }
