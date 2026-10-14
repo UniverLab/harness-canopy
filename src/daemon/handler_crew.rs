@@ -37,10 +37,7 @@ impl TaskTriggerHandler {
         name = "crew_list",
         description = "List every crew: its name, description, version, ordered members, and how many ensembles/nodes/hooks bind it. Member order is meaningful — cascade tries it in order, round_robin rotates through it, a bound agent node takes the first available member."
     )]
-    pub(crate) async fn crew_list(
-        &self,
-        Parameters(_params): Parameters<CrewGetParams>,
-    ) -> Result<CallToolResult, McpError> {
+    pub(crate) async fn crew_list(&self) -> Result<CallToolResult, McpError> {
         let crews = self.db.crew_list().map_err(internal_error)?;
         let counts = self.db.crew_binding_counts().map_err(internal_error)?;
         let body: Vec<serde_json::Value> = crews
@@ -67,7 +64,7 @@ impl TaskTriggerHandler {
 
     #[tool(
         name = "crew_get",
-        description = "Show one crew — its description, version, ordered members — and every binding of it as {graph, portion, name}."
+        description = "Show one crew — its description, version, ordered members — and every binding of it as {graph, kind, name}, where kind is ensemble, node, or hook."
     )]
     pub(crate) async fn crew_get(
         &self,

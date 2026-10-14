@@ -293,7 +293,9 @@ literal.
 
 An ensemble binds to a crew with `graph_add_ensemble {crew}` or
 `graph_update_ensemble {crew: "name"}`; `crew: null` unbinds and keeps the
-current member rows as literal members. A bound ensemble renders the shared
+current member rows as literal members. A crew change is its own call — it
+is never combined with a literal `members` list (or any other ensemble
+field) in one update. A bound ensemble renders the shared
 `prompt_template` for every member. Binding replaces the member rows through
 the one sync path and clamps `min_pass` to the crew size. Member order is
 meaningful: `cascade` tries it in order, `round_robin` rotates through it,
@@ -736,9 +738,24 @@ An ensemble's `kind` is carried in the document for `cascade` and
 absent `kind` means on import. Import refuses a `kind` value it does
 not know — naming the ensemble and the value — and refuses a document
 that carries any field it does not know how to restore, as part of
-its all-or-nothing contract. `format_version` 4 remains the newest
-accepted version; 1, 2 and 3 documents import unchanged (they carry fewer fields,
-never more).
+its all-or-nothing contract. `format_version` 5 remains the newest
+accepted version; 1, 2, 3 and 4 documents import unchanged (they carry
+fewer fields, never more).
+
+A [crew](#crews)-bound design travels by name, never by its members:
+`graph_export` writes `crew: "<name>"` on a bound ensemble (with no
+`members` array), on a bound agent node's config, and on a bound agent
+hook — and, since version 5, a graph's event-keyed `hooks` ride along
+in the document as well, which is what gives a bound hook something to
+travel in. `graph_import` keeps the reference when a crew of that name
+exists locally: the ensemble binds and re-materializes the crew's
+members, and a bound node or hook resolves its pair at dispatch from
+the crew. When the name is missing locally the import still succeeds,
+lists every unresolved binding under `missing_crews` (next to
+`nodes_missing_platform`) in the MCP response or the CLI output, and
+leaves the binding pending — a pending ensemble cannot dispatch until
+a crew of that name is created, and `graph_preflight` reports it as
+`would_fail`.
 
 An [ensemble](#ensembles) round-trips as one ensemble — not as its
 expanded member/quorum nodes — via its own `ensembles` array entry.
@@ -762,7 +779,7 @@ ensemble of reviewers, and a committer the quorum routes to on pass.
 
 ```json
 {
-  "format_version": 4,
+  "format_version": 5,
   "name": "implement-and-review",
   "description": "Implement a spec, get two model opinions, then commit.",
   "nodes": [

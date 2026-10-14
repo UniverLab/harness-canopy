@@ -376,33 +376,58 @@ pub(crate) fn resolve_chained_exit_ensemble(
     }))
 }
 
+/// Every update field `graph_update_ensemble` accepts, as presence flags —
+/// one list shared by the empty-update refusal and the crew-combination
+/// refusal, so the two can never drift apart.
+fn ensemble_update_field_flags(params: &GraphUpdateEnsembleParams) -> [bool; 19] {
+    [
+        params.kind.is_some(),
+        params.prompt_template.is_some(),
+        params.members.is_some(),
+        params.min_pass.is_some(),
+        params.straggler_timeout_minutes.is_some(),
+        params.quorum_grace_minutes.is_some(),
+        params.timeout_minutes.is_some(),
+        params.infra_retry_limit.is_some(),
+        params.infra_crash_max_seconds.is_some(),
+        params.infra_backoff_seconds.is_some(),
+        params.on_pass_to.is_some(),
+        params.on_fail_to.is_some(),
+        params.from_node.is_some(),
+        params.condition.is_some(),
+        params.add_entry_from.is_some(),
+        params.add_entry_condition.is_some(),
+        params.remove_entry_from.is_some(),
+        params.commit_rights.is_some(),
+        params.crew.is_some(),
+    ]
+}
+
 pub(crate) fn reject_empty_ensemble_update(
     params: &GraphUpdateEnsembleParams,
 ) -> Result<(), String> {
     validate_at_least_one_bool(
-        &[
-            params.kind.is_some(),
-            params.prompt_template.is_some(),
-            params.members.is_some(),
-            params.min_pass.is_some(),
-            params.straggler_timeout_minutes.is_some(),
-            params.quorum_grace_minutes.is_some(),
-            params.timeout_minutes.is_some(),
-            params.infra_retry_limit.is_some(),
-            params.infra_crash_max_seconds.is_some(),
-            params.infra_backoff_seconds.is_some(),
-            params.on_pass_to.is_some(),
-            params.on_fail_to.is_some(),
-            params.from_node.is_some(),
-            params.condition.is_some(),
-            params.add_entry_from.is_some(),
-            params.add_entry_condition.is_some(),
-            params.remove_entry_from.is_some(),
-            params.commit_rights.is_some(),
-            params.crew.is_some(),
-        ],
+        &ensemble_update_field_flags(params),
         "graph_update_ensemble",
     )
+}
+
+/// CM49: binding or unbinding a crew is its own operation. The crew arm
+/// returns early, so any other field passed alongside it would be silently
+/// dropped — refuse the combination instead of half-applying it.
+pub(crate) fn reject_crew_update_combination(
+    params: &GraphUpdateEnsembleParams,
+) -> Result<(), String> {
+    let flags = ensemble_update_field_flags(params);
+    let others = flags.iter().filter(|set| **set).count();
+    if others > 1 {
+        return Err(
+            "crew binds or unbinds on its own and cannot be combined with other ensemble \
+             updates in one call; send the crew change and the other updates separately."
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 pub(crate) fn validate_ensemble_infra_updates(

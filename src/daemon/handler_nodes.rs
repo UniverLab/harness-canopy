@@ -9,7 +9,8 @@ use crate::daemon::handler_formatting::{
 use crate::daemon::handler_helpers::record_config_change_if_running;
 use crate::daemon::handler_specs::validate_at_least_one_bool;
 use crate::daemon::handler_validate::{
-    json_value_kind_name, parse_router_routes, resolve_prefix_or_error, validate_node_exists,
+    config_has_agent_harness, json_value_kind_name, parse_router_routes, resolve_prefix_or_error,
+    validate_agent_crew_exclusive, validate_blueprint_agent_harness, validate_node_exists,
     validate_node_kind, validate_node_not_ensemble_owned, validate_node_position_conflict,
     validate_non_empty, validate_not_join_kind, validate_topology_mutation_allowed,
 };
@@ -428,20 +429,6 @@ impl TaskTriggerHandler {
     }
 }
 
-/// Whether an agent node's config names a harness — a non-empty `platform`
-/// or `cli` field. Shared by [`validate_node_config`]'s `Agent` arm (the
-/// general "this config can run" gate) and `resolve_node_kind_and_config`'s
-/// blueprint branch (which needs the same check before merge, to give a
-/// blueprint-specific error instead of the generic one).
-pub(crate) fn config_has_agent_harness(map: &serde_json::Map<String, serde_json::Value>) -> bool {
-    let has_non_empty_str = |field: &str| {
-        map.get(field)
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|s| !s.trim().is_empty())
-    };
-    has_non_empty_str("platform") || has_non_empty_str("cli") || has_non_empty_str("crew")
-}
-
 /// `graph_add_node`/`graph_update_node`'s interactive-only gate (CM35):
 /// `Some(reason)` when the node's effective config names a harness marked
 /// `headless = false`. Extracts the platform exactly the way
@@ -632,13 +619,7 @@ pub(crate) fn validate_node_config(
             }
             // CM49: `crew` names the harness the same way `platform` does —
             // pass one or the other, never both.
-            if has_non_empty_str("crew")
-                && (has_non_empty_str("platform") || has_non_empty_str("cli"))
-            {
-                return Err(
-                    "Graph node config must pass 'crew' or 'platform', never both.".to_string(),
-                );
-            }
+            validate_agent_crew_exclusive(map)?;
             for key in [
                 "infra_retry_limit",
                 "infra_crash_max_seconds",
@@ -773,7 +754,7 @@ pub(crate) fn resolve_node_kind_and_config(
             };
             let overrides = config_overrides.map(serde_json::Value::Object);
             let merged = merge_blueprint_config(&bp.config, overrides.as_ref());
-            // Blueprints intentionally carry no platform/cli (see
+            // Blueprints intentionally carry no platform/cli/crew (see
             // `builtin_blueprint_specs`) — which harness runs a node is the
             // caller's decision, supplied here via `config_overrides`, never
             // a default this resolver falls back to. Catching the missing
@@ -781,12 +762,7 @@ pub(crate) fn resolve_node_kind_and_config(
             // generic message) lets the error name the blueprint and say
             // *why* the field is missing instead of just that it is.
             if node_kind == GraphNodeKind::Agent {
-                let has_harness = merged.as_object().is_some_and(config_has_agent_harness);
-                if !has_harness {
-                    return Err(format!(
-                        "Blueprint '{blueprint_name}' intentionally does not provide a platform (or cli) — which harness runs a node is the caller's decision, not the blueprint's. Pass config_overrides with a non-empty 'platform' (and 'model' if that platform needs one) to select the harness."
-                    ));
-                }
+                validate_blueprint_agent_harness(blueprint_name, &merged)?;
             }
             Ok((node_kind, merged))
         }

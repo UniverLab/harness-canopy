@@ -710,6 +710,7 @@ pub mod blueprints;
 pub mod clean;
 pub(crate) mod connection;
 pub mod crew_binding;
+pub mod crew_bindings;
 pub(crate) mod crew_member_config;
 pub mod crews;
 pub mod ensembles;

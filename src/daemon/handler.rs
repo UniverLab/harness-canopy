@@ -696,8 +696,8 @@ mod tests {
                 "create_seed|ec16a67a00abe30d8410e1720468a039cd4b4c1a85820894e9b766a6ba868701|804d0cbcfaf45bb6e046d219beeeda3d4981abb00893efbcbc22e9d2547db8e6",
                 "crew_create|731ac03f7474a59d939a6acd2e6cb97344805db5dea7dc185c287468f39a6ce3|fee9ee72a0374a920bb6c867d714b832c32af904c5628af9c16d16abf6d090d9",
                 "crew_delete|6ac73732aec72b5596cf240decbc0da64ea177ae39be4e40f77629371bb81f48|c39d718a7b13b7d9432a28814db6f3e555fee5d78ea8ef1be866966fb8e80889",
-                "crew_get|bba530ed5ff6bd401935954f0ccfcaedc979e4c97882bb2d3900396b964531fa|b2a1d8c6ff42aa877b0a58ddd1455838dc2933a7e8d968fa43b1842cc7d85eb5",
-                "crew_list|de5d37159a9000510178aa3147800fdb7166d2feab4fc55b7a66622d0a0c0cec|b2a1d8c6ff42aa877b0a58ddd1455838dc2933a7e8d968fa43b1842cc7d85eb5",
+                "crew_get|d9471965dee083abac1ffe1f0b61cff31f46f3c339f42cd1b7cd646ac62181d5|b2a1d8c6ff42aa877b0a58ddd1455838dc2933a7e8d968fa43b1842cc7d85eb5",
+                "crew_list|de5d37159a9000510178aa3147800fdb7166d2feab4fc55b7a66622d0a0c0cec|efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
                 "crew_update|ba98471566591039ce23de7339c7b0355f9715bf8ff743e7ede1715319479689|530c5d983133929d9ea3704500d0871f7109e24eb7089f3155ac5f971f46415f",
                 "evolve_identity|cbae994f70163b304935cc28f006ffac2eec8e1bea905dea2c0fb59bd1c66cdc|5def265f8dddb09352b474cd0068aff558d8993ec3711458fe912388888c42a4",
                 "get_identity|21d80d3a69d9719487bc498958b5600e86bf36519e229d270d2c2ae338383f72|efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
@@ -734,7 +734,7 @@ mod tests {
                 "graph_schedule_continue|1a383d649dbb9963e8ef76d698b9293b1a517205b3f61cd48d6c484f0c009c35|ab6b9783dd0a4ddb3cbcbe23c4ccaefa955cdffecead28d2a4ee758c21e27a55",
                 "graph_update|27c9d848836295967b3588395ddf8a8038ef4b881b7402fb4b9bcccf430d4da8|efcd24f3827ffad22568ecfd9627dd856545d98a47d8a5fd4cbecce117be9ea9",
                 "graph_update_edge|ec07b87be17723f5212d8024e8bca2e2f44c215a417140898e1bab2539b832f5|51dafc02acbe8f4df24d69e44b6afcba2b381c212cfe426dcdbdde3a6196b6da",
-                "graph_update_ensemble|d847b49f4550d31047a892df10c93054da01396841ac78af0afe9353221ae671|807ab9ea6fa0a08ea52efc8016c06bfc980732f0900bb99f1081b7f3ceabbce4",
+                "graph_update_ensemble|8f4a8cc93ef6623a86316c28879a1cf986490e97db21c650e99574a9e9ef3f3d|6191428edb5c8cab9d118dd7eaa326beb04d7313c491b0ccde2ae63e5572db81",
                 "graph_update_node|3d0f3c46a8d6fee1d776385e178662ae2a187e678bb5e3dd899c0bb93010c51e|13a30ea327b630709e99b78a98a12c210dc32034db31fad6595d4833a2a9697a",
                 "graph_update_spec|cc242e8d96c9fa9c957a7ca885258947ab54337e4a9e1b9f2ddc66eb6ae06b6d|e8c2e945b5f6f1080c5fe54b38f36e0c75e1716e61f80db812c32547d30e8264",
                 "intelligence_delete_node|b70ce24d59d2619e275cb40397037d7748f3ebca64ac5ffdc85eae6ee65bb1af|318c60c03fd6f5012a88be52de9aea7e9f372081ac1a378f5ee033b024ce229b",
@@ -1771,6 +1771,29 @@ mod tests {
         let error = validate_node_config(GraphNodeKind::Agent, &config).unwrap_err();
         assert!(error.contains("'agent'"), "{error}");
         assert!(error.contains("platform"), "{error}");
+    }
+
+    /// CM49: a crew is the agent config's harness alternative — accepted
+    /// alone, refused beside a literal pair.
+    #[test]
+    fn validate_node_config_agent_crew_is_the_harness_alternative() {
+        assert!(validate_node_config(
+            GraphNodeKind::Agent,
+            &serde_json::json!({ "crew": "implementers" })
+        )
+        .is_ok());
+        let with_platform = serde_json::json!({ "crew": "implementers", "platform": "claude" });
+        let error = validate_node_config(GraphNodeKind::Agent, &with_platform).unwrap_err();
+        assert!(
+            error.contains("'crew' or 'platform', never both"),
+            "{error}"
+        );
+        let with_cli = serde_json::json!({ "crew": "implementers", "cli": "codex" });
+        let error = validate_node_config(GraphNodeKind::Agent, &with_cli).unwrap_err();
+        assert!(
+            error.contains("'crew' or 'platform', never both"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -4549,6 +4572,67 @@ mod tests {
         assert_eq!(hook.model, Some("opus-4".to_string()));
         assert_eq!(hook.prompt.as_deref(), Some("{{graph_name}} completed"));
         assert_eq!(hook.timeout_minutes, Some(10));
+    }
+
+    /// CM49: an agent hook names a crew instead of a platform — accepted
+    /// alone, refused beside a literal platform.
+    #[test]
+    fn build_graph_completion_hook_crew_is_the_platform_alternative() {
+        let params = GraphCompletionHookParams {
+            platform: None,
+            crew: Some("reviewers".to_string()),
+            model: None,
+            effort: None,
+            prompt: Some("review the diff".to_string()),
+            command: None,
+            target_session_id: None,
+            target_session_name: None,
+            timeout_minutes: None,
+            target_graph_id: None,
+            queue_id: None,
+            workdir_override: None,
+            idea: None,
+        };
+        let hook = build_graph_completion_hook(&params).unwrap();
+        assert!(hook.platform.is_none(), "a crew hook names no platform");
+        assert_eq!(hook.crew.as_deref(), Some("reviewers"));
+        assert_eq!(hook.prompt.as_deref(), Some("review the diff"));
+
+        let both = GraphCompletionHookParams {
+            platform: Some("claude".to_string()),
+            crew: Some("reviewers".to_string()),
+            model: None,
+            effort: None,
+            prompt: Some("review the diff".to_string()),
+            command: None,
+            target_session_id: None,
+            target_session_name: None,
+            timeout_minutes: None,
+            target_graph_id: None,
+            queue_id: None,
+            workdir_override: None,
+            idea: None,
+        };
+        let err = build_graph_completion_hook(&both).unwrap_err();
+        assert!(err.contains("'platform' or 'crew', never both"), "{err}");
+
+        let no_prompt = GraphCompletionHookParams {
+            platform: None,
+            crew: Some("reviewers".to_string()),
+            model: None,
+            effort: None,
+            prompt: None,
+            command: None,
+            target_session_id: None,
+            target_session_name: None,
+            timeout_minutes: None,
+            target_graph_id: None,
+            queue_id: None,
+            workdir_override: None,
+            idea: None,
+        };
+        let err = build_graph_completion_hook(&no_prompt).unwrap_err();
+        assert!(err.contains("prompt"), "{err}");
     }
 
     #[test]
@@ -24117,6 +24201,335 @@ mod endpoint_tests {
         assert_eq!(
             imported2_json["missing_crews"],
             serde_json::json!(["ghost"])
+        );
+    }
+
+    /// Build a graph with a check→ensemble→agent unit whose ensemble has
+    /// LITERAL members (no crew binding); returns `(graph_id, ensemble_id)`.
+    async fn build_literal_ensemble(
+        handler: &TaskTriggerHandler,
+        workdir: &str,
+        graph_name: &str,
+    ) -> (String, String) {
+        let created = handler
+            .graph_create(Parameters(GraphCreateParams {
+                name: graph_name.to_string(),
+                description: None,
+                workdir: workdir.to_string(),
+                trigger: None,
+                infra_node_id: None,
+                allow_dirty_start: false,
+            }))
+            .await
+            .unwrap();
+        let graph_id = extract_id(&created, "graph_id");
+        let kickoff = handler
+            .graph_add_node(Parameters(GraphAddNodeParams {
+                spec_id: None,
+                graph_id: Some(graph_id.clone()),
+                name: "kickoff".to_string(),
+                kind: Some("check".to_string()),
+                config: Some(check_node_config("true")),
+                blueprint: None,
+                config_overrides: None,
+            }))
+            .await
+            .unwrap();
+        let kickoff_id = extract_id(&kickoff, "node_id");
+        let downstream = handler
+            .graph_add_node(Parameters(GraphAddNodeParams {
+                spec_id: None,
+                graph_id: Some(graph_id.clone()),
+                name: "downstream".to_string(),
+                kind: Some("agent".to_string()),
+                config: Some(agent_node_config("claude")),
+                blueprint: None,
+                config_overrides: None,
+            }))
+            .await
+            .unwrap();
+        let downstream_id = extract_id(&downstream, "node_id");
+        let members = vec![
+            crate::daemon::params::EnsembleMemberParams {
+                platform: "claude".to_string(),
+                model: None,
+                prompt_override: None,
+                timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
+            },
+            crate::daemon::params::EnsembleMemberParams {
+                platform: "claude".to_string(),
+                model: None,
+                prompt_override: None,
+                timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
+            },
+        ];
+        let ensemble = handler
+            .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                commit_rights: None,
+                spec_id: None,
+                graph_id: Some(graph_id.clone()),
+                kind: None,
+                name: "Proposers".to_string(),
+                prompt_template: Some("draft it".to_string()),
+                blueprint: None,
+                members: Some(members),
+                condition: "always".to_string(),
+                from_node: kickoff_id,
+                on_pass_to: downstream_id,
+                on_fail_to: None,
+                min_pass: None,
+                timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
+                crew: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&ensemble), "{}", text(&ensemble));
+        (graph_id, extract_id(&ensemble, "ensemble_id"))
+    }
+
+    fn ensemble_update_params(ensemble_id: &str) -> GraphUpdateEnsembleParams {
+        GraphUpdateEnsembleParams {
+            ensemble_id: ensemble_id.to_string(),
+            kind: None,
+            prompt_template: None,
+            members: None,
+            crew: None,
+            min_pass: None,
+            straggler_timeout_minutes: None,
+            quorum_grace_minutes: None,
+            timeout_minutes: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
+            on_pass_to: None,
+            on_fail_to: None,
+            from_node: None,
+            condition: None,
+            add_entry_from: None,
+            add_entry_condition: None,
+            remove_entry_from: None,
+            commit_rights: None,
+        }
+    }
+
+    /// CM49 req 4: `graph_update_ensemble` binds an ensemble to a crew by
+    /// name and `crew: null` unbinds it, keeping the current rows literal.
+    #[tokio::test]
+    async fn graph_update_ensemble_binds_then_unbinds_a_crew() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let workdir = dir.path().to_string_lossy().to_string();
+        handler
+            .crew_create(Parameters(CrewCreateParams {
+                name: "eager".to_string(),
+                description: None,
+                members: Some(vec![crew_json_member("a"), crew_json_member("b")]),
+                from_ensemble: None,
+            }))
+            .await
+            .unwrap();
+        let (_graph_id, ensemble_id) =
+            build_literal_ensemble(&handler, &workdir, "Literal G").await;
+
+        // Bind: the literal rows are replaced by the crew's members.
+        let bound = handler
+            .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+                crew: Some(Some("eager".to_string())),
+                ..ensemble_update_params(&ensemble_id)
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&bound), "{}", text(&bound));
+        let details = db.get_ensemble_details(&ensemble_id).unwrap().unwrap();
+        assert!(details.ensemble.crew_id.is_some(), "bound to the crew");
+        assert_eq!(details.ensemble.crew_name.as_deref(), Some("eager"));
+        assert_eq!(details.ensemble.crew_version_applied, Some(1));
+        assert_eq!(details.members.len(), 2);
+        assert!(
+            details
+                .members
+                .iter()
+                .all(|m| m.platform == "openrouter" && m.prompt_override.is_none()),
+            "the crew's members are materialized with the shared prompt"
+        );
+
+        // Unbind with an explicit null: the rows stay, the columns clear.
+        let unbound = handler
+            .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+                crew: Some(None),
+                ..ensemble_update_params(&ensemble_id)
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&unbound), "{}", text(&unbound));
+        let details = db.get_ensemble_details(&ensemble_id).unwrap().unwrap();
+        assert!(details.ensemble.crew_id.is_none(), "unbound");
+        assert!(details.ensemble.crew_name.is_none(), "unbound");
+        assert!(details.ensemble.crew_version_applied.is_none(), "unbound");
+        assert_eq!(
+            details.members.len(),
+            2,
+            "the member rows stay as literal members"
+        );
+        assert!(
+            details.members.iter().all(|m| m.platform == "openrouter"),
+            "the kept rows are the crew-materialized ones"
+        );
+
+        // A crew change is its own call: combining it with any other field is
+        // refused rather than silently dropping that field.
+        let combined = handler
+            .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+                crew: Some(Some("eager".to_string())),
+                min_pass: Some(1),
+                ..ensemble_update_params(&ensemble_id)
+            }))
+            .await
+            .unwrap();
+        assert!(is_err(&combined), "{}", text(&combined));
+        assert!(
+            text(&combined).contains("cannot be combined"),
+            "{}",
+            text(&combined)
+        );
+        let with_members = handler
+            .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+                crew: Some(Some("eager".to_string())),
+                members: Some(vec![crate::daemon::params::EnsembleMemberParams {
+                    platform: "claude".to_string(),
+                    model: None,
+                    prompt_override: None,
+                    timeout_minutes: None,
+                    infra_retry_limit: None,
+                    infra_crash_max_seconds: None,
+                    infra_backoff_seconds: None,
+                }]),
+                ..ensemble_update_params(&ensemble_id)
+            }))
+            .await
+            .unwrap();
+        assert!(is_err(&with_members), "{}", text(&with_members));
+        assert!(
+            text(&with_members).contains("cannot be combined"),
+            "{}",
+            text(&with_members)
+        );
+    }
+
+    /// CM49 req 4: `graph_add_ensemble` refuses a crew beside literal members.
+    #[tokio::test]
+    async fn graph_add_ensemble_crew_and_members_are_exclusive() {
+        let (dir, _db, handler) = endpoint_test_handler();
+        let workdir = dir.path().to_string_lossy().to_string();
+        handler
+            .crew_create(Parameters(CrewCreateParams {
+                name: "eager".to_string(),
+                description: None,
+                members: Some(vec![crew_json_member("a"), crew_json_member("b")]),
+                from_ensemble: None,
+            }))
+            .await
+            .unwrap();
+        let (graph_id, _ens) = build_literal_ensemble(&handler, &workdir, "Exclusive G").await;
+        let entry = handler
+            .graph_add_node(Parameters(GraphAddNodeParams {
+                spec_id: None,
+                graph_id: Some(graph_id.clone()),
+                name: "entry".to_string(),
+                kind: Some("check".to_string()),
+                config: Some(check_node_config("true")),
+                blueprint: None,
+                config_overrides: None,
+            }))
+            .await
+            .unwrap();
+        let entry_id = extract_id(&entry, "node_id");
+
+        let refused = handler
+            .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                commit_rights: None,
+                spec_id: None,
+                graph_id: Some(graph_id.clone()),
+                kind: None,
+                name: "Both".to_string(),
+                prompt_template: Some("draft it".to_string()),
+                blueprint: None,
+                members: Some(vec![crate::daemon::params::EnsembleMemberParams {
+                    platform: "claude".to_string(),
+                    model: None,
+                    prompt_override: None,
+                    timeout_minutes: None,
+                    infra_retry_limit: None,
+                    infra_crash_max_seconds: None,
+                    infra_backoff_seconds: None,
+                }]),
+                condition: "always".to_string(),
+                from_node: entry_id.clone(),
+                on_pass_to: entry_id,
+                on_fail_to: None,
+                min_pass: None,
+                timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
+                crew: Some("eager".to_string()),
+            }))
+            .await
+            .unwrap();
+        assert!(is_err(&refused), "{}", text(&refused));
+        assert!(
+            text(&refused).contains("pass crew or members, never both"),
+            "{}",
+            text(&refused)
+        );
+    }
+
+    /// CM49 req 3: `crew_list` takes no arguments and reports every crew
+    /// with its version, members and per-kind binding counts.
+    #[tokio::test]
+    async fn crew_list_reports_crews_members_and_bindings_without_arguments() {
+        let (dir, _db, handler) = endpoint_test_handler();
+        let workdir = dir.path().to_string_lossy().to_string();
+        handler
+            .crew_create(Parameters(CrewCreateParams {
+                name: "eager".to_string(),
+                description: Some("the implementers".to_string()),
+                members: Some(vec![crew_json_member("a"), crew_json_member("b")]),
+                from_ensemble: None,
+            }))
+            .await
+            .unwrap();
+        let (_graph_id, _ens) = build_crew_ensemble(&handler, &workdir, "Bound G").await;
+
+        let listed = handler.crew_list().await.unwrap();
+        assert!(!is_err(&listed), "{}", text(&listed));
+        let body: serde_json::Value = serde_json::from_str(&raw_text(&listed)).unwrap();
+        let crews = body.as_array().expect("a JSON array of crews");
+        assert_eq!(crews.len(), 1);
+        assert_eq!(crews[0]["name"], "eager");
+        assert_eq!(crews[0]["description"], "the implementers");
+        assert_eq!(crews[0]["version"], 1);
+        assert_eq!(crews[0]["members"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            crews[0]["members"][0]["model"], "a",
+            "member order is preserved"
+        );
+        assert_eq!(
+            crews[0]["bindings"],
+            serde_json::json!({ "ensembles": 1, "nodes": 0, "hooks": 0 }),
+            "the bound ensemble is counted"
         );
     }
 }

@@ -498,6 +498,7 @@ pub struct GraphUpdateEnsembleParams {
     /// Mutually exclusive with `members`. Binding replaces the member rows
     /// with the crew's and stamps the crew version; `null` keeps the current
     /// rows as literal members.
+    #[serde(default, deserialize_with = "double_option")]
     pub crew: Option<Option<String>>,
     /// New pass threshold.
     pub min_pass: Option<i64>,
