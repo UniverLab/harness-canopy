@@ -69,18 +69,31 @@ pub fn list(canopy_dir: &Path, group: Option<&str>) -> Vec<Row> {
 }
 
 /// `list`, with the running daemon's startup snapshot injected — the form
-/// tests use, so no process-wide state is needed.
+/// tests use, so no process-wide state is needed. The environment is read
+/// from the process.
 pub fn list_with_snapshot(
     canopy_dir: &Path,
     group: Option<&str>,
     snapshot: Option<&CanopyConfig>,
+) -> Vec<Row> {
+    list_with_env(canopy_dir, group, snapshot, &|key| std::env::var(key).ok())
+}
+
+/// `list`, with the environment lookup injected as well: the same closure
+/// drives `apply_env_overrides` and the `source` column, so a row can never
+/// say `env` for a value that was not applied (D1).
+pub fn list_with_env(
+    canopy_dir: &Path,
+    group: Option<&str>,
+    snapshot: Option<&CanopyConfig>,
+    env: &dyn Fn(&str) -> Option<String>,
 ) -> Vec<Row> {
     let prev = snapshot
         .cloned()
         .unwrap_or_else(|| CanopyConfig::load(canopy_dir));
     let text = std::fs::read_to_string(canopy_dir.join("config.toml")).unwrap_or_default();
     let (mut effective, problems) = effective_after_hand_edit(&prev, &text);
-    super::apply_env_overrides(&mut effective, &|key| std::env::var(key).ok());
+    super::apply_env_overrides(&mut effective, env);
     let doc: Option<DocumentMut> = text.parse().ok();
 
     let mut rows: Vec<Row> = Vec::new();
@@ -95,9 +108,9 @@ pub fn list_with_snapshot(
             .and_then(|doc| super::writer::read_dotted(doc, def.key));
         let status = match problems.iter().find(|problem| problem.key == def.key) {
             Some(problem) => Status::Invalid(problem.reason.clone()),
-            None => status_for(def.apply, raw.as_ref(), &effective, snapshot, def.key),
+            None => status_for(def.apply, &effective, snapshot, def.key),
         };
-        let source = if super::env_override_applies(def.key) {
+        let source = if super::env_override_applies(def.key, env) {
             Source::Env
         } else if raw.is_some() {
             Source::File
@@ -118,6 +131,25 @@ pub fn list_with_snapshot(
     }
 
     if group.is_none() {
+        // A file that will not parse has no per-key statuses to show, so it
+        // gets one row of its own — `config_list` and `canopy doctor` would
+        // otherwise report the previous values as if nothing were wrong.
+        if let Some(problem) = problems.iter().find(|problem| problem.key == "*") {
+            rows.insert(
+                0,
+                Row {
+                    key: "config.toml".to_string(),
+                    group: String::new(),
+                    kind: "file".to_string(),
+                    description: String::new(),
+                    default: String::new(),
+                    effective: String::new(),
+                    source: Source::File,
+                    apply: String::new(),
+                    status: Status::Invalid(problem.reason.clone()),
+                },
+            );
+        }
         for (key, rendered) in unknown_leaves(doc.as_ref()) {
             rows.push(Row {
                 key,
@@ -137,14 +169,17 @@ pub fn list_with_snapshot(
 
 fn status_for(
     apply: Apply,
-    raw: Option<&Value>,
     effective: &CanopyConfig,
     snapshot: Option<&CanopyConfig>,
     key: &str,
 ) -> Status {
-    if apply != Apply::RestartDaemon || raw.is_none() {
+    if apply != Apply::RestartDaemon {
         return Status::Ok;
     }
+    // D12: `pending_restart` is the file's effective value differing from
+    // the one the daemon loaded — whether the key was changed in the file
+    // or removed from it (the effective value then falls back to the
+    // default, while the daemon keeps running the old one).
     let Some(snapshot) = snapshot else {
         return Status::Ok;
     };
@@ -197,7 +232,16 @@ pub fn effective_after_hand_edit(
             }
             (config, problems)
         }
-        Err(_) => (prev.clone(), problems),
+        Err(error) => {
+            // Valid TOML that is not a canopy config (a wrong type in a key
+            // no validator reaches): everything falls back to `prev`, and
+            // that has to be visible rather than silent.
+            problems.push(Problem {
+                key: "*".to_string(),
+                reason: error.to_string(),
+            });
+            (prev.clone(), problems)
+        }
     }
 }
 
@@ -224,7 +268,16 @@ pub fn config_value(config: &CanopyConfig, key: &str) -> Value {
             .to_string(),
         ),
         "embeddings_model" => Value::from(config.embeddings_model.clone()),
-        "similarity_threshold" => Value::from(config.similarity_threshold as f64),
+        // Through its own shortest round-trip form: `as f64` would widen the
+        // f32 bits (0.42 → 0.41999998688697815), and the wizard writes this
+        // rendering straight into config.toml.
+        "similarity_threshold" => Value::from(
+            config
+                .similarity_threshold
+                .to_string()
+                .parse::<f64>()
+                .unwrap_or(config.similarity_threshold as f64),
+        ),
         "rag_personal_dirs" => {
             let mut array = toml_edit::Array::new();
             for dir in &config.rag_personal_dirs {
@@ -364,24 +417,117 @@ mod tests {
         assert_eq!(unit.source, Source::File);
     }
 
+    /// The env override must show in the row's `source`, and only when the
+    /// value parses: `apply_env_overrides` ignores an unparseable value, so
+    /// the file stays the effective source (plan test 9).
     #[test]
     fn list_reports_source_env_for_an_env_override() {
-        // The env override is exercised through the pure function instead of
-        // the process environment, so tests never race each other.
-        let mut config = CanopyConfig {
-            scheduler: SchedulerConfig {
-                retry_max: 5,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        crate::domain::settings::apply_env_overrides(&mut config, &|key| {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[scheduler]\nretry_max = 5\n",
+        )
+        .unwrap();
+
+        let rows = list_with_env(dir.path(), None, None, &|key| {
             (key == crate::domain::settings::ENV_RETRY_MAX).then(|| "7".to_string())
         });
-        assert_eq!(config.scheduler.retry_max, 7);
+        let row = rows
+            .iter()
+            .find(|row| row.key == "scheduler.retry_max")
+            .unwrap();
+        assert_eq!(row.source, Source::Env);
+        assert_eq!(row.effective, "7");
+
+        let rows = list_with_env(dir.path(), None, None, &|key| {
+            (key == crate::domain::settings::ENV_RETRY_MAX).then(|| "x".to_string())
+        });
+        let row = rows
+            .iter()
+            .find(|row| row.key == "scheduler.retry_max")
+            .unwrap();
+        assert_eq!(row.source, Source::File);
+        assert_eq!(row.effective, "5");
+    }
+
+    /// A `RestartDaemon` key the file no longer holds is a pending restart
+    /// too: the effective value falls back to the default while the running
+    /// daemon keeps the old one.
+    #[test]
+    fn pending_restart_when_a_restart_only_key_leaves_the_file() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("config.toml"), "theme = \"classic\"\n").unwrap();
+        let snapshot = CanopyConfig {
+            ensemble_concurrency_cap: 8,
+            ..Default::default()
+        };
+
+        let rows = list_with_snapshot(dir.path(), None, Some(&snapshot));
+        let cap = rows
+            .iter()
+            .find(|row| row.key == "ensemble_concurrency_cap")
+            .unwrap();
+        assert_eq!(cap.status, Status::PendingRestart);
+
+        let unit = rows.iter().find(|row| row.key == "theme").unwrap();
+        assert_eq!(unit.status, Status::Ok);
+    }
+
+    /// A file that will not even parse is reported as one `config.toml` row,
+    /// so `config_list` and `canopy doctor` cannot present the previous
+    /// values as if nothing were wrong.
+    #[test]
+    fn a_file_that_will_not_parse_is_reported_as_one_invalid_row() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("config.toml"), "theme = \"classic\n").unwrap();
+
+        let rows = list(dir.path(), None);
+        let row = rows
+            .iter()
+            .find(|row| row.key == "config.toml")
+            .expect("the file itself is reported");
+        assert!(
+            matches!(&row.status, Status::Invalid(_)),
+            "{:?}",
+            row.status
+        );
+
+        let grouped = list(dir.path(), Some("Notifications"));
+        assert!(grouped.iter().all(|row| row.key != "config.toml"));
+    }
+
+    /// Valid TOML that is not a canopy config (a type no validator reaches)
+    /// silently falls back to the previous values — that fallback gets the
+    /// same visible `config.toml` row.
+    #[test]
+    fn a_file_that_is_not_a_canopy_config_is_reported_too() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("config.toml"), "skills.sources = 5\n").unwrap();
+
+        let rows = list(dir.path(), None);
+        let row = rows
+            .iter()
+            .find(|row| row.key == "config.toml")
+            .expect("the file itself is reported");
+        assert!(
+            matches!(&row.status, Status::Invalid(_)),
+            "{:?}",
+            row.status
+        );
+    }
+
+    /// The f32 threshold is rendered through its own shortest round-trip
+    /// form; widening the bits would write `0.41999998688697815` into
+    /// config.toml from the wizard's save path.
+    #[test]
+    fn config_value_renders_the_f32_threshold_as_its_shortest_round_trip() {
+        let config = CanopyConfig {
+            similarity_threshold: 0.42,
+            ..Default::default()
+        };
         assert_eq!(
-            config_value(&config, "scheduler.retry_max").as_integer(),
-            Some(7)
+            config_value(&config, "similarity_threshold").to_string(),
+            "0.42"
         );
     }
 

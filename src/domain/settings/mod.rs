@@ -242,9 +242,25 @@ pub fn env_name_for(key: &str) -> Option<&'static str> {
     }
 }
 
-/// Whether an environment override currently applies to `key`.
-pub fn env_override_applies(key: &str) -> bool {
-    env_name_for(key).is_some_and(|name| std::env::var(name).is_ok())
+/// Whether an environment override applies to `key`: the variable is set
+/// *and* its value parses the way [`apply_env_overrides`] will use it, so
+/// `config_list`'s `source` column never claims `env` for a value that is
+/// ignored. The lookup is injected so tests never touch the process
+/// environment (D1).
+pub fn env_override_applies(key: &str, env: &dyn Fn(&str) -> Option<String>) -> bool {
+    let Some(name) = env_name_for(key) else {
+        return false;
+    };
+    let Some(raw) = env(name) else {
+        return false;
+    };
+    let raw = raw.trim();
+    match key {
+        "scheduler.retry_enabled" => parse_env_bool(raw).is_some(),
+        "scheduler.retry_delay_minutes" => raw.parse::<u64>().is_ok(),
+        "scheduler.retry_max" => raw.parse::<u32>().is_ok(),
+        _ => false,
+    }
 }
 
 fn parse_env_bool(raw: &str) -> Option<bool> {
@@ -375,6 +391,23 @@ mod tests {
                 def.key
             );
         }
+    }
+
+    /// The structured `skills.sources` default is skipped by the loop above,
+    /// so it gets its own drift check: the registry literal must hold the
+    /// one source `SkillsConfig::default()` starts with.
+    #[test]
+    fn skills_sources_registry_default_matches_the_model_default() {
+        use crate::domain::canopy_config::SkillsConfig;
+        let def = find("skills.sources").expect("skills.sources is declared");
+        let text = def.default_value().to_string();
+        let parsed = toml::from_str::<SkillsConfig>(&format!("sources = {text}\n"))
+            .expect("registry default parses as SkillsConfig");
+        assert_eq!(
+            parsed.sources,
+            SkillsConfig::default().sources,
+            "skills.sources default drifted"
+        );
     }
 
     /// `retry_max` env override wins over the file, and an unparseable value

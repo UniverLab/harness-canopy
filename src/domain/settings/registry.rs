@@ -121,7 +121,7 @@ pub static REGISTRY: &[SettingDef] = &[
     SettingDef {
         key: "skills.sources",
         kind: Kind::Structured,
-        default: DefaultValue::Literal("[]"),
+        default: DefaultValue::Literal("[{url=\"https://github.com/UniverLab/skills\"}]"),
         group: Group::AgentsHarnesses,
         description: "Git sources for the dynamic skill store, checked in list order.",
         apply: Apply::RestartDaemon,

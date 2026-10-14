@@ -13,6 +13,7 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use crate::application::ports::StateRepository;
 use crate::db::Database;
 use crate::domain::canopy_config::CanopyConfig;
+use crate::domain::settings::apply_env_overrides;
 use crate::domain::settings::inspect;
 
 /// DB state row publishing "the settings changed": `<n>|<key1,key2>`.
@@ -105,10 +106,11 @@ fn apply_hand_edit(canopy_dir: &Path, db: &Database, prev: &Mutex<CanopyConfig>)
         return;
     };
     let mut guard = prev.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    let (effective, problems) = inspect::effective_after_hand_edit(&guard, &text);
+    let (mut effective, problems) = inspect::effective_after_hand_edit(&guard, &text);
     for problem in &problems {
         eprintln!("config: {} invalid: {}", problem.key, problem.reason);
     }
+    apply_env_overrides(&mut effective, &|key| std::env::var(key).ok());
     let changed = inspect::diff_keys(&guard, &effective);
     *guard = effective;
     drop(guard);
@@ -122,6 +124,7 @@ fn apply_hand_edit(canopy_dir: &Path, db: &Database, prev: &Mutex<CanopyConfig>)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::settings::apply_env_overrides;
     use crate::domain::settings::inspect::effective_after_hand_edit;
     use tempfile::TempDir;
 
@@ -136,6 +139,30 @@ mod tests {
         assert!(
             inspect::diff_keys(&prev, &effective).is_empty(),
             "an invalid value must not count as a change"
+        );
+    }
+
+    #[test]
+    fn env_override_does_not_spuriously_bump_revision_on_hand_edit() {
+        let env = |key: &str| match key {
+            crate::domain::settings::ENV_RETRY_DELAY_MINUTES => Some("5".to_string()),
+            _ => None,
+        };
+        let mut prev = CanopyConfig {
+            scheduler: crate::domain::canopy_config::SchedulerConfig {
+                retry_delay_minutes: 10,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        apply_env_overrides(&mut prev, &env);
+        let (mut effective, _problems) =
+            effective_after_hand_edit(&prev, "scheduler.retry_delay_minutes = 10\n");
+        apply_env_overrides(&mut effective, &env);
+        let changed = inspect::diff_keys(&prev, &effective);
+        assert!(
+            changed.is_empty(),
+            "an env-driven value that matches the file must not count as a change, got: {changed:?}"
         );
     }
 

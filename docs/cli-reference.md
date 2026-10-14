@@ -183,7 +183,11 @@ effect: `applied`, `applies on next run`, `restart the daemon`, or `restart
 the TUI`. A hand edit is picked up by the daemon's file watcher without a
 restart, and an invalid value keeps the previous effective value — it is
 reported by `canopy config list` and as a `canopy doctor` warning rather than
-being applied. `skills.sources` (a list of tables) must still be edited by
+being applied. `pending_restart` marks a restart-only setting whose value on
+disk differs from the one the running daemon loaded, including a key the file
+no longer holds, and a `config.toml` that will not parse at all is reported
+as a single `config.toml` row (and doctor warning) instead of being silently
+ignored. `skills.sources` (a list of tables) must still be edited by
 hand.
 
 ## Spec queues

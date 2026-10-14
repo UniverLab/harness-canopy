@@ -94,7 +94,7 @@ stdio. Connect any MCP-capable AI CLI with `canopy mcp`.
 | `crew_create` | Create a crew from an ordered member list, or seed it from an ensemble's current members |
 | `crew_update` | Update a crew's ordered members, description and/or name; bound ensembles pick it up at their next dispatch |
 | `crew_delete` | Delete a crew (refused while any ensemble, node or hook still binds it) |
-| `config_list` | List every setting with its group, kind, default, effective value, source (`default`/`file`/`env`), apply mode and status (`ok`, `invalid: <reason>`, `pending_restart`, `unknown`); optional `group` filter |
+| `config_list` | List every setting with its group, kind, default, effective value, source (`default`/`file`/`env`), apply mode and status (`ok`, `invalid: <reason>`, `pending_restart`, `unknown`); a `config.toml` that will not parse appears as one `config.toml` row with `invalid: <reason>`; optional `group` filter |
 | `config_get` | Read one setting by its dotted key (e.g. `clean.retention_days`) |
 | `config_set` | Change one setting, validated against its type and range first (nothing is written on refusal); returns the new effective value and what the user must do — `applied`, `applies on next run`, `restart the daemon`, or `restart the TUI` |
 | `config_reset` | Reset one setting to its registry default, through the same validating path as `config_set` |
