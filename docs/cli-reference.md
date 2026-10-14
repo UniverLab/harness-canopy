@@ -64,6 +64,11 @@ Plain `canopy update` exits 2 on the same lookup errors.
 | `canopy graph list` | List all graphs with status and spec progress |
 | `canopy graph list --workdir <path>` | Filter graphs by workdir |
 | `canopy graph info <id-or-name>` | Detailed status for a single graph (specs, runs, hooks) |
+| `canopy graph crew [id-or-name]` | List harness/model assignments — agent nodes outside ensembles, ensemble members and agent hooks, each with platform, model, timeout, crew and availability. Omit the graph for every graph |
+| `canopy graph crew --platform <p> --model <m>` | Filter by exact platform and case-insensitive model substring |
+| `canopy graph crew --all` | Include archived graphs |
+| `canopy graph crew --group-by-pair` | Summarise per platform/model pair: graph, ensemble, node and hook counts plus the graph names |
+| `canopy graph crew --json` | Print the MCP `graph_crew` JSON shape instead of tables |
 
 Graph ids can be specified by exact id, exact name, or unambiguous id
 prefix. Ambiguous references list the candidates.

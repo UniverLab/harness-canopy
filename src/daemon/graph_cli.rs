@@ -22,6 +22,7 @@ use crate::db::Database;
 use crate::domain::db_paths::database_path;
 use crate::domain::graphs::GraphStatus;
 
+use crew::handle_graph_crew;
 use format::{current_spec_name, format_autorun_compact, graph_progress, short_id, status_icon};
 use info::handle_graph_info;
 use resolve::resolve_graph;
@@ -45,7 +46,8 @@ use info::{
 #[cfg(test)]
 use resolve::{ambiguous_error, candidate_list, not_found_error};
 
-mod format;
+mod crew;
+pub(crate) mod format;
 mod info;
 mod resolve;
 
@@ -187,6 +189,29 @@ pub(crate) enum GraphAction {
         #[arg(long)]
         follow: bool,
     },
+    /// List harness/model assignments across graphs or for one graph:
+    /// agent nodes, ensemble members and agent hooks, with crew and
+    /// availability when set. Read-only — no daemon required.
+    Crew {
+        /// Full graph id, an unambiguous id prefix, or the exact graph name.
+        /// Omit for every graph.
+        id_or_name: Option<String>,
+        /// Filter to an exact platform match (e.g. claude, opencode-go).
+        #[arg(long)]
+        platform: Option<String>,
+        /// Filter to a case-insensitive model substring match (e.g. opus).
+        #[arg(long)]
+        model: Option<String>,
+        /// Include archived graphs.
+        #[arg(long)]
+        all: bool,
+        /// Print the platform/model summary instead of per-graph rows.
+        #[arg(long)]
+        group_by_pair: bool,
+        /// Output the MCP JSON shape instead of tables.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 pub(crate) async fn handle_graph_action(
@@ -260,6 +285,22 @@ pub(crate) async fn handle_graph_action(
             spec,
             follow,
         } => handle_graph_log(&db, port_override, &id_or_name, since, kind, spec, follow).await,
+        GraphAction::Crew {
+            id_or_name,
+            platform,
+            model,
+            all,
+            group_by_pair,
+            json,
+        } => handle_graph_crew(
+            &db,
+            id_or_name.as_deref(),
+            platform.as_deref(),
+            model.as_deref(),
+            all,
+            group_by_pair,
+            json,
+        ),
     }
 }
 

@@ -661,19 +661,20 @@ Queue membership is unaffected by `graph_run` — specs stay standalone.
 The `graph info` CLI and `graph_get` MCP tool show queue-driven progress
 by reconstructing what ran from the run history.
 
-## The 33 MCP tools
+## The 36 MCP tools
 
 | Stage | Tools |
 |---|---|
-| Authoring | `graph_create`, `graph_update`, `graph_add_spec`, `graph_update_spec`, `graph_add_node`, `graph_update_node`, `graph_add_edge`, `graph_update_edge`, `graph_delete_edge`, `graph_delete_node`, `graph_add_ensemble`, `graph_update_ensemble`, `graph_delete_ensemble`, `graph_copy_node`, `graph_copy_ensemble`, `graph_audit_node_configs` |
+| Authoring | `graph_create`, `graph_update`, `graph_add_spec`, `graph_update_spec`, `graph_remove_spec`, `graph_add_node`, `graph_update_node`, `graph_add_edge`, `graph_update_edge`, `graph_delete_edge`, `graph_delete_node`, `graph_add_ensemble`, `graph_update_ensemble`, `graph_delete_ensemble`, `graph_copy_node`, `graph_copy_ensemble`, `graph_audit_node_configs` |
 | Sharing | `graph_export`, `graph_import`, `graph_archive`, `graph_restore` |
-| Inspection | `graph_get`, `graph_list`, `graph_node_runs_list`, `graph_node_run_get`, `graph_events` |
+| Inspection | `graph_get`, `graph_list`, `graph_crew`, `graph_node_runs_list`, `graph_node_run_get`, `graph_events` |
 | Runtime | `graph_run`, `graph_reset`, `graph_schedule_autorun`, `graph_schedule_continue`, `graph_pause`, `graph_continue`, `graph_complete_node`, `graph_report_blocker`, `graph_preflight` |
 
 Graphs can be authored programmatically by agents through these tools,
 or edited in the [TUI graph editor](tui.md) with inline JSON config
 validation. The `canopy graph` CLI subcommands mirror the runtime tools
-from the terminal: `list`/`info`/`export` are read-only inspection, and
+from the terminal: `list`/`info`/`crew`/`export` are read-only
+inspection, and
 `import`/`run`/`pause`/`continue`/`reset`/`autorun` delegate the
 matching MCP tool to the daemon — a second way to drive a graph when an
 MCP client can't reach it. See the

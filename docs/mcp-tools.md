@@ -1,12 +1,12 @@
 ---
 title: MCP Tools
-description: All 98 MCP tools exposed by the canopy daemon, by category.
+description: All 111 MCP tools exposed by the canopy daemon, by category.
 order: 11
 ---
 
 # MCP Tools
 
-The daemon exposes **98 MCP tools** over Streamable HTTP (port 7755) and
+The daemon exposes **111 MCP tools** over Streamable HTTP (port 7755) and
 stdio. Connect any MCP-capable AI CLI with `canopy mcp`.
 
 ## Agent management (18)
@@ -71,7 +71,7 @@ stdio. Connect any MCP-capable AI CLI with `canopy mcp`.
 | `skill_list` | List skills available from the dynamic skill store and configured catalogs |
 | `skill_get` | Fetch a skill's full instructions by name, cloning or refreshing it on demand |
 
-## Graph engine (39)
+## Graph engine (41)
 
 | Tool | Description |
 |---|---|
@@ -96,6 +96,7 @@ stdio. Connect any MCP-capable AI CLI with `canopy mcp`.
 | `crew_delete` | Delete a crew (refused while any ensemble, node or hook still binds it) |
 | `graph_get` | Get a graph with its specs, nodes, and edges |
 | `graph_list` | List graphs |
+| `graph_crew` | List every graph's harness/model assignments — agent nodes outside ensembles, ensemble members and agent hooks with platform, model, timeout, crew and availability; `group_by: "pair"` summarises per platform/model pair. No prompt text is returned |
 | `graph_run` | Run a graph (optionally `start_node_id` to start the first spec at a chosen node) |
 | `graph_reset` | Reset a graph's pending specs |
 | `graph_schedule_autorun` | Schedule a graph to resume or run |
@@ -124,7 +125,7 @@ See [Graphs](graphs.md).
 
 Kept callable for the whole 3.x line, but excluded from tool listings
 (`tools/list`) so nothing new adopts them — call the 3.x name instead. Not
-counted in the 98 tools above.
+counted in the 111 tools above.
 
 | Deprecated name | Renamed to (3.0.0) |
 |---|---|

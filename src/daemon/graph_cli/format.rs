@@ -3,7 +3,8 @@ use chrono::{DateTime, Utc};
 
 use crate::db::Database;
 use crate::domain::graphs::{
-    Graph, GraphNodeRun, GraphRunStatus, GraphSpec, GraphSpecStatus, GraphStatus,
+    Graph, GraphCrewRow, GraphCrewSummary, GraphNodeRun, GraphRunStatus, GraphSpec,
+    GraphSpecStatus, GraphStatus,
 };
 
 pub(super) fn commit_rights_note(output: Option<&serde_json::Value>) -> String {
@@ -255,4 +256,128 @@ pub(super) fn format_elapsed(d: chrono::Duration) -> String {
     } else {
         format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
     }
+}
+
+/// Two-space-aligned columns, header underlined — the table shape
+/// `canopy graph crew` prints. Cells are padded to their column's widest
+/// value, trailing padding trimmed, so both the header and every row read
+/// as one grid without pulling in a table crate.
+fn render_table(headers: &[&str], rows: &[Vec<String>]) -> String {
+    let mut grid: Vec<Vec<String>> = Vec::with_capacity(rows.len() + 1);
+    grid.push(headers.iter().map(|h| (*h).to_string()).collect());
+    grid.extend(rows.iter().cloned());
+    let mut widths = vec![0usize; headers.len()];
+    for row in &grid {
+        for (index, cell) in row.iter().enumerate() {
+            widths[index] = widths[index].max(cell.chars().count());
+        }
+    }
+    let line = |row: &[String]| -> String {
+        row.iter()
+            .enumerate()
+            .map(|(index, cell)| format!("{:<width$}", cell, width = widths[index]))
+            .collect::<Vec<_>>()
+            .join("  ")
+            .trim_end()
+            .to_string()
+    };
+    let separator: Vec<String> = widths.iter().map(|w| "-".repeat(*w)).collect();
+    let mut out = String::new();
+    out.push_str(&line(&grid[0]));
+    out.push('\n');
+    out.push_str(&line(&separator));
+    for row in grid.iter().skip(1) {
+        out.push('\n');
+        out.push_str(&line(row));
+    }
+    out
+}
+
+/// One table cell for a possibly-empty string: empty renders as the
+/// same `-` placeholder every absent cell uses.
+fn cell(value: &str) -> String {
+    if value.is_empty() {
+        "-".to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+/// The Availability column: `available`, `unavailable (reason)`, or `-`
+/// when the row has no platform to ask the roster about (CM48).
+fn availability_cell(row: &GraphCrewRow) -> String {
+    match row.availability.as_deref() {
+        Some("unavailable") => {
+            let reason = row.availability_reason.as_deref().unwrap_or("unspecified");
+            format!("unavailable ({reason})")
+        }
+        Some(state) => cell(state),
+        None => "-".to_string(),
+    }
+}
+
+/// `canopy graph crew`'s per-graph table: kind, name, pair, timeout, and
+/// the CM49 crew / CM48 availability columns when a row carries them.
+pub(crate) fn format_graph_crew_table(rows: &[GraphCrewRow]) -> String {
+    if rows.is_empty() {
+        return "No matching crew assignments found.".to_string();
+    }
+    let headers = [
+        "Kind",
+        "Name",
+        "Platform",
+        "Model",
+        "Timeout",
+        "Crew",
+        "Availability",
+    ];
+    let body: Vec<Vec<String>> = rows
+        .iter()
+        .map(|row| {
+            vec![
+                row.kind.as_str().to_string(),
+                row.name.clone(),
+                cell(&row.platform),
+                cell(&row.model),
+                row.timeout_minutes
+                    .map(|minutes| format!("{minutes}m"))
+                    .unwrap_or_else(|| "-".to_string()),
+                cell(row.crew.as_deref().unwrap_or_default()),
+                availability_cell(row),
+            ]
+        })
+        .collect();
+    render_table(&headers, &body)
+}
+
+/// `canopy graph crew --group-by-pair`'s summary table: one row per
+/// distinct pair with its counts and the graphs that use it.
+pub(super) fn format_graph_crew_summary_table(summaries: &[GraphCrewSummary]) -> String {
+    if summaries.is_empty() {
+        return "No matching crew assignments found.".to_string();
+    }
+    let headers = [
+        "Platform",
+        "Model",
+        "Graphs",
+        "Ensembles",
+        "Nodes",
+        "Hooks",
+        "Graphs using it",
+    ];
+    let body: Vec<Vec<String>> = summaries
+        .iter()
+        .map(|summary| {
+            vec![
+                summary.platform.clone(),
+                cell(&summary.model),
+                summary.graph_count.to_string(),
+                summary.ensemble_count.to_string(),
+                summary.node_count.to_string(),
+                summary.hook_count.to_string(),
+                summary.graph_names.join(", "),
+            ]
+        })
+        .collect();
+    render_table(&headers, &body)
 }

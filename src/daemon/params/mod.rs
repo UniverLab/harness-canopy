@@ -13,6 +13,8 @@ mod graph_core;
 pub use graph_core::*;
 mod graph_access;
 pub use graph_access::*;
+mod graph_crew;
+pub use graph_crew::*;
 mod roster;
 pub use roster::*;
 mod crew;

@@ -24,6 +24,7 @@ pub(crate) mod handler_ensemble_exit;
 pub(crate) mod handler_ensemble_plan;
 pub(crate) mod handler_ensemble_update;
 pub(crate) mod handler_formatting;
+pub(crate) mod handler_graph_crew;
 pub(crate) mod handler_graphs;
 pub(crate) mod handler_helpers;
 pub(crate) mod handler_intel;

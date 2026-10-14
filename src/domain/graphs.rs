@@ -9,11 +9,16 @@ use crate::domain::models::{Trigger, WatchEvent};
 #[allow(unused_imports)]
 pub use crate::domain::specs::validate_spec_description_template;
 
+mod crew;
 mod ensembles;
 mod hooks;
 mod statuses;
 mod topology;
 
+pub use crew::{
+    group_graph_crew_rows, summarize_graph_crew_rows, CrewRowKind, GraphCrewGroup, GraphCrewRow,
+    GraphCrewSummary,
+};
 pub use ensembles::{
     member_bounds, Ensemble, EnsembleDetails, EnsembleKind, EnsembleMember, EnsembleMemberSpec,
 };

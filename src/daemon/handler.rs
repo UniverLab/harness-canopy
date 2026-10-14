@@ -294,6 +294,7 @@ impl TaskTriggerHandler {
         router.merge(TaskTriggerHandler::tool_router_intel());
         router.merge(TaskTriggerHandler::tool_router_seeds_skills());
         router.merge(TaskTriggerHandler::tool_router_graphs());
+        router.merge(TaskTriggerHandler::tool_router_graph_crew());
         router.merge(TaskTriggerHandler::tool_router_specs());
         router.merge(TaskTriggerHandler::tool_router_blueprints());
         router.merge(TaskTriggerHandler::tool_router_queues());
@@ -595,6 +596,7 @@ mod tests {
         "graph_copy_ensemble",
         "graph_copy_node",
         "graph_create",
+        "graph_crew",
         "graph_delete_edge",
         "graph_delete_ensemble",
         "graph_delete_node",
@@ -713,6 +715,7 @@ mod tests {
                 "graph_copy_ensemble|84fa10199406a21732121a5efcb531a8b635de720b9ced9ad23c9d21b442804b|81e6123364f5ffa77f6389270cf7cec410a5fc66bec93fd60631e66b85abc488",
                 "graph_copy_node|00f28a0220fed92a866e7e9489c5c6d0796b61f125ba83d7f2e4528ed8089d75|7aa9c075d640d2f792c386c0a0ca8d999bbaa223ea9787e40a52ab7471a2c8fc",
                 "graph_create|6f4749b2ffabdacfded946e01630ea558cefcf18110801fab0bb31c7fec79769|5f326cdb2c1ff3d7cca2cf25bf7fec5acc828bf70fe9e5e8e3d6423cb7de4a96",
+                "graph_crew|21b4da02c1240d4ca5cb9609c412b60f6b89d07a31ce2b4f89e39669fce69180|69cec388444f8b50e9cebbec21f52cfbb1b326fde7e15c2bfcb2c2450b19a07c",
                 "graph_delete_edge|515e60718a86a111f77da9caab9a8f1a420c8a8cedea9c759dd3061efe54bcab|05d5202f073aea27378f794577e989b9636bad6d72397887d82887ad1d549d2f",
                 "graph_delete_ensemble|a1de1cf8f4d4a23060cbe860ac4eb31995cb9a166c99da92d209d5f18758940d|93fdb4962aa14f5b7921af9435ab70339df060c397464a3cc4e514bd83cc720b",
                 "graph_delete_node|82e65603faf2df8e3ff9ada9b0cb11f8470db786d91b32fa5ce0f9c3f9afbded|d9668a40560f1659b0e0d6e83a66825f8bb0e36729220f69f27f08bf81a4418f",

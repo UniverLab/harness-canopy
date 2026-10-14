@@ -715,6 +715,7 @@ pub(crate) mod crew_member_config;
 pub mod crews;
 pub mod ensembles;
 pub mod gamification;
+pub mod graph_crew;
 pub mod graph_transfer;
 pub mod graphs;
 pub mod group;
