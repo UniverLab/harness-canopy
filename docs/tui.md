@@ -24,6 +24,19 @@ time.
 The dialog includes a CLI picker, model picker, seed identity selector
 (`◀ None / SeedName ▶`), directory browser, and a yolo-mode toggle.
 
+## Interactive sessions
+
+- **Copying text** — drag inside a focused session pane to select and copy;
+  the key-hint row shows `drag to copy`, so no keyboard modifier is needed.
+  A `Ctrl+C` within 3 s of that copy is taken as the copy reflex and
+  swallowed, and the pane shows `already copied`.
+- **Interrupting a session** — a platform whose registry entry sets
+  `ctrl_c_exits = true` (opencode) exits on a *single* `Ctrl+C`. To protect
+  the copy reflex, the first `Ctrl+C` of such a session is held back and the
+  pane shows `Ctrl+C again within 1 s to send it to <platform>`; press it
+  twice within that second to forward the interrupt. Every other platform
+  (claude, …) keeps forwarding `Ctrl+C` unchanged.
+
 ## Monitoring
 
 - **Agent status colors** — teal for working (recent output), blue for
