@@ -455,7 +455,15 @@ fn report_stale_names(db: &Database, issues: &mut Vec<String>) {
         success("Stale 2.x names: none found");
         return;
     }
-    if report.agents.is_empty() {
+    if report.graphs.is_empty() {
+        // Only scheduled-agent prompts are stale (every affected graph is
+        // already archived): a "0 graph(s)" header would read as a bug.
+        println!(
+            " \x1b[31m✗\x1b[0m Stale 2.x names ({} found in {} scheduled agent(s)):",
+            total,
+            report.agents.len()
+        );
+    } else if report.agents.is_empty() {
         println!(
             " \x1b[31m✗\x1b[0m Stale 2.x names ({} found in {} graph(s)):",
             total,
@@ -2975,6 +2983,31 @@ mod tests {
         assert!(output.contains("age:"), "{output}");
         assert!(
             output.contains("deferred 4 times since the last run"),
+            "{output}"
+        );
+    }
+
+    /// Agents-only stale names (every affected graph already archived): the
+    /// header must count the agents without also printing a "0 graph(s)"
+    /// clause, and the agent line still lists the distinct old→new pair.
+    #[tokio::test]
+    #[ignore]
+    async fn run_doctor_stale_names_header_counts_agents_when_no_graph_is_affected() {
+        let (home, _canopy_dir, db) = fresh_home_with_db();
+        let mut agent = sample_agent("agent-1");
+        agent.prompt = "run `canopy loop info` and alert on drift".to_string();
+        db.upsert_agent(&agent).unwrap();
+
+        let (result, output) = run_doctor_captured(home.path()).await;
+
+        assert!(result.is_ok());
+        assert!(
+            output.contains("Stale 2.x names (1 found in 1 scheduled agent(s)):"),
+            "{output}"
+        );
+        assert!(!output.contains("0 graph(s)"), "{output}");
+        assert!(
+            output.contains("scheduled agent 'agent-1' (1 refs): canopy loop → canopy graph"),
             "{output}"
         );
     }
