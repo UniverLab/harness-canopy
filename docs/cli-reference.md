@@ -211,7 +211,7 @@ hand.
 | `canopy rag compact` | Merge store fragments and prune old versions (daemon does it, or this process when the daemon is down) |
 | `canopy rag backfill` | Index every configured file that is not in the vector store yet |
 | `canopy rag purge [--yes]` | Delete the entire vector store and reset all RAG state; asks for confirmation unless `--yes` (`-y`) is given |
-| `canopy rag model retry` | Clear a failed local embedding-model download so the daemon's background loop retries it, without re-running setup |
+| `canopy rag model retry` | Clear a failed local embedding-model download so the daemon retries it in the background, without re-running setup |
 
 ## Clean
 
