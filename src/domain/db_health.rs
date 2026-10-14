@@ -15,6 +15,12 @@ pub const STATE_KEY: &str = "db_health_status";
 /// once this many seconds have passed since the last one.
 pub const HEALTH_CHECK_INTERVAL_SECS: i64 = 24 * 60 * 60;
 
+/// 72 hours, in seconds: the ceiling on how long the daily routine will defer
+/// to a busy daemon (running graphs / attached TUI) before FR2 forces a run
+/// anyway. Mirrors [`HEALTH_CHECK_INTERVAL_SECS`] (24h): the routine tries
+/// daily, but must never be deferred forever.
+pub const MAX_HEALTH_DEFERRAL: i64 = 72 * 60 * 60;
+
 /// What the most recent completed run found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -60,6 +66,21 @@ pub struct DbHealthStatus {
     /// Why it was skipped (the busy reasons, e.g. "1 graph(s) currently
     /// running").
     pub last_skip_reason: Option<String>,
+    /// Number of consecutive busy-skip deferrals since the last *completed*
+    /// run. A completed run (any outcome) resets this to 0; a busy skip
+    /// increments it. Backstops FR2: when this is non-zero for ≥ 72h the
+    /// daemon forces a run anyway.
+    #[serde(default)]
+    pub deferred_count: u32,
+    /// First busy-skip timestamp since the last completed run (`None` when
+    /// the routine is either pristine or has completed at least once since
+    /// the last skip). The 72h deadline in FR2 is measured from here.
+    pub first_deferred_at: Option<DateTime<Utc>>,
+    /// True when the most recent *completed* run was forced while the daemon
+    /// was busy by the FR2 72h override. Always false for idle-path and
+    /// on-demand runs.
+    #[serde(default)]
+    pub ran_while_busy: bool,
 }
 
 impl DbHealthStatus {
@@ -85,6 +106,17 @@ pub fn is_due(last_run_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
     match last_run_at {
         None => true,
         Some(t) => now.signed_duration_since(t).num_seconds() >= HEALTH_CHECK_INTERVAL_SECS,
+    }
+}
+
+/// FR2 pure predicate: true when the routine has been deferred (busy-skipped)
+/// for at least [`MAX_HEALTH_DEFERRAL`] seconds since `first_deferred_at`.
+/// `None` (never deferred, or the last completed run reset the counter) →
+/// false.
+pub fn first_deferral_exceeded(status: &DbHealthStatus, now: DateTime<Utc>) -> bool {
+    match status.first_deferred_at {
+        None => false,
+        Some(t) => now.signed_duration_since(t).num_seconds() >= MAX_HEALTH_DEFERRAL,
     }
 }
 
@@ -126,6 +158,7 @@ mod tests {
 
     #[test]
     fn status_json_round_trips() {
+        let first_deferred_at = Utc::now();
         let status = DbHealthStatus {
             last_run_at: Some(Utc::now()),
             outcome: Some(DbHealthOutcome::Passed),
@@ -134,6 +167,9 @@ mod tests {
             backup_path: Some("/home/user/.canopy/background_agents.db.backup".to_string()),
             last_skip_at: None,
             last_skip_reason: None,
+            deferred_count: 3,
+            first_deferred_at: Some(first_deferred_at),
+            ran_while_busy: true,
         };
         let json = status.to_json();
         let round_tripped = DbHealthStatus::from_json(&json);
@@ -144,6 +180,9 @@ mod tests {
             status.foreign_key_violations
         );
         assert_eq!(round_tripped.backup_path, status.backup_path);
+        assert_eq!(round_tripped.deferred_count, 3);
+        assert_eq!(round_tripped.first_deferred_at, Some(first_deferred_at));
+        assert!(round_tripped.ran_while_busy);
     }
 
     #[test]
@@ -163,5 +202,66 @@ mod tests {
         assert!(status.last_run_at.is_none());
         assert!(status.outcome.is_none());
         assert!(status.foreign_key_violations.is_empty());
+        assert_eq!(status.deferred_count, 0);
+        assert!(status.first_deferred_at.is_none());
+        assert!(!status.ran_while_busy);
+    }
+
+    #[test]
+    fn status_from_json_fills_defaults_for_new_fields() {
+        // A status persisted before CB93 added the deferral fields: every
+        // key the older schema wrote is present, the three new keys are
+        // absent. `#[serde(default)]` must fill only the missing fields —
+        // a missing key must never make serde reject the whole object and
+        // hand back `DbHealthStatus::default()`, which would silently drop
+        // the recorded run outcome and backup path.
+        let json = r#"{
+            "last_run_at": "2026-10-01T00:00:00Z",
+            "outcome": "passed",
+            "integrity_result": "ok",
+            "foreign_key_violations": [],
+            "backup_path": "/home/user/.canopy/background_agents.db.backup",
+            "last_skip_at": null,
+            "last_skip_reason": null
+        }"#;
+        let status = DbHealthStatus::from_json(json);
+
+        assert!(status.last_run_at.is_some(), "old field must survive");
+        assert_eq!(status.outcome, Some(DbHealthOutcome::Passed));
+        assert_eq!(status.integrity_result.as_deref(), Some("ok"));
+        assert_eq!(
+            status.backup_path.as_deref(),
+            Some("/home/user/.canopy/background_agents.db.backup")
+        );
+        assert_eq!(status.deferred_count, 0);
+        assert!(status.first_deferred_at.is_none());
+        assert!(!status.ran_while_busy);
+    }
+
+    #[test]
+    fn first_deferral_exceeded_false_before_72h() {
+        let now = Utc::now();
+        // 71h59m: one minute short of the ceiling.
+        let status = DbHealthStatus {
+            first_deferred_at: Some(now - chrono::Duration::seconds(MAX_HEALTH_DEFERRAL - 60)),
+            ..Default::default()
+        };
+        assert!(!first_deferral_exceeded(&status, now));
+    }
+
+    #[test]
+    fn first_deferral_exceeded_true_at_72h() {
+        let now = Utc::now();
+        let status = DbHealthStatus {
+            first_deferred_at: Some(now - chrono::Duration::seconds(MAX_HEALTH_DEFERRAL)),
+            ..Default::default()
+        };
+        assert!(first_deferral_exceeded(&status, now));
+    }
+
+    #[test]
+    fn first_deferral_exceeded_false_when_never_deferred() {
+        let now = Utc::now();
+        assert!(!first_deferral_exceeded(&DbHealthStatus::default(), now));
     }
 }

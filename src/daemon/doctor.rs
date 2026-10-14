@@ -1,7 +1,8 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use chrono::Utc;
 
 use crate::application::ports::{AgentRepository, StateRepository};
 use crate::daemon::process::{
@@ -9,7 +10,12 @@ use crate::daemon::process::{
     DaemonState,
 };
 use crate::db::Database;
+use crate::domain::db_health::DbHealthStatus;
 use crate::domain::db_paths::database_path;
+use crate::domain::graphs::{
+    EnsembleDetails, GraphCompletionHook, GraphHookEvent, GraphNode, GraphStatus,
+};
+use crate::domain::validation::{find_stale_2x_names, StaleNameHit};
 
 mod service_unit;
 use service_unit::*;
@@ -18,124 +24,135 @@ use path_copies::*;
 mod rag_report;
 use rag_report::*;
 
-/// CB68 FR3: scan every non-archived graph's node/ensemble prompts and
-/// hooks, and every scheduled agent's prompt, for a stale 2.x `loop_<name>`
-/// tool name or the gone `canopy loop` CLI. Pure over an already-open
-/// `Database` — no printing — so tests can assert on a fixture DB directly,
-/// the same reason `diagnose_embeddings_config` above is split out from
-/// `run_doctor` (stdout-fd capture is unreliable in CI; see the `#[ignore]`
-/// notes on the `run_doctor_*` fixture tests below).
-pub(crate) fn find_stale_2x_name_hits(db: &Database) -> anyhow::Result<Vec<String>> {
-    let mut hits = Vec::new();
+/// CB68 FR3: aggregated result of scanning every non-archived graph's
+/// node/ensemble prompts and hooks, and every scheduled agent's prompt, for a
+/// stale 2.x `loop_<name>` tool name or the gone `canopy loop` CLI. Grouped
+/// one entry per graph (not one per node) so doctor prints a readable line per
+/// graph. Pure over an already-open `Database` — no printing — so tests can
+/// assert on a fixture DB directly (stdout-fd capture is unreliable in CI; see
+/// the `#[ignore]` notes on the `run_doctor_*` fixture tests below).
+pub(crate) struct StaleNameReport {
+    pub graphs: Vec<StaleGraphNames>,
+    pub agents: Vec<StaleAgentNames>,
+}
+
+/// Distinct stale names found in one graph, with the total reference count
+/// (hits, not distinct pairs) and the graph's current top-level status.
+pub(crate) struct StaleGraphNames {
+    pub graph_name: String,
+    pub status: GraphStatus,
+    pub ref_count: usize,
+    pub names: Vec<StaleNameHit>,
+}
+
+/// Distinct stale names found in one scheduled agent's prompt.
+pub(crate) struct StaleAgentNames {
+    pub agent_id: String,
+    pub ref_count: usize,
+    pub names: Vec<StaleNameHit>,
+}
+
+/// Unique old→new pairs, preserving first-seen order. O(n²) but n < ~10.
+fn distinct_hits(hits: Vec<StaleNameHit>) -> Vec<StaleNameHit> {
+    let mut distinct: Vec<StaleNameHit> = Vec::new();
+    for hit in hits {
+        if !distinct.contains(&hit) {
+            distinct.push(hit);
+        }
+    }
+    distinct
+}
+
+pub(crate) fn find_stale_2x_name_hits(db: &Database) -> anyhow::Result<StaleNameReport> {
+    let mut graphs = Vec::new();
     for graph in db.list_graphs(None, false)? {
         let Some(details) = db.get_graph_details(&graph.id)? else {
             continue;
         };
-        append_graph_node_hits(&graph.name, &details, &mut hits);
-        append_graph_hook_hits(&graph.name, &details.lp.hooks, &mut hits);
+        let mut hits: Vec<StaleNameHit> = Vec::new();
+        hits.extend(graph_node_hits(
+            details
+                .graph_nodes
+                .iter()
+                .chain(details.specs.iter().flat_map(|s| s.nodes.iter())),
+        ));
+        hits.extend(graph_hook_hits(&details.lp.hooks));
         let mut ensembles = db.list_ensembles_for_graph(&graph.id)?;
         for spec in &details.specs {
             ensembles.extend(db.list_ensembles_for_spec(&spec.spec.id)?);
         }
-        append_graph_ensemble_hits(&graph.name, &ensembles, &mut hits);
+        hits.extend(graph_ensemble_hits(&ensembles));
+        if !hits.is_empty() {
+            graphs.push(StaleGraphNames {
+                graph_name: graph.name,
+                status: details.lp.status,
+                ref_count: hits.len(),
+                names: distinct_hits(hits),
+            });
+        }
     }
-    append_agent_prompt_hits(&db.list_agents()?, &mut hits);
-    Ok(hits)
+
+    let mut agents = Vec::new();
+    for agent in db.list_agents()? {
+        let hits = find_stale_2x_names(&agent.prompt);
+        if !hits.is_empty() {
+            agents.push(StaleAgentNames {
+                agent_id: agent.id,
+                ref_count: hits.len(),
+                names: hits,
+            });
+        }
+    }
+
+    Ok(StaleNameReport { graphs, agents })
 }
 
 /// Stale-name hits in every node config of one graph: the top-level graph
 /// nodes and each spec's nodes, `prompt_template` then `command`.
-fn append_graph_node_hits(
-    graph_name: &str,
-    details: &crate::domain::graphs::GraphDetails,
-    hits: &mut Vec<String>,
-) {
-    let all_nodes = details
-        .graph_nodes
-        .iter()
-        .chain(details.specs.iter().flat_map(|s| s.nodes.iter()));
-    for node in all_nodes {
+fn graph_node_hits<'a>(nodes: impl Iterator<Item = &'a GraphNode>) -> Vec<StaleNameHit> {
+    let mut hits = Vec::new();
+    for node in nodes {
         for field in ["prompt_template", "command"] {
             if let Some(text) = node.config.get(field).and_then(|v| v.as_str()) {
-                for hit in crate::domain::validation::find_stale_2x_names(text) {
-                    hits.push(format!(
-                        "{} · {} · {} → {}",
-                        graph_name, node.name, hit.old, hit.new
-                    ));
-                }
+                hits.extend(find_stale_2x_names(text));
             }
         }
     }
+    hits
 }
 
-/// Stale-name hits in one graph's hooks, event by event, each hook's
-/// prompt then its command, labelled with the event it fires on.
-fn append_graph_hook_hits(
-    graph_name: &str,
-    hooks: &std::collections::BTreeMap<
-        crate::domain::graphs::GraphHookEvent,
-        Vec<crate::domain::graphs::GraphCompletionHook>,
-    >,
-    hits: &mut Vec<String>,
-) {
-    for (event, hook_list) in hooks {
+/// Stale-name hits in one graph's hooks, each hook's prompt then its command.
+fn graph_hook_hits(
+    hooks: &BTreeMap<GraphHookEvent, Vec<GraphCompletionHook>>,
+) -> Vec<StaleNameHit> {
+    let mut hits = Vec::new();
+    for hook_list in hooks.values() {
         for hook in hook_list {
             for text in [hook.prompt.as_deref(), hook.command.as_deref()]
                 .into_iter()
                 .flatten()
             {
-                for hit in crate::domain::validation::find_stale_2x_names(text) {
-                    hits.push(format!(
-                        "{} · {} hook · {} → {}",
-                        graph_name,
-                        event.as_str(),
-                        hit.old,
-                        hit.new
-                    ));
-                }
+                hits.extend(find_stale_2x_names(text));
             }
         }
     }
+    hits
 }
 
 /// Stale-name hits in one graph's ensembles: the shared prompt first, then
-/// each member's prompt override, both labelled with the ensemble name.
-fn append_graph_ensemble_hits(
-    graph_name: &str,
-    ensembles: &[crate::domain::graphs::EnsembleDetails],
-    hits: &mut Vec<String>,
-) {
+/// each member's prompt override.
+fn graph_ensemble_hits(ensembles: &[EnsembleDetails]) -> Vec<StaleNameHit> {
+    let mut hits = Vec::new();
     for ens in ensembles {
-        for hit in crate::domain::validation::find_stale_2x_names(&ens.ensemble.prompt_template) {
-            hits.push(format!(
-                "{} · {} · {} → {}",
-                graph_name, ens.ensemble.name, hit.old, hit.new
-            ));
-        }
+        hits.extend(find_stale_2x_names(&ens.ensemble.prompt_template));
         for member in &ens.members {
             let Some(prompt_override) = &member.prompt_override else {
                 continue;
             };
-            for hit in crate::domain::validation::find_stale_2x_names(prompt_override) {
-                hits.push(format!(
-                    "{} · {} · {} → {}",
-                    graph_name, ens.ensemble.name, hit.old, hit.new
-                ));
-            }
+            hits.extend(find_stale_2x_names(prompt_override));
         }
     }
-}
-
-/// Stale-name hits in every scheduled agent's prompt.
-fn append_agent_prompt_hits(agents: &[crate::domain::models::Agent], hits: &mut Vec<String>) {
-    for agent in agents {
-        for hit in crate::domain::validation::find_stale_2x_names(&agent.prompt) {
-            hits.push(format!(
-                "{} · scheduled agent prompt · {} → {}",
-                agent.id, hit.old, hit.new
-            ));
-        }
-    }
+    hits
 }
 
 /// Print doctor's "verified" line — the ✓ glyph reserved for a check that
@@ -314,14 +331,64 @@ fn report_open_database(db_path: &Path, db: &Database, issues: &mut Vec<String>)
     // which is exactly what `DbHealthStatus::last_run_at` being
     // `None` vs `Some` distinguishes.
     let health_status = crate::daemon::health_routine::load_status(db);
-    match (health_status.last_run_at, health_status.outcome) {
-        (Some(when), Some(crate::domain::db_health::DbHealthOutcome::Passed)) => {
+    report_health_routine(&health_status, issues);
+
+    report_stale_names(db, issues);
+}
+
+/// The "Daily health routine" line and its follow-ups. Reports the daemon's
+/// last *recorded* outcome (never a check run here). CB93: a routine that has
+/// never completed but keeps being deferred (busy daemon) reads distinctly
+/// from a fresh install's "never run", and a completed run shows its backup's
+/// age and any deferrals since.
+fn report_health_routine(health_status: &DbHealthStatus, issues: &mut Vec<String>) {
+    let now = Utc::now();
+    match health_status.last_run_at {
+        None => {
+            if health_status.deferred_count > 0 {
+                let first = format_ts(health_status.first_deferred_at);
+                let last = format_ts(health_status.last_skip_at);
+                let busy = health_status
+                    .last_skip_reason
+                    .as_deref()
+                    .unwrap_or("unknown");
+                println!(
+                    " \x1b[33m⚠\x1b[0m Daily health routine: never completed — deferred {} times \
+                     since {}, last {} (busy: {}); it runs anyway after 72h of deferral",
+                    health_status.deferred_count, first, last, busy
+                );
+                issues.push(format!(
+                    "Daily database health routine has never completed — deferred {} times since \
+                     {} (busy: {}); run 'canopy daemon health-check' to run it now.",
+                    health_status.deferred_count, first, busy
+                ));
+            } else {
+                println!(" \x1b[33m⚠\x1b[0m Daily health routine: never run");
+            }
+        }
+        Some(when) => {
+            report_completed_health_routine(health_status, when, now, issues);
+        }
+    }
+}
+
+/// The rendering for a routine that has completed at least once: the outcome
+/// line, the backup path and its age (when a backup exists on disk), and the
+/// deferrals counted since that run.
+fn report_completed_health_routine(
+    health_status: &DbHealthStatus,
+    when: chrono::DateTime<Utc>,
+    now: chrono::DateTime<Utc>,
+    issues: &mut Vec<String>,
+) {
+    match health_status.outcome {
+        Some(crate::domain::db_health::DbHealthOutcome::Passed) => {
             success(format!(
                 "Daily health routine: passed (last run {})",
                 when.to_rfc3339()
             ));
         }
-        (Some(when), Some(outcome)) => {
+        Some(outcome) => {
             println!(
                 " \x1b[31m✗\x1b[0m Daily health routine: {outcome:?} (last run {})",
                 when.to_rfc3339()
@@ -334,30 +401,125 @@ fn report_open_database(db_path: &Path, db: &Database, issues: &mut Vec<String>)
                 when.to_rfc3339()
             ));
         }
-        _ => {
-            println!(" \x1b[33m⚠\x1b[0m Daily health routine: never run");
+        None => {
+            println!(
+                " \x1b[33m⚠\x1b[0m Daily health routine: last run {} (outcome unknown)",
+                when.to_rfc3339()
+            );
         }
     }
+    if let Some(age) = backup_age(health_status, now) {
+        println!("     backup: {age}");
+    }
+    if health_status.deferred_count > 0 {
+        println!(
+            "     deferred {} times since the last run",
+            health_status.deferred_count
+        );
+    }
+}
 
-    match find_stale_2x_name_hits(db) {
-        Ok(hits) if hits.is_empty() => {
-            success("Stale 2.x names: none found");
-        }
-        Ok(hits) => {
-            println!(" \x1b[31m✗\x1b[0m Stale 2.x names ({} found):", hits.len());
-            for hit in &hits {
-                println!("     {hit}");
-            }
-            issues.push(format!(
-                "{} stale 2.x loop_*/canopy-loop reference(s) found in stored prompts, hooks, \
-                 or scheduled agent prompts (listed above) — not rewritten automatically, edit \
-                 them to the 3.x names shown.",
-                hits.len()
-            ));
-        }
+/// "path (age: 2h)" for the routine's recorded backup, when that file still
+/// exists on disk and its mtime is readable. `None` otherwise — a stale path
+/// must not be printed as if a backup were there.
+fn backup_age(health_status: &DbHealthStatus, now: chrono::DateTime<Utc>) -> Option<String> {
+    let path = std::path::Path::new(health_status.backup_path.as_deref()?);
+    let mtime = path.metadata().ok()?.modified().ok()?;
+    let age = now
+        .signed_duration_since(chrono::DateTime::<Utc>::from(mtime))
+        .to_std()
+        .unwrap_or_default();
+    let age = crate::daemon::handler_formatting::format_duration_short(age);
+    Some(format!("{} (age: {})", path.display(), age))
+}
+
+fn format_ts(ts: Option<chrono::DateTime<Utc>>) -> String {
+    ts.map(|t| t.to_rfc3339())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// The stale-2.x-name section: one line per affected graph (not one per node),
+/// one line per affected scheduled agent, then the remediation suggestion.
+fn report_stale_names(db: &Database, issues: &mut Vec<String>) {
+    let report = match find_stale_2x_name_hits(db) {
+        Ok(r) => r,
         Err(e) => {
             println!(" \x1b[33m⚠\x1b[0m Could not scan for stale 2.x names: {e}");
+            return;
         }
+    };
+    let graph_refs: usize = report.graphs.iter().map(|g| g.ref_count).sum();
+    let agent_refs: usize = report.agents.iter().map(|a| a.ref_count).sum();
+    let total = graph_refs + agent_refs;
+    if total == 0 {
+        success("Stale 2.x names: none found");
+        return;
+    }
+    if report.agents.is_empty() {
+        println!(
+            " \x1b[31m✗\x1b[0m Stale 2.x names ({} found in {} graph(s)):",
+            total,
+            report.graphs.len()
+        );
+    } else {
+        println!(
+            " \x1b[31m✗\x1b[0m Stale 2.x names ({} found in {} graph(s), {} in scheduled agent(s)):",
+            total,
+            report.graphs.len(),
+            report.agents.len()
+        );
+    }
+    for g in &report.graphs {
+        println!(
+            "     • {} ({}, {} refs): {}",
+            g.graph_name,
+            g.status.as_str(),
+            g.ref_count,
+            format_hits(&g.names)
+        );
+    }
+    for a in &report.agents {
+        println!(
+            "     • scheduled agent '{}' ({} refs): {}",
+            a.agent_id,
+            a.ref_count,
+            format_hits(&a.names)
+        );
+    }
+    issues.push(stale_names_suggestion(&report, total));
+}
+
+fn format_hits(names: &[StaleNameHit]) -> String {
+    names
+        .iter()
+        .map(|n| format!("{} → {}", n.old, n.new))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// CB93 FR4: when every affected graph is completed/failed, archiving is the
+/// clean remediation (`graph_archive`, reversible with `graph_restore`); the
+/// scan already skips archived graphs, so archiving actually clears the
+/// report. Any graph in another status (or any scheduled agent) keeps the
+/// edit-to-3.x-names suggestion instead — archiving would not be enough.
+fn stale_names_suggestion(report: &StaleNameReport, total: usize) -> String {
+    let all_graphs_terminal = !report.graphs.is_empty()
+        && report
+            .graphs
+            .iter()
+            .all(|g| matches!(g.status, GraphStatus::Completed | GraphStatus::Failed));
+    if all_graphs_terminal && report.agents.is_empty() {
+        format!(
+            "{total} stale 2.x name(s) found in completed/failed graphs (listed above) — those \
+             graphs can be archived with `graph_archive` (reversible with `graph_restore`); the \
+             scan already skips archived graphs."
+        )
+    } else {
+        format!(
+            "{total} stale 2.x loop_*/canopy-loop reference(s) found in stored prompts, hooks, or \
+             scheduled agent prompts (listed above) — not rewritten automatically, edit them to \
+             the 3.x names shown."
+        )
     }
 }
 
@@ -2473,41 +2635,50 @@ mod tests {
         agent.prompt = "run `canopy loop info` and alert on drift".to_string();
         db.upsert_agent(&agent).unwrap();
 
-        let hits = find_stale_2x_name_hits(&db).unwrap();
+        let report = find_stale_2x_name_hits(&db).unwrap();
+        assert_eq!(report.graphs.len(), 1, "one graph, one grouped line");
+        let graph = &report.graphs[0];
+        assert_eq!(graph.graph_name, "Resilience Graph");
+        assert_eq!(graph.ref_count, 2, "one node hit plus one hook hit");
         assert!(
-            hits.iter().any(|h| h.contains("Resilience")
-                && h.contains("loop_complete_node")
-                && h.contains("graph_complete_node")),
-            "{hits:?}"
+            graph.names.contains(&StaleNameHit {
+                old: "loop_complete_node".to_string(),
+                new: "graph_complete_node".to_string(),
+            }),
+            "{:?}",
+            graph.names
         );
         assert!(
-            hits.iter().any(|h| h.contains("loop-watchdog")
-                && h.contains("canopy loop")
-                && h.contains("canopy graph")),
-            "{hits:?}"
+            graph.names.contains(&StaleNameHit {
+                old: "loop_report_blocker".to_string(),
+                new: "graph_report_blocker".to_string(),
+            }),
+            "{:?}",
+            graph.names
         );
-        // The hook hit must name the event it fires on — labelling every
-        // hook "completion hook" would send a reader to the wrong hook.
+
+        assert_eq!(report.agents.len(), 1);
+        let agent = &report.agents[0];
+        assert_eq!(agent.agent_id, "loop-watchdog");
         assert!(
-            hits.iter().any(|h| h.contains("on_failed hook")
-                && h.contains("loop_report_blocker")
-                && h.contains("graph_report_blocker")),
-            "{hits:?}"
+            agent.names.contains(&StaleNameHit {
+                old: "canopy loop".to_string(),
+                new: "canopy graph".to_string(),
+            }),
+            "{:?}",
+            agent.names
         );
     }
 
     /// Covers the scanner sections the fixture above doesn't reach: a
     /// hook's `command` (not just its prompt), an ensemble's shared prompt,
-    /// and a member's own prompt override — each labelled the way the
-    /// report promises (event name for hooks, ensemble name for members).
+    /// and a member's own prompt override.
     #[test]
     fn find_stale_2x_name_hits_scans_hook_commands_and_ensemble_prompts() {
         use crate::domain::graphs::{
             Ensemble, EnsembleDetails, EnsembleKind, EnsembleMember, GraphCompletionHook,
             GraphEdgeCondition, GraphHookEvent,
         };
-
-        let mut hits = Vec::new();
 
         let mut hooks = std::collections::BTreeMap::new();
         hooks.insert(
@@ -2529,7 +2700,6 @@ mod tests {
                 crew: None,
             }],
         );
-        append_graph_hook_hits("Resilience Graph", &hooks, &mut hits);
 
         let ensembles = vec![EnsembleDetails {
             ensemble: Ensemble {
@@ -2572,25 +2742,29 @@ mod tests {
                 infra_backoff_seconds: None,
             }],
         }];
-        append_graph_ensemble_hits("Resilience Graph", &ensembles, &mut hits);
+
+        let mut hits = graph_hook_hits(&hooks);
+        hits.extend(graph_ensemble_hits(&ensembles));
 
         assert!(
-            hits.iter().any(|h| h.contains("on_completed hook")
-                && h.contains("canopy loop")
-                && h.contains("canopy graph")),
+            hits.contains(&StaleNameHit {
+                old: "canopy loop".to_string(),
+                new: "canopy graph".to_string(),
+            }),
             "{hits:?}"
         );
         assert!(
-            hits.iter().any(|h| h.contains("Resilience Graph")
-                && h.contains("reviewers")
-                && h.contains("loop_complete_node")
-                && h.contains("graph_complete_node")),
+            hits.contains(&StaleNameHit {
+                old: "loop_complete_node".to_string(),
+                new: "graph_complete_node".to_string(),
+            }),
             "{hits:?}"
         );
         assert!(
-            hits.iter().any(|h| h.contains("reviewers")
-                && h.contains("loop_report_blocker")
-                && h.contains("graph_report_blocker")),
+            hits.contains(&StaleNameHit {
+                old: "loop_report_blocker".to_string(),
+                new: "graph_report_blocker".to_string(),
+            }),
             "{hits:?}"
         );
         assert_eq!(hits.len(), 3, "{hits:?}");
@@ -2604,6 +2778,204 @@ mod tests {
         agent.prompt = "summarize the diff and open a PR".to_string();
         db.upsert_agent(&agent).unwrap();
 
-        assert!(find_stale_2x_name_hits(&db).unwrap().is_empty());
+        let report = find_stale_2x_name_hits(&db).unwrap();
+        assert!(report.graphs.is_empty());
+        assert!(report.agents.is_empty());
+    }
+
+    #[test]
+    fn stale_name_report_groups_several_nodes_in_one_graph() {
+        use crate::domain::graphs::{Graph, GraphNode, GraphNodeKind, GraphStatus};
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::new(&dir.path().join("test.db")).unwrap();
+        let graph_id = "graph-many-nodes";
+        db.insert_graph(&Graph {
+            archived: false,
+            paused_by_reconciliation: false,
+            allow_dirty_start: false,
+            infra_node_id: None,
+            id: graph_id.to_string(),
+            name: "Many Nodes".to_string(),
+            description: None,
+            workdir: "/tmp".to_string(),
+            status: GraphStatus::Completed,
+            trigger: None,
+            created_at: chrono::Utc::now(),
+            started_at: None,
+            completed_at: None,
+            autorun_at: None,
+            auto_continue_at: None,
+            auto_continue_action: None,
+            active_run_queue_id: None,
+            hooks: std::collections::BTreeMap::new(),
+        })
+        .unwrap();
+        for i in 0..3 {
+            db.insert_graph_node(&GraphNode {
+                id: format!("node-{i}"),
+                spec_id: None,
+                graph_id: Some(graph_id.to_string()),
+                name: format!("Node {i}"),
+                kind: GraphNodeKind::Agent,
+                config: serde_json::json!({
+                    "prompt_template": "finish with loop_complete_node",
+                }),
+                position: i,
+                created_at: chrono::Utc::now(),
+            })
+            .unwrap();
+        }
+
+        let report = find_stale_2x_name_hits(&db).unwrap();
+        assert_eq!(
+            report.graphs.len(),
+            1,
+            "three stale nodes in one graph must collapse to one entry"
+        );
+        assert_eq!(report.graphs[0].ref_count, 3);
+        assert_eq!(
+            report.graphs[0].names.len(),
+            1,
+            "the same old→new pair repeats: one distinct name"
+        );
+    }
+
+    #[test]
+    fn stale_names_suggestion_archives_when_all_graphs_terminal() {
+        let report = StaleNameReport {
+            graphs: vec![
+                StaleGraphNames {
+                    graph_name: "done-1".to_string(),
+                    status: GraphStatus::Completed,
+                    ref_count: 2,
+                    names: vec![],
+                },
+                StaleGraphNames {
+                    graph_name: "failed-1".to_string(),
+                    status: GraphStatus::Failed,
+                    ref_count: 1,
+                    names: vec![],
+                },
+            ],
+            agents: vec![],
+        };
+
+        let suggestion = stale_names_suggestion(&report, 3);
+        assert!(suggestion.contains("graph_archive"), "{suggestion}");
+        assert!(suggestion.contains("graph_restore"), "{suggestion}");
+        assert!(suggestion.contains("skips archived graphs"), "{suggestion}");
+    }
+
+    #[test]
+    fn stale_names_suggestion_edits_when_graph_not_terminal() {
+        let report = StaleNameReport {
+            graphs: vec![StaleGraphNames {
+                graph_name: "still-drafting".to_string(),
+                status: GraphStatus::Draft,
+                ref_count: 1,
+                names: vec![],
+            }],
+            agents: vec![],
+        };
+
+        let suggestion = stale_names_suggestion(&report, 1);
+        assert!(
+            suggestion.contains("edit them to the 3.x names"),
+            "{suggestion}"
+        );
+        assert!(!suggestion.contains("graph_archive"), "{suggestion}");
+    }
+
+    // ── CB93: doctor's daily-health-routine renderings ───────────────
+    // stdout-fd capture is unreliable in CI (see the `run_doctor_*` note
+    // above) — these work locally and are marked ignored.
+
+    fn fresh_home_with_db() -> (tempfile::TempDir, std::path::PathBuf, Database) {
+        let home = tempfile::tempdir().unwrap();
+        let canopy_dir = home.path().join(".canopy");
+        std::fs::create_dir_all(&canopy_dir).unwrap();
+        let db_path = canopy_dir.join("background_agents.db");
+        let db = Database::new(&db_path).unwrap();
+        db.upsert_agent(&sample_agent("agent-1")).unwrap();
+        (home, canopy_dir, db)
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn run_doctor_health_routine_never_run_never_deferred() {
+        let (home, _canopy_dir, _db) = fresh_home_with_db();
+
+        let (result, output) = run_doctor_captured(home.path()).await;
+
+        assert!(result.is_ok());
+        assert!(
+            output.contains("Daily health routine: never run"),
+            "{output}"
+        );
+        assert!(!output.contains("never completed"), "{output}");
+        assert!(!output.contains("72h"), "{output}");
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn run_doctor_health_routine_never_completed_but_deferred() {
+        let (home, _canopy_dir, db) = fresh_home_with_db();
+        crate::daemon::health_routine::save_status(
+            &db,
+            &DbHealthStatus {
+                last_run_at: None,
+                deferred_count: 3,
+                first_deferred_at: Some(Utc::now() - chrono::Duration::hours(2)),
+                last_skip_at: Some(Utc::now() - chrono::Duration::hours(1)),
+                last_skip_reason: Some("2 graph(s) currently running".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let (result, output) = run_doctor_captured(home.path()).await;
+
+        assert!(result.is_ok());
+        assert!(
+            output.contains("never completed — deferred 3 times since"),
+            "{output}"
+        );
+        assert!(output.contains("it runs anyway after 72h"), "{output}");
+        assert!(output.contains("canopy daemon health-check"), "{output}");
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn run_doctor_health_routine_ran_with_backup_and_deferral() {
+        let (home, canopy_dir, db) = fresh_home_with_db();
+        let backup = canopy_dir.join("background_agents.db.backup");
+        std::fs::write(&backup, b"backup bytes").unwrap();
+        crate::daemon::health_routine::save_status(
+            &db,
+            &DbHealthStatus {
+                last_run_at: Some(Utc::now() - chrono::Duration::hours(1)),
+                outcome: Some(crate::domain::db_health::DbHealthOutcome::Passed),
+                integrity_result: Some("ok".to_string()),
+                backup_path: Some(backup.display().to_string()),
+                deferred_count: 4,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let (result, output) = run_doctor_captured(home.path()).await;
+
+        assert!(result.is_ok());
+        assert!(
+            output.contains("Daily health routine: passed (last run"),
+            "{output}"
+        );
+        assert!(output.contains(&backup.display().to_string()), "{output}");
+        assert!(output.contains("age:"), "{output}");
+        assert!(
+            output.contains("deferred 4 times since the last run"),
+            "{output}"
+        );
     }
 }

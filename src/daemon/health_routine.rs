@@ -31,7 +31,10 @@ use tokio_util::sync::CancellationToken;
 use crate::application::ports::StateRepository;
 use crate::db::health::integrity_check_file;
 use crate::db::Database;
-use crate::domain::db_health::{is_due, DbHealthOutcome, DbHealthStatus, STATE_KEY};
+use crate::domain::db_health::{
+    first_deferral_exceeded, is_due, DbHealthOutcome, DbHealthStatus, MAX_HEALTH_DEFERRAL,
+    STATE_KEY,
+};
 use crate::domain::db_paths::{database_path, DB_FILE_NAME};
 
 /// Where the single verified backup lives, under the canopy data directory.
@@ -132,7 +135,9 @@ impl HealthRoutine {
     /// Runs the routine if (and only if) it's due and the daemon is
     /// currently idle. If it's due but busy, records the skip (so a
     /// routine that never finds an idle moment is visible) and leaves it
-    /// due for the next poll rather than resetting the cadence.
+    /// due for the next poll rather than resetting the cadence. FR2: once
+    /// the first deferral is older than [`MAX_HEALTH_DEFERRAL`], the run
+    /// happens anyway.
     async fn maybe_run(&self) {
         let status = load_status(&self.db);
         let now = Utc::now();
@@ -148,30 +153,45 @@ impl HealthRoutine {
             }
         };
         if !busy.is_empty() {
-            Self::record_busy_health_skip(&self.db, status, now, &busy);
+            let skipped = Self::record_busy_health_skip(&self.db, status, now, &busy);
+            // FR2: never defer forever. Once the first deferral is older
+            // than MAX_HEALTH_DEFERRAL, run the same check anyway, through
+            // the same spawn_blocking path, so graph/MCP work is unaffected.
+            if first_deferral_exceeded(&skipped, now) {
+                tracing::info!(
+                    "db health routine: running despite busy (deferred {} times since {}, limit {}h): {}",
+                    skipped.deferred_count,
+                    skipped.first_deferred_at.unwrap_or(now), // guaranteed Some by first_deferral_exceeded
+                    MAX_HEALTH_DEFERRAL / 3600,
+                    busy.join(", ")
+                );
+                self.run_and_record(true).await;
+            }
             return;
         }
 
-        let db = Arc::clone(&self.db);
-        let db_path = database_path(&self.data_dir);
-        let backup_path = backup_path(&self.data_dir);
-        let Some(new_status) = Self::run_health_check_blocking(db, db_path, backup_path).await
-        else {
-            return;
-        };
-        Self::record_health_outcome(&self.db, &new_status);
+        // Idle path: unchanged, just delegates to the shared runner.
+        self.run_and_record(false).await;
     }
 
     /// Records the skip (so a routine that never finds an idle moment stays
     /// visible) and leaves the routine due for the next poll rather than
-    /// resetting the cadence.
+    /// resetting the cadence. Returns the persisted status so the caller can
+    /// read the updated deferral fields without a reload.
     fn record_busy_health_skip(
         db: &Database,
         status: DbHealthStatus,
         now: DateTime<Utc>,
         busy: &[String],
-    ) {
+    ) -> DbHealthStatus {
         let skipped = DbHealthStatus {
+            deferred_count: status.deferred_count + 1,
+            // Only the FIRST skip since the last completed run records the
+            // deadline-start timestamp; later skips keep the original.
+            first_deferred_at: status.first_deferred_at.or(Some(now)),
+            // A skip is not a run — never carry ran_while_busy=true from a
+            // prior forced run (the struct-spread would otherwise preserve it).
+            ran_while_busy: false,
             last_skip_at: Some(now),
             last_skip_reason: Some(busy.join(", ")),
             ..status
@@ -180,6 +200,7 @@ impl HealthRoutine {
         if let Err(e) = save_status(db, &skipped) {
             tracing::error!("db health routine: failed to record skip: {e}");
         }
+        skipped
     }
 
     /// Runs the whole check-and-backup off the async runtime (a long
@@ -216,6 +237,23 @@ impl HealthRoutine {
         if let Err(e) = save_status(db, new_status) {
             tracing::error!("db health routine: failed to persist status: {e}");
         }
+    }
+
+    /// Runs the health check on a blocking thread and persists the result
+    /// (the FR2 forced-due run and the idle path share this). `ran_while_busy`
+    /// is set on the saved status only for the forced run — the idle path
+    /// passes `false`, which is also the default.
+    async fn run_and_record(&self, ran_while_busy: bool) {
+        let db = Arc::clone(&self.db);
+        let db_path = database_path(&self.data_dir);
+        let backup_path = backup_path(&self.data_dir);
+        let Some(mut new_status) = Self::run_health_check_blocking(db, db_path, backup_path).await
+        else {
+            tracing::warn!("db health routine: blocking check did not produce a status");
+            return;
+        };
+        new_status.ran_while_busy = ran_while_busy;
+        Self::record_health_outcome(&self.db, &new_status);
     }
 }
 
@@ -692,7 +730,133 @@ mod tests {
         );
         assert!(status.last_skip_at.is_some());
         assert!(status.last_skip_reason.unwrap().contains("running"));
+        assert_eq!(status.deferred_count, 1);
+        assert!(status.first_deferred_at.is_some());
         assert!(!backup_path(dir.path()).exists());
+    }
+
+    #[test]
+    fn record_busy_health_skip_increments_count_and_sets_first_deferral_only_once() {
+        let dir = tempdir().unwrap();
+        let db = Database::new(&dir.path().join("test.db")).unwrap();
+        let now1 = Utc::now();
+        let now2 = now1 + chrono::Duration::hours(1);
+
+        let first = HealthRoutine::record_busy_health_skip(
+            &db,
+            DbHealthStatus::default(),
+            now1,
+            &["1 graph(s) currently running".to_string()],
+        );
+        assert_eq!(first.deferred_count, 1);
+        assert_eq!(first.first_deferred_at, Some(now1));
+
+        let second = HealthRoutine::record_busy_health_skip(
+            &db,
+            first,
+            now2,
+            &["2 graph(s) currently running".to_string()],
+        );
+        assert_eq!(second.deferred_count, 2);
+        assert_eq!(
+            second.first_deferred_at,
+            Some(now1),
+            "the first deferral timestamp must stick across later skips"
+        );
+        assert_eq!(second.last_skip_at, Some(now2));
+    }
+
+    #[test]
+    fn completed_run_resets_deferral_fields() {
+        let dir = tempdir().unwrap();
+        let db_path = database_path(dir.path());
+        let db = Database::new(&db_path).unwrap();
+        db.insert_terminal_session("t1", "t1", "bash", "/tmp")
+            .unwrap();
+        save_status(
+            &db,
+            &DbHealthStatus {
+                deferred_count: 5,
+                first_deferred_at: Some(Utc::now() - chrono::Duration::hours(80)),
+                ran_while_busy: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let status = run_health_check(&db, &db_path, &backup_path(dir.path()));
+
+        assert_eq!(status.deferred_count, 0);
+        assert!(status.first_deferred_at.is_none());
+        assert!(!status.ran_while_busy);
+    }
+
+    #[tokio::test]
+    async fn maybe_run_forces_run_after_max_deferral_while_busy() {
+        let dir = tempdir().unwrap();
+        let db_path = database_path(dir.path());
+        let db = Arc::new(Database::new(&db_path).unwrap());
+        db.insert_graph(&make_running_graph("graph-1")).unwrap();
+        save_status(
+            &db,
+            &DbHealthStatus {
+                last_run_at: Some(Utc::now() - chrono::Duration::hours(25)),
+                first_deferred_at: Some(Utc::now() - chrono::Duration::hours(73)),
+                deferred_count: 5,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let routine = HealthRoutine::new(Arc::clone(&db), dir.path().to_path_buf());
+        routine.maybe_run().await;
+
+        assert!(
+            backup_path(dir.path()).exists(),
+            "72h of deferral must force the check to run despite the busy daemon"
+        );
+        let status = load_status(&db);
+        assert_eq!(status.outcome, Some(DbHealthOutcome::Passed));
+        assert!(status.last_run_at.is_some());
+        assert!(status.ran_while_busy, "the forced run must be marked busy");
+        assert_eq!(status.deferred_count, 0, "a completed run resets deferrals");
+    }
+
+    #[tokio::test]
+    async fn maybe_run_does_not_force_run_before_max_deferral_while_busy() {
+        let dir = tempdir().unwrap();
+        let db_path = database_path(dir.path());
+        let db = Arc::new(Database::new(&db_path).unwrap());
+        db.insert_graph(&make_running_graph("graph-1")).unwrap();
+        // Due (last run 25h ago) but the first deferral is only an hour old —
+        // short of the 72h ceiling, so the busy daemon must still defer.
+        let last_run = Utc::now() - chrono::Duration::hours(25);
+        save_status(
+            &db,
+            &DbHealthStatus {
+                last_run_at: Some(last_run),
+                first_deferred_at: Some(Utc::now() - chrono::Duration::hours(1)),
+                deferred_count: 5,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let routine = HealthRoutine::new(Arc::clone(&db), dir.path().to_path_buf());
+        routine.maybe_run().await;
+
+        assert!(
+            !backup_path(dir.path()).exists(),
+            "short of 72h, a busy daemon must still defer the run"
+        );
+        let status = load_status(&db);
+        assert_eq!(
+            status.last_run_at,
+            Some(last_run),
+            "the deferred routine must not have refreshed its last-run time"
+        );
+        assert!(status.outcome.is_none(), "no run must have been recorded");
+        assert_eq!(status.deferred_count, 6);
     }
 
     #[tokio::test]
