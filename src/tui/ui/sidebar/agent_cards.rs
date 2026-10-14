@@ -219,7 +219,17 @@ pub(super) fn agent_card_meta<'a>(
                 STATUS_OK
             },
             agent_type: agent.trigger_type_label(),
-            type_detail: agent.cli.as_str(),
+            // A send_to_session agent has no CLI (CM53) — name the target
+            // session instead of rendering an empty harness slot.
+            type_detail: if agent.is_send_to_session() {
+                agent
+                    .action
+                    .target_session_name()
+                    .or(agent.action.target_session_id())
+                    .unwrap_or("session")
+            } else {
+                agent.cli.as_str()
+            },
             work_dir: agent.working_dir.as_deref().or_else(|| agent.watch_path()),
         },
         AgentEntry::Interactive(index) => {

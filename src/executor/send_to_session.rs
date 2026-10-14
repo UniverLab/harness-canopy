@@ -39,6 +39,11 @@ impl Executor {
         agent: &Agent,
         ctx: &ExecutionContext<'_>,
     ) -> Result<i32> {
+        // Close any run left active by an interrupted delivery before claiming
+        // a new one — the same self-heal the headless path applies, without
+        // which a daemon restart mid-delivery would skip every later fire.
+        self.resolve_timeout(&agent.id);
+
         let Some(run_id) = self.start_run(agent, ctx.trigger_type)? else {
             return Ok(-1);
         };

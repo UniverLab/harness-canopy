@@ -9647,6 +9647,129 @@ mod endpoint_tests {
     }
 
     #[tokio::test]
+    async fn agent_update_retargets_send_agent_without_repeating_action() {
+        let home = tempdir().unwrap();
+        let _home_guard = HomeVar::set(home.path());
+        let (_dir, db, handler) = endpoint_test_handler();
+
+        let created = handler
+            .task_add(
+                Parameters(TaskAddParams {
+                    action: Some("send_to_session".to_string()),
+                    target_session_name: Some("orch".to_string()),
+                    target_session_id: None,
+                    id: "retarget-1".to_string(),
+                    prompt: "p".to_string(),
+                    schedule: "0 * * * *".to_string(),
+                    cli: None,
+                    model: None,
+                    effort: None,
+                    duration_minutes: None,
+                    working_dir: None,
+                    timeout_minutes: None,
+                }),
+                OptionalExtension(None),
+            )
+            .await
+            .unwrap();
+        assert!(!is_err(&created), "{}", text(&created));
+
+        let updated = handler
+            .task_update(
+                Parameters(TaskUpdateParams {
+                    action: None,
+                    target_session_name: Some("other".to_string()),
+                    target_session_id: None,
+                    id: "retarget-1".to_string(),
+                    new_id: None,
+                    prompt: None,
+                    cli: None,
+                    model: None,
+                    effort: None,
+                    schedule: None,
+                    working_dir: None,
+                    duration_minutes: None,
+                    path: None,
+                    events: None,
+                    debounce_seconds: None,
+                    recursive: None,
+                    enabled: None,
+                    notify_on_success: None,
+                }),
+                OptionalExtension(None),
+            )
+            .await
+            .unwrap();
+        assert!(!is_err(&updated), "{}", text(&updated));
+
+        let stored = db.get_agent("retarget-1").unwrap().unwrap();
+        assert_eq!(stored.action.target_session_name(), Some("other"));
+    }
+
+    #[tokio::test]
+    async fn agent_update_refuses_target_on_headless_agent() {
+        let home = tempdir().unwrap();
+        let _home_guard = HomeVar::set(home.path());
+        let (dir, db, handler) = endpoint_test_handler();
+
+        let created = handler
+            .task_watch(
+                Parameters(TaskWatchParams {
+                    action: None,
+                    target_session_name: None,
+                    target_session_id: None,
+                    id: "headless-watch".to_string(),
+                    path: dir.path().to_string_lossy().to_string(),
+                    events: vec!["modify".to_string()],
+                    prompt: "p".to_string(),
+                    cli: Some("opencode".to_string()),
+                    model: None,
+                    effort: None,
+                    debounce_seconds: None,
+                    recursive: None,
+                    timeout_minutes: None,
+                }),
+                OptionalExtension(None),
+            )
+            .await
+            .unwrap();
+        assert!(!is_err(&created), "{}", text(&created));
+
+        let updated = handler
+            .task_update(
+                Parameters(TaskUpdateParams {
+                    action: None,
+                    target_session_name: Some("orch".to_string()),
+                    target_session_id: None,
+                    id: "headless-watch".to_string(),
+                    new_id: None,
+                    prompt: None,
+                    cli: None,
+                    model: None,
+                    effort: None,
+                    schedule: None,
+                    working_dir: None,
+                    duration_minutes: None,
+                    path: None,
+                    events: None,
+                    debounce_seconds: None,
+                    recursive: None,
+                    enabled: None,
+                    notify_on_success: None,
+                }),
+                OptionalExtension(None),
+            )
+            .await
+            .unwrap();
+        assert!(is_err(&updated), "{}", text(&updated));
+        assert!(!db
+            .get_agent("headless-watch")
+            .unwrap()
+            .unwrap()
+            .is_send_to_session());
+    }
+
+    #[tokio::test]
     async fn task_add_rejects_invalid_cron_expression() {
         let home = tempdir().unwrap();
         let _home_guard = HomeVar::set(home.path());

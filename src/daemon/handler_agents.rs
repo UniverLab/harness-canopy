@@ -636,14 +636,32 @@ impl TaskTriggerHandler {
             || params.target_session_name.is_some()
             || params.target_session_id.is_some()
         {
-            let new_action = match build_send_action(
-                params.action.as_deref(),
-                params.target_session_name.clone(),
-                params.target_session_id.clone(),
-                caller_session_id(parts.as_ref(), self),
-            ) {
-                Ok(action) => action,
-                Err(e) => return Ok(error_result(&e)),
+            // Patch semantics: a target-only call keeps the agent's current
+            // action (so a send agent can be re-targeted, while a headless
+            // agent is still refused), and an action-only call on a send agent
+            // keeps its existing target instead of demanding a caller session.
+            let has_target =
+                params.target_session_name.is_some() || params.target_session_id.is_some();
+            let effective_action = match params.action.as_deref() {
+                Some(action) => action,
+                None if has_target => agent.action.kind_str(),
+                None => "",
+            };
+            let new_action = if effective_action == "send_to_session"
+                && !has_target
+                && agent.is_send_to_session()
+            {
+                agent.action.clone()
+            } else {
+                match build_send_action(
+                    Some(effective_action),
+                    params.target_session_name.clone(),
+                    params.target_session_id.clone(),
+                    caller_session_id(parts.as_ref(), self),
+                ) {
+                    Ok(action) => action,
+                    Err(e) => return Ok(error_result(&e)),
+                }
             };
             if matches!(new_action, AgentAction::Headless) {
                 if agent.is_send_to_session() && params.cli.is_none() {

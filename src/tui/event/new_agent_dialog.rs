@@ -139,6 +139,16 @@ impl DialogFields {
         }
     }
 
+    /// The field Up from the prompt lands on. In send mode (CM53) the model row
+    /// is not rendered, so it is the target picker on the CLI slot instead.
+    fn prompt_up_target(self, dialog: &NewAgentDialog) -> usize {
+        if self.is_background && dialog.is_send_to_session() {
+            self.cli_field
+        } else {
+            self.model_field
+        }
+    }
+
     fn previous_dir_field(self, is_watch_dir: bool) -> usize {
         if is_watch_dir {
             self.prompt_field
@@ -414,11 +424,13 @@ fn toggle_background_trigger(dialog: &mut NewAgentDialog) {
 
 fn handle_cli_field(dialog: &mut NewAgentDialog, code: KeyCode, fields: DialogFields) {
     // CM53: in send mode this row is the target-session picker, not the harness.
+    // The model row is not rendered in send mode, so navigation steps over it
+    // straight to the prompt.
     if dialog.is_send_to_session() {
         match code {
             KeyCode::Left => dialog.move_send_target(false),
             KeyCode::Right => dialog.move_send_target(true),
-            KeyCode::Down | KeyCode::Tab => dialog.field = fields.model_field,
+            KeyCode::Down | KeyCode::Tab => dialog.field = fields.prompt_field,
             KeyCode::Up | KeyCode::BackTab => dialog.field = fields.cli_up_target(),
             _ => {}
         }

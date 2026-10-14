@@ -25,6 +25,14 @@ impl App {
         let action =
             AgentAction::send_to_session(Some(target), None).map_err(anyhow::Error::msg)?;
 
+        // Same guards `launch_watcher` applies: a watch agent with no path or
+        // no parseable events would never fire.
+        if matches!(dialog.background_trigger, BackgroundTrigger::Watch)
+            && (dialog.watch_path.is_empty() || dialog.watch_events.is_empty())
+        {
+            return Ok(());
+        }
+
         let id = new_short_id("agent");
         let working_dir = (!dialog.working_dir.is_empty()).then(|| dialog.working_dir.clone());
         let log_path = agent_log_path(&id);

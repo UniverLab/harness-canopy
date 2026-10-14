@@ -604,9 +604,9 @@ mod tests {
             .is_empty());
     }
 
-    /// notify_hook_delivery returns true only for hook provenance.
+    /// notify_hook_delivery returns true for hook and agent-trigger provenance.
     #[test]
-    fn notify_hook_delivery_is_true_only_for_hook_provenance() {
+    fn notify_hook_delivery_is_true_for_hook_and_agent_trigger_provenance() {
         use crate::db::scheduled_sends::{ScheduledSend, ScheduledSendProvenance};
 
         let hook_prov = ScheduledSendProvenance::hook("graph-1", "on_failed");
@@ -621,6 +621,20 @@ mod tests {
             provenance: Some(hook_prov),
         };
         assert!(App::notify_hook_delivery(&send_hook));
+
+        // CM53: an agent-triggered send announces delivery the same way.
+        let agent_prov = ScheduledSendProvenance::agent_trigger("nudger", "cron");
+        let send_agent = ScheduledSend {
+            id: "ss-agent".into(),
+            prompt: "test".into(),
+            target_session_id: "sess".into(),
+            workdir: None,
+            fire_at: chrono::Utc::now(),
+            created_at: chrono::Utc::now(),
+            builder_state: None,
+            provenance: Some(agent_prov),
+        };
+        assert!(App::notify_hook_delivery(&send_agent));
 
         let non_hook_prov = ScheduledSendProvenance {
             kind: "other".into(),

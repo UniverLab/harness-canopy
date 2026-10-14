@@ -177,6 +177,9 @@ impl TaskTriggerHandler {
             params.working_dir.clone(),
             log_path,
         );
+        // The delivery path never reads it, but an explicitly passed value is
+        // still the run lock's timeout — do not silently drop it.
+        agent.timeout_minutes = params.timeout_minutes.unwrap_or(15);
         agent.trigger = Some(Trigger::Cron {
             schedule_expr: schedule_expr.clone(),
         });
@@ -232,6 +235,7 @@ impl TaskTriggerHandler {
             None,
             log_path,
         );
+        agent.timeout_minutes = params.timeout_minutes.unwrap_or(15);
         agent.trigger = Some(Trigger::Watch {
             path: params.path.clone(),
             events,

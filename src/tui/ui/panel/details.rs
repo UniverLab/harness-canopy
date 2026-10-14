@@ -205,6 +205,10 @@ fn push_agent_trigger_lines<'a>(lines: &mut Vec<Line<'a>>, agent: &'a Agent, the
 }
 
 /// Append the always-present CLI/timeout lines plus the optional metadata rows.
+///
+/// A `send_to_session` agent has no CLI/model/effort/timeout (CM53): the
+/// delivery target replaces those rows. Dir, expiry, last-run and trigger
+/// count still apply — they describe the agent, not the delivery action.
 fn push_agent_metadata_lines<'a>(lines: &mut Vec<Line<'a>>, agent: &'a Agent, theme: &Theme) {
     if agent.is_send_to_session() {
         let description = crate::daemon::handler_formatting::describe_action(agent);
@@ -212,26 +216,25 @@ fn push_agent_metadata_lines<'a>(lines: &mut Vec<Line<'a>>, agent: &'a Agent, th
             Span::styled("Delivers to: ", Style::default().fg(theme.dim_text)),
             Span::raw(description.target.unwrap_or_default()),
         ]));
-        return;
-    }
-
-    lines.push(Line::from(vec![
-        Span::styled("CLI:     ", Style::default().fg(theme.dim_text)),
-        Span::raw(agent.cli.as_str()),
-    ]));
-
-    if let Some(ref model) = agent.model {
+    } else {
         lines.push(Line::from(vec![
-            Span::styled("Model:   ", Style::default().fg(theme.dim_text)),
-            Span::raw(model),
+            Span::styled("CLI:     ", Style::default().fg(theme.dim_text)),
+            Span::raw(agent.cli.as_str()),
         ]));
-    }
 
-    if let Some(ref effort) = agent.effort {
-        lines.push(Line::from(vec![
-            Span::styled("Effort:  ", Style::default().fg(theme.dim_text)),
-            Span::raw(effort),
-        ]));
+        if let Some(ref model) = agent.model {
+            lines.push(Line::from(vec![
+                Span::styled("Model:   ", Style::default().fg(theme.dim_text)),
+                Span::raw(model),
+            ]));
+        }
+
+        if let Some(ref effort) = agent.effort {
+            lines.push(Line::from(vec![
+                Span::styled("Effort:  ", Style::default().fg(theme.dim_text)),
+                Span::raw(effort),
+            ]));
+        }
     }
 
     if let Some(ref dir) = agent.working_dir {
@@ -241,10 +244,12 @@ fn push_agent_metadata_lines<'a>(lines: &mut Vec<Line<'a>>, agent: &'a Agent, th
         ]));
     }
 
-    lines.push(Line::from(vec![
-        Span::styled("Timeout: ", Style::default().fg(theme.dim_text)),
-        Span::raw(format!("{} min", agent.timeout_minutes)),
-    ]));
+    if !agent.is_send_to_session() {
+        lines.push(Line::from(vec![
+            Span::styled("Timeout: ", Style::default().fg(theme.dim_text)),
+            Span::raw(format!("{} min", agent.timeout_minutes)),
+        ]));
+    }
 
     if let Some(ref exp) = agent.expires_at {
         lines.push(Line::from(vec![
@@ -265,5 +270,82 @@ fn push_agent_metadata_lines<'a>(lines: &mut Vec<Line<'a>>, agent: &'a Agent, th
             Span::styled("Triggers:", Style::default().fg(theme.dim_text)),
             Span::raw(agent.trigger_count.to_string()),
         ]));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::models::{AgentAction, Cli};
+    use chrono::Utc;
+
+    fn send_agent() -> Agent {
+        Agent {
+            id: "nudger".to_string(),
+            prompt: "report status".to_string(),
+            trigger: Some(Trigger::Cron {
+                schedule_expr: "0 * * * *".to_string(),
+            }),
+            cli: Cli(String::new()),
+            model: None,
+            effort: None,
+            working_dir: Some("/tmp/project".to_string()),
+            enabled: true,
+            enable_at: None,
+            created_at: Utc::now(),
+            log_path: "/tmp/nudger.log".to_string(),
+            timeout_minutes: 15,
+            expires_at: None,
+            last_run_at: Some(Utc::now()),
+            last_run_ok: Some(false),
+            last_triggered_at: None,
+            trigger_count: 3,
+            action: AgentAction::send_to_session(Some("orch".to_string()), None).unwrap(),
+        }
+    }
+
+    fn line_text(lines: &[Line<'_>]) -> String {
+        lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn send_agent_shows_target_and_keeps_metadata_rows() {
+        let agent = send_agent();
+        let mut lines = Vec::new();
+        push_agent_metadata_lines(&mut lines, &agent, &Theme::classic());
+        let text = line_text(&lines);
+
+        assert!(text.contains("Delivers to:"), "{text}");
+        assert!(text.contains("session name 'orch'"), "{text}");
+        // The delivery action replaces the CLI stack, never the agent metadata.
+        assert!(!text.contains("CLI:"), "{text}");
+        assert!(!text.contains("Timeout:"), "{text}");
+        assert!(text.contains("Dir:"), "{text}");
+        assert!(text.contains("/tmp/project"), "{text}");
+        assert!(text.contains("Last run:"), "{text}");
+        assert!(text.contains("Triggers:"), "{text}");
+    }
+
+    #[test]
+    fn headless_agent_keeps_cli_rows() {
+        let mut agent = send_agent();
+        agent.action = AgentAction::Headless;
+        agent.cli = Cli::new("opencode");
+        let mut lines = Vec::new();
+        push_agent_metadata_lines(&mut lines, &agent, &Theme::classic());
+        let text = line_text(&lines);
+
+        assert!(text.contains("CLI:"), "{text}");
+        assert!(!text.contains("Delivers to:"), "{text}");
+        assert!(text.contains("Timeout:"), "{text}");
     }
 }

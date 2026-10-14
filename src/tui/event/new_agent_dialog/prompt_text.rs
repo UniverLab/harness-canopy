@@ -53,7 +53,9 @@ pub(super) fn handle_prompt_field(
             if let Some(new_cursor) = move_prompt_visual(dialog, cursor, field_width, false) {
                 dialog.prompt_cursor = new_cursor;
             } else {
-                dialog.field = fields.model_field;
+                // In send mode the model row is not rendered (CM53), so Up goes
+                // straight to the target picker.
+                dialog.field = fields.prompt_up_target(dialog);
                 return;
             }
         }
