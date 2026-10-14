@@ -148,7 +148,22 @@ impl App {
 
     /// Store a fresh snapshot and clamp every selection against it so a
     /// shrunken list can never leave the keys pointing past the end.
-    fn apply_crews_snapshot(&mut self, snapshot: CrewsSnapshot) {
+    fn apply_crews_snapshot(&mut self, mut snapshot: CrewsSnapshot) {
+        // `crew_list` carries only binding counts, so the Enter-expand read
+        // (D16) is the only source of a crew's binding list. Carry the
+        // already-loaded bindings over to the new snapshot by name, or the
+        // periodic refresh would blank the expanded row's bindings seconds
+        // after the user expanded it. A changed count means the bindings
+        // moved underneath us, so the stale list is dropped instead.
+        if let Some(previous) = self.crews.snapshot.as_ref() {
+            for crew in &mut snapshot.crews {
+                if let Some(old) = previous.crews.iter().find(|old| old.name == crew.name) {
+                    if !old.bindings.is_empty() && old.binding_total == crew.binding_total {
+                        crew.bindings = old.bindings.clone();
+                    }
+                }
+            }
+        }
         let rows = build_pair_rows(&snapshot, &Utc::now());
         let row_count = rows.len();
         let crew_count = snapshot.crews.len();
@@ -318,5 +333,98 @@ impl App {
         } else {
             ""
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::Database;
+    use crate::tui::app::crews_logic::{CrewBindingView, CrewView};
+    use std::sync::Arc;
+    use tempfile::{tempdir, NamedTempFile};
+
+    fn test_app() -> App {
+        let tmp = NamedTempFile::new().expect("create temp file");
+        let path = tmp.path().to_path_buf();
+        std::mem::forget(tmp);
+        let db = Arc::new(Database::new(&path).expect("create test db"));
+        let data_dir = tempdir().expect("create data dir");
+        App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app")
+    }
+
+    fn binding(name: &str) -> CrewBindingView {
+        CrewBindingView {
+            graph: "g1".to_string(),
+            kind: "ensemble".to_string(),
+            name: name.to_string(),
+        }
+    }
+
+    /// A one-member crew with the given loaded bindings and binding count.
+    fn crew(name: &str, bindings: Vec<CrewBindingView>, binding_total: usize) -> CrewView {
+        CrewView {
+            name: name.to_string(),
+            description: None,
+            version: 1,
+            members: vec![serde_json::json!({"platform": "claude", "model": null})],
+            member_pairs: vec![("claude".to_string(), String::new())],
+            bindings,
+            binding_total,
+        }
+    }
+
+    fn snapshot(crews: Vec<CrewView>) -> CrewsSnapshot {
+        CrewsSnapshot {
+            roster: Vec::new(),
+            pairs: Vec::new(),
+            crews,
+        }
+    }
+
+    /// The refresh tick must not blank an expanded crew's bindings: the
+    /// `crew_list` snapshot only counts them, so the value `crew_get` loaded
+    /// on Enter has to survive (`crew_list` carries no binding list).
+    #[test]
+    fn refresh_keeps_loaded_bindings_on_the_expanded_crew() {
+        let mut app = test_app();
+        app.crews.snapshot = Some(snapshot(vec![crew(
+            "review",
+            vec![binding("reviewers")],
+            1,
+        )]));
+        app.apply_crews_snapshot(snapshot(vec![crew("review", Vec::new(), 1)]));
+
+        let crew = &app.crews.snapshot.as_ref().unwrap().crews[0];
+        assert_eq!(
+            crew.bindings.len(),
+            1,
+            "the loaded binding must survive the periodic refresh"
+        );
+        assert_eq!(crew.bindings[0].name, "reviewers");
+    }
+
+    /// A changed binding count means the bindings moved underneath us: the
+    /// stale list is dropped rather than shown against the new count.
+    #[test]
+    fn refresh_drops_bindings_when_the_count_changed() {
+        let mut app = test_app();
+        app.crews.snapshot = Some(snapshot(vec![crew(
+            "review",
+            vec![binding("reviewers")],
+            1,
+        )]));
+        app.apply_crews_snapshot(snapshot(vec![crew("review", Vec::new(), 2)]));
+
+        let crew = &app.crews.snapshot.as_ref().unwrap().crews[0];
+        assert!(
+            crew.bindings.is_empty(),
+            "a changed count invalidates the loaded list"
+        );
     }
 }

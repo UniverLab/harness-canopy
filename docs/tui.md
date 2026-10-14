@@ -51,6 +51,20 @@ The dialog includes a CLI picker, model picker, seed identity selector
   `PageUp`/`PageDown` scroll by half a screen, `End` returns to the live
   edge, and `,`/`.` step through an ensemble's members. Opening, closing or
   switching the pane never writes to a run.
+- **Crews face** — `F6` pins a panel face; **crews** is pin-only (never
+  selected automatically). It lists every harness/model pair in use with its
+  effective availability — `●` available, `○` unavailable, `◐` expired — its
+  reason and expiry, and how many graphs and crews use it, plus every crew
+  with its member and binding counts. Click the panel to focus it, then `Tab`
+  switches between the Pairs and Crews sections. In Pairs, `Space` toggles the
+  selected pair, `e` marks it unavailable with a reason and an optional
+  `YYYY-MM-DD HH:MM` expiry, and `p` marks its whole provider prefix
+  unavailable (showing how many pairs that covers first). In Crews, `Enter`
+  expands a crew to its ordered members and bindings, `a` adds a member from
+  the model picker, `d` removes one (refused when it would empty the crew),
+  and `Shift+↑`/`Shift+↓` reorder members. Every roster and crew write goes
+  through the daemon — the face never touches SQLite — and the view refreshes
+  without blocking while a call is in flight.
 - **Idle visuals** — Brian's Brain cellular automaton, drawn as Braille
   glyphs and seeded by the cursor at a fixed step rate, plus animated
   kaomoji status messages (whimsg).
