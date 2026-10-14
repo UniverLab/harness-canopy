@@ -33,7 +33,9 @@ pub(crate) struct GraphActionMessage {
 /// How long a graph-action result banner stays up before auto-dismissing
 /// (mirrors `show_copied`/`dismiss_copied`'s 2s, held a bit longer since
 /// these messages are often full daemon sentences, not a one-word toast).
-const GRAPH_ACTION_MESSAGE_TTL: std::time::Duration = std::time::Duration::from_secs(6);
+/// `pub(crate)` so the CT30 Crews face reuses the exact same TTL for its
+/// own status line (D14) instead of inventing a second one.
+pub(crate) const GRAPH_ACTION_MESSAGE_TTL: std::time::Duration = std::time::Duration::from_secs(6);
 
 /// One control offered for a graph in a given [`GraphStatus`] — the source of
 /// truth for both the footer's discoverability hints and the key handler's

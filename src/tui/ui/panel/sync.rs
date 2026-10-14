@@ -50,6 +50,9 @@ pub(crate) fn draw_panel_face(frame: &mut Frame, area: Rect, app: &mut App, them
         }
         PanelFace::Knowledge => draw_knowledge_face(frame, inner, app, theme),
         PanelFace::Graph => draw_graph_face(frame, inner, app, theme),
+        // CT30: the Crews face is read-only (`&App` reborrow) and manages
+        // its own refresh through the tick, not through rendering.
+        PanelFace::Crews => super::crews::draw_crews_face(frame, inner, app, theme),
     }
 }
 

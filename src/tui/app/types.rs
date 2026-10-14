@@ -482,6 +482,10 @@ pub struct App {
     /// panel was clicked into (keyboard focus claimed by the panel).
     /// While set, any pending automatic switch is dropped, not deferred.
     pub(crate) panel_focused: bool,
+    /// CT30: state of the Crews panel face (pairs + crews sections). Keys
+    /// are routed here only while `panel_focused` and the Crews face is
+    /// visible; data arrives through the daemon client only (never SQLite).
+    pub(crate) crews: crate::tui::app::crews_face::CrewsFaceState,
     /// Set by a mouse-wheel scroll over the panel; consumed (cleared) by
     /// the next panel-face tick, which drops the pending switch with it.
     pub(crate) panel_interacting: bool,

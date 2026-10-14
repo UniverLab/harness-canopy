@@ -21,6 +21,7 @@ mod rag_view;
 use rag_view::*;
 mod playground;
 use playground::*;
+mod crews;
 
 pub mod background_agent;
 pub mod details;

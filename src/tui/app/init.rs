@@ -174,6 +174,7 @@ macro_rules! app_new_fields {
             panel_picker_open: false,
             panel_picker_idx: 0,
             panel_focused: false,
+            crews: crate::tui::app::crews_face::CrewsFaceState::default(),
             panel_interacting: false,
             panel_last_knowledge_updated: None,
             panel_last_backlog_updated: None,

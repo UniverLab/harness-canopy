@@ -1,5 +1,9 @@
 mod agents;
 mod context_transfer;
+pub(crate) mod crews_calls;
+pub(crate) mod crews_dialog;
+pub(crate) mod crews_face;
+pub(crate) mod crews_logic;
 mod data;
 pub mod dialog;
 mod gamification;

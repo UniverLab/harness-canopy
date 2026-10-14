@@ -40,6 +40,12 @@ impl App {
         self.poll_graph_action();
         self.poll_node_tail_dialog();
         self.dismiss_graph_action_message();
+        // CT30: apply any finished Crews-face fetch/write, then start a new
+        // one if the face is visible and its throttle allows (D5). Runs
+        // before the panel-face tick so the recomputation sees current data.
+        self.poll_crews_face();
+        self.poll_crews_write();
+        self.refresh_crews_face();
         // CT1 multi-face panel: recompute the visible face from the
         // switching rule after every data refresh above has run.
         self.tick_panel_face();

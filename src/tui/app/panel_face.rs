@@ -24,11 +24,12 @@ use crate::domain::graphs::GraphStatus;
 pub(crate) const PANEL_DWELL_SECS: u64 = 10;
 
 /// Picker rows: automatic first (the default), then one per face.
-pub(crate) const PANEL_PICKER_OPTIONS: [Option<PanelFace>; 4] = [
+pub(crate) const PANEL_PICKER_OPTIONS: [Option<PanelFace>; 5] = [
     None,
     Some(PanelFace::Activity),
     Some(PanelFace::Knowledge),
     Some(PanelFace::Graph),
+    Some(PanelFace::Crews),
 ];
 
 impl App {
@@ -233,6 +234,10 @@ impl App {
                     || !self.graphs.is_empty()
                     || self.activity_panel_state().is_some()
             }
+            // Crews is pin-only: it is always visible once pinned, so this
+            // arm only exists for exhaustiveness (the pin check above
+            // already returned true).
+            PanelFace::Crews => true,
         }
     }
 
@@ -245,6 +250,11 @@ impl App {
             self.clear_panel_dwell();
             self.panel_face = face;
             self.panel_last_reason = None;
+            if face == PanelFace::Crews {
+                // The Crews face refreshes only while it is the visible
+                // face; pinning it is that moment.
+                self.request_crews_refresh();
+            }
         } else {
             self.tick_panel_face();
         }
@@ -790,6 +800,41 @@ mod tests {
         app.graphs = vec![make_graph("l1", GraphStatus::Completed)];
         app.tick_panel_face();
         assert!(matches!(app.focus, Focus::Agent));
+    }
+
+    #[test]
+    fn picker_has_five_rows() {
+        assert_eq!(PANEL_PICKER_OPTIONS.len(), 5);
+        assert_eq!(PANEL_PICKER_OPTIONS[4], Some(PanelFace::Crews));
+    }
+
+    /// Crews is a management view: no combination of resting state, graph
+    /// state or knowledge/backlog event may ever select it automatically.
+    #[test]
+    fn crews_is_never_chosen_automatically() {
+        let mut app = test_app();
+        assert_ne!(app.panel_face, PanelFace::Crews);
+
+        // (a) no graphs: resting face is Activity.
+        app.tick_panel_face();
+        assert_ne!(app.panel_face, PanelFace::Crews);
+
+        // (b) a running graph: resting face is Graph.
+        app.graphs = vec![make_graph("l1", GraphStatus::Running)];
+        app.tick_panel_face();
+        assert_ne!(app.panel_face, PanelFace::Crews);
+
+        // (c) a knowledge event: dwell face is Knowledge.
+        app.graphs.clear();
+        app.fire_panel_event(PanelFace::Knowledge, "new knowledge");
+        app.tick_panel_face();
+        assert_ne!(app.panel_face, PanelFace::Crews);
+    }
+
+    #[test]
+    fn crews_from_str() {
+        assert_eq!(PanelFace::from_str("crews"), Some(PanelFace::Crews));
+        assert_eq!(PanelFace::Crews.label(), "crews");
     }
 
     #[test]

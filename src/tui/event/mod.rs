@@ -136,6 +136,7 @@ mod search_picker;
 mod terminal_warp;
 
 use knowledge_dialog::handle_knowledge_dialog_key;
+mod crews_keys;
 mod graph_editor;
 mod graph_form;
 
@@ -162,6 +163,12 @@ use scroll::{
 pub fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> Result<()> {
     if app.panel_picker_open {
         handle_panel_picker_key(app, code);
+        return Ok(());
+    }
+    // CT30: while the panel is focused on the Crews face (or one of its
+    // dialogs is open) the key belongs to the face first; it reports
+    // whether it consumed the key so global keys still work otherwise.
+    if crews_keys::handle_crews_face_key(app, code, modifiers) {
         return Ok(());
     }
     if dismiss_legend(app, code) || handle_global_key(app, code, modifiers) {

@@ -21,10 +21,11 @@ pub enum AutomationKind {
     Graph,
 }
 
-/// The right panel's faces (CT1): one panel, three views. Activity is the
+/// The right panel's faces (CT1): one panel, four views. Activity is the
 /// resting face when nothing else applies; Knowledge shows activity moved
 /// under it plus the project-relations graph; Graph shows a read-only view
-/// of the running graph.
+/// of the running graph; Crews is a management view: pin-only, never chosen
+/// automatically.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PanelFace {
@@ -32,16 +33,23 @@ pub enum PanelFace {
     Activity,
     Knowledge,
     Graph,
+    Crews,
 }
 
 impl PanelFace {
-    pub const ALL: [PanelFace; 3] = [PanelFace::Activity, PanelFace::Knowledge, PanelFace::Graph];
+    pub const ALL: [PanelFace; 4] = [
+        PanelFace::Activity,
+        PanelFace::Knowledge,
+        PanelFace::Graph,
+        PanelFace::Crews,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             PanelFace::Activity => "activity",
             PanelFace::Knowledge => "knowledge",
             PanelFace::Graph => "graph",
+            PanelFace::Crews => "crews",
         }
     }
 
@@ -53,6 +61,7 @@ impl PanelFace {
             "activity" => Some(PanelFace::Activity),
             "knowledge" => Some(PanelFace::Knowledge),
             "graph" => Some(PanelFace::Graph),
+            "crews" => Some(PanelFace::Crews),
             _ => None,
         }
     }
