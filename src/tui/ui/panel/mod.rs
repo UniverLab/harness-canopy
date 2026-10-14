@@ -74,9 +74,9 @@ fn render_wrapped_paragraph<'a>(frame: &mut Frame, area: Rect, lines: Vec<Line<'
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
 }
 
-fn format_unix_timestamp(timestamp: i64) -> String {
+fn format_unix_timestamp(timestamp: i64, fmt: &str) -> String {
     match Local.timestamp_opt(timestamp, 0).single() {
-        Some(datetime) => datetime.format("%Y-%m-%d %H:%M").to_string(),
+        Some(datetime) => datetime.format(fmt).to_string(),
         None => timestamp.to_string(),
     }
 }
@@ -784,15 +784,25 @@ mod tests {
     #[test]
     fn format_unix_timestamp_valid() {
         let ts = 1_700_000_000; // 2023-11-14 22:13:20 UTC
-        let result = format_unix_timestamp(ts);
+        let result = format_unix_timestamp(ts, "%Y-%m-%d %H:%M");
         assert!(result.contains("2023"), "Should contain year: {result}");
     }
 
     #[test]
     fn format_unix_timestamp_zero() {
-        let result = format_unix_timestamp(0);
+        let result = format_unix_timestamp(0, "%Y-%m-%d %H:%M");
         // Epoch 0 is 1970-01-01 UTC, displayed as local time
         assert!(!result.is_empty(), "Should produce a string: {result}");
+    }
+
+    /// CM52: the format comes from `tui.datetime_format`.
+    #[test]
+    fn format_unix_timestamp_reads_the_setting() {
+        let ts = 1_700_000_000;
+        assert_ne!(
+            format_unix_timestamp(ts, "%Y-%m-%d %H:%M"),
+            format_unix_timestamp(ts, "%d/%m/%Y")
+        );
     }
 
     #[test]

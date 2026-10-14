@@ -609,11 +609,14 @@ impl SimplePromptDialog {
         self.send_error = None;
     }
 
-    /// The send control's inline value text (U11).
-    pub fn send_display(&self) -> String {
+    /// The send control's inline value text (U11). `datetime_format` is
+    /// `tui.datetime_format`; the inline date editor's field layout stays
+    /// fixed (it drives a fixed-format parse), only this display follows the
+    /// setting.
+    pub fn send_display(&self, datetime_format: &str) -> String {
         match (self.send_choice, self.send_at) {
             (SendChoice::Now, _) => "now".to_string(),
-            (SendChoice::Date, Some(at)) => at.format("%Y-%m-%d %H:%M").to_string(),
+            (SendChoice::Date, Some(at)) => at.format(datetime_format).to_string(),
             (SendChoice::Date, None) => "date".to_string(),
         }
     }

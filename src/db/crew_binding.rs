@@ -113,11 +113,16 @@ fn check_bindable(details: &EnsembleDetails, crew_len: usize) -> Result<()> {
             details.ensemble.name
         );
     }
-    let (min, max) = member_bounds(details.ensemble.kind);
+    let caps = crate::domain::graphs::MemberCaps::from_graphs(
+        &crate::domain::canopy_config::CanopyConfig::load(&crate::domain::prompts::canopy_dir())
+            .graphs,
+    );
+    let (min, max) = member_bounds(details.ensemble.kind, caps);
     if crew_len < min || crew_len > max {
         anyhow::bail!(
-            "A {} ensemble must have {min}-{max} members, got {crew_len}.",
-            details.ensemble.kind.as_str()
+            "A {} ensemble must have {min}-{max} members, got {crew_len}. Raise {} to allow more.",
+            details.ensemble.kind.as_str(),
+            crate::domain::graphs::member_cap_key(details.ensemble.kind)
         );
     }
     Ok(())

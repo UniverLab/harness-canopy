@@ -56,14 +56,55 @@ impl EnsembleKind {
 /// Every ensemble kind requires at least two members.
 pub const ENSEMBLE_MIN_MEMBERS: usize = 2;
 
+/// The two per-kind member caps, read from `[graphs]` at each write:
+/// `graphs.ensemble_max_members_parallel` and
+/// `graphs.ensemble_max_members_sequential`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemberCaps {
+    pub parallel: usize,
+    pub sequential: usize,
+}
+
+impl MemberCaps {
+    pub fn from_graphs(graphs: &crate::domain::canopy_config::GraphsConfig) -> Self {
+        Self {
+            parallel: graphs.ensemble_max_members_parallel,
+            sequential: graphs.ensemble_max_members_sequential,
+        }
+    }
+}
+
+impl Default for MemberCaps {
+    /// The registry defaults (8 / 16), so tests run against fixed bounds
+    /// regardless of any user `config.toml`.
+    fn default() -> Self {
+        use crate::domain::settings;
+        Self {
+            parallel: settings::default_int("graphs.ensemble_max_members_parallel") as usize,
+            sequential: settings::default_int("graphs.ensemble_max_members_sequential") as usize,
+        }
+    }
+}
+
 /// Per-kind member-count bounds. `parallel` runs every member concurrently,
-/// so it stays at 2–8; `cascade` and `round_robin` dispatch one member at a
-/// time, so a longer list only adds rotation/fallback depth (not concurrency
-/// or cost) and they allow 2–16.
-pub fn member_bounds(kind: EnsembleKind) -> (usize, usize) {
+/// so it has its own cap (`graphs.ensemble_max_members_parallel`, default 8);
+/// `cascade` and `round_robin` dispatch one member at a time, so a longer
+/// list only adds rotation/fallback depth, and they share the sequential cap
+/// (`graphs.ensemble_max_members_sequential`, default 16).
+pub fn member_bounds(kind: EnsembleKind, caps: MemberCaps) -> (usize, usize) {
     match kind {
-        EnsembleKind::Parallel => (ENSEMBLE_MIN_MEMBERS, 8),
-        EnsembleKind::Cascade | EnsembleKind::RoundRobin => (ENSEMBLE_MIN_MEMBERS, 16),
+        EnsembleKind::Parallel => (ENSEMBLE_MIN_MEMBERS, caps.parallel),
+        EnsembleKind::Cascade | EnsembleKind::RoundRobin => (ENSEMBLE_MIN_MEMBERS, caps.sequential),
+    }
+}
+
+/// The setting key that caps `kind`, for refusal messages.
+pub fn member_cap_key(kind: EnsembleKind) -> &'static str {
+    match kind {
+        EnsembleKind::Parallel => "graphs.ensemble_max_members_parallel",
+        EnsembleKind::Cascade | EnsembleKind::RoundRobin => {
+            "graphs.ensemble_max_members_sequential"
+        }
     }
 }
 
@@ -210,4 +251,48 @@ pub struct EnsembleDetails {
     /// Members in `position` order — the order consolidation and
     /// `graph_update_ensemble` resize diffs rely on.
     pub members: Vec<EnsembleMember>,
+}
+
+#[cfg(test)]
+mod member_caps_tests {
+    use super::*;
+
+    #[test]
+    fn member_bounds_reads_the_caps() {
+        let caps = MemberCaps {
+            parallel: 4,
+            sequential: 3,
+        };
+        assert_eq!(member_bounds(EnsembleKind::Parallel, caps), (2, 4));
+        assert_eq!(member_bounds(EnsembleKind::Cascade, caps), (2, 3));
+        assert_eq!(member_bounds(EnsembleKind::RoundRobin, caps), (2, 3));
+    }
+
+    #[test]
+    fn member_bounds_defaults_are_8_and_16() {
+        assert_eq!(
+            member_bounds(EnsembleKind::Parallel, MemberCaps::default()),
+            (2, 8)
+        );
+        assert_eq!(
+            member_bounds(EnsembleKind::Cascade, MemberCaps::default()),
+            (2, 16)
+        );
+    }
+
+    #[test]
+    fn member_cap_key_names_the_setting() {
+        assert_eq!(
+            member_cap_key(EnsembleKind::Parallel),
+            "graphs.ensemble_max_members_parallel"
+        );
+        assert_eq!(
+            member_cap_key(EnsembleKind::Cascade),
+            "graphs.ensemble_max_members_sequential"
+        );
+        assert_eq!(
+            member_cap_key(EnsembleKind::RoundRobin),
+            "graphs.ensemble_max_members_sequential"
+        );
+    }
 }

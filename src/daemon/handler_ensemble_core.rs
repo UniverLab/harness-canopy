@@ -34,6 +34,10 @@ impl TaskTriggerHandler {
         &self,
         Parameters(params): Parameters<GraphAddEnsembleParams>,
     ) -> Result<CallToolResult, McpError> {
+        let canopy_dir = crate::domain::prompts::canopy_dir();
+        let graphs = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir).graphs;
+        let caps = crate::domain::graphs::MemberCaps::from_graphs(&graphs);
+
         let name = params.name.trim();
         if let Err(e) = validate_non_empty(name, "Ensemble name") {
             return Ok(error_result(&e));
@@ -126,7 +130,7 @@ impl TaskTriggerHandler {
                 }
             },
             None => match &params.members {
-                Some(explicit) => match validate_ensemble_members(explicit, kind) {
+                Some(explicit) => match validate_ensemble_members(explicit, kind, caps) {
                     Ok(members) => members,
                     Err(e) => return Ok(error_result(&e)),
                 },
@@ -145,12 +149,13 @@ impl TaskTriggerHandler {
         // kind's bounds here for both paths — a 12-member blueprint used
         // with kind parallel is refused exactly like 12 explicit members.
         {
-            let (min, max) = crate::domain::graphs::member_bounds(kind);
+            let (min, max) = crate::domain::graphs::member_bounds(kind, caps);
             if members.len() < min || members.len() > max {
                 return Ok(error_result(&format!(
-                    "A {} ensemble must have {min}-{max} members, got {}.",
+                    "A {} ensemble must have {min}-{max} members, got {}. Raise {} to allow more.",
                     kind.as_str(),
-                    members.len()
+                    members.len(),
+                    crate::domain::graphs::member_cap_key(kind)
                 )));
             }
         }
@@ -289,9 +294,7 @@ impl TaskTriggerHandler {
         {
             return Ok(error_result(&e));
         }
-        let timeout_minutes = params
-            .timeout_minutes
-            .unwrap_or(DEFAULT_ENSEMBLE_MEMBER_TIMEOUT_MINUTES);
+        let timeout_minutes = default_member_timeout(&graphs, params.timeout_minutes);
         if timeout_minutes < 0 {
             return Ok(error_result("timeout_minutes must not be negative."));
         }
@@ -470,18 +473,25 @@ impl TaskTriggerHandler {
     }
 }
 
-pub(crate) const DEFAULT_ENSEMBLE_MEMBER_TIMEOUT_MINUTES: i64 = 30;
+pub(crate) fn default_member_timeout(
+    graphs: &crate::domain::canopy_config::GraphsConfig,
+    requested: Option<i64>,
+) -> i64 {
+    requested.unwrap_or(graphs.straggler_timeout_minutes as i64)
+}
 
 pub(crate) fn validate_ensemble_members(
     members: &[EnsembleMemberParams],
     kind: EnsembleKind,
+    caps: crate::domain::graphs::MemberCaps,
 ) -> Result<Vec<EnsembleMemberSpec>, String> {
-    let (min, max) = crate::domain::graphs::member_bounds(kind);
+    let (min, max) = crate::domain::graphs::member_bounds(kind, caps);
     if members.len() < min || members.len() > max {
         return Err(format!(
-            "A {} ensemble must have {min}-{max} members, got {}.",
+            "A {} ensemble must have {min}-{max} members, got {}. Raise {} to allow more.",
             kind.as_str(),
-            members.len()
+            members.len(),
+            crate::domain::graphs::member_cap_key(kind)
         ));
     }
     members
@@ -578,4 +588,19 @@ pub(crate) fn member_node_config(
         }
     }
     config
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_member_timeout_applies_setting_when_requested_is_none() {
+        let graphs = crate::domain::canopy_config::GraphsConfig {
+            straggler_timeout_minutes: 45,
+            ..Default::default()
+        };
+        assert_eq!(default_member_timeout(&graphs, None), 45);
+        assert_eq!(default_member_timeout(&graphs, Some(10)), 10);
+    }
 }

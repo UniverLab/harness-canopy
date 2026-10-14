@@ -66,7 +66,12 @@ pub async fn handle_clean_action(
     if hard {
         projected_rows += projected_hard_cascade_rows(&build_hard_cascade_plan(&db)?);
     }
-    let reclaim_warranted = !no_reclaim && clean::should_reclaim(projected_rows as usize);
+    let canopy_dir = crate::domain::prompts::canopy_dir();
+    let threshold = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir)
+        .clean
+        .reclaim_min_deleted_rows;
+    let reclaim_warranted =
+        !no_reclaim && clean::should_reclaim(projected_rows as usize, threshold);
 
     if !reclaim_warranted {
         return run_clean_without_window(

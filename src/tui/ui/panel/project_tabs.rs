@@ -81,13 +81,14 @@ pub(super) fn build_project_overview_lines<'a>(
     project_activity: Option<&crate::tui::app::types::SyncPanelState>,
     recent_sessions: &[(String, String)],
     theme: &Theme,
+    datetime_format: &str,
 ) -> Vec<Line<'a>> {
     let tags = project.tags.as_deref().unwrap_or("none");
     let indexed = project
         .indexed_at
-        .map(format_unix_timestamp)
+        .map(|ts| format_unix_timestamp(ts, datetime_format))
         .unwrap_or_else(|| "pending".to_string());
-    let created = format_unix_timestamp(project.created_at);
+    let created = format_unix_timestamp(project.created_at, datetime_format);
     let description = project
         .description
         .as_deref()
@@ -156,8 +157,13 @@ pub(super) fn draw_project_overview(frame: &mut Frame, area: Rect, app: &App, th
 
     let project_activity = app.activity_panel_state_for_workdir(&project.path);
     let recent_sessions = recent_project_session_summaries(app, project, 3);
-    let lines =
-        build_project_overview_lines(project, project_activity.as_ref(), &recent_sessions, theme);
+    let lines = build_project_overview_lines(
+        project,
+        project_activity.as_ref(),
+        &recent_sessions,
+        theme,
+        &app.tui_settings.datetime_format,
+    );
 
     render_wrapped_paragraph(frame, area, lines);
 }

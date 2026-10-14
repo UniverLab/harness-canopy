@@ -297,14 +297,21 @@ fn draw_copied_badge(frame: &mut Frame, theme: &Theme) {
     }
 }
 
+/// CM52: whether the atmosphere scene ticks and draws this frame. False when
+/// the user hid it for the session or `tui.atmosphere = false`.
+pub(crate) fn atmosphere_active(app: &App) -> bool {
+    !app.atmosphere_hidden && app.tui_settings.atmosphere
+}
+
 /// Top-level overlays rendered last so they appear above all content.
 fn draw_top_overlays(frame: &mut Frame, app: &mut App, theme: &Theme) {
     if app.show_copied {
         draw_copied_badge(frame, theme);
     }
 
-    // Atmosphere particles — absolute top layer, drawn last over everything
-    if !app.atmosphere_hidden {
+    // Atmosphere particles — absolute top layer, drawn last over everything.
+    // CM52: `tui.atmosphere = false` skips both the scene tick and the draw.
+    if atmosphere_active(app) {
         let area = frame.area();
         app.atmosphere.tick(area, &mut app.atmosphere_ctx);
         // Reset mouse deltas after the scene has consumed them
@@ -469,6 +476,44 @@ mod tests {
         assert_eq!(sidebar.x, 0);
         assert_eq!(content.x, SIDEBAR_WIDTH);
         assert_eq!(content.width, body.width - SIDEBAR_WIDTH);
+    }
+
+    /// CM52: `tui.brians_brain = false` stops the banner automaton.
+    #[test]
+    fn brians_brain_toggle_stops_the_banner_animation() {
+        let (mut app, _data_dir) = picker_test_app();
+        app.focus = crate::tui::app::types::Focus::Agent;
+        app.home_brain = Some(crate::tui::brians_brain::BriansBrain::new(6, 10));
+
+        app.tui_settings.brians_brain = false;
+        let before = app.home_brain.as_ref().expect("brain set").grid.clone();
+        app.tick_banner_animation();
+        assert_eq!(
+            app.home_brain.as_ref().expect("brain set").grid,
+            before,
+            "disabled must not advance the automaton"
+        );
+
+        app.tui_settings.brians_brain = true;
+        app.tick_banner_animation();
+        assert_ne!(
+            app.home_brain.as_ref().expect("brain set").grid,
+            before,
+            "enabled must advance the automaton"
+        );
+    }
+
+    /// CM52: `tui.atmosphere = false` disables the scene tick and draw.
+    #[test]
+    fn atmosphere_toggle_gates_the_scene() {
+        let (mut app, _data_dir) = picker_test_app();
+        app.atmosphere_hidden = false;
+        app.tui_settings.atmosphere = false;
+        assert!(!atmosphere_active(&app));
+        app.tui_settings.atmosphere = true;
+        assert!(atmosphere_active(&app));
+        app.atmosphere_hidden = true;
+        assert!(!atmosphere_active(&app));
     }
 
     #[test]

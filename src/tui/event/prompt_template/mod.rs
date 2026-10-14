@@ -1427,7 +1427,7 @@ mod send_at_tests {
         assert_eq!(dialog.send_choice, SendChoice::Now);
         assert!(dialog.send_at.is_none());
         assert!(dialog.send_edit.is_none());
-        assert_eq!(dialog.send_display(), "now");
+        assert_eq!(dialog.send_display("%Y-%m-%d %H:%M"), "now");
     }
 
     #[test]
@@ -1435,13 +1435,13 @@ mod send_at_tests {
         let mut dialog = SimplePromptDialog::new();
         dialog.send_toggle();
         assert_eq!(dialog.send_choice, SendChoice::Date);
-        assert_eq!(dialog.send_display(), "date");
+        assert_eq!(dialog.send_display("%Y-%m-%d %H:%M"), "date");
         // Toggling back to now discards any picked time.
         dialog.send_at = Some(chrono::Local::now().naive_local() + chrono::Duration::hours(2));
         dialog.send_toggle();
         assert_eq!(dialog.send_choice, SendChoice::Now);
         assert!(dialog.send_at.is_none());
-        assert_eq!(dialog.send_display(), "now");
+        assert_eq!(dialog.send_display("%Y-%m-%d %H:%M"), "now");
     }
 
     #[test]
@@ -1504,7 +1504,7 @@ mod send_at_tests {
         assert!(dialog.send_edit.is_none());
         assert!(dialog.send_error.is_none());
         assert_eq!(
-            dialog.send_display(),
+            dialog.send_display("%Y-%m-%d %H:%M"),
             future.format("%Y-%m-%d %H:%M").to_string()
         );
     }
@@ -1541,7 +1541,7 @@ mod send_at_tests {
         assert_eq!(dialog.send_choice, SendChoice::Now);
         assert!(dialog.send_at.is_none());
         assert!(dialog.send_edit.is_none());
-        assert_eq!(dialog.send_display(), "now");
+        assert_eq!(dialog.send_display("%Y-%m-%d %H:%M"), "now");
     }
 
     #[test]

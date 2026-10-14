@@ -15,12 +15,6 @@
 /// enforced at bind time, because a crew is kind-agnostic.)
 pub const CREW_MIN_MEMBERS: usize = 1;
 
-/// The upper bound is the largest ensemble cap: `max(member_bounds(Parallel).1,
-/// member_bounds(Cascade).1)` = 16. A crew is kind-agnostic so it takes the
-/// max; kind-specific bounds are enforced at bind time. If `member_bounds`
-/// ever changes, change this constant with it.
-pub const CREW_MAX_MEMBERS: usize = 16;
-
 /// One crew: the stored header row. Members live in `crew_members`, keyed by
 /// `(crew_id, position)`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,17 +62,19 @@ pub fn validate_crew_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Validate a member list: 1..=[`CREW_MAX_MEMBERS`] entries, each platform
-/// non-empty after trim, each optional numeric non-negative.
-pub fn validate_crew_members(members: &[CrewMember]) -> Result<(), String> {
+/// Validate a member list: 1..=`max` entries, each platform non-empty after
+/// trim, each optional numeric non-negative. `max` is
+/// `graphs.ensemble_max_members_sequential` (a crew is kind-agnostic, so it
+/// takes the sequential cap; kind-specific bounds are enforced at bind time).
+pub fn validate_crew_members(members: &[CrewMember], max: usize) -> Result<(), String> {
     if members.len() < CREW_MIN_MEMBERS {
         return Err(format!(
             "a crew needs at least {CREW_MIN_MEMBERS} member(s)"
         ));
     }
-    if members.len() > CREW_MAX_MEMBERS {
+    if members.len() > max {
         return Err(format!(
-            "a crew holds at most {CREW_MAX_MEMBERS} members, got {}",
+            "a crew holds at most {max} members, got {}",
             members.len()
         ));
     }
@@ -128,24 +124,38 @@ mod tests {
 
     #[test]
     fn member_validation_bounds_and_values() {
-        assert!(validate_crew_members(&[member("opencode")]).is_ok());
-        assert!(validate_crew_members(&[]).is_err());
-        let many: Vec<CrewMember> = (0..CREW_MAX_MEMBERS + 1)
+        let default_max =
+            crate::domain::settings::default_int("graphs.ensemble_max_members_sequential") as usize;
+        assert!(validate_crew_members(&[member("opencode")], default_max).is_ok());
+        assert!(validate_crew_members(&[], default_max).is_err());
+        let many: Vec<CrewMember> = (0..default_max + 1)
             .map(|i| CrewMember {
                 position: i as i64,
                 ..member("opencode")
             })
             .collect();
-        assert!(validate_crew_members(&many).is_err());
+        assert!(validate_crew_members(&many, default_max).is_err());
         let blank = CrewMember {
             platform: "   ".to_string(),
             ..member("opencode")
         };
-        assert!(validate_crew_members(&[blank]).is_err());
+        assert!(validate_crew_members(&[blank], default_max).is_err());
         let negative = CrewMember {
             timeout_minutes: Some(-1),
             ..member("opencode")
         };
-        assert!(validate_crew_members(&[negative]).is_err());
+        assert!(validate_crew_members(&[negative], default_max).is_err());
+    }
+
+    #[test]
+    fn member_validation_reads_the_cap() {
+        let m: Vec<CrewMember> = (0..3)
+            .map(|i| CrewMember {
+                position: i as i64,
+                ..member("opencode")
+            })
+            .collect();
+        assert!(validate_crew_members(&m, 3).is_ok());
+        assert!(validate_crew_members(&m, 2).is_err());
     }
 }

@@ -75,13 +75,24 @@ pub(crate) fn spawn_output_reader(
     })
 }
 
-pub(crate) const RUN_OUTPUT_TAIL_BYTES: usize = 64 * 1024;
+/// Live check-output tail in bytes (`graphs.check_output_max_kib` KiB).
+pub(crate) fn check_output_max_bytes() -> usize {
+    let canopy_dir = crate::domain::prompts::canopy_dir();
+    let graphs = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir).graphs;
+    graphs.check_output_max_kib as usize * 1024
+}
 
 pub(crate) fn truncate_check_output(s: String) -> (String, bool) {
-    if s.len() <= RUN_OUTPUT_TAIL_BYTES {
+    truncate_check_output_with(s, check_output_max_bytes())
+}
+
+/// Pure form of [`truncate_check_output`] over an explicit byte budget, so
+/// tests can assert the cut without touching config.
+pub(crate) fn truncate_check_output_with(s: String, max_bytes: usize) -> (String, bool) {
+    if s.len() <= max_bytes {
         return (s, false);
     }
-    let mut start = s.len() - RUN_OUTPUT_TAIL_BYTES;
+    let mut start = s.len() - max_bytes;
     while start < s.len() && !s.is_char_boundary(start) {
         start += 1;
     }
@@ -89,8 +100,41 @@ pub(crate) fn truncate_check_output(s: String) -> (String, bool) {
     (
         format!(
             "[...truncated, keeping last {} bytes...]\n{}",
-            RUN_OUTPUT_TAIL_BYTES, tail
+            max_bytes, tail
         ),
         true,
     )
+}
+
+#[cfg(test)]
+mod shell_utils_settings_tests {
+    use super::{check_output_max_bytes, truncate_check_output_with};
+
+    #[test]
+    fn check_output_cut_at_16_kib() {
+        let input = "a".repeat(20 * 1024);
+        let (kept, truncated) = truncate_check_output_with(input, 16 * 1024);
+        assert!(truncated);
+        assert!(kept.ends_with(&"a".repeat(16 * 1024)));
+        assert!(kept.contains("keeping last 16384 bytes"));
+    }
+
+    #[test]
+    fn check_output_default_keeps_20_kib_whole() {
+        let input = "a".repeat(20 * 1024);
+        let (kept, truncated) = truncate_check_output_with(input, 64 * 1024);
+        assert!(!truncated);
+        assert_eq!(kept.len(), 20 * 1024);
+    }
+
+    #[test]
+    fn check_output_max_bytes_default_is_64_kib() {
+        // Default registry value: 64 KiB. Only asserts when no user config
+        // overrides it; a local config.toml with a custom value skips.
+        let v = check_output_max_bytes();
+        let graphs =
+            crate::domain::canopy_config::CanopyConfig::load(&crate::domain::prompts::canopy_dir())
+                .graphs;
+        assert_eq!(v, graphs.check_output_max_kib as usize * 1024);
+    }
 }

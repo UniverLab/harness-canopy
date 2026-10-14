@@ -2003,14 +2003,14 @@ mod tests {
     #[test]
     fn send_display_now() {
         let dialog = SimplePromptDialog::new();
-        assert_eq!(dialog.send_display(), "now");
+        assert_eq!(dialog.send_display("%Y-%m-%d %H:%M"), "now");
     }
 
     #[test]
     fn send_display_date_no_time() {
         let mut dialog = SimplePromptDialog::new();
         dialog.send_choice = SendChoice::Date;
-        assert_eq!(dialog.send_display(), "date");
+        assert_eq!(dialog.send_display("%Y-%m-%d %H:%M"), "date");
     }
 
     #[test]
@@ -2023,7 +2023,7 @@ mod tests {
                 .and_hms_opt(14, 30, 0)
                 .unwrap(),
         );
-        assert_eq!(dialog.send_display(), "2026-07-20 14:30");
+        assert_eq!(dialog.send_display("%Y-%m-%d %H:%M"), "2026-07-20 14:30");
     }
 
     // ── send toggle and clear ────────────────────────────────────

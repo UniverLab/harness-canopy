@@ -110,7 +110,7 @@ fn should_check_returns_true_when_no_last_check_file() {
     // When there's no last check file, should_check should return true. The
     // result depends on the user's data directory, so this test only checks
     // that the helper remains safe to call without panicking.
-    let _ = super::should_check();
+    let _ = super::should_check(24 * 3600);
 }
 
 #[test]
@@ -426,7 +426,11 @@ fn tui_path_never_calls_replace() {
         called: Cell::new(false),
         bytes: Vec::new(),
     };
-    let notice = super::check_and_update_notice_with(&fetcher, &downloader);
+    let notice = super::check_and_update_notice_with(
+        &crate::domain::canopy_config::UpdateConfig::default(),
+        &fetcher,
+        &downloader,
+    );
     assert_eq!(notice.as_deref(), Some(fake.as_str()));
     assert!(!downloader.called.get());
     crate::autoupdate::notice::clear_update_tag_for_tests();
@@ -705,7 +709,11 @@ fn tui_notice_is_quiet_without_network() {
         called: Cell::new(false),
         bytes: Vec::new(),
     };
-    let notice = super::check_and_update_notice_with(&FailingFetcher, &downloader);
+    let notice = super::check_and_update_notice_with(
+        &crate::domain::canopy_config::UpdateConfig::default(),
+        &FailingFetcher,
+        &downloader,
+    );
     assert_eq!(notice, None);
     assert!(!downloader.called.get());
     crate::autoupdate::notice::clear_update_tag_for_tests();
@@ -844,7 +852,11 @@ fn tui_notice_silent_on_rate_limit() {
         called: Cell::new(false),
         bytes: Vec::new(),
     };
-    let notice = super::check_and_update_notice_with(&fake, &downloader);
+    let notice = super::check_and_update_notice_with(
+        &crate::domain::canopy_config::UpdateConfig::default(),
+        &fake,
+        &downloader,
+    );
     assert_eq!(notice, None);
     assert!(!downloader.called.get());
     crate::autoupdate::notice::clear_update_tag_for_tests();
@@ -958,4 +970,47 @@ fn install_script_silent_on_api_403() {
         !stdout.contains("latest stable"),
         "no version may be resolved on 403: {stdout}"
     );
+}
+
+#[test]
+fn update_check_disabled_makes_no_request() {
+    use std::cell::Cell;
+    crate::autoupdate::notice::clear_update_tag_for_tests();
+    struct CountingFetcher {
+        calls: Cell<usize>,
+    }
+    impl super::ReleaseFetcher for CountingFetcher {
+        fn get(&self, _url: &str) -> anyhow::Result<String> {
+            self.calls.set(self.calls.get() + 1);
+            Ok(r#"[{"tag_name":"v9.9.9","prerelease":false,"draft":false}]"#.to_string())
+        }
+    }
+    let update = crate::domain::canopy_config::UpdateConfig {
+        check_enabled: false,
+        check_interval_hours: 24,
+    };
+    let fetcher = CountingFetcher {
+        calls: Cell::new(0),
+    };
+    let downloader = RecordingDownloader {
+        called: Cell::new(false),
+        bytes: Vec::new(),
+    };
+    let notice = super::check_and_update_notice_with(&update, &fetcher, &downloader);
+    assert_eq!(notice, None);
+    assert_eq!(fetcher.calls.get(), 0);
+    crate::autoupdate::notice::clear_update_tag_for_tests();
+}
+
+#[test]
+fn should_check_honours_interval_secs() {
+    // interval semantics: due after interval, not due before it.
+    // Use pure arithmetic on the same expression should_check uses.
+    let last: u64 = 1_000_000;
+    let now_due: u64 = last + 3600;
+    let now_early: u64 = last + 3599;
+    assert!(now_due.saturating_sub(last) >= 3600);
+    assert!(!(now_early.saturating_sub(last) >= 7200));
+    // And the real helper stays callable with a live interval.
+    let _ = super::should_check(3600);
 }

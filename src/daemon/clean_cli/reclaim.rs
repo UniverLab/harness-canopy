@@ -32,7 +32,11 @@ pub(super) fn reclaim_if_warranted(
     no_reclaim: bool,
     rows_deleted: u64,
 ) {
-    if no_reclaim || !clean::should_reclaim(rows_deleted as usize) {
+    let canopy_dir = crate::domain::prompts::canopy_dir();
+    let threshold = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir)
+        .clean
+        .reclaim_min_deleted_rows;
+    if no_reclaim || !clean::should_reclaim(rows_deleted as usize, threshold) {
         return;
     }
 
@@ -43,7 +47,7 @@ pub(super) fn reclaim_if_warranted(
             println!(
                 "\n Database file: {} — would reclaim space ({rows_deleted} row(s) deleted, ≥ {} threshold; run without --dry-run to apply).",
                 format_bytes(before),
-                clean::RECLAIM_ROW_THRESHOLD,
+                threshold,
             );
         }
         return;
@@ -103,11 +107,15 @@ pub(super) fn confirm_stop_daemon() -> Result<bool> {
 }
 
 pub(super) fn print_dry_run_reclaim_window(rows_deleted: u64, db_path: &Path) {
+    let canopy_dir = crate::domain::prompts::canopy_dir();
+    let threshold = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir)
+        .clean
+        .reclaim_min_deleted_rows;
     let size_before = std::fs::metadata(db_path).ok().map(|m| m.len());
     println!(
         "\n Database file: {} — would reclaim space ({rows_deleted} row(s) deleted, ≥ {} threshold).",
         size_before.map(format_bytes).unwrap_or_default(),
-        clean::RECLAIM_ROW_THRESHOLD,
+        threshold,
     );
     println!(
         " Would stop the canopy daemon (if running), run `PRAGMA quick_check`, reclaim space \

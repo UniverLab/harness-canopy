@@ -410,6 +410,12 @@ pub struct App {
     pub(crate) prompt_raw_content_rect: Option<ratatui::layout::Rect>,
     /// Whether to send OS-level desktop notifications (agent done/failed).
     pub(crate) notifications_enabled: bool,
+    /// CM52: the `[tui]` settings this app renders with (date/time formats,
+    /// panel dwell, scroll steps, brian's-brain and atmosphere toggles). A
+    /// snapshot, reloaded when the daemon publishes a newer settings
+    /// revision — the TUI redraws every frame and cannot reload
+    /// `config.toml` per draw.
+    pub(crate) tui_settings: crate::domain::canopy_config::TuiConfig,
     /// Notification service for sending cross-platform notifications.
     pub(crate) notification_service: Arc<dyn NotificationService>,
     /// IDs of runs that were active on the previous refresh tick.

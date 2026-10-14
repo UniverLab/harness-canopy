@@ -102,6 +102,7 @@ impl GraphEngine {
             dynamic_skills: None,
             spec_attempt_limit: crate::domain::settings::default_int("spec_attempt_limit") as usize,
             shutdown: Arc::new(AtomicBool::new(false)),
+            canopy_dir: crate::domain::prompts::canopy_dir(),
         }
     }
 
@@ -141,6 +142,20 @@ impl GraphEngine {
         self
     }
 
+    /// Point this engine at a fixture `.canopy` dir (tests). The
+    /// `graphs.max_iterations_per_node` ceiling is read from here at each
+    /// iteration check, so a test can set it to 2 and watch the third bounce
+    /// block.
+    #[cfg(test)]
+    pub fn with_canopy_dir(mut self, dir: std::path::PathBuf) -> Self {
+        self.canopy_dir = dir;
+        self
+    }
+
+    pub(crate) fn graph_settings(&self) -> crate::domain::canopy_config::GraphsConfig {
+        crate::domain::canopy_config::CanopyConfig::load(&self.canopy_dir).graphs
+    }
+
     pub(crate) fn is_shutting_down(&self) -> bool {
         self.shutdown.load(Ordering::SeqCst)
     }
@@ -154,20 +169,6 @@ impl GraphEngine {
 // binary MUST instruct the agent to set HOME to a disposable temp directory
 // (e.g., `export HOME=$(mktemp -d)`) so the binary builds its own empty
 // state instead of touching the real ~/.canopy.
-
-// Five bounces of the same (spec,node) pair is enough signal that a spec
-// needs a human or a redesign; ten burned entire quota windows ping-ponging.
-const DEFAULT_MAX_ITERATIONS_PER_NODE: usize = 5;
-/// Default cross-run attempt budget (C19): how many separate graph executions
-/// a spec may fail with a genuine verdict before the graph is marked blocked
-/// instead of quietly costing another quota window on relaunch. Deliberately
-/// lower than [`DEFAULT_MAX_ITERATIONS_PER_NODE`] — these are whole attempts
-/// (one per relaunch), not node cycles within a single one. Overridable via
-/// [`GraphEngine::with_spec_attempt_limit`] (`CanopyConfig::spec_attempt_limit`);
-/// the default lives in the CM51 settings registry.
-const DEFAULT_INFRA_RETRY_LIMIT: u32 = 2;
-const DEFAULT_INFRA_CRASH_MAX_SECONDS: u64 = 60;
-const DEFAULT_INFRA_BACKOFF_SECONDS: u64 = 30;
 
 /// Default cap (F1) on ensemble members actually executing at once, across
 /// every graph run this engine drives — an 8-member ensemble queues past this
@@ -199,6 +200,11 @@ pub struct GraphEngine {
     /// `run_spec`/`spec_step`/ensemble loops check it before routing any edge
     /// so a shutdown kill never traverses a fail edge.
     shutdown: Arc<AtomicBool>,
+    /// Canopy home dir (`~/.canopy` parent) this engine reads
+    /// `graphs.*` settings from at the point of use. A path, not a cached
+    /// value, so `NextRun`/`Hot` settings stay live. Tests override it with
+    /// [`GraphEngine::with_canopy_dir`].
+    canopy_dir: std::path::PathBuf,
 }
 
 /// Where a spec's sequential graph cursor currently is: at a single ordinary
@@ -7755,7 +7761,8 @@ echo done
             kind: GraphNodeKind::Check,
             config: serde_json::json!({
                 "command": format!(
-                    "n=$(cat counter.txt 2>/dev/null || echo 0); n=$((n+1)); echo $n > counter.txt; test $n -ge {DEFAULT_MAX_ITERATIONS_PER_NODE}"
+                    "n=$(cat counter.txt 2>/dev/null || echo 0); n=$((n+1)); echo $n > counter.txt; test $n -ge {}",
+                    crate::domain::settings::default_int("graphs.max_iterations_per_node")
                 ),
                 "success_condition": "exit_code_0"
             }),
@@ -7784,7 +7791,10 @@ echo done
         let spec1 = db.get_graph_spec(&spec1_id).unwrap().unwrap();
         let spec1_runs = db.list_graph_runs_for_spec(&spec1_id).unwrap();
         assert_eq!(spec1.status, GraphSpecStatus::Completed);
-        assert_eq!(spec1_runs.len(), DEFAULT_MAX_ITERATIONS_PER_NODE);
+        assert_eq!(
+            spec1_runs.len(),
+            crate::domain::settings::default_int("graphs.max_iterations_per_node") as usize
+        );
 
         let spec2_saved = db.get_graph_spec(&spec2.id).unwrap().unwrap();
         let spec2_runs = db.list_graph_runs_for_spec(&spec2.id).unwrap();
@@ -9585,7 +9595,7 @@ echo done
     /// The regression test for the whole spec: a spec that keeps failing
     /// with a genuine verdict — never an infra crash — across three
     /// SEPARATE `run_graph` dispatches (not three bounces within one, which
-    /// is the pre-existing per-node `DEFAULT_MAX_ITERATIONS_PER_NODE`
+    /// is the pre-existing per-node `graphs.max_iterations_per_node`
     /// budget) must end up `Blocked`, not `Failed`: the graph pauses, and the
     /// terminating run's blocker names the spec and the attempt count.
     #[tokio::test]
@@ -10233,7 +10243,7 @@ echo done
     /// Iteration budget exhaustion must terminate any in-flight child
     /// processes and finalize all runs. A check node that always fails
     /// graphs back to itself via a self-graph edge until the per-node
-    /// iteration budget (DEFAULT_MAX_ITERATIONS_PER_NODE) is hit.
+    /// iteration budget (`graphs.max_iterations_per_node`) is hit.
     #[cfg(unix)]
     #[tokio::test]
     async fn iteration_budget_exhaustion_kills_inflight_child() {
@@ -10278,7 +10288,10 @@ echo done
 
         // All runs for this spec must be finalized (no longer `running`).
         let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
-        assert_eq!(runs.len(), DEFAULT_MAX_ITERATIONS_PER_NODE);
+        assert_eq!(
+            runs.len(),
+            crate::domain::settings::default_int("graphs.max_iterations_per_node") as usize
+        );
         assert!(
             runs.iter().all(|r| r.status != GraphRunStatus::Running),
             "no run should still be running after budget exhaustion"
@@ -10294,9 +10307,67 @@ echo done
         assert!(
             blocker.contains(&spec.name)
                 && blocker.contains("agotó")
-                && blocker.contains(&DEFAULT_MAX_ITERATIONS_PER_NODE.to_string()),
+                && blocker.contains(
+                    &crate::domain::settings::default_int("graphs.max_iterations_per_node")
+                        .to_string()
+                ),
             "blocker must name the spec, mention exhaustion, and state the limit; got: {}",
             blocker
+        );
+    }
+
+    /// CM52: the per-node iteration ceiling is read from
+    /// `graphs.max_iterations_per_node` at each check, not a hardcoded 5.
+    /// With the setting at 2 the engine blocks on the third bounce (two
+    /// attempts run). The default-config run still blocks on the sixth,
+    /// covered by `iteration_budget_exhaustion_kills_inflight_child`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn iteration_ceiling_reads_the_setting() {
+        let config_dir = tempdir().unwrap();
+        let mut config = crate::domain::canopy_config::CanopyConfig::default();
+        config.graphs.max_iterations_per_node = 2;
+        config.save_for_tests(config_dir.path()).unwrap();
+
+        let (_dir, db, engine, graph_id, spec_id) = graph_fixture().unwrap();
+        let engine = engine.with_canopy_dir(config_dir.path().to_path_buf());
+
+        db.insert_graph_node(&GraphNode {
+            id: "flaky".to_string(),
+            spec_id: Some(spec_id.clone()),
+            graph_id: None,
+            name: "flaky".to_string(),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({
+                "command": "exit 1",
+                "success_condition": "exit_code_0",
+            }),
+            position: 1,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+        db.insert_graph_edge(&GraphEdge {
+            id: "self-graph".to_string(),
+            spec_id: Some(spec_id.clone()),
+            graph_id: None,
+            from_node: "flaky".to_string(),
+            to_node: "flaky".to_string(),
+            condition: crate::domain::graphs::GraphEdgeCondition::Fail,
+        })
+        .unwrap();
+
+        engine
+            .run_graph(graph_id.clone(), None, None, None, None, None)
+            .await
+            .unwrap();
+
+        let spec = db.get_graph_spec(&spec_id).unwrap().unwrap();
+        assert_eq!(spec.status, GraphSpecStatus::Failed);
+        let runs = db.list_graph_runs_for_spec(&spec_id).unwrap();
+        assert_eq!(
+            runs.len(),
+            2,
+            "ceiling 2 must block on the third bounce, not the sixth"
         );
     }
 
@@ -18477,16 +18548,19 @@ echo done
 
         // No platform named anywhere: engine defaults, source "default".
         let resolved = resolve_node_infra_config(&node_with(serde_json::json!({})));
-        assert_eq!(resolved.retry_limit.value, DEFAULT_INFRA_RETRY_LIMIT as u64);
+        assert_eq!(
+            resolved.retry_limit.value,
+            crate::domain::settings::default_int("graphs.infra_retry_limit") as u64
+        );
         assert_eq!(resolved.retry_limit.source, "default");
         assert_eq!(
             resolved.crash_max_seconds.value,
-            DEFAULT_INFRA_CRASH_MAX_SECONDS
+            crate::domain::settings::default_int("graphs.infra_crash_max_seconds") as u64
         );
         assert_eq!(resolved.crash_max_seconds.source, "default");
         assert_eq!(
             resolved.backoff_seconds.value,
-            DEFAULT_INFRA_BACKOFF_SECONDS
+            crate::domain::settings::default_int("graphs.infra_backoff_seconds") as u64
         );
         assert_eq!(resolved.backoff_seconds.source, "default");
 
@@ -18517,7 +18591,10 @@ echo done
         let resolved = resolve_node_infra_config(&node_with(
             serde_json::json!({"platform": "no-such-platform"}),
         ));
-        assert_eq!(resolved.retry_limit.value, DEFAULT_INFRA_RETRY_LIMIT as u64);
+        assert_eq!(
+            resolved.retry_limit.value,
+            crate::domain::settings::default_int("graphs.infra_retry_limit") as u64
+        );
         assert_eq!(resolved.retry_limit.source, "default");
     }
 
@@ -19142,9 +19219,18 @@ echo done
         };
 
         let (retry_limit, crash_max, backoff) = read_infra_config(&node);
-        assert_eq!(retry_limit, DEFAULT_INFRA_RETRY_LIMIT);
-        assert_eq!(crash_max, DEFAULT_INFRA_CRASH_MAX_SECONDS);
-        assert_eq!(backoff, DEFAULT_INFRA_BACKOFF_SECONDS);
+        assert_eq!(
+            retry_limit,
+            crate::domain::settings::default_int("graphs.infra_retry_limit") as u32
+        );
+        assert_eq!(
+            crash_max,
+            crate::domain::settings::default_int("graphs.infra_crash_max_seconds") as u64
+        );
+        assert_eq!(
+            backoff,
+            crate::domain::settings::default_int("graphs.infra_backoff_seconds") as u64
+        );
     }
 
     /// Read infra config respects overrides in node config.
@@ -19212,7 +19298,7 @@ echo done
         assert_eq!(spec.status, GraphSpecStatus::Failed);
         assert_eq!(
             runs.len(),
-            DEFAULT_MAX_ITERATIONS_PER_NODE,
+            crate::domain::settings::default_int("graphs.max_iterations_per_node") as usize,
             "check node should retry through edge, not infra retry"
         );
     }
@@ -20933,7 +21019,7 @@ echo done
 
     /// Guideline 5: a node already on its last allowed iteration survives a
     /// pause and continue and still gets that attempt — it is not pushed over
-    /// `DEFAULT_MAX_ITERATIONS_PER_NODE` by the operator's pause.
+    /// `graphs.max_iterations_per_node` by the operator's pause.
     #[tokio::test]
     async fn node_at_last_iteration_survives_pause_and_continue() {
         let (_dir, db, engine, graph_id, spec_id) = cb31_fixture("sleep 2 && true");
@@ -20945,7 +21031,7 @@ echo done
         )
         .unwrap();
         // Four genuine prior attempts: the node's next attempt is iteration 5,
-        // the last one DEFAULT_MAX_ITERATIONS_PER_NODE allows.
+        // the last one `graphs.max_iterations_per_node` allows.
         for i in 1..=4 {
             db.insert_graph_run(&GraphNodeRun {
                 id: format!("cb31-seed-{i}"),

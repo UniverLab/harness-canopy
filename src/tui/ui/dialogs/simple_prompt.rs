@@ -121,6 +121,7 @@ fn draw_send_control(
     dialog: &SimplePromptDialog,
     accent: Color,
     theme: &Theme,
+    datetime_format: &str,
 ) {
     let send_is_focused = dialog.focused_section == 0 && !dialog.enabled_sections.is_empty();
     let send_y = inner.y + inner.height.saturating_sub(1);
@@ -160,7 +161,7 @@ fn draw_send_control(
     } else if send_is_focused {
         send_spans.push(Span::styled("‹ ", ghost));
         send_spans.push(Span::styled(
-            format!("send: {}", dialog.send_display()),
+            format!("send: {}", dialog.send_display(datetime_format)),
             lit,
         ));
         send_spans.push(Span::styled(" ›", ghost));
@@ -174,7 +175,7 @@ fn draw_send_control(
         send_spans.push(Span::styled(hint, ghost));
     } else {
         send_spans.push(Span::styled(
-            format!("send: {}", dialog.send_display()),
+            format!("send: {}", dialog.send_display(datetime_format)),
             ghost,
         ));
     }
@@ -261,7 +262,14 @@ pub fn draw_simple_prompt_dialog(
     };
     frame.render_widget(Paragraph::new(instructions), instructions_area);
 
-    draw_send_control(frame, inner, dialog, accent, theme);
+    draw_send_control(
+        frame,
+        inner,
+        dialog,
+        accent,
+        theme,
+        &app.tui_settings.datetime_format,
+    );
 
     // ── Content region ──────────────────────────────────────────────────
     // The Raw tab draws a single free-text field (or the composed-prompt

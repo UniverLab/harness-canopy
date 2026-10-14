@@ -480,7 +480,11 @@ pub(crate) fn resolve_ensemble_copy_inputs(
         .to_string();
 
     let copy_kind = source.kind;
-    let (members, members_replaced) = copy_ensemble_members(&details, params, copy_kind)?;
+    let caps = crate::domain::graphs::MemberCaps::from_graphs(
+        &crate::domain::canopy_config::CanopyConfig::load(&crate::domain::prompts::canopy_dir())
+            .graphs,
+    );
+    let (members, members_replaced) = copy_ensemble_members(&details, params, copy_kind, caps)?;
 
     Ok(EnsembleCopyInputs {
         details,
@@ -502,10 +506,11 @@ pub(crate) fn copy_ensemble_members(
     details: &crate::domain::graphs::EnsembleDetails,
     params: &GraphCopyEnsembleParams,
     copy_kind: EnsembleKind,
+    caps: crate::domain::graphs::MemberCaps,
 ) -> Result<(Vec<EnsembleMemberSpec>, bool), String> {
     let members_replaced = params.members.is_some();
     let members: Vec<EnsembleMemberSpec> = match &params.members {
-        Some(explicit) => validate_ensemble_members(explicit, copy_kind)?,
+        Some(explicit) => validate_ensemble_members(explicit, copy_kind, caps)?,
         None => details
             .members
             .iter()

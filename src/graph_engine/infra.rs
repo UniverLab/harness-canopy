@@ -85,6 +85,20 @@ pub(crate) fn platform_cli_for_node(
 /// baseline (see `resolve_platform_only_infra_config`, used by the audit
 /// tool to detect "differs from platform's own value").
 pub(crate) fn resolve_infra_config_from(node_config: &Value) -> NodeInfraConfig {
+    let canopy_dir = crate::domain::prompts::canopy_dir();
+    let defaults = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir).graphs;
+    resolve_infra_config_from_with(node_config, &defaults)
+}
+
+/// Pure form of [`resolve_infra_config_from`] over explicit graph defaults,
+/// so tests can assert the member > ensemble > platform > setting precedence
+/// without touching `HOME`. Precedence (strongest first): the node's own
+/// `infra_*` key (covers a member/ensemble override baked into the config),
+/// the platform's `clis[]` entry, then the global `graphs.infra_*` setting.
+pub(crate) fn resolve_infra_config_from_with(
+    node_config: &Value,
+    defaults: &crate::domain::canopy_config::GraphsConfig,
+) -> NodeInfraConfig {
     let platform_cli = platform_cli_for_node(node_config);
     NodeInfraConfig {
         retry_limit: resolve_infra_field(
@@ -92,21 +106,21 @@ pub(crate) fn resolve_infra_config_from(node_config: &Value) -> NodeInfraConfig 
             "infra_retry_limit",
             platform_cli.as_ref(),
             |c| c.infra_retry_limit.map(u64::from),
-            DEFAULT_INFRA_RETRY_LIMIT as u64,
+            u64::from(defaults.infra_retry_limit),
         ),
         crash_max_seconds: resolve_infra_field(
             node_config,
             "infra_crash_max_seconds",
             platform_cli.as_ref(),
             |c| c.infra_crash_max_seconds,
-            DEFAULT_INFRA_CRASH_MAX_SECONDS,
+            defaults.infra_crash_max_seconds,
         ),
         backoff_seconds: resolve_infra_field(
             node_config,
             "infra_backoff_seconds",
             platform_cli.as_ref(),
             |c| c.infra_backoff_seconds,
-            DEFAULT_INFRA_BACKOFF_SECONDS,
+            defaults.infra_backoff_seconds,
         ),
     }
 }

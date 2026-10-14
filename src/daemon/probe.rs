@@ -43,11 +43,8 @@ pub(crate) use targets::{
     GraphProbeTarget,
 };
 
-/// Default bound on how long a single probe waits for a response — this is a
-/// liveness check, not a capability benchmark, so it stays short.
-pub(crate) const DEFAULT_PROBE_TIMEOUT_SECS: u64 = 30;
 pub(crate) const MIN_PROBE_TIMEOUT_SECS: u64 = 5;
-pub(crate) const MAX_PROBE_TIMEOUT_SECS: u64 = 120;
+pub(crate) const MAX_PROBE_TIMEOUT_SECS: u64 = 300;
 
 /// One platform+model pair to probe. `model: None` means "whatever this
 /// platform's CLI defaults to when no model flag is passed" — not "any

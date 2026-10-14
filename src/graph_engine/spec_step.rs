@@ -504,7 +504,7 @@ impl GraphEngine {
         // pause was pending (`paused_through`) — the re-execution on
         // `graph_continue` reuses the same iteration number instead of
         // consuming a fresh one. Only genuine node outcomes count against
-        // DEFAULT_MAX_ITERATIONS_PER_NODE.
+        // `graphs.max_iterations_per_node`.
         let previous_was_operator_paused = self.db.last_spec_node_run_was_operator_paused(
             &ctx.spec.id,
             &cursor_node_ids(&state.cursor, ctx.ensembles),
@@ -512,7 +512,8 @@ impl GraphEngine {
         if !previous_was_operator_paused {
             *iteration += 1;
         }
-        if *iteration > DEFAULT_MAX_ITERATIONS_PER_NODE {
+        let max_iterations = self.graph_settings().max_iterations_per_node;
+        if *iteration > max_iterations {
             // B12: the process from the last execution at this node
             // (or any other node still running) must not survive the
             // spec failure — otherwise it burns quota, holds locks,
@@ -535,8 +536,8 @@ impl GraphEngine {
                      nodo individual sino del spec en su conjunto.",
                     ctx.spec.name,
                     cursor_label(&state.cursor, ctx.ensembles),
-                    DEFAULT_MAX_ITERATIONS_PER_NODE,
-                    DEFAULT_MAX_ITERATIONS_PER_NODE,
+                    max_iterations,
+                    max_iterations,
                 );
             // CB7: SIEMPRE escribir el blocker en el último run para que sea visible
             // en graph_list/graph_get sin necesidad de encadenar graph_node_runs_list

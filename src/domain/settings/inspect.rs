@@ -310,6 +310,41 @@ pub fn config_value(config: &CanopyConfig, key: &str) -> Value {
         "scheduler.retry_enabled" => Value::from(config.scheduler.retry_enabled),
         "scheduler.retry_delay_minutes" => Value::from(config.scheduler.retry_delay_minutes as i64),
         "scheduler.retry_max" => Value::from(config.scheduler.retry_max as i64),
+        "graphs.max_iterations_per_node" => {
+            Value::from(config.graphs.max_iterations_per_node as i64)
+        }
+        "graphs.infra_retry_limit" => Value::from(config.graphs.infra_retry_limit as i64),
+        "graphs.infra_crash_max_seconds" => {
+            Value::from(config.graphs.infra_crash_max_seconds as i64)
+        }
+        "graphs.infra_backoff_seconds" => Value::from(config.graphs.infra_backoff_seconds as i64),
+        "graphs.straggler_timeout_minutes" => {
+            Value::from(config.graphs.straggler_timeout_minutes as i64)
+        }
+        "graphs.ensemble_max_members_parallel" => {
+            Value::from(config.graphs.ensemble_max_members_parallel as i64)
+        }
+        "graphs.ensemble_max_members_sequential" => {
+            Value::from(config.graphs.ensemble_max_members_sequential as i64)
+        }
+        "graphs.check_output_max_kib" => Value::from(config.graphs.check_output_max_kib as i64),
+        "agents.probe_timeout_seconds" => Value::from(config.agents.probe_timeout_seconds as i64),
+        "clean.reclaim_min_deleted_rows" => {
+            Value::from(config.clean.reclaim_min_deleted_rows as i64)
+        }
+        "activity.retention_per_workdir" => {
+            Value::from(config.activity.retention_per_workdir as i64)
+        }
+        "update.check_enabled" => Value::from(config.update.check_enabled),
+        "update.check_interval_hours" => Value::from(config.update.check_interval_hours as i64),
+        "notifications.enabled" => Value::from(config.notifications.enabled),
+        "tui.datetime_format" => Value::from(config.tui.datetime_format.clone()),
+        "tui.time_format" => Value::from(config.tui.time_format.clone()),
+        "tui.panel_dwell_seconds" => Value::from(config.tui.panel_dwell_seconds as i64),
+        "tui.brians_brain" => Value::from(config.tui.brians_brain),
+        "tui.atmosphere" => Value::from(config.tui.atmosphere),
+        "tui.scroll_step" => Value::from(config.tui.scroll_step as i64),
+        "tui.page_step" => Value::from(config.tui.page_step as i64),
         _ => Value::from(String::new()),
     }
 }
@@ -367,6 +402,32 @@ mod tests {
         assert_eq!(effective.theme, "modern");
         assert_eq!(problems.len(), 1, "{problems:?}");
         assert_eq!(problems[0].key, "spec_attempt_limit");
+    }
+
+    /// CM52: a hand edit that sets an invalid chrono format keeps the
+    /// previous value (CM51 requirement 4).
+    #[test]
+    fn hand_edit_invalid_chrono_format_keeps_previous_value() {
+        let prev = CanopyConfig {
+            tui: crate::domain::canopy_config::TuiConfig {
+                datetime_format: "%Y-%m-%d %H:%M".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let (effective, problems) =
+            effective_after_hand_edit(&prev, "tui.datetime_format = \"%Q\"\n");
+        assert_eq!(effective.tui.datetime_format, "%Y-%m-%d %H:%M");
+        assert!(
+            problems.iter().any(|p| p.key == "tui.datetime_format"),
+            "{problems:?}"
+        );
+
+        // A valid custom format is accepted and takes effect.
+        let (effective, problems) =
+            effective_after_hand_edit(&prev, "tui.datetime_format = \"%d/%m/%Y\"\n");
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(effective.tui.datetime_format, "%d/%m/%Y");
     }
 
     #[test]

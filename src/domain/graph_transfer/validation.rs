@@ -50,6 +50,7 @@ pub(super) fn reject_unknown_output_references(
 pub(super) fn validate_import_ensemble_shape(
     doc_ensemble: &GraphExportEnsemble,
     import_kind: EnsembleKind,
+    caps: crate::domain::graphs::MemberCaps,
 ) -> Result<(), String> {
     // CM49: a crew-bound ensemble carries the crew NAME and no literal
     // members — its size is the crew's, enforced at bind/dispatch, so the
@@ -73,13 +74,14 @@ pub(super) fn validate_import_ensemble_shape(
             ));
         }
     } else {
-        let (min_members, max_members) = member_bounds(import_kind);
+        let (min_members, max_members) = member_bounds(import_kind, caps);
         if doc_ensemble.members.len() < min_members || doc_ensemble.members.len() > max_members {
             return Err(format!(
-                "Ensemble '{}' (kind {}) must have {min_members}-{max_members} members, got {}.",
+                "Ensemble '{}' (kind {}) must have {min_members}-{max_members} members, got {}. Raise {} to allow more.",
                 doc_ensemble.name,
                 import_kind.as_str(),
-                doc_ensemble.members.len()
+                doc_ensemble.members.len(),
+                crate::domain::graphs::member_cap_key(import_kind)
             ));
         }
         validate_ensemble_min_pass(

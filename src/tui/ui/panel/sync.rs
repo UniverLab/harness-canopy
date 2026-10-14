@@ -43,7 +43,14 @@ pub(crate) fn draw_panel_face(frame: &mut Frame, area: Rect, app: &mut App, them
         PanelFace::Activity => {
             app.last_activity_rect = Some(inner);
             if let Some(state) = app.activity_panel_state() {
-                draw_sync_section(frame, inner, &state, app.sync_scroll_offset, theme);
+                draw_sync_section(
+                    frame,
+                    inner,
+                    &state,
+                    app.sync_scroll_offset,
+                    &app.tui_settings.datetime_format,
+                    theme,
+                );
             } else {
                 draw_panel_placeholder(frame, inner, "no activity", theme);
             }
@@ -75,7 +82,14 @@ fn draw_knowledge_face(frame: &mut Frame, area: Rect, app: &mut App, theme: &The
         // Too short to split honestly: activity keeps the whole panel.
         app.last_activity_rect = Some(area);
         if let Some(state) = app.selected_activity_state() {
-            draw_sync_section(frame, area, &state, app.sync_scroll_offset, theme);
+            draw_sync_section(
+                frame,
+                area,
+                &state,
+                app.sync_scroll_offset,
+                &app.tui_settings.datetime_format,
+                theme,
+            );
         } else {
             draw_panel_placeholder(frame, area, "no activity", theme);
         }
@@ -91,7 +105,14 @@ fn draw_knowledge_face(frame: &mut Frame, area: Rect, app: &mut App, theme: &The
 
     app.last_activity_rect = Some(activity_area);
     if let Some(state) = app.selected_activity_state() {
-        draw_sync_section(frame, activity_area, &state, app.sync_scroll_offset, theme);
+        draw_sync_section(
+            frame,
+            activity_area,
+            &state,
+            app.sync_scroll_offset,
+            &app.tui_settings.datetime_format,
+            theme,
+        );
     } else {
         draw_panel_placeholder(frame, activity_area, "no activity", theme);
     }
@@ -343,6 +364,7 @@ fn draw_sync_section(
     area: Rect,
     state: &SyncPanelState,
     scroll_offset: u16,
+    datetime_format: &str,
     theme: &Theme,
 ) {
     let w = area.width as usize;
@@ -387,7 +409,7 @@ fn draw_sync_section(
             .add_modifier(Modifier::BOLD),
     )));
 
-    push_sync_message_lines(&mut lines, state, w, theme);
+    push_sync_message_lines(&mut lines, state, w, theme, datetime_format);
 
     frame.render_widget(
         Paragraph::new(lines)
@@ -464,6 +486,7 @@ fn push_sync_message_lines<'a>(
     state: &'a SyncPanelState,
     w: usize,
     theme: &Theme,
+    datetime_format: &str,
 ) {
     let recent_msgs = recent_messages_for_display(&state.recent_messages);
     if state.active_intents.is_empty() && recent_msgs.is_empty() {
@@ -492,7 +515,7 @@ fn push_sync_message_lines<'a>(
         lines.push(Line::from(vec![
             Span::styled("│ ", Style::default().fg(color)),
             Span::styled(
-                format_timestamp(message.created_at),
+                format_timestamp(message.created_at, datetime_format),
                 Style::default().fg(theme.dim_text),
             ),
         ]));
@@ -564,9 +587,9 @@ fn kind_color(kind: MessageKind, theme: &Theme) -> Color {
     }
 }
 
-fn format_timestamp(timestamp: i64) -> String {
+fn format_timestamp(timestamp: i64, fmt: &str) -> String {
     match Local.timestamp_opt(timestamp, 0).single() {
-        Some(datetime) => datetime.format("%Y-%m-%d %H:%M").to_string(),
+        Some(datetime) => datetime.format(fmt).to_string(),
         None => timestamp.to_string(),
     }
 }
@@ -640,7 +663,17 @@ mod tests {
 
     #[test]
     fn format_timestamp_returns_non_empty_text() {
-        assert!(!format_timestamp(0).is_empty());
+        assert!(!format_timestamp(0, "%Y-%m-%d %H:%M").is_empty());
+    }
+
+    /// CM52: the message timestamp uses `tui.datetime_format`.
+    #[test]
+    fn format_timestamp_reads_the_setting() {
+        let default = format_timestamp(0, "%Y-%m-%d %H:%M");
+        let custom = format_timestamp(0, "%d/%m/%Y");
+        assert_ne!(default, custom);
+        assert!(custom.contains('/'));
+        assert!(!custom.contains(':'));
     }
 
     #[test]

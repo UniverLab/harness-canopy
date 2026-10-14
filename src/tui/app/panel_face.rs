@@ -20,10 +20,6 @@ use super::types::{App, PanelFace};
 use crate::application::ports::StateRepository;
 use crate::domain::graphs::GraphStatus;
 
-/// How long a knowledge/backlog event holds the panel before it falls back
-/// to the resting face.
-pub(crate) const PANEL_DWELL_SECS: u64 = 10;
-
 /// Picker rows: automatic first (the default), then one per face.
 pub(crate) const PANEL_PICKER_OPTIONS: [Option<PanelFace>; 5] = [
     None,
@@ -58,15 +54,16 @@ impl App {
     }
 
     /// Record a knowledge/backlog event: it takes the panel for a dwell of
-    /// 10 seconds. A newer event during a dwell replaces it and restarts
-    /// the dwell — events never queue. While pinned or interacting the event
-    /// is dropped outright.
+    /// `tui.panel_dwell_seconds` (default 10; 0 disables the dwell). A newer
+    /// event during a dwell replaces it and restarts the dwell — events never
+    /// queue. While pinned or interacting the event is dropped outright.
     pub(crate) fn fire_panel_event(&mut self, face: PanelFace, reason: &str) {
         if self.panel_pinned.is_some() || self.panel_is_interacting() {
             return;
         }
         self.panel_dwell_face = Some(face);
-        self.panel_dwell_until = Some(Instant::now() + Duration::from_secs(PANEL_DWELL_SECS));
+        self.panel_dwell_until =
+            Some(Instant::now() + Duration::from_secs(self.tui_settings.panel_dwell_seconds));
         self.panel_dwell_reason = Some(reason.to_string());
     }
 
@@ -718,18 +715,31 @@ mod tests {
         let badge = app.panel_face_badge().expect("event face shows a reason");
         assert!(badge.contains("new knowledge"), "badge was {badge:?}");
 
-        // The dwell lasts 10 seconds.
+        // The dwell lasts `tui.panel_dwell_seconds` (default 10).
+        let dwell = crate::domain::settings::default_int("tui.panel_dwell_seconds") as u64;
         let wait = app
             .panel_dwell_until
             .expect("dwell deadline is set")
             .saturating_duration_since(Instant::now());
-        assert!(wait <= Duration::from_secs(PANEL_DWELL_SECS));
-        assert!(wait > Duration::from_secs(PANEL_DWELL_SECS - 2));
+        assert!(wait <= Duration::from_secs(dwell));
+        assert!(wait > Duration::from_secs(dwell - 2));
 
         expire_dwell(&mut app);
         app.tick_panel_face();
         assert_eq!(app.panel_face, PanelFace::Activity);
         assert_eq!(app.panel_face_badge(), None);
+    }
+
+    /// CM52: `tui.panel_dwell_seconds = 0` disables the dwell — the event
+    /// never holds the panel.
+    #[test]
+    fn panel_dwell_zero_expires_immediately() {
+        let mut app = test_app();
+        app.tui_settings.panel_dwell_seconds = 0;
+        app.fire_panel_event(PanelFace::Knowledge, "new knowledge");
+        assert!(!app.panel_dwell_valid(), "dwell 0 must be expired at once");
+        app.tick_panel_face();
+        assert_eq!(app.panel_face, PanelFace::Activity);
     }
 
     #[test]

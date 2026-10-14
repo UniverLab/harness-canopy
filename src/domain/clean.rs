@@ -340,18 +340,11 @@ impl CleanPlan {
     }
 }
 
-/// Minimum number of database rows a clean run must have removed before
-/// `canopy clean` bothers reclaiming space with a `VACUUM`. A full `VACUUM`
-/// rewrites the entire database file and takes an exclusive lock, so
-/// running it after deleting a handful of rows would cost far more than it
-/// gives back.
-pub const RECLAIM_ROW_THRESHOLD: usize = 50;
-
 /// Whether a clean run deleted enough database rows to justify reclaiming
 /// space. Pure function over the row count so both the real run and
 /// `--dry-run`'s projection agree on the same threshold.
-pub fn should_reclaim(rows_deleted: usize) -> bool {
-    rows_deleted >= RECLAIM_ROW_THRESHOLD
+pub fn should_reclaim(rows_deleted: usize, threshold: usize) -> bool {
+    rows_deleted >= threshold
 }
 
 /// Cutoff timestamp (unix seconds): a row/file whose age is strictly older
@@ -1258,19 +1251,26 @@ mod tests {
 
     #[test]
     fn should_reclaim_false_below_threshold() {
-        assert!(!should_reclaim(RECLAIM_ROW_THRESHOLD - 1));
+        assert!(!should_reclaim(49, 50));
     }
 
     #[test]
     fn should_reclaim_true_at_and_above_threshold() {
-        assert!(should_reclaim(RECLAIM_ROW_THRESHOLD));
-        assert!(should_reclaim(RECLAIM_ROW_THRESHOLD + 1));
-        assert!(should_reclaim(957));
+        assert!(should_reclaim(50, 50));
+        assert!(should_reclaim(51, 50));
+        assert!(should_reclaim(957, 50));
     }
 
     #[test]
     fn should_reclaim_false_for_zero() {
-        assert!(!should_reclaim(0));
+        assert!(!should_reclaim(0, 50));
+    }
+
+    #[test]
+    fn should_reclaim_custom_threshold() {
+        assert!(!should_reclaim(9, 10));
+        assert!(should_reclaim(10, 10));
+        assert!(should_reclaim(0, 0));
     }
 
     #[test]

@@ -23,7 +23,7 @@ pub(super) fn render_graph_live_view(
     ctx: &LiveViewContext,
 ) -> LiveViewRenderResult {
     let state = ctx.state;
-    let mut lines = header_lines(state, ctx.blocked, ctx.theme);
+    let mut lines = header_lines(state, ctx.blocked, ctx.theme, ctx.time_format);
     lines.push(Line::from(""));
 
     let chip_row = area.y + lines.len() as u16;
@@ -217,12 +217,13 @@ fn status_icon_and_label(
     state: &GraphLiveState,
     blocked: bool,
     theme: &Theme,
+    time_format: &str,
 ) -> (&'static str, String, Color) {
     if let Some(at) = state.autorun_at {
         let local = at.with_timezone(&Local);
         return (
             "⏰",
-            format!("autorun {}", local.format("%H:%M")),
+            format!("autorun {}", local.format(time_format)),
             Color::Cyan,
         );
     }
@@ -239,8 +240,13 @@ fn status_icon_and_label(
     }
 }
 
-fn header_lines(state: &GraphLiveState, blocked: bool, theme: &Theme) -> Vec<Line<'static>> {
-    let (icon, label, color) = status_icon_and_label(state, blocked, theme);
+fn header_lines(
+    state: &GraphLiveState,
+    blocked: bool,
+    theme: &Theme,
+    time_format: &str,
+) -> Vec<Line<'static>> {
+    let (icon, label, color) = status_icon_and_label(state, blocked, theme, time_format);
     vec![
         Line::from(vec![
             Span::styled(icon, Style::default().fg(color)),
@@ -639,6 +645,7 @@ mod tests {
             blocked: false,
             now: Utc::now(),
             theme,
+            time_format: "%H:%M",
             selected_spec_id: None,
             spec_scroll: 0,
             scroll,

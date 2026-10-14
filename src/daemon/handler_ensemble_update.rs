@@ -138,13 +138,21 @@ impl TaskTriggerHandler {
             .as_ref()
             .map(|m| m.len())
             .unwrap_or(details.members.len());
+        let caps =
+            crate::domain::graphs::MemberCaps::from_graphs(
+                &crate::domain::canopy_config::CanopyConfig::load(
+                    &crate::domain::prompts::canopy_dir(),
+                )
+                .graphs,
+            );
         let (min_for_effective, max_for_effective) =
-            crate::domain::graphs::member_bounds(effective_kind);
+            crate::domain::graphs::member_bounds(effective_kind, caps);
         if resulting_member_count > max_for_effective {
             return Ok(error_result(&format!(
-                "A {} ensemble must have {min_for_effective}-{max_for_effective} members, got {}.",
+                "A {} ensemble must have {min_for_effective}-{max_for_effective} members, got {}. Raise {} to allow more.",
                 effective_kind.as_str(),
-                resulting_member_count
+                resulting_member_count,
+                crate::domain::graphs::member_cap_key(effective_kind)
             )));
         }
 
@@ -356,7 +364,14 @@ impl TaskTriggerHandler {
         new_members: &[EnsembleMemberParams],
         effective_kind: EnsembleKind,
     ) -> Result<Result<(), CallToolResult>, McpError> {
-        let members = match validate_ensemble_members(new_members, effective_kind) {
+        let caps =
+            crate::domain::graphs::MemberCaps::from_graphs(
+                &crate::domain::canopy_config::CanopyConfig::load(
+                    &crate::domain::prompts::canopy_dir(),
+                )
+                .graphs,
+            );
+        let members = match validate_ensemble_members(new_members, effective_kind, caps) {
             Ok(members) => members,
             Err(e) => return Ok(Err(error_result(&e))),
         };

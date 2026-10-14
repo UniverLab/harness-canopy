@@ -149,6 +149,30 @@ pub struct CanopyConfig {
     /// `CANOPY_RETRY_MAX` still override these when set.
     #[serde(default)]
     pub scheduler: SchedulerConfig,
+
+    /// `[graphs]` settings for the graph engine.
+    #[serde(default)]
+    pub graphs: GraphsConfig,
+
+    /// `[agents]` settings for agents and harnesses.
+    #[serde(default)]
+    pub agents: AgentsConfig,
+
+    /// `[activity]` settings for activity log retention.
+    #[serde(default)]
+    pub activity: ActivityConfig,
+
+    /// `[update]` settings for automatic update checks.
+    #[serde(default)]
+    pub update: UpdateConfig,
+
+    /// `[notifications]` settings for desktop notifications.
+    #[serde(default)]
+    pub notifications: NotificationsConfig,
+
+    /// `[tui]` settings for the terminal UI.
+    #[serde(default)]
+    pub tui: TuiConfig,
 }
 
 /// Retry policy of the cron scheduler, read from the `[scheduler]` table in
@@ -185,6 +209,224 @@ fn default_retry_delay_minutes() -> u64 {
 
 fn default_retry_max() -> u32 {
     settings::default_int("scheduler.retry_max") as u32
+}
+
+/// Settings for the graph engine. Read from the `[graphs]` table in
+/// `config.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphsConfig {
+    #[serde(default = "default_max_iterations_per_node")]
+    pub max_iterations_per_node: usize,
+    #[serde(default = "default_infra_retry_limit")]
+    pub infra_retry_limit: u32,
+    #[serde(default = "default_infra_crash_max_seconds")]
+    pub infra_crash_max_seconds: u64,
+    #[serde(default = "default_infra_backoff_seconds")]
+    pub infra_backoff_seconds: u64,
+    #[serde(default = "default_straggler_timeout_minutes")]
+    pub straggler_timeout_minutes: u64,
+    #[serde(default = "default_ensemble_max_members_parallel")]
+    pub ensemble_max_members_parallel: usize,
+    #[serde(default = "default_ensemble_max_members_sequential")]
+    pub ensemble_max_members_sequential: usize,
+    #[serde(default = "default_check_output_max_kib")]
+    pub check_output_max_kib: u64,
+}
+
+impl Default for GraphsConfig {
+    fn default() -> Self {
+        Self {
+            max_iterations_per_node: default_max_iterations_per_node(),
+            infra_retry_limit: default_infra_retry_limit(),
+            infra_crash_max_seconds: default_infra_crash_max_seconds(),
+            infra_backoff_seconds: default_infra_backoff_seconds(),
+            straggler_timeout_minutes: default_straggler_timeout_minutes(),
+            ensemble_max_members_parallel: default_ensemble_max_members_parallel(),
+            ensemble_max_members_sequential: default_ensemble_max_members_sequential(),
+            check_output_max_kib: default_check_output_max_kib(),
+        }
+    }
+}
+
+fn default_max_iterations_per_node() -> usize {
+    settings::default_int("graphs.max_iterations_per_node") as usize
+}
+
+fn default_infra_retry_limit() -> u32 {
+    settings::default_int("graphs.infra_retry_limit") as u32
+}
+
+fn default_infra_crash_max_seconds() -> u64 {
+    settings::default_int("graphs.infra_crash_max_seconds") as u64
+}
+
+fn default_infra_backoff_seconds() -> u64 {
+    settings::default_int("graphs.infra_backoff_seconds") as u64
+}
+
+fn default_straggler_timeout_minutes() -> u64 {
+    settings::default_int("graphs.straggler_timeout_minutes") as u64
+}
+
+fn default_ensemble_max_members_parallel() -> usize {
+    settings::default_int("graphs.ensemble_max_members_parallel") as usize
+}
+
+fn default_ensemble_max_members_sequential() -> usize {
+    settings::default_int("graphs.ensemble_max_members_sequential") as usize
+}
+
+fn default_check_output_max_kib() -> u64 {
+    settings::default_int("graphs.check_output_max_kib") as u64
+}
+
+/// Settings for agents and harnesses. Read from the `[agents]` table in
+/// `config.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentsConfig {
+    #[serde(default = "default_probe_timeout_seconds")]
+    pub probe_timeout_seconds: u64,
+}
+
+impl Default for AgentsConfig {
+    fn default() -> Self {
+        Self {
+            probe_timeout_seconds: default_probe_timeout_seconds(),
+        }
+    }
+}
+
+fn default_probe_timeout_seconds() -> u64 {
+    settings::default_int("agents.probe_timeout_seconds") as u64
+}
+
+/// Settings for activity log retention. Read from the `[activity]` table in
+/// `config.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivityConfig {
+    #[serde(default = "default_retention_per_workdir")]
+    pub retention_per_workdir: usize,
+}
+
+impl Default for ActivityConfig {
+    fn default() -> Self {
+        Self {
+            retention_per_workdir: default_retention_per_workdir(),
+        }
+    }
+}
+
+fn default_retention_per_workdir() -> usize {
+    settings::default_int("activity.retention_per_workdir") as usize
+}
+
+/// Settings for automatic update checks. Read from the `[update]` table in
+/// `config.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateConfig {
+    #[serde(default = "default_update_check_enabled")]
+    pub check_enabled: bool,
+    #[serde(default = "default_update_check_interval_hours")]
+    pub check_interval_hours: u64,
+}
+
+impl Default for UpdateConfig {
+    fn default() -> Self {
+        Self {
+            check_enabled: default_update_check_enabled(),
+            check_interval_hours: default_update_check_interval_hours(),
+        }
+    }
+}
+
+fn default_update_check_enabled() -> bool {
+    settings::default_bool("update.check_enabled")
+}
+
+fn default_update_check_interval_hours() -> u64 {
+    settings::default_int("update.check_interval_hours") as u64
+}
+
+/// Settings for desktop notifications. Read from the `[notifications]` table in
+/// `config.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotificationsConfig {
+    #[serde(default = "default_notifications_enabled")]
+    pub enabled: bool,
+}
+
+impl Default for NotificationsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_notifications_enabled(),
+        }
+    }
+}
+
+fn default_notifications_enabled() -> bool {
+    settings::default_bool("notifications.enabled")
+}
+
+/// Settings for the terminal UI. Read from the `[tui]` table in
+/// `config.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TuiConfig {
+    #[serde(default = "default_datetime_format")]
+    pub datetime_format: String,
+    #[serde(default = "default_time_format")]
+    pub time_format: String,
+    #[serde(default = "default_panel_dwell_seconds")]
+    pub panel_dwell_seconds: u64,
+    #[serde(default = "default_brians_brain")]
+    pub brians_brain: bool,
+    #[serde(default = "default_atmosphere")]
+    pub atmosphere: bool,
+    #[serde(default = "default_scroll_step")]
+    pub scroll_step: usize,
+    #[serde(default = "default_page_step")]
+    pub page_step: usize,
+}
+
+impl Default for TuiConfig {
+    fn default() -> Self {
+        Self {
+            datetime_format: default_datetime_format(),
+            time_format: default_time_format(),
+            panel_dwell_seconds: default_panel_dwell_seconds(),
+            brians_brain: default_brians_brain(),
+            atmosphere: default_atmosphere(),
+            scroll_step: default_scroll_step(),
+            page_step: default_page_step(),
+        }
+    }
+}
+
+fn default_datetime_format() -> String {
+    settings::default_string("tui.datetime_format")
+}
+
+fn default_time_format() -> String {
+    settings::default_string("tui.time_format")
+}
+
+fn default_panel_dwell_seconds() -> u64 {
+    settings::default_int("tui.panel_dwell_seconds") as u64
+}
+
+fn default_brians_brain() -> bool {
+    settings::default_bool("tui.brians_brain")
+}
+
+fn default_atmosphere() -> bool {
+    settings::default_bool("tui.atmosphere")
+}
+
+fn default_scroll_step() -> usize {
+    settings::default_int("tui.scroll_step") as usize
+}
+
+fn default_page_step() -> usize {
+    settings::default_int("tui.page_step") as usize
 }
 
 /// Highest per-file indexing cap a user may configure, in MB. Text/PDF
@@ -283,14 +525,22 @@ pub struct CleanConfig {
     /// `canopy clean --older-than <days>`.
     #[serde(default = "default_retention_days")]
     pub retention_days: u64,
+    /// Minimum deleted rows to trigger VACUUM during clean.
+    #[serde(default = "default_reclaim_min_deleted_rows")]
+    pub reclaim_min_deleted_rows: usize,
 }
 
 impl Default for CleanConfig {
     fn default() -> Self {
         Self {
             retention_days: default_retention_days(),
+            reclaim_min_deleted_rows: default_reclaim_min_deleted_rows(),
         }
     }
+}
+
+fn default_reclaim_min_deleted_rows() -> usize {
+    settings::default_int("clean.reclaim_min_deleted_rows") as usize
 }
 
 /// Settings for the `agent_models` catalog cache. Read from the `[models]`
@@ -484,6 +734,12 @@ impl Default for CanopyConfig {
             pinned_panel_face: None,
             graph_event_retention_days: default_graph_event_retention_days(),
             scheduler: SchedulerConfig::default(),
+            graphs: GraphsConfig::default(),
+            agents: AgentsConfig::default(),
+            activity: ActivityConfig::default(),
+            update: UpdateConfig::default(),
+            notifications: NotificationsConfig::default(),
+            tui: TuiConfig::default(),
         }
     }
 }

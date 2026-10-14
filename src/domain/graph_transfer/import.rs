@@ -357,7 +357,11 @@ pub(super) fn build_import_ensemble_plan(
     next_position: &mut i64,
 ) -> Result<(GraphImportEnsemblePlan, Vec<GraphEdge>), String> {
     let import_kind = parse_import_ensemble_kind(doc_ensemble)?;
-    validate_import_ensemble_shape(doc_ensemble, import_kind)?;
+    let caps = crate::domain::graphs::MemberCaps::from_graphs(
+        &crate::domain::canopy_config::CanopyConfig::load(&crate::domain::prompts::canopy_dir())
+            .graphs,
+    );
+    validate_import_ensemble_shape(doc_ensemble, import_kind, caps)?;
 
     let targets = ImportResolvedTargets {
         entry_from_node: maps.resolve_target(

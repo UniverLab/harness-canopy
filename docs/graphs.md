@@ -973,3 +973,28 @@ Five builtins are seeded automatically at daemon startup if missing
 `blueprint_list`, `blueprint_create`, and `blueprint_delete` (custom
 only). The TUI sidebar lists available blueprints, and the graph editor
 validates blueprint references inline.
+
+## Tuning the engine
+
+These `[graphs]` settings (see `canopy config list`) adjust the engine's
+retry budgets and caps. Each keeps its default until you set it.
+
+| Setting | Default | What it does |
+|---|---|---|
+| `graphs.max_iterations_per_node` | 5 | Node visits a spec may make before it is blocked (the iteration ceiling). |
+| `graphs.infra_retry_limit` | 2 | Infra-crash retries before the infra failure falls through the error edge. |
+| `graphs.infra_crash_max_seconds` | 60 | Longest an infra crash may last before the retry budget is exhausted. |
+| `graphs.infra_backoff_seconds` | 30 | Backoff between infra retries. |
+| `graphs.straggler_timeout_minutes` | 30 | Default timeout for a **new** ensemble; existing ensembles keep theirs. |
+| `graphs.ensemble_max_members_parallel` | 8 | Largest member count a `parallel` ensemble may have. |
+| `graphs.ensemble_max_members_sequential` | 16 | Largest member count for a `cascade`/`round_robin` ensemble, and the largest crew. |
+| `graphs.check_output_max_kib` | 64 | Check-output tail kept, in KiB. |
+
+The three `graphs.infra_*` settings resolve with this precedence, strongest
+first: **member > ensemble > the platform's `clis[]` entry > the global
+setting**. Nothing else supplies a value.
+
+The member caps (`graphs.ensemble_max_members_parallel` /
+`graphs.ensemble_max_members_sequential`) bound **new** writes only:
+lowering a cap below an existing ensemble's member count never edits that
+ensemble, and an over-cap create is refused with the setting key named.

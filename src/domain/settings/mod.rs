@@ -33,6 +33,8 @@ pub enum Kind {
         options: &'static [&'static str],
     },
     String,
+    /// A chrono `strftime` format string; valid only if it formats a fixed instant.
+    ChronoFormat,
     Duration {
         unit: DurationUnit,
         min: u64,
@@ -154,6 +156,7 @@ impl SettingDef {
             Kind::Float { min, max } => format!("float ({min}..={max})"),
             Kind::Enum { options } => format!("enum ({})", options.join(",")),
             Kind::String => "string".to_string(),
+            Kind::ChronoFormat => "chrono format".to_string(),
             Kind::Duration { unit, min, max } => {
                 format!("duration ({min}..={max} {})", unit.label())
             }

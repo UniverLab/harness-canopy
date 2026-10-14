@@ -229,18 +229,23 @@ impl TaskTriggerHandler {
     }
 }
 
+/// The default probe timeout from the agents config.
+pub(crate) fn default_probe_timeout(agents: &crate::domain::canopy_config::AgentsConfig) -> u64 {
+    agents.probe_timeout_seconds
+}
+
 /// Resolve `agent_probe`/`graph_preflight`'s `timeout_seconds` param to an
 /// actual bound: the configured default when omitted, clamped to
 /// `[MIN_PROBE_TIMEOUT_SECS, MAX_PROBE_TIMEOUT_SECS]` otherwise — a probe is
 /// a liveness check, not a capability benchmark, so callers can't ask for an
 /// unbounded wait.
 pub(crate) fn clamp_probe_timeout(requested: Option<u64>) -> u64 {
-    requested
-        .unwrap_or(crate::daemon::probe::DEFAULT_PROBE_TIMEOUT_SECS)
-        .clamp(
-            crate::daemon::probe::MIN_PROBE_TIMEOUT_SECS,
-            crate::daemon::probe::MAX_PROBE_TIMEOUT_SECS,
-        )
+    let canopy_dir = crate::domain::prompts::canopy_dir();
+    let agents = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir).agents;
+    requested.unwrap_or(default_probe_timeout(&agents)).clamp(
+        crate::daemon::probe::MIN_PROBE_TIMEOUT_SECS,
+        crate::daemon::probe::MAX_PROBE_TIMEOUT_SECS,
+    )
 }
 
 pub(crate) fn clamp_max_recent_pairs(requested: Option<u32>) -> usize {
@@ -603,5 +608,18 @@ pub(crate) fn model_result_footer(
             source.as_str(),
             format_system_time(fetched_at),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_probe_timeout_reads_from_config() {
+        let agents = crate::domain::canopy_config::AgentsConfig {
+            probe_timeout_seconds: 45,
+        };
+        assert_eq!(default_probe_timeout(&agents), 45);
     }
 }

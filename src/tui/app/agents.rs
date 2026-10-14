@@ -147,8 +147,11 @@ impl App {
     }
 
     pub fn tick_banner_animation(&mut self) {
-        if let Some(ref mut brain) = self.home_brain {
-            brain.step();
+        // CM52: `tui.brians_brain = false` keeps the banner static.
+        if self.tui_settings.brians_brain {
+            if let Some(ref mut brain) = self.home_brain {
+                brain.step();
+            }
         }
 
         if self.focus != Focus::Home {
@@ -180,8 +183,11 @@ impl App {
             self.sidebar_brain = Some(make_brain(rows, cols));
         }
 
-        if let Some(ref mut brain) = self.sidebar_brain {
-            brain.step();
+        // CM52: `tui.brians_brain = false` keeps the sidebar brain static too.
+        if self.tui_settings.brians_brain {
+            if let Some(ref mut brain) = self.sidebar_brain {
+                brain.step();
+            }
         }
     }
 

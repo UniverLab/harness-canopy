@@ -230,6 +230,7 @@ impl GraphEngine {
         let dynamic_skills = self.dynamic_skills.clone();
         let spec_attempt_limit = self.spec_attempt_limit;
         let shutdown = Arc::clone(&self.shutdown);
+        let canopy_dir = self.canopy_dir.clone();
 
         tokio::spawn(async move {
             let engine = GraphEngine {
@@ -239,6 +240,7 @@ impl GraphEngine {
                 dynamic_skills,
                 spec_attempt_limit,
                 shutdown,
+                canopy_dir,
             };
             if let Err(error) = engine
                 .run_graph(

@@ -87,6 +87,7 @@ impl App {
         self.theme = crate::tui::ui::theme::Theme::resolve(&config.theme);
         self.temperature_unit = config.temperature_unit;
         self.panel_pinned = App::load_panel_pinned_face(&config.pinned_panel_face);
+        self.tui_settings = config.tui;
     }
 
     pub(crate) fn interpolate_system_info(&mut self) {

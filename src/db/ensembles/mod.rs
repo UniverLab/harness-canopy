@@ -831,6 +831,158 @@ mod tests {
     /// join node + 3 member nodes (4 new `graph_nodes` rows total), the
     /// entry fan-out edge per member, the member->join fan-in edge per
     /// member, and the join's own pass edge — all in one shot.
+    /// CM52: lowering `graphs.ensemble_max_members_parallel` below an
+    /// existing ensemble's member count never edits that ensemble — the cap
+    /// is a bound on new writes, not a migration.
+    #[test]
+    fn lowering_the_member_cap_leaves_an_existing_ensemble_untouched() {
+        let db = test_db();
+        insert_spec(&db, "spec-cap");
+        db.insert_graph_node(&GraphNode {
+            id: "kickoff".to_string(),
+            spec_id: Some("spec-cap".to_string()),
+            graph_id: None,
+            name: "kickoff".to_string(),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({"command": "true", "success_condition": "exit_code_0"}),
+            position: 1,
+            created_at: Utc::now(),
+        })
+        .unwrap();
+        db.insert_graph_node(&GraphNode {
+            id: "arbiter".to_string(),
+            spec_id: Some("spec-cap".to_string()),
+            graph_id: None,
+            name: "arbiter".to_string(),
+            kind: GraphNodeKind::Agent,
+            config: serde_json::json!({}),
+            position: 10,
+            created_at: Utc::now(),
+        })
+        .unwrap();
+
+        let now = Utc::now();
+        let member_ids: Vec<String> = (0..6).map(|i| format!("m{i}")).collect();
+        let member_nodes: Vec<GraphNode> = member_ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| GraphNode {
+                id: id.clone(),
+                spec_id: Some("spec-cap".to_string()),
+                graph_id: None,
+                name: format!("member-{i}"),
+                kind: GraphNodeKind::Agent,
+                config: serde_json::json!({"platform": "openrouter", "prompt_template": "draft it"}),
+                position: 2 + i as i64,
+                created_at: now,
+            })
+            .collect();
+        let join_node = GraphNode {
+            id: "join-cap".to_string(),
+            spec_id: Some("spec-cap".to_string()),
+            graph_id: None,
+            name: "quorum".to_string(),
+            kind: GraphNodeKind::Join,
+            config: serde_json::json!({"ensemble_id": "ens-cap"}),
+            position: 9,
+            created_at: now,
+        };
+        let mut edges = Vec::new();
+        for id in &member_ids {
+            edges.push(GraphEdge {
+                id: format!("kickoff->{id}"),
+                spec_id: Some("spec-cap".to_string()),
+                graph_id: None,
+                from_node: "kickoff".to_string(),
+                to_node: id.clone(),
+                condition: GraphEdgeCondition::Always,
+            });
+            edges.push(GraphEdge {
+                id: format!("{id}->join-cap"),
+                spec_id: Some("spec-cap".to_string()),
+                graph_id: None,
+                from_node: id.clone(),
+                to_node: "join-cap".to_string(),
+                condition: GraphEdgeCondition::Always,
+            });
+        }
+        edges.push(GraphEdge {
+            id: "join-cap->arbiter".to_string(),
+            spec_id: Some("spec-cap".to_string()),
+            graph_id: None,
+            from_node: "join-cap".to_string(),
+            to_node: "arbiter".to_string(),
+            condition: GraphEdgeCondition::Pass,
+        });
+        let ensemble = Ensemble {
+            commit_rights: false,
+            id: "ens-cap".to_string(),
+            spec_id: Some("spec-cap".to_string()),
+            graph_id: None,
+            name: "Six".to_string(),
+            prompt_template: "draft it".to_string(),
+            join_node_id: "join-cap".to_string(),
+            entry_from_node: "kickoff".to_string(),
+            entry_condition: GraphEdgeCondition::Always,
+            min_pass: 6,
+            straggler_timeout_minutes: None,
+            quorum_grace_minutes: None,
+            timeout_minutes: 30,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
+            on_pass_to: "arbiter".to_string(),
+            on_fail_to: None,
+            kind: EnsembleKind::Parallel,
+            round_robin_index: None,
+            created_at: now,
+            crew_id: None,
+            crew_name: None,
+            crew_version_applied: None,
+        };
+        let members: Vec<EnsembleMember> = member_ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| EnsembleMember {
+                ensemble_id: "ens-cap".to_string(),
+                node_id: id.clone(),
+                position: i as i64,
+                platform: "openrouter".to_string(),
+                model: None,
+                prompt_override: None,
+                timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
+            })
+            .collect();
+        db.insert_ensemble_unit(&ensemble, &members, &member_nodes, &join_node, &edges)
+            .unwrap();
+
+        let before = db.list_ensemble_members("ens-cap").unwrap();
+        assert_eq!(before.len(), 6);
+
+        // Lower the cap to 4 (what `config_set` would do). The bound drops,
+        // but no code rewrites the stored ensemble.
+        let caps = crate::domain::graphs::MemberCaps {
+            parallel: 4,
+            sequential: 16,
+        };
+        assert_eq!(
+            crate::domain::graphs::member_bounds(EnsembleKind::Parallel, caps).1,
+            4
+        );
+        let after = db.list_ensemble_members("ens-cap").unwrap();
+        assert_eq!(
+            after.len(),
+            6,
+            "lowering the cap must not edit an existing ensemble"
+        );
+        let before_ids: Vec<_> = before.iter().map(|m| m.node_id.clone()).collect();
+        let after_ids: Vec<_> = after.iter().map(|m| m.node_id.clone()).collect();
+        assert_eq!(after_ids, before_ids);
+    }
+
     #[test]
     fn insert_ensemble_unit_creates_join_and_member_nodes_with_correct_wiring() {
         let db = test_db();

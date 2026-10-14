@@ -16,6 +16,14 @@ use crate::domain::graphs::{EnsembleMember, GraphNode, GraphNodeKind};
 
 use super::crew_member_config::member_node_config;
 
+/// The crew member cap: `graphs.ensemble_max_members_sequential`, read at each
+/// write. A crew is kind-agnostic, so it takes the sequential ensemble cap.
+fn crew_member_cap() -> usize {
+    crate::domain::canopy_config::CanopyConfig::load(&crate::domain::prompts::canopy_dir())
+        .graphs
+        .ensemble_max_members_sequential
+}
+
 /// One ensemble's crew binding columns: `(crew_id, crew_name,
 /// crew_version_applied)`, each `None` when unset. `crew_name` alone (with a
 /// NULL `crew_id`) is a pending import binding.
@@ -68,7 +76,7 @@ impl Database {
         members: &[CrewMember],
     ) -> Result<Crew> {
         validate_crew_name(name).map_err(|e| anyhow!(e))?;
-        validate_crew_members(members).map_err(|e| anyhow!(e))?;
+        validate_crew_members(members, crew_member_cap()).map_err(|e| anyhow!(e))?;
         let name = name.trim();
         let id = uuid::Uuid::new_v4().to_string();
         let mut conn = self
@@ -200,7 +208,7 @@ impl Database {
             validate_crew_name(rename).map_err(|e| anyhow!(e))?;
         }
         if let Some(members) = members {
-            validate_crew_members(members).map_err(|e| anyhow!(e))?;
+            validate_crew_members(members, crew_member_cap()).map_err(|e| anyhow!(e))?;
         }
         let (crew_id, current_version) = self
             .crew_id_and_version(name)?

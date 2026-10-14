@@ -128,4 +128,20 @@ Native desktop notifications for task completions, failures, watcher
 triggers, and graph lifecycle events (graph started, spec completed with
 progress, graph finished with outcome, blocker reported, completion hook
 failure). Platform auto-detected: WSL (PowerShell toasts), macOS
-(`osascript`), Linux (`notify-send`).
+(`osascript`), Linux (`notify-send`). Set `notifications.enabled = false`
+to silence them.
+
+## Appearance and behaviour settings
+
+The `[tui]` settings (see `canopy config list`) tune the interface without a
+restart. Each keeps its default until you set it.
+
+| Setting | Default | What it does |
+|---|---|---|
+| `tui.datetime_format` | `%Y-%m-%d %H:%M` | chrono format for dates and times (validated by formatting a fixed instant). |
+| `tui.time_format` | `%H:%M` | chrono format for time-only labels (validated the same way). |
+| `tui.panel_dwell_seconds` | 10 | Seconds a panel event holds the right panel (0 disables the dwell). |
+| `tui.brians_brain` | true | false keeps the home banner static. |
+| `tui.atmosphere` | true | false disables fireflies and dandelions. |
+| `tui.scroll_step` | 3 | Terminal scroll step, in lines. |
+| `tui.page_step` | 15 | Terminal page step, in lines. |

@@ -125,6 +125,7 @@ macro_rules! app_new_fields {
             prompt_tab_origin: None,
             prompt_raw_content_rect: None,
             notifications_enabled: true,
+            tui_settings: $canopy_config.tui.clone(),
             notification_service: Arc::new(DefaultNotificationService),
             prev_active_run_ids: std::collections::HashSet::new(),
             animation_tick: 0,

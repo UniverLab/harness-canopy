@@ -843,23 +843,64 @@ mod tests {
     #[test]
     fn validate_ensemble_members_rejects_below_minimum() {
         let members = vec![ensemble_member_params("claude")];
-        let err = validate_ensemble_members(&members, EnsembleKind::Parallel).unwrap_err();
+        let err = validate_ensemble_members(
+            &members,
+            EnsembleKind::Parallel,
+            crate::domain::graphs::MemberCaps::default(),
+        )
+        .unwrap_err();
         assert!(err.contains("2-8 members"), "{err}");
     }
 
     #[test]
     fn validate_ensemble_members_rejects_above_maximum() {
         let members: Vec<_> = (0..9).map(|_| ensemble_member_params("claude")).collect();
-        let err = validate_ensemble_members(&members, EnsembleKind::Parallel).unwrap_err();
+        let err = validate_ensemble_members(
+            &members,
+            EnsembleKind::Parallel,
+            crate::domain::graphs::MemberCaps::default(),
+        )
+        .unwrap_err();
         assert!(err.contains("2-8 members"), "{err}");
+    }
+
+    /// CM52: the parallel cap comes from `graphs.ensemble_max_members_parallel`
+    /// (passed in as `MemberCaps`); an over-cap write is refused with the
+    /// setting key named so the user knows what to raise.
+    #[test]
+    fn validate_ensemble_members_refuses_over_configured_cap_naming_the_key() {
+        let caps = crate::domain::graphs::MemberCaps {
+            parallel: 4,
+            sequential: 16,
+        };
+        let members: Vec<_> = (0..5).map(|_| ensemble_member_params("claude")).collect();
+        let err = validate_ensemble_members(&members, EnsembleKind::Parallel, caps).unwrap_err();
+        assert!(
+            err.contains("2-4 members"),
+            "message must show the live bound: {err}"
+        );
+        assert!(
+            err.contains("graphs.ensemble_max_members_parallel"),
+            "message must name the setting key: {err}"
+        );
     }
 
     #[test]
     fn validate_ensemble_members_accepts_boundary_counts() {
         let two: Vec<_> = (0..2).map(|_| ensemble_member_params("claude")).collect();
-        assert!(validate_ensemble_members(&two, EnsembleKind::Parallel).is_ok());
+        assert!(validate_ensemble_members(
+            &two,
+            EnsembleKind::Parallel,
+            crate::domain::graphs::MemberCaps::default()
+        )
+        .is_ok());
         let eight: Vec<_> = (0..8).map(|_| ensemble_member_params("claude")).collect();
-        assert!(validate_ensemble_members(&eight, EnsembleKind::Parallel).is_ok());
+        assert!(validate_ensemble_members(
+            &eight,
+            EnsembleKind::Parallel,
+            crate::domain::graphs::MemberCaps::default()
+        )
+        .is_ok());
     }
 
     /// CM36: a sequential kind dispatches one member at a time, so its list
@@ -869,7 +910,12 @@ mod tests {
         let m: Vec<_> = (0..12)
             .map(|i| ensemble_member_params(&format!("p{i}")))
             .collect();
-        assert!(validate_ensemble_members(&m, EnsembleKind::RoundRobin).is_ok());
+        assert!(validate_ensemble_members(
+            &m,
+            EnsembleKind::RoundRobin,
+            crate::domain::graphs::MemberCaps::default()
+        )
+        .is_ok());
     }
 
     /// CM36: the sequential ceiling is 16, and the error names the kind.
@@ -878,7 +924,12 @@ mod tests {
         let m: Vec<_> = (0..17)
             .map(|i| ensemble_member_params(&format!("p{i}")))
             .collect();
-        let err = validate_ensemble_members(&m, EnsembleKind::Cascade).unwrap_err();
+        let err = validate_ensemble_members(
+            &m,
+            EnsembleKind::Cascade,
+            crate::domain::graphs::MemberCaps::default(),
+        )
+        .unwrap_err();
         assert!(err.contains("cascade"), "{err}");
         assert!(err.contains("2-16 members"), "{err}");
     }
@@ -889,7 +940,12 @@ mod tests {
             ensemble_member_params("claude"),
             ensemble_member_params("  "),
         ];
-        let err = validate_ensemble_members(&members, EnsembleKind::Parallel).unwrap_err();
+        let err = validate_ensemble_members(
+            &members,
+            EnsembleKind::Parallel,
+            crate::domain::graphs::MemberCaps::default(),
+        )
+        .unwrap_err();
         assert!(err.contains("platform"), "{err}");
     }
 
@@ -906,7 +962,12 @@ mod tests {
                 m
             },
         ];
-        let result = validate_ensemble_members(&members, EnsembleKind::Parallel).unwrap();
+        let result = validate_ensemble_members(
+            &members,
+            EnsembleKind::Parallel,
+            crate::domain::graphs::MemberCaps::default(),
+        )
+        .unwrap();
         assert_eq!(result[0].2.as_deref(), Some("review for security"));
         assert_eq!(result[1].2, None);
     }
@@ -924,7 +985,12 @@ mod tests {
             },
             ensemble_member_params("openrouter"),
         ];
-        let err = validate_ensemble_members(&members, EnsembleKind::Cascade).unwrap_err();
+        let err = validate_ensemble_members(
+            &members,
+            EnsembleKind::Cascade,
+            crate::domain::graphs::MemberCaps::default(),
+        )
+        .unwrap_err();
         assert!(err.contains("timeout_minutes"), "{err}");
     }
 
@@ -938,7 +1004,12 @@ mod tests {
             },
             ensemble_member_params("openrouter"),
         ];
-        let result = validate_ensemble_members(&members, EnsembleKind::Cascade).unwrap();
+        let result = validate_ensemble_members(
+            &members,
+            EnsembleKind::Cascade,
+            crate::domain::graphs::MemberCaps::default(),
+        )
+        .unwrap();
         assert_eq!(result[0].3, Some(0));
     }
 
@@ -6615,7 +6686,12 @@ mod additional_tests {
                 infra_backoff_seconds: None,
             },
         ];
-        let err = validate_ensemble_members(&members, EnsembleKind::Parallel).unwrap_err();
+        let err = validate_ensemble_members(
+            &members,
+            EnsembleKind::Parallel,
+            crate::domain::graphs::MemberCaps::default(),
+        )
+        .unwrap_err();
         assert!(err.contains("platform"), "{err}");
     }
 
@@ -6643,7 +6719,12 @@ mod additional_tests {
                 infra_backoff_seconds: None,
             },
         ];
-        let result = validate_ensemble_members(&members, EnsembleKind::Parallel).unwrap();
+        let result = validate_ensemble_members(
+            &members,
+            EnsembleKind::Parallel,
+            crate::domain::graphs::MemberCaps::default(),
+        )
+        .unwrap();
         assert_eq!(result[0].1.as_deref(), Some("opus-4"));
         assert_eq!(result[1].1, None); // whitespace-only model becomes None
     }
@@ -8611,7 +8692,12 @@ mod coverage_tests {
                 infra_backoff_seconds: None,
             })
             .collect();
-        assert!(validate_ensemble_members(&m, EnsembleKind::Parallel).is_ok());
+        assert!(validate_ensemble_members(
+            &m,
+            EnsembleKind::Parallel,
+            crate::domain::graphs::MemberCaps::default()
+        )
+        .is_ok());
     }
 
     #[test]
@@ -8627,7 +8713,12 @@ mod coverage_tests {
                 infra_backoff_seconds: None,
             })
             .collect();
-        assert!(validate_ensemble_members(&m, EnsembleKind::Parallel).is_ok());
+        assert!(validate_ensemble_members(
+            &m,
+            EnsembleKind::Parallel,
+            crate::domain::graphs::MemberCaps::default()
+        )
+        .is_ok());
     }
 
     #[test]
@@ -8643,9 +8734,13 @@ mod coverage_tests {
                 infra_backoff_seconds: None,
             })
             .collect();
-        assert!(validate_ensemble_members(&m, EnsembleKind::Parallel)
-            .unwrap_err()
-            .contains("2-8"));
+        assert!(validate_ensemble_members(
+            &m,
+            EnsembleKind::Parallel,
+            crate::domain::graphs::MemberCaps::default()
+        )
+        .unwrap_err()
+        .contains("2-8"));
     }
 
     #[test]
@@ -8670,7 +8765,12 @@ mod coverage_tests {
                 infra_backoff_seconds: None,
             },
         ];
-        let result = validate_ensemble_members(&m, EnsembleKind::Parallel).unwrap();
+        let result = validate_ensemble_members(
+            &m,
+            EnsembleKind::Parallel,
+            crate::domain::graphs::MemberCaps::default(),
+        )
+        .unwrap();
         assert_eq!(result[0].1, None);
         assert_eq!(result[1].1, None);
     }

@@ -20,7 +20,8 @@ pub use restart::{restart_daemon_after_update, RealUpdateDaemonOps, UpdateDaemon
 
 /// The GitHub repository whose stable releases contain canopy binaries.
 pub const GITHUB_REPO: &str = "UniverLab/harness-canopy";
-const CHECK_INTERVAL_SECS: u64 = 24 * 3600;
+/// Auto-check throttle default (24 h); the live value comes from
+/// `update.check_interval_hours` and is passed to `should_check`.
 const LAST_CHECK_FILE: &str = "last_update_check.txt";
 
 /// The release fields needed to select a stable, published binary.
@@ -287,15 +288,21 @@ fn run_update_core(
 /// the no-replacement boundary is the same code the tests exercise: the
 /// downloader is accepted and never touched.
 pub fn check_and_update_notice() -> Option<String> {
-    check_and_update_notice_with(&RealFetcher, &RealDownloader)
+    let canopy_dir = crate::domain::prompts::canopy_dir();
+    let update = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir).update;
+    check_and_update_notice_with(&update, &RealFetcher, &RealDownloader)
 }
 
 /// Injectable form of [`check_and_update_notice`].  Network failures are
 /// quiet, as required for the TUI startup path.
 pub fn check_and_update_notice_with(
+    update: &crate::domain::canopy_config::UpdateConfig,
     fetcher: &dyn ReleaseFetcher,
     _downloader: &dyn BinaryDownloader,
 ) -> Option<String> {
+    if !update.check_enabled {
+        return None;
+    }
     let latest = resolve_latest_stable_with(fetcher, current_version())
         .ok()
         .flatten();
@@ -307,7 +314,7 @@ pub fn check_and_update_notice_with(
 
 // ── Throttle ────────────────────────────────────────────────────
 
-fn should_check() -> bool {
+pub(crate) fn should_check(interval_secs: u64) -> bool {
     let Ok(data_dir) = crate::ensure_data_dir() else {
         return true;
     };
@@ -320,7 +327,7 @@ fn should_check() -> bool {
     let Ok(now) = now_secs() else {
         return true;
     };
-    now.saturating_sub(last) >= CHECK_INTERVAL_SECS
+    now.saturating_sub(last) >= interval_secs
 }
 
 fn record_check() -> Result<()> {

@@ -15,6 +15,7 @@ pub fn validate_value(def: &SettingDef, value: &toml_edit::Value) -> Result<(), 
         Kind::Float { min, max } => require_float(def.key, value, min, max),
         Kind::Enum { options } => require_enum(def.key, value, options),
         Kind::String => require_string(def.key, value),
+        Kind::ChronoFormat => require_chrono_format(def.key, value),
         Kind::Duration { unit, min, max } => require_duration(def, value, unit, min, max),
         Kind::PathList => require_path_list(def.key, value),
         // Structured values are validated by parsing the file, not here.
@@ -30,7 +31,9 @@ pub fn parse_cli_value(def: &SettingDef, raw: &str) -> Result<toml_edit::Value, 
         return Ok(value);
     }
     match def.kind {
-        Kind::String | Kind::Enum { .. } => Ok(toml_edit::Value::from(raw.to_string())),
+        Kind::String | Kind::Enum { .. } | Kind::ChronoFormat => {
+            Ok(toml_edit::Value::from(raw.to_string()))
+        }
         _ => Err(format!(
             "{}: \"{}\" is not valid for {}",
             def.key,
@@ -118,6 +121,26 @@ fn require_string(key: &str, value: &toml_edit::Value) -> Result<(), String> {
     Err(format!("{key}: {} is not a string", shown(value)))
 }
 
+fn require_chrono_format(key: &str, value: &toml_edit::Value) -> Result<(), String> {
+    use chrono::format::{Item, StrftimeItems};
+    use std::fmt::Write;
+    let Some(text) = value.as_str() else {
+        return Err(format!("{key}: {} is not a string", shown(value)));
+    };
+    let invalid = || format!("{key}: \"{text}\" is not a valid chrono format");
+    if StrftimeItems::new(text).any(|item| matches!(item, Item::Error)) {
+        return Err(invalid());
+    }
+    // Formatting an invalid format panics through `to_string()`; write into a
+    // String and check the fmt::Result instead.
+    let instant = chrono::NaiveDate::from_ymd_opt(2026, 1, 2)
+        .and_then(|d| d.and_hms_opt(3, 4, 5))
+        .expect("fixed instant is valid");
+    let mut out = String::new();
+    write!(out, "{}", instant.format(text)).map_err(|_| invalid())?;
+    Ok(())
+}
+
 fn require_duration(
     def: &SettingDef,
     value: &toml_edit::Value,
@@ -191,6 +214,24 @@ mod tests {
         let threshold = find("similarity_threshold").unwrap();
         let error = validate_value(threshold, &value("\"x\"")).unwrap_err();
         assert!(error.contains("similarity_threshold"), "{error}");
+    }
+
+    /// CM52: a chrono format string is accepted only if it formats a fixed
+    /// instant; the invalid specifier `%Q` is refused.
+    #[test]
+    fn chrono_format_is_validated_by_formatting() {
+        let def = find("tui.datetime_format").unwrap();
+        assert!(validate_value(def, &value("\"%Y-%m-%d %H:%M\"")).is_ok());
+        assert!(validate_value(def, &value("\"%d/%m/%Y\"")).is_ok());
+        let error = validate_value(def, &value("\"%Q\"")).unwrap_err();
+        assert!(error.contains("tui.datetime_format"), "{error}");
+        assert!(error.contains("not a valid chrono format"), "{error}");
+        // A non-string is refused too.
+        assert!(validate_value(def, &value("5")).is_err());
+
+        let time = find("tui.time_format").unwrap();
+        assert!(validate_value(time, &value("\"%H:%M\"")).is_ok());
+        assert!(validate_value(time, &value("\"%Q\"")).is_err());
     }
 
     #[test]
