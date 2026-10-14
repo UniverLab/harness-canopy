@@ -17,6 +17,7 @@
 use std::time::{Duration, Instant};
 
 use super::types::{App, PanelFace};
+use crate::application::ports::StateRepository;
 use crate::domain::graphs::GraphStatus;
 
 /// How long a knowledge/backlog event holds the panel before it falls back
@@ -261,12 +262,42 @@ impl App {
         self.save_panel_pinned_face();
     }
 
-    fn save_panel_pinned_face(&self) {
-        let home = dirs::home_dir().unwrap_or_default();
-        let canopy_dir = home.join(".canopy");
-        let mut config = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir);
-        config.pinned_panel_face = self.panel_pinned.map(|face| face.label().to_string());
-        let _ = config.save(&canopy_dir);
+    /// CM51 (D5): persist the pin through the daemon's `config_set`, the one
+    /// writer of `config.toml` — the TUI never writes the file itself, so a
+    /// pin can no longer drop the user's comments or race another writer.
+    /// With the daemon down the pin still applies in memory for this session
+    /// and the status banner says so.
+    fn save_panel_pinned_face(&mut self) {
+        let value = self
+            .panel_pinned
+            .map(|face| face.label().to_string())
+            .unwrap_or_else(|| "auto".to_string());
+        let port = self
+            .db
+            .get_state("port")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| crate::resolve_port(None).to_string());
+        let outcome = crate::tui::mcp_client::call_daemon_tool(
+            &port,
+            "config_set",
+            &serde_json::json!({ "key": "pinned_panel_face", "value": value }),
+        );
+        match outcome {
+            Ok(outcome) if !outcome.is_error => {}
+            Ok(outcome) => self.set_status_message(true, outcome.text),
+            Err(_) => self.set_status_message(true, "pin not saved: daemon not running"),
+        }
+    }
+
+    /// Show a daemon response on the app's status banner (same shape and TTL
+    /// as the graph-control banner).
+    fn set_status_message(&mut self, is_error: bool, text: impl Into<String>) {
+        self.graph_action_message = Some(crate::tui::app::dialog::GraphActionMessage {
+            is_error,
+            text: text.into(),
+        });
+        self.graph_action_message_at = std::time::Instant::now();
     }
 
     /// Read the persisted pin back into a face, ignoring unknown values.

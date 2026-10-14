@@ -19,6 +19,8 @@ mod roster;
 pub use roster::*;
 mod crew;
 pub use crew::*;
+mod settings;
+pub use settings::*;
 
 #[cfg(test)]
 mod tests {

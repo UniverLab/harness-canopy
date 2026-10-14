@@ -166,9 +166,14 @@ pub(crate) fn load_mcp_fs_root(home: &Path) -> String {
 /// Persist the chosen filesystem root path for reuse across setups and updates.
 pub(crate) fn save_mcp_fs_root(home: &Path, root: &str) {
     let canopy_dir = home.join(".canopy");
-    let mut config = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir);
-    config.mcp_filesystem_root = root.to_string();
-    let _ = config.save(&canopy_dir);
+    // CM51: one writer, so the user's comments survive this write.
+    let _ = crate::domain::settings::writer::write_keys(
+        &canopy_dir,
+        &[(
+            "mcp_filesystem_root",
+            Some(toml_edit::Value::from(root.to_string())),
+        )],
+    );
 }
 #[allow(dead_code)]
 pub(crate) fn is_binary_available(binary: &str) -> bool {

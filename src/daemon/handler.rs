@@ -313,6 +313,7 @@ impl TaskTriggerHandler {
         router.merge(TaskTriggerHandler::tool_router_run_exec());
         router.merge(TaskTriggerHandler::tool_router_run_lifecycle());
         router.merge(TaskTriggerHandler::tool_router_meta());
+        router.merge(TaskTriggerHandler::tool_router_settings());
         router
     }
 }
@@ -576,6 +577,10 @@ mod tests {
         "blueprint_create",
         "blueprint_delete",
         "blueprint_list",
+        "config_get",
+        "config_list",
+        "config_reset",
+        "config_set",
         "create_seed",
         "crew_create",
         "crew_delete",
@@ -695,6 +700,10 @@ mod tests {
                 "blueprint_create|066e750e9f90069f2f3ed530cdff588725ea3751872f30ea1aec5758bb15b5d2|8bcf3050ebfd3b2d22ef822cdfd1c41d40448d7f65cb3c1d5ed51abbd9e73a8f",
                 "blueprint_delete|1eaa169fb5798e6d4095b44d1784bfb6a390925ec2e8513ca4dbe542119b69fb|12321d76b465455bffa88b83e79d533adc9ea8c854db8a5af7b5a559c93203a7",
                 "blueprint_list|3408d1c0af354e3890676ffa6fff2237a27a130aaa7b49ca3e0e075f95362584|efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
+                "config_get|f1ddfd06dae3dc171e677fcb02ff75eb7ceca0aaffbb868a91ee11a8c271fa9e|8175c3fece403d4b9e0e101fa8e9e9949a22669944764fe861d73c83c241bada",
+                "config_list|72678d9d9c372128e56333712c1fc402a70318f3ed63909ff91c629fdab0f683|d6c1b74cd9671775125cc9b6b2f72352a59a108486dd055bd7971d9cc202edbe",
+                "config_reset|3a0f24b627f69af16eeefd214b2f0c92df61f4e60ac982704c58457f24708c54|81027280afebc9d59fae573201cdf60037646e626370ab9e4258fe597602afda",
+                "config_set|d3c69dd3454c45c952ee10f97731f2dd9e5e419a3492a3aa52e8c703634ab479|2c3e790dbe43573349b1e665d5eb6f6db4637ee08b80ef68061811785bff4a47",
                 "create_seed|ec16a67a00abe30d8410e1720468a039cd4b4c1a85820894e9b766a6ba868701|804d0cbcfaf45bb6e046d219beeeda3d4981abb00893efbcbc22e9d2547db8e6",
                 "crew_create|731ac03f7474a59d939a6acd2e6cb97344805db5dea7dc185c287468f39a6ce3|fee9ee72a0374a920bb6c867d714b832c32af904c5628af9c16d16abf6d090d9",
                 "crew_delete|6ac73732aec72b5596cf240decbc0da64ea177ae39be4e40f77629371bb81f48|c39d718a7b13b7d9432a28814db6f3e555fee5d78ea8ef1be866966fb8e80889",
@@ -9436,7 +9445,7 @@ mod endpoint_tests {
             }],
             ..Default::default()
         }
-        .save(&canopy_dir)
+        .save_for_tests(&canopy_dir)
         .unwrap();
         let _home_guard = HomeVar::set(home.path());
 
@@ -10407,7 +10416,7 @@ mod endpoint_tests {
             }],
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
         let _home_guard = HomeVar::set(home.path());
 
         let (_dir, _db, handler) = endpoint_test_handler();
@@ -10480,7 +10489,7 @@ mod endpoint_tests {
             }],
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
         let _home_guard = HomeVar::set(home.path());
 
         let (_dir, _db, handler) = endpoint_test_handler();
@@ -10521,7 +10530,7 @@ mod endpoint_tests {
             }],
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
         // Seed a minimal models.dev catalog so the models.dev path succeeds
         // without a network fetch — `load_catalog_with_source` serves a fresh
         // cache with no network when the file exists and is within TTL.
@@ -10579,7 +10588,7 @@ mod endpoint_tests {
             }],
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
         let _home_guard = HomeVar::set(home.path());
 
         let (_dir, _db, handler) = endpoint_test_handler();
@@ -10627,7 +10636,7 @@ mod endpoint_tests {
             }],
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
         let _home_guard = HomeVar::set(home.path());
 
         let (_dir, _db, handler) = endpoint_test_handler();
@@ -10688,7 +10697,7 @@ mod endpoint_tests {
             }],
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
         let _home_guard = HomeVar::set(home.path());
 
         let (_dir, _db, handler) = endpoint_test_handler();
@@ -10743,7 +10752,7 @@ mod endpoint_tests {
             }],
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
         let _home_guard = HomeVar::set(home.path());
 
         let (_dir, _db, handler) = endpoint_test_handler();
@@ -10790,7 +10799,7 @@ mod endpoint_tests {
             }],
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
         let _home_guard = HomeVar::set(home.path());
 
         let (_dir, _db, handler) = endpoint_test_handler();
@@ -10859,7 +10868,7 @@ mod endpoint_tests {
             }],
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
         let _home_guard = HomeVar::set(home.path());
 
         let (_dir, _db, handler) = endpoint_test_handler();
@@ -13643,7 +13652,7 @@ mod endpoint_tests {
             }],
             ..Default::default()
         }
-        .save(&dir.path().join(".canopy"))
+        .save_for_tests(&dir.path().join(".canopy"))
         .unwrap();
 
         let lp = insert_test_graph(&db, dir.path());
@@ -18812,7 +18821,7 @@ mod endpoint_tests {
             }],
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
         let _home_guard = HomeVar::set(home.path());
 
         let (dir, db, handler) = endpoint_test_handler();
@@ -23520,7 +23529,7 @@ mod endpoint_tests {
             }],
             ..Default::default()
         }
-        .save(&canopy_dir)
+        .save_for_tests(&canopy_dir)
         .unwrap();
         marker
     }

@@ -519,7 +519,7 @@ mod tests {
             clis: vec![cli],
             ..Default::default()
         }
-        .save(&home.path().join(".canopy"))
+        .save_for_tests(&home.path().join(".canopy"))
         .unwrap();
 
         let err = ensure_cli_installed_in(home.path(), "blackbox")
@@ -546,7 +546,7 @@ mod tests {
             clis: vec![cli],
             ..Default::default()
         }
-        .save(&home.path().join(".canopy"))
+        .save_for_tests(&home.path().join(".canopy"))
         .unwrap();
         assert!(ensure_cli_installed_in(home.path(), "bb-ok").await.is_ok());
 
@@ -555,7 +555,7 @@ mod tests {
             clis: vec![cli_with_identity(&no_identity, None, None)],
             ..Default::default()
         }
-        .save(&home.path().join(".canopy"))
+        .save_for_tests(&home.path().join(".canopy"))
         .unwrap();
         assert!(ensure_cli_installed_in(home.path(), "plain-cli")
             .await

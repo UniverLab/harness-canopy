@@ -518,7 +518,7 @@ mod tests {
     fn test_manager_with_store(dir: &TempDir) -> (IngestionManager, std::path::PathBuf) {
         let mut config = CanopyConfig::load(dir.path());
         config.embeddings_model = TEST_MODEL.to_string();
-        config.save(dir.path()).unwrap();
+        config.save_for_tests(dir.path()).unwrap();
         let store_path = dir.path().join("vectors.lancedb");
         let mut mgr = test_manager(dir);
         mgr.set_store_path_for_tests(store_path.clone());

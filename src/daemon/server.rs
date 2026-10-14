@@ -54,6 +54,11 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
     ));
     let sync_manager = Arc::new(SyncManager::new(Arc::clone(&db)));
     let canopy_config = crate::domain::canopy_config::CanopyConfig::load(&data_dir);
+    // CM51 (D12): remember what the running daemon loaded, so `config_list`
+    // can report `pending_restart`, and watch the file so a hand edit takes
+    // effect without a restart (D4).
+    crate::domain::settings::set_running_snapshot(canopy_config.clone());
+    crate::daemon::config_watch::spawn(data_dir.clone(), Arc::clone(&db));
     let dynamic_skills = Arc::new(crate::dynamic_skills::SkillStore::from_config(
         &data_dir,
         &canopy_config.skills,
@@ -223,11 +228,16 @@ fn start_background_tasks(
     data_dir: &std::path::Path,
     announcements_enabled: bool,
 ) -> HttpBackgroundTasks {
-    let cron_scheduler = Arc::new(CronScheduler::with_graphs(
-        Arc::clone(db),
-        Arc::clone(executor),
-        Arc::clone(graph_engine),
-    ));
+    let cron_scheduler = Arc::new(
+        CronScheduler::with_graphs(
+            Arc::clone(db),
+            Arc::clone(executor),
+            Arc::clone(graph_engine),
+        )
+        .with_retry(crate::scheduler::cron_scheduler::RetryPolicy::from_config(
+            &crate::domain::canopy_config::CanopyConfig::load(data_dir).scheduler,
+        )),
+    );
     let scheduler_notify = cron_scheduler.notifier();
     let scheduler_cancel = Arc::clone(&cron_scheduler).start();
 
@@ -604,11 +614,16 @@ async fn stdio_server_startup(db: Arc<Database>, data_dir: &std::path::Path) -> 
         tracing::error!("Failed to reload watchers: {}", e);
     }
 
-    let cron_scheduler = Arc::new(CronScheduler::with_graphs(
-        Arc::clone(&db),
-        Arc::clone(&executor),
-        Arc::clone(&graph_engine),
-    ));
+    let cron_scheduler = Arc::new(
+        CronScheduler::with_graphs(
+            Arc::clone(&db),
+            Arc::clone(&executor),
+            Arc::clone(&graph_engine),
+        )
+        .with_retry(crate::scheduler::cron_scheduler::RetryPolicy::from_config(
+            &canopy_config.scheduler,
+        )),
+    );
     let scheduler_notify = cron_scheduler.notifier();
     let scheduler_cancel = Arc::clone(&cron_scheduler).start();
 
@@ -730,7 +745,7 @@ mod hang_repro {
             }],
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
         fake_home
     }
 

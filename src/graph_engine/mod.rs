@@ -96,9 +96,11 @@ impl GraphEngine {
         Self {
             db,
             notification_service,
-            ensemble_concurrency: Arc::new(Semaphore::new(DEFAULT_ENSEMBLE_CONCURRENCY_CAP)),
+            ensemble_concurrency: Arc::new(Semaphore::new(crate::domain::settings::default_int(
+                "ensemble_concurrency_cap",
+            ) as usize)),
             dynamic_skills: None,
-            spec_attempt_limit: DEFAULT_MAX_SPEC_ATTEMPTS,
+            spec_attempt_limit: crate::domain::settings::default_int("spec_attempt_limit") as usize,
             shutdown: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -161,8 +163,8 @@ const DEFAULT_MAX_ITERATIONS_PER_NODE: usize = 5;
 /// instead of quietly costing another quota window on relaunch. Deliberately
 /// lower than [`DEFAULT_MAX_ITERATIONS_PER_NODE`] — these are whole attempts
 /// (one per relaunch), not node cycles within a single one. Overridable via
-/// [`GraphEngine::with_spec_attempt_limit`] (`CanopyConfig::spec_attempt_limit`).
-const DEFAULT_MAX_SPEC_ATTEMPTS: usize = 3;
+/// [`GraphEngine::with_spec_attempt_limit`] (`CanopyConfig::spec_attempt_limit`);
+/// the default lives in the CM51 settings registry.
 const DEFAULT_INFRA_RETRY_LIMIT: u32 = 2;
 const DEFAULT_INFRA_CRASH_MAX_SECONDS: u64 = 60;
 const DEFAULT_INFRA_BACKOFF_SECONDS: u64 = 30;
@@ -171,9 +173,8 @@ const DEFAULT_INFRA_BACKOFF_SECONDS: u64 = 30;
 /// every graph run this engine drives — an 8-member ensemble queues past this
 /// many rather than fork-bombing the host. Overridable via
 /// [`GraphEngine::with_ensemble_concurrency_cap`]
-/// (`CanopyConfig::ensemble_concurrency_cap`).
-const DEFAULT_ENSEMBLE_CONCURRENCY_CAP: usize = 4;
-
+/// (`CanopyConfig::ensemble_concurrency_cap`); the default lives in the CM51
+/// settings registry.
 #[derive(Clone)]
 pub struct GraphEngine {
     db: Arc<Database>,
@@ -190,7 +191,8 @@ pub struct GraphEngine {
     /// degrades to a WARN + note per skill, exactly like a store that's
     /// there but can't reach its sources.
     dynamic_skills: Option<Arc<crate::dynamic_skills::SkillStore>>,
-    /// Cross-run attempt budget (C19) — see [`DEFAULT_MAX_SPEC_ATTEMPTS`].
+    /// Cross-run attempt budget (C19) — see the settings registry key
+    /// `spec_attempt_limit`.
     spec_attempt_limit: usize,
     /// Process-wide daemon-shutdown flag (CB82): set once, as the first step
     /// of graceful shutdown, before any node process is SIGTERMed. Guards in
@@ -5419,7 +5421,7 @@ echo done
             clis: vec![cli],
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
         home
     }
 
@@ -10983,7 +10985,7 @@ echo done
             }],
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
         fake_home
     }
 
@@ -11028,7 +11030,7 @@ echo done
             }],
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
         fake_home
     }
 
@@ -14202,7 +14204,7 @@ echo done
                 .collect(),
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
         fake_home
     }
 
@@ -14252,7 +14254,7 @@ echo done
                 .collect(),
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
         fake_home
     }
 
@@ -14272,7 +14274,7 @@ echo done
             clis,
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
         fake_home
     }
 
@@ -19543,7 +19545,7 @@ echo done
             }],
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
 
         db.insert_graph_node(&GraphNode {
             id: "node-flaky".to_string(),
@@ -19670,7 +19672,7 @@ echo done
             }],
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
 
         db.insert_graph_node(&GraphNode {
             id: "node-flaky".to_string(),
@@ -22181,7 +22183,7 @@ exit 0
             }],
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
         fake_home
     }
 
@@ -25606,7 +25608,7 @@ binary = "{}"
                 .collect(),
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
         fake_home
     }
 
@@ -26111,7 +26113,7 @@ binary = "{}"
             }],
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
 
         let _home = HomeGuard::set(fake_home.path());
         let config_json = serde_json::json!({

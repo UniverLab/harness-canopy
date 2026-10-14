@@ -351,8 +351,34 @@ fn record_config_and_summary(
     config.similarity_threshold = similarity_threshold;
     config.rag_personal_dirs = rag_personal_dirs;
     config.rag_max_file_mb = rag_max_file_mb;
-    let config_step = match config.save(canopy_dir) {
-        Ok(_) => format!(
+    // CM51: first install, no daemon running yet — the wizard writes through
+    // the same writer as everything else, so nothing else in config.toml is
+    // rewritten. The keys it asks for come from the registry's `wizard`
+    // flag, so "what setup asks for" is declared in one place (CM51 FR1).
+    let edits: Vec<(&str, Option<toml_edit::Value>)> = std::iter::once((
+        "configured_at",
+        Some(toml_edit::Value::from(
+            config.configured_at.clone().unwrap_or_default(),
+        )),
+    ))
+    .chain(
+        crate::domain::settings::REGISTRY
+            .iter()
+            .filter(|def| def.wizard)
+            .map(|def| {
+                (
+                    def.key,
+                    Some(crate::domain::settings::inspect::config_value(
+                        &config, def.key,
+                    )),
+                )
+            }),
+    )
+    .collect();
+    let saved = crate::domain::settings::writer::write_keys(canopy_dir, &edits)
+        .and_then(|()| crate::domain::settings::writer::write_clis(canopy_dir, &config.clis));
+    let config_step = match saved {
+        Ok(()) => format!(
             "\x1b[32m✓\x1b[0m Config: {} CLI(s) saved to config.toml",
             config.clis.len()
         ),

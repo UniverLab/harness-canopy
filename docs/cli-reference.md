@@ -162,6 +162,30 @@ A crew is a named, ordered member list ensembles and agent nodes/hooks bind
 to; member editing is MCP/TUI only (see
 [MCP tools](mcp-tools.md)).
 
+## Settings
+
+Every setting in `~/.canopy/config.toml` is declared once, in a typed
+registry, and read and written through one surface the CLI, MCP and the TUI
+all use.
+
+| Command | Description |
+|---|---|
+| `canopy config list [--group <group>]` | List settings with their group, kind, default, effective value, where it came from (`default`, `file`, `env`), when it applies, and status (`ok`, `invalid: <reason>`, `pending_restart`, `unknown`) |
+| `canopy config get <key>` | Show one setting by its dotted key (e.g. `clean.retention_days`) |
+| `canopy config set <key> <value>` | Change one setting; validated first, and nothing is written if it is refused |
+| `canopy config reset <key>` | Write the setting's default back |
+| `canopy config path` | Print the path of `config.toml` |
+
+Only the daemon writes `config.toml`, and it edits the file with `toml_edit`,
+so hand-written comments, key order and unknown keys survive every change.
+`canopy config set` reports what the user must do for the value to take
+effect: `applied`, `applies on next run`, `restart the daemon`, or `restart
+the TUI`. A hand edit is picked up by the daemon's file watcher without a
+restart, and an invalid value keeps the previous effective value — it is
+reported by `canopy config list` and as a `canopy doctor` warning rather than
+being applied. `skills.sources` (a list of tables) must still be edited by
+hand.
+
 ## Spec queues
 
 | Command | Description |

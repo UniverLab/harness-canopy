@@ -478,6 +478,12 @@ pub struct App {
     /// Whether the face picker overlay is open, and its cursor.
     pub(crate) panel_picker_open: bool,
     pub(crate) panel_picker_idx: usize,
+    /// CM51 (D4): the last `settings_revision` this session has applied. When
+    /// the daemon publishes a newer one (a `config_set`, or a hand edit seen
+    /// by the file watcher), the TUI reloads `CanopyConfig` so the values it
+    /// renders — theme, temperature unit, the pinned face — are current
+    /// without a restart.
+    pub(crate) settings_seen: String,
     /// True while the mouse is pressed/dragging inside the panel or the
     /// panel was clicked into (keyboard focus claimed by the panel).
     /// While set, any pending automatic switch is dropped, not deferred.

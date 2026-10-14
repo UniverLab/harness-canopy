@@ -867,7 +867,7 @@ mod tests {
         let (mgr, dir) = test_manager();
         let mut config = crate::domain::canopy_config::CanopyConfig::load(dir.path());
         config.embeddings_model = "baai/bge-small-en-v1.5".to_string();
-        config.save(dir.path()).unwrap();
+        config.save_for_tests(dir.path()).unwrap();
 
         assert_eq!(mgr.queue_len().await, 0);
         mgr.ensure_configured_model_acquired().await;
@@ -1222,7 +1222,7 @@ mod tests {
             rag_max_file_mb: 1,
             ..Default::default()
         };
-        config.save(dir.path()).unwrap();
+        config.save_for_tests(dir.path()).unwrap();
 
         mgr.index_file(&source_path).await.unwrap();
 

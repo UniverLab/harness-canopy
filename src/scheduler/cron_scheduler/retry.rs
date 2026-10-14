@@ -15,10 +15,11 @@ use crate::executor::Executor;
 
 /// How a failed scheduled run is retried, independently of the cron slot.
 ///
-/// Configurable via environment (read once at scheduler construction):
-/// - `CANOPY_RETRY_ENABLED`      (bool, default true)
-/// - `CANOPY_RETRY_DELAY_MINUTES` (u64,  default 60)
-/// - `CANOPY_RETRY_MAX`          (u32,  default 3)
+/// Configurable through the `[scheduler]` table in `config.toml`
+/// (`retry_enabled`, `retry_delay_minutes`, `retry_max`); the
+/// `CANOPY_RETRY_ENABLED`, `CANOPY_RETRY_DELAY_MINUTES` and
+/// `CANOPY_RETRY_MAX` environment variables still override those when set.
+/// The defaults live in the CM51 settings registry.
 #[derive(Debug, Clone, Copy)]
 pub struct RetryPolicy {
     pub enabled: bool,
@@ -29,34 +30,23 @@ pub struct RetryPolicy {
 impl Default for RetryPolicy {
     fn default() -> Self {
         Self {
-            enabled: true,
-            delay_minutes: 60,
-            max_retries: 3,
+            enabled: crate::domain::settings::default_bool("scheduler.retry_enabled"),
+            delay_minutes: crate::domain::settings::default_duration_units(
+                "scheduler.retry_delay_minutes",
+            ),
+            max_retries: crate::domain::settings::default_int("scheduler.retry_max") as u32,
         }
     }
 }
 
 impl RetryPolicy {
-    /// Build from environment variables, falling back to defaults.
-    pub fn from_env() -> Self {
-        let d = Self::default();
+    /// Build from the loaded config's `[scheduler]` table (which already
+    /// carries any `CANOPY_RETRY_*` environment override).
+    pub fn from_config(config: &crate::domain::canopy_config::SchedulerConfig) -> Self {
         Self {
-            enabled: std::env::var("CANOPY_RETRY_ENABLED")
-                .ok()
-                .and_then(|v| match v.trim().to_ascii_lowercase().as_str() {
-                    "1" | "true" | "yes" | "on" => Some(true),
-                    "0" | "false" | "no" | "off" => Some(false),
-                    _ => None,
-                })
-                .unwrap_or(d.enabled),
-            delay_minutes: std::env::var("CANOPY_RETRY_DELAY_MINUTES")
-                .ok()
-                .and_then(|v| v.trim().parse().ok())
-                .unwrap_or(d.delay_minutes),
-            max_retries: std::env::var("CANOPY_RETRY_MAX")
-                .ok()
-                .and_then(|v| v.trim().parse().ok())
-                .unwrap_or(d.max_retries),
+            enabled: config.retry_enabled,
+            delay_minutes: config.retry_delay_minutes,
+            max_retries: config.retry_max,
         }
     }
 }

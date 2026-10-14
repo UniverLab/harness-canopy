@@ -28,6 +28,7 @@ pub mod registry_baseline;
 pub mod roster;
 pub mod sandbox;
 pub mod seeds;
+pub mod settings;
 pub mod specs;
 pub mod subagent_mcp;
 pub mod sync;

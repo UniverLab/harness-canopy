@@ -94,6 +94,10 @@ stdio. Connect any MCP-capable AI CLI with `canopy mcp`.
 | `crew_create` | Create a crew from an ordered member list, or seed it from an ensemble's current members |
 | `crew_update` | Update a crew's ordered members, description and/or name; bound ensembles pick it up at their next dispatch |
 | `crew_delete` | Delete a crew (refused while any ensemble, node or hook still binds it) |
+| `config_list` | List every setting with its group, kind, default, effective value, source (`default`/`file`/`env`), apply mode and status (`ok`, `invalid: <reason>`, `pending_restart`, `unknown`); optional `group` filter |
+| `config_get` | Read one setting by its dotted key (e.g. `clean.retention_days`) |
+| `config_set` | Change one setting, validated against its type and range first (nothing is written on refusal); returns the new effective value and what the user must do — `applied`, `applies on next run`, `restart the daemon`, or `restart the TUI` |
+| `config_reset` | Reset one setting to its registry default, through the same validating path as `config_set` |
 | `graph_get` | Get a graph with its specs, nodes, and edges |
 | `graph_list` | List graphs |
 | `graph_crew` | List every graph's harness/model assignments — agent nodes outside ensembles, ensemble members and agent hooks with platform, model, timeout, crew and availability; `group_by: "pair"` summarises per platform/model pair. No prompt text is returned |

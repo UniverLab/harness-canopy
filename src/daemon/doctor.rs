@@ -377,6 +377,7 @@ fn report_configuration(canopy_dir: &Path, config: &crate::domain::canopy_config
         } else {
             println!(" Harnesses: {}", config.cli_names().join(", "));
         }
+        report_settings_problems(canopy_dir);
         return;
     }
 
@@ -388,6 +389,26 @@ fn report_configuration(canopy_dir: &Path, config: &crate::domain::canopy_config
         );
     } else {
         println!(" \x1b[33m⚠\x1b[0m Config not found (run setup)");
+    }
+    report_settings_problems(canopy_dir);
+}
+
+/// CM51: surface every setting the file gets wrong — an invalid value (still
+/// running on its previous effective value) and a key nothing declares.
+fn report_settings_problems(canopy_dir: &Path) {
+    for row in crate::domain::settings::inspect::list(canopy_dir, None) {
+        match row.status {
+            crate::domain::settings::inspect::Status::Invalid(reason) => {
+                println!(" \x1b[33m⚠\x1b[0m Config: {} invalid: {reason}", row.key);
+            }
+            crate::domain::settings::inspect::Status::Unknown => {
+                println!(
+                    " \x1b[33m⚠\x1b[0m Config: unknown key {} (kept, not used)",
+                    row.key
+                );
+            }
+            _ => {}
+        }
     }
 }
 
@@ -1590,7 +1611,7 @@ mod tests {
             rag_personal_dirs: vec![rag_dir.to_string_lossy().to_string()],
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
 
         // ragignore present (optional but exercises the ✓ branch).
         std::fs::write(canopy_dir.join("ragignore"), "*.lock\n").unwrap();
@@ -1697,7 +1718,7 @@ mod tests {
         let config = CanopyConfig {
             configured_at: None, // config.toml won't even be written below —
             // is_configured() reads whatever CanopyConfig::load() sees, and
-            // we intentionally never call config.save() so the legacy-file
+            // we intentionally never call config.save_for_tests() so the legacy-file
             // branch (not the config.toml branch) is what fires.
             clis: vec![CliConfig {
                 name: "ghost-cli".to_string(),
@@ -1720,7 +1741,7 @@ mod tests {
         // "legacy config" (not "configured") message, so config.toml IS
         // saved but without configured_at — is_configured() only checks
         // `configured_at.is_some()`.
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
 
         let prev_key = std::env::var("OPENAI_API_KEY").ok();
         unsafe { std::env::remove_var("OPENAI_API_KEY") };
@@ -1764,7 +1785,7 @@ mod tests {
             embeddings_model: "some-unknown-model-9000".to_string(),
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
 
         let (result, output) = run_doctor_captured(home.path()).await;
 
@@ -1842,7 +1863,7 @@ mod tests {
             embeddings_model: "baai/bge-small-en-v1.5".to_string(),
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
 
         let (result, output) = run_doctor_captured(home.path()).await;
 
@@ -1874,7 +1895,7 @@ mod tests {
             embeddings_model: "baai/bge-small-en-v1.5".to_string(),
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
 
         let (result, output) = run_doctor_captured(home.path()).await;
 
@@ -1899,7 +1920,7 @@ mod tests {
             embeddings_model: "baai/bge-small-en-v1.5".to_string(),
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
 
         let db = Database::new(&canopy_dir.join("background_agents.db")).unwrap();
         crate::rag::status::mark_downloading(&db, "baai/bge-small-en-v1.5");
@@ -1929,7 +1950,7 @@ mod tests {
             embeddings_model: "baai/bge-small-en-v1.5".to_string(),
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
 
         let db = Database::new(&canopy_dir.join("background_agents.db")).unwrap();
         crate::rag::status::mark_failed(&db, "baai/bge-small-en-v1.5", "connection reset");
@@ -1959,7 +1980,7 @@ mod tests {
             embeddings_model: String::new(),
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
 
         let (result, output) = run_doctor_captured(home.path()).await;
 
@@ -1990,7 +2011,7 @@ mod tests {
             embeddings_model: "baai/bge-small-en-v1.5".to_string(),
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
 
         let (result, output) = run_doctor_captured(home.path()).await;
 
@@ -2020,7 +2041,7 @@ mod tests {
             embeddings_model: "text-embedding-3-small".to_string(),
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
 
         let prev_key = std::env::var("OPENAI_API_KEY").ok();
         unsafe { std::env::remove_var("OPENAI_API_KEY") };
@@ -2060,7 +2081,7 @@ mod tests {
             embeddings_model: "text-embedding-3-small".to_string(),
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
 
         // Put a plain file where VectorStore::open_at's `create_dir_all`
         // needs to make a directory — opening it must fail, the way a

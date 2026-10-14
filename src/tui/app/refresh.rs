@@ -46,6 +46,10 @@ impl App {
         self.poll_crews_face();
         self.poll_crews_write();
         self.refresh_crews_face();
+        // CM51 (D4): a `config_set` from anywhere, or a hand edit the
+        // daemon's watcher saw, publishes a settings revision. When it moves,
+        // re-read the settings this TUI renders — no restart needed.
+        self.poll_settings_revision();
         // CT1 multi-face panel: recompute the visible face from the
         // switching rule after every data refresh above has run.
         self.tick_panel_face();
@@ -61,6 +65,28 @@ impl App {
         self.interpolate_system_info();
 
         Ok(())
+    }
+
+    /// CM51 (D4): re-read the settings this TUI renders when the daemon
+    /// publishes a newer `settings_revision` — from a `config_set`, or from a
+    /// hand edit its file watcher saw. The revision row carries the changed
+    /// keys, but the cheap and always-correct move is to reload the config
+    /// and re-derive theme, temperature unit and the pinned face.
+    pub(crate) fn poll_settings_revision(&mut self) {
+        let Ok(Some(revision)) = self
+            .db
+            .get_state(crate::daemon::config_watch::SETTINGS_REVISION_KEY)
+        else {
+            return;
+        };
+        if revision == self.settings_seen {
+            return;
+        }
+        self.settings_seen = revision;
+        let config = crate::domain::canopy_config::CanopyConfig::load(&self.data_dir);
+        self.theme = crate::tui::ui::theme::Theme::resolve(&config.theme);
+        self.temperature_unit = config.temperature_unit;
+        self.panel_pinned = App::load_panel_pinned_face(&config.pinned_panel_face);
     }
 
     pub(crate) fn interpolate_system_info(&mut self) {

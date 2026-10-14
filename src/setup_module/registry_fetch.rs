@@ -377,7 +377,10 @@ fn apply_registry_refresh(home: &Path, registry: &RegistryRaw) -> Result<()> {
     // above never touches a manually-added, registry-unknown entry), so
     // that's a real state worth writing, not a detection glitch to shield
     // the config from.
-    config.save(&canopy_dir)?;
+    //
+    // CM51: written through the one writer, so a registry refresh can no
+    // longer wipe the user's comments out of config.toml.
+    crate::domain::settings::writer::write_clis(&canopy_dir, &config.clis)?;
 
     RegistryBaseline {
         clis: cli_registry.available_clis,
@@ -699,7 +702,7 @@ mod tests {
     fn write_config(canopy_dir: &Path, clis: Vec<CliConfig>) {
         let mut config = crate::domain::canopy_config::CanopyConfig::load(canopy_dir);
         config.clis = clis;
-        config.save(canopy_dir).unwrap();
+        config.save_for_tests(canopy_dir).unwrap();
     }
 
     fn write_baseline(canopy_dir: &Path, clis: Vec<CliConfig>) {

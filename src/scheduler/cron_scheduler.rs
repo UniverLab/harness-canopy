@@ -89,8 +89,16 @@ impl CronScheduler {
             graph_engine: None,
             last_fired: Arc::new(Mutex::new(std::collections::HashMap::new())),
             in_flight: Arc::new(Mutex::new(std::collections::HashSet::new())),
-            retry: RetryPolicy::from_env(),
+            retry: RetryPolicy::default(),
         }
+    }
+
+    /// CM51: take the retry policy from the loaded config's `[scheduler]`
+    /// table (which already carries any `CANOPY_RETRY_*` override) instead of
+    /// the registry defaults.
+    pub fn with_retry(mut self, retry: RetryPolicy) -> Self {
+        self.retry = retry;
+        self
     }
 
     /// Build a scheduler that also fires cron-triggered graphs via `graph_engine`.

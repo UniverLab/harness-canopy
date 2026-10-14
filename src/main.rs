@@ -45,6 +45,7 @@ use daemon::rag_cli::{handle_rag_action, RagAction};
 use daemon::roster_cli::{handle_roster_action, RosterAction};
 use daemon::sandbox_cli::{handle_sandbox_action, SandboxAction};
 use daemon::server::{run_http_server, run_stdio_server};
+use daemon::settings_cli::{handle_settings_action, SettingsAction};
 use daemon::spec_cli::{handle_spec_action, SpecAction};
 use daemon::subagent_cli::{handle_subagent_action, SubagentAction};
 use std::path::PathBuf;
@@ -145,6 +146,11 @@ enum Commands {
     Crew {
         #[command(subcommand)]
         action: CrewAction,
+    },
+    /// Inspect and change settings in config.toml.
+    Config {
+        #[command(subcommand)]
+        action: SettingsAction,
     },
     /// Manage spec queues.
     Queue {
@@ -276,6 +282,7 @@ async fn main() -> Result<()> {
         Some(Commands::Spec { action }) => handle_spec_action(action, cli.port).await,
         Some(Commands::Roster { action }) => handle_roster_action(action, cli.port).await,
         Some(Commands::Crew { action }) => handle_crew_action(action, cli.port).await,
+        Some(Commands::Config { action }) => handle_settings_action(action, cli.port).await,
         Some(Commands::Queue { action }) => handle_queue_action(action, cli.port).await,
         Some(Commands::Models { action }) => handle_models_action(action).await,
         Some(Commands::Project { action }) => handle_project_action(action).await,

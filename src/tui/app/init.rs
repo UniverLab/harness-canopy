@@ -180,6 +180,7 @@ macro_rules! app_new_fields {
             panel_last_backlog_updated: None,
             panel_last_graph_running: false,
             panel_baselines_init: false,
+            settings_seen: String::new(),
             session_protocol_state: HashMap::new(),
             active_sandbox: None,
             project_relation_dialog: None,

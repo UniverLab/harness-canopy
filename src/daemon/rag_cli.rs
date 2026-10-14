@@ -858,7 +858,7 @@ mod tests {
             embeddings_model: "baai/bge-small-en-v1.5".to_string(),
             ..Default::default()
         };
-        config.save(dir.path()).unwrap();
+        config.save_for_tests(dir.path()).unwrap();
         crate::rag::status::mark_downloading(&db, "baai/bge-small-en-v1.5");
         crate::rag::status::mark_failed(&db, "baai/bge-small-en-v1.5", "connection reset");
 
@@ -878,7 +878,7 @@ mod tests {
             embeddings_model: "baai/bge-small-en-v1.5".to_string(),
             ..Default::default()
         };
-        config.save(dir.path()).unwrap();
+        config.save_for_tests(dir.path()).unwrap();
 
         // Must not error and must not fabricate a state where none exists.
         handle_model_retry(dir.path(), &db).unwrap();
@@ -897,7 +897,7 @@ mod tests {
             embeddings_model: "baai/bge-small-en-v1.5".to_string(),
             ..Default::default()
         };
-        config.save(dir.path()).unwrap();
+        config.save_for_tests(dir.path()).unwrap();
         crate::rag::status::mark_downloading(&db, "baai/bge-small-en-v1.5");
 
         handle_model_retry(dir.path(), &db).unwrap();
