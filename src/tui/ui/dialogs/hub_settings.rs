@@ -27,6 +27,7 @@ pub(super) fn draw_settings_tab(frame: &mut Frame, app: &App, theme: &Theme, are
         split[1]
     };
 
+    let rows_area = draw_filter_line(frame, app, theme, rows_area);
     draw_rows(frame, app, theme, rows_area);
     draw_message(frame, app, theme, area);
     draw_editor(frame, app, theme, area);
@@ -68,6 +69,33 @@ fn draw_group_header(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     );
 }
 
+/// The `/` filter line, drawn above the rows while it is typed or applied.
+/// Returns the area left for the rows.
+fn draw_filter_line(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) -> Rect {
+    let settings = &app.hub.settings;
+    if (!settings.filter_mode && settings.filter.is_empty()) || area.height < 2 {
+        return area;
+    }
+    let cursor = if settings.filter_mode { "█" } else { "" };
+    let line = Line::from(vec![
+        Span::styled(
+            " / ",
+            Style::default()
+                .fg(theme.header_color)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("{}{cursor}", settings.filter),
+            Style::default().fg(theme.text_primary),
+        ),
+    ]);
+    frame.render_widget(
+        Paragraph::new(line),
+        Rect::new(area.x, area.y, area.width, 1),
+    );
+    Rect::new(area.x, area.y + 1, area.width, area.height - 1)
+}
+
 fn draw_rows(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     let height = area.height as usize;
     if height == 0 {
@@ -78,6 +106,8 @@ fn draw_rows(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     let start = selected.saturating_sub(height.saturating_sub(1) / 2);
     let start = clamp_scroll(selected, start, visible.len(), height);
     let end = (start + height).min(visible.len());
+    // While filtering, rows come from every group, so each names its group.
+    let show_group = !app.hub.settings.filter.is_empty();
 
     for (offset, (_, flat)) in visible[start..end].iter().enumerate() {
         let Some(row) = app.hub.settings.rows.get(*flat) else {
@@ -85,7 +115,7 @@ fn draw_rows(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         };
         let selected_row = start + offset == selected;
         let row_area = Rect::new(area.x, area.y + offset as u16, area.width, 1);
-        draw_setting_row(frame, row, selected_row, theme, row_area);
+        draw_setting_row(frame, row, selected_row, show_group, theme, row_area);
     }
 }
 
@@ -93,10 +123,18 @@ fn draw_setting_row(
     frame: &mut Frame,
     row: &SettingRow,
     selected: bool,
+    show_group: bool,
     theme: &Theme,
     area: Rect,
 ) {
-    let mut spans: Vec<Span> = vec![
+    let mut spans: Vec<Span> = Vec::new();
+    if show_group {
+        spans.push(Span::styled(
+            format!(" [{}]", row.group),
+            Style::default().fg(theme.dim_text),
+        ));
+    }
+    spans.extend([
         Span::styled(
             format!(" {}", row.key),
             Style::default()
@@ -108,7 +146,7 @@ fn draw_setting_row(
             display_value(&row.effective),
             Style::default().fg(theme.text_primary),
         ),
-    ];
+    ]);
     spans.push(Span::styled(
         format!(" (default {})", display_value(&row.default)),
         Style::default().fg(if effective_eq_default(row) {

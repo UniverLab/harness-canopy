@@ -362,25 +362,34 @@ impl App {
         Group::ALL.iter().map(|group| group.label()).collect()
     }
 
-    /// The selected group's visible rows as `(flat row index)` pairs wrapped
-    /// as `(group_index, row_index)` — filtered by `filter`.
+    /// The rows the Settings tab shows, as `(group_index, row_index)` pairs
+    /// into `rows`. With no filter that is the selected group's rows; a filter
+    /// searches every group by key or description (spec: `/` filters every
+    /// group).
     pub(crate) fn settings_visible_rows(&self) -> Vec<(usize, usize)> {
         let labels = Self::settings_group_labels();
         let group_idx = self.hub.settings.group_idx.min(labels.len() - 1);
         let group_label = labels[group_idx];
         let filter = self.hub.settings.filter.to_lowercase();
+        let filtering = !filter.is_empty();
         self.hub
             .settings
             .rows
             .iter()
             .enumerate()
-            .filter(|(_, row)| row.group == group_label)
+            .filter(|(_, row)| filtering || row.group == group_label)
             .filter(|(_, row)| {
-                filter.is_empty()
+                !filtering
                     || row.key.to_lowercase().contains(&filter)
                     || row.description.to_lowercase().contains(&filter)
             })
-            .map(|(index, _)| (group_idx, index))
+            .map(|(index, row)| {
+                let owner = labels
+                    .iter()
+                    .position(|label| *label == row.group)
+                    .unwrap_or(group_idx);
+                (owner, index)
+            })
             .collect()
     }
 
@@ -660,8 +669,17 @@ mod tests {
         assert!(args.get("value").is_none());
     }
 
+    fn visible_keys(app: &App) -> Vec<&str> {
+        app.settings_visible_rows()
+            .iter()
+            .map(|(_, flat)| app.hub.settings.rows[*flat].key.as_str())
+            .collect()
+    }
+
+    /// With no filter only the selected group shows; a filter searches every
+    /// group by key or description.
     #[test]
-    fn slash_filter_narrows_rows() {
+    fn slash_filter_searches_every_group() {
         let mut app = test_app();
         app.hub.settings.rows = vec![
             // Key match.
@@ -673,32 +691,156 @@ mod tests {
             },
             // No match at all.
             row("spec_attempt_limit", "General", "5"),
+            // A match in another group.
+            row("notify.theme_sound", "Notifications", "true"),
         ];
 
         app.hub.settings.filter.clear();
-        assert_eq!(app.settings_visible_rows().len(), 3);
+        assert_eq!(visible_keys(&app).len(), 3, "only General without a filter");
 
-        // "theme" matches one key and one description.
+        // "theme" matches a key and a description in General, and a key in
+        // Notifications.
         app.hub.settings.filter = "theme".to_string();
-        let keys: Vec<&str> = app
-            .settings_visible_rows()
-            .iter()
-            .map(|(_, flat)| app.hub.settings.rows[*flat].key.as_str())
-            .collect();
-        assert_eq!(keys, vec!["theme", "tui.brians_brain"]);
+        assert_eq!(
+            visible_keys(&app),
+            vec!["theme", "tui.brians_brain", "notify.theme_sound"]
+        );
 
         // Case-insensitive, and matching by key alone.
         app.hub.settings.filter = "SPEC_ATTEMPT".to_string();
-        let keys: Vec<&str> = app
-            .settings_visible_rows()
-            .iter()
-            .map(|(_, flat)| app.hub.settings.rows[*flat].key.as_str())
-            .collect();
-        assert_eq!(keys, vec!["spec_attempt_limit"]);
+        assert_eq!(visible_keys(&app), vec!["spec_attempt_limit"]);
 
-        // An empty filter restores everything.
+        // An empty filter restores the selected group.
         app.hub.settings.filter.clear();
-        assert_eq!(app.settings_visible_rows().len(), 3);
+        assert_eq!(visible_keys(&app).len(), 3);
+    }
+
+    /// Spawn a fake daemon whose every tool call answers with `result`, and
+    /// point the app at it.
+    fn app_on_daemon(
+        result: serde_json::Value,
+    ) -> (App, crate::tui::mcp_client::test_support::FakeDaemon) {
+        let fake = crate::tui::mcp_client::test_support::spawn_fake_daemon(result);
+        let app = test_app();
+        app.db.set_state("port", &fake.port).unwrap();
+        (app, fake)
+    }
+
+    fn ok_result() -> serde_json::Value {
+        serde_json::json!({ "content": [{ "type": "text", "text": "{}" }], "isError": false })
+    }
+
+    /// Wait for the background write to finish and apply its result.
+    fn finish_write(app: &mut App) {
+        for _ in 0..1000 {
+            if app.hub.settings.write_rx.is_none() {
+                return;
+            }
+            app.poll_settings_write();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("settings write did not finish");
+    }
+
+    #[test]
+    fn enter_on_an_int_row_calls_config_set_with_the_typed_value() {
+        let (mut app, fake) = app_on_daemon(ok_result());
+        app.hub.settings.rows = vec![row("spec_attempt_limit", "General", "5")];
+
+        app.open_setting_editor();
+        if let Some(SettingsEditor::Text { buffer, .. }) = app.hub.settings.editor.as_mut() {
+            *buffer = "7".to_string();
+        }
+        app.commit_editor_value();
+        finish_write(&mut app);
+
+        let calls = fake.recorded_calls();
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!(calls[0]["name"], "config_set");
+        assert_eq!(
+            calls[0]["arguments"],
+            serde_json::json!({ "key": "spec_attempt_limit", "value": "7" })
+        );
+    }
+
+    #[test]
+    fn space_on_a_bool_row_calls_config_set_with_the_flip() {
+        let (mut app, fake) = app_on_daemon(ok_result());
+        app.hub.settings.rows = vec![row("tui.atmosphere", "General", "true")];
+
+        app.toggle_bool();
+        finish_write(&mut app);
+
+        let calls = fake.recorded_calls();
+        assert_eq!(calls[0]["name"], "config_set");
+        assert_eq!(calls[0]["arguments"]["value"], "false");
+    }
+
+    #[test]
+    fn arrows_on_an_enum_row_call_config_set_with_the_next_option() {
+        let (mut app, fake) = app_on_daemon(ok_result());
+        app.hub.settings.rows = vec![row("theme", "General", "\"classic\"")];
+
+        app.cycle_enum(true);
+        finish_write(&mut app);
+
+        let calls = fake.recorded_calls();
+        assert_eq!(calls[0]["name"], "config_set");
+        assert_eq!(calls[0]["arguments"]["value"], "modern");
+    }
+
+    #[test]
+    fn path_list_commit_calls_config_set_with_the_toml_array() {
+        let (mut app, fake) = app_on_daemon(ok_result());
+        app.hub.settings.rows = vec![row("rag_personal_dirs", "General", "[\"/a\",\"/b\"]")];
+
+        app.open_setting_editor();
+        app.path_list_delete();
+        app.commit_editor_value();
+        finish_write(&mut app);
+
+        let calls = fake.recorded_calls();
+        assert_eq!(calls[0]["name"], "config_set");
+        assert_eq!(
+            calls[0]["arguments"],
+            serde_json::json!({ "key": "rag_personal_dirs", "value": "[\"/b\"]" })
+        );
+    }
+
+    #[test]
+    fn r_calls_config_reset_for_the_selected_row() {
+        let (mut app, fake) = app_on_daemon(ok_result());
+        app.hub.settings.rows = vec![row("theme", "General", "\"modern\"")];
+
+        app.reset_selected_setting();
+        finish_write(&mut app);
+
+        let calls = fake.recorded_calls();
+        assert_eq!(calls[0]["name"], "config_reset");
+        assert_eq!(calls[0]["arguments"], serde_json::json!({ "key": "theme" }));
+    }
+
+    /// A range refusal from the daemon leaves the old value on screen and
+    /// shows the daemon's message as an error.
+    #[test]
+    fn out_of_range_refusal_keeps_the_old_value() {
+        let (mut app, _fake) = app_on_daemon(serde_json::json!({
+            "content": [{ "type": "text", "text": "spec_attempt_limit: 99 is outside 1..=20" }],
+            "isError": true
+        }));
+        app.hub.settings.rows = vec![row("spec_attempt_limit", "General", "5")];
+
+        app.open_setting_editor();
+        if let Some(SettingsEditor::Text { buffer, .. }) = app.hub.settings.editor.as_mut() {
+            *buffer = "99".to_string();
+        }
+        app.commit_editor_value();
+        finish_write(&mut app);
+
+        assert_eq!(app.hub.settings.rows[0].effective, "5");
+        let message = app.hub.settings.message.as_ref().expect("message");
+        assert!(message.is_error);
+        assert_eq!(message.text, "spec_attempt_limit: 99 is outside 1..=20");
     }
 
     #[test]

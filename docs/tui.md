@@ -92,6 +92,13 @@ mode and status), **Keys** is a grouped reference of every shortcut the TUI
 handles, and **Missions & stats** lists the missions above. `Tab`/`1`/`2`/`3`
 switch tabs; `F1` or `Esc` closes it.
 
+In **Settings**, `Space` flips a bool, `←`/`→` cycle an enum, `Enter` edits a
+number, duration, string or format, and `r` resets the selected setting to its
+default. A path list edits with `a` (add a folder), `d` (delete) and
+`Shift+↑`/`Shift+↓` (reorder). `/` filters every group by key or description.
+Each change goes through the daemon; a refused value keeps the old one and the
+daemon's message shows in the status line.
+
 ## Projects sidebar
 
 The sidebar shows sections for the selected project:

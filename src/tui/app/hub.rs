@@ -90,9 +90,11 @@ impl App {
         self.set_hub_tab(tab);
     }
 
-    /// Scroll the Keys tab, clamped to the total shortcut row count.
+    /// Scroll the Keys tab, clamped to its rendered line count: one header per
+    /// context plus one line per shortcut.
     pub(crate) fn move_keys_scroll(&mut self, forward: bool) {
-        let total = crate::tui::keymap_reference::KEY_REFS.len();
+        let total = crate::tui::keymap_reference::KEY_REFS.len()
+            + crate::tui::keymap_reference::CONTEXTS.len();
         let current = self.hub.keys_scroll;
         self.hub.keys_scroll = if forward {
             (current + 1).min(total.saturating_sub(1))
