@@ -86,6 +86,12 @@ Missions are checked automatically during normal TUI operation — no
 manual action required. Progress is persisted in the database and
 visible in the TUI's gamification panel.
 
+Press **F1** to open the **Canopy hub**, a full-screen tabbed overlay:
+**Settings** edits every registry setting in place (with the value's apply
+mode and status), **Keys** is a grouped reference of every shortcut the TUI
+handles, and **Missions & stats** lists the missions above. `Tab`/`1`/`2`/`3`
+switch tabs; `F1` or `Esc` closes it.
+
 ## Projects sidebar
 
 The sidebar shows sections for the selected project:
@@ -134,7 +140,10 @@ to silence them.
 ## Appearance and behaviour settings
 
 The `[tui]` settings (see `canopy config list`) tune the interface without a
-restart. Each keeps its default until you set it.
+restart. Each keeps its default until you set it. All of them — and every
+other registry setting — can also be edited in place from the hub's
+**Settings** tab (`F1`), which writes through the daemon and shows each
+value's apply mode.
 
 | Setting | Default | What it does |
 |---|---|---|

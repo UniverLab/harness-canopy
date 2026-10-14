@@ -208,8 +208,8 @@ fn draw_modal_dialogs(frame: &mut Frame, app: &mut App, theme: &Theme) {
         dialogs::draw_graph_action_message(frame, app, theme);
     }
 
-    if app.show_legend {
-        dialogs::draw_legend(frame, app, theme);
+    if app.hub_open {
+        dialogs::draw_hub(frame, app, theme);
     }
 
     if app.context_transfer_modal.is_some() {

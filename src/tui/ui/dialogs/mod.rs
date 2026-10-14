@@ -1,4 +1,4 @@
-//! Dialog overlays — new agent, quit confirmation, color legend, context transfer.
+//! Dialog overlays — new agent, quit confirmation, the F1 hub, context transfer.
 
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -11,6 +11,10 @@ pub mod context_transfer;
 pub mod graph_control;
 pub mod graph_editor;
 pub mod graph_form;
+pub mod hub;
+pub mod hub_keys;
+pub mod hub_legend;
+pub mod hub_settings;
 pub mod knowledge_dialog;
 pub mod launchpad;
 pub mod new_agent_dialog;
@@ -26,6 +30,7 @@ pub use context_transfer::draw_context_transfer_modal;
 pub use graph_control::{draw_graph_action_message, draw_graph_autorun_dialog};
 pub use graph_editor::draw_graph_editor_dialog;
 pub use graph_form::draw_graph_form_dialog;
+pub use hub::draw_hub;
 pub use knowledge_dialog::draw_knowledge_dialog;
 pub use launchpad::draw_launchpad_dialog;
 pub use new_agent_dialog::draw_new_agent_dialog;
@@ -33,7 +38,7 @@ pub(crate) use node_tail::draw_node_tail_pane;
 pub use pickers::{draw_split_picker, draw_suggestion_picker};
 pub use rag_transfer::draw_rag_transfer_modal;
 pub use simple_modals::{
-    draw_archive_graph_confirm, draw_delete_project_confirm, draw_graph_reset_confirm, draw_legend,
+    draw_archive_graph_confirm, draw_delete_project_confirm, draw_graph_reset_confirm,
     draw_permanent_delete_graph_confirm, draw_quit_confirm,
 };
 pub use simple_prompt::draw_simple_prompt_dialog;

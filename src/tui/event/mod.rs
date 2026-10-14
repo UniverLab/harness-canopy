@@ -139,6 +139,7 @@ use knowledge_dialog::handle_knowledge_dialog_key;
 mod crews_keys;
 mod graph_editor;
 mod graph_form;
+mod hub;
 
 use mouse::handle_mouse;
 use scroll::{selected_terminal_like, with_terminal_like_agent, with_terminal_like_agent_mut};
@@ -171,7 +172,7 @@ pub fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> Resu
     if crews_keys::handle_crews_face_key(app, code, modifiers) {
         return Ok(());
     }
-    if dismiss_legend(app, code) || handle_global_key(app, code, modifiers) {
+    if hub::handle_hub_key(app, code, modifiers) || handle_global_key(app, code, modifiers) {
         return Ok(());
     }
 
@@ -180,29 +181,6 @@ pub fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> Resu
     }
 
     dispatch_focus_key(app, code, modifiers)
-}
-
-fn dismiss_legend(app: &mut App, code: KeyCode) -> bool {
-    if !app.show_legend {
-        return false;
-    }
-
-    match code {
-        KeyCode::Esc | KeyCode::F(1) | KeyCode::Enter => {
-            app.show_legend = false;
-        }
-        KeyCode::Up | KeyCode::Char('k') | KeyCode::Down | KeyCode::Char('j') => {
-            let unlocked_count = app.mission_manager.unlocked_count();
-            if unlocked_count == 0 {
-                return true;
-            }
-            let forward = matches!(code, KeyCode::Down | KeyCode::Char('j'));
-            app.legend_selected =
-                crate::tui::selection::move_index(app.legend_selected, unlocked_count, forward);
-        }
-        _ => {}
-    }
-    true
 }
 
 fn handle_global_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {

@@ -120,7 +120,7 @@ fn footer_hints_home(_app: &App, activity_available: bool) -> Vec<(&'static str,
     }
     h.push(("Shift+←→", "panels"));
     h.push(("F10", "preview"));
-    h.push(("F1", "stats"));
+    h.push(("F1", "hub"));
     h
 }
 
@@ -305,7 +305,7 @@ fn footer_hints_agent_pty(
     }
     h.push(("Ctrl+N", "new"));
     if !child_claimed {
-        h.push(("F1", "legend"));
+        h.push(("F1", "hub"));
     }
     h
 }
@@ -328,7 +328,7 @@ fn footer_hints_agent_plain(
         h.push(("F6", "panel"));
     }
     h.push(("Ctrl+N", "new"));
-    h.push(("F1", "legend"));
+    h.push(("F1", "hub"));
     h
 }
 

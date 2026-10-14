@@ -189,7 +189,7 @@ fn handle_background_agent_key(app: &mut App, code: KeyCode, modifiers: KeyModif
         KeyCode::Down | KeyCode::Char('j') => app.scroll_log_down(),
         KeyCode::Up | KeyCode::Char('k') => app.scroll_log_up(),
         KeyCode::Char('q') => app.running = false,
-        KeyCode::F(1) => app.show_legend = !app.show_legend,
+        KeyCode::F(1) => app.toggle_hub(),
         KeyCode::Char('e') if !app.agents_rag_focused => app.open_edit_dialog(),
         _ => {}
     }
@@ -312,7 +312,7 @@ fn handle_focus_shortcuts(app: &mut App, code: KeyCode, modifiers: KeyModifiers)
         || handle_orphaned_session_key(app, code)
         || handle_preview_shortcut(app, code)
         || handle_termination_shortcut(app, code, modifiers)
-        || handle_legend_shortcut(app, code)
+        || handle_hub_shortcut(app, code)
         || handle_agent_cycle_shortcut(app, code, modifiers)
 }
 
@@ -441,12 +441,12 @@ fn handle_termination_shortcut(app: &mut App, code: KeyCode, modifiers: KeyModif
     true
 }
 
-fn handle_legend_shortcut(app: &mut App, code: KeyCode) -> bool {
+fn handle_hub_shortcut(app: &mut App, code: KeyCode) -> bool {
     if code != KeyCode::F(1) {
         return false;
     }
 
-    app.show_legend = !app.show_legend;
+    app.toggle_hub();
     true
 }
 

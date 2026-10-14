@@ -64,6 +64,19 @@ impl DurationUnit {
     }
 }
 
+impl Apply {
+    /// Short badge for the hub and `config_list`: hot / next run /
+    /// restart daemon / restart tui.
+    pub fn badge(self) -> &'static str {
+        match self {
+            Apply::Hot => "hot",
+            Apply::NextRun => "next run",
+            Apply::RestartDaemon => "restart daemon",
+            Apply::RestartTui => "restart tui",
+        }
+    }
+}
+
 /// When a changed value takes effect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Apply {
@@ -107,6 +120,19 @@ impl Group {
             Group::Notifications => "Notifications",
         }
     }
+}
+
+impl Group {
+    /// Every group in presentation order (the hub's left column).
+    pub const ALL: [Group; 7] = [
+        Group::General,
+        Group::TuiAppearance,
+        Group::GraphsEngine,
+        Group::AgentsHarnesses,
+        Group::RagIntelligence,
+        Group::DaemonStorage,
+        Group::Notifications,
+    ];
 }
 
 /// Where a setting's effective value came from.
@@ -449,6 +475,21 @@ mod tests {
         assert_eq!(action_for(Apply::NextRun), "applies on next run");
         assert_eq!(action_for(Apply::RestartDaemon), "restart the daemon");
         assert_eq!(action_for(Apply::RestartTui), "restart the TUI");
+    }
+
+    #[test]
+    fn apply_badge_covers_every_mode() {
+        assert_eq!(Apply::Hot.badge(), "hot");
+        assert_eq!(Apply::NextRun.badge(), "next run");
+        assert_eq!(Apply::RestartDaemon.badge(), "restart daemon");
+        assert_eq!(Apply::RestartTui.badge(), "restart tui");
+    }
+
+    #[test]
+    fn group_all_lists_every_group_in_order() {
+        assert_eq!(Group::ALL.len(), 7);
+        assert_eq!(Group::ALL[0], Group::General);
+        assert_eq!(Group::ALL[6], Group::Notifications);
     }
 
     #[test]

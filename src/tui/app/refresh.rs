@@ -50,6 +50,12 @@ impl App {
         // daemon's watcher saw, publishes a settings revision. When it moves,
         // re-read the settings this TUI renders — no restart needed.
         self.poll_settings_revision();
+        // CT31: apply any finished Settings-tab fetch/write, then start a new
+        // one if the hub's Settings tab is visible and the throttle allows.
+        self.poll_settings_rows();
+        self.poll_settings_write();
+        self.refresh_settings_rows();
+        self.dismiss_settings_message();
         // CT1 multi-face panel: recompute the visible face from the
         // switching rule after every data refresh above has run.
         self.tick_panel_face();
@@ -763,5 +769,45 @@ impl App {
             WhimContext::Idle
         };
         self.whimsg.set_ambient(ctx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::application::ports::StateRepository;
+    use crate::db::Database;
+    use crate::tui::ui::theme::Theme;
+    use std::sync::Arc;
+    use tempfile::{tempdir, NamedTempFile};
+
+    /// A `settings_changed` revision for `theme` must swap the in-memory
+    /// theme on the next poll, without a restart (CT31 hot apply).
+    #[test]
+    fn settings_changed_swaps_the_theme_next_frame() {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        std::mem::forget(tmp);
+        let db = Arc::new(Database::new(&path).unwrap());
+        let data_dir = tempdir().unwrap();
+        std::fs::write(data_dir.path().join("config.toml"), "theme = \"modern\"\n").unwrap();
+
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(app.theme, Theme::classic(), "starts on the passed config");
+
+        app.db
+            .set_state(
+                crate::daemon::config_watch::SETTINGS_REVISION_KEY,
+                "1|theme",
+            )
+            .unwrap();
+        app.poll_settings_revision();
+
+        assert_eq!(app.theme, Theme::modern(), "theme hot-applied");
     }
 }

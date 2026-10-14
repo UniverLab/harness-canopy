@@ -263,7 +263,8 @@ impl App {
     /// writer of `config.toml` — the TUI never writes the file itself, so a
     /// pin can no longer drop the user's comments or race another writer.
     /// With the daemon down the pin still applies in memory for this session
-    /// and the status banner says so.
+    /// and the status banner says so. CT31 keeps this path unchanged: the
+    /// hub's Settings tab writes through the same `config_set`.
     fn save_panel_pinned_face(&mut self) {
         let value = self
             .panel_pinned
@@ -876,6 +877,32 @@ mod tests {
     fn crews_from_str() {
         assert_eq!(PanelFace::from_str("crews"), Some(PanelFace::Crews));
         assert_eq!(PanelFace::Crews.label(), "crews");
+    }
+
+    /// CT31 requirement 5: the F6 pin must go through the daemon's
+    /// `config_set`, never a direct `CanopyConfig::save` — the TUI must not
+    /// write `config.toml` itself.
+    #[test]
+    fn save_panel_pinned_face_calls_config_set() {
+        use crate::application::ports::StateRepository;
+        use crate::tui::mcp_client::test_support::spawn_fake_daemon;
+
+        let fake = spawn_fake_daemon(serde_json::json!({
+            "content": [{ "type": "text", "text": "{}" }],
+            "isError": false
+        }));
+        let mut app = test_app();
+        app.db.set_state("port", &fake.port).unwrap();
+
+        app.pin_panel_face(Some(PanelFace::Knowledge));
+
+        let calls = fake.recorded_calls();
+        assert_eq!(calls.len(), 1, "exactly one daemon call: {calls:?}");
+        assert_eq!(calls[0]["name"], "config_set");
+        assert_eq!(
+            calls[0]["arguments"],
+            serde_json::json!({ "key": "pinned_panel_face", "value": "knowledge" })
+        );
     }
 
     #[test]

@@ -8,7 +8,7 @@ use crate::domain::models_db::{self, ModelCatalog, ModelEntry};
 use crate::tui::app::types::Focus;
 use crate::tui::ui::theme::Theme;
 
-mod dir_browser;
+pub(crate) mod dir_browser;
 
 /// Seed identity option for the agent creation dialog.
 #[derive(Clone, Debug)]

@@ -134,7 +134,7 @@ impl NewAgentDialog {
     }
 }
 
-fn collect_dir_names(entries: &[std::fs::DirEntry]) -> Vec<String> {
+pub(crate) fn collect_dir_names(entries: &[std::fs::DirEntry]) -> Vec<String> {
     entries
         .iter()
         .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))

@@ -42,7 +42,7 @@ pub fn handle_home_key(app: &mut App, code: KeyCode, _modifiers: KeyModifiers) -
             }
         }
         KeyCode::F(1) => {
-            app.show_legend = true;
+            app.open_hub();
         }
         KeyCode::Down | KeyCode::Char('j') if has_sidebar_preview => {
             app.dismiss_brain();
@@ -607,7 +607,7 @@ fn preview_function_key(
             }
         }
         KeyCode::F(10) => app.focus = Focus::Home,
-        KeyCode::F(1) => app.show_legend = true,
+        KeyCode::F(1) => app.open_hub(),
         _ => return false,
     }
     true
@@ -1245,9 +1245,9 @@ mod home_key_tests {
     fn home_f1_shows_legend() {
         let mut app = app_with_agents();
         app.focus = Focus::Home;
-        app.show_legend = false;
+        app.hub_open = false;
         handle_home_key(&mut app, KeyCode::F(1), KeyModifiers::NONE).unwrap();
-        assert!(app.show_legend);
+        assert!(app.hub_open);
     }
 
     #[test]
@@ -1414,9 +1414,9 @@ mod preview_key_tests {
     fn preview_f1_shows_legend() {
         let mut app = app_with_agents();
         app.focus = Focus::Preview;
-        app.show_legend = false;
+        app.hub_open = false;
         handle_preview_key(&mut app, KeyCode::F(1), KeyModifiers::NONE).unwrap();
-        assert!(app.show_legend);
+        assert!(app.hub_open);
     }
 
     #[test]

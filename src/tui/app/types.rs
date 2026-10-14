@@ -377,7 +377,9 @@ pub struct App {
     pub(crate) hidden_activity_workdirs: HashSet<String>,
     pub(crate) forced_activity_workdirs: HashSet<String>,
     pub(crate) term_width: u16,
-    pub(crate) show_legend: bool,
+    /// CT31: whether the F1 Canopy hub overlay is open.
+    pub(crate) hub_open: bool,
+    /// Cursor of the hub's `Missions & stats` tab.
     pub(crate) legend_selected: usize,
     pub(crate) show_copied: bool,
     pub(crate) copied_at: std::time::Instant,
@@ -498,6 +500,9 @@ pub struct App {
     /// are routed here only while `panel_focused` and the Crews face is
     /// visible; data arrives through the daemon client only (never SQLite).
     pub(crate) crews: crate::tui::app::crews_face::CrewsFaceState,
+    /// CT31: the F1 Canopy hub's session-only state (last-used tab, the
+    /// Settings tab's data and editors, the Keys tab's scroll offset).
+    pub(crate) hub: crate::tui::app::hub::HubState,
     /// Set by a mouse-wheel scroll over the panel; consumed (cleared) by
     /// the next panel-face tick, which drops the pending switch with it.
     pub(crate) panel_interacting: bool,
