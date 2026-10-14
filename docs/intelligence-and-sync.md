@@ -14,6 +14,10 @@ Canopy persists what agents learn, scoped to projects.
   the canonical workdir path, truncated to 8 hex chars), auto-detected
   from the session workdir. Agents never set it manually.
 - **Node kinds** — facts, patterns and session summaries.
+- **Writes** — `intelligence_upsert` is all-or-nothing. A relation whose
+  target cannot be resolved fails the whole call and leaves no half-written
+  node behind. A relation target may be a short id prefix, which is resolved
+  to the full id before anything is written.
 - **Full-text search** — `intelligence_search` queries nodes by text and
   optional kind filter across all projects.
 - **Graph walk** — `intelligence_graph_walk` traverses from any node up

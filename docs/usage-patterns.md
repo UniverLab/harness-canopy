@@ -135,11 +135,12 @@ window.
 
 ## 4. Draft ensemble — Proven
 
-An ensemble is 2–8 agent nodes (2–16 for the sequential `cascade`/`round_robin`
-kinds, which dispatch one member at a time so a longer list only adds
-rotation/fallback depth — parallel stays at 8 because it runs every member
-concurrently) that get the same prompt, plus a quorum (parallel) or single dispatch
-(cascade/round_robin). The canonical use spends the expensive
+An ensemble is a set of agent nodes that get the same prompt, plus a quorum
+(parallel) or single dispatch (cascade/round_robin). A parallel ensemble takes
+2–8 members by default, since it runs every member concurrently; the
+sequential `cascade`/`round_robin` kinds take 2–16, because they dispatch one
+member at a time and a longer list only adds rotation/fallback depth. Both caps
+can be raised in settings (see [Tuning the engine](graphs.md#tuning-the-engine)). The canonical use spends the expensive
 model once, on a pre-digested problem.
 
 ```mermaid
@@ -399,6 +400,24 @@ the case where you want something actively trying to falsify the fix before
 it lands.
 
 ---
+
+## Resuming and redirecting a run
+
+Three levers, from least to most intrusive:
+
+- **Retry or skip the stuck node.** `graph_continue` with
+  `retry_current_node` re-runs the node the run stopped on; `skip_next_spec`
+  moves past the spec. Use these first.
+- **Start a spec at a node you choose.** When everything before a node is
+  already right, a directed run (`graph_continue run_from_node`, or
+  `canopy graph run <graph> --from <node>`) begins at that node and reuses the
+  recorded output of every earlier node. Use it after a crash, a rewired
+  ensemble or a hand fix, instead of paying for the earlier nodes again. The
+  run is refused, and names the missing node, when a prompt or check still
+  needs output that was never recorded for the spec.
+- **Keep a related run warm.** Put specs that share context in one queue
+  group. A grouped spec resumes the harness session its previous completed
+  sibling used, so the repo is not analysed again from cold.
 
 ## Choosing a shape
 

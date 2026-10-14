@@ -25,6 +25,7 @@ to install)).
 | `canopy daemon logs` | Show the daemon log |
 | `canopy daemon install-service` | Register as a system service |
 | `canopy daemon uninstall-service` | Remove the system service |
+| `canopy daemon health-check` | Run the daily database integrity check and backup now, instead of waiting for the daemon to find an idle moment (see [Installation](installation.md#health-check)) |
 
 ## Updates
 
@@ -50,6 +51,7 @@ Plain `canopy update` exits 2 on the same lookup errors.
 |---|---|
 | `canopy setup` | Interactive setup wizard — detects AI CLIs, generates `~/.canopy/config.toml` |
 | `canopy setup --local-registry <path>` | Use a local registry directory (for registry development) |
+| `canopy setup --force-skills` | Overwrite local skill files that diverge from the sync source, even when they were edited locally (default: skip them with a warning) |
 | `canopy mcp` | MCP wizard — sync/add/remove canopy's MCP entry across platforms |
 | `canopy mcp --local-registry <path>` | Run the MCP wizard against a local registry directory instead of GitHub (same flag as `canopy setup --local-registry`) |
 | `canopy mcp` → Add | Add a server via pasted README JSON, local stdio command (with args + env), or remote URL (with headers); previews entries, marks `(replaces existing)` overwrites, then asks `Install on N platform(s)?` |
@@ -98,6 +100,7 @@ missing.
 | `canopy graph reset <id-or-name> --specs <id>...` | Reset specific spec ids, even if already completed |
 | `canopy graph reset <id-or-name> --yes` | Skip the confirmation prompt |
 | `canopy graph reset <id-or-name> --clear-notes` | Also delete the reset specs' spec notes (default keeps them) |
+| `canopy graph remove-spec <id-or-name> <spec-id>` | Unbind a spec from the graph, making it a standalone backlog spec; its execution history is kept |
 | `canopy graph autorun <id-or-name> --at <iso8601>` | Schedule a one-shot resume at a future time |
 | `canopy graph autorun <id-or-name> --quota-reset-message <text>` | Schedule a resume from a raw CLI quota-limit message |
 | `canopy graph autorun <id-or-name> --cancel` | Cancel a pending autorun schedule |
@@ -133,6 +136,7 @@ Read-only inspection of registered agents, served from the local database
 | `canopy spec skip <spec-id> --reason <text>` | Mark a standalone spec as skipped |
 | `canopy spec reopen <spec-id> --reason <text>` | Reopen a completed/skipped spec back to pending |
 | `canopy spec convert` | Migrate legacy heading-format spec bodies to the tagged `<spec>` format (skips tagged and running specs; prints a report) |
+| `canopy spec notes <spec-id>` | Print every spec note of a spec, newest first, with its owner, last update and body (see [Spec notes](graphs.md#spec-notes)) |
 
 ## Availability roster
 
@@ -205,6 +209,78 @@ hand.
 | `canopy rag auto-index stop` | Pause indexing without losing the queue |
 | `canopy rag report` | Detailed per-file indexing report, store footprint and health |
 | `canopy rag compact` | Merge store fragments and prune old versions (daemon does it, or this process when the daemon is down) |
+| `canopy rag backfill` | Index every configured file that is not in the vector store yet |
+| `canopy rag purge [--yes]` | Delete the entire vector store and reset all RAG state; asks for confirmation unless `--yes` (`-y`) is given |
+| `canopy rag model retry` | Clear a failed local embedding-model download so the daemon's background loop retries it, without re-running setup |
+
+## Clean
+
+`canopy clean` removes stale data. The default run is a soft cleanup:
+
+| Command | Description |
+|---|---|
+| `canopy clean --dry-run` | Preview what would be removed; deletes and modifies nothing |
+| `canopy clean` | Soft cleanup: sessions and files older than `clean.retention_days`, and graph event-log rows older than `graph_event_retention_days` for graphs that are not running |
+| `canopy clean --older-than <days>` | Override the retention window for this run only |
+| `canopy clean --hard` | Also delete orphaned projects (workdir missing) and their dependent rows; asks for confirmation unless `--yes` is given. Soft cleanup runs first |
+| `canopy clean --yes` | Skip the confirmation prompt that `--hard` requires. A typo here can delete a real cascade |
+| `canopy clean --no-reclaim` | Skip reclaiming freed database space (VACUUM and WAL checkpoint) even when this run deleted enough rows to warrant it |
+| `canopy clean --stop-daemon` | Consent to stop a running daemon for a warranted reclaim, then restart it exactly as it was. Without it, an interactive terminal is prompted; a non-interactive run skips reclamation while the daemon is up |
+
+Reclaim runs only when a run deletes at least `clean.reclaim_min_deleted_rows`
+rows (default 50). It takes an exclusive lock and rewrites the whole database
+file, which is why it can be skipped or deferred.
+
+## Settings reference
+
+Every key the registry declares, with its default and range. `canopy config
+list` prints the same keys with the value this machine actually uses and where
+it came from. **Apply** says when a change takes effect: `applied` (at once),
+`applies on next run`, `restart the daemon` or `restart the TUI`.
+
+| Key | Default | Range | Apply | Meaning |
+|---|---|---|---|---|
+| `mcp_filesystem_root` | home directory | — | next run | Root directory the MCP filesystem server exposes |
+| `temperature_unit` | `celsius` | `celsius`, `fahrenheit` | restart the TUI | Temperature unit for the TUI's system widgets |
+| `theme` | `classic` | `classic`, `modern` | applied | TUI colour theme: bordered or borderless |
+| `pinned_panel_face` | `auto` | `auto`, `activity`, `knowledge`, `graph`, `crews` | applied | Pinned right-panel face; `auto` lets the panel switch on its own |
+| `tui.datetime_format` | `%Y-%m-%d %H:%M` | chrono format | applied | Dates and times in the TUI (validated by formatting a fixed instant) |
+| `tui.time_format` | `%H:%M` | chrono format | applied | Time-only labels in the TUI |
+| `tui.panel_dwell_seconds` | 10 | 0–300 | applied | Seconds a panel event holds the right panel; 0 disables the dwell |
+| `tui.brians_brain` | `true` | bool | applied | Home-banner animation |
+| `tui.atmosphere` | `true` | bool | applied | Fireflies and dandelions |
+| `tui.scroll_step` | 3 | 1–20 | applied | Lines per scroll event |
+| `tui.page_step` | 15 | 5–100 | applied | Lines per page-up/down |
+| `notifications.enabled` | `true` | bool | applied | Desktop notifications |
+| `update.check_enabled` | `true` | bool | applied | Automatic update checks |
+| `update.check_interval_hours` | 24 | 1–720 | applied | Hours between automatic update checks |
+| `announcements_enabled` | `true` | bool | next run | Upgrade and tip announcements |
+| `embeddings_model` | empty | — | restart the daemon | Embedding model used by the knowledge layer |
+| `embeddings_idle_unload_secs` | 600 | 1–86400 s | restart the daemon | Idle time before the embedding model is unloaded |
+| `similarity_threshold` | 0.25 | 0.0–1.0 | next run | Lexical-cohesion threshold for semantic chunk merging |
+| `rag_personal_dirs` | `[]` | list of paths | next run | Personal directories indexed recursively |
+| `rag_max_file_mb` | 10 | 1–ceiling | next run | Per-file indexing size cap, in MB |
+| `rag_vector_cache_entries` | 64 | 1–4096 | restart the daemon | LanceDB index cache ceiling, in entries |
+| `skills.sources` | the UniverLab skills repo | list of tables | restart the daemon | Git sources for the skill store, checked in order (edit by hand) |
+| `skills.ttl_minutes` | 15 | 0–10080 | next run | Minutes a fetched skill is served before its source is re-checked |
+| `models.catalog_ttl_minutes` | 1440 | 1–43200 | next run | Minutes the models.dev catalog cache is served |
+| `models.native_ttl_minutes` | 60 | 1–43200 | next run | Minutes a platform's native model list is served |
+| `agents.probe_timeout_seconds` | 30 | 5–300 s | applied | Timeout for a probe before the harness gives up |
+| `scheduler.retry_enabled` | `true` | bool | next run | Retry a failed scheduled run after a delay |
+| `scheduler.retry_delay_minutes` | 60 | 1–1440 | next run | Wait before a scheduled run is retried |
+| `scheduler.retry_max` | 3 | 0–20 | next run | Retries of a failed scheduled run |
+| `spec_attempt_limit` | 3 | 1–20 | restart the daemon | Separate graph executions a spec may fail with a verdict before it is blocked |
+| `ensemble_concurrency_cap` | 4 | 1–64 | restart the daemon | Ensemble members that run at once across every graph |
+| `graphs.*` | see [Tuning the engine](graphs.md#tuning-the-engine) | see there | see there | Graph engine retry budgets, ensemble member caps and check output |
+| `clean.retention_days` | 7 | 1–3650 days | next run | Days kept before `canopy clean` removes sessions and files |
+| `graph_event_retention_days` | 90 | 1–3650 days | next run | Days a graph's event log is kept before `canopy clean` prunes it |
+| `clean.reclaim_min_deleted_rows` | 50 | 0–100000 | applied | Deleted rows that trigger VACUUM during `canopy clean` |
+| `activity.retention_per_workdir` | 500 | 50–100000 | applied | Activity-log entries kept per workdir |
+
+`scheduler.retry_*` and `spec_attempt_limit` are not in `graphs.*`, which is
+why they are listed here.
+
+## Spec queues
 
 ## Plumbing
 

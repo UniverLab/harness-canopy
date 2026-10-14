@@ -148,12 +148,13 @@ a concurrent commit from outside this run isn't a concern.
 
 ## Ensembles
 
-An **ensemble** is a group of 2–8 `agent` nodes in parallel (2–16 for the
-sequential `cascade`/`round_robin` kinds, whose members run one at a time —
-parallel stays at 8 because it runs every member concurrently) that receive
-the same
-prompt, plus a quorum that waits for every member
-before routing onward. It replaces what would otherwise be N member
+An **ensemble** is a group of `agent` nodes that receive the same prompt,
+plus a quorum that waits for every member before routing onward. A
+`parallel` ensemble runs 2–8 members at once by default (up to 16 if you
+raise `graphs.ensemble_max_members_parallel`). A `cascade` or `round_robin`
+ensemble runs its members one at a time, so it takes 2–16 by default (up to
+32 with `graphs.ensemble_max_members_sequential`). Both caps are listed in
+[Tuning the engine](#tuning-the-engine). It replaces what would otherwise be N member
 nodes, N prompts, and 2N+2 edges wired by hand — `graph_add_ensemble`
 creates the whole unit in one call:
 
@@ -210,7 +211,8 @@ source) alongside its expanded nodes.
 The quorum's consolidated output is one document with a
 `## <platform/model> [pass|fail]` section per member, in member order. The
 quorum reports pass when at least `min_pass` members passed. Member
-execution is capped by a global concurrency limit (default 4) so an
+execution is capped by a global concurrency limit
+(`ensemble_concurrency_cap`, default 4, counted across every graph) so an
 8-member ensemble queues rather than forking every member at once.
 
 By default a **parallel** quorum waits for every member branch to
@@ -479,6 +481,12 @@ the same input it had (the same command for a check node, the same
 `previous_feedback` for an ensemble member) — not whichever node an
 edge would have led to.
 
+When a node is terminated, canopy also ends the harness session that node
+started, for platforms that declare how to end a session (opencode does).
+Without that, a terminated opencode session could be resumed by the
+platform's background service after a restart and edit the repo beside the
+next attempt.
+
 A spec interrupted by a no-verdict ensemble block (see
 [No-verdict blocks](#no-verdict-blocks)) is resumed the same way:
 `graph_continue` with `retry` re-enters the blocked ensemble with its
@@ -655,7 +663,18 @@ bound specs:
 | `queue_reorder` | Full replacement of a queue's order |
 | `queue_set_group` | Set or clear a member's context group |
 
-Pass a queue to `graph_run` via `queue_id`.
+Pass a queue to `graph_run` via `queue_id` (or `canopy graph run <graph>
+--queue <queue-id>`).
+
+**Context groups.** A queue member may carry a `group` label. Grouped
+specs stay together: `queue_add_spec` with a `group` lands the spec right
+after the group's last pending member, and `queue_set_group` (or
+`canopy queue group`) moves a member next to its group. `queue_reorder`
+refuses an order that would split a group's pending members, and reports
+the positions that would have split it; nothing changes on refusal. Members
+of one group share a warm harness session: a grouped spec resumes the
+session captured by its previous successfully-completed sibling instead of
+analysing the repo from cold. Ungrouped members never share a session.
 
 Queue membership is unaffected by `graph_run` — specs stay standalone.
 The `graph info` CLI and `graph_get` MCP tool show queue-driven progress
@@ -861,10 +880,7 @@ moved.
 When a graph fails, the node run history lets you diagnose exactly what
 happened:
 
-```
-canopy graph runs <graph_id> [--node <node_id>] [--limit <n>]
-```
-
+The CLI prints the most recent node runs in `canopy graph info <graph>`.
 Over MCP: `graph_node_runs_list { graph_id, node_id?, spec_id?, limit? }`
 returns the most recent runs first (default 20, capped at 200).
 `graph_node_run_get { run_id }` fetches one run's full stored input and
@@ -985,10 +1001,16 @@ retry budgets and caps. Each keeps its default until you set it.
 | `graphs.infra_retry_limit` | 2 | Infra-crash retries before the infra failure falls through the error edge. |
 | `graphs.infra_crash_max_seconds` | 60 | Longest an infra crash may last before the retry budget is exhausted. |
 | `graphs.infra_backoff_seconds` | 30 | Backoff between infra retries. |
-| `graphs.straggler_timeout_minutes` | 30 | Default timeout for a **new** ensemble; existing ensembles keep theirs. |
-| `graphs.ensemble_max_members_parallel` | 8 | Largest member count a `parallel` ensemble may have. |
-| `graphs.ensemble_max_members_sequential` | 16 | Largest member count for a `cascade`/`round_robin` ensemble, and the largest crew. |
-| `graphs.check_output_max_kib` | 64 | Check-output tail kept, in KiB. |
+| `graphs.straggler_timeout_minutes` | 30 | Default timeout (1–480) for a **new** ensemble; existing ensembles keep theirs. |
+| `graphs.ensemble_max_members_parallel` | 8 (range 2–16) | Largest member count a `parallel` ensemble may have. Lowering it never edits an existing ensemble. |
+| `graphs.ensemble_max_members_sequential` | 16 (range 2–32) | Largest member count for a `cascade`/`round_robin` ensemble, and the largest crew. |
+| `graphs.check_output_max_kib` | 64 (range 16–4096) | Check-output tail kept, in KiB. |
+
+Two more engine settings sit outside the `graphs.` prefix (see
+[CLI reference](cli-reference.md#settings-reference)):
+`spec_attempt_limit` (default 3) caps how many separate executions of a spec
+may fail with a verdict before it is blocked, and `ensemble_concurrency_cap`
+(default 4) caps how many ensemble members run at once across every graph.
 
 The three `graphs.infra_*` settings resolve with this precedence, strongest
 first: **member > ensemble > the platform's `clis[]` entry > the global

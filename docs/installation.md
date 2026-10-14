@@ -113,6 +113,7 @@ All state lives under `~/.canopy/`:
 | Data | Location | Format |
 |------|----------|--------|
 | Structured data | `~/.canopy/background_agents.db` | SQLite (WAL mode) |
+| Database backup | `~/.canopy/background_agents.db.backup` | SQLite, written by the daily health routine |
 | Vector embeddings | `~/.canopy/rag/vectors.lancedb` | LanceDB |
 | Seed identities | `~/.canopy/seeds/<id>/identity.toml` | TOML |
 | Terminal history | `~/.canopy/terminals/<name>/history.toml` | TOML |
@@ -158,6 +159,18 @@ canopy doctor
 
 Checks the data directory, database, config, harnesses, RAG status, file
 watchers, daemon process, registry connectivity and auto-update health.
+
+The database has a daily routine: a full integrity check and foreign-key
+check, then one verified backup written with `VACUUM INTO`, replacing the
+previous backup. It runs only while the daemon is idle (no graph running, no TUI
+attached). A busy daemon defers it, and after 72 hours of deferral it runs
+anyway. `canopy doctor` reports the routine's last outcome, the backup and
+its age, and how many times it has been deferred, and warns when it has never
+completed. To run the check and backup now:
+
+```bash
+canopy daemon health-check
+```
 For platforms, it confirms each configured binary is present and
 executable on `PATH`, and — when the entry declares `identity_args` /
 `identity_pattern` — that the binary really is that program; a wrong

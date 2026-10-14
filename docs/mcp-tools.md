@@ -1,13 +1,17 @@
 ---
 title: MCP Tools
-description: All 111 MCP tools exposed by the canopy daemon, by category.
+description: All 115 MCP tools exposed by the canopy daemon, by category.
 order: 11
 ---
 
 # MCP Tools
 
-The daemon exposes **111 MCP tools** over Streamable HTTP (port 7755) and
+The daemon exposes **115 MCP tools** over Streamable HTTP (port 7755) and
 stdio. Connect any MCP-capable AI CLI with `canopy mcp`.
+
+Writes wait up to 5 seconds for a concurrent writer. If the database is still
+busy after that, the call fails with `<tool>: database busy after 5 s — nothing
+was written, retry`. Nothing changed, so retry the same call.
 
 ## Agent management (18)
 
@@ -68,10 +72,10 @@ stdio. Connect any MCP-capable AI CLI with `canopy mcp`.
 
 | Tool | Description |
 |---|---|
-| `skill_list` | List skills available from the dynamic skill store and configured catalogs |
+| `skill_list` | List skills available from the dynamic skill store and configured catalogs; an installed skill that its git source no longer lists is marked `orphaned`, and its description starts with `[removed upstream]` |
 | `skill_get` | Fetch a skill's full instructions by name, cloning or refreshing it on demand |
 
-## Graph engine (41)
+## Graph engine (45)
 
 | Tool | Description |
 |---|---|
@@ -102,7 +106,7 @@ stdio. Connect any MCP-capable AI CLI with `canopy mcp`.
 | `graph_list` | List graphs |
 | `graph_crew` | List every graph's harness/model assignments — agent nodes outside ensembles, ensemble members and agent hooks with platform, model, timeout, crew and availability; `group_by: "pair"` summarises per platform/model pair. No prompt text is returned |
 | `graph_run` | Run a graph (optionally `start_node_id` to start the first spec at a chosen node) |
-| `graph_reset` | Reset a graph's pending specs |
+| `graph_reset` | Reset a graph's pending specs; `clear_notes: true` also deletes the reset specs' spec notes (kept by default) |
 | `graph_schedule_autorun` | Schedule a graph to resume or run |
 | `graph_pause` | Pause a running graph |
 | `graph_continue` | Continue a paused graph (retry/skip), or start a spec at a chosen node with `run_from_node` |
@@ -129,7 +133,7 @@ See [Graphs](graphs.md).
 
 Kept callable for the whole 3.x line, but excluded from tool listings
 (`tools/list`) so nothing new adopts them — call the 3.x name instead. Not
-counted in the 111 tools above.
+counted in the 115 tools above.
 
 | Deprecated name | Renamed to (3.0.0) |
 |---|---|

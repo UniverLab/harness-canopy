@@ -646,6 +646,11 @@ burnt ceiling means a failed spec. Splitting work into specs that finish in
 under half an hour is not tidiness; it is the difference between losing one
 spec and losing a night.
 
+**Queue order can split a group.** A queue reorder that would separate one
+context group's pending specs is refused and nothing changes. Put a spec in
+a group with `queue_add_spec` or `queue_set_group` and the engine keeps the
+group together, so it gets the warm session it shares with its siblings.
+
 **Commit rights are configuration, not instruction.** Three different models
 have committed against a capitalised "you have no commit rights" rule, each
 time handing the reviewers an empty diff. Mark the committer with
