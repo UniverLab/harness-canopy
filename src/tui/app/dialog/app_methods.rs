@@ -1,5 +1,6 @@
 use super::super::types::AgentEntry;
 use super::super::types::App;
+use super::background_action::BackgroundAction;
 use super::new_agent::{BackgroundTrigger, NewAgentDialog, NewTaskType};
 use super::prompt::SimplePromptDialog;
 use crate::domain::models::Trigger;
@@ -10,6 +11,7 @@ use super::launchpad::LaunchpadDialog;
 use crate::application::ports::AgentRepository;
 
 mod launch;
+mod launch_send;
 
 impl App {
     pub fn open_edit_dialog(&mut self) {
@@ -25,6 +27,7 @@ impl App {
             return; // editing not supported for Interactive/Terminal/Group
         };
         let mut dialog = NewAgentDialog::new(agent_dir);
+        dialog.send_target_names = NewAgentDialog::send_target_names(&self.session_names());
         dialog.prev_focus = Some(prev_focus);
         populate_dialog_from_agent(&mut dialog, a);
         dialog.refresh_model_suggestions();
@@ -48,9 +51,20 @@ impl App {
             _ => None,
         });
 
-        self.new_agent_dialog = Some(NewAgentDialog::new(agent_dir));
-        self.new_agent_dialog.as_mut().unwrap().prev_focus = Some(prev_focus);
+        let mut dialog = NewAgentDialog::new(agent_dir);
+        dialog.send_target_names = NewAgentDialog::send_target_names(&self.session_names());
+        dialog.prev_focus = Some(prev_focus);
+        self.new_agent_dialog = Some(dialog);
         self.focus = super::super::types::Focus::NewAgentDialog;
+    }
+
+    /// Live interactive session names, in display order — the same list the
+    /// scheduled-send prompt's target picker uses.
+    fn session_names(&self) -> Vec<String> {
+        self.interactive_agents
+            .iter()
+            .map(|agent| agent.name.clone())
+            .collect()
     }
 
     pub fn close_new_agent_dialog(&mut self) {
@@ -329,8 +343,11 @@ fn apply_scheduled_edit(
     if let Some(Trigger::Cron { schedule_expr }) = &mut agent.trigger {
         *schedule_expr = dialog.cron_expr.clone();
     }
-    agent.cli = dialog.selected_cli();
-    agent.model = model.map(String::from);
+    // A send_to_session agent has no CLI/model — a TUI edit keeps them unset.
+    if !dialog.is_send_to_session() {
+        agent.cli = dialog.selected_cli();
+        agent.model = model.map(String::from);
+    }
     agent.working_dir = if dialog.working_dir.is_empty() {
         None
     } else {
@@ -348,8 +365,10 @@ fn apply_watcher_edit(
     model: Option<&str>,
 ) {
     agent.prompt = dialog.prompt.clone();
-    agent.cli = dialog.selected_cli();
-    agent.model = model.map(String::from);
+    if !dialog.is_send_to_session() {
+        agent.cli = dialog.selected_cli();
+        agent.model = model.map(String::from);
+    }
     if let Some(Trigger::Watch { path, events, .. }) = &mut agent.trigger {
         *path = dialog.watch_path.clone();
         *events =
@@ -367,6 +386,15 @@ fn populate_dialog_from_agent(dialog: &mut NewAgentDialog, a: &crate::domain::mo
     dialog.model = a.model.clone().unwrap_or_default();
     dialog.working_dir = a.working_dir.clone().unwrap_or_default();
     dialog.field = 2;
+
+    if a.is_send_to_session() {
+        dialog.background_action = BackgroundAction::SendToSession;
+        if let Some(name) = a.action.target_session_name() {
+            if let Some(idx) = dialog.send_target_names.iter().position(|n| n == name) {
+                dialog.send_target_idx = idx;
+            }
+        }
+    }
 
     if let Some(idx) = dialog
         .available_clis
@@ -442,6 +470,7 @@ mod tests {
             last_run_ok: None,
             last_triggered_at: None,
             trigger_count: 3,
+            action: crate::domain::models::AgentAction::Headless,
         }
     }
 
@@ -469,6 +498,7 @@ mod tests {
             last_run_ok: None,
             last_triggered_at: None,
             trigger_count: 7,
+            action: crate::domain::models::AgentAction::Headless,
         }
     }
 

@@ -1536,6 +1536,7 @@ mod tests {
             last_run_ok: None,
             last_triggered_at: None,
             trigger_count: 0,
+            action: crate::domain::models::AgentAction::Headless,
         }
     }
 

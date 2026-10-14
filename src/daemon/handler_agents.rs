@@ -2,16 +2,19 @@
 //! Moved verbatim; tool names, schemas, and behaviour unchanged.
 
 use crate::application::ports::{AgentRepository, RunRepository};
-use crate::daemon::handler::{TaskTriggerHandler, SESSION_LIST_DEFAULT_LIMIT};
+use crate::daemon::handler::{OptionalExtension, TaskTriggerHandler, SESSION_LIST_DEFAULT_LIMIT};
 use crate::daemon::handler_formatting::{
-    agent_detail_json, append_temporal_agents_section, build_json_result, format_agent_info,
-    format_log_output, format_uptime, internal_error, make_log_path, recent_runs_output,
-    resolve_log_path,
+    agent_detail_json, append_send_session_section, append_temporal_agents_section,
+    build_json_result, format_agent_info, format_log_output, format_uptime, internal_error,
+    make_log_path, recent_runs_output, resolve_log_path,
 };
 use crate::daemon::handler_helpers::{
     apply_scalar_updates, apply_trigger_updates, handle_timed_out_run, new_agent_base,
     parse_report_status, prepare_cron_task, prepare_watch_task, update_agent_last_run,
     validate_report_summary, validate_run_transition, watcher_restart_needed,
+};
+use crate::daemon::handler_send_session::{
+    build_send_action, caller_session_id, classify_action, AddAction,
 };
 use crate::daemon::helpers::{data_dir, error_result, notify_run_result, success_result};
 use crate::daemon::params::*;
@@ -19,7 +22,9 @@ use crate::daemon::params_extract::Parameters;
 use crate::db::session::InteractiveSession;
 use crate::domain::models::Agent;
 use crate::domain::models::Trigger;
+use crate::domain::models::{AgentAction, Cli};
 use crate::domain::validation::validate_id;
+use axum::http::request::Parts;
 use rmcp::model::{CallToolResult, Content};
 use rmcp::tool;
 use rmcp::tool_router;
@@ -42,13 +47,27 @@ impl TaskTriggerHandler {
          Fields: minute(0-59) hour(0-23) day(1-31) month(1-12) weekday(0-6, 0=Sun). \
          Use duration_minutes for temporary agents that auto-expire. \
          The cli parameter is optional — if omitted, auto-detects from registry. \
-         The model parameter is optional — if omitted, the CLI uses its configured default."
+         The model parameter is optional — if omitted, the CLI uses its configured default. \
+         Set action to send_to_session with target_session_name (recommended) or target_session_id \
+         to deliver the prompt into a live interactive session instead of running a CLI; omit both \
+         to target your own session. Delivery waits until a TUI is open."
     )]
     pub(crate) async fn task_add(
         &self,
         Parameters(params): Parameters<TaskAddParams>,
+        OptionalExtension(parts): OptionalExtension<Parts>,
     ) -> Result<CallToolResult, McpError> {
         use crate::scheduler::validate_cron;
+
+        match classify_action(
+            params.action.as_deref(),
+            params.target_session_name.as_deref(),
+            params.target_session_id.as_deref(),
+        ) {
+            Ok(AddAction::Send) => return self.send_agent_add(&params, parts.as_ref()).await,
+            Ok(AddAction::Headless) => {}
+            Err(e) => return Ok(error_result(&e)),
+        }
 
         let prepared = match prepare_cron_task(&params, &validate_cron) {
             Ok(prepared) => prepared,
@@ -109,12 +128,26 @@ impl TaskTriggerHandler {
         name = "agent_watch",
         description = "Watch a file or directory for changes and execute a prompt when events occur. \
          The cli parameter is optional — if omitted, auto-detects from registry. \
-         The model parameter is optional — if omitted, the CLI uses its configured default model."
+         The model parameter is optional — if omitted, the CLI uses its configured default model. \
+         Set action to send_to_session with target_session_name (recommended) or target_session_id \
+         to deliver the prompt into a live interactive session instead of running a CLI; omit both \
+         to target your own session. Delivery waits until a TUI is open."
     )]
     pub(crate) async fn task_watch(
         &self,
         Parameters(params): Parameters<TaskWatchParams>,
+        OptionalExtension(parts): OptionalExtension<Parts>,
     ) -> Result<CallToolResult, McpError> {
+        match classify_action(
+            params.action.as_deref(),
+            params.target_session_name.as_deref(),
+            params.target_session_id.as_deref(),
+        ) {
+            Ok(AddAction::Send) => return self.send_agent_watch(&params, parts.as_ref()).await,
+            Ok(AddAction::Headless) => {}
+            Err(e) => return Ok(error_result(&e)),
+        }
+
         let prepared = match prepare_watch_task(&params) {
             Ok(prepared) => prepared,
             Err(e) => return Ok(error_result(&e)),
@@ -505,6 +538,7 @@ impl TaskTriggerHandler {
             log_dir,
         );
 
+        append_send_session_section(&mut status, &agents);
         append_temporal_agents_section(&mut status, &agents);
 
         // CB91: the RAG store's latest computed health, read from memory —
@@ -559,6 +593,7 @@ impl TaskTriggerHandler {
     pub(crate) async fn task_update(
         &self,
         Parameters(params): Parameters<TaskUpdateParams>,
+        OptionalExtension(parts): OptionalExtension<Parts>,
     ) -> Result<CallToolResult, McpError> {
         use crate::scheduler::validate_cron;
 
@@ -596,6 +631,34 @@ impl TaskTriggerHandler {
         if let Err(e) = apply_scalar_updates(&mut agent, &params) {
             return Ok(error_result(&e));
         }
+
+        if params.action.is_some()
+            || params.target_session_name.is_some()
+            || params.target_session_id.is_some()
+        {
+            let new_action = match build_send_action(
+                params.action.as_deref(),
+                params.target_session_name.clone(),
+                params.target_session_id.clone(),
+                caller_session_id(parts.as_ref(), self),
+            ) {
+                Ok(action) => action,
+                Err(e) => return Ok(error_result(&e)),
+            };
+            if matches!(new_action, AgentAction::Headless) {
+                if agent.is_send_to_session() && params.cli.is_none() {
+                    return Ok(error_result(
+                        "This agent delivers to a session; switching to headless needs a cli. Pass cli to switch back.",
+                    ));
+                }
+            } else {
+                agent.cli = Cli(String::new());
+                agent.model = None;
+                agent.effort = None;
+            }
+            agent.action = new_action;
+        }
+
         if let Err(e) = apply_trigger_updates(&mut agent, &params, &validate_cron) {
             return Ok(error_result(&e));
         }

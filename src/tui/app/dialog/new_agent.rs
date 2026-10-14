@@ -110,6 +110,14 @@ pub struct NewAgentDialog {
     pub yolo_mode: bool,
     /// Whether to launch in a sandbox (git worktree with instruction file).
     pub sandbox_mode: bool,
+    /// Delivery action for a background agent (CM53): run a CLI headlessly, or
+    /// deliver the prompt into a live interactive session.
+    pub background_action: super::background_action::BackgroundAction,
+    /// Index into `send_target_names` for the selected target session.
+    pub send_target_idx: usize,
+    /// Live session names offered as `send_to_session` targets, populated when
+    /// the dialog opens from the app's interactive session list.
+    pub send_target_names: Vec<String>,
     /// Index into `seed_options` for the selected seed identity.
     pub seed_index: usize,
     /// Available seed identity options.
@@ -182,6 +190,9 @@ impl NewAgentDialog {
             resume_sessions_empty: false,
             yolo_mode: false,
             sandbox_mode: false,
+            background_action: super::background_action::BackgroundAction::Headless,
+            send_target_idx: 0,
+            send_target_names: Vec::new(),
             seed_index: 0,
             seed_options,
         };

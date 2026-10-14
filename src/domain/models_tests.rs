@@ -21,6 +21,7 @@ fn sample_agent(id: &str, trigger: Option<Trigger>) -> Agent {
         last_run_ok: None,
         last_triggered_at: None,
         trigger_count: 0,
+        action: crate::domain::models::AgentAction::Headless,
     }
 }
 
@@ -507,4 +508,53 @@ fn test_trigger_watch_all_fields() {
     } else {
         panic!("expected Watch trigger");
     }
+}
+
+// ── CM53: AgentAction ──────────────────────────────────────────────────
+
+#[test]
+fn agent_action_missing_field_decodes_as_headless() {
+    let agent = sample_agent("a1", None);
+    let mut json = serde_json::to_value(&agent).unwrap();
+    json.as_object_mut().unwrap().remove("action");
+    let decoded: Agent = serde_json::from_value(json).unwrap();
+    assert_eq!(decoded.action, AgentAction::Headless);
+}
+
+#[test]
+fn send_to_session_refuses_both_targets() {
+    let err = AgentAction::send_to_session(Some("a".into()), Some("b".into())).unwrap_err();
+    assert!(err.contains("exactly one"), "error: {err}");
+}
+
+#[test]
+fn send_to_session_refuses_neither_target() {
+    assert!(AgentAction::send_to_session(None, None).is_err());
+}
+
+#[test]
+fn send_to_session_treats_blank_name_as_missing() {
+    assert!(AgentAction::send_to_session(Some("  ".into()), None).is_err());
+}
+
+#[test]
+fn validate_rejects_hand_built_both_targets() {
+    let action = AgentAction::SendToSession {
+        target_session_name: Some("a".into()),
+        target_session_id: Some("b".into()),
+    };
+    assert!(action.validate().is_err());
+}
+
+#[test]
+fn from_columns_reads_old_rows_as_headless_and_quarantines_unknown() {
+    assert_eq!(
+        AgentAction::from_columns(None, None, None).unwrap(),
+        AgentAction::Headless
+    );
+    assert_eq!(
+        AgentAction::from_columns(Some("headless"), None, None).unwrap(),
+        AgentAction::Headless
+    );
+    assert!(AgentAction::from_columns(Some("bogus"), None, None).is_err());
 }

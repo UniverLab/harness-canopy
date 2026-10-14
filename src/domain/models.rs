@@ -60,6 +60,117 @@ pub struct CorruptAgent {
     pub error: String,
 }
 
+/// How an agent fires when its trigger fires: spawn a headless CLI
+/// subprocess (the default), or deliver its rendered prompt into a live
+/// interactive session via `scheduled_sends`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AgentAction {
+    #[default]
+    Headless,
+    SendToSession {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_session_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_session_id: Option<String>,
+    },
+}
+
+impl AgentAction {
+    /// The only way to build a `SendToSession` action, so "exactly one
+    /// target" is refused at the model level. Blank strings count as unset.
+    pub fn send_to_session(name: Option<String>, id: Option<String>) -> Result<Self, String> {
+        let name = trim_target(name);
+        let id = trim_target(id);
+        match (name, id) {
+            (Some(name), None) => Ok(Self::SendToSession {
+                target_session_name: Some(name),
+                target_session_id: None,
+            }),
+            (None, Some(id)) => Ok(Self::SendToSession {
+                target_session_name: None,
+                target_session_id: Some(id),
+            }),
+            _ => Err(SEND_TARGET_ERROR.to_string()),
+        }
+    }
+
+    /// Re-checks the "exactly one target" rule for values built by struct
+    /// literal or decoded from the database.
+    pub fn validate(&self) -> Result<(), String> {
+        match self {
+            Self::Headless => Ok(()),
+            Self::SendToSession {
+                target_session_name,
+                target_session_id,
+            } => {
+                let has_name = target_session_name
+                    .as_deref()
+                    .is_some_and(|s| !s.trim().is_empty());
+                let has_id = target_session_id
+                    .as_deref()
+                    .is_some_and(|s| !s.trim().is_empty());
+                if has_name ^ has_id {
+                    Ok(())
+                } else {
+                    Err(SEND_TARGET_ERROR.to_string())
+                }
+            }
+        }
+    }
+
+    pub fn kind_str(&self) -> &'static str {
+        match self {
+            Self::Headless => "headless",
+            Self::SendToSession { .. } => "send_to_session",
+        }
+    }
+
+    /// The configured target session *name*, if this action targets one.
+    pub fn target_session_name(&self) -> Option<&str> {
+        match self {
+            Self::SendToSession {
+                target_session_name,
+                ..
+            } => target_session_name.as_deref(),
+            Self::Headless => None,
+        }
+    }
+
+    /// The configured target session *id*, if this action targets one.
+    pub fn target_session_id(&self) -> Option<&str> {
+        match self {
+            Self::SendToSession {
+                target_session_id, ..
+            } => target_session_id.as_deref(),
+            Self::Headless => None,
+        }
+    }
+
+    /// Decode the flat `action` / `target_session_id` / `target_session_name`
+    /// columns. A missing or `"headless"` kind is `Headless` (pre-CM53 rows);
+    /// an unknown kind is an error so the row is quarantined as corrupt.
+    pub fn from_columns(
+        kind: Option<&str>,
+        id: Option<String>,
+        name: Option<String>,
+    ) -> Result<Self, String> {
+        match kind {
+            None | Some("headless") => Ok(Self::Headless),
+            Some("send_to_session") => Self::send_to_session(name, id),
+            Some(other) => Err(format!("unknown action '{other}'")),
+        }
+    }
+}
+
+const SEND_TARGET_ERROR: &str = "send_to_session needs exactly one target: pass target_session_name or target_session_id (not both, not neither).";
+
+fn trim_target(value: Option<String>) -> Option<String> {
+    value
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 /// A unified agent — the core entity in canopy.
 ///
 /// An agent can have a trigger (cron schedule or file watcher) or no trigger
@@ -91,6 +202,11 @@ pub struct Agent {
     // Watch-specific
     pub last_triggered_at: Option<DateTime<Utc>>,
     pub trigger_count: u64,
+    /// How this agent fires when triggered. `Headless` (default) spawns a
+    /// CLI subprocess; `SendToSession` delivers the rendered prompt to a
+    /// live interactive session via `scheduled_sends`.
+    #[serde(default)]
+    pub action: AgentAction,
 }
 
 impl Agent {
@@ -134,6 +250,10 @@ impl Agent {
 
     pub fn is_watch(&self) -> bool {
         matches!(&self.trigger, Some(Trigger::Watch { .. }))
+    }
+
+    pub fn is_send_to_session(&self) -> bool {
+        matches!(self.action, AgentAction::SendToSession { .. })
     }
 }
 

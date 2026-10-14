@@ -206,6 +206,15 @@ fn push_agent_trigger_lines<'a>(lines: &mut Vec<Line<'a>>, agent: &'a Agent, the
 
 /// Append the always-present CLI/timeout lines plus the optional metadata rows.
 fn push_agent_metadata_lines<'a>(lines: &mut Vec<Line<'a>>, agent: &'a Agent, theme: &Theme) {
+    if agent.is_send_to_session() {
+        let description = crate::daemon::handler_formatting::describe_action(agent);
+        lines.push(Line::from(vec![
+            Span::styled("Delivers to: ", Style::default().fg(theme.dim_text)),
+            Span::raw(description.target.unwrap_or_default()),
+        ]));
+        return;
+    }
+
     lines.push(Line::from(vec![
         Span::styled("CLI:     ", Style::default().fg(theme.dim_text)),
         Span::raw(agent.cli.as_str()),

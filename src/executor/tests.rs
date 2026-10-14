@@ -28,6 +28,7 @@ fn agent_with_unresolvable_cli(id: &str, log_path: &std::path::Path) -> Agent {
         last_run_ok: None,
         last_triggered_at: None,
         trigger_count: 0,
+        action: crate::domain::models::AgentAction::Headless,
     }
 }
 
@@ -151,6 +152,7 @@ fn cron_agent(id: &str) -> Agent {
         last_run_ok: None,
         last_triggered_at: None,
         trigger_count: 0,
+        action: crate::domain::models::AgentAction::Headless,
     }
 }
 

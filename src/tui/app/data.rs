@@ -276,18 +276,32 @@ impl App {
         let Some(provenance) = send.provenance.as_ref() else {
             return false;
         };
-        if provenance.kind != "hook" {
-            return false;
+        match provenance.kind.as_str() {
+            "hook" => {
+                crate::domain::notification::send_notification(
+                    "Hook message delivered",
+                    &format!(
+                        "Graph '{}' sent a message to this session (event '{}').",
+                        provenance.graph_id, provenance.event
+                    ),
+                    crate::domain::notification::NotificationLevel::Info,
+                );
+                true
+            }
+            "agent_trigger" => {
+                crate::domain::notification::send_notification(
+                    "Agent message delivered",
+                    &format!(
+                        "Agent '{}' ({}) sent a message to this session.",
+                        provenance.agent_id.as_deref().unwrap_or(""),
+                        provenance.trigger.as_deref().unwrap_or("trigger")
+                    ),
+                    crate::domain::notification::NotificationLevel::Info,
+                );
+                true
+            }
+            _ => false,
         }
-        crate::domain::notification::send_notification(
-            "Hook message delivered",
-            &format!(
-                "Graph '{}' sent a message to this session (event '{}').",
-                provenance.graph_id, provenance.event
-            ),
-            crate::domain::notification::NotificationLevel::Info,
-        );
-        true
     }
 
     fn preserve_dead_scheduled_send(
@@ -613,6 +627,8 @@ mod tests {
             graph_id: "graph-1".into(),
             event: "on_failed".into(),
             session_id: None,
+            agent_id: None,
+            trigger: None,
             target_session_name: None,
         };
         let send_other = ScheduledSend {
@@ -713,6 +729,7 @@ mod tests {
             last_run_ok: None,
             last_triggered_at: None,
             trigger_count: 0,
+            action: crate::domain::models::AgentAction::Headless,
         };
         app.db.upsert_agent(&agent).expect("insert agent");
 

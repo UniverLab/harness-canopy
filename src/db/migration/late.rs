@@ -723,4 +723,42 @@ impl Database {
         }
         Ok(())
     }
+
+    /// CM53: add `action`/`target_session_id`/`target_session_name` columns to
+    /// `agents` for `send_to_session` delivery. `action` defaults to
+    /// `'headless'` so pre-existing rows keep their existing (CLI-spawn)
+    /// behaviour; the target columns default to NULL.
+    pub(in crate::db) fn migrate_agent_action_columns(conn: &Connection) -> Result<()> {
+        let has_action: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('agents') WHERE name = 'action'",
+                [],
+                |row| Ok(row.get::<_, i32>(0)? > 0),
+            )
+            .unwrap_or(false);
+        if !has_action {
+            conn.execute(
+                "ALTER TABLE agents ADD COLUMN action TEXT NOT NULL DEFAULT 'headless'",
+                [],
+            )
+            .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
+        }
+
+        for col in ["target_session_id", "target_session_name"] {
+            let has_col: bool = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) FROM pragma_table_info('agents') WHERE name = '{col}'"
+                    ),
+                    [],
+                    |row| Ok(row.get::<_, i32>(0)? > 0),
+                )
+                .unwrap_or(false);
+            if !has_col {
+                conn.execute(&format!("ALTER TABLE agents ADD COLUMN {col} TEXT"), [])
+                    .map_err(|e| anyhow::anyhow!("Migration failed: {e}"))?;
+            }
+        }
+        Ok(())
+    }
 }

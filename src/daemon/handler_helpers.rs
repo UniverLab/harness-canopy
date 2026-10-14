@@ -58,6 +58,26 @@ pub(crate) struct PreparedWatchTask {
     pub recursive: bool,
 }
 
+/// Validate a cron schedule and derive its expiry, shared by the headless
+/// `prepare_cron_task` and the CM53 `send_to_session` add path so both produce
+/// identical errors and expiry semantics.
+pub(crate) fn parse_schedule_and_expiry(
+    schedule: &str,
+    duration_minutes: Option<i64>,
+    validate_cron: &impl Fn(&str) -> bool,
+) -> Result<(String, Option<chrono::DateTime<Utc>>), String> {
+    let schedule_expr = validate_cron_schedule(schedule, validate_cron, |schedule| {
+        format!(
+            "Invalid cron expression '{}'. Must be a 5-field cron expression. \
+             Examples: '*/5 * * * *' (every 5 min), '0 9 * * *' (daily 9am).",
+            schedule
+        )
+    })?;
+    let expires_at =
+        duration_minutes.map(|minutes| Utc::now() + chrono::Duration::minutes(minutes));
+    Ok((schedule_expr, expires_at))
+}
+
 pub(crate) fn prepare_cron_task(
     params: &TaskAddParams,
     validate_cron: &impl Fn(&str) -> bool,
@@ -65,18 +85,14 @@ pub(crate) fn prepare_cron_task(
     validate_id(&params.id)?;
     validate_prompt(&params.prompt)?;
 
+    let cli = Cli::resolve(params.cli.as_deref())?;
+    let (schedule_expr, expires_at) =
+        parse_schedule_and_expiry(&params.schedule, params.duration_minutes, validate_cron)?;
+
     Ok(PreparedCronTask {
-        cli: Cli::resolve(params.cli.as_deref())?,
-        schedule_expr: validate_cron_schedule(&params.schedule, validate_cron, |schedule| {
-            format!(
-                "Invalid cron expression '{}'. Must be a 5-field cron expression. \
-                 Examples: '*/5 * * * *' (every 5 min), '0 9 * * *' (daily 9am).",
-                schedule
-            )
-        })?,
-        expires_at: params
-            .duration_minutes
-            .map(|minutes| Utc::now() + chrono::Duration::minutes(minutes)),
+        cli,
+        schedule_expr,
+        expires_at,
     })
 }
 
@@ -329,6 +345,7 @@ pub(crate) fn new_agent_base(
         last_run_ok: None,
         last_triggered_at: None,
         trigger_count: 0,
+        action: crate::domain::models::AgentAction::Headless,
     }
 }
 
@@ -501,6 +518,9 @@ mod tests {
     #[test]
     fn watcher_restart_needed_true() {
         let mut params = TaskUpdateParams {
+            action: None,
+            target_session_name: None,
+            target_session_id: None,
             id: "test".to_string(),
             new_id: None,
             prompt: None,
@@ -605,9 +625,13 @@ mod tests {
             last_run_ok: None,
             last_triggered_at: None,
             trigger_count: 0,
+            action: crate::domain::models::AgentAction::Headless,
         };
 
         let params = TaskUpdateParams {
+            action: None,
+            target_session_name: None,
+            target_session_id: None,
             id: "test".to_string(),
             new_id: None,
             prompt: Some("new prompt".to_string()),
@@ -649,9 +673,13 @@ mod tests {
             last_run_ok: None,
             last_triggered_at: None,
             trigger_count: 0,
+            action: crate::domain::models::AgentAction::Headless,
         };
 
         let params = TaskUpdateParams {
+            action: None,
+            target_session_name: None,
+            target_session_id: None,
             id: "test".to_string(),
             new_id: None,
             prompt: None,
@@ -693,9 +721,13 @@ mod tests {
             last_run_ok: None,
             last_triggered_at: None,
             trigger_count: 0,
+            action: crate::domain::models::AgentAction::Headless,
         };
 
         let params = TaskUpdateParams {
+            action: None,
+            target_session_name: None,
+            target_session_id: None,
             id: "test".to_string(),
             new_id: None,
             prompt: None,
@@ -739,6 +771,9 @@ mod tests {
     #[test]
     fn prepare_cron_task_valid() {
         let params = TaskAddParams {
+            action: None,
+            target_session_name: None,
+            target_session_id: None,
             id: "test-agent".to_string(),
             prompt: "Run tests".to_string(),
             schedule: "0 9 * * *".to_string(),
@@ -760,6 +795,9 @@ mod tests {
     #[test]
     fn prepare_cron_task_invalid_id() {
         let params = TaskAddParams {
+            action: None,
+            target_session_name: None,
+            target_session_id: None,
             id: "".to_string(),
             prompt: "Run tests".to_string(),
             schedule: "0 9 * * *".to_string(),
@@ -778,6 +816,9 @@ mod tests {
     #[test]
     fn prepare_cron_task_invalid_schedule() {
         let params = TaskAddParams {
+            action: None,
+            target_session_name: None,
+            target_session_id: None,
             id: "test-agent".to_string(),
             prompt: "Run tests".to_string(),
             schedule: "not a cron".to_string(),
@@ -796,6 +837,9 @@ mod tests {
     #[test]
     fn prepare_watch_task_valid() {
         let params = TaskWatchParams {
+            action: None,
+            target_session_name: None,
+            target_session_id: None,
             id: "test-watcher".to_string(),
             path: "/tmp/test".to_string(),
             events: vec!["create".to_string(), "modify".to_string()],
@@ -820,6 +864,9 @@ mod tests {
     #[test]
     fn prepare_watch_task_defaults() {
         let params = TaskWatchParams {
+            action: None,
+            target_session_name: None,
+            target_session_id: None,
             id: "test-watcher".to_string(),
             path: "/tmp/test".to_string(),
             events: vec!["modify".to_string()],
@@ -840,6 +887,9 @@ mod tests {
     #[test]
     fn prepare_watch_task_invalid_path() {
         let params = TaskWatchParams {
+            action: None,
+            target_session_name: None,
+            target_session_id: None,
             id: "test-watcher".to_string(),
             path: "".to_string(),
             events: vec!["modify".to_string()],
@@ -882,9 +932,13 @@ mod tests {
             last_run_ok: None,
             last_triggered_at: None,
             trigger_count: 0,
+            action: crate::domain::models::AgentAction::Headless,
         };
 
         let params = TaskUpdateParams {
+            action: None,
+            target_session_name: None,
+            target_session_id: None,
             id: "cron-agent".to_string(),
             new_id: None,
             prompt: None,

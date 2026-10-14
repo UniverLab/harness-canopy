@@ -681,7 +681,7 @@ mod tests {
     /// B7 A1 frozen snapshot: per-tool `name|sha256(description)|sha256(input_schema JSON)`.
     /// Any byte drift in a description or schema fails `tool_inventory_is_byte_identical`.
     const EXPECTED_TOOL_ROWS: &[&str] = &[
-                "agent_add|9d68a02373a5fddbeadced0e7863c7d816824428975fd76a7b7d410dde64e8c2|f4e62e346a1b0da8e4243cfde1fe49c3262b541c04bf56037931f63e44f6805e",
+                "agent_add|dce812557e165d8d06b92ab956bafaf4c4eccd29acd4216074adbce66d116570|7483eea0afc405f19c5e149fa2963fbc5c329d1a4984feb1ab3fa82fb94941bc",
                 "agent_disable|a5d3befdd0358cdb34f4cbceba2ad730b8cb7968bea1f4d5af15095cfc3e5d16|0b0c3f322df51316c53bc050ccdddd27c4296ae0ce3c97b074416a17f5bb8081",
                 "agent_enable|812c3569335836df22c0021c4591ab1642a739c0be32ab921aa3a9dad35040f3|0b0c3f322df51316c53bc050ccdddd27c4296ae0ce3c97b074416a17f5bb8081",
                 "agent_get|efc57a83aaf2b2b93b249749d2af313ad14b7d5f78bc63dfeb4a8067069d81fb|0b0c3f322df51316c53bc050ccdddd27c4296ae0ce3c97b074416a17f5bb8081",
@@ -695,8 +695,8 @@ mod tests {
                 "agent_run|39ae4bbed141b7635a135111a7cf767c2569bf36d7d2d64da8089091534706f1|0b0c3f322df51316c53bc050ccdddd27c4296ae0ce3c97b074416a17f5bb8081",
                 "agent_schedule_enable|ed852e08dc893d9cd6ae715374b0e695ee4516030ebe02b2e5ecb09aa0d98f1c|75b1290fa28ea5e614bbf45495964ab03ac917d86e3ce703843b403c8904221f",
                 "agent_status|d1054486453a2080fe05eb9ccbcd4a86aefe4894a2a93870b6b2bb9e8781b194|efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
-                "agent_update|5f6ad5332501fc94b77510ae0093dcf92d451b051a90b3843e3e134c2d029415|a82dea1e39582995a0f9579ba0a7a9ed5a4ee5214eb1d612600901ae02c363a2",
-                "agent_watch|fca0c0cedd156013122d4da513ee1409b06ff294f2915ac633c46bde361705d2|4cff7775405a9c6ed7d27980e11537c82a9141b706d4f32e5d168e59a5c1c527",
+                "agent_update|5f6ad5332501fc94b77510ae0093dcf92d451b051a90b3843e3e134c2d029415|36f48264461d4613308196fa21be49ce3f87de117e8f1471e68aedd8f27a4452",
+                "agent_watch|b7aeeaf163d575665d5e2f9699687dede83db72e17a55d0b1aa0becd998aea87|027d5fa87372afb37c5970c218175408a01801e964fe5b83cfd48cbe6951a601",
                 "blueprint_create|066e750e9f90069f2f3ed530cdff588725ea3751872f30ea1aec5758bb15b5d2|8bcf3050ebfd3b2d22ef822cdfd1c41d40448d7f65cb3c1d5ed51abbd9e73a8f",
                 "blueprint_delete|1eaa169fb5798e6d4095b44d1784bfb6a390925ec2e8513ca4dbe542119b69fb|12321d76b465455bffa88b83e79d533adc9ea8c854db8a5af7b5a559c93203a7",
                 "blueprint_list|3408d1c0af354e3890676ffa6fff2237a27a130aaa7b49ca3e0e075f95362584|efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
@@ -7513,6 +7513,7 @@ mod coverage_tests {
             last_run_ok: None,
             last_triggered_at: None,
             trigger_count: 0,
+            action: crate::domain::models::AgentAction::Headless,
         }
     }
 
@@ -9451,17 +9452,23 @@ mod endpoint_tests {
         let (_dir, db, handler) = endpoint_test_handler();
 
         let result = handler
-            .task_add(Parameters(TaskAddParams {
-                id: "agt-1".to_string(),
-                prompt: "run the tests".to_string(),
-                schedule: "*/5 * * * *".to_string(),
-                cli: Some("opencode".to_string()),
-                model: None,
-                effort: None,
-                duration_minutes: None,
-                working_dir: None,
-                timeout_minutes: None,
-            }))
+            .task_add(
+                Parameters(TaskAddParams {
+                    action: None,
+                    target_session_name: None,
+                    target_session_id: None,
+                    id: "agt-1".to_string(),
+                    prompt: "run the tests".to_string(),
+                    schedule: "*/5 * * * *".to_string(),
+                    cli: Some("opencode".to_string()),
+                    model: None,
+                    effort: None,
+                    duration_minutes: None,
+                    working_dir: None,
+                    timeout_minutes: None,
+                }),
+                OptionalExtension(None),
+            )
             .await
             .unwrap();
 
@@ -9472,23 +9479,197 @@ mod endpoint_tests {
     }
 
     #[tokio::test]
+    async fn agent_add_send_action_does_not_require_cli() {
+        let home = tempdir().unwrap();
+        let _home_guard = HomeVar::set(home.path());
+        let (_dir, db, handler) = endpoint_test_handler();
+
+        let result = handler
+            .task_add(
+                Parameters(TaskAddParams {
+                    action: Some("send_to_session".to_string()),
+                    target_session_name: Some("orch".to_string()),
+                    target_session_id: None,
+                    id: "nudge-1".to_string(),
+                    prompt: "nudge the orchestrator".to_string(),
+                    schedule: "0 * * * *".to_string(),
+                    cli: None,
+                    model: None,
+                    effort: None,
+                    duration_minutes: None,
+                    working_dir: None,
+                    timeout_minutes: None,
+                }),
+                OptionalExtension(None),
+            )
+            .await
+            .unwrap();
+
+        assert!(!is_err(&result), "{}", text(&result));
+        assert!(text(&result).contains("orch"), "{}", text(&result));
+        let stored = db.get_agent("nudge-1").unwrap().unwrap();
+        assert!(stored.is_send_to_session());
+        assert_eq!(stored.action.target_session_name(), Some("orch"));
+    }
+
+    #[tokio::test]
+    async fn agent_watch_send_action_registers_watcher() {
+        let home = tempdir().unwrap();
+        let _home_guard = HomeVar::set(home.path());
+        let (dir, db, handler) = endpoint_test_handler();
+
+        let result = handler
+            .task_watch(
+                Parameters(TaskWatchParams {
+                    action: Some("send_to_session".to_string()),
+                    target_session_name: None,
+                    target_session_id: Some("sess-1".to_string()),
+                    id: "watch-send-1".to_string(),
+                    path: dir.path().to_string_lossy().to_string(),
+                    events: vec!["modify".to_string()],
+                    prompt: "a spec changed".to_string(),
+                    cli: None,
+                    model: None,
+                    effort: None,
+                    debounce_seconds: None,
+                    recursive: None,
+                    timeout_minutes: None,
+                }),
+                OptionalExtension(None),
+            )
+            .await
+            .unwrap();
+
+        assert!(!is_err(&result), "{}", text(&result));
+        assert!(text(&result).contains("sess-1"), "{}", text(&result));
+        let stored = db.get_agent("watch-send-1").unwrap().unwrap();
+        assert!(stored.is_send_to_session());
+        assert!(matches!(stored.trigger, Some(Trigger::Watch { .. })));
+    }
+
+    #[tokio::test]
+    async fn agent_update_switching_to_headless_requires_cli() {
+        let home = tempdir().unwrap();
+        let _home_guard = HomeVar::set(home.path());
+        let (_dir, db, handler) = endpoint_test_handler();
+
+        let created = handler
+            .task_add(
+                Parameters(TaskAddParams {
+                    action: Some("send_to_session".to_string()),
+                    target_session_name: Some("orch".to_string()),
+                    target_session_id: None,
+                    id: "switch-1".to_string(),
+                    prompt: "p".to_string(),
+                    schedule: "0 * * * *".to_string(),
+                    cli: None,
+                    model: None,
+                    effort: None,
+                    duration_minutes: None,
+                    working_dir: None,
+                    timeout_minutes: None,
+                }),
+                OptionalExtension(None),
+            )
+            .await
+            .unwrap();
+        assert!(!is_err(&created), "{}", text(&created));
+
+        let result = handler
+            .task_update(
+                Parameters(TaskUpdateParams {
+                    action: Some("headless".to_string()),
+                    target_session_name: None,
+                    target_session_id: None,
+                    id: "switch-1".to_string(),
+                    new_id: None,
+                    prompt: None,
+                    cli: None,
+                    model: None,
+                    effort: None,
+                    schedule: None,
+                    working_dir: None,
+                    duration_minutes: None,
+                    path: None,
+                    events: None,
+                    debounce_seconds: None,
+                    recursive: None,
+                    enabled: None,
+                    notify_on_success: None,
+                }),
+                OptionalExtension(None),
+            )
+            .await
+            .unwrap();
+
+        assert!(is_err(&result), "{}", text(&result));
+        assert!(text(&result).contains("cli"), "{}", text(&result));
+        // The action is unchanged.
+        assert!(db
+            .get_agent("switch-1")
+            .unwrap()
+            .unwrap()
+            .is_send_to_session());
+    }
+
+    #[test]
+    fn agent_get_hides_cli_for_send_agents() {
+        let mut agent = crate::daemon::handler_helpers::new_agent_base(
+            "send-1".to_string(),
+            "p".to_string(),
+            crate::domain::models::Cli::new("opencode"),
+            Some("a-model".to_string()),
+            None,
+            None,
+            "/tmp/send-1.log".to_string(),
+        );
+        agent.action =
+            crate::domain::models::AgentAction::send_to_session(Some("orch".to_string()), None)
+                .unwrap();
+
+        let info = crate::daemon::handler_formatting::format_agent_info(&agent);
+        assert!(info.contains("send to session"), "{info}");
+        assert!(info.contains("target: session name 'orch'"), "{info}");
+        assert!(!info.contains("CLI:"), "{info}");
+
+        let json = crate::daemon::handler_formatting::agent_detail_json(&agent, false);
+        assert!(json.get("cli").is_none(), "{json}");
+        assert!(json.get("model").is_none(), "{json}");
+        assert!(json.get("timeout_minutes").is_none(), "{json}");
+        assert!(
+            json.get("target")
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .contains("orch"),
+            "{json}"
+        );
+    }
+
+    #[tokio::test]
     async fn task_add_rejects_invalid_cron_expression() {
         let home = tempdir().unwrap();
         let _home_guard = HomeVar::set(home.path());
         let (_dir, db, handler) = endpoint_test_handler();
 
         let result = handler
-            .task_add(Parameters(TaskAddParams {
-                id: "agt-bad-cron".to_string(),
-                prompt: "run the tests".to_string(),
-                schedule: "not a cron expr!".to_string(),
-                cli: Some("opencode".to_string()),
-                model: None,
-                effort: None,
-                duration_minutes: None,
-                working_dir: None,
-                timeout_minutes: None,
-            }))
+            .task_add(
+                Parameters(TaskAddParams {
+                    action: None,
+                    target_session_name: None,
+                    target_session_id: None,
+                    id: "agt-bad-cron".to_string(),
+                    prompt: "run the tests".to_string(),
+                    schedule: "not a cron expr!".to_string(),
+                    cli: Some("opencode".to_string()),
+                    model: None,
+                    effort: None,
+                    duration_minutes: None,
+                    working_dir: None,
+                    timeout_minutes: None,
+                }),
+                OptionalExtension(None),
+            )
             .await
             .unwrap();
 
@@ -9504,17 +9685,23 @@ mod endpoint_tests {
         let (_dir, _db, handler) = endpoint_test_handler();
 
         let result = handler
-            .task_add(Parameters(TaskAddParams {
-                id: "bad id with spaces!".to_string(),
-                prompt: "run the tests".to_string(),
-                schedule: "*/5 * * * *".to_string(),
-                cli: Some("opencode".to_string()),
-                model: None,
-                effort: None,
-                duration_minutes: None,
-                working_dir: None,
-                timeout_minutes: None,
-            }))
+            .task_add(
+                Parameters(TaskAddParams {
+                    action: None,
+                    target_session_name: None,
+                    target_session_id: None,
+                    id: "bad id with spaces!".to_string(),
+                    prompt: "run the tests".to_string(),
+                    schedule: "*/5 * * * *".to_string(),
+                    cli: Some("opencode".to_string()),
+                    model: None,
+                    effort: None,
+                    duration_minutes: None,
+                    working_dir: None,
+                    timeout_minutes: None,
+                }),
+                OptionalExtension(None),
+            )
             .await
             .unwrap();
 
@@ -9551,17 +9738,23 @@ mod endpoint_tests {
 
         let (_dir, db, handler) = endpoint_test_handler();
         let result = handler
-            .task_add(Parameters(TaskAddParams {
-                id: "agt-wrong-bin".to_string(),
-                prompt: "run the tests".to_string(),
-                schedule: "*/5 * * * *".to_string(),
-                cli: Some("blackbox".to_string()),
-                model: None,
-                effort: None,
-                duration_minutes: None,
-                working_dir: None,
-                timeout_minutes: None,
-            }))
+            .task_add(
+                Parameters(TaskAddParams {
+                    action: None,
+                    target_session_name: None,
+                    target_session_id: None,
+                    id: "agt-wrong-bin".to_string(),
+                    prompt: "run the tests".to_string(),
+                    schedule: "*/5 * * * *".to_string(),
+                    cli: Some("blackbox".to_string()),
+                    model: None,
+                    effort: None,
+                    duration_minutes: None,
+                    working_dir: None,
+                    timeout_minutes: None,
+                }),
+                OptionalExtension(None),
+            )
             .await
             .unwrap();
 
@@ -9585,17 +9778,23 @@ mod endpoint_tests {
         let (_dir, db, handler) = endpoint_test_handler();
 
         let result = handler
-            .task_add(Parameters(TaskAddParams {
-                id: "agt-live-only".to_string(),
-                prompt: "run the tests".to_string(),
-                schedule: "*/5 * * * *".to_string(),
-                cli: Some("freebuff".to_string()),
-                model: None,
-                effort: None,
-                duration_minutes: None,
-                working_dir: None,
-                timeout_minutes: None,
-            }))
+            .task_add(
+                Parameters(TaskAddParams {
+                    action: None,
+                    target_session_name: None,
+                    target_session_id: None,
+                    id: "agt-live-only".to_string(),
+                    prompt: "run the tests".to_string(),
+                    schedule: "*/5 * * * *".to_string(),
+                    cli: Some("freebuff".to_string()),
+                    model: None,
+                    effort: None,
+                    duration_minutes: None,
+                    working_dir: None,
+                    timeout_minutes: None,
+                }),
+                OptionalExtension(None),
+            )
             .await
             .unwrap();
 
@@ -9622,18 +9821,24 @@ mod endpoint_tests {
         let (dir, db, handler) = endpoint_test_handler();
 
         let result = handler
-            .task_watch(Parameters(TaskWatchParams {
-                id: "watch-1".to_string(),
-                path: dir.path().to_string_lossy().to_string(),
-                events: vec!["modify".to_string(), "create".to_string()],
-                prompt: "react to changes".to_string(),
-                cli: Some("opencode".to_string()),
-                model: None,
-                effort: None,
-                debounce_seconds: None,
-                recursive: Some(true),
-                timeout_minutes: None,
-            }))
+            .task_watch(
+                Parameters(TaskWatchParams {
+                    action: None,
+                    target_session_name: None,
+                    target_session_id: None,
+                    id: "watch-1".to_string(),
+                    path: dir.path().to_string_lossy().to_string(),
+                    events: vec!["modify".to_string(), "create".to_string()],
+                    prompt: "react to changes".to_string(),
+                    cli: Some("opencode".to_string()),
+                    model: None,
+                    effort: None,
+                    debounce_seconds: None,
+                    recursive: Some(true),
+                    timeout_minutes: None,
+                }),
+                OptionalExtension(None),
+            )
             .await
             .unwrap();
 
@@ -9649,18 +9854,24 @@ mod endpoint_tests {
         let (_dir, db, handler) = endpoint_test_handler();
 
         let result = handler
-            .task_watch(Parameters(TaskWatchParams {
-                id: "watch-bad-path".to_string(),
-                path: "relative/path".to_string(),
-                events: vec!["modify".to_string()],
-                prompt: "react to changes".to_string(),
-                cli: Some("opencode".to_string()),
-                model: None,
-                effort: None,
-                debounce_seconds: None,
-                recursive: None,
-                timeout_minutes: None,
-            }))
+            .task_watch(
+                Parameters(TaskWatchParams {
+                    action: None,
+                    target_session_name: None,
+                    target_session_id: None,
+                    id: "watch-bad-path".to_string(),
+                    path: "relative/path".to_string(),
+                    events: vec!["modify".to_string()],
+                    prompt: "react to changes".to_string(),
+                    cli: Some("opencode".to_string()),
+                    model: None,
+                    effort: None,
+                    debounce_seconds: None,
+                    recursive: None,
+                    timeout_minutes: None,
+                }),
+                OptionalExtension(None),
+            )
             .await
             .unwrap();
 
@@ -9676,18 +9887,24 @@ mod endpoint_tests {
         let (dir, _db, handler) = endpoint_test_handler();
 
         let result = handler
-            .task_watch(Parameters(TaskWatchParams {
-                id: "watch-bad-event".to_string(),
-                path: dir.path().to_string_lossy().to_string(),
-                events: vec!["explode".to_string()],
-                prompt: "react to changes".to_string(),
-                cli: Some("opencode".to_string()),
-                model: None,
-                effort: None,
-                debounce_seconds: None,
-                recursive: None,
-                timeout_minutes: None,
-            }))
+            .task_watch(
+                Parameters(TaskWatchParams {
+                    action: None,
+                    target_session_name: None,
+                    target_session_id: None,
+                    id: "watch-bad-event".to_string(),
+                    path: dir.path().to_string_lossy().to_string(),
+                    events: vec!["explode".to_string()],
+                    prompt: "react to changes".to_string(),
+                    cli: Some("opencode".to_string()),
+                    model: None,
+                    effort: None,
+                    debounce_seconds: None,
+                    recursive: None,
+                    timeout_minutes: None,
+                }),
+                OptionalExtension(None),
+            )
             .await
             .unwrap();
 
@@ -9715,6 +9932,7 @@ mod endpoint_tests {
             last_run_ok: None,
             last_triggered_at: None,
             trigger_count: 0,
+            action: crate::domain::models::AgentAction::Headless,
         }
     }
 
@@ -11059,23 +11277,29 @@ mod endpoint_tests {
         .unwrap();
 
         let result = handler
-            .task_update(Parameters(TaskUpdateParams {
-                id: "old-id".to_string(),
-                new_id: Some("new-id".to_string()),
-                prompt: Some("updated prompt".to_string()),
-                cli: None,
-                model: None,
-                effort: None,
-                schedule: None,
-                working_dir: None,
-                duration_minutes: None,
-                path: None,
-                events: None,
-                debounce_seconds: None,
-                recursive: None,
-                enabled: None,
-                notify_on_success: None,
-            }))
+            .task_update(
+                Parameters(TaskUpdateParams {
+                    action: None,
+                    target_session_name: None,
+                    target_session_id: None,
+                    id: "old-id".to_string(),
+                    new_id: Some("new-id".to_string()),
+                    prompt: Some("updated prompt".to_string()),
+                    cli: None,
+                    model: None,
+                    effort: None,
+                    schedule: None,
+                    working_dir: None,
+                    duration_minutes: None,
+                    path: None,
+                    events: None,
+                    debounce_seconds: None,
+                    recursive: None,
+                    enabled: None,
+                    notify_on_success: None,
+                }),
+                OptionalExtension(None),
+            )
             .await
             .unwrap();
 
@@ -11092,23 +11316,29 @@ mod endpoint_tests {
         let (_dir, _db, handler) = endpoint_test_handler();
 
         let result = handler
-            .task_update(Parameters(TaskUpdateParams {
-                id: "ghost".to_string(),
-                new_id: None,
-                prompt: None,
-                cli: None,
-                model: None,
-                effort: None,
-                schedule: None,
-                working_dir: None,
-                duration_minutes: None,
-                path: None,
-                events: None,
-                debounce_seconds: None,
-                recursive: None,
-                enabled: None,
-                notify_on_success: None,
-            }))
+            .task_update(
+                Parameters(TaskUpdateParams {
+                    action: None,
+                    target_session_name: None,
+                    target_session_id: None,
+                    id: "ghost".to_string(),
+                    new_id: None,
+                    prompt: None,
+                    cli: None,
+                    model: None,
+                    effort: None,
+                    schedule: None,
+                    working_dir: None,
+                    duration_minutes: None,
+                    path: None,
+                    events: None,
+                    debounce_seconds: None,
+                    recursive: None,
+                    enabled: None,
+                    notify_on_success: None,
+                }),
+                OptionalExtension(None),
+            )
             .await
             .unwrap();
 
@@ -11124,23 +11354,29 @@ mod endpoint_tests {
         db.upsert_agent(&sample_agent("keep-id", None)).unwrap();
 
         let result = handler
-            .task_update(Parameters(TaskUpdateParams {
-                id: "keep-id".to_string(),
-                new_id: Some("bad id!".to_string()),
-                prompt: None,
-                cli: None,
-                model: None,
-                effort: None,
-                schedule: None,
-                working_dir: None,
-                duration_minutes: None,
-                path: None,
-                events: None,
-                debounce_seconds: None,
-                recursive: None,
-                enabled: None,
-                notify_on_success: None,
-            }))
+            .task_update(
+                Parameters(TaskUpdateParams {
+                    action: None,
+                    target_session_name: None,
+                    target_session_id: None,
+                    id: "keep-id".to_string(),
+                    new_id: Some("bad id!".to_string()),
+                    prompt: None,
+                    cli: None,
+                    model: None,
+                    effort: None,
+                    schedule: None,
+                    working_dir: None,
+                    duration_minutes: None,
+                    path: None,
+                    events: None,
+                    debounce_seconds: None,
+                    recursive: None,
+                    enabled: None,
+                    notify_on_success: None,
+                }),
+                OptionalExtension(None),
+            )
             .await
             .unwrap();
 

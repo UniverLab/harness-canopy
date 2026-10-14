@@ -1,4 +1,5 @@
 use super::*;
+use crate::db::session_target::SessionTarget;
 
 pub(crate) struct InteractiveSend<'a> {
     pub(crate) target: &'a str,
@@ -63,29 +64,19 @@ impl GraphEngine {
         name: &str,
         event: &GraphHookEvent,
     ) -> Result<(String, Option<String>), HookExecution> {
-        let candidates = match self.db.list_hookable_sessions(i64::MAX) {
-            Ok(sessions) => sessions,
-            Err(error) => {
-                return Err(HookExecution {
-                    status: GraphRunStatus::Fail,
-                    output: serde_json::json!({
-                        "target_session_name": name,
-                        "error": error.to_string(),
-                    }),
-                    summary: format!(
-                        "{} hook could not resolve target session name '{name}': {error}",
-                        event.as_str()
-                    ),
-                });
-            }
-        };
-        let matching_ids: Vec<&str> = candidates
-            .iter()
-            .filter(|session| session.name == name)
-            .map(|session| session.id.as_str())
-            .collect();
-        match matching_ids.as_slice() {
-            [] => Err(HookExecution {
+        match self.db.resolve_target_session_name(name) {
+            Err(error) => Err(HookExecution {
+                status: GraphRunStatus::Fail,
+                output: serde_json::json!({
+                    "target_session_name": name,
+                    "error": error.to_string(),
+                }),
+                summary: format!(
+                    "{} hook could not resolve target session name '{name}': {error}",
+                    event.as_str()
+                ),
+            }),
+            Ok(SessionTarget::Missing) => Err(HookExecution {
                 status: GraphRunStatus::Fail,
                 output: serde_json::json!({
                     "target_session_name": name,
@@ -96,8 +87,8 @@ impl GraphEngine {
                     event.as_str()
                 ),
             }),
-            [only] => Ok((only.to_string(), Some(name.to_string()))),
-            many => Err(HookExecution {
+            Ok(SessionTarget::Found { id, name }) => Ok((id, name)),
+            Ok(SessionTarget::Ambiguous(many)) => Err(HookExecution {
                 status: GraphRunStatus::Fail,
                 output: serde_json::json!({
                     "target_session_name": name,

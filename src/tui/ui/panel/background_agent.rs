@@ -65,33 +65,40 @@ fn background_agent_metadata_lines(
         .map(|dt| relative_time(&dt))
         .unwrap_or_else(|| "never".to_string());
 
-    vec![
-        Line::from(vec![
-            Span::styled("Status:  ", Style::default().fg(theme.dim_text)),
-            Span::styled(status_text, Style::default().fg(status_color)),
-        ]),
-        Line::from(vec![
+    let mut lines = vec![Line::from(vec![
+        Span::styled("Status:  ", Style::default().fg(theme.dim_text)),
+        Span::styled(status_text, Style::default().fg(status_color)),
+    ])];
+    if agent.is_send_to_session() {
+        let description = crate::daemon::handler_formatting::describe_action(agent);
+        lines.push(Line::from(vec![
+            Span::styled("Delivers to: ", Style::default().fg(theme.dim_text)),
+            Span::raw(description.target.unwrap_or_default()),
+        ]));
+    } else {
+        lines.push(Line::from(vec![
             Span::styled("CLI:     ", Style::default().fg(theme.dim_text)),
             Span::raw(agent.cli.as_str().to_string()),
-        ]),
-        Line::from(vec![
+        ]));
+        lines.push(Line::from(vec![
             Span::styled("Model:   ", Style::default().fg(theme.dim_text)),
             Span::raw(model),
-        ]),
-        Line::from(vec![
+        ]));
+        lines.push(Line::from(vec![
             Span::styled("Effort:  ", Style::default().fg(theme.dim_text)),
             Span::raw(agent.effort.as_deref().unwrap_or("-").to_string()),
-        ]),
-        Line::from(vec![
-            Span::styled("Last run:", Style::default().fg(theme.dim_text)),
-            Span::raw(format!(" {last_run}")),
-        ]),
-        Line::from(vec![
-            Span::styled("Trigger: ", Style::default().fg(theme.dim_text)),
-            Span::raw(trigger_summary(agent)),
-        ]),
-        Line::from(""),
-    ]
+        ]));
+    }
+    lines.push(Line::from(vec![
+        Span::styled("Last run:", Style::default().fg(theme.dim_text)),
+        Span::raw(format!(" {last_run}")),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Trigger: ", Style::default().fg(theme.dim_text)),
+        Span::raw(trigger_summary(agent)),
+    ]));
+    lines.push(Line::from(""));
+    lines
 }
 
 /// Colors a single raw log line: ERROR in red, WARN in amber, the
@@ -177,6 +184,7 @@ mod tests {
             last_run_ok: None,
             last_triggered_at: None,
             trigger_count: 0,
+            action: crate::domain::models::AgentAction::Headless,
         }
     }
 

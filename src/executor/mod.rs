@@ -16,6 +16,11 @@ use crate::db::Database;
 use crate::domain::models::{Agent, Cli, RunLog, RunStatus, StartRunOutcome, Trigger, TriggerType};
 use crate::scheduler::substitute_variables;
 
+mod send_to_session;
+
+#[cfg(test)]
+mod send_tests;
+
 #[cfg(test)]
 mod tests;
 
@@ -229,6 +234,10 @@ impl Executor {
 
     /// Core execution logic shared by all trigger types.
     async fn run_agent(&self, agent: &Agent, ctx: ExecutionContext<'_>) -> Result<i32> {
+        if agent.is_send_to_session() {
+            return self.deliver_to_session(agent, &ctx).await;
+        }
+
         self.resolve_timeout(&agent.id);
 
         let Some(run_id) = self.start_run(agent, ctx.trigger_type)? else {
@@ -498,6 +507,9 @@ fn resolve_cli_binary(cli: &Cli) -> Result<PathBuf> {
 /// `Cli::strategy`): an unknown platform stores the requested model as-is
 /// rather than dropping it.
 fn executed_pair_for_agent(agent: &Agent) -> (Option<String>, Option<String>) {
+    if agent.is_send_to_session() {
+        return (None, None);
+    }
     let platform = agent.cli.as_str().to_string();
     let model = agent
         .model

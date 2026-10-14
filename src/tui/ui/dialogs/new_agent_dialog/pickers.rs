@@ -91,8 +91,13 @@ pub(super) fn append_background_sections(
 ) {
     let layout = section.fields;
     append_trigger_section(lines, dialog, accent, theme);
-    append_cli_section(lines, dialog, accent, filtered_clis, layout.cli, theme);
-    append_model_section(lines, dialog, accent, layout.model, theme);
+    append_action_section(lines, dialog, accent, theme);
+    if dialog.is_send_to_session() {
+        append_target_section(lines, dialog, accent, layout.cli, theme);
+    } else {
+        append_cli_section(lines, dialog, accent, filtered_clis, layout.cli, theme);
+        append_model_section(lines, dialog, accent, layout.model, theme);
+    }
     append_prompt_section(lines, dialog, accent, layout, section.field_width, theme);
 
     let hide_dir = dialog.background_trigger == BackgroundTrigger::Watch;
@@ -149,6 +154,57 @@ fn append_trigger_section(
         theme,
     ));
     push_spaced_row(lines, Line::from(trigger_row));
+}
+
+/// The delivery action row (CM53): headless CLI run, or delivery into a live
+/// session. Space toggles it; edit mode shows it read-only.
+fn append_action_section(
+    lines: &mut Vec<Line<'static>>,
+    dialog: &NewAgentDialog,
+    accent: Color,
+    theme: &Theme,
+) {
+    let mut row = vec![Span::styled(
+        "  Action:",
+        Style::default().fg(theme.dim_text),
+    )];
+    row.extend(selector_spans(
+        dialog.background_action.label(),
+        BACKGROUND_TRIGGER_FIELD,
+        dialog.is_edit_mode(),
+        accent,
+        dialog.field,
+        theme,
+    ));
+    if !dialog.is_edit_mode() {
+        row.push(Span::styled(
+            "  (Space toggles)",
+            Style::default().fg(theme.dim_text),
+        ));
+    }
+    push_spaced_row(lines, Line::from(row));
+}
+
+/// In send mode, the target session picker replaces the CLI/model rows.
+fn append_target_section(
+    lines: &mut Vec<Line<'static>>,
+    dialog: &NewAgentDialog,
+    accent: Color,
+    cli_field: usize,
+    theme: &Theme,
+) {
+    let target = dialog
+        .selected_send_target()
+        .unwrap_or_else(|| "(no live session — open one)".to_string());
+    lines.push(Line::from(vec![
+        Span::styled("  Target: ", Style::default().fg(theme.dim_text)),
+        Span::styled(
+            format!(" {target} "),
+            focus_style(dialog.field, cli_field, accent),
+        ),
+        Span::styled("  (◂▸ cycle)", Style::default().fg(theme.dim_text)),
+    ]));
+    lines.push(Line::from(""));
 }
 
 fn append_cli_section(

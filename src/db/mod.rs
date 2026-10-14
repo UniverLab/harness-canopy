@@ -19,7 +19,9 @@ use std::sync::{Arc, Mutex};
 /// `migrate_graph_events_table` (CM46).
 /// Version 10 adds the `crews`/`crew_members` tables and the ensemble
 /// binding columns — see `migrate_crews_tables` (CM49).
-const SCHEMA_VERSION: i64 = 10;
+/// Version 11 adds the `action`/`target_session_id`/`target_session_name`
+/// columns to `agents` for `send_to_session` delivery (CM53).
+const SCHEMA_VERSION: i64 = 11;
 
 /// CM40: how long every daemon SQLite connection waits for a concurrent writer
 /// before failing with `SQLITE_BUSY`. Applied once, at open, in
@@ -664,6 +666,7 @@ impl Database {
         Self::migrate_spec_notes_table(&conn)?;
         Self::migrate_roster_entries_table(&conn)?;
         Self::migrate_crews_tables(&conn)?;
+        Self::migrate_agent_action_columns(&conn)?;
 
         Self::set_schema_version(&conn)?;
 
@@ -729,15 +732,20 @@ pub(crate) mod roster_entries;
 pub mod run;
 pub mod sandbox;
 pub mod scheduled_sends;
+pub mod scheduled_sends_agent;
 mod schema;
 pub mod seeds;
 pub mod session;
+pub mod session_target;
 pub mod state;
 mod subagent_runs;
 pub mod sync;
 
 #[cfg(test)]
 pub use crate::application::ports::{AgentRepository, RunRepository, StateRepository};
+
+#[cfg(test)]
+mod agent_action_tests;
 
 #[cfg(test)]
 mod tests;

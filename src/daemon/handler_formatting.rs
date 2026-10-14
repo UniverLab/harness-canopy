@@ -8,6 +8,9 @@ use crate::db::Database;
 use crate::db::{connection::is_busy_error, DB_BUSY_TIMEOUT};
 use crate::domain::models::{Agent, RunLog, Trigger};
 
+mod send_action;
+pub(crate) use send_action::{append_send_session_section, describe_action};
+
 pub(crate) fn format_uptime(secs: u64) -> String {
     if secs > 3600 {
         format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
@@ -44,9 +47,21 @@ pub(crate) fn format_agent_info(a: &Agent) -> String {
         None => "manual".to_string(),
     };
 
+    // A send_to_session agent has no CLI/model/effort/timeout; show its
+    // action and target instead of a CLI line.
+    let delivery_line = if a.is_send_to_session() {
+        let description = describe_action(a);
+        match description.target {
+            Some(target) => format!(" Action: {}\n {}\n", description.label, target),
+            None => format!(" Action: {}\n", description.label),
+        }
+    } else {
+        format!(" CLI: {}\n", a.cli)
+    };
+
     let mut info = format!(
-        "- **{}** [{}] ({})\n Trigger: {} `{}`\n CLI: {}\n Prompt: {}\n",
-        a.id, status, trigger_label, trigger_label, trigger_detail, a.cli, prompt_preview
+        "- **{}** [{}] ({})\n Trigger: {} `{}`\n{} Prompt: {}\n",
+        a.id, status, trigger_label, trigger_label, trigger_detail, delivery_line, prompt_preview
     );
 
     if let Some(last) = a.last_run_at {
@@ -85,7 +100,7 @@ pub(crate) fn format_agent_info(a: &Agent) -> String {
 /// it in. `trigger_type`/`trigger_config` are null for a manual (trigger-less)
 /// agent — they mirror the stored columns, not the "manual" display label.
 pub(crate) fn agent_detail_json(a: &Agent, notify_on_success: bool) -> serde_json::Value {
-    serde_json::json!({
+    let mut value = serde_json::json!({
         "id": &a.id,
         "trigger_type": a.trigger.as_ref().map(|t| t.type_str()),
         "trigger_config": &a.trigger,
@@ -105,7 +120,21 @@ pub(crate) fn agent_detail_json(a: &Agent, notify_on_success: bool) -> serde_jso
         "last_triggered_at": a.last_triggered_at.as_ref().map(|t| t.to_rfc3339()),
         "trigger_count": a.trigger_count,
         "prompt": &a.prompt,
-    })
+    });
+    if a.is_send_to_session() {
+        let description = describe_action(a);
+        if let Some(obj) = value.as_object_mut() {
+            obj.remove("cli");
+            obj.remove("model");
+            obj.remove("effort");
+            obj.remove("timeout_minutes");
+            obj.insert("action".to_string(), serde_json::json!(description.label));
+            if let Some(target) = description.target {
+                obj.insert("target".to_string(), serde_json::json!(target));
+            }
+        }
+    }
+    value
 }
 
 pub(crate) fn resolve_log_path(db: &Database, id: &str) -> Result<String, McpError> {
@@ -605,6 +634,7 @@ mod formatting_unit_tests {
             last_run_ok: None,
             last_triggered_at: None,
             trigger_count: 0,
+            action: crate::domain::models::AgentAction::Headless,
         }
     }
 

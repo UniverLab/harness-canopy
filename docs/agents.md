@@ -32,6 +32,33 @@ Background agents are managed from the TUI or by other agents through the
 [agent MCP tools](mcp-tools.md) (`agent_add`, `agent_watch`,
 `agent_run`, `agent_status`, …).
 
+### Send to a session
+
+A background agent can deliver its prompt into a *live interactive session*
+instead of running a CLI headlessly. Set `action` to `send_to_session` and give
+a target session — by **name** is recommended, because a name survives session
+recovery where an id changes. Every time the agent's cron or watch trigger
+fires, canopy enqueues the prompt as a scheduled send to that session, and the
+TUI delivers it on its next refresh tick. Delivery happens when a TUI is open:
+a message that fires while no TUI is running waits for the next TUI — it is not
+lost. If a fire is already waiting for the same target, a new fire replaces that
+message rather than piling up a second one.
+
+Cron example (MCP call):
+
+```json
+{"tool":"agent_add","arguments":{"id":"hourly-orchestrator-nudge","schedule":"0 * * * *","action":"send_to_session","target_session_name":"orchestrator","prompt":"Check the release board and report anything blocked."}}
+```
+
+Watch example:
+
+```json
+{"tool":"agent_watch","arguments":{"id":"spec-changed-nudge","path":"/abs/path/to/specs","events":["modify","create"],"action":"send_to_session","target_session_name":"orchestrator","prompt":"A spec changed; re-read it and update the plan."}}
+```
+
+Omit both target fields to target the calling session. Use `agent_run` to
+deliver once now.
+
 ## Terminal sessions
 
 Raw shell sessions with per-session command history (TOML-backed),

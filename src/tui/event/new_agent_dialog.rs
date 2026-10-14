@@ -392,6 +392,11 @@ fn toggle_task_mode(dialog: &mut NewAgentDialog, resumable_sessions: &[Interacti
 
 fn handle_trigger_field(dialog: &mut NewAgentDialog, code: KeyCode, fields: DialogFields) {
     match code {
+        // CM53: Space toggles headless vs send-to-session. Edit mode keeps the
+        // existing action, so the toggle is inert there.
+        KeyCode::Char(' ') if !dialog.is_edit_mode() => {
+            dialog.background_action = dialog.background_action.next();
+        }
         KeyCode::Left | KeyCode::Right => toggle_background_trigger(dialog),
         KeyCode::Down | KeyCode::Tab => dialog.field = fields.cli_field,
         KeyCode::Up | KeyCode::BackTab => dialog.field = 0,
@@ -408,6 +413,17 @@ fn toggle_background_trigger(dialog: &mut NewAgentDialog) {
 }
 
 fn handle_cli_field(dialog: &mut NewAgentDialog, code: KeyCode, fields: DialogFields) {
+    // CM53: in send mode this row is the target-session picker, not the harness.
+    if dialog.is_send_to_session() {
+        match code {
+            KeyCode::Left => dialog.move_send_target(false),
+            KeyCode::Right => dialog.move_send_target(true),
+            KeyCode::Down | KeyCode::Tab => dialog.field = fields.model_field,
+            KeyCode::Up | KeyCode::BackTab => dialog.field = fields.cli_up_target(),
+            _ => {}
+        }
+        return;
+    }
     match code {
         KeyCode::Char(' ') => dialog.open_cli_picker(),
         KeyCode::Char(c) => {

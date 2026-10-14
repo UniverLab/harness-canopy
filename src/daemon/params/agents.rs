@@ -22,6 +22,17 @@ pub struct TaskAddParams {
     pub working_dir: Option<String>,
     /// Timeout in minutes for execution locking. Default: 15.
     pub timeout_minutes: Option<u32>,
+    /// Delivery action: "headless" (default) runs a CLI, or
+    /// "send_to_session" delivers the prompt into a live interactive session.
+    /// `cli` is ignored when this is "send_to_session".
+    pub action: Option<String>,
+    /// Target session *name* for action "send_to_session" (recommended — a
+    /// name survives session recovery). Mutually exclusive with
+    /// `target_session_id`.
+    pub target_session_name: Option<String>,
+    /// Target session *id* for action "send_to_session". Omit both target
+    /// fields to target the calling session.
+    pub target_session_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -46,6 +57,13 @@ pub struct TaskWatchParams {
     pub recursive: Option<bool>,
     /// Timeout in minutes for execution locking. Default: 15.
     pub timeout_minutes: Option<u32>,
+    /// Delivery action: "headless" (default) runs a CLI, or
+    /// "send_to_session" delivers the prompt into a live interactive session.
+    pub action: Option<String>,
+    /// Target session *name* for action "send_to_session".
+    pub target_session_name: Option<String>,
+    /// Target session *id* for action "send_to_session".
+    pub target_session_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -88,6 +106,13 @@ pub struct TaskUpdateParams {
     /// only failures notify — so a frequent agent can't spam notifications.
     /// Manual `agent_run` executions always report success regardless.
     pub notify_on_success: Option<bool>,
+    /// Set the delivery action: "headless" runs a CLI, "send_to_session"
+    /// delivers the prompt into a live interactive session.
+    pub action: Option<String>,
+    /// Target session *name* for action "send_to_session".
+    pub target_session_name: Option<String>,
+    /// Target session *id* for action "send_to_session".
+    pub target_session_id: Option<String>,
 }
 
 // ── Shared parameter types ─────────────────────────────────────────────

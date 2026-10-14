@@ -1934,6 +1934,7 @@ mod tests {
             last_run_ok: None,
             last_triggered_at: None,
             trigger_count: 0,
+            action: crate::domain::models::AgentAction::Headless,
         });
         assert_eq!(entry.id(&app), "bg-1");
     }
@@ -2370,6 +2371,7 @@ mod tests {
             last_run_ok: None,
             last_triggered_at: None,
             trigger_count: 0,
+            action: crate::domain::models::AgentAction::Headless,
         }
     }
 
@@ -4497,6 +4499,7 @@ mod ct14_sidebar_tests {
             last_run_ok: None,
             last_triggered_at: None,
             trigger_count: 0,
+            action: crate::domain::models::AgentAction::Headless,
         }
     }
 

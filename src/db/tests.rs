@@ -287,6 +287,7 @@ fn sample_cron_agent(id: &str) -> Agent {
         last_run_ok: None,
         last_triggered_at: None,
         trigger_count: 0,
+        action: crate::domain::models::AgentAction::Headless,
     }
 }
 
@@ -314,6 +315,7 @@ fn sample_watch_agent(id: &str) -> Agent {
         last_run_ok: None,
         last_triggered_at: None,
         trigger_count: 0,
+        action: crate::domain::models::AgentAction::Headless,
     }
 }
 
@@ -336,6 +338,7 @@ fn sample_manual_agent(id: &str) -> Agent {
         last_run_ok: None,
         last_triggered_at: None,
         trigger_count: 0,
+        action: crate::domain::models::AgentAction::Headless,
     }
 }
 

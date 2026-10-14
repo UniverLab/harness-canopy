@@ -114,6 +114,10 @@ impl App {
     ) -> Result<Option<String>> {
         match dialog.task_type {
             NewTaskType::Background => {
+                if dialog.is_send_to_session() {
+                    self.launch_send_to_session(dialog)?;
+                    return Ok(None);
+                }
                 match dialog.background_trigger {
                     BackgroundTrigger::Cron => {
                         self.launch_scheduled(dialog, model)?;
@@ -463,6 +467,7 @@ impl App {
             last_run_ok: None,
             last_triggered_at: None,
             trigger_count: 0,
+            action: crate::domain::models::AgentAction::Headless,
         };
         self.db.upsert_agent(&agent)?;
         if let Some(workdir) = agent.working_dir.as_deref() {
@@ -516,6 +521,7 @@ impl App {
             last_run_ok: None,
             last_triggered_at: None,
             trigger_count: 0,
+            action: crate::domain::models::AgentAction::Headless,
         };
         self.db.upsert_agent(&agent)?;
         Ok(())
