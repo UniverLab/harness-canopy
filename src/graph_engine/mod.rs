@@ -22815,8 +22815,17 @@ exit 0
         let source = db.get_graph("source-bg").unwrap().unwrap();
         assert_eq!(source.status, GraphStatus::Completed);
 
-        // Give the background task a moment to start the target graph.
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        // The launch is fire-and-forget: wait until the target has started
+        // instead of sleeping a fixed time, which failed under the full
+        // parallel suite on a loaded machine.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !matches!(
+            db.get_graph(&target_id).unwrap().map(|g| g.status),
+            Some(GraphStatus::Running | GraphStatus::Completed)
+        ) && std::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
 
         // The target graph should have been launched.
         let target = db.get_graph(&target_id).unwrap().unwrap();
@@ -22915,8 +22924,17 @@ exit 0
             .await;
         assert!(result.is_ok(), "source graph should complete: {result:?}");
 
-        // Let the fire-and-forget launch start.
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        // The launch is fire-and-forget: wait until the target has started
+        // instead of sleeping a fixed time, which failed under the full
+        // parallel suite on a loaded machine.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !matches!(
+            db.get_graph(&target_id).unwrap().map(|g| g.status),
+            Some(GraphStatus::Running | GraphStatus::Completed)
+        ) && std::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
 
         let target = db.get_graph(&target_id).unwrap().unwrap();
         assert!(
@@ -23066,8 +23084,18 @@ exit 0
             .await;
         assert!(result.is_ok(), "graph A should complete: {result:?}");
 
-        // Give background tasks time to run.
-        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+        // B runs on a background task: wait until its own hook run is
+        // recorded instead of sleeping a fixed time, which failed whenever the
+        // machine was loaded.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while db
+            .list_graph_completion_hook_runs("graph-b")
+            .unwrap()
+            .is_empty()
+            && std::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
 
         // Debug: check what happened to B
         let b_graph = db.get_graph("graph-b").unwrap().unwrap();
