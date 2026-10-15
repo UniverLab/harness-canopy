@@ -231,9 +231,8 @@ impl Database {
     /// running and visible in the sidebar; `resumed` rows are excluded
     /// because they were already superseded by a replacement session that
     /// appears in its own right once it finishes. Most-recent-first, capped
-    /// at `limit` rows. Collapsing to one candidate per (cli, working_dir)
-    /// happens afterward in `session_resume::dedupe_resumable_sessions` —
-    /// this is a plain fetch, not the final candidate list.
+    /// at `limit` rows. This is a plain fetch: the Mode step narrows it to
+    /// the form's harness and directory, keeping this order as-is.
     pub fn get_resumable_sessions(&self, limit: usize) -> Result<Vec<InteractiveSession>> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
         let mut stmt = conn.prepare(

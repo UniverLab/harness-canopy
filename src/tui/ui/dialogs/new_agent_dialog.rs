@@ -6,23 +6,23 @@ use ratatui::Frame;
 
 use super::{centered_rect, draw_dialog_left_wave, truncate_str};
 use crate::tui::app::{
-    dialog::new_agent::{BackgroundTrigger, NewAgentDialog, NewTaskMode, NewTaskType, SeedOption},
+    dialog::new_agent::{BackgroundTrigger, DialogStep, NewAgentDialog, NewTaskType, SeedOption},
     types::App,
 };
 use crate::tui::ui::theme::Theme;
 
 mod fields;
+mod mode_step;
 mod pickers;
 
 #[cfg(test)]
 use fields::prompt_visual_line_range;
 use pickers::{
     append_background_sections, append_interactive_sections, append_terminal_sections,
-    session_resume_label, SectionLayout,
+    SectionLayout,
 };
 
 const TYPE_FIELD: usize = 0;
-const INTERACTIVE_MODE_FIELD: usize = 1;
 const BACKGROUND_TRIGGER_FIELD: usize = 1;
 const TERMINAL_DIR_FIELD: usize = 1;
 const TERMINAL_SHELL_FIELD: usize = 2;
@@ -52,15 +52,17 @@ struct FieldLayout {
 impl FieldLayout {
     fn for_task(task_type: NewTaskType) -> Self {
         match task_type {
+            // Interactive (CT34: no Mode row): 0 Type · 1 Harness · 2 Identity
+            // · 3 Yolo · 4 Sandbox · 5 Dir (model/prompt are unused here).
             NewTaskType::Interactive => Self {
-                cli: 2,
-                identity: 5,
+                cli: 1,
+                identity: 2,
                 model: 3,
                 prompt: 4,
                 extra: 5,
-                dir: 6,
-                yolo: 4,
-                sandbox: 7,
+                dir: 5,
+                yolo: 3,
+                sandbox: 4,
             },
             NewTaskType::Terminal => Self {
                 cli: 0,
@@ -109,25 +111,30 @@ pub fn draw_new_agent_dialog(frame: &mut Frame, app: &App, theme: &Theme) {
         return;
     };
 
-    let accent = theme.header_color;
-    let filtered_clis = dialog.filtered_cli_indices();
-    let field_width = prompt_field_width(frame.area());
-    let dir_visible = visible_dir_rows(
-        dialog,
-        accent,
-        &filtered_clis,
-        field_width,
-        theme,
-        frame.area(),
-    );
-    let lines = build_dialog_lines(
-        dialog,
-        accent,
-        &filtered_clis,
-        field_width,
-        theme,
-        dir_visible,
-    );
+    let lines = match dialog.step {
+        DialogStep::Mode => mode_step::build_dialog_lines(dialog, theme),
+        DialogStep::Form => {
+            let accent = theme.header_color;
+            let filtered_clis = dialog.filtered_cli_indices();
+            let field_width = prompt_field_width(frame.area());
+            let dir_visible = visible_dir_rows(
+                dialog,
+                accent,
+                &filtered_clis,
+                field_width,
+                theme,
+                frame.area(),
+            );
+            build_dialog_lines(
+                dialog,
+                accent,
+                &filtered_clis,
+                field_width,
+                theme,
+                dir_visible,
+            )
+        }
+    };
     let height = dialog_height(&lines, frame.area());
 
     let area = centered_rect(65, height, frame.area());
@@ -137,7 +144,7 @@ pub fn draw_new_agent_dialog(frame: &mut Frame, app: &App, theme: &Theme) {
     let block = Block::default()
         .title(dialog_title(dialog))
         .borders(crate::tui::ui::dialog_borders_for(theme))
-        .border_style(Style::default().fg(accent))
+        .border_style(Style::default().fg(theme.header_color))
         .style(Style::default().bg(theme.dialog_bg));
 
     let inner = block.inner(area);
@@ -183,7 +190,12 @@ pub(super) fn visible_dir_rows(
 
 fn dialog_title(dialog: &NewAgentDialog) -> &'static str {
     if !dialog.is_edit_mode() {
-        return " New Agent ";
+        // CT34: the dialog names the step it is showing; the Mode step is the
+        // New-or-Resume choice that follows the setup form.
+        return match dialog.step {
+            DialogStep::Form => " New Session · Setup ",
+            DialogStep::Mode => " New Session · Mode ",
+        };
     }
 
     match dialog.task_type {
@@ -198,13 +210,6 @@ fn task_type_label(task_type: NewTaskType) -> &'static str {
         NewTaskType::Interactive => "Interactive",
         NewTaskType::Terminal => "Terminal",
         NewTaskType::Background => "Background",
-    }
-}
-
-fn interactive_mode_label(task_mode: NewTaskMode) -> &'static str {
-    match task_mode {
-        NewTaskMode::Interactive => "New",
-        NewTaskMode::Resume => "Resume",
     }
 }
 
@@ -227,14 +232,6 @@ fn help_text(dialog: &NewAgentDialog) -> &'static str {
             "  ↑↓: fields · Shift+↑↓: navigate  (in dirs: → enter  ← up) · Enter: launch · Esc: cancel"
         }
     }
-}
-
-fn session_picker_label(dialog: &NewAgentDialog) -> String {
-    let Some((_, title)) = &dialog.selected_session else {
-        return "  ↵ pick session  (latest)".to_string();
-    };
-
-    format!("  ↵ pick  [{}]", truncate_with_ellipsis(title, 40))
 }
 
 pub(super) fn truncate_with_ellipsis(value: &str, max_chars: usize) -> String {
@@ -406,52 +403,6 @@ fn push_spaced_row(lines: &mut Vec<Line<'static>>, row: Line<'static>) {
 
 // ── Section builders ─────────────────────────────────────────────────────────
 
-pub(super) fn interactive_mode_row(
-    dialog: &NewAgentDialog,
-    accent: Color,
-    theme: &Theme,
-) -> Line<'static> {
-    let mut spans = vec![Span::styled(
-        "  Session:  ",
-        Style::default().fg(theme.dim_text),
-    )];
-    spans.extend(selector_spans(
-        interactive_mode_label(dialog.task_mode),
-        INTERACTIVE_MODE_FIELD,
-        false,
-        accent,
-        dialog.field,
-        theme,
-    ));
-
-    if dialog.resume_unconfigured() && !dialog.has_session_picker() {
-        spans.push(Span::styled(
-            "  (not configured — falls back to new)",
-            Style::default().fg(Color::Yellow),
-        ));
-    }
-
-    if matches!(dialog.task_mode, NewTaskMode::Resume) && dialog.has_session_picker() {
-        spans.push(Span::styled(
-            session_picker_label(dialog),
-            Style::default().fg(Color::Cyan),
-        ));
-    }
-
-    if matches!(dialog.task_mode, NewTaskMode::Resume) {
-        spans.push(Span::styled(
-            session_resume_label(dialog),
-            Style::default().fg(if dialog.resume_sessions_empty {
-                Color::Yellow
-            } else {
-                Color::Cyan
-            }),
-        ));
-    }
-
-    Line::from(spans)
-}
-
 pub(super) fn model_value(dialog: &NewAgentDialog) -> String {
     if dialog.model.is_empty() {
         "(optional — Space to browse)".to_string()
@@ -617,7 +568,7 @@ mod tests {
     #[test]
     fn selector_uses_discreet_angle_glyphs_not_solid_triangles() {
         // Focused and unfocused variants both use the ‹ › glyphs, never ◀ ▶.
-        for current in [TYPE_FIELD, INTERACTIVE_MODE_FIELD] {
+        for current in [TYPE_FIELD, BACKGROUND_TRIGGER_FIELD] {
             let text = spans_text(&selector_spans(
                 "Background",
                 TYPE_FIELD,
@@ -647,10 +598,12 @@ mod tests {
     }
 
     #[test]
-    fn dialog_title_new_agent() {
+    fn dialog_title_names_the_setup_form_in_create_mode() {
         let mut d = NewAgentDialog::new(Some("."));
         d.task_type = NewTaskType::Interactive;
-        assert_eq!(dialog_title(&d), " New Agent ");
+        assert_eq!(dialog_title(&d), " New Session · Setup ");
+        d.step = DialogStep::Mode;
+        assert_eq!(dialog_title(&d), " New Session · Mode ");
     }
 
     #[test]
@@ -682,12 +635,6 @@ mod tests {
         assert_eq!(task_type_label(NewTaskType::Interactive), "Interactive");
         assert_eq!(task_type_label(NewTaskType::Terminal), "Terminal");
         assert_eq!(task_type_label(NewTaskType::Background), "Background");
-    }
-
-    #[test]
-    fn interactive_mode_label_all_variants() {
-        assert_eq!(interactive_mode_label(NewTaskMode::Interactive), "New");
-        assert_eq!(interactive_mode_label(NewTaskMode::Resume), "Resume");
     }
 
     #[test]
@@ -810,9 +757,13 @@ mod tests {
 
     #[test]
     fn field_layout_for_interactive() {
+        // CT34: the Mode row is gone, so every interactive field shifts up.
         let layout = FieldLayout::for_task(NewTaskType::Interactive);
-        assert_eq!(layout.cli, 2);
-        assert_eq!(layout.identity, 5);
+        assert_eq!(layout.cli, 1);
+        assert_eq!(layout.identity, 2);
+        assert_eq!(layout.yolo, 3);
+        assert_eq!(layout.sandbox, 4);
+        assert_eq!(layout.dir, 5);
     }
 
     #[test]
@@ -886,22 +837,6 @@ mod tests {
     }
 
     #[test]
-    fn session_picker_label_no_selection() {
-        let mut d = NewAgentDialog::new(Some("."));
-        d.selected_session = None;
-        let label = session_picker_label(&d);
-        assert!(label.contains("pick session"));
-    }
-
-    #[test]
-    fn session_picker_label_with_selection() {
-        let mut d = NewAgentDialog::new(Some("."));
-        d.selected_session = Some(("id-1".to_string(), "My Session".to_string()));
-        let label = session_picker_label(&d);
-        assert!(label.contains("My Session"));
-    }
-
-    #[test]
     fn focus_style_focused() {
         let style = focus_style(0, 0, Color::Cyan);
         assert_eq!(style.bg, Some(Color::Cyan));
@@ -940,24 +875,29 @@ mod tests {
         assert_eq!(style.fg, Some(theme.dim_text));
     }
 
+    /// CT34 FR 1: the Mode (Session) row is gone from the form — neither
+    /// `New`/`Resume` nor the old inline resume hints may render.
     #[test]
-    fn session_picker_label_truncates_long_title() {
+    fn interactive_form_has_no_mode_row() {
         let mut d = NewAgentDialog::new(Some("."));
-        d.selected_session = Some(("id".to_string(), "A".repeat(100)));
-        let label = session_picker_label(&d);
-        assert!(label.chars().count() < 60);
-    }
-
-    #[test]
-    fn interactive_mode_row_resume_unconfigured() {
-        let mut d = NewAgentDialog::new(Some("."));
-        d.task_mode = NewTaskMode::Resume;
-        d.session_entries = vec![];
-        d.cli_configs = vec![None];
-        d.cli_index = 0;
-        let line = interactive_mode_row(&d, Color::Cyan, &Theme::classic());
-        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.contains("not configured"));
+        d.task_type = NewTaskType::Interactive;
+        d.task_mode = crate::tui::app::dialog::new_agent::NewTaskMode::Resume;
+        let lines = build_dialog_lines(
+            &d,
+            Color::White,
+            &[0],
+            40,
+            &Theme::classic(),
+            DIR_BROWSER_VISIBLE,
+        );
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(!text.contains("Session:"), "mode row must be gone: {text}");
+        assert!(!text.contains("not configured"), "{text}");
+        assert!(!text.contains("pick session"), "{text}");
     }
 
     #[test]
@@ -982,17 +922,6 @@ mod tests {
     #[test]
     fn task_type_label_background() {
         assert_eq!(task_type_label(NewTaskType::Background), "Background");
-    }
-
-    /// interactive_mode_label returns correct labels for modes
-    #[test]
-    fn interactive_mode_label_new() {
-        assert_eq!(interactive_mode_label(NewTaskMode::Interactive), "New");
-    }
-
-    #[test]
-    fn interactive_mode_label_resume() {
-        assert_eq!(interactive_mode_label(NewTaskMode::Resume), "Resume");
     }
 
     /// background_trigger_label returns correct labels for triggers

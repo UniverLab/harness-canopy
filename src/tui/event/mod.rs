@@ -129,6 +129,7 @@ pub(crate) mod knowledge_dialog;
 mod launchpad;
 mod mouse;
 mod new_agent_dialog;
+pub(crate) mod new_agent_mode_step;
 mod paste;
 mod prompt_template;
 mod rag_transfer;

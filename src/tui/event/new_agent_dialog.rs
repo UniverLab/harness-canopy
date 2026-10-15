@@ -1,17 +1,15 @@
 use anyhow::Result;
 use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 
-use crate::db::session::InteractiveSession;
-use crate::tui::app::dialog::{BackgroundTrigger, NewAgentDialog, NewTaskMode, NewTaskType};
-use crate::tui::app::session_resume::{
-    dedupe_resumable_sessions, plan_resume, ResumeChoice, SessionResumePicker, RESUME_CANDIDATE_CAP,
-};
+use crate::tui::app::dialog::{BackgroundTrigger, DialogStep, NewAgentDialog, NewTaskType};
 use crate::tui::app::types::App;
 use crate::tui::ui::dialogs::new_agent_dialog::SESSION_RESUME_PICKER_VISIBLE;
 
 mod prompt_text;
 
 use prompt_text::handle_prompt_field;
+
+use crate::tui::app::dialog::new_agent::mode_step;
 
 pub(crate) use prompt_text::insert_prompt_text;
 #[cfg(test)]
@@ -25,15 +23,24 @@ use prompt_text::{
 
 // ── Dialog: new agent creation ──────────────────────────────────────
 //
-// Flow: ↑↓ switch fields, ←→ choose CLI/type/mode, ↑↓ in dir browser,
-//       Space enter directory, Enter launch, Esc cancel.
+// Flow: ↑↓ switch fields, ←→ choose CLI/type, ↑↓ in dir browser,
+//       Space enter directory, Enter confirm — an Interactive create form
+//       then opens the Mode step (New / Resume), Esc cancel.
 
-/// Raw row count fetched from the DB before dedup collapses repeat (cli,
-/// working_dir) rows into one candidate each — comfortably more than
-/// `RESUME_CANDIDATE_CAP` so a busy directory doesn't starve the final list.
+/// Raw row count fetched from the DB before the Mode step filters it down
+/// to the sessions that apply to the chosen harness and directory (FR 4).
 const RESUME_CANDIDATE_FETCH_LIMIT: usize = 200;
 
 pub fn handle_dialog_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> Result<()> {
+    // The Mode step owns every key until it hands control back (FR 2).
+    if app
+        .new_agent_dialog
+        .as_ref()
+        .is_some_and(|d| matches!(d.step, DialogStep::Mode))
+    {
+        return crate::tui::event::new_agent_mode_step::handle_mode_step_key(app, code);
+    }
+
     {
         let Some(dialog) = app.new_agent_dialog.as_mut() else {
             return Ok(());
@@ -49,30 +56,10 @@ pub fn handle_dialog_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) 
         KeyCode::Enter if !modifiers.contains(KeyModifiers::SHIFT) => handle_dialog_enter(app),
         _ => {
             let term_width = app.term_width;
-            // Resumable sessions only matter when the mode toggle itself is
-            // about to flip to `Resume` — fetch them lazily so every other
-            // keystroke (typing a prompt, etc.) doesn't hit the DB.
-            let toggling_to_resume = app.new_agent_dialog.as_ref().is_some_and(|d| {
-                d.field == 1
-                    && matches!(d.task_type, NewTaskType::Interactive)
-                    && matches!(code, KeyCode::Left | KeyCode::Right)
-            });
-            let resumable_sessions = if toggling_to_resume {
-                // Fetch generously beyond the picker's final cap: several
-                // rows can collapse into one candidate per (cli, working_dir)
-                // (decision 5), so the raw fetch needs headroom for dedup to
-                // still surface `RESUME_CANDIDATE_CAP` distinct candidates.
-                app.db
-                    .get_resumable_sessions(RESUME_CANDIDATE_FETCH_LIMIT)
-                    .map(|sessions| dedupe_resumable_sessions(sessions, RESUME_CANDIDATE_CAP))
-                    .unwrap_or_default()
-            } else {
-                Vec::new()
-            };
             let Some(dialog) = app.new_agent_dialog.as_mut() else {
                 return Ok(());
             };
-            handle_dialog_field_key(term_width, dialog, code, modifiers, &resumable_sessions);
+            handle_dialog_field_key(term_width, dialog, code, modifiers);
         }
     }
 
@@ -100,28 +87,33 @@ impl DialogFields {
         let is_terminal = matches!(dialog.task_type, NewTaskType::Terminal);
         let is_background = matches!(dialog.task_type, NewTaskType::Background);
 
+        // Interactive (CT34: the Mode row is gone, its step follows the form):
+        // 0 Type · 1 Harness · 2 Identity · 3 Yolo · 4 Sandbox · 5 Dir.
+        // Terminal/Background keep their own numbering.
         Self {
             is_interactive,
             is_terminal,
             is_background,
-            cli_field: if is_interactive || is_background {
+            cli_field: if is_interactive {
+                1
+            } else if is_background {
                 2
             } else {
                 0
             },
-            identity_field: if is_interactive { 5 } else { 0 },
+            identity_field: if is_interactive { 2 } else { 0 },
             model_field: 3,
             prompt_field: 4,
             extra_field: 5,
             dir_field: if is_interactive {
-                6
+                5
             } else if is_terminal {
                 1
             } else {
                 6
             },
-            yolo_field: 4,
-            sandbox_field: if is_interactive { 7 } else { 0 },
+            yolo_field: if is_interactive { 3 } else { 4 },
+            sandbox_field: if is_interactive { 4 } else { 0 },
         }
     }
 
@@ -132,7 +124,9 @@ impl DialogFields {
     }
 
     fn cli_up_target(self) -> usize {
-        if self.is_interactive || self.is_background {
+        // Interactive: Up from the harness row lands on Type (there is no
+        // Mode row above it any more); Background still lands on Trigger.
+        if self.is_background {
             1
         } else {
             0
@@ -192,7 +186,8 @@ fn handle_picker_key(dialog: &mut NewAgentDialog, code: KeyCode) -> bool {
 }
 
 /// Key handling for the canopy-native session-resume picker (FR 1-4, 7).
-fn handle_session_resume_picker_key(dialog: &mut NewAgentDialog, code: KeyCode) {
+/// Shared with the Mode step (CT34), which now opens the list.
+pub(crate) fn handle_session_resume_picker_key(dialog: &mut NewAgentDialog, code: KeyCode) {
     match code {
         KeyCode::Down => move_session_resume_picker(dialog, true),
         KeyCode::Up => move_session_resume_picker(dialog, false),
@@ -210,7 +205,9 @@ fn move_session_resume_picker(dialog: &mut NewAgentDialog, forward: bool) {
     }
 }
 
-fn confirm_session_resume_picker(dialog: &mut NewAgentDialog) {
+/// Confirm the native resume picker's highlighted session and mark the
+/// dialog as resuming (called by the Mode step on Enter).
+pub(crate) fn confirm_session_resume_picker(dialog: &mut NewAgentDialog) {
     let Some(picker) = dialog.session_resume_picker.take() else {
         return;
     };
@@ -219,7 +216,9 @@ fn confirm_session_resume_picker(dialog: &mut NewAgentDialog) {
     }
 }
 
-fn handle_session_picker_key(dialog: &mut NewAgentDialog, code: KeyCode) {
+/// Key handling for the CLI's own session list (`session_list_cmd`), opened
+/// from the Mode step's Resume branch (CT34).
+pub(crate) fn handle_session_picker_key(dialog: &mut NewAgentDialog, code: KeyCode) {
     match code {
         KeyCode::Down => move_session_picker(dialog, true),
         KeyCode::Up => move_session_picker(dialog, false),
@@ -262,37 +261,25 @@ fn confirm_cli_picker(dialog: &mut NewAgentDialog) {
 }
 
 fn handle_dialog_enter(app: &mut App) {
-    {
-        let Some(dialog) = app.new_agent_dialog.as_mut() else {
-            return;
-        };
-
-        if should_open_session_picker(dialog) {
-            dialog.open_session_picker();
-            return;
+    // An Interactive create-mode form confirms into the Mode step (New or
+    // Resume) instead of launching; the resumable sessions are fetched once,
+    // here, so the Resume row already knows what it can offer (FR 2, 4).
+    let opens_mode_step = app
+        .new_agent_dialog
+        .as_ref()
+        .is_some_and(mode_step::can_open_mode_step);
+    if opens_mode_step {
+        let sessions = app
+            .db
+            .get_resumable_sessions(RESUME_CANDIDATE_FETCH_LIMIT)
+            .unwrap_or_default();
+        if let Some(dialog) = app.new_agent_dialog.as_mut() {
+            mode_step::open_mode_step(dialog, sessions);
         }
-
-        // Resume was chosen but there is nothing to resume — say so rather
-        // than falling through to starting a fresh session (decision 4).
-        if blocks_resume_submit(dialog) {
-            return;
-        }
+        return;
     }
 
     let _ = app.launch_new_agent();
-}
-
-fn should_open_session_picker(dialog: &NewAgentDialog) -> bool {
-    matches!(dialog.task_type, NewTaskType::Interactive)
-        && matches!(dialog.task_mode, NewTaskMode::Resume)
-        && dialog.has_session_picker()
-        && dialog.selected_session.is_none()
-}
-
-fn blocks_resume_submit(dialog: &NewAgentDialog) -> bool {
-    matches!(dialog.task_type, NewTaskType::Interactive)
-        && matches!(dialog.task_mode, NewTaskMode::Resume)
-        && dialog.resume_sessions_empty
 }
 
 fn handle_dialog_field_key(
@@ -300,13 +287,11 @@ fn handle_dialog_field_key(
     dialog: &mut NewAgentDialog,
     code: KeyCode,
     modifiers: KeyModifiers,
-    resumable_sessions: &[InteractiveSession],
 ) {
     let fields = DialogFields::from(dialog);
 
     match dialog.field {
         0 => handle_type_field(dialog, code),
-        1 if fields.is_interactive => handle_mode_field(dialog, code, fields, resumable_sessions),
         1 if fields.is_background => handle_trigger_field(dialog, code, fields),
         n if n == fields.cli_field && !fields.is_terminal => handle_cli_field(dialog, code, fields),
         n if n == fields.identity_field && fields.is_interactive => {
@@ -343,6 +328,8 @@ fn handle_type_field(dialog: &mut NewAgentDialog, code: KeyCode) {
     match code {
         KeyCode::Left => cycle_task_type(dialog, false),
         KeyCode::Right => cycle_task_type(dialog, true),
+        // Field 1 is the first row below Type for every type: harness
+        // (Interactive), trigger (Background), directory (Terminal).
         KeyCode::Down | KeyCode::Tab => dialog.field = 1,
         _ => {}
     }
@@ -359,45 +346,6 @@ fn cycle_task_type(dialog: &mut NewAgentDialog, forward: bool) {
     };
     dialog.field = 0;
     dialog.refresh_dir_entries();
-}
-
-fn handle_mode_field(
-    dialog: &mut NewAgentDialog,
-    code: KeyCode,
-    fields: DialogFields,
-    resumable_sessions: &[InteractiveSession],
-) {
-    match code {
-        KeyCode::Left | KeyCode::Right => toggle_task_mode(dialog, resumable_sessions),
-        KeyCode::Delete | KeyCode::Backspace if matches!(dialog.task_mode, NewTaskMode::Resume) => {
-            dialog.clear_selected_session();
-        }
-        KeyCode::Down | KeyCode::Tab => dialog.field = fields.cli_field,
-        KeyCode::Up | KeyCode::BackTab => dialog.field = 0,
-        _ => {}
-    }
-}
-
-/// Toggling to `Resume` is "choosing to resume" (decision 1): it resolves
-/// which canopy session — and therefore which harness — before the CLI
-/// field is ever reached, per `plan_resume`'s decision (FR 1, 5, 6).
-fn toggle_task_mode(dialog: &mut NewAgentDialog, resumable_sessions: &[InteractiveSession]) {
-    dialog.task_mode = match dialog.task_mode {
-        NewTaskMode::Interactive => NewTaskMode::Resume,
-        NewTaskMode::Resume => NewTaskMode::Interactive,
-    };
-    dialog.selected_session = None;
-    dialog.reset_resume_choice();
-
-    if matches!(dialog.task_mode, NewTaskMode::Resume) {
-        match plan_resume(resumable_sessions) {
-            ResumeChoice::None => dialog.resume_sessions_empty = true,
-            ResumeChoice::Direct(session) => dialog.apply_resume_choice(session),
-            ResumeChoice::Picker(sessions) => {
-                dialog.session_resume_picker = Some(SessionResumePicker::new(sessions));
-            }
-        }
-    }
 }
 
 fn handle_trigger_field(dialog: &mut NewAgentDialog, code: KeyCode, fields: DialogFields) {
@@ -1041,130 +989,222 @@ mod tests {
         assert_eq!(start, 6); // after the '\n'
     }
 
-    // ── canopy-native session-resume picker (C12) ────────────────
+    // ── Mode step (CT34) ─────────────────────────────────────────
 
-    fn resume_dialog() -> NewAgentDialog {
-        let mut d = NewAgentDialog::new(Some("."));
-        d.field = 1;
+    fn interactive_form(dir: &str) -> NewAgentDialog {
+        let mut d = NewAgentDialog::new(Some(dir));
+        d.task_type = NewTaskType::Interactive;
         d.available_clis = vec![
             crate::domain::models::Cli::new("claude"),
             crate::domain::models::Cli::new("codex"),
-            crate::domain::models::Cli::new("gemini"),
         ];
-        d.cli_configs = vec![None, None, None];
+        d.cli_configs = vec![None, None];
+        d.cli_index = 0;
+        d.working_dir = dir.to_string();
         d
     }
 
-    fn session(id: &str, cli: &str, started_at: &str) -> InteractiveSession {
-        InteractiveSession {
+    fn app_with(dialog: NewAgentDialog) -> App {
+        let db_file = tempfile::NamedTempFile::new().unwrap();
+        let path = db_file.path().to_path_buf();
+        std::mem::forget(db_file); // keep the sqlite file alive for the test
+        let db = std::sync::Arc::new(crate::db::Database::new(&path).unwrap());
+        let data_dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(
+            db,
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
+        app.new_agent_dialog = Some(dialog);
+        app
+    }
+
+    fn session_in(
+        id: &str,
+        cli: &str,
+        dir: &str,
+        started_at: &str,
+    ) -> crate::db::session::InteractiveSession {
+        crate::db::session::InteractiveSession {
             id: id.to_string(),
             name: format!("session-{id}"),
             cli: cli.to_string(),
-            working_dir: "/tmp".to_string(),
+            working_dir: dir.to_string(),
             args: None,
             started_at: started_at.to_string(),
-            status: "orphaned".to_string(),
+            status: "completed".to_string(),
             session_type: "interactive".to_string(),
             pid: None,
             boot_id: None,
         }
     }
 
+    /// FR 7: Enter on an Interactive create form opens the Mode step and
+    /// launches nothing.
     #[test]
-    fn resume_with_three_sessions_opens_picker_most_recent_first() {
-        let mut d = resume_dialog();
+    fn enter_on_interactive_form_opens_mode_step_without_launching() {
+        let mut app = app_with(interactive_form("/tmp/proj"));
+
+        handle_dialog_key(&mut app, KeyCode::Enter, KeyModifiers::NONE).unwrap();
+
+        let dialog = app.new_agent_dialog.as_ref().expect("form stays open");
+        assert_eq!(dialog.step, DialogStep::Mode);
+        assert!(
+            app.launchpad_dialog.is_none(),
+            "the mission step must not open yet"
+        );
+        assert!(app.pending_launch_dialog.is_none());
+        assert!(app.interactive_agents.is_empty(), "nothing launched");
+    }
+
+    /// FR 7: Esc from the Mode step returns to the form with every value —
+    /// the directory above all — unchanged.
+    #[test]
+    fn esc_from_mode_step_returns_to_form_with_directory_kept() {
+        let mut form = interactive_form("/tmp/proj");
+        form.prompt = "keep me".to_string();
+        let mut app = app_with(form);
+
+        handle_dialog_key(&mut app, KeyCode::Enter, KeyModifiers::NONE).unwrap();
+        crate::tui::event::new_agent_mode_step::handle_mode_step_key(&mut app, KeyCode::Esc)
+            .unwrap();
+
+        let dialog = app.new_agent_dialog.as_ref().expect("still open");
+        assert_eq!(dialog.step, DialogStep::Form);
+        assert_eq!(
+            dialog.working_dir, "/tmp/proj",
+            "directory survives the round trip"
+        );
+        assert_eq!(dialog.prompt, "keep me", "form values survive too");
+    }
+
+    /// FR 3: New session continues to the mission step (launchpad) exactly
+    /// as today's Interactive create path does.
+    #[test]
+    fn new_session_opens_the_launchpad() {
+        let mut app = app_with(interactive_form("/tmp/proj"));
+
+        handle_dialog_key(&mut app, KeyCode::Enter, KeyModifiers::NONE).unwrap();
+        crate::tui::event::new_agent_mode_step::handle_mode_step_key(&mut app, KeyCode::Enter)
+            .unwrap();
+
+        assert!(
+            app.launchpad_dialog.is_some(),
+            "New session must open the mission step"
+        );
+        assert!(app.pending_launch_dialog.is_some());
+        assert!(app.new_agent_dialog.is_none());
+        assert!(app.interactive_agents.is_empty(), "no session spawned yet");
+    }
+
+    /// FR 7: two native sessions in the chosen dir and one in another dir
+    /// (or another harness) — the Resume list shows exactly the two.
+    #[test]
+    fn resume_lists_exactly_the_sessions_for_harness_and_directory() {
         let sessions = vec![
-            session("s1", "claude", "2026-08-19T09:00:00Z"),
-            session("s2", "codex", "2026-08-19T11:00:00Z"),
-            session("s3", "gemini", "2026-08-19T10:00:00Z"),
+            session_in("s1", "claude", "/tmp/proj", "2026-10-01T10:00:00Z"),
+            session_in("s2", "claude", "/tmp/proj/", "2026-10-01T09:00:00Z"),
+            session_in("s3", "codex", "/tmp/proj", "2026-10-01T11:00:00Z"),
+            session_in("s4", "claude", "/tmp/other", "2026-10-01T12:00:00Z"),
         ];
+        let mut d = interactive_form("/tmp/proj");
+        mode_step::open_mode_step(&mut d, sessions);
+        d.mode_index = 1;
+        let mut app = app_with(d);
 
-        toggle_task_mode(&mut d, &sessions);
+        crate::tui::event::new_agent_mode_step::handle_mode_step_key(&mut app, KeyCode::Enter)
+            .unwrap();
 
-        let picker = d.session_resume_picker.expect("picker should open");
-        assert_eq!(picker.sessions.len(), 3);
+        let dialog = app.new_agent_dialog.as_ref().expect("still choosing");
+        assert_eq!(dialog.step, DialogStep::Mode, "the list shows on the step");
+        let picker = dialog
+            .session_resume_picker
+            .as_ref()
+            .expect("the resume list opens");
         let ids: Vec<&str> = picker.sessions.iter().map(|s| s.id.as_str()).collect();
-        assert_eq!(ids, vec!["s2", "s3", "s1"], "must be most-recent-first");
-        assert!(d.selected_resume_session.is_none());
+        assert_eq!(ids, vec!["s1", "s2"], "only harness + directory match");
+        assert!(
+            app.interactive_agents.is_empty(),
+            "Enter only opened the list"
+        );
+        assert!(app.launchpad_dialog.is_none());
     }
 
+    /// FR 7 + FR 5: nothing to resume → the Resume row is empty, Enter
+    /// launches nothing and the dialog stays put.
     #[test]
-    fn selecting_second_row_resumes_that_session_with_its_harness() {
-        let mut d = resume_dialog();
-        let sessions = vec![
-            session("s1", "claude", "2026-08-19T09:00:00Z"),
-            session("s2", "codex", "2026-08-19T11:00:00Z"),
-            session("s3", "gemini", "2026-08-19T10:00:00Z"),
-        ];
-        toggle_task_mode(&mut d, &sessions);
+    fn resume_with_nothing_to_resume_enter_launches_nothing() {
+        let sessions = vec![session_in(
+            "s1",
+            "claude",
+            "/tmp/other",
+            "2026-10-01T10:00:00Z",
+        )];
+        let mut d = interactive_form("/tmp/proj");
+        mode_step::open_mode_step(&mut d, sessions);
+        assert!(mode_step::resume_row_is_empty(&d), "no session applies");
+        d.mode_index = 1;
+        let mut app = app_with(d);
 
-        move_session_resume_picker(&mut d, true); // s2 -> s3 (index 1)
-        confirm_session_resume_picker(&mut d);
+        crate::tui::event::new_agent_mode_step::handle_mode_step_key(&mut app, KeyCode::Enter)
+            .unwrap();
 
-        assert!(d.session_resume_picker.is_none());
+        let dialog = app.new_agent_dialog.as_ref().expect("dialog stays open");
+        assert!(dialog.session_resume_picker.is_none(), "no list to show");
+        assert!(!dialog.session_picker_open, "and no list left open");
         assert_eq!(
-            d.selected_cli().as_str(),
-            "gemini",
-            "harness follows from the session"
+            dialog.task_mode,
+            crate::tui::app::dialog::new_agent::NewTaskMode::Interactive
         );
-        let resumed = d.selected_resume_session.expect("a session was resumed");
-        assert_eq!(
-            resumed.id, "s3",
-            "the resume path must receive the picked session id"
+        assert!(
+            app.launchpad_dialog.is_none(),
+            "the mission step must not open"
         );
+        assert!(app.interactive_agents.is_empty(), "nothing launched");
     }
 
+    /// FR 7: a harness with its own `session_list_cmd` gets that list on
+    /// Resume, not the native one (FR 4's first branch).
     #[test]
-    fn exactly_one_session_resumes_directly_with_no_picker() {
-        let mut d = resume_dialog();
-        let sessions = vec![session("s1", "codex", "2026-08-19T09:00:00Z")];
+    fn resume_uses_the_cli_own_session_list_when_the_harness_has_one() {
+        let mut d = interactive_form("/tmp");
+        d.cli_configs = vec![Some(crate::domain::cli_config::CliConfig {
+            name: "claude".into(),
+            binary: "echo".into(),
+            // `echo` prints its args, so the parser sees one real session id.
+            session_list_cmd: Some("ses_abcdef123 --list".into()),
+            ..Default::default()
+        })];
+        mode_step::open_mode_step(&mut d, Vec::new());
+        d.mode_index = 1;
+        let mut app = app_with(d);
 
-        toggle_task_mode(&mut d, &sessions);
+        crate::tui::event::new_agent_mode_step::handle_mode_step_key(&mut app, KeyCode::Enter)
+            .unwrap();
 
+        let dialog = app.new_agent_dialog.as_ref().expect("still choosing");
+        assert!(dialog.session_picker_open, "the CLI's own list opens");
         assert!(
-            d.session_resume_picker.is_none(),
-            "a single candidate must not prompt"
+            dialog.session_resume_picker.is_none(),
+            "not the native list"
         );
-        assert_eq!(d.selected_cli().as_str(), "codex");
-        let resumed = d.selected_resume_session.expect("resumed directly");
-        assert_eq!(resumed.id, "s1");
+        assert_eq!(dialog.session_entries.len(), 1);
+        assert!(app.interactive_agents.is_empty());
     }
 
+    /// FR 7: Terminal (and Background) never open the Mode step.
     #[test]
-    fn zero_sessions_reports_empty_and_blocks_submit() {
-        let mut d = resume_dialog();
+    fn terminal_form_skips_the_mode_step() {
+        let mut d = interactive_form("/tmp/proj");
+        d.task_type = NewTaskType::Terminal;
+        assert!(!mode_step::can_open_mode_step(&d));
 
-        toggle_task_mode(&mut d, &[]);
+        d.task_type = NewTaskType::Background;
+        assert!(!mode_step::can_open_mode_step(&d));
 
-        assert!(d.session_resume_picker.is_none());
-        assert!(d.selected_resume_session.is_none());
-        assert!(d.resume_sessions_empty);
-        assert!(
-            blocks_resume_submit(&d),
-            "must not fall through to starting something new"
-        );
-    }
-
-    #[test]
-    fn cancelling_picker_starts_nothing() {
-        let mut d = resume_dialog();
-        let sessions = vec![
-            session("s1", "claude", "2026-08-19T09:00:00Z"),
-            session("s2", "codex", "2026-08-19T11:00:00Z"),
-        ];
-        toggle_task_mode(&mut d, &sessions);
-        assert!(d.session_resume_picker.is_some());
-
-        handle_session_resume_picker_key(&mut d, KeyCode::Esc);
-
-        assert!(d.session_resume_picker.is_none());
-        assert!(
-            d.selected_resume_session.is_none(),
-            "cancelling must not resume anything"
-        );
-        assert!(
-            matches!(d.task_mode, NewTaskMode::Resume),
-            "returns to the previous dialog, not further back"
-        );
+        d.task_type = NewTaskType::Interactive;
+        d.edit_id = Some("agent-1".into());
+        assert!(!mode_step::can_open_mode_step(&d), "edit mode skips it too");
     }
 }

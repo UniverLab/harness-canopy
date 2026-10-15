@@ -12,7 +12,9 @@ use super::{
 };
 use crate::application::ports::AgentRepository;
 use crate::tui::app::dialog::launchpad::{LaunchpadChoice, LaunchpadDialog};
-use crate::tui::app::dialog::new_agent::{BackgroundTrigger, NewAgentDialog, NewTaskType};
+use crate::tui::app::dialog::new_agent::{
+    BackgroundTrigger, NewAgentDialog, NewTaskMode, NewTaskType,
+};
 use crate::tui::app::types::App;
 
 impl App {
@@ -56,7 +58,9 @@ impl App {
 
         // ── Create mode ───────────────────────────────────────────────────
         if matches!(dialog.task_type, NewTaskType::Interactive) {
-            if dialog.is_planting_new_seed() {
+            // New (the mission step) is the launchpad; resuming and nursery
+            // sessions go straight to the PTY as they always have (CT34).
+            if dialog.is_planting_new_seed() || matches!(dialog.task_mode, NewTaskMode::Resume) {
                 self.launch_interactive(&dialog)?;
                 let name = self.take_new_interactive_name();
                 self.new_agent_dialog = None;

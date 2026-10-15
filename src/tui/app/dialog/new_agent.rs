@@ -9,6 +9,7 @@ use crate::tui::app::types::Focus;
 use crate::tui::ui::theme::Theme;
 
 pub(crate) mod dir_browser;
+pub(crate) mod mode_step;
 
 /// Seed identity option for the agent creation dialog.
 #[derive(Clone, Debug)]
@@ -37,12 +38,22 @@ pub enum BackgroundTrigger {
 }
 
 /// Launch mode for interactive agents.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum NewTaskMode {
     /// Start a fresh interactive session.
     Interactive,
     /// Resume a previous session.
     Resume,
+}
+
+/// Which screen of the new-session dialog is on show (CT34). The Mode step
+/// follows a confirmed Interactive create-mode form and asks New or Resume.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DialogStep {
+    /// The form: type, harness, identity, directory and the rest.
+    Form,
+    /// The New session / Resume a session choice after the form.
+    Mode,
 }
 
 /// State for the "new agent" dialog.
@@ -51,6 +62,14 @@ pub struct NewAgentDialog {
     pub edit_id: Option<String>,
     pub task_type: NewTaskType,
     pub task_mode: NewTaskMode,
+    /// Which step of the dialog flow is showing.
+    pub step: DialogStep,
+    /// Selection on the Mode step: 0 = New session, 1 = Resume a session.
+    pub mode_index: usize,
+    /// Resumable sessions the Mode step's Resume row offers, filtered to the
+    /// harness and directory chosen on the form (no dedupe — every matching
+    /// session stays listable).
+    pub mode_candidates: Vec<crate::db::session::InteractiveSession>,
     pub background_trigger: BackgroundTrigger,
     pub cli_index: usize,
     pub available_clis: Vec<Cli>,
@@ -104,8 +123,6 @@ pub struct NewAgentDialog {
     /// The canopy session resolved via the picker, or set directly when
     /// exactly one resumable session existed. Its `cli` is the harness.
     pub selected_resume_session: Option<crate::tui::app::session_resume::ResumableSession>,
-    /// Set when `Resume` was chosen but no resumable sessions exist.
-    pub resume_sessions_empty: bool,
     /// Whether to launch the agent in yolo (autonomous) mode.
     pub yolo_mode: bool,
     /// Whether to launch in a sandbox (git worktree with instruction file).
@@ -145,6 +162,9 @@ impl NewAgentDialog {
             edit_id: None,
             task_type: NewTaskType::Interactive,
             task_mode: NewTaskMode::Interactive,
+            step: DialogStep::Form,
+            mode_index: 0,
+            mode_candidates: Vec::new(),
             background_trigger: BackgroundTrigger::Cron,
             cli_index: 0,
             available_clis: if available.is_empty() {
@@ -187,7 +207,6 @@ impl NewAgentDialog {
             selected_session: None,
             session_resume_picker: None,
             selected_resume_session: None,
-            resume_sessions_empty: false,
             yolo_mode: false,
             sandbox_mode: false,
             background_action: super::background_action::BackgroundAction::Headless,
@@ -370,30 +389,20 @@ impl NewAgentDialog {
         self.edit_id.is_some()
     }
 
-    pub fn resume_unconfigured(&self) -> bool {
-        matches!(self.task_mode, NewTaskMode::Resume)
-            && self
-                .cli_configs
-                .get(self.cli_index)
-                .and_then(|c| c.as_ref())
-                .map(|c| c.resume_args.is_none())
-                .unwrap_or(true)
-    }
-
-    /// Returns true when the current CLI supports canopy-side session picking.
-    pub fn has_session_picker(&self) -> bool {
-        matches!(self.task_mode, NewTaskMode::Resume)
-            && self
-                .cli_configs
-                .get(self.cli_index)
-                .and_then(|c| c.as_ref())
-                .map(|c| {
-                    c.session_list_cmd
-                        .as_ref()
-                        .map(|cmd| !cmd.trim().is_empty())
-                        .unwrap_or(false)
-                })
-                .unwrap_or(false)
+    /// Returns true when the current CLI has a dedicated session list command
+    /// (independent of `task_mode`, so the Mode step can pick the list source
+    /// before Resume is confirmed).
+    pub fn has_cli_session_list(&self) -> bool {
+        self.cli_configs
+            .get(self.cli_index)
+            .and_then(|c| c.as_ref())
+            .map(|c| {
+                c.session_list_cmd
+                    .as_ref()
+                    .map(|cmd| !cmd.trim().is_empty())
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false)
     }
 
     /// Run the CLI's session_list_cmd, parse the output and populate session_entries.
@@ -443,11 +452,6 @@ impl NewAgentDialog {
             self.selected_session = Some(entry.clone());
         }
         self.session_picker_open = false;
-    }
-
-    /// Clear the selected session (fall back to --continue / resume_args).
-    pub fn clear_selected_session(&mut self) {
-        self.selected_session = None;
     }
 
     pub fn selected_fallback_args(&self) -> Option<String> {
@@ -515,12 +519,11 @@ impl NewAgentDialog {
         self.selected_resume_session = Some(session);
     }
 
-    /// Clear all canopy-native resume-picker state (mode toggled away from
-    /// `Resume`, or the picker cancelled).
+    /// Clear all canopy-native resume-picker state (the Mode step's Resume
+    /// branch re-opens, or the picker cancelled).
     pub fn reset_resume_choice(&mut self) {
         self.session_resume_picker = None;
         self.selected_resume_session = None;
-        self.resume_sessions_empty = false;
     }
 
     pub fn open_cli_picker(&mut self) {
@@ -929,47 +932,43 @@ mod tests {
     }
 
     #[test]
-    fn has_session_picker_false_for_empty_session_list_cmd() {
+    fn has_cli_session_list_false_for_empty_session_list_cmd() {
         let mut dialog = NewAgentDialog::new(None);
-        dialog.task_mode = NewTaskMode::Resume;
         dialog.available_clis = vec![Cli::new("antigravity")];
         dialog.cli_configs = vec![Some(cli_config_with_session_list(Some("")))];
         dialog.cli_index = 0;
 
-        assert!(!dialog.has_session_picker());
+        assert!(!dialog.has_cli_session_list());
     }
 
     #[test]
-    fn has_session_picker_false_for_whitespace_session_list_cmd() {
+    fn has_cli_session_list_false_for_whitespace_session_list_cmd() {
         let mut dialog = NewAgentDialog::new(None);
-        dialog.task_mode = NewTaskMode::Resume;
         dialog.available_clis = vec![Cli::new("antigravity")];
         dialog.cli_configs = vec![Some(cli_config_with_session_list(Some("   ")))];
         dialog.cli_index = 0;
 
-        assert!(!dialog.has_session_picker());
+        assert!(!dialog.has_cli_session_list());
     }
 
     #[test]
-    fn has_session_picker_true_for_real_session_list_cmd() {
+    fn has_cli_session_list_true_for_real_session_list_cmd() {
         let mut dialog = NewAgentDialog::new(None);
-        dialog.task_mode = NewTaskMode::Resume;
         dialog.available_clis = vec![Cli::new("antigravity")];
         dialog.cli_configs = vec![Some(cli_config_with_session_list(Some("session list")))];
         dialog.cli_index = 0;
 
-        assert!(dialog.has_session_picker());
+        assert!(dialog.has_cli_session_list());
     }
 
     #[test]
-    fn has_session_picker_false_for_none_session_list_cmd() {
+    fn has_cli_session_list_false_for_none_session_list_cmd() {
         let mut dialog = NewAgentDialog::new(None);
-        dialog.task_mode = NewTaskMode::Resume;
         dialog.available_clis = vec![Cli::new("antigravity")];
         dialog.cli_configs = vec![Some(cli_config_with_session_list(None))];
         dialog.cli_index = 0;
 
-        assert!(!dialog.has_session_picker());
+        assert!(!dialog.has_cli_session_list());
     }
 
     #[test]
@@ -1268,7 +1267,7 @@ mod tests {
         assert_eq!(dialog.selected_yolo_flag().as_deref(), Some("--yolo"));
     }
 
-    // ── is_edit_mode / resume_unconfigured ───────────────────────
+    // ── is_edit_mode ─────────────────────────────────────────────
 
     #[test]
     fn is_edit_mode_false_for_new() {
@@ -1281,73 +1280,6 @@ mod tests {
         let mut dialog = NewAgentDialog::new(None);
         dialog.edit_id = Some("existing-id".to_string());
         assert!(dialog.is_edit_mode());
-    }
-
-    #[test]
-    fn resume_unconfigured_false_for_interactive_mode() {
-        let mut dialog = NewAgentDialog::new(None);
-        dialog.task_mode = NewTaskMode::Interactive;
-        assert!(!dialog.resume_unconfigured());
-    }
-
-    #[test]
-    fn resume_unconfigured_true_for_resume_no_config() {
-        let mut dialog = NewAgentDialog::new(None);
-        dialog.task_mode = NewTaskMode::Resume;
-        dialog.cli_configs = vec![None];
-        dialog.cli_index = 0;
-        assert!(dialog.resume_unconfigured());
-    }
-
-    #[test]
-    fn resume_unconfigured_false_for_resume_with_config() {
-        let mut dialog = NewAgentDialog::new(None);
-        dialog.task_mode = NewTaskMode::Resume;
-        dialog.cli_configs = vec![Some(crate::domain::cli_config::CliConfig {
-            name: "test".into(),
-            binary: "test".into(),
-            headless_mode: String::new(),
-            headless: true,
-            ctrl_c_exits: false,
-            model_flag: None,
-            supports_working_dir: false,
-            working_dir_flag: None,
-            env_vars: std::collections::HashMap::new(),
-            interactive_args: None,
-            fallback_interactive_args: None,
-            resume_args: Some("--continue".to_string()),
-            session_list_cmd: None,
-            session_resume_cmd: None,
-            session_id_set_flag: None,
-            session_list_format_args: None,
-            session_id_pattern: None,
-            session_title_flag: None,
-            session_list_args: None,
-            session_end_args: None,
-            models_list_cmd: None,
-            identity_check: None,
-            identity_args: None,
-            identity_pattern: None,
-            accent_color: None,
-            yolo_flag: None,
-            trust_flag: None,
-            instruction_file: None,
-            prompt_via_stdin: false,
-            paste_submit_delay_ms: None,
-            paste_submit_key: None,
-            paste_submit_presses: 1,
-            invocation_template: None,
-            effort_declaration: None,
-            infra_retry_limit: None,
-            infra_crash_max_seconds: None,
-            infra_backoff_seconds: None,
-            decision_args: None,
-
-            provider: None,
-            tool_name: None,
-        })];
-        dialog.cli_index = 0;
-        assert!(!dialog.resume_unconfigured());
     }
 
     // ── set_cli_index ────────────────────────────────────────────
@@ -1496,14 +1428,6 @@ mod tests {
         dialog.session_entries = vec![("id1".to_string(), "Session 1".to_string())];
         dialog.session_picker_idx = 99;
         dialog.confirm_session_pick();
-        assert!(dialog.selected_session.is_none());
-    }
-
-    #[test]
-    fn clear_selected_session() {
-        let mut dialog = NewAgentDialog::new(None);
-        dialog.selected_session = Some(("id1".to_string(), "Session 1".to_string()));
-        dialog.clear_selected_session();
         assert!(dialog.selected_session.is_none());
     }
 
@@ -2227,16 +2151,6 @@ mod tests {
         dialog.confirm_session_pick();
         assert!(dialog.selected_session.is_none());
         assert!(!dialog.session_picker_open);
-    }
-
-    // ── clear_selected_session when none ─────────────────────────
-
-    #[test]
-    fn clear_selected_session_when_none() {
-        let mut dialog = NewAgentDialog::new(None);
-        dialog.selected_session = None;
-        dialog.clear_selected_session();
-        assert!(dialog.selected_session.is_none());
     }
 
     // ── open_session_picker with entries ─────────────────────────

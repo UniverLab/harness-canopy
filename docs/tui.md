@@ -24,6 +24,21 @@ time.
 The dialog includes a CLI picker, model picker, seed identity selector
 (`◀ None / SeedName ▶`), directory browser, and a yolo-mode toggle.
 
+For **Interactive**, `Enter` on the finished form opens a second **Mode**
+step instead of launching straight away:
+
+- **New session** — exactly the launch the form always did: the launchpad
+  opens (or the session starts directly when a new seed is being planted).
+- **Resume a session** — lists the finished sessions that belong to the
+  selected harness *and* directory, or the harness's own `session_list_cmd`
+  output when it defines one. `Enter` on a session launches it resumed,
+  skipping the mission step; a harness with nothing to resume shows
+  `No sessions to resume for <harness> in <dir>` and `New session` stays
+  usable.
+- `↑↓` selects, `Enter` confirms, and `Esc` returns to the form with every
+  value kept. **Background** and **Terminal** launch from the form as
+  before — the Mode step is Interactive-only.
+
 ## Interactive sessions
 
 - **Copying text** — drag inside a focused session pane to select and copy;
