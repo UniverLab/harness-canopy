@@ -21,7 +21,10 @@ pub fn open_knowledge_viewer(app: &mut App) {
 }
 
 /// Esc closes back to the list with the selection untouched; `e` closes and
-/// opens the edit dialog for the same entry; ↑↓/PgUp/PgDn scroll the body.
+/// opens the edit dialog for the same entry; ↑↓/PgUp/PgDn scroll the body,
+/// bounded by the rendered line count the last draw measured
+/// (`KnowledgeViewerDialog::max_scroll` — these keys cannot measure a wrapped
+/// body themselves, since they never see the dialog's width or height).
 pub fn handle_knowledge_viewer_key(app: &mut App, code: KeyCode) -> Result<()> {
     match code {
         KeyCode::Esc => {
@@ -40,12 +43,11 @@ pub fn handle_knowledge_viewer_key(app: &mut App, code: KeyCode) -> Result<()> {
         return Ok(());
     };
 
-    let max_scroll = (dialog.body.lines().count() as u16).saturating_sub(1);
     match code {
-        KeyCode::Up => dialog.scroll = dialog.scroll.saturating_sub(1),
-        KeyCode::Down => dialog.scroll = (dialog.scroll + 1).min(max_scroll),
-        KeyCode::PageUp => dialog.scroll = dialog.scroll.saturating_sub(10),
-        KeyCode::PageDown => dialog.scroll = (dialog.scroll + 10).min(max_scroll),
+        KeyCode::Up => dialog.scroll_by(-1),
+        KeyCode::Down => dialog.scroll_by(1),
+        KeyCode::PageUp => dialog.scroll_by(-10),
+        KeyCode::PageDown => dialog.scroll_by(10),
         _ => {}
     }
 

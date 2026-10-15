@@ -713,6 +713,11 @@ mod tests {
             text.contains("25 / 30"),
             "the position indicator must show on the first row:\n{text}"
         );
+        let first_row = text.lines().next().unwrap_or_default();
+        assert!(
+            first_row.trim_end().ends_with("25 / 30"),
+            "the indicator is right-aligned on the first row:\n{first_row:?}"
+        );
     }
 
     /// FR4: the Overview tab's three section labels are headings in the
