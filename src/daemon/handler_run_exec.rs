@@ -640,7 +640,7 @@ pub(crate) fn resolve_directed_spec(
             .and_then(|lp| lp.active_run_queue_id)
         else {
             return Err(format!(
-                "Spec '{spec_id}' does not belong to graph '{graph_id}.'"
+                "Spec '{spec_id}' does not belong to graph '{graph_id}'."
             ));
         };
         for member_id in db
@@ -655,7 +655,7 @@ pub(crate) fn resolve_directed_spec(
             }
         }
         return Err(format!(
-            "Spec '{spec_id}' does not belong to graph '{graph_id}.'"
+            "Spec '{spec_id}' does not belong to graph '{graph_id}'."
         ));
     }
     if let Some(spec) = bound.iter().find(|s| s.status.is_resumable()).or_else(|| {

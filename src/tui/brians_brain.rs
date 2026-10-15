@@ -183,9 +183,9 @@ impl BriansBrain {
         self.trail_last_row = by as i32;
     }
 
-    /// Advance the automaton one fixed step if [`STEP_MS`] has elapsed.
-    /// Returns `true` when the field actually stepped. Pointer motion never
-    /// changes the rate — this is the whole point of the rebrand.
+    /// The next state of the cell at `idx` (`x`, `y`): a firing cell dies, a
+    /// dying cell goes off, and an off cell fires when exactly two of its
+    /// neighbours are on. `firing` counts the cells that fire this step.
     fn cell_next_state(&self, idx: usize, x: usize, y: usize, firing: &mut usize) -> CellState {
         match self.grid[idx] {
             CellState::On => CellState::Dying,
