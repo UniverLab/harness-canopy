@@ -64,6 +64,20 @@ impl SpawnError {
     }
 }
 
+/// Best-effort cleanup of a harness session when an agent node timed out
+/// (CB84): the process group was already killed (B12), but the platform's
+/// service-side session may keep running. Detached, never fails the caller.
+async fn end_harness_session_on_timeout(db: &Database, run_id: &str, cli: &Cli, workdir: &str) {
+    let Ok(Some(run)) = db.get_graph_run(run_id) else {
+        return;
+    };
+    let platform = cli.as_str().to_string();
+    let workdir = workdir.to_string();
+    tokio::spawn(async move {
+        crate::graph_engine::routing::end_harness_session(&platform, &run, &workdir).await;
+    });
+}
+
 /// CB85: the platform's binary must identify as the platform before
 /// anything is spawned. `None` when the platform declares no identity
 /// fields, or its binary does not resolve (the build below then reports
@@ -129,18 +143,9 @@ pub(crate) async fn spawn_and_wait_cli_process(
     on_pid: impl FnOnce(u32),
     tee: Option<OutputTee>,
 ) -> Result<CliProcessOutcome, SpawnError> {
-    // CB85: identity check before anything is spawned. Cached per
-    // path+mtime, so this is a hashmap hit after the first check for a
-    // given binary; the node path also checks in `run_agent_process`
-    // (which also runs the session-list capture below against the binary).
-    if let Some(identity) = strategy.identity.as_ref() {
-        if let Ok(resolved) = crate::domain::cli_strategy::resolve_binary(&strategy.binary) {
-            if let Err(error) =
-                crate::domain::cli_strategy::ensure_binary_identity(&resolved, identity).await
-            {
-                return Err(SpawnError::from_identity(&error));
-            }
-        }
+    // CB85: identity check before anything is spawned.
+    if let Some(error) = ensure_platform_identity(strategy).await {
+        return Err(error);
     }
 
     // A resume (RS2) uses the by-id resume flag and continues an existing
@@ -361,6 +366,64 @@ pub(crate) fn cli_model_flag(platform: &str) -> Option<Option<String>> {
     config.get_cli(platform).map(|cli| cli.model_flag.clone())
 }
 
+/// The effort/model rejection notices for one spawn, stamped onto every
+/// outcome's output so the run row records why a requested effort/model was
+/// not applied.
+struct AgentNotices<'a> {
+    effort: Option<&'a str>,
+    effort_not_applied: Option<Value>,
+    model_not_applied: Option<Value>,
+}
+
+impl AgentNotices<'_> {
+    fn stamp(&self, output: &mut Value) {
+        stamp_effort_model_notices(
+            output,
+            self.effort,
+            self.effort_not_applied.as_ref(),
+            self.model_not_applied.as_ref(),
+        );
+    }
+}
+
+/// The node execution for a run whose harness process timed out: the timeout
+/// output JSON (with the effort/model notices stamped), the run row recorded
+/// as failed, and the summary.
+fn agent_timeout_execution(
+    db: &Database,
+    run_id: &str,
+    node: &GraphNode,
+    cli: &Cli,
+    model: Option<&str>,
+    timeout_minutes: u64,
+    notices: &AgentNotices<'_>,
+) -> NodeExecution {
+    let mut output = serde_json::json!({
+        "kind": "agent",
+        "node_id": node.id,
+        "cli": cli.as_str(),
+        "model": model,
+        "error": "timed out",
+        "timeout_minutes": timeout_minutes,
+        "prompt_source": agent_prompt_source(&node.config),
+    });
+    notices.stamp(&mut output);
+    let _ = db.update_graph_run_result(
+        run_id,
+        GraphRunStatus::Fail,
+        Some(&output),
+        Some(chrono::Utc::now()),
+    );
+    NodeExecution {
+        status: GraphRunStatus::Fail,
+        output,
+        summary: format!(
+            "Agent node '{}' timed out after {timeout_minutes}m.",
+            node.name
+        ),
+    }
+}
+
 #[expect(clippy::too_many_arguments)]
 pub(crate) async fn run_agent_process(
     db: &Database,
@@ -383,17 +446,17 @@ pub(crate) async fn run_agent_process(
         .unwrap_or(false);
     let effort_not_applied = effort_notice(cli.as_str(), strategy, effort);
     let model_not_applied = model_notice(cli.as_str(), strategy, model);
+    let notices = AgentNotices {
+        effort,
+        effort_not_applied,
+        model_not_applied,
+    };
 
     // CB85: fail before spawning anything — including the session-list
     // capture, which also runs the platform's binary.
     if let Some(error) = ensure_platform_identity(strategy).await {
         let mut exec = agent_spawn_failure(node, cli, model, &error);
-        stamp_effort_model_notices(
-            &mut exec.output,
-            effort,
-            effort_not_applied.as_ref(),
-            model_not_applied.as_ref(),
-        );
+        notices.stamp(&mut exec.output);
         return Ok(exec);
     }
 
@@ -438,16 +501,10 @@ pub(crate) async fn run_agent_process(
             capture_session_id_after_run(db, run_id, strategy, workdir, &pre).await;
         }
     }
-
     match outcome {
         Err(error) => {
             let mut exec = agent_spawn_failure(node, cli, model, &error);
-            stamp_effort_model_notices(
-                &mut exec.output,
-                effort,
-                effort_not_applied.as_ref(),
-                model_not_applied.as_ref(),
-            );
+            notices.stamp(&mut exec.output);
             Ok(exec)
         }
         Ok(CliProcessOutcome::TimedOut) => {
@@ -456,43 +513,16 @@ pub(crate) async fn run_agent_process(
             // — end it too. Best-effort, detached, never fails the caller.
             // The run row's `session_id` was recorded at spawn (set-at-spawn
             // or resume), so no title lookup is needed here.
-            let platform = cli.as_str().to_string();
-            if let Ok(Some(run)) = db.get_graph_run(run_id) {
-                let workdir = workdir.to_string();
-                tokio::spawn(async move {
-                    crate::graph_engine::routing::end_harness_session(&platform, &run, &workdir)
-                        .await;
-                });
-            }
-            let mut output = serde_json::json!({
-                "kind": "agent",
-                "node_id": node.id,
-                "cli": cli.as_str(),
-                "model": model,
-                "error": "timed out",
-                "timeout_minutes": timeout_minutes,
-                "prompt_source": agent_prompt_source(&node.config),
-            });
-            stamp_effort_model_notices(
-                &mut output,
-                effort,
-                effort_not_applied.as_ref(),
-                model_not_applied.as_ref(),
-            );
-            let _ = db.update_graph_run_result(
+            end_harness_session_on_timeout(db, run_id, cli, workdir).await;
+            Ok(agent_timeout_execution(
+                db,
                 run_id,
-                GraphRunStatus::Fail,
-                Some(&output),
-                Some(chrono::Utc::now()),
-            );
-            Ok(NodeExecution {
-                status: GraphRunStatus::Fail,
-                output,
-                summary: format!(
-                    "Agent node '{}' timed out after {timeout_minutes}m.",
-                    node.name
-                ),
-            })
+                node,
+                cli,
+                model,
+                timeout_minutes,
+                &notices,
+            ))
         }
         Ok(CliProcessOutcome::Finished {
             exit_code,
@@ -516,12 +546,7 @@ pub(crate) async fn run_agent_process(
                 &stderr,
                 self_reported,
             );
-            stamp_effort_model_notices(
-                &mut exec.output,
-                effort,
-                effort_not_applied.as_ref(),
-                model_not_applied.as_ref(),
-            );
+            notices.stamp(&mut exec.output);
             Ok(exec)
         }
     }

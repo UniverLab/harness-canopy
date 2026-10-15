@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+#![allow(unused_imports)]
 #![allow(clippy::doc_markdown)]
 
 mod setup_module {

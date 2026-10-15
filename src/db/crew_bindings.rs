@@ -49,6 +49,32 @@ pub struct CrewBindingCounts {
     pub hooks: usize,
 }
 
+/// Append every `crew`-bound hook in one graph's `hooks` JSON blob.
+fn append_hook_bindings(out: &mut Vec<(String, CrewBinding)>, graph_name: &str, hooks_raw: &str) {
+    let hooks: serde_json::Value =
+        serde_json::from_str(hooks_raw).unwrap_or(serde_json::Value::Null);
+    let Some(events) = hooks.as_object() else {
+        return;
+    };
+    let bindings = events.iter().flat_map(|(event, list)| {
+        list.as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(move |hook| {
+                let crew_name = hook.get("crew").and_then(|v| v.as_str())?;
+                Some((
+                    crew_name.to_string(),
+                    CrewBinding {
+                        graph: graph_name.to_string(),
+                        kind: CrewBindingKind::Hook,
+                        name: event.clone(),
+                    },
+                ))
+            })
+    });
+    out.extend(bindings);
+}
+
 impl Database {
     /// Every binding of the named crew.
     pub fn crew_bindings(&self, name: &str) -> Result<Vec<CrewBinding>> {
@@ -91,8 +117,14 @@ impl Database {
     /// Every binding of every crew, as `(crew_name, binding)`. One code path
     /// shared by `crew_bindings` and `crew_binding_counts`.
     fn all_crew_bindings(&self) -> Result<Vec<(String, CrewBinding)>> {
-        let mut out = Vec::new();
+        let mut out = self.ensemble_crew_bindings()?;
+        out.extend(self.node_crew_bindings()?);
+        out.extend(self.hook_crew_bindings()?);
+        Ok(out)
+    }
 
+    /// Every ensemble-bound crew.
+    fn ensemble_crew_bindings(&self) -> Result<Vec<(String, CrewBinding)>> {
         let ensembles: Vec<(Option<String>, Option<String>, String, String)> = {
             let conn = self
                 .conn
@@ -108,6 +140,7 @@ impl Database {
             })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
+        let mut out = Vec::new();
         for (graph_id, spec_id, ensemble_name, crew_name) in ensembles {
             out.push((
                 crew_name,
@@ -118,7 +151,11 @@ impl Database {
                 },
             ));
         }
+        Ok(out)
+    }
 
+    /// Every node-bound crew.
+    fn node_crew_bindings(&self) -> Result<Vec<(String, CrewBinding)>> {
         let nodes: Vec<(String, Option<String>, String, String)> = {
             let conn = self
                 .conn
@@ -142,6 +179,7 @@ impl Database {
                 })
                 .collect()
         };
+        let mut out = Vec::new();
         for (_id, graph_id, node_name, crew_name) in nodes {
             out.push((
                 crew_name,
@@ -152,7 +190,11 @@ impl Database {
                 },
             ));
         }
+        Ok(out)
+    }
 
+    /// Every hook-bound crew.
+    fn hook_crew_bindings(&self) -> Result<Vec<(String, CrewBinding)>> {
         let hook_rows: Vec<(String, String, String)> = {
             let conn = self
                 .conn
@@ -169,31 +211,10 @@ impl Database {
             })?;
             rows.filter_map(|row| row.ok()).collect()
         };
+        let mut out = Vec::new();
         for (_id, graph_name, hooks_raw) in hook_rows {
-            let hooks: serde_json::Value =
-                serde_json::from_str(&hooks_raw).unwrap_or(serde_json::Value::Null);
-            let Some(events) = hooks.as_object() else {
-                continue;
-            };
-            for (event, list) in events {
-                let Some(list) = list.as_array() else {
-                    continue;
-                };
-                for hook in list {
-                    if let Some(crew_name) = hook.get("crew").and_then(|v| v.as_str()) {
-                        out.push((
-                            crew_name.to_string(),
-                            CrewBinding {
-                                graph: graph_name.clone(),
-                                kind: CrewBindingKind::Hook,
-                                name: event.clone(),
-                            },
-                        ));
-                    }
-                }
-            }
+            append_hook_bindings(&mut out, &graph_name, &hooks_raw);
         }
-
         Ok(out)
     }
 
@@ -208,14 +229,15 @@ impl Database {
             }
             return Ok(graph_id.to_string());
         }
-        if let Some(spec_id) = spec_id {
-            if let Some(spec) = self.get_graph_spec(spec_id)? {
-                if let Some(graph_id) = spec.graph_id.as_deref() {
-                    if let Some(graph) = self.get_graph(graph_id)? {
-                        return Ok(graph.name);
-                    }
-                    return Ok(graph_id.to_string());
+        let Some(spec_id) = spec_id else {
+            return Ok("(unknown)".to_string());
+        };
+        if let Some(spec) = self.get_graph_spec(spec_id)? {
+            if let Some(graph_id) = spec.graph_id.as_deref() {
+                if let Some(graph) = self.get_graph(graph_id)? {
+                    return Ok(graph.name);
                 }
+                return Ok(graph_id.to_string());
             }
         }
         Ok("(unknown)".to_string())

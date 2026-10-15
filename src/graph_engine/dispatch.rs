@@ -396,27 +396,27 @@ impl GraphEngine {
             }
             let directed_for_spec = ctx.directed.filter(|d| d.spec_id == spec.id);
             if let Some(target) = ctx.directed {
+                if !reached_directed && spec.id != target.spec_id {
+                    activity::record(
+                        &self.db,
+                        activity::GraphEvent {
+                            graph_id: ctx.graph_id,
+                            graph_name: &ctx.lp.name,
+                            workdir: ctx.workdir,
+                            spec_id: Some(&spec.id),
+                            node_id: None,
+                            run_id: None,
+                            kind: activity::GraphEventKind::SpecSkipped,
+                            message: format!(
+                                "Spec '{}' skipped (directed run starts later).",
+                                spec.name
+                            ),
+                            payload: None,
+                        },
+                    );
+                    continue;
+                }
                 if !reached_directed {
-                    if spec.id != target.spec_id {
-                        activity::record(
-                            &self.db,
-                            activity::GraphEvent {
-                                graph_id: ctx.graph_id,
-                                graph_name: &ctx.lp.name,
-                                workdir: ctx.workdir,
-                                spec_id: Some(&spec.id),
-                                node_id: None,
-                                run_id: None,
-                                kind: activity::GraphEventKind::SpecSkipped,
-                                message: format!(
-                                    "Spec '{}' skipped (directed run starts later).",
-                                    spec.name
-                                ),
-                                payload: None,
-                            },
-                        );
-                        continue; // specs before the directed target are not run
-                    }
                     reached_directed = true;
                 }
             } else if matches!(

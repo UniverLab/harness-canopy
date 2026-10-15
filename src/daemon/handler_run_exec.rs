@@ -634,24 +634,28 @@ pub(crate) fn resolve_directed_spec(
         if let Some(spec) = bound.iter().find(|s| s.id == spec_id) {
             return Ok(spec.clone());
         }
-        if let Some(queue_id) = db
+        let Some(queue_id) = db
             .get_graph(graph_id)
             .map_err(|e| e.to_string())?
             .and_then(|lp| lp.active_run_queue_id)
+        else {
+            return Err(format!(
+                "Spec '{spec_id}' does not belong to graph '{graph_id}.'"
+            ));
+        };
+        for member_id in db
+            .list_queue_member_spec_ids(&queue_id)
+            .map_err(|e| e.to_string())?
         {
-            for member_id in db
-                .list_queue_member_spec_ids(&queue_id)
-                .map_err(|e| e.to_string())?
-            {
-                if member_id == spec_id {
-                    if let Some(spec) = db.get_graph_spec(spec_id).map_err(|e| e.to_string())? {
-                        return Ok(spec);
-                    }
-                }
+            if member_id != spec_id {
+                continue;
+            }
+            if let Some(spec) = db.get_graph_spec(spec_id).map_err(|e| e.to_string())? {
+                return Ok(spec);
             }
         }
         return Err(format!(
-            "Spec '{spec_id}' does not belong to graph '{graph_id}'."
+            "Spec '{spec_id}' does not belong to graph '{graph_id}.'"
         ));
     }
     if let Some(spec) = bound.iter().find(|s| s.status.is_resumable()).or_else(|| {

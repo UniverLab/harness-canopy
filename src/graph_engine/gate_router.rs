@@ -312,35 +312,19 @@ async fn execute_decision_router_node(
         );
     }
 
+    let routing = DecisionRouting {
+        routes,
+        fallback,
+        min_confidence,
+    };
     let state = match render_decision_state(lp, spec, node, previous_output) {
         Ok(s) => s,
-        Err(e) => {
-            return Ok(NodeExecution {
-                status: GraphRunStatus::Fail,
-                output: serde_json::json!({
-                    "kind": "router",
-                    "mode": "decision",
-                    "node_id": node.id,
-                    "cli": cli.as_str(),
-                    "model": model,
-                    "error": e.to_string(),
-                }),
-                summary: format!(
-                    "Router node '{}' decision template failed: {}",
-                    node.name, e
-                ),
-            });
-        }
+        Err(e) => return Ok(decision_template_failure(node, &cli, model, &e)),
     };
 
-    let instructions = node
-        .config
-        .get("prompt_template")
-        .and_then(Value::as_str)
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or(DECISION_DEFAULT_INSTRUCTIONS);
+    let instructions = decision_instructions(node);
 
-    let request = build_decision_request(&state, instructions, routes);
+    let request = build_decision_request(&state, instructions, routing.routes);
 
     let outcome = run_decision_process(
         db,
@@ -359,8 +343,10 @@ async fn execute_decision_router_node(
             exec.output["mode"] = Value::String("decision".to_string());
             Ok(exec)
         }
-        Ok(CliProcessOutcome::TimedOut) => {
-            let output = serde_json::json!({
+        Ok(CliProcessOutcome::TimedOut) => Ok(finish_decision_failure(
+            db,
+            run_id,
+            serde_json::json!({
                 "kind": "router",
                 "mode": "decision",
                 "node_id": node.id,
@@ -368,105 +354,170 @@ async fn execute_decision_router_node(
                 "model": model,
                 "error": "timed out",
                 "timeout_minutes": timeout_minutes,
-            });
-            let _ = db.update_graph_run_result(
-                run_id,
-                GraphRunStatus::Fail,
-                Some(&output),
-                Some(chrono::Utc::now()),
-            );
-            Ok(NodeExecution {
-                status: GraphRunStatus::Fail,
-                output,
-                summary: format!(
-                    "Router node '{}' decision timed out after {timeout_minutes}m.",
-                    node.name
-                ),
-            })
-        }
+            }),
+            format!(
+                "Router node '{}' decision timed out after {timeout_minutes}m.",
+                node.name
+            ),
+        )),
         Ok(CliProcessOutcome::Finished {
             exit_code,
             stdout,
             stderr,
         }) => {
             if exit_code != 0 {
-                let output = serde_json::json!({
-                    "kind": "router",
-                    "mode": "decision",
-                    "node_id": node.id,
-                    "cli": cli.as_str(),
-                    "model": model,
-                    "exit_code": exit_code,
-                    "stdout": stdout,
-                    "stderr": stderr,
-                });
-                let _ = db.update_graph_run_result(
+                return Ok(finish_decision_failure(
+                    db,
                     run_id,
-                    GraphRunStatus::Fail,
-                    Some(&output),
-                    Some(chrono::Utc::now()),
-                );
-                return Ok(NodeExecution {
-                    status: GraphRunStatus::Fail,
-                    output,
-                    summary: format!(
+                    serde_json::json!({
+                        "kind": "router",
+                        "mode": "decision",
+                        "node_id": node.id,
+                        "cli": cli.as_str(),
+                        "model": model,
+                        "exit_code": exit_code,
+                        "stdout": stdout,
+                        "stderr": stderr,
+                    }),
+                    format!(
                         "Router node '{}' decision process exited with code {exit_code}.",
                         node.name
                     ),
-                });
+                ));
             }
-
-            let (choice, confidence, probabilities, usage) = match parse_decision_answer(&stdout) {
-                Some(ans) => {
-                    let choice = ans.choice.clone();
-                    (Some(choice), ans.confidence, ans.probabilities, ans.usage)
-                }
-                None => (None, 0.0, HashMap::new(), Value::Null),
-            };
-            let choice = choice.as_deref();
-
-            let (route, used_fallback) =
-                resolve_decision_route(choice, confidence, routes, fallback, min_confidence);
-
-            tracing::info!(
-                run_id,
-                node = %node.name,
-                route = %route,
-                confidence,
-                used_fallback,
-                "router node decided route (decision mode)"
-            );
-
-            let probabilities_json: serde_json::Map<String, Value> = probabilities
-                .into_iter()
-                .map(|(k, v)| (k, Value::from(v)))
-                .collect();
-
-            Ok(NodeExecution {
-                status: GraphRunStatus::Pass,
-                output: serde_json::json!({
-                    "kind": "router",
-                    "mode": "decision",
-                    "node_id": node.id,
-                    "cli": cli.as_str(),
-                    "model": model,
-                    "route": route,
-                    "used_fallback": used_fallback,
-                    "confidence": confidence,
-                    "probabilities": probabilities_json,
-                    "usage": usage,
-                    "raw_answer": stdout,
-                }),
-                summary: format!(
-                    "Router node '{}' selected route '{}' (decision, confidence {confidence:.2}){}.",
-                    node.name,
-                    route,
-                    if used_fallback { " (fallback)" } else { "" }
-                ),
-            })
+            Ok(decision_success_execution(
+                run_id, node, &cli, model, &routing, &stdout,
+            ))
         }
     }
 }
+
+/// The routing the decision-mode router was configured with.
+struct DecisionRouting<'a> {
+    routes: &'a [RouterRoute],
+    fallback: &'a str,
+    min_confidence: f64,
+}
+
+/// The router node's decision instructions: its `prompt_template` when set,
+/// else the default.
+fn decision_instructions(node: &GraphNode) -> &str {
+    node.config
+        .get("prompt_template")
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(DECISION_DEFAULT_INSTRUCTIONS)
+}
+
+/// The node execution for a decision template that could not be rendered.
+fn decision_template_failure(
+    node: &GraphNode,
+    cli: &Cli,
+    model: Option<&str>,
+    error: &anyhow::Error,
+) -> NodeExecution {
+    NodeExecution {
+        status: GraphRunStatus::Fail,
+        output: serde_json::json!({
+            "kind": "router",
+            "mode": "decision",
+            "node_id": node.id,
+            "cli": cli.as_str(),
+            "model": model,
+            "error": error.to_string(),
+        }),
+        summary: format!(
+            "Router node '{}' decision template failed: {}",
+            node.name, error
+        ),
+    }
+}
+
+/// Record a decision-mode router failure on the run row and build its
+/// execution.
+fn finish_decision_failure(
+    db: &Database,
+    run_id: &str,
+    output: Value,
+    summary: String,
+) -> NodeExecution {
+    let _ = db.update_graph_run_result(
+        run_id,
+        GraphRunStatus::Fail,
+        Some(&output),
+        Some(chrono::Utc::now()),
+    );
+    NodeExecution {
+        status: GraphRunStatus::Fail,
+        output,
+        summary,
+    }
+}
+
+/// Build the pass execution for a decision-mode router that ran to completion.
+fn decision_success_execution(
+    run_id: &str,
+    node: &GraphNode,
+    cli: &Cli,
+    model: Option<&str>,
+    routing: &DecisionRouting<'_>,
+    stdout: &str,
+) -> NodeExecution {
+    let (choice, confidence, probabilities, usage) = match parse_decision_answer(stdout) {
+        Some(ans) => {
+            let choice = ans.choice.clone();
+            (Some(choice), ans.confidence, ans.probabilities, ans.usage)
+        }
+        None => (None, 0.0, HashMap::new(), Value::Null),
+    };
+    let choice = choice.as_deref();
+
+    let (route, used_fallback) = resolve_decision_route(
+        choice,
+        confidence,
+        routing.routes,
+        routing.fallback,
+        routing.min_confidence,
+    );
+
+    tracing::info!(
+        run_id,
+        node = %node.name,
+        route = %route,
+        confidence,
+        used_fallback,
+        "router node decided route (decision mode)"
+    );
+
+    let probabilities_json: serde_json::Map<String, Value> = probabilities
+        .into_iter()
+        .map(|(k, v)| (k, Value::from(v)))
+        .collect();
+
+    NodeExecution {
+        status: GraphRunStatus::Pass,
+        output: serde_json::json!({
+            "kind": "router",
+            "mode": "decision",
+            "node_id": node.id,
+            "cli": cli.as_str(),
+            "model": model,
+            "route": route,
+            "used_fallback": used_fallback,
+            "confidence": confidence,
+            "probabilities": probabilities_json,
+            "usage": usage,
+            "raw_answer": stdout,
+        }),
+        summary: format!(
+            "Router node '{}' selected route '{}' (decision, confidence {confidence:.2}){}.",
+            node.name,
+            route,
+            if used_fallback { " (fallback)" } else { "" }
+        ),
+    }
+}
+
 /// Result of one `on_completed` hook firing (N2) — deliberately not a
 /// [`NodeExecution`]: the hook belongs to no node, and unlike a node's
 /// result, this one must never feed back into the run's routing or final

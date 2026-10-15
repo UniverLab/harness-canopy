@@ -543,19 +543,7 @@ impl IngestionManager {
                 Ok(()) => {
                     processed += 1;
                     indexed_paths.push(source_path.clone());
-                    let _ = self.db.remove_rag_item(&source_path);
-                    let _ = self.db.log_rag_event(
-                        &source_path,
-                        "indexed",
-                        None,
-                        chrono::Utc::now().timestamp(),
-                    );
-                    // CB91: a long backfill compacts in bands of 500 chunks,
-                    // so the store never waits until the whole queue drains.
-                    if self.chunks_since_compact.load(Ordering::Relaxed) >= COMPACT_AFTER_CHUNKS {
-                        self.compact_shared_store("every 500 chunks during backfill")
-                            .await;
-                    }
+                    self.record_indexed_file(&source_path).await;
                 }
                 Err(e) => {
                     tracing::error!("RAG index error {source_path}: {e:#}");
@@ -574,6 +562,20 @@ impl IngestionManager {
         }
 
         Self::report_drain_queue_outcome(processed, skipped, &indexed_paths);
+    }
+
+    /// Record one successfully indexed file: drop its queue row, log the
+    /// `"indexed"` event, and compact the store in bands of 500 chunks so a
+    /// long backfill never waits until the whole queue drains (CB91).
+    async fn record_indexed_file(&self, source_path: &str) {
+        let _ = self.db.remove_rag_item(source_path);
+        let _ = self
+            .db
+            .log_rag_event(source_path, "indexed", None, chrono::Utc::now().timestamp());
+        if self.chunks_since_compact.load(Ordering::Relaxed) >= COMPACT_AFTER_CHUNKS {
+            self.compact_shared_store("every 500 chunks during backfill")
+                .await;
+        }
     }
 
     /// Emit the end-of-drain summary: the indexed count (with its directory

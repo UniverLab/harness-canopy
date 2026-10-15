@@ -678,34 +678,47 @@ pub(crate) fn validate_node_config(
                     );
                 }
             }
-            if map.get("decision").and_then(serde_json::Value::as_bool) == Some(true) {
-                let platform = map
-                    .get("platform")
-                    .or_else(|| map.get("cli"))
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::trim)
-                    .filter(|v| !v.is_empty());
-                if let Some(name) = platform {
-                    let home = std::env::var_os("CANOPY_HOME_OVERRIDE")
-                        .map(std::path::PathBuf::from)
-                        .or_else(dirs::home_dir);
-                    if let Some(home) = home {
-                        let canopy_config =
-                            crate::domain::canopy_config::CanopyConfig::load(&home.join(".canopy"));
-                        if let Some(cli_config) = canopy_config.get_cli(name) {
-                            if cli_config.decision_args.is_none() {
-                                return Err(format!(
-                                    "Router node uses decision mode but platform '{}' has no decision-model invocation in the registry.",
-                                    name
-                                ));
-                            }
-                        }
-                    }
-                }
-            }
+            validate_router_decision_config(map)?;
         }
     }
 
+    Ok(())
+}
+
+/// CM49: when a router node enables decision mode (`decision: true`), verify
+/// that the named platform/cli entry in the local registry actually declares
+/// a decision-model invocation — otherwise the router would silently fall
+/// through to a non-decision spawn path mid-run.
+fn validate_router_decision_config(
+    map: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), String> {
+    if map.get("decision").and_then(serde_json::Value::as_bool) != Some(true) {
+        return Ok(());
+    }
+    let Some(platform) = map
+        .get("platform")
+        .or_else(|| map.get("cli"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    else {
+        return Ok(());
+    };
+    let Some(home) = std::env::var_os("CANOPY_HOME_OVERRIDE")
+        .map(std::path::PathBuf::from)
+        .or_else(dirs::home_dir)
+    else {
+        return Ok(());
+    };
+    let canopy_config = crate::domain::canopy_config::CanopyConfig::load(&home.join(".canopy"));
+    if let Some(cli_config) = canopy_config.get_cli(platform) {
+        if cli_config.decision_args.is_none() {
+            return Err(format!(
+                "Router node uses decision mode but platform '{}' has no decision-model invocation in the registry.",
+                platform
+            ));
+        }
+    }
     Ok(())
 }
 

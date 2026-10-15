@@ -19,7 +19,7 @@ use crate::daemon::helpers::{error_result, success_result};
 use crate::daemon::params::*;
 use crate::daemon::params_extract::Parameters;
 use crate::db::Database;
-use crate::domain::graphs::{EnsembleDetails, EnsembleKind, GraphNode};
+use crate::domain::graphs::{Ensemble, EnsembleDetails, EnsembleKind, GraphNode};
 use rmcp::model::CallToolResult;
 use rmcp::tool;
 use rmcp::tool_router;
@@ -308,12 +308,7 @@ impl TaskTriggerHandler {
                             None,
                         )
                         .map_err(internal_error)?;
-                    if clear_straggler {
-                        details.ensemble.straggler_timeout_minutes = None;
-                    }
-                    if clear_grace {
-                        details.ensemble.quorum_grace_minutes = None;
-                    }
+                    clear_stale_kind_fields(&mut details.ensemble, clear_straggler, clear_grace);
                 }
                 cleared_grace_fields_for_kind_change = true;
             }
@@ -504,5 +499,14 @@ impl TaskTriggerHandler {
                 .map_err(internal_error)?;
         }
         Ok(Ok(()))
+    }
+}
+
+fn clear_stale_kind_fields(ensemble: &mut Ensemble, clear_straggler: bool, clear_grace: bool) {
+    if clear_straggler {
+        ensemble.straggler_timeout_minutes = None;
+    }
+    if clear_grace {
+        ensemble.quorum_grace_minutes = None;
     }
 }

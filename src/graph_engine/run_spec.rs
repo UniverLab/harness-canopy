@@ -1,5 +1,39 @@
 use super::*;
 
+/// CM43 req 6: the directed-start activity message — the start node, the
+/// nodes skipped between Start and it, the outputs reused (by node and run
+/// id), and the counter restart.
+fn directed_start_message(
+    spec_name: &str,
+    target: &super::directed::DirectedTarget,
+    nodes: &[GraphNode],
+    existing_runs: &[GraphNodeRun],
+) -> String {
+    let skipped = if target.skipped_nodes.is_empty() {
+        String::new()
+    } else {
+        format!(" [{}]", target.skipped_nodes.join(", "))
+    };
+    let reused = reused_output_records(nodes, existing_runs);
+    let reused = if reused.is_empty() {
+        "none".to_string()
+    } else {
+        reused
+            .iter()
+            .map(|(name, run_id)| format!("{name} ({run_id})"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    format!(
+        "Directed run: spec '{}' starts at {}; skipped {} node(s){}; \
+         reused outputs: {reused}; iteration counters restarted at 1.",
+        spec_name,
+        target.label,
+        target.skipped_nodes.len(),
+        skipped
+    )
+}
+
 impl GraphEngine {
     /// Run one spec's node graph to completion, pause, or failure.
     ///
@@ -83,21 +117,6 @@ impl GraphEngine {
         // outputs reused (by node and run id), and the counter restart.
         if let Some(start) = directed.filter(|d| d.spec_id == spec.id) {
             if let Ok(target) = resolve_directed_target(&start.node_arg, nodes, edges, &ensembles) {
-                let skipped = if target.skipped_nodes.is_empty() {
-                    String::new()
-                } else {
-                    format!(" [{}]", target.skipped_nodes.join(", "))
-                };
-                let reused = reused_output_records(nodes, &existing_runs);
-                let reused = if reused.is_empty() {
-                    "none".to_string()
-                } else {
-                    reused
-                        .iter()
-                        .map(|(name, run_id)| format!("{name} ({run_id})"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                };
                 activity::record(
                     &self.db,
                     activity::GraphEvent {
@@ -108,14 +127,7 @@ impl GraphEngine {
                         node_id: None,
                         run_id: None,
                         kind: activity::GraphEventKind::SpecStarted,
-                        message: format!(
-                            "Directed run: spec '{}' starts at {}; skipped {} node(s){}; \
-                             reused outputs: {reused}; iteration counters restarted at 1.",
-                            spec.name,
-                            target.label,
-                            target.skipped_nodes.len(),
-                            skipped
-                        ),
+                        message: directed_start_message(&spec.name, &target, nodes, &existing_runs),
                         payload: None,
                     },
                 );
@@ -130,10 +142,7 @@ impl GraphEngine {
         // RS3: the context group this spec belongs to within the running
         // queue, if any. The ONE deliberate exception to RS2's "first visit
         // is cold" rule.
-        let spec_group = match queue_id {
-            Some(pid) => self.db.queue_member_group(pid, &spec.id)?,
-            None => None,
-        };
+        let spec_group = self.spec_group_for(queue_id, &spec.id)?;
 
         let mut state = SpecRunState {
             cursor,
@@ -160,6 +169,15 @@ impl GraphEngine {
         };
 
         self.run_spec_loop(&ctx, &mut state).await
+    }
+
+    /// RS3: the context group this spec belongs to within the running queue,
+    /// if any.
+    fn spec_group_for(&self, queue_id: Option<&str>, spec_id: &str) -> Result<Option<String>> {
+        match queue_id {
+            Some(pid) => self.db.queue_member_group(pid, spec_id),
+            None => Ok(None),
+        }
     }
 
     pub(crate) async fn run_spec_loop(

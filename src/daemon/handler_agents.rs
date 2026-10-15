@@ -5,8 +5,8 @@ use crate::application::ports::{AgentRepository, RunRepository};
 use crate::daemon::handler::{OptionalExtension, TaskTriggerHandler, SESSION_LIST_DEFAULT_LIMIT};
 use crate::daemon::handler_formatting::{
     agent_detail_json, append_send_session_section, append_temporal_agents_section,
-    build_json_result, format_agent_info, format_log_output, format_uptime, internal_error,
-    make_log_path, recent_runs_output, resolve_log_path,
+    build_json_result, format_agent_info, format_log_output, format_session_info, format_uptime,
+    internal_error, make_log_path, recent_runs_output, resolve_log_path, transport_details,
 };
 use crate::daemon::handler_helpers::{
     apply_scalar_updates, apply_trigger_updates, handle_timed_out_run, new_agent_base,
@@ -19,7 +19,6 @@ use crate::daemon::handler_send_session::{
 use crate::daemon::helpers::{data_dir, error_result, notify_run_result, success_result};
 use crate::daemon::params::*;
 use crate::daemon::params_extract::Parameters;
-use crate::db::session::InteractiveSession;
 use crate::domain::models::Agent;
 use crate::domain::models::Trigger;
 use crate::domain::models::{AgentAction, Cli};
@@ -301,7 +300,7 @@ impl TaskTriggerHandler {
                 )));
             };
 
-            return Ok(success_result(&Self::format_session_info(&session)));
+            return Ok(success_result(&format_session_info(&session)));
         }
 
         let sessions = self
@@ -316,7 +315,7 @@ impl TaskTriggerHandler {
             "Found {} live interactive session(s):\n",
             sessions.len()
         )];
-        lines.extend(sessions.iter().map(Self::format_session_info));
+        lines.extend(sessions.iter().map(format_session_info));
         Ok(CallToolResult::success(vec![Content::text(
             lines.join("\n"),
         )]))
@@ -753,26 +752,6 @@ impl TaskTriggerHandler {
 }
 
 impl TaskTriggerHandler {
-    pub(crate) fn format_session_info(session: &InteractiveSession) -> String {
-        let attached = if session_is_attached(session) {
-            "yes"
-        } else {
-            "no"
-        };
-        let hook_target = if session.status == "active" {
-            "yes".to_string()
-        } else {
-            format!(
-                "no (status: {} — an interactive hook rejects this id until the session is live again)",
-                session.status
-            )
-        };
-        format!(
-            "- id: {} | name: {} | platform: {} | workdir: {} | attached: {} | hook_target: {}",
-            session.id, session.name, session.cli, session.working_dir, attached, hook_target
-        )
-    }
-
     pub(crate) async fn restart_updated_watcher(
         &self,
         params: &TaskUpdateParams,
@@ -804,33 +783,5 @@ impl TaskTriggerHandler {
             "Agent '{}' updated but watcher failed to restart: {}. It will be retried on daemon restart.",
             agent.id, e
         ))])))
-    }
-}
-
-/// Whether an interactive session is attached to a live CLI process on this
-/// host right now (CM16). `true` only when provable: the row was recorded on
-/// the current boot AND its PID is still alive. A different boot id, a NULL
-/// boot id, or a missing/dead PID all read as `false` — the session may
-/// still be a valid hook target (an enqueued send is delivered when a TUI
-/// next attaches), it just is not attached at this moment. Side-effect-free:
-/// no PTY touched, no session woken.
-pub(crate) fn session_is_attached(session: &InteractiveSession) -> bool {
-    match (
-        session.boot_id.as_deref(),
-        crate::system::boot_id().as_deref(),
-    ) {
-        (Some(stored), Some(current)) if stored == current => session
-            .pid
-            .map(crate::system::process_is_alive)
-            .unwrap_or(false),
-        _ => false,
-    }
-}
-
-pub(crate) fn transport_details(port: u16) -> (&'static str, String) {
-    if port > 0 {
-        ("Streamable HTTP", port.to_string())
-    } else {
-        ("stdio", "N/A".to_owned())
     }
 }

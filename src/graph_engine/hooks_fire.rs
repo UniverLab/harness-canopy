@@ -249,26 +249,9 @@ impl GraphEngine {
             .map(str::trim)
             .filter(|value| !value.is_empty());
         let resolved: Option<(String, Option<String>)> = match crew {
-            Some(crew) => match self.db.resolve_crew_pair(crew, None) {
-                Ok(Some((platform, model, _index))) => Some((platform, model)),
-                Ok(None) => {
-                    let owner = format!("{} hook", fire.event.as_str());
-                    let message = if self.db.crew_get(crew).ok().flatten().is_some() {
-                        super::crew_resolve::crew_no_member_blocker(&owner, crew)
-                    } else {
-                        super::crew_resolve::crew_missing_blocker(&owner, crew)
-                    };
-                    return Self::hook_failure(
-                        serde_json::json!({ "crew": crew, "error": "crew_unavailable" }),
-                        message,
-                    );
-                }
-                Err(error) => {
-                    return Self::hook_failure(
-                        serde_json::json!({ "crew": crew, "error": error.to_string() }),
-                        format!("{} hook crew lookup failed: {error}", fire.event.as_str()),
-                    );
-                }
+            Some(crew) => match self.resolve_hook_crew(fire, crew) {
+                Ok(pair) => Some(pair),
+                Err(exec) => return exec,
             },
             None => None,
         };
@@ -287,15 +270,7 @@ impl GraphEngine {
             let avail = self.availability_for(platform, model, &Utc::now());
             if !avail.available {
                 let reason = avail.reason.as_deref().unwrap_or("no reason");
-                return Self::hook_failure(
-                    serde_json::json!({
-                        "platform": platform,
-                        "model": model,
-                        "error": "unavailable",
-                        "reason": reason,
-                    }),
-                    node_unavailable_blocker(fire.event.as_str(), platform, model, reason),
-                );
+                return Self::hook_unavailable_execution(fire, platform, model, reason);
             }
         }
         let cli = match Cli::resolve(platform) {
@@ -346,6 +321,54 @@ impl GraphEngine {
             fire.hook.timeout_minutes.unwrap_or(30),
         )
         .await
+    }
+
+    /// CM49: resolve a crew-bound hook's `(platform, model)` at fire time,
+    /// failing the hook (naming the crew) when the crew is missing or has no
+    /// available member.
+    fn resolve_hook_crew(
+        &self,
+        fire: &HookFireCtx<'_>,
+        crew: &str,
+    ) -> Result<(String, Option<String>), HookExecution> {
+        match self.db.resolve_crew_pair(crew, None) {
+            Ok(Some((platform, model, _index))) => Ok((platform, model)),
+            Ok(None) => {
+                let owner = format!("{} hook", fire.event.as_str());
+                let message = if self.db.crew_get(crew).ok().flatten().is_some() {
+                    super::crew_resolve::crew_no_member_blocker(&owner, crew)
+                } else {
+                    super::crew_resolve::crew_missing_blocker(&owner, crew)
+                };
+                Err(Self::hook_failure(
+                    serde_json::json!({ "crew": crew, "error": "crew_unavailable" }),
+                    message,
+                ))
+            }
+            Err(error) => Err(Self::hook_failure(
+                serde_json::json!({ "crew": crew, "error": error.to_string() }),
+                format!("{} hook crew lookup failed: {error}", fire.event.as_str()),
+            )),
+        }
+    }
+
+    /// CM48: the failed hook execution for a hook whose pair is declared
+    /// unavailable.
+    fn hook_unavailable_execution(
+        fire: &HookFireCtx<'_>,
+        platform: &str,
+        model: Option<&str>,
+        reason: &str,
+    ) -> HookExecution {
+        Self::hook_failure(
+            serde_json::json!({
+                "platform": platform,
+                "model": model,
+                "error": "unavailable",
+                "reason": reason,
+            }),
+            node_unavailable_blocker(fire.event.as_str(), platform, model, reason),
+        )
     }
 
     pub(crate) fn publish_hook_outcome(&self, fire: &HookFireCtx<'_>, execution: &HookExecution) {

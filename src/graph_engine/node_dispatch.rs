@@ -149,17 +149,7 @@ impl GraphEngine {
         summary: &str,
     ) -> Result<()> {
         if let Some(expected) = dispatch_started_at {
-            let current_started_at = self.db.get_graph(graph_id)?.and_then(|lp| lp.started_at);
-            let still_current =
-                current_started_at.is_some_and(|at| at.timestamp() == expected.timestamp());
-            if !still_current {
-                tracing::info!(
-                    "Graph '{}' failure from a stale dispatch (claimed at {}) ignored — a newer \
-                     dispatch has since taken over; this attempt's own run row already records \
-                     its own outcome.",
-                    graph_id,
-                    expected.to_rfc3339()
-                );
+            if self.dispatch_is_stale(graph_id, expected)? {
                 return Ok(());
             }
         }
@@ -171,44 +161,7 @@ impl GraphEngine {
             Some(chrono::Utc::now()),
         )?;
         if let Ok(Some(lp)) = self.db.get_graph(graph_id) {
-            let spec_id = spec_id.map(str::to_string).or_else(|| {
-                spec_name.and_then(|name| {
-                    self.db
-                        .resolve_spec_id_by_name(graph_id, name)
-                        .ok()
-                        .flatten()
-                })
-            });
-            if let Some(spec_name) = spec_name {
-                activity::record(
-                    &self.db,
-                    activity::GraphEvent {
-                        graph_id,
-                        graph_name: &lp.name,
-                        workdir: &lp.workdir,
-                        spec_id: spec_id.as_deref(),
-                        node_id: None,
-                        run_id: None,
-                        kind: activity::GraphEventKind::SpecFailed,
-                        message: format!("Spec '{spec_name}' failed: {summary}"),
-                        payload: None,
-                    },
-                );
-            }
-            activity::record(
-                &self.db,
-                activity::GraphEvent {
-                    graph_id,
-                    graph_name: &lp.name,
-                    workdir: &lp.workdir,
-                    spec_id: None,
-                    node_id: None,
-                    run_id: None,
-                    kind: activity::GraphEventKind::GraphFailed,
-                    message: format!("Failed: {summary}"),
-                    payload: None,
-                },
-            );
+            self.record_failed_activity(graph_id, &lp, spec_id, spec_name, summary);
         }
         // Resolve the human-readable ending node name BEFORE sweeping the
         // running runs below — afterwards there is nothing left to resolve.
@@ -231,29 +184,8 @@ impl GraphEngine {
 
         // Fire `on_failed` hooks if any are registered.
         if let Ok(Some(lp)) = self.db.get_graph(graph_id) {
-            let ending_node_with_dirty_note = spec_id
-                .and_then(|id| self.db.get_graph_spec(id).ok().flatten())
-                .and_then(|spec| {
-                    dirty_tree_note(
-                        spec.spec_end_dirty,
-                        &spec.spec_end_dirty_paths.unwrap_or_default(),
-                    )
-                })
-                .map(|note| match ending_node.as_deref() {
-                    Some(node) => format!("{node} ({note})"),
-                    None => note,
-                })
-                .or_else(|| ending_node.clone());
-            let ctx = HookContext {
-                graph_name: &lp.name,
-                workdir: &lp.workdir,
-                completed_specs: &[],
-                spec_name: None,
-                spec_id: None,
-                blocker: Some(summary),
-                node_name: ending_node_with_dirty_note.as_deref(),
-            };
-            self.fire_hooks(&lp, GraphHookEvent::OnFailed, &ctx).await;
+            self.fire_on_failed_hooks(&lp, spec_id, ending_node.clone(), summary)
+                .await;
         }
 
         let graph_name = self
@@ -276,6 +208,115 @@ impl GraphEngine {
         }
         Ok(())
     }
+
+    /// Whether the dispatch that is failing `graph_id` has been superseded: a
+    /// newer dispatch has claimed the graph since `expected`, so this failure
+    /// is stale and must be ignored (traced when so).
+    fn dispatch_is_stale(
+        &self,
+        graph_id: &str,
+        expected: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool> {
+        let current_started_at = self.db.get_graph(graph_id)?.and_then(|lp| lp.started_at);
+        let still_current =
+            current_started_at.is_some_and(|at| at.timestamp() == expected.timestamp());
+        if still_current {
+            return Ok(false);
+        }
+        tracing::info!(
+            "Graph '{}' failure from a stale dispatch (claimed at {}) ignored — a newer \
+             dispatch has since taken over; this attempt's own run row already records \
+             its own outcome.",
+            graph_id,
+            expected.to_rfc3339()
+        );
+        Ok(true)
+    }
+
+    /// Record the failed-graph activity: the spec failure (when a spec is
+    /// named) plus the graph failure.
+    fn record_failed_activity(
+        &self,
+        graph_id: &str,
+        lp: &Graph,
+        spec_id: Option<&str>,
+        spec_name: Option<&str>,
+        summary: &str,
+    ) {
+        let spec_id = spec_id.map(str::to_string).or_else(|| {
+            spec_name.and_then(|name| {
+                self.db
+                    .resolve_spec_id_by_name(graph_id, name)
+                    .ok()
+                    .flatten()
+            })
+        });
+        if let Some(spec_name) = spec_name {
+            activity::record(
+                &self.db,
+                activity::GraphEvent {
+                    graph_id,
+                    graph_name: &lp.name,
+                    workdir: &lp.workdir,
+                    spec_id: spec_id.as_deref(),
+                    node_id: None,
+                    run_id: None,
+                    kind: activity::GraphEventKind::SpecFailed,
+                    message: format!("Spec '{spec_name}' failed: {summary}"),
+                    payload: None,
+                },
+            );
+        }
+        activity::record(
+            &self.db,
+            activity::GraphEvent {
+                graph_id,
+                graph_name: &lp.name,
+                workdir: &lp.workdir,
+                spec_id: None,
+                node_id: None,
+                run_id: None,
+                kind: activity::GraphEventKind::GraphFailed,
+                message: format!("Failed: {summary}"),
+                payload: None,
+            },
+        );
+    }
+
+    /// Fire `lp`'s `on_failed` hooks, naming the ending node (with its dirty
+    /// note when the spec ended dirty) as the blocker's node.
+    async fn fire_on_failed_hooks(
+        &self,
+        lp: &Graph,
+        spec_id: Option<&str>,
+        ending_node: Option<String>,
+        summary: &str,
+    ) {
+        let ending_node_with_dirty_note = spec_id
+            .and_then(|id| self.db.get_graph_spec(id).ok().flatten())
+            .and_then(|spec| {
+                dirty_tree_note(
+                    spec.spec_end_dirty,
+                    &spec.spec_end_dirty_paths.unwrap_or_default(),
+                )
+            })
+            .map(|note| match ending_node.as_deref() {
+                Some(node) => format!("{node} ({note})"),
+                None => note,
+            })
+            .or_else(|| ending_node.clone());
+        let ctx = HookContext {
+            graph_name: &lp.name,
+            workdir: &lp.workdir,
+            completed_specs: &[],
+            spec_name: None,
+            spec_id: None,
+            blocker: Some(summary),
+            node_name: ending_node_with_dirty_note.as_deref(),
+        };
+        self.fire_hooks(lp, GraphHookEvent::OnFailed, &ctx).await;
+    }
+
     /// C19: the `Blocked` counterpart to [`Self::fail_graph`] — same
     /// stale-dispatch guard (a reset + relaunch that's already claimed the
     /// graph must not be paused out from under it) and the same B12 sweep of

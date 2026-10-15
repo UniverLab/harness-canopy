@@ -4,6 +4,7 @@ use rmcp::ErrorData as McpError;
 
 use crate::application::ports::{AgentRepository, RunRepository};
 use crate::daemon::helpers::{data_dir, filter_log_line, success_result};
+use crate::db::session::InteractiveSession;
 use crate::db::Database;
 use crate::db::{connection::is_busy_error, DB_BUSY_TIMEOUT};
 use crate::domain::models::{Agent, RunLog, Trigger};
@@ -1410,5 +1411,54 @@ mod model_listing_tests {
             out1, out2,
             "two consecutive calls must produce identical output"
         );
+    }
+}
+
+/// Format one interactive session as a single summary line for `session_list`.
+pub(crate) fn format_session_info(session: &InteractiveSession) -> String {
+    let attached = if session_is_attached(session) {
+        "yes"
+    } else {
+        "no"
+    };
+    let hook_target = if session.status == "active" {
+        "yes".to_string()
+    } else {
+        format!(
+            "no (status: {} — an interactive hook rejects this id until the session is live again)",
+            session.status
+        )
+    };
+    format!(
+        "- id: {} | name: {} | platform: {} | workdir: {} | attached: {} | hook_target: {}",
+        session.id, session.name, session.cli, session.working_dir, attached, hook_target
+    )
+}
+
+/// Whether an interactive session is attached to a live CLI process on this
+/// host right now (CM16). `true` only when provable: the row was recorded on
+/// the current boot AND its PID is still alive. A different boot id, a NULL
+/// boot id, or a missing/dead PID all read as `false` — the session may
+/// still be a valid hook target (an enqueued send is delivered when a TUI
+/// next attaches), it just is not attached at this moment. Side-effect-free:
+/// no PTY touched, no session woken.
+pub(crate) fn session_is_attached(session: &InteractiveSession) -> bool {
+    match (
+        session.boot_id.as_deref(),
+        crate::system::boot_id().as_deref(),
+    ) {
+        (Some(stored), Some(current)) if stored == current => session
+            .pid
+            .map(crate::system::process_is_alive)
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+pub(crate) fn transport_details(port: u16) -> (&'static str, String) {
+    if port > 0 {
+        ("Streamable HTTP", port.to_string())
+    } else {
+        ("stdio", "N/A".to_owned())
     }
 }

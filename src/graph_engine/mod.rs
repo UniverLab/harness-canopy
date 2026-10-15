@@ -32,6 +32,7 @@ mod dispatch;
 mod ensemble_cascade;
 mod ensemble_exec;
 mod ensemble_member;
+mod ensemble_member_settle;
 mod ensemble_parallel;
 mod gate_router;
 mod hooks_fire;

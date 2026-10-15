@@ -60,8 +60,6 @@ pub(crate) use crate::daemon::handler_validate::{
 };
 
 #[cfg(test)]
-pub(crate) use crate::daemon::handler_agents::transport_details;
-#[cfg(test)]
 pub(crate) use crate::daemon::handler_blueprints::blueprint_json;
 #[cfg(test)]
 pub(crate) use crate::daemon::handler_copy::{node_copy_note, plan_ensemble_copy, plan_node_copy};
@@ -72,6 +70,8 @@ pub(crate) use crate::daemon::handler_ensemble_core::{
     build_ensemble_unit, effective_member_prompt, member_node_config, validate_ensemble_members,
     BuiltEnsembleUnit, EnsembleUnitSpec,
 };
+#[cfg(test)]
+pub(crate) use crate::daemon::handler_formatting::transport_details;
 #[cfg(test)]
 pub(crate) use crate::daemon::handler_formatting::{
     append_temporal_agents_section, build_graph_update_response, build_id_result,

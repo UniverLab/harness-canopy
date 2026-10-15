@@ -62,14 +62,7 @@ pub(crate) async fn execute_agent_node(
             // the choice depends on runtime state (which spec the resumed
             // session was captured under) that a static per-node template
             // cannot know, so it is not the node's to make.
-            let resume_template = if resume_crosses_spec {
-                RESUME_PROMPT_CROSS_SPEC_DEFAULT
-            } else {
-                node.config
-                    .get("resume_prompt")
-                    .and_then(Value::as_str)
-                    .unwrap_or(RESUME_PROMPT_DEFAULT)
-            };
+            let resume_template = resume_template_for(node, resume_crosses_spec);
             let ctx = AgentRunCtx {
                 db,
                 lp,
@@ -115,16 +108,7 @@ pub(crate) async fn execute_agent_node(
         &spec_notes_section,
     ) {
         Ok(p) => p,
-        Err(e) => {
-            return Ok(NodeExecution {
-                status: GraphRunStatus::Fail,
-                output: serde_json::json!({
-                    "failure_kind": "invalid_template",
-                    "error": e.to_string(),
-                }),
-                summary: format!("Agent node '{}' prompt template is invalid: {e}", node.name),
-            });
-        }
+        Err(e) => return Ok(invalid_template_execution(node, &e)),
     };
     let prompt = append_pinned_skills(prompt, node, dynamic_skills).await;
     let strategy = sized_strategy(&base_strategy, &prompt);
@@ -147,6 +131,35 @@ pub(crate) async fn execute_agent_node(
         return Ok(reported);
     }
     Ok(execution)
+}
+
+/// The resume prompt template for a node: the engine's own cross-spec
+/// boundary template when the session being resumed was captured by a
+/// different spec, else the node's `resume_prompt` override (or the default).
+fn resume_template_for(node: &GraphNode, crosses_spec: bool) -> &str {
+    if crosses_spec {
+        RESUME_PROMPT_CROSS_SPEC_DEFAULT
+    } else {
+        node.config
+            .get("resume_prompt")
+            .and_then(Value::as_str)
+            .unwrap_or(RESUME_PROMPT_DEFAULT)
+    }
+}
+
+/// The node execution for a prompt template that could not be rendered.
+fn invalid_template_execution(node: &GraphNode, error: &anyhow::Error) -> NodeExecution {
+    NodeExecution {
+        status: GraphRunStatus::Fail,
+        output: serde_json::json!({
+            "failure_kind": "invalid_template",
+            "error": error.to_string(),
+        }),
+        summary: format!(
+            "Agent node '{}' prompt template is invalid: {error}",
+            node.name
+        ),
+    }
 }
 
 /// CM47: build the `[SPEC NOTES]` section for a cold-start prompt. Fetches

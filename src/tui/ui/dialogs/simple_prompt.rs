@@ -215,20 +215,8 @@ pub fn draw_simple_prompt_dialog(
     let pending_scheduled = pending_scheduled_for_selection(app);
 
     // Scheduled-sends list panel geometry (B33).
-    let list_selected = dialog
-        .scheduled_list_selected
-        .filter(|_| !pending_scheduled.is_empty());
-    let (list_visible_rows, list_scroll) = SimplePromptDialog::scheduled_list_view(
-        pending_scheduled.len(),
-        SCHEDULED_LIST_MAX_ROWS,
-        list_selected,
-    );
-    // Panel height: a label/top-border row plus one row per visible entry.
-    let list_panel_height: u16 = if pending_scheduled.is_empty() {
-        0
-    } else {
-        1 + list_visible_rows as u16
-    };
+    let (list_selected, list_visible_rows, list_scroll, list_panel_height) =
+        scheduled_list_layout(dialog, pending_scheduled.len());
     let geo = compute_prompt_geometry(frame.area(), dialog, list_panel_height);
 
     let area = centered_rect_fixed(geo.dialog_width, geo.height, frame.area());
@@ -319,14 +307,15 @@ pub fn draw_simple_prompt_dialog(
         );
     }
 
-    // Draw @ file picker dropdown if active
-    if dialog.at_picker.is_some() {
-        let anchor = picker_anchor_area.unwrap_or(inner);
-        draw_at_picker_dropdown(frame, area, anchor, accent, dialog, theme);
-    }
-
-    // Draw picker modal if open
-    draw_section_picker_modal(frame, app, accent, &dialog.picker_mode, theme);
+    draw_prompt_pickers(
+        frame,
+        app,
+        dialog,
+        accent,
+        theme,
+        area,
+        picker_anchor_area.unwrap_or(inner),
+    );
 
     let content_rect = if dialog.active_tab == PromptTab::Raw {
         Some(SimplePromptDialog::raw_content_rect(
@@ -337,6 +326,53 @@ pub fn draw_simple_prompt_dialog(
         None
     };
     Some(((inner.x, inner.y), content_rect))
+}
+
+/// B33: the geometry of the scheduled-sends list panel for `dialog` with
+/// `pending_len` pending sends — the selected row, the visible rows, the
+/// scroll offset, and the panel height (a label/top-border row plus one row
+/// per visible entry, or zero when empty).
+fn scheduled_list_layout(
+    dialog: &SimplePromptDialog,
+    pending_len: usize,
+) -> (Option<usize>, usize, usize, u16) {
+    let list_selected = dialog.scheduled_list_selected.filter(|_| pending_len > 0);
+    let (list_visible_rows, list_scroll) = SimplePromptDialog::scheduled_list_view(
+        pending_len,
+        SCHEDULED_LIST_MAX_ROWS,
+        list_selected,
+    );
+    let list_panel_height: u16 = if pending_len == 0 {
+        0
+    } else {
+        1 + list_visible_rows as u16
+    };
+    (
+        list_selected,
+        list_visible_rows,
+        list_scroll,
+        list_panel_height,
+    )
+}
+
+/// Draw the @ file picker dropdown (when active) and the section picker modal
+/// (when open).
+fn draw_prompt_pickers(
+    frame: &mut Frame,
+    app: &App,
+    dialog: &SimplePromptDialog,
+    accent: Color,
+    theme: &Theme,
+    area: Rect,
+    anchor: Rect,
+) {
+    // Draw @ file picker dropdown if active
+    if dialog.at_picker.is_some() {
+        draw_at_picker_dropdown(frame, area, anchor, accent, dialog, theme);
+    }
+
+    // Draw picker modal if open
+    draw_section_picker_modal(frame, app, accent, &dialog.picker_mode, theme);
 }
 
 #[cfg(test)]

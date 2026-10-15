@@ -157,10 +157,11 @@ impl App {
         // moved underneath us, so the stale list is dropped instead.
         if let Some(previous) = self.crews.snapshot.as_ref() {
             for crew in &mut snapshot.crews {
-                if let Some(old) = previous.crews.iter().find(|old| old.name == crew.name) {
-                    if !old.bindings.is_empty() && old.binding_total == crew.binding_total {
-                        crew.bindings = old.bindings.clone();
-                    }
+                let Some(old) = previous.crews.iter().find(|old| old.name == crew.name) else {
+                    continue;
+                };
+                if !old.bindings.is_empty() && old.binding_total == crew.binding_total {
+                    crew.bindings = old.bindings.clone();
                 }
             }
         }

@@ -186,6 +186,24 @@ impl BriansBrain {
     /// Advance the automaton one fixed step if [`STEP_MS`] has elapsed.
     /// Returns `true` when the field actually stepped. Pointer motion never
     /// changes the rate — this is the whole point of the rebrand.
+    fn cell_next_state(&self, idx: usize, x: usize, y: usize, firing: &mut usize) -> CellState {
+        match self.grid[idx] {
+            CellState::On => CellState::Dying,
+            CellState::Dying => CellState::Off,
+            CellState::Off => {
+                if self.count_on_neighbors(x, y) == 2 {
+                    *firing += 1;
+                    CellState::On
+                } else {
+                    CellState::Off
+                }
+            }
+        }
+    }
+
+    /// Advance the automaton one fixed step if [`STEP_MS`] has elapsed.
+    /// Returns `true` when the field actually stepped. Pointer motion never
+    /// changes the rate — this is the whole point of the rebrand.
     pub fn step(&mut self) -> bool {
         let now = Instant::now();
         if now.duration_since(self.last_step) < Duration::from_millis(STEP_MS) {
@@ -199,18 +217,7 @@ impl BriansBrain {
         for y in 0..self.gh {
             for x in 0..self.gw {
                 let i = y * self.gw + x;
-                next[i] = match self.grid[i] {
-                    CellState::On => CellState::Dying,
-                    CellState::Dying => CellState::Off,
-                    CellState::Off => {
-                        if self.count_on_neighbors(x, y) == 2 {
-                            firing += 1;
-                            CellState::On
-                        } else {
-                            CellState::Off
-                        }
-                    }
-                };
+                next[i] = self.cell_next_state(i, x, y, &mut firing);
             }
         }
         self.grid = next;

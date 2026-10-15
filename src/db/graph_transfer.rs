@@ -19,7 +19,7 @@ use anyhow::{anyhow, Result};
 use rusqlite::{params, Transaction};
 
 use crate::db::Database;
-use crate::domain::graph_transfer::GraphImportPlan;
+use crate::domain::graph_transfer::{GraphImportEnsemblePlan, GraphImportPlan};
 use crate::domain::graphs::{Graph, GraphEdge, GraphNode};
 
 /// Record `name` once, preserving first-seen order.
@@ -39,6 +39,61 @@ impl Database {
     pub fn import_graph(&self, lp: &Graph, plan: &GraphImportPlan) -> Result<Vec<String>> {
         // Resolve each bound ensemble's crew BEFORE taking the connection lock
         // (the transaction below holds it for its whole life).
+        let (missing_crews, resolved_crew_ids) = self.resolve_bound_crews(plan)?;
+
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let tx = conn.transaction()?;
+
+        // CM49: completion hooks travel in the document and are restored
+        // verbatim (an empty map writes NULL, as before).
+        let hooks_json = if plan.hooks.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(&plan.hooks)?)
+        };
+
+        insert_graph_row_tx(&tx, lp, &hooks_json)?;
+
+        for node in &plan.nodes {
+            insert_graph_node_tx(&tx, node)?;
+        }
+        for ensemble_plan in &plan.ensembles {
+            insert_graph_node_tx(&tx, &ensemble_plan.join_node)?;
+            for node in &ensemble_plan.member_nodes {
+                insert_graph_node_tx(&tx, node)?;
+            }
+        }
+        for edge in &plan.edges {
+            insert_graph_edge_tx(&tx, edge)?;
+        }
+        for (index, ensemble_plan) in plan.ensembles.iter().enumerate() {
+            insert_ensemble_unit_tx(&tx, ensemble_plan, &resolved_crew_ids[index])?;
+        }
+
+        tx.commit()?;
+        drop(conn);
+
+        // Materialize every bound ensemble whose crew exists locally, through
+        // the one sync path (it creates the member nodes/rows and wires the
+        // fan-out/fan-in, then stamps the applied version).
+        for ensemble_plan in &plan.ensembles {
+            if ensemble_plan.ensemble.crew_name.is_some() {
+                self.sync_ensemble_with_crew(&ensemble_plan.ensemble.id)?;
+            }
+        }
+        Ok(missing_crews)
+    }
+
+    /// Resolve every bound crew named by the plan, returning the crew names
+    /// that do not exist locally (deduped, first-seen order) and the resolved
+    /// crew id per ensemble (aligned with `plan.ensembles`).
+    fn resolve_bound_crews(
+        &self,
+        plan: &GraphImportPlan,
+    ) -> Result<(Vec<String>, Vec<Option<String>>)> {
         let mut missing_crews: Vec<String> = Vec::new();
         let mut resolved_crew_ids: Vec<Option<String>> = Vec::with_capacity(plan.ensembles.len());
         for ensemble_plan in &plan.ensembles {
@@ -56,140 +111,113 @@ impl Database {
         // CM49: a crew-bound plain node or agent hook names a crew too; report
         // every name that does not exist locally (deduped) so the caller knows
         // what to create before the graph can run.
-        for node in &plan.nodes {
-            if let Some(name) = node.config.get("crew").and_then(serde_json::Value::as_str) {
-                if self.crew_get(name)?.is_none() {
-                    record_missing_crew(&mut missing_crews, name);
-                }
+        let node_crews = plan
+            .nodes
+            .iter()
+            .filter_map(|node| node.config.get("crew").and_then(serde_json::Value::as_str));
+        for name in node_crews {
+            if self.crew_get(name)?.is_none() {
+                record_missing_crew(&mut missing_crews, name);
             }
         }
-        for hooks in plan.hooks.values() {
-            for hook in hooks {
-                if let Some(name) = hook.crew.as_deref() {
-                    if self.crew_get(name)?.is_none() {
-                        record_missing_crew(&mut missing_crews, name);
-                    }
-                }
+        let hook_crews = plan
+            .hooks
+            .values()
+            .flatten()
+            .filter_map(|hook| hook.crew.as_deref());
+        for name in hook_crews {
+            if self.crew_get(name)?.is_none() {
+                record_missing_crew(&mut missing_crews, name);
             }
         }
+        Ok((missing_crews, resolved_crew_ids))
+    }
+}
 
-        let mut conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
-        let tx = conn.transaction()?;
+fn insert_graph_row_tx(tx: &Transaction, lp: &Graph, hooks_json: &Option<String>) -> Result<()> {
+    tx.execute(
+        "INSERT INTO graphs (id, name, description, workdir, status, trigger_type, trigger_config, created_at, started_at, completed_at, autorun_at, active_run_queue_id, on_completed, auto_continue_at, auto_continue_action, archived, paused_by_reconciliation, infra_node_id, hooks)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+        params![
+            &lp.id,
+            &lp.name,
+            &lp.description,
+            &lp.workdir,
+            lp.status.as_str(),
+            Option::<String>::None,
+            Option::<String>::None,
+            lp.created_at.timestamp(),
+            lp.started_at.map(|value| value.timestamp()),
+            lp.completed_at.map(|value| value.timestamp()),
+            lp.autorun_at.map(|value| value.timestamp()),
+            &lp.active_run_queue_id,
+            Option::<String>::None,
+            lp.auto_continue_at.map(|value| value.timestamp()),
+            &lp.auto_continue_action,
+            lp.archived,
+            lp.paused_by_reconciliation,
+            &lp.infra_node_id,
+            hooks_json,
+        ],
+    )?;
+    Ok(())
+}
 
-        // CM49: completion hooks travel in the document and are restored
-        // verbatim (an empty map writes NULL, as before).
-        let hooks_json = if plan.hooks.is_empty() {
-            None
-        } else {
-            Some(serde_json::to_string(&plan.hooks)?)
-        };
-
+fn insert_ensemble_unit_tx(
+    tx: &Transaction,
+    ensemble_plan: &GraphImportEnsemblePlan,
+    crew_id: &Option<String>,
+) -> Result<()> {
+    let ensemble = &ensemble_plan.ensemble;
+    tx.execute(
+        "INSERT INTO ensembles (id, spec_id, graph_id, name, prompt_template, join_node_id, entry_from_node, entry_condition, min_pass, straggler_timeout_minutes, quorum_grace_minutes, timeout_minutes, infra_retry_limit, infra_crash_max_seconds, infra_backoff_seconds, on_pass_to, on_fail_to, kind, round_robin_index, commit_rights, created_at, crew_id, crew_name, crew_version_applied)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
+        params![
+            &ensemble.id,
+            &ensemble.spec_id,
+            &ensemble.graph_id,
+            &ensemble.name,
+            &ensemble.prompt_template,
+            &ensemble.join_node_id,
+            &ensemble.entry_from_node,
+            ensemble.entry_condition.as_str(),
+            ensemble.min_pass,
+            ensemble.straggler_timeout_minutes,
+            ensemble.quorum_grace_minutes,
+            ensemble.timeout_minutes,
+            ensemble.infra_retry_limit,
+            ensemble.infra_crash_max_seconds,
+            ensemble.infra_backoff_seconds,
+            &ensemble.on_pass_to,
+            &ensemble.on_fail_to,
+            ensemble.kind.as_str(),
+            ensemble.round_robin_index,
+            ensemble.commit_rights,
+            ensemble.created_at.timestamp(),
+            crew_id,
+            &ensemble.crew_name,
+            Option::<i64>::None,
+        ],
+    )?;
+    for member in &ensemble_plan.members {
         tx.execute(
-            "INSERT INTO graphs (id, name, description, workdir, status, trigger_type, trigger_config, created_at, started_at, completed_at, autorun_at, active_run_queue_id, on_completed, auto_continue_at, auto_continue_action, archived, paused_by_reconciliation, infra_node_id, hooks)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+            "INSERT INTO ensemble_members (ensemble_id, node_id, position, platform, model, prompt_override, timeout_minutes, infra_retry_limit, infra_crash_max_seconds, infra_backoff_seconds)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
-                &lp.id,
-                &lp.name,
-                &lp.description,
-                &lp.workdir,
-                lp.status.as_str(),
-                Option::<String>::None,
-                Option::<String>::None,
-                lp.created_at.timestamp(),
-                lp.started_at.map(|value| value.timestamp()),
-                lp.completed_at.map(|value| value.timestamp()),
-                lp.autorun_at.map(|value| value.timestamp()),
-                &lp.active_run_queue_id,
-                Option::<String>::None,
-                lp.auto_continue_at.map(|value| value.timestamp()),
-                &lp.auto_continue_action,
-                lp.archived,
-                lp.paused_by_reconciliation,
-                &lp.infra_node_id,
-                hooks_json,
+                &member.ensemble_id,
+                &member.node_id,
+                member.position,
+                &member.platform,
+                &member.model,
+                &member.prompt_override,
+                &member.timeout_minutes,
+                &member.infra_retry_limit,
+                &member.infra_crash_max_seconds,
+                &member.infra_backoff_seconds,
             ],
         )?;
-
-        for node in &plan.nodes {
-            insert_graph_node_tx(&tx, node)?;
-        }
-        for ensemble_plan in &plan.ensembles {
-            insert_graph_node_tx(&tx, &ensemble_plan.join_node)?;
-            for node in &ensemble_plan.member_nodes {
-                insert_graph_node_tx(&tx, node)?;
-            }
-        }
-        for edge in &plan.edges {
-            insert_graph_edge_tx(&tx, edge)?;
-        }
-        for (index, ensemble_plan) in plan.ensembles.iter().enumerate() {
-            let ensemble = &ensemble_plan.ensemble;
-            tx.execute(
-                "INSERT INTO ensembles (id, spec_id, graph_id, name, prompt_template, join_node_id, entry_from_node, entry_condition, min_pass, straggler_timeout_minutes, quorum_grace_minutes, timeout_minutes, infra_retry_limit, infra_crash_max_seconds, infra_backoff_seconds, on_pass_to, on_fail_to, kind, round_robin_index, commit_rights, created_at, crew_id, crew_name, crew_version_applied)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
-                params![
-                    &ensemble.id,
-                    &ensemble.spec_id,
-                    &ensemble.graph_id,
-                    &ensemble.name,
-                    &ensemble.prompt_template,
-                    &ensemble.join_node_id,
-                    &ensemble.entry_from_node,
-                    ensemble.entry_condition.as_str(),
-                    ensemble.min_pass,
-                    ensemble.straggler_timeout_minutes,
-                    ensemble.quorum_grace_minutes,
-                    ensemble.timeout_minutes,
-                    ensemble.infra_retry_limit,
-                    ensemble.infra_crash_max_seconds,
-                    ensemble.infra_backoff_seconds,
-                    &ensemble.on_pass_to,
-                    &ensemble.on_fail_to,
-                    ensemble.kind.as_str(),
-                    ensemble.round_robin_index,
-                    ensemble.commit_rights,
-                    ensemble.created_at.timestamp(),
-                    &resolved_crew_ids[index],
-                    &ensemble.crew_name,
-                    Option::<i64>::None,
-                ],
-            )?;
-            for member in &ensemble_plan.members {
-                tx.execute(
-                    "INSERT INTO ensemble_members (ensemble_id, node_id, position, platform, model, prompt_override, timeout_minutes, infra_retry_limit, infra_crash_max_seconds, infra_backoff_seconds)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                    params![
-                        &member.ensemble_id,
-                        &member.node_id,
-                        member.position,
-                        &member.platform,
-                        &member.model,
-                        &member.prompt_override,
-                        &member.timeout_minutes,
-                        &member.infra_retry_limit,
-                        &member.infra_crash_max_seconds,
-                        &member.infra_backoff_seconds,
-                    ],
-                )?;
-            }
-        }
-
-        tx.commit()?;
-        drop(conn);
-
-        // Materialize every bound ensemble whose crew exists locally, through
-        // the one sync path (it creates the member nodes/rows and wires the
-        // fan-out/fan-in, then stamps the applied version).
-        for ensemble_plan in &plan.ensembles {
-            if ensemble_plan.ensemble.crew_name.is_some() {
-                self.sync_ensemble_with_crew(&ensemble_plan.ensemble.id)?;
-            }
-        }
-        Ok(missing_crews)
     }
+    Ok(())
 }
 
 fn insert_graph_node_tx(tx: &Transaction, node: &GraphNode) -> Result<()> {

@@ -1,3 +1,4 @@
+use super::ensemble_member_settle::{RoundRobinSettle, RoundRobinWalkCtx};
 use super::*;
 
 /// Invariant inputs of a single ensemble-member run, gathered once by
@@ -457,32 +458,17 @@ impl GraphEngine {
         resumable_sessions: &mut HashMap<String, String>,
         round_robin_pins: &mut HashMap<String, i64>,
     ) -> Result<NodeExecution> {
+        let setup = self
+            .prepare_round_robin(
+                details,
+                available_members,
+                enforce_commit_rights,
+                workdir,
+                round_robin_pins,
+                resumable_sessions,
+            )
+            .await?;
         let ensemble = &details.ensemble;
-        // CM48: the FULL member list is the rotation's index space. A member
-        // that is unavailable now is stepped over inside the walk, so the
-        // stored `round_robin_index` keeps naming the same member whatever
-        // the roster says today.
-        let member_count = details.members.len() as i64;
-        if member_count == 0 {
-            return Err(anyhow!(
-                "Round-robin ensemble '{}' has no members to run.",
-                ensemble.id
-            ));
-        }
-        let available_members: HashSet<&str> = available_members
-            .iter()
-            .map(|member| member.node_id.as_str())
-            .collect();
-        let (start_index, initial_resume_candidate, next_index) = self.resolve_round_robin_start(
-            details,
-            member_count,
-            round_robin_pins,
-            resumable_sessions,
-        )?;
-        let member_nodes = load_ensemble_member_nodes(&self.db, details)?;
-        let any_member_may_commit = details.ensemble.commit_rights;
-        let commit_watch =
-            CommitRightsWatch::begin(enforce_commit_rights, any_member_may_commit, workdir).await;
         let previous_output_owned = previous_output.cloned();
         let join_ctx = EnsembleJoinCtx {
             lp,
@@ -495,46 +481,28 @@ impl GraphEngine {
         let mut tried_no_verdict: Vec<(String, String, Value, String)> = Vec::new();
         let mut members_ran: i64 = 0;
         let mut skipped_unavailable = false;
-        for offset in 0..member_count {
-            let current_index = (start_index + offset).rem_euclid(member_count);
+        for offset in 0..setup.member_count {
+            let current_index = (setup.start_index + offset).rem_euclid(setup.member_count);
             let member = &details.members[current_index as usize];
-            // CM48: the rotation advances past an unavailable member without
-            // running it and without counting it as a verdict-less attempt.
-            if !available_members.contains(member.node_id.as_str()) {
+            // CM48: an unavailable member is stepped over, not counted.
+            if !setup.available_members.contains(member.node_id.as_str()) {
                 skipped_unavailable = true;
                 continue;
             }
             members_ran += 1;
-            // The rotation cursor is the member that actually ran. Without
-            // this, a member stepped over as unavailable leaves the cursor on
-            // the member before it, and a bounce back into the ensemble
-            // replays the skipped members instead of continuing. Only the
-            // roster's own skips move the cursor here — an empty roster skips
-            // nothing, and its cursor discipline stays exactly as before.
+            // The rotation cursor is the member that actually ran, so a bounce
+            // back into the ensemble continues past the roster's skips.
             if skipped_unavailable {
                 round_robin_pins.insert(ensemble.id.clone(), current_index);
             }
-            // CB82: start no further round-robin member during shutdown —
-            // settle the member's active run if any, return interrupted with
-            // no join row (`push_round_robin_no_verdict` not called).
+            // CB82: no further round-robin member starts during shutdown.
             if self.is_shutting_down() {
-                return Ok(self.shutdown_interrupted_member_execution(
-                    &member.node_id,
-                    format!(
-                        "Ensemble '{}' (round-robin member) interrupted: daemon shutdown.",
-                        ensemble.name
-                    ),
-                ));
+                return Ok(self.shutdown_member_interruption(ensemble, member));
             }
-            let node = member_nodes
-                .get(&member.node_id)
-                .cloned()
-                .ok_or_else(|| anyhow!("Ensemble member node '{}' not found.", member.node_id))?;
-            let resume_candidate = if offset == 0 {
-                initial_resume_candidate.clone()
-            } else {
-                None
-            };
+            let node = ensemble_member_node(&setup.member_nodes, member)?;
+            let resume_candidate = (offset == 0)
+                .then(|| setup.initial_resume_candidate.clone())
+                .flatten();
             let (execution, member_had_no_verdict) = self
                 .run_ensemble_member(
                     lp,
@@ -561,61 +529,35 @@ impl GraphEngine {
                 );
                 continue;
             }
-            // The rotation's next start is the one after the member that
-            // actually ran — skipped members are not a position of their own.
-            let next_after_winner = (current_index + 1).rem_euclid(member_count);
-            // CM48: `round_robin_index` is stored as the index actually used.
-            // The eager walk-start write (`start + 1`) predicts the member
-            // after the first one tried; once the walk has stepped over
-            // unavailable members that prediction no longer names the member
-            // after the one that won — it can point at the winner itself
-            // (dispatching it twice in a row) or at a member that never ran.
-            // Re-store it from the member that actually won, so the next
-            // dispatch's rotation continues after it and the stored index
-            // agrees with the join output. An empty roster skips nothing,
-            // so the stored index is exactly today's.
-            let next_reported = if skipped_unavailable {
-                self.db
-                    .update_ensemble_kind(&ensemble.id, None, Some(Some(next_after_winner)))?;
-                next_after_winner
-            } else {
-                next_index
-            };
-            let join_execution = round_robin_winner_execution(
-                ensemble,
-                details,
-                member,
-                &node,
-                &execution,
-                // The members actually run so far, minus this one — a member
-                // stepped over as unavailable above is not "tried".
-                members_ran - 1,
-                next_reported,
-            );
-            let join_execution = apply_round_robin_commit_watch(
-                join_execution,
-                &commit_watch,
-                workdir,
-                format!("Ensemble '{}' (round-robin member)", ensemble.name),
-                &ensemble.join_node_id,
-            )
-            .await;
-            self.record_ensemble_join(&join_ctx, &join_execution)
-                .await?;
-            return Ok(join_execution);
+            return self
+                .settle_round_robin_winner(RoundRobinSettle {
+                    join_ctx: &join_ctx,
+                    ensemble,
+                    details,
+                    member,
+                    node: &node,
+                    execution,
+                    members_ran,
+                    skipped_unavailable,
+                    next_after_winner: (current_index + 1).rem_euclid(setup.member_count),
+                    next_index: setup.next_index,
+                    commit_watch: &setup.commit_watch,
+                    workdir,
+                })
+                .await;
         }
-        let execution =
-            round_robin_no_verdict_execution(ensemble, details, &tried_no_verdict, next_index);
-        let execution = apply_round_robin_commit_watch(
-            execution,
-            &commit_watch,
-            workdir,
-            format!("Ensemble '{}' (round-robin)", ensemble.name),
-            &ensemble.join_node_id,
+        self.settle_round_robin_no_verdict(
+            &RoundRobinWalkCtx {
+                join_ctx: &join_ctx,
+                commit_watch: &setup.commit_watch,
+                workdir,
+                ensemble,
+            },
+            details,
+            &tried_no_verdict,
+            setup.next_index,
         )
-        .await;
-        self.record_ensemble_join(&join_ctx, &execution).await?;
-        Ok(execution)
+        .await
     }
 
     pub(crate) fn resolve_round_robin_start(
@@ -763,4 +705,16 @@ impl GraphEngine {
         }
         Ok(())
     }
+}
+
+/// The graph node for an ensemble member, or an error naming the member when
+/// the node is missing.
+fn ensemble_member_node(
+    nodes: &HashMap<String, GraphNode>,
+    member: &EnsembleMember,
+) -> Result<GraphNode> {
+    nodes
+        .get(&member.node_id)
+        .cloned()
+        .ok_or_else(|| anyhow!("Ensemble member node '{}' not found.", member.node_id))
 }
