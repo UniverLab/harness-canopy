@@ -1367,11 +1367,11 @@ mod tests {
             }
         }
 
-        let mut harness_cells = 0;
+        let mut accent_rows = std::collections::BTreeSet::new();
         for (row, (text, _)) in rows.iter().enumerate() {
             for (x, _) in text.chars().enumerate() {
                 if grid[row][x].0 == harness {
-                    harness_cells += 1;
+                    accent_rows.insert(row);
                     assert!(
                         text.contains(&label),
                         "harness accent fg is only for the harness name row, found on: {text:?}"
@@ -1379,9 +1379,12 @@ mod tests {
                 }
             }
         }
+        // Both the harness row's value and the picker row's own name carry the
+        // accent, so at least two distinct rows must be painted with it.
         assert!(
-            harness_cells >= 1,
-            "the harness name must carry its accent (label {label:?})"
+            accent_rows.len() >= 2,
+            "the harness name must carry its accent on the value row and on the \
+             picker row (label {label:?}), found on rows {accent_rows:?}"
         );
     }
 }

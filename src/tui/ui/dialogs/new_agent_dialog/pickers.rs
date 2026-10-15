@@ -215,19 +215,22 @@ fn append_cli_section(
     cli_field: usize,
     theme: &Theme,
 ) {
+    // The harness name always reads in that harness's own accent; focus only
+    // adds the header-coloured highlight behind it.
     let cli_accent = dialog.cli_accent_color(dialog.cli_index, theme);
+    let value_style = if dialog.field == cli_field {
+        Style::default()
+            .fg(cli_accent)
+            .bg(accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(cli_accent)
+    };
     lines.push(Line::from(vec![
         Span::styled("  Harness: ", Style::default().fg(theme.dim_text)),
         Span::styled(
             format!(" {} ", dialog.cli_display_label(dialog.cli_index)),
-            if dialog.field == cli_field {
-                Style::default()
-                    .fg(cli_accent)
-                    .bg(accent)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                focus_style(dialog.field, cli_field, accent)
-            },
+            value_style,
         ),
         Span::styled(
             "  (◂▸ cycle · type/Space pick)",
@@ -277,8 +280,13 @@ fn append_cli_picker_rows(
         {
             let is_selected = i == dialog.cli_picker_idx;
             let style = picker_item_style(accent, is_selected);
+            // Each row names its own harness in that harness's accent; the
+            // selection highlight only adds the header background behind it.
             let label_style = if is_selected {
-                style
+                Style::default()
+                    .fg(dialog.cli_accent_color(*cli_idx, theme))
+                    .bg(accent)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(dialog.cli_accent_color(*cli_idx, theme))
             };
