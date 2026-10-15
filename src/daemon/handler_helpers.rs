@@ -4,8 +4,46 @@ use rmcp::model::CallToolResult;
 use crate::application::ports::{AgentRepository, RunRepository};
 use crate::daemon::helpers::{error_result, success_result};
 use crate::daemon::params::*;
+use crate::domain::activity::{self, GraphEvent, GraphEventKind};
+use crate::domain::graphs::GraphStatus;
 use crate::domain::models::{Agent, Cli, RunLog, RunStatus, Trigger, WatchEvent};
 use crate::domain::validation::{validate_id, validate_prompt, validate_watch_path};
+
+/// CM46: record a `config_changed` event for a mid-run edit. A no-op when the
+/// graph can't be resolved or is not `running` — edits to an idle graph are
+/// not "changes made while the graph runs", which is what this narrates.
+pub(crate) fn record_config_change_if_running(
+    db: &Database,
+    graph_id: Option<&str>,
+    spec_id: Option<&str>,
+    node_id: Option<&str>,
+    change: &str,
+    message: String,
+) {
+    let Some(graph_id) = graph_id else {
+        return;
+    };
+    let Ok(Some(graph)) = db.get_graph(graph_id) else {
+        return;
+    };
+    if graph.status != GraphStatus::Running {
+        return;
+    }
+    activity::record(
+        db,
+        GraphEvent {
+            graph_id,
+            graph_name: &graph.name,
+            workdir: &graph.workdir,
+            spec_id,
+            node_id,
+            run_id: None,
+            kind: GraphEventKind::ConfigChanged,
+            message,
+            payload: Some(serde_json::json!({ "change": change })),
+        },
+    );
+}
 
 pub(crate) struct PreparedCronTask {
     pub cli: Cli,
@@ -20,6 +58,26 @@ pub(crate) struct PreparedWatchTask {
     pub recursive: bool,
 }
 
+/// Validate a cron schedule and derive its expiry, shared by the headless
+/// `prepare_cron_task` and the CM53 `send_to_session` add path so both produce
+/// identical errors and expiry semantics.
+pub(crate) fn parse_schedule_and_expiry(
+    schedule: &str,
+    duration_minutes: Option<i64>,
+    validate_cron: &impl Fn(&str) -> bool,
+) -> Result<(String, Option<chrono::DateTime<Utc>>), String> {
+    let schedule_expr = validate_cron_schedule(schedule, validate_cron, |schedule| {
+        format!(
+            "Invalid cron expression '{}'. Must be a 5-field cron expression. \
+             Examples: '*/5 * * * *' (every 5 min), '0 9 * * *' (daily 9am).",
+            schedule
+        )
+    })?;
+    let expires_at =
+        duration_minutes.map(|minutes| Utc::now() + chrono::Duration::minutes(minutes));
+    Ok((schedule_expr, expires_at))
+}
+
 pub(crate) fn prepare_cron_task(
     params: &TaskAddParams,
     validate_cron: &impl Fn(&str) -> bool,
@@ -27,18 +85,14 @@ pub(crate) fn prepare_cron_task(
     validate_id(&params.id)?;
     validate_prompt(&params.prompt)?;
 
+    let cli = Cli::resolve(params.cli.as_deref())?;
+    let (schedule_expr, expires_at) =
+        parse_schedule_and_expiry(&params.schedule, params.duration_minutes, validate_cron)?;
+
     Ok(PreparedCronTask {
-        cli: Cli::resolve(params.cli.as_deref())?,
-        schedule_expr: validate_cron_schedule(&params.schedule, validate_cron, |schedule| {
-            format!(
-                "Invalid cron expression '{}'. Must be a 5-field cron expression. \
-                 Examples: '*/5 * * * *' (every 5 min), '0 9 * * *' (daily 9am).",
-                schedule
-            )
-        })?,
-        expires_at: params
-            .duration_minutes
-            .map(|minutes| Utc::now() + chrono::Duration::minutes(minutes)),
+        cli,
+        schedule_expr,
+        expires_at,
     })
 }
 
@@ -291,6 +345,7 @@ pub(crate) fn new_agent_base(
         last_run_ok: None,
         last_triggered_at: None,
         trigger_count: 0,
+        action: crate::domain::models::AgentAction::Headless,
     }
 }
 
@@ -302,6 +357,30 @@ pub(crate) fn map_action_result<T>(
         Ok(_) => success_result(success_message),
         Err(e) => error_result(&e.to_string()),
     }
+}
+
+/// `Some(reason)` when `platform` is configured in canopy and its registry
+/// entry is marked `headless = false` — that platform can host a live
+/// interactive session but can never run a graph node, an ensemble member, a
+/// background agent, or answer a probe (CM35, freebuff v0.1.2).
+///
+/// `None` for an *unconfigured* platform: no node/ensemble/agent handler
+/// checks configuration membership today, so an unknown platform keeps its
+/// existing behaviour at every call site — only a platform canopy knows about
+/// can be known to be interactive-only.
+///
+/// Home resolution mirrors `Cli::strategy` (`CANOPY_HOME_OVERRIDE` first, then
+/// `dirs::home_dir`) so handler tests can point it at a fixture config.
+pub(crate) fn interactive_only_rejection(platform: &str) -> Option<String> {
+    let home = std::env::var_os("CANOPY_HOME_OVERRIDE")
+        .map(std::path::PathBuf::from)
+        .or_else(dirs::home_dir)?;
+    let config = crate::domain::canopy_config::CanopyConfig::load(&home.join(".canopy"));
+    let cli = config.get_cli(platform)?;
+    if cli.headless {
+        return None;
+    }
+    Some(crate::domain::cli_config::interactive_only_reason(platform))
 }
 
 // ── Intelligence context helpers ─────────────────────────────────
@@ -439,6 +518,9 @@ mod tests {
     #[test]
     fn watcher_restart_needed_true() {
         let mut params = TaskUpdateParams {
+            action: None,
+            target_session_name: None,
+            target_session_id: None,
             id: "test".to_string(),
             new_id: None,
             prompt: None,
@@ -543,9 +625,13 @@ mod tests {
             last_run_ok: None,
             last_triggered_at: None,
             trigger_count: 0,
+            action: crate::domain::models::AgentAction::Headless,
         };
 
         let params = TaskUpdateParams {
+            action: None,
+            target_session_name: None,
+            target_session_id: None,
             id: "test".to_string(),
             new_id: None,
             prompt: Some("new prompt".to_string()),
@@ -587,9 +673,13 @@ mod tests {
             last_run_ok: None,
             last_triggered_at: None,
             trigger_count: 0,
+            action: crate::domain::models::AgentAction::Headless,
         };
 
         let params = TaskUpdateParams {
+            action: None,
+            target_session_name: None,
+            target_session_id: None,
             id: "test".to_string(),
             new_id: None,
             prompt: None,
@@ -631,9 +721,13 @@ mod tests {
             last_run_ok: None,
             last_triggered_at: None,
             trigger_count: 0,
+            action: crate::domain::models::AgentAction::Headless,
         };
 
         let params = TaskUpdateParams {
+            action: None,
+            target_session_name: None,
+            target_session_id: None,
             id: "test".to_string(),
             new_id: None,
             prompt: None,
@@ -677,6 +771,9 @@ mod tests {
     #[test]
     fn prepare_cron_task_valid() {
         let params = TaskAddParams {
+            action: None,
+            target_session_name: None,
+            target_session_id: None,
             id: "test-agent".to_string(),
             prompt: "Run tests".to_string(),
             schedule: "0 9 * * *".to_string(),
@@ -698,6 +795,9 @@ mod tests {
     #[test]
     fn prepare_cron_task_invalid_id() {
         let params = TaskAddParams {
+            action: None,
+            target_session_name: None,
+            target_session_id: None,
             id: "".to_string(),
             prompt: "Run tests".to_string(),
             schedule: "0 9 * * *".to_string(),
@@ -716,6 +816,9 @@ mod tests {
     #[test]
     fn prepare_cron_task_invalid_schedule() {
         let params = TaskAddParams {
+            action: None,
+            target_session_name: None,
+            target_session_id: None,
             id: "test-agent".to_string(),
             prompt: "Run tests".to_string(),
             schedule: "not a cron".to_string(),
@@ -734,6 +837,9 @@ mod tests {
     #[test]
     fn prepare_watch_task_valid() {
         let params = TaskWatchParams {
+            action: None,
+            target_session_name: None,
+            target_session_id: None,
             id: "test-watcher".to_string(),
             path: "/tmp/test".to_string(),
             events: vec!["create".to_string(), "modify".to_string()],
@@ -758,6 +864,9 @@ mod tests {
     #[test]
     fn prepare_watch_task_defaults() {
         let params = TaskWatchParams {
+            action: None,
+            target_session_name: None,
+            target_session_id: None,
             id: "test-watcher".to_string(),
             path: "/tmp/test".to_string(),
             events: vec!["modify".to_string()],
@@ -778,6 +887,9 @@ mod tests {
     #[test]
     fn prepare_watch_task_invalid_path() {
         let params = TaskWatchParams {
+            action: None,
+            target_session_name: None,
+            target_session_id: None,
             id: "test-watcher".to_string(),
             path: "".to_string(),
             events: vec!["modify".to_string()],
@@ -820,9 +932,13 @@ mod tests {
             last_run_ok: None,
             last_triggered_at: None,
             trigger_count: 0,
+            action: crate::domain::models::AgentAction::Headless,
         };
 
         let params = TaskUpdateParams {
+            action: None,
+            target_session_name: None,
+            target_session_id: None,
             id: "cron-agent".to_string(),
             new_id: None,
             prompt: None,

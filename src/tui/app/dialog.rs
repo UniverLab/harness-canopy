@@ -2,8 +2,10 @@
 
 mod app_methods;
 pub mod at_picker;
+pub(crate) mod background_action;
 pub mod datetime_picker;
 pub mod graph_control;
+pub mod graph_editor;
 pub mod graph_form;
 pub mod knowledge;
 pub mod launchpad;

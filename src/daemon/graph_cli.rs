@@ -15,16 +15,41 @@
 //! and its database still can.
 
 use anyhow::{anyhow, Context, Result};
-use chrono::{DateTime, Utc};
 use clap::Subcommand;
 
 use crate::daemon::cli_daemon::call_tool;
-use crate::daemon::handler::{active_graph_spec_context, ActiveGraphSpec};
 use crate::db::Database;
 use crate::domain::db_paths::database_path;
-use crate::domain::graphs::{
-    Graph, GraphNodeRun, GraphRunStatus, GraphSpec, GraphSpecStatus, GraphStatus,
+use crate::domain::graphs::GraphStatus;
+
+use crew::handle_graph_crew;
+use format::{current_spec_name, format_autorun_compact, graph_progress, short_id, status_icon};
+use info::handle_graph_info;
+use resolve::resolve_graph;
+
+#[cfg(test)]
+use crate::daemon::handler::{active_graph_spec_context, ActiveGraphSpec};
+#[cfg(test)]
+use crate::domain::graphs::{Graph, GraphNodeRun, GraphRunStatus, GraphSpec, GraphSpecStatus};
+#[cfg(test)]
+use chrono::{DateTime, Utc};
+#[cfg(test)]
+use format::{
+    commit_rights_note, current_running_run, current_spec, distinct_spec_ids_in_order, format_dt,
+    format_elapsed, format_relative_duration, interrupted_note, is_interrupted, no_verdict_note,
+    run_status_icon, spec_progress, spec_status_icon,
 };
+#[cfg(test)]
+use info::{
+    print_graph_info_current_node, print_graph_info_hook_runs, print_graph_info_recent_runs,
+};
+#[cfg(test)]
+use resolve::{ambiguous_error, candidate_list, not_found_error};
+
+mod crew;
+pub(crate) mod format;
+mod info;
+mod resolve;
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum GraphAction {
@@ -77,6 +102,10 @@ pub(crate) enum GraphAction {
         /// no bound specs and no queue.
         #[arg(long)]
         idea: Option<String>,
+        /// Start the first spec this run executes at this node (id, id prefix,
+        /// node name, or ensemble name) instead of Start.
+        #[arg(long = "from")]
+        from: Option<String>,
     },
     /// Pause a running graph after the current node finishes.
     Pause {
@@ -94,6 +123,13 @@ pub(crate) enum GraphAction {
         /// Skip the current spec and move on to the next one.
         #[arg(long = "skip-next-spec")]
         skip_next_spec: bool,
+        /// Start the current (or --spec) spec at this node instead of resuming
+        /// the paused node: id, id prefix, node name, or ensemble name.
+        #[arg(long = "from")]
+        from: Option<String>,
+        /// Spec to start at when using --from. Defaults to the graph's current spec.
+        #[arg(long)]
+        spec: Option<String>,
     },
     /// Reset a completed/failed graph back to pending so `run` can relaunch
     /// it.
@@ -104,6 +140,10 @@ pub(crate) enum GraphAction {
         /// reset every non-completed spec, leaving completed ones untouched.
         #[arg(long)]
         specs: Vec<String>,
+        /// Delete the reset specs' spec notes. Default false preserves them
+        /// (notes are keyed by spec, not run, and survive a reset).
+        #[arg(long)]
+        clear_notes: bool,
         /// Skip the confirmation prompt.
         #[arg(long)]
         yes: bool,
@@ -131,6 +171,47 @@ pub(crate) enum GraphAction {
         /// Spec ID (or unambiguous prefix) to unbind.
         spec_id: String,
     },
+    /// Print a graph's durable event log, one line per event.
+    Log {
+        /// Full graph id, an unambiguous id prefix, or the exact graph name.
+        id_or_name: String,
+        /// Start from this event id, or from events at/after an RFC3339
+        /// timestamp.
+        #[arg(long)]
+        since: Option<String>,
+        /// Only events of this kind (repeatable), e.g. `--kind node_finished`.
+        #[arg(long = "kind")]
+        kind: Vec<String>,
+        /// Only this spec's events (id or prefix).
+        #[arg(long)]
+        spec: Option<String>,
+        /// Poll the daemon every 2 s and print new events until Ctrl+C.
+        #[arg(long)]
+        follow: bool,
+    },
+    /// List harness/model assignments across graphs or for one graph:
+    /// agent nodes, ensemble members and agent hooks, with crew and
+    /// availability when set. Read-only — no daemon required.
+    Crew {
+        /// Full graph id, an unambiguous id prefix, or the exact graph name.
+        /// Omit for every graph.
+        id_or_name: Option<String>,
+        /// Filter to an exact platform match (e.g. claude, opencode-go).
+        #[arg(long)]
+        platform: Option<String>,
+        /// Filter to a case-insensitive model substring match (e.g. opus).
+        #[arg(long)]
+        model: Option<String>,
+        /// Include archived graphs.
+        #[arg(long)]
+        all: bool,
+        /// Print the platform/model summary instead of per-graph rows.
+        #[arg(long)]
+        group_by_pair: bool,
+        /// Output the MCP JSON shape instead of tables.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 pub(crate) async fn handle_graph_action(
@@ -156,24 +237,30 @@ pub(crate) async fn handle_graph_action(
             queue,
             workdir,
             idea,
-        } => handle_graph_run(&db, port_override, &id_or_name, queue, workdir, idea),
+            from,
+        } => handle_graph_run(&db, port_override, &id_or_name, queue, workdir, idea, from),
         GraphAction::Pause { id_or_name } => handle_graph_pause(&db, port_override, &id_or_name),
         GraphAction::Continue {
             id_or_name,
             retry_current_node,
             skip_next_spec,
+            from,
+            spec,
         } => handle_graph_continue(
             &db,
             port_override,
             &id_or_name,
             retry_current_node,
             skip_next_spec,
+            from,
+            spec,
         ),
         GraphAction::Reset {
             id_or_name,
             specs,
+            clear_notes,
             yes,
-        } => handle_graph_reset(&db, port_override, &id_or_name, &specs, yes),
+        } => handle_graph_reset(&db, port_override, &id_or_name, &specs, clear_notes, yes),
         GraphAction::Autorun {
             id_or_name,
             at,
@@ -191,7 +278,147 @@ pub(crate) async fn handle_graph_action(
             id_or_name,
             spec_id,
         } => handle_graph_remove_spec(&db, port_override, &id_or_name, &spec_id),
+        GraphAction::Log {
+            id_or_name,
+            since,
+            kind,
+            spec,
+            follow,
+        } => handle_graph_log(&db, port_override, &id_or_name, since, kind, spec, follow).await,
+        GraphAction::Crew {
+            id_or_name,
+            platform,
+            model,
+            all,
+            group_by_pair,
+            json,
+        } => handle_graph_crew(
+            &db,
+            id_or_name.as_deref(),
+            platform.as_deref(),
+            model.as_deref(),
+            all,
+            group_by_pair,
+            json,
+        ),
     }
+}
+
+/// One line of `canopy graph log`:
+/// `<created_at> <KIND> spec=<name> node=<name> <message>`, with the
+/// `spec=`/`node=` segments omitted when the event has no such id.
+fn format_event_line(event: &serde_json::Value) -> String {
+    let created_at = event["created_at"].as_str().unwrap_or_default();
+    let kind = event["kind"].as_str().unwrap_or_default().to_uppercase();
+    let mut line = format!("{created_at} {kind}");
+    if let Some(spec) = event["spec_name"].as_str() {
+        line.push_str(&format!(" spec={spec}"));
+    }
+    if let Some(node) = event["node_name"].as_str() {
+        line.push_str(&format!(" node={node}"));
+    }
+    let message = event["message"].as_str().unwrap_or_default();
+    line.push(' ');
+    line.push_str(message);
+    line
+}
+
+/// Ask the daemon for one page of `graph_events`.
+fn query_graph_events(
+    port_override: Option<u16>,
+    graph_id: &str,
+    since_id: Option<i64>,
+    since_ts: Option<&str>,
+    kinds: &[String],
+    spec: Option<&str>,
+) -> Result<Vec<serde_json::Value>> {
+    let mut args = serde_json::json!({ "graph_id": graph_id, "limit": 200 });
+    if let Some(id) = since_id {
+        args["since_id"] = serde_json::json!(id);
+    }
+    if let Some(ts) = since_ts {
+        args["since_ts"] = serde_json::json!(ts);
+    }
+    if !kinds.is_empty() {
+        args["kinds"] = serde_json::json!(kinds);
+    }
+    if let Some(spec) = spec {
+        args["spec_id"] = serde_json::json!(spec);
+    }
+    let text = call_tool(port_override, "graph_events", &args)?;
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .with_context(|| format!("unexpected graph_events response: {text}"))?;
+    Ok(value["events"].as_array().cloned().unwrap_or_default())
+}
+
+/// Print the events a page returned and return the id of the last one, if any.
+fn print_event_page(events: &[serde_json::Value]) -> Option<i64> {
+    for event in events {
+        println!("{}", format_event_line(event));
+    }
+    events.last().and_then(|event| event["id"].as_i64())
+}
+
+async fn handle_graph_log(
+    db: &Database,
+    port_override: Option<u16>,
+    id_or_name: &str,
+    since: Option<String>,
+    kinds: Vec<String>,
+    spec: Option<String>,
+    follow: bool,
+) -> Result<()> {
+    let graphs = db.list_graphs(None, true)?;
+    let lp = resolve_graph(&graphs, id_or_name)?;
+
+    // `--since` is either an integer event id or an RFC3339 timestamp.
+    let (mut since_id, since_ts): (Option<i64>, Option<String>) = match since {
+        Some(value) => match value.parse::<i64>() {
+            Ok(id) => (Some(id), None),
+            Err(_) => (None, Some(value)),
+        },
+        None => (None, None),
+    };
+
+    let events = query_graph_events(
+        port_override,
+        &lp.id,
+        since_id,
+        since_ts.as_deref(),
+        &kinds,
+        spec.as_deref(),
+    )?;
+    if let Some(last) = print_event_page(&events) {
+        since_id = Some(last);
+    }
+
+    if !follow {
+        return Ok(());
+    }
+
+    loop {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => break,
+            _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {
+                // `since_ts` is passed on every poll: with an empty first
+                // page (e.g. `--since` in the future) no cursor id exists
+                // yet, and dropping the timestamp would dump the whole log
+                // retroactively on the next poll.
+                let events = query_graph_events(
+                    port_override,
+                    &lp.id,
+                    since_id,
+                    since_ts.as_deref(),
+                    &kinds,
+                    spec.as_deref(),
+                )?;
+                if let Some(last) = print_event_page(&events) {
+                    since_id = Some(last);
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn handle_graph_run(
@@ -201,6 +428,7 @@ fn handle_graph_run(
     queue: Option<String>,
     workdir: Option<String>,
     idea: Option<String>,
+    from: Option<String>,
 ) -> Result<()> {
     let graphs = db.list_graphs(None, true)?;
     let lp = resolve_graph(&graphs, id_or_name)?;
@@ -214,6 +442,9 @@ fn handle_graph_run(
     }
     if let Some(idea_text) = idea {
         args["idea"] = serde_json::json!(idea_text);
+    }
+    if let Some(node) = from {
+        args["start_node_id"] = serde_json::json!(node);
     }
 
     println!("{}", call_tool(port_override, "graph_run", &args)?);
@@ -263,7 +494,28 @@ fn handle_graph_continue(
     id_or_name: &str,
     retry_current_node: bool,
     skip_next_spec: bool,
+    from: Option<String>,
+    spec: Option<String>,
 ) -> Result<()> {
+    let graphs = db.list_graphs(None, true)?;
+    let lp = resolve_graph(&graphs, id_or_name)?;
+
+    if let Some(node) = from {
+        if retry_current_node || skip_next_spec {
+            return Err(anyhow!(
+                "--from cannot be combined with --retry-current-node or --skip-next-spec."
+            ));
+        }
+        let mut args = serde_json::json!({
+            "graph_id": lp.id, "action": "run_from_node", "node_id": node
+        });
+        if let Some(spec) = spec {
+            args["spec_id"] = serde_json::json!(spec);
+        }
+        println!("{}", call_tool(port_override, "graph_continue", &args)?);
+        return Ok(());
+    }
+
     let action = match (retry_current_node, skip_next_spec) {
         (true, false) => "retry_current_node",
         (false, true) => "skip_next_spec",
@@ -278,9 +530,6 @@ fn handle_graph_continue(
             ))
         }
     };
-
-    let graphs = db.list_graphs(None, true)?;
-    let lp = resolve_graph(&graphs, id_or_name)?;
 
     println!(
         "{}",
@@ -298,6 +547,7 @@ fn handle_graph_reset(
     port_override: Option<u16>,
     id_or_name: &str,
     specs: &[String],
+    clear_notes: bool,
     yes: bool,
 ) -> Result<()> {
     let graphs = db.list_graphs(None, true)?;
@@ -311,6 +561,9 @@ fn handle_graph_reset(
     let mut args = serde_json::json!({ "graph_id": lp.id });
     if !specs.is_empty() {
         args["specs"] = serde_json::json!(specs);
+    }
+    if clear_notes {
+        args["clear_notes"] = serde_json::json!(true);
     }
 
     println!("{}", call_tool(port_override, "graph_reset", &args)?);
@@ -476,591 +729,63 @@ fn handle_graph_list(db: &Database, workdir: Option<&str>) -> Result<()> {
     println!();
     Ok(())
 }
-
-/// One spec row for `graph info`'s Specs section. Callers guarantee `spec`
-/// is never the blank-name placeholder — it is hidden, not relabelled.
-fn print_graph_info_spec_line(spec: &GraphSpec) {
-    let admin_tag = if spec.completed_via.as_deref() == Some("admin") {
-        " (admin)"
-    } else {
-        ""
-    };
-    println!(
-        " {} {}{}",
-        spec_status_icon(spec.status),
-        spec.name,
-        admin_tag
-    );
-}
-
-/// Header for the run-history reconstruction of a graph with nothing bound
-/// and nothing in flight (e.g. a drained queue-driven graph). Names the
-/// queue when the graph still links to one, so the reader knows where the
-/// sequence came from.
-fn print_graph_info_queue_history_header(db: &Database, lp: &Graph) -> Result<()> {
-    if let Some(queue_id) = lp.active_run_queue_id.as_deref() {
-        if let Some(queue) = db.get_queue(queue_id)? {
-            println!(
-                " (queue-driven: \"{}\" — showing specs worked so far, not the full queue)",
-                queue.name
-            );
-            return Ok(());
-        }
-    }
-    println!(" (queue-driven — showing specs worked so far, not the full queue)");
-    Ok(())
-}
-
-fn handle_graph_info(db: &Database, id_or_name: &str) -> Result<()> {
-    // Resolves by id/name (not a browsing list), so an archived graph must
-    // still be found here.
-    let graphs = db.list_graphs(None, true)?;
-    let lp = resolve_graph(&graphs, id_or_name)?;
-
-    println!("\n\x1b[1m── Graph: {} ──\x1b[0m", lp.name);
-    println!(" id:      {}", lp.id);
-    println!(
-        " status:  {} {}",
-        status_icon(lp.status),
-        lp.status.as_str()
-    );
-    println!(" workdir: {}", lp.workdir);
-    print!(" trigger: {}", lp.trigger_type_label());
-    if let Some(expr) = lp.schedule_expr() {
-        print!(" ({expr})");
-    }
-    if let Some(path) = lp.watch_path() {
-        print!(" ({path})");
-    }
-    println!();
-    if let Some(at) = lp.autorun_at {
-        println!(
-            " autorun: {} ({})",
-            at.to_rfc3339(),
-            format_relative_duration(at - Utc::now())
-        );
-    }
-    // Event-keyed hooks: the legacy singular display stays for old users,
-    // with the full event-keyed listing as the authoritative detail.
-    if let Some(hooks) = lp
-        .hooks
-        .get(&crate::domain::graphs::GraphHookEvent::OnCompleted)
-    {
-        if let Some(hook) = hooks.first() {
-            if hook.is_command() {
-                println!(
-                    " on_completed: command: {}",
-                    hook.command.as_deref().unwrap_or("")
-                );
-            } else {
-                println!(
-                    " on_completed: {} ({})",
-                    hook.platform.as_deref().unwrap_or(""),
-                    hook.model.as_deref().unwrap_or("default model")
-                );
-            }
-        }
-    }
-    for (event, hooks) in &lp.hooks {
-        // The legacy line above already showed the first on_completed hook;
-        // list every event's hooks here so non-completion events are visible.
-        if *event == crate::domain::graphs::GraphHookEvent::OnCompleted {
-            for (idx, hook) in hooks.iter().enumerate().skip(1) {
-                if hook.is_command() {
-                    println!(
-                        " {}[{}]: command: {}",
-                        event.as_str(),
-                        idx,
-                        hook.command.as_deref().unwrap_or("")
-                    );
-                } else {
-                    println!(
-                        " {}[{}]: {} ({})",
-                        event.as_str(),
-                        idx,
-                        hook.platform.as_deref().unwrap_or(""),
-                        hook.model.as_deref().unwrap_or("default model")
-                    );
-                }
-            }
-        } else {
-            for (idx, hook) in hooks.iter().enumerate() {
-                if hook.is_command() {
-                    println!(
-                        " {}[{}]: command: {}",
-                        event.as_str(),
-                        idx,
-                        hook.command.as_deref().unwrap_or("")
-                    );
-                } else {
-                    println!(
-                        " {}[{}]: {} ({})",
-                        event.as_str(),
-                        idx,
-                        hook.platform.as_deref().unwrap_or(""),
-                        hook.model.as_deref().unwrap_or("default model")
-                    );
-                }
-            }
-        }
-    }
-
-    let all_runs = db.list_graph_runs_for_graph(&lp.id)?;
-    let hook_runs = db.list_graph_completion_hook_runs(&lp.id)?;
-
-    println!("\n\x1b[1m── Specs ──────────────────────────────────────────────────────\x1b[0m");
-    // CB30: one helper decides what the graph is on — the raw bound list
-    // reads as a nameless placeholder for queue/idea runs.
-    match active_graph_spec_context(db, lp)? {
-        ActiveGraphSpec::Bound(_) | ActiveGraphSpec::None => {
-            let visible: Vec<GraphSpec> = db
-                .list_graph_specs(&lp.id)?
-                .into_iter()
-                .filter(|spec| !spec.name.trim().is_empty())
-                .collect();
-            if !visible.is_empty() {
-                for spec in &visible {
-                    print_graph_info_spec_line(spec);
-                }
-            } else if !all_runs.is_empty() {
-                // Nothing bound and nothing in flight — e.g. a drained
-                // queue-driven graph. Reconstruct what ran so far from
-                // `graph_runs`, which always records the real `graph_id`
-                // regardless of queue membership. Placeholders are engine
-                // bookkeeping, never work: skip them.
-                print_graph_info_queue_history_header(db, lp)?;
-                for spec_id in distinct_spec_ids_in_order(&all_runs) {
-                    if let Some(spec) = db.get_graph_spec(spec_id)? {
-                        if spec.name.trim().is_empty() {
-                            continue;
-                        }
-                        print_graph_info_spec_line(&spec);
-                    }
-                }
-            } else {
-                println!(" (no specs queued)");
-            }
-        }
-        ActiveGraphSpec::QueueMember {
-            spec, queue_name, ..
-        } => {
-            println!(" (queue-driven: \"{queue_name}\" — showing current spec)");
-            print_graph_info_spec_line(&spec);
-            for spec_id in distinct_spec_ids_in_order(&all_runs) {
-                if *spec_id == spec.id {
-                    continue;
-                }
-                if let Some(prior) = db.get_graph_spec(spec_id)? {
-                    if prior.name.trim().is_empty() {
-                        continue;
-                    }
-                    print_graph_info_spec_line(&prior);
-                }
-            }
-        }
-        ActiveGraphSpec::Idea { .. } => {
-            println!(" (idea-driven — no bound specs)");
-        }
-    }
-
-    // A `running`-status run row can outlive its graph (e.g. a run left over
-    // from before `reconcile_orphaned_graphs` existed to clean these up), so
-    // only trust it as "current" while the graph itself is actually running —
-    // otherwise a completed/failed graph could misreport an old node as still
-    // in flight.
-    if lp.status == GraphStatus::Running {
-        if let Some(run) = current_running_run(&all_runs) {
-            let node = db.get_graph_node(&run.node_id)?;
-            let node_name = node.as_ref().map_or(run.node_id.as_str(), |n| &n.name);
-            let node_kind = node.as_ref().map_or("?", |n| n.kind.display_str());
-            let elapsed = format_elapsed(Utc::now() - run.started_at);
-            println!(
-                "\n\x1b[1m── Current Node ───────────────────────────────────────────────\x1b[0m"
-            );
-            println!(
-                " {} ({})  running {}  iteration {}",
-                node_name, node_kind, elapsed, run.iteration
-            );
-            // Surfaces the exact baseline `{{spec_start_head}}` resolved to
-            // for this spec's current attempt (B10) — the one number every
-            // "why did this check pass/fail" debugging session needs.
-            if let Some(spec) = db.get_graph_spec(&run.spec_id)? {
-                match spec.spec_start_head {
-                    Some(head) => println!(" spec_start_head: {head}"),
-                    None => println!(" spec_start_head: (not a git workdir)"),
-                }
-                // C15: the HEAD this attempt's own committer last left
-                // behind, if any — `{{spec_committed_head}}` in a check node.
-                match spec.spec_committed_head {
-                    Some(head) => println!(" spec_committed_head: {head}"),
-                    None => println!(" spec_committed_head: (nothing committed by this run yet)"),
-                }
-            }
-        }
-    }
-
-    println!("\n\x1b[1m── Recent Node Runs ───────────────────────────────────────────\x1b[0m");
-    if all_runs.is_empty() {
-        println!(" (no runs yet)");
-    }
-    for run in all_runs.iter().rev().take(5) {
-        let node_name = db
-            .get_graph_node(&run.node_id)?
-            .map_or_else(|| run.node_id.clone(), |n| n.name);
-        let sid = run
-            .session_id
-            .as_deref()
-            .map(|sid| format!("  sid {}", sid.chars().take(8).collect::<String>()))
-            .unwrap_or_default();
-        // RS3: flag a run that continued a context group's warm session (its
-        // session id was first captured by a grouped sibling on this node).
-        let group_note = match (lp.active_run_queue_id.as_deref(), run.session_id.as_deref()) {
-            (Some(queue_id), Some(session_id)) => db
-                .group_resume_source(queue_id, &run.spec_id, &run.node_id, session_id)?
-                .map(|group| format!("  \x1b[36m(resumed group {group})\x1b[0m"))
-                .unwrap_or_default(),
-            _ => String::new(),
-        };
-        // B37: a node that moved git HEAD without `commit_rights` was failed
-        // by the engine, not by its own verdict — say so, otherwise the run
-        // reads as an ordinary fail and the operator hunts the wrong cause.
-        let commit_note = commit_rights_note(run.output.as_ref());
-        // B36: a run the daemon marked `fail` only because it was cut short
-        // by a restart/kill must never read as "the node failed" — flag it
-        // with its own icon and note, including how to recover any
-        // quarantined worktree changes.
-        let interrupted_note = interrupted_note(run.output.as_ref());
-        let no_verdict = no_verdict_note(run.output.as_ref());
-        println!(
-            " {} {}  {}{}{}{}{}{}",
-            run_status_icon(run.status, run.output.as_ref()),
-            node_name,
-            format_dt(run.started_at),
-            sid,
-            group_note,
-            commit_note,
-            interrupted_note,
-            no_verdict
-        );
-    }
-
-    if !hook_runs.is_empty() {
-        println!("\n\x1b[1m── Hook Runs ────────────────────────────────────────────────\x1b[0m");
-        for run in hook_runs.iter().rev().take(5) {
-            println!(
-                " {} {}[{}] {}",
-                run_status_icon(run.status, run.output.as_ref()),
-                run.event.as_str(),
-                run.hook_index,
-                format_dt(run.started_at)
-            );
-        }
-    }
-    println!();
-    Ok(())
-}
-
-/// The `graph info` annotation for a run the engine failed on a commit-rights
-/// violation (B37), or an empty string for every other run. Reads the marker
-/// the engine writes into the run's output rather than re-running git, so it
-/// stays true long after the fact.
-fn commit_rights_note(output: Option<&serde_json::Value>) -> String {
-    let Some(violation) = output.and_then(|o| o.get("commit_rights_violation")) else {
-        return String::new();
-    };
-    let head_after = violation
-        .get("head_after")
-        .and_then(|v| v.as_str())
-        .unwrap_or("?");
-    format!(
-        "  \x1b[31m(no commit rights — committed {})\x1b[0m",
-        head_after.chars().take(8).collect::<String>()
-    )
-}
-
-/// The `graph info` annotation for a run cut short by a daemon restart/kill
-/// (B36), or an empty string for every other run — pairs with the distinct
-/// icon `run_status_icon` already gives it, so a `fail` here never reads as
-/// the node's own doing. The engine never touches git on this path, so
-/// there's nothing to point the operator at recovering — the spec's own
-/// `interrupted` status (visible via `graph_info`'s spec listing) is what
-/// says the worktree still holds the interrupted attempt's partial work.
-fn interrupted_note(output: Option<&serde_json::Value>) -> String {
-    if !is_interrupted(output) {
-        return String::new();
-    }
-    "  \x1b[33m(interrupted — not a node failure)\x1b[0m".to_string()
-}
-
-/// The `graph info` annotation for a quorum join that settled with no filed
-/// verdict (CB66), or an empty string for every other run. Pairs with the
-/// distinct icon `run_status_icon` gives `Error`, so a no-verdict exit never
-/// reads as an ordinary fail.
-fn no_verdict_note(output: Option<&serde_json::Value>) -> String {
-    let is_no_verdict = output
-        .and_then(|o| o.get("no_verdict"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    if !is_no_verdict {
-        return String::new();
-    }
-    "  \x1b[33merror (no verdict)\x1b[0m".to_string()
-}
-
-/// Count of specs that have reached a final `completed` state, alongside the
-/// total — used to render `done/total` progress in `graph list`/`graph info`.
-fn spec_progress(specs: &[GraphSpec]) -> (usize, usize) {
-    let done = specs
-        .iter()
-        .filter(|s| s.status == GraphSpecStatus::Completed)
-        .count();
-    (done, specs.len())
-}
-
-/// `done/total` progress for a graph's `graph list` row. A queue-driven run binds
-/// no specs of its own (`graph_specs.graph_id` stays null for queue members), so
-/// counting `bound_specs` renders a misleading `0/0`. When the graph's row
-/// carries an `active_run_queue_id`, count that queue's members instead —
-/// mirroring `GraphEngine::spec_progress`, which the running engine uses for the
-/// same graph. Falls back to the bound specs for ordinary (non-queue) graphs.
-fn graph_progress(db: &Database, lp: &Graph, bound_specs: &[GraphSpec]) -> Result<(usize, usize)> {
-    let Some(queue_id) = lp.active_run_queue_id.as_deref() else {
-        return Ok(spec_progress(bound_specs));
-    };
-    let ids = db.list_queue_member_spec_ids(queue_id)?;
-    let mut done = 0;
-    for id in &ids {
-        if let Some(spec) = db.get_graph_spec(id)? {
-            if spec.status == GraphSpecStatus::Completed {
-                done += 1;
-            }
-        }
-    }
-    Ok((done, ids.len()))
-}
-
-/// The spec a graph is actively working through: the one currently `running`,
-/// or else the next `pending`/`interrupted` one (equally runnable — see
-/// `queue_next_pending_spec_id`) in position order. Mirrors
-/// `build_graph_summary_json` in `daemon/handler.rs` so the CLI and MCP report
-/// the same "current spec" for a given graph. The blank-name placeholder is
-/// engine bookkeeping, never work: it is skipped here, not reported.
-fn current_spec(specs: &[GraphSpec]) -> Option<&GraphSpec> {
-    specs
-        .iter()
-        .filter(|s| !s.name.trim().is_empty())
-        .find(|s| s.status == GraphSpecStatus::Running)
-        .or_else(|| {
-            specs
-                .iter()
-                .filter(|s| !s.name.trim().is_empty())
-                .find(|s| {
-                    matches!(
-                        s.status,
-                        GraphSpecStatus::Pending | GraphSpecStatus::Interrupted
-                    )
-                })
-        })
-}
-
-/// Name of the spec a graph is actively working through, for both bound-spec
-/// graphs (via [`current_spec`]) and queue-driven graphs, which never bind a
-/// spec to `graph_specs.graph_id` and so must fall back to `graph_runs` (see
-/// [`Database::list_graph_runs_for_graph`]) to find what's currently running.
-/// A blank-name placeholder resolves to `None`, never to an empty name.
-fn current_spec_name(
-    db: &Database,
-    lp: &Graph,
-    bound_specs: &[GraphSpec],
-) -> Result<Option<String>> {
-    if let Some(spec) = current_spec(bound_specs) {
-        return Ok(Some(spec.name.clone()));
-    }
-    let runs = db.list_graph_runs_for_graph(&lp.id)?;
-    let Some(run) = current_running_run(&runs).or_else(|| runs.last()) else {
-        return Ok(None);
-    };
-    Ok(db
-        .get_graph_spec(&run.spec_id)?
-        .filter(|s| !s.name.trim().is_empty())
-        .map(|s| s.name))
-}
-
-/// The run currently in flight, if any — assumes `runs` is ordered by
-/// `started_at` ascending (as every `list_graph_runs_for_*` query returns it),
-/// so the last matching entry is the most recent.
-fn current_running_run(runs: &[GraphNodeRun]) -> Option<&GraphNodeRun> {
-    runs.iter()
-        .rev()
-        .find(|r| r.status == GraphRunStatus::Running)
-}
-
-/// Spec ids referenced by `runs`, in first-seen (chronological) order with
-/// duplicates dropped — used to approximate a queue-driven graph's queue from
-/// its run history, since the queue itself isn't persisted per graph.
-fn distinct_spec_ids_in_order(runs: &[GraphNodeRun]) -> Vec<&str> {
-    let mut seen = std::collections::HashSet::new();
-    let mut out = Vec::new();
-    for run in runs {
-        if seen.insert(run.spec_id.as_str()) {
-            out.push(run.spec_id.as_str());
-        }
-    }
-    out
-}
-
-/// Resolve a user-supplied graph reference against the full graph set: an exact
-/// id match wins first, then an exact (necessarily unique) name match, then
-/// an unambiguous id prefix. Anything else is an actionable error listing the
-/// candidates the caller could have meant.
-fn resolve_graph<'a>(graphs: &'a [Graph], query: &str) -> Result<&'a Graph> {
-    let query = query.trim();
-    if query.is_empty() {
-        return Err(anyhow!("Graph id or name must not be empty."));
-    }
-
-    if let Some(lp) = graphs.iter().find(|l| l.id == query) {
-        return Ok(lp);
-    }
-
-    let name_matches: Vec<&Graph> = graphs.iter().filter(|l| l.name == query).collect();
-    match name_matches.len() {
-        1 => return Ok(name_matches[0]),
-        n if n > 1 => return Err(ambiguous_error(query, &name_matches)),
-        _ => {}
-    }
-
-    let prefix_matches: Vec<&Graph> = graphs.iter().filter(|l| l.id.starts_with(query)).collect();
-    match prefix_matches.len() {
-        1 => Ok(prefix_matches[0]),
-        0 => Err(not_found_error(query, graphs)),
-        _ => Err(ambiguous_error(query, &prefix_matches)),
-    }
-}
-
-fn not_found_error(query: &str, all: &[Graph]) -> anyhow::Error {
-    if all.is_empty() {
-        return anyhow!("No graph matches '{query}' — no graphs exist yet.");
-    }
-    anyhow!(
-        "No graph matches '{query}'. Available graphs:\n{}",
-        candidate_list(all.iter())
-    )
-}
-
-fn ambiguous_error(query: &str, matches: &[&Graph]) -> anyhow::Error {
-    anyhow!(
-        "'{query}' matches multiple graphs:\n{}\nUse the full id to disambiguate.",
-        candidate_list(matches.iter().copied())
-    )
-}
-
-fn candidate_list<'a>(graphs: impl Iterator<Item = &'a Graph>) -> String {
-    graphs
-        .map(|l| format!("  {} ({})", l.name, short_id(&l.id)))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn short_id(id: &str) -> String {
-    id.chars().take(8).collect()
-}
-
-fn status_icon(status: GraphStatus) -> &'static str {
-    match status {
-        GraphStatus::Running => "\x1b[36m▶\x1b[0m",
-        GraphStatus::Pausing => "\x1b[33m⏸\x1b[0m",
-        GraphStatus::Paused => "\x1b[33m⏸\x1b[0m",
-        GraphStatus::Completed => "\x1b[32m✓\x1b[0m",
-        GraphStatus::Failed => "\x1b[31m✗\x1b[0m",
-        GraphStatus::Draft => "\x1b[90m●\x1b[0m",
-    }
-}
-
-fn spec_status_icon(status: GraphSpecStatus) -> &'static str {
-    match status {
-        GraphSpecStatus::Running => "\x1b[36m▶\x1b[0m",
-        GraphSpecStatus::Completed => "\x1b[32m✓\x1b[0m",
-        GraphSpecStatus::Failed => "\x1b[31m✗\x1b[0m",
-        GraphSpecStatus::Skipped => "\x1b[90m⊘\x1b[0m",
-        GraphSpecStatus::Pending => "\x1b[90m●\x1b[0m",
-        GraphSpecStatus::Interrupted => "\x1b[33m⚑\x1b[0m",
-    }
-}
-
-/// B36: a run cut short by a daemon restart/kill is recorded as `fail` (see
-/// `reconcile_orphaned_graphs` / `reconcile_stranded_queue_specs`), but it must
-/// never render like an ordinary node failure — its own icon, distinct from
-/// both a genuine fail and a healthy pass.
-fn run_status_icon(status: GraphRunStatus, output: Option<&serde_json::Value>) -> &'static str {
-    if is_interrupted(output) {
-        return "\x1b[33m⚑\x1b[0m";
-    }
-    match status {
-        GraphRunStatus::Running => "\x1b[36m▶\x1b[0m",
-        GraphRunStatus::Pass => "\x1b[32m✓\x1b[0m",
-        GraphRunStatus::Fail => "\x1b[31m✗\x1b[0m",
-        GraphRunStatus::Interrupted => "\x1b[33m⚑\x1b[0m",
-        GraphRunStatus::Error => "\x1b[33m⚠\x1b[0m",
-    }
-}
-
-fn is_interrupted(output: Option<&serde_json::Value>) -> bool {
-    output
-        .and_then(|o| o.get("interrupted"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-}
-
-fn format_dt(dt: DateTime<Utc>) -> String {
-    dt.with_timezone(&chrono::Local)
-        .format("%Y-%m-%d %H:%M")
-        .to_string()
-}
-
-/// Compact `⏲ HH:MMZ` badge for a scheduled autorun, used in `graph list` rows.
-fn format_autorun_compact(at: DateTime<Utc>) -> String {
-    format!("⏲ {}", at.format("%H:%MZ"))
-}
-
-/// Human relative hint for a scheduled autorun, e.g. "in 2h 14m", used
-/// alongside the ISO8601 timestamp in `graph info`.
-fn format_relative_duration(d: chrono::Duration) -> String {
-    let secs = d.num_seconds();
-    if secs <= 0 {
-        "due now".to_string()
-    } else if secs < 60 {
-        format!("in {secs}s")
-    } else if secs < 3600 {
-        format!("in {}m", secs / 60)
-    } else if secs < 86400 {
-        let hours = secs / 3600;
-        let mins = (secs % 3600) / 60;
-        if mins == 0 {
-            format!("in {hours}h")
-        } else {
-            format!("in {hours}h {mins}m")
-        }
-    } else {
-        format!("in {}d", secs / 86400)
-    }
-}
-
-fn format_elapsed(d: chrono::Duration) -> String {
-    let secs = d.num_seconds().max(0);
-    if secs < 60 {
-        format!("{secs}s")
-    } else if secs < 3600 {
-        format!("{}m{}s", secs / 60, secs % 60)
-    } else {
-        format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use clap::Parser;
+    use std::io::{Read, Write};
+    use std::os::unix::io::FromRawFd;
+
+    /// Redirects fd 1 into a pipe for the lifetime of the guard, so a
+    /// section printer that writes straight to stdout can be asserted on.
+    /// `cargo nextest` runs one test per process, so the process-wide fd
+    /// swap is isolated; this crate's protocol mandates nextest.
+    struct StdoutCapture {
+        saved_fd: i32,
+        read_end: std::fs::File,
+    }
+
+    impl StdoutCapture {
+        fn start() -> Self {
+            let mut fds = [0i32; 2];
+            let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
+            assert_eq!(rc, 0, "pipe() failed");
+            let (read_fd, write_fd) = (fds[0], fds[1]);
+            let saved_fd = unsafe { libc::dup(1) };
+            assert!(saved_fd >= 0, "dup(1) failed");
+            std::io::stdout().flush().unwrap();
+            let rc = unsafe { libc::dup2(write_fd, 1) };
+            assert_eq!(rc, 1, "dup2 failed");
+            unsafe { libc::close(write_fd) };
+            StdoutCapture {
+                saved_fd,
+                read_end: unsafe { std::fs::File::from_raw_fd(read_fd) },
+            }
+        }
+
+        fn stop(mut self) -> String {
+            std::io::stdout().flush().unwrap();
+            unsafe {
+                libc::dup2(self.saved_fd, 1);
+                libc::close(self.saved_fd);
+            }
+            let mut buf = String::new();
+            self.read_end.read_to_string(&mut buf).unwrap();
+            buf
+        }
+    }
+
+    /// Byte index of `needle`'s first occurrence, for asserting section
+    /// order without depending on the exact surrounding bytes.
+    fn assert_ordered(haystack: &str, needles: &[&str]) {
+        let mut cursor = 0usize;
+        for needle in needles {
+            let at = haystack[cursor..]
+                .find(needle)
+                .unwrap_or_else(|| panic!("missing {needle:?} after byte {cursor}"));
+            cursor += at + needle.len();
+        }
+    }
 
     #[derive(Parser)]
     struct TestCli {
@@ -1100,11 +825,13 @@ mod tests {
                 queue,
                 workdir,
                 idea,
+                from,
             } => {
                 assert_eq!(id_or_name, "my-graph");
                 assert!(queue.is_none());
                 assert!(workdir.is_none());
                 assert!(idea.is_none());
+                assert!(from.is_none());
             }
             other => panic!("expected Run, got {other:?}"),
         }
@@ -1125,11 +852,13 @@ mod tests {
                 queue,
                 workdir,
                 idea,
+                from,
             } => {
                 assert_eq!(id_or_name, "my-graph");
                 assert_eq!(queue.as_deref(), Some("q1"));
                 assert_eq!(workdir.as_deref(), Some("/tmp/proj"));
                 assert!(idea.is_none());
+                assert!(from.is_none());
             }
             other => panic!("expected Run, got {other:?}"),
         }
@@ -1216,10 +945,14 @@ mod tests {
                 id_or_name,
                 retry_current_node,
                 skip_next_spec,
+                from,
+                spec,
             } => {
                 assert_eq!(id_or_name, "my-graph");
                 assert!(retry_current_node);
                 assert!(!skip_next_spec);
+                assert!(from.is_none());
+                assert!(spec.is_none());
             }
             other => panic!("expected Continue, got {other:?}"),
         }
@@ -1242,10 +975,12 @@ mod tests {
             GraphAction::Reset {
                 id_or_name,
                 specs,
+                clear_notes,
                 yes,
             } => {
                 assert_eq!(id_or_name, "my-graph");
                 assert_eq!(specs, vec!["a".to_string(), "b".to_string()]);
+                assert!(!clear_notes);
                 assert!(yes);
             }
             other => panic!("expected Reset, got {other:?}"),
@@ -1972,6 +1707,7 @@ mod tests {
             Some("q1".to_string()),
             None,
             None,
+            None,
         )
         .expect("run should succeed");
 
@@ -1988,7 +1724,8 @@ mod tests {
         // No fake daemon is spawned — a request that reaches the network at
         // all would fail differently (connection refused) than the
         // not-found error resolution must produce locally.
-        let err = handle_graph_run(&db, Some(65535), "missing", None, None, None).unwrap_err();
+        let err =
+            handle_graph_run(&db, Some(65535), "missing", None, None, None, None).unwrap_err();
         assert!(err.to_string().contains("No graph matches"));
     }
 
@@ -2017,7 +1754,8 @@ mod tests {
         }));
         let port: u16 = fake.port.parse().unwrap();
 
-        handle_graph_continue(&db, Some(port), "graph-1", true, false).expect("should succeed");
+        handle_graph_continue(&db, Some(port), "graph-1", true, false, None, None)
+            .expect("should succeed");
 
         let calls = fake.recorded_calls();
         assert_eq!(calls[0]["arguments"]["action"], "retry_current_node");
@@ -2032,7 +1770,8 @@ mod tests {
         }));
         let port: u16 = fake.port.parse().unwrap();
 
-        handle_graph_continue(&db, Some(port), "graph-1", false, true).expect("should succeed");
+        handle_graph_continue(&db, Some(port), "graph-1", false, true, None, None)
+            .expect("should succeed");
 
         let calls = fake.recorded_calls();
         assert_eq!(calls[0]["arguments"]["action"], "skip_next_spec");
@@ -2041,14 +1780,16 @@ mod tests {
     #[test]
     fn handle_graph_continue_rejects_when_neither_flag_set() {
         let (_dir, db) = db_with_graph("graph-1", "my-graph", GraphStatus::Paused);
-        let err = handle_graph_continue(&db, Some(65535), "graph-1", false, false).unwrap_err();
+        let err = handle_graph_continue(&db, Some(65535), "graph-1", false, false, None, None)
+            .unwrap_err();
         assert!(err.to_string().contains("Specify one of"));
     }
 
     #[test]
     fn handle_graph_continue_rejects_when_both_flags_set() {
         let (_dir, db) = db_with_graph("graph-1", "my-graph", GraphStatus::Paused);
-        let err = handle_graph_continue(&db, Some(65535), "graph-1", true, true).unwrap_err();
+        let err =
+            handle_graph_continue(&db, Some(65535), "graph-1", true, true, None, None).unwrap_err();
         assert!(err.to_string().contains("mutually exclusive"));
     }
 
@@ -2069,6 +1810,7 @@ mod tests {
             Some(port),
             "graph-1",
             &["spec-a".to_string(), "spec-b".to_string()],
+            false,
             true,
         )
         .expect("reset should succeed");
@@ -2083,6 +1825,22 @@ mod tests {
     }
 
     #[test]
+    fn handle_graph_reset_sends_clear_notes_flag() {
+        let (_dir, db) = db_with_graph("graph-1", "my-graph", GraphStatus::Failed);
+        let fake = spawn_fake_daemon(serde_json::json!({
+            "content": [{"type": "text", "text": "Graph 'graph-1' reset."}],
+            "isError": false
+        }));
+        let port: u16 = fake.port.parse().unwrap();
+
+        handle_graph_reset(&db, Some(port), "graph-1", &[], true, true)
+            .expect("reset should succeed");
+
+        let calls = fake.recorded_calls();
+        assert_eq!(calls[0]["arguments"]["clear_notes"], true);
+    }
+
+    #[test]
     fn handle_graph_reset_omits_specs_field_when_none_given() {
         let (_dir, db) = db_with_graph("graph-1", "my-graph", GraphStatus::Failed);
         let fake = spawn_fake_daemon(serde_json::json!({
@@ -2091,7 +1849,8 @@ mod tests {
         }));
         let port: u16 = fake.port.parse().unwrap();
 
-        handle_graph_reset(&db, Some(port), "graph-1", &[], true).expect("reset should succeed");
+        handle_graph_reset(&db, Some(port), "graph-1", &[], false, true)
+            .expect("reset should succeed");
 
         let calls = fake.recorded_calls();
         assert!(calls[0]["arguments"].get("specs").is_none());
@@ -2120,7 +1879,7 @@ mod tests {
 
         let raw = std::fs::read_to_string(&out_path).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(doc["format_version"], 4);
+        assert_eq!(doc["format_version"], 5);
         assert_eq!(doc["name"], "my-graph");
         assert_eq!(doc["nodes"][0]["config"]["platform"], "claude");
         // No model stored (platform default): exported as explicit null.
@@ -2285,5 +2044,161 @@ mod tests {
             }
         }
         panic!("port kept getting claimed by another test after 5 attempts");
+    }
+
+    #[test]
+    fn handle_graph_info_covers_bound_specs_branch() {
+        let (_dir, db) = db_with_graph("graph-1", "bound-graph", GraphStatus::Draft);
+        let mut spec = make_spec("graph-1", "spec-a", 0, GraphSpecStatus::Pending);
+        spec.id = "graph-1-0".to_string();
+        db.insert_graph_spec(&spec).unwrap();
+        handle_graph_info(&db, "bound-graph").expect("bound info must print");
+    }
+
+    #[test]
+    fn handle_graph_info_covers_idea_branch() {
+        let (_dir, db) = db_with_graph("graph-2", "idea-graph", GraphStatus::Draft);
+        let mut placeholder = make_spec("graph-2", "", 0, GraphSpecStatus::Pending);
+        placeholder.id = "graph-2-0".to_string();
+        db.insert_graph_spec(&placeholder).unwrap();
+        handle_graph_info(&db, "idea-graph").expect("idea info must print");
+    }
+
+    #[test]
+    fn handle_graph_info_covers_queue_member_branch() {
+        use crate::domain::queues::Queue;
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::new(&dir.path().join("t.db")).unwrap();
+        let mut lp = make_graph("graph-3", "queue-graph", GraphStatus::Running);
+        lp.active_run_queue_id = Some("queue-1".to_string());
+        db.insert_graph(&lp).unwrap();
+        db.insert_queue(&Queue {
+            id: "queue-1".to_string(),
+            name: "Q".to_string(),
+            created_at: Utc::now(),
+        })
+        .unwrap();
+        let mut member = make_spec("queue", "real work", 0, GraphSpecStatus::Running);
+        member.id = "spec-a".to_string();
+        member.graph_id = None;
+        db.insert_graph_spec(&member).unwrap();
+        db.append_queue_member("queue-1", "spec-a", None).unwrap();
+        handle_graph_info(&db, "queue-graph").expect("queue info must print");
+    }
+
+    /// Plan §5: a section-level capture for `handle_graph_info`, asserting
+    /// exact section order and the key lines of each mode it routes to.
+    #[test]
+    fn handle_graph_info_output_captures_bound_mode_sections_in_order() {
+        let (_dir, db) = db_with_graph("graph-c1", "cap-bound", GraphStatus::Draft);
+        let mut spec = make_spec("graph-c1", "spec-a", 0, GraphSpecStatus::Pending);
+        spec.id = "graph-c1-0".to_string();
+        db.insert_graph_spec(&spec).unwrap();
+
+        let cap = StdoutCapture::start();
+        handle_graph_info(&db, "cap-bound").expect("bound info must print");
+        let out = cap.stop();
+
+        assert_ordered(
+            &out,
+            &[
+                "── Graph: cap-bound ──",
+                " id:      graph-c1",
+                "── Specs ──",
+                "spec-a",
+                "\n",
+            ],
+        );
+        assert!(
+            !out.contains("── Current Node ──"),
+            "draft graph has no current node"
+        );
+        assert!(!out.contains("── Recent Runs ──"), "no runs recorded yet");
+    }
+
+    /// Plan §5: the idea mode's single placeholder line, plus the
+    /// "no specs queued" queue-history fallback for a drained queue.
+    #[test]
+    fn handle_graph_info_output_captures_idea_and_queue_history_modes() {
+        let (_dir, db) = db_with_graph("graph-c2", "cap-idea", GraphStatus::Draft);
+        let mut placeholder = make_spec("graph-c2", "", 0, GraphSpecStatus::Pending);
+        placeholder.id = "graph-c2-0".to_string();
+        db.insert_graph_spec(&placeholder).unwrap();
+
+        let cap = StdoutCapture::start();
+        handle_graph_info(&db, "cap-idea").expect("idea info must print");
+        let idea_out = cap.stop();
+        assert!(idea_out.contains("── Specs ──"));
+        assert!(
+            idea_out.contains("(idea-driven — no bound specs)"),
+            "idea mode prints its placeholder line, got {idea_out:?}"
+        );
+
+        // Queue history: a graph with nothing bound but a recorded run.
+        let mut lp = make_graph("graph-c3", "cap-history", GraphStatus::Completed);
+        lp.id = "graph-c3".to_string();
+        let dir = tempfile::tempdir().unwrap();
+        let db2 = Database::new(&dir.path().join("h.db")).unwrap();
+        db2.insert_graph(&lp).unwrap();
+        let mut ran = make_spec("graph-c3", "earlier work", 0, GraphSpecStatus::Pending);
+        ran.id = "spec-hist".to_string();
+        db2.insert_graph_spec(&ran).unwrap();
+        let node = crate::domain::graphs::GraphNode {
+            id: "node-hist".to_string(),
+            spec_id: None,
+            graph_id: Some("graph-c3".to_string()),
+            name: "check".to_string(),
+            kind: crate::domain::graphs::GraphNodeKind::Check,
+            config: serde_json::json!({}),
+            position: 0,
+            created_at: Utc::now(),
+        };
+        db2.insert_graph_node(&node).unwrap();
+        let mut hist_run = make_run(
+            "spec-hist",
+            "node-hist",
+            GraphRunStatus::Pass,
+            1_700_000_000,
+        );
+        hist_run.id = "run-hist".to_string();
+        hist_run.graph_id = "graph-c3".to_string();
+        hist_run.completed_at = Some(Utc::now());
+        db2.insert_graph_run(&hist_run).unwrap();
+
+        let cap = StdoutCapture::start();
+        handle_graph_info(&db2, "cap-history").expect("queue-history info must print");
+        let hist_out = cap.stop();
+        assert_ordered(&hist_out, &["── Specs ──", "earlier work"]);
+    }
+
+    #[test]
+    fn print_graph_info_hook_runs_covers_empty_and_populated() {
+        print_graph_info_hook_runs(&[]);
+        let run = crate::domain::graphs::GraphCompletionHookRun {
+            id: "run-1".to_string(),
+            graph_id: "graph-1".to_string(),
+            event: crate::domain::graphs::GraphHookEvent::OnCompleted,
+            hook_index: 0,
+            status: GraphRunStatus::Pass,
+            output: None,
+            summary: None,
+            started_at: Utc::now(),
+            completed_at: None,
+            pid: None,
+            boot_id: None,
+            executed_platform: None,
+            executed_model: None,
+            hook_config: None,
+        };
+        print_graph_info_hook_runs(std::slice::from_ref(&run));
+    }
+
+    #[test]
+    fn print_graph_info_current_node_covers_idle_and_recent_runs_empty() {
+        let lp = make_graph("graph-9", "idle-graph", GraphStatus::Draft);
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::new(&dir.path().join("t.db")).unwrap();
+        print_graph_info_current_node(&db, &lp, &[]).expect("idle current node");
+        print_graph_info_recent_runs(&db, &lp, &[]).expect("empty recent runs");
     }
 }

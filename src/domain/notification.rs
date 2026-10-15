@@ -313,8 +313,22 @@ pub fn clear_notifications_on_exit() {
         .status();
 }
 
+/// Whether desktop notifications are enabled (`notifications.enabled`).
+pub(crate) fn notifications_enabled() -> bool {
+    notifications_enabled_in(&crate::domain::prompts::canopy_dir())
+}
+
+/// Pure form of [`notifications_enabled`] over an explicit canopy dir, so
+/// tests can point it at a fixture config without touching `HOME`.
+pub(crate) fn notifications_enabled_in(dir: &std::path::Path) -> bool {
+    crate::domain::canopy_config::CanopyConfig::load(dir)
+        .notifications
+        .enabled
+}
+
 /// Send a desktop notification. Fire-and-forget — spawns a background thread
-/// and never blocks the caller. Failures are silently ignored.
+/// and never blocks the caller. Failures are silently ignored. Sends nothing
+/// when `notifications.enabled` is false.
 ///
 /// `level` selects a native themed icon and urgency on Linux. On WSL and macOS
 /// the system shows the Canopy app icon, so the level has no visible effect
@@ -326,6 +340,9 @@ pub fn clear_notifications_on_exit() {
 /// id, an agent id, a mission name, a graph name), so this needs no extra
 /// plumbing per call site.
 pub fn send_notification(title: &str, body: &str, level: NotificationLevel) {
+    if !notifications_enabled() {
+        return;
+    }
     let tag = tag_for_subject(title);
     let title = title.to_owned();
     let body = body.to_owned();
@@ -419,5 +436,25 @@ mod tests {
         let other_long_subject = "y".repeat(200);
         assert_ne!(tag, tag_for_subject(&other_long_subject));
         assert_eq!(tag, tag_for_subject(&long_subject));
+    }
+
+    #[test]
+    fn test_notifications_enabled_gate() {
+        let dir = std::env::temp_dir().join(format!("canopy-notif-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(dir.join(".canopy"));
+        // Default (no config file): enabled.
+        let fresh = std::env::temp_dir().join(format!(
+            "canopy-notif-fresh-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::create_dir_all(&fresh);
+        assert!(super::notifications_enabled_in(&fresh));
+        // Disabled via config file.
+        let cfg = dir.join(".canopy").join("config.toml");
+        std::fs::write(&cfg, "[notifications]\nenabled = false\n").unwrap();
+        // CanopyConfig::load expects the canopy dir itself (containing config.toml),
+        // not its parent: pass dir/.canopy.
+        assert!(!super::notifications_enabled_in(&dir.join(".canopy")));
     }
 }

@@ -1,13 +1,17 @@
 ---
 title: MCP Tools
-description: All 96 MCP tools exposed by the canopy daemon, by category.
+description: All 115 MCP tools exposed by the canopy daemon, by category.
 order: 11
 ---
 
 # MCP Tools
 
-The daemon exposes **96 MCP tools** over Streamable HTTP (port 7755) and
+The daemon exposes **115 MCP tools** over Streamable HTTP (port 7755) and
 stdio. Connect any MCP-capable AI CLI with `canopy mcp`.
+
+Writes wait up to 5 seconds for a concurrent writer. If the database is still
+busy after that, the call fails with `<tool>: database busy after 5 s — nothing
+was written, retry`. Nothing changed, so retry the same call.
 
 ## Agent management (18)
 
@@ -68,10 +72,10 @@ stdio. Connect any MCP-capable AI CLI with `canopy mcp`.
 
 | Tool | Description |
 |---|---|
-| `skill_list` | List skills available from the dynamic skill store and configured catalogs |
+| `skill_list` | List skills available from the dynamic skill store and configured catalogs; an installed skill that its git source no longer lists is marked `orphaned`, and its description starts with `[removed upstream]` |
 | `skill_get` | Fetch a skill's full instructions by name, cloning or refreshing it on demand |
 
-## Graph engine (34)
+## Graph engine (45)
 
 | Tool | Description |
 |---|---|
@@ -89,13 +93,23 @@ stdio. Connect any MCP-capable AI CLI with `canopy mcp`.
 | `graph_add_ensemble` | Add an ensemble to a graph |
 | `graph_update_ensemble` | Update an ensemble |
 | `graph_delete_ensemble` | Delete an ensemble |
+| `crew_list` | List every crew: name, description, version, ordered members, and how many ensembles/nodes/hooks bind it |
+| `crew_get` | Show one crew and every binding of it |
+| `crew_create` | Create a crew from an ordered member list, or seed it from an ensemble's current members |
+| `crew_update` | Update a crew's ordered members, description and/or name; bound ensembles pick it up at their next dispatch |
+| `crew_delete` | Delete a crew (refused while any ensemble, node or hook still binds it) |
+| `config_list` | List every setting with its group, kind, default, effective value, source (`default`/`file`/`env`), apply mode and status (`ok`, `invalid: <reason>`, `pending_restart`, `unknown`); a `config.toml` that will not parse appears as one `config.toml` row with `invalid: <reason>`; optional `group` filter |
+| `config_get` | Read one setting by its dotted key (e.g. `clean.retention_days`) |
+| `config_set` | Change one setting, validated against its type and range first (nothing is written on refusal); returns the new effective value and what the user must do — `applied`, `applies on next run`, `restart the daemon`, or `restart the TUI` |
+| `config_reset` | Reset one setting to its registry default, through the same validating path as `config_set` |
 | `graph_get` | Get a graph with its specs, nodes, and edges |
 | `graph_list` | List graphs |
-| `graph_run` | Run a graph |
-| `graph_reset` | Reset a graph's pending specs |
+| `graph_crew` | List every graph's harness/model assignments — agent nodes outside ensembles, ensemble members and agent hooks with platform, model, timeout, crew and availability; `group_by: "pair"` summarises per platform/model pair. No prompt text is returned |
+| `graph_run` | Run a graph (optionally `start_node_id` to start the first spec at a chosen node) |
+| `graph_reset` | Reset a graph's pending specs; `clear_notes: true` also deletes the reset specs' spec notes (kept by default) |
 | `graph_schedule_autorun` | Schedule a graph to resume or run |
 | `graph_pause` | Pause a running graph |
-| `graph_continue` | Continue a paused graph |
+| `graph_continue` | Continue a paused graph (retry/skip), or start a spec at a chosen node with `run_from_node` |
 | `graph_complete_node` | Complete an active graph node |
 | `graph_report_blocker` | Report a blocker for an active graph node |
 | `graph_export` | Export a graph design |
@@ -104,6 +118,7 @@ stdio. Connect any MCP-capable AI CLI with `canopy mcp`.
 | `graph_restore` | Restore an archived graph |
 | `graph_node_runs_list` | List a graph's node run history |
 | `graph_node_run_get` | Fetch a graph node run's full input and output |
+| `graph_events` | Read a graph's durable event log (oldest-first, with `since_id` paging) |
 | `graph_copy_node` | Copy a graph node configuration |
 | `graph_copy_ensemble` | Copy an ensemble configuration |
 | `graph_audit_node_configs` | Audit graph node configurations |
@@ -118,7 +133,7 @@ See [Graphs](graphs.md).
 
 Kept callable for the whole 3.x line, but excluded from tool listings
 (`tools/list`) so nothing new adopts them — call the 3.x name instead. Not
-counted in the 96 tools above.
+counted in the 115 tools above.
 
 | Deprecated name | Renamed to (3.0.0) |
 |---|---|
@@ -156,7 +171,26 @@ for how name resolution and its failure modes work. `session_list` remains
 the way to see both the names and ids of every live session a hook can
 target.
 
-## Spec backlog (7)
+## Availability roster (4)
+
+The roster declares which platform/model pairs may run. The engine consults
+it at dispatch — an unavailable member is skipped, an unavailable single node
+or agent hook blocks the spec — and never infers availability from failures,
+exit codes or quota messages. Only these tools (and the CLI, which calls them)
+write the table.
+
+| Tool | Description |
+|---|---|
+| `roster_set` | Declare one `platform`/`model_pattern` pair `available` or `unavailable`. `model_pattern` is omitted for every model of the platform, or an exact model id, or a prefix ending in `*` (e.g. `opencode-go/*`). `until` (RFC 3339 UTC) is accepted only with `unavailable` and must be in the future |
+| `roster_clear` | Delete one entry (idempotent); omit `model_pattern` for the platform-wide entry |
+| `roster_list` | Every entry, filterable by `platform`, each with its effective state now |
+| `roster_check` | The effective availability of one `platform`/`model` pair, naming the entry that decided it |
+
+The most specific entry wins: exact model, then the longest `*` prefix, then the
+platform-wide entry. An `unavailable` entry past its `until` reads as available
+(expired) — expiry is evaluated at read time, never by a timer.
+
+## Spec backlog (9)
 
 | Tool | Description |
 |---|---|
@@ -167,6 +201,8 @@ target.
 | `spec_set_status` | Admin transition: complete, skip, or reopen a standalone spec |
 | `spec_section_get` | Extract one canonical section (`<objective>`, `<constraints>`, …) from a spec body |
 | `spec_convert` | Convert legacy heading-format spec bodies to the tagged `<spec>` format (skips tagged and running specs) |
+| `spec_note_write` | Write or replace the caller's note for the current spec: `run_id` + `body` resolves the owner from the active run (node, or its ensemble when a member) and refuses a finished run; `spec_id` + `body` with no `run_id` writes the `operator` note. Body ≤ 2 500 chars |
+| `spec_notes_get` | Read every note of a spec (`spec_id`), newest first, with owner, author model, `updated_at` and body |
 
 Spec bodies use the tagged `<spec>` format with all seven canonical section
 tags — `<objective>`, `<functional_requirements>`,
@@ -175,15 +211,16 @@ tags — `<objective>`, `<functional_requirements>`,
 are rejected naming the offending tag; legacy heading-format bodies remain
 readable until `spec_convert` migrates them.
 
-## Spec queues (5)
+## Spec queues (6)
 
 | Tool | Description |
 |---|---|
 | `queue_create` | Create an ordered queue of specs |
-| `queue_add_spec` | Append a spec to the end of a queue |
+| `queue_add_spec` | Append a spec to a queue — a grouped add lands after the group's last pending member |
 | `queue_list` | List a queue's members, or all queues |
 | `queue_remove_spec` | Remove a spec from a queue |
 | `queue_reorder` | Full replacement of a queue's order |
+| `queue_set_group` | Set or clear a member's context group |
 
 ## Node blueprints (3)
 
@@ -202,11 +239,12 @@ readable until `spec_convert` migrates them.
 | `project_remap` | Remap a moved/renamed workdir instead of orphaning history |
 | `project_register` | Explicitly register a project directory (no marker file needed) |
 
-## RAG (1)
+## RAG (2)
 
 | Tool | Description |
 |---|---|
 | `rag_search` | Semantic search over indexed documents (rate-limited) |
+| `rag_compact` | Compact the vector store now: merge fragments and prune old versions |
 
 ## Protocol (1)
 

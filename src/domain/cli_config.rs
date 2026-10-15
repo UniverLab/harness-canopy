@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 /// Complete CLI definition from the registry.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CliConfig {
     #[serde(default)]
     pub name: String,
@@ -17,6 +17,20 @@ pub struct CliConfig {
     pub binary: String,
     #[serde(default)]
     pub headless_mode: String,
+    /// False marks a platform that can only host a live interactive session
+    /// (no headless/print mode), e.g. freebuff v0.1.2. Such platforms stay
+    /// available for interactive sessions but must never run a graph node or
+    /// answer a probe. Defaults to true so every existing platform is
+    /// unchanged.
+    #[serde(default = "default_headless")]
+    pub headless: bool,
+    /// CT26: true marks a platform whose default keybinding exits the app on a
+    /// SINGLE Ctrl+C (opencode; claude needs two). For such a platform the TUI
+    /// swallows the first Ctrl+C of an interactive session and shows a confirm
+    /// hint instead — see `tui::event::ctrl_c`. Defaults to false so every
+    /// registry entry that never mentions it keeps today's forwarding.
+    #[serde(default = "default_ctrl_c_exits")]
+    pub ctrl_c_exits: bool,
     #[serde(default)]
     pub model_flag: Option<String>,
     #[serde(default)]
@@ -74,6 +88,25 @@ pub struct CliConfig {
     /// [`session_list_format_args`]: Self::session_list_format_args
     #[serde(default)]
     pub session_id_pattern: Option<String>,
+    /// Flag that sets the session's human-readable title when spawning a new
+    /// headless session, e.g. `"--title"`. When present, the headless command
+    /// gets `<flag> canopy-<run_id>` so the session can be found by title
+    /// later (for platforms that don't record the session id at spawn).
+    /// Optional — a platform without it keeps today's behaviour.
+    #[serde(default)]
+    pub session_title_flag: Option<String>,
+    /// Subcommand/args that list this platform's sessions as a JSON array of
+    /// objects with `id` and `title`, e.g. `["session", "list", "--format",
+    /// `"json"]`. Used to find a session by title when the id was not
+    /// captured at spawn. Optional.
+    #[serde(default)]
+    pub session_list_args: Option<Vec<String>>,
+    /// Subcommand/args that interrupt/end a session by id, e.g.
+    /// `["api", "session.interrupt", "--param", "sessionID={session_id}"]`.
+    /// `{session_id}` is replaced with the session id. Optional — a platform
+    /// without it keeps today's behaviour.
+    #[serde(default)]
+    pub session_end_args: Option<Vec<String>>,
     /// Subcommand/args that make this CLI print its own available model ids,
     /// one passable id per line (e.g. opencode's `models` → `opencode/big-pickle`,
     /// `opencode-go/glm-5.2`). When set, `agent_models` uses this enumeration as
@@ -91,8 +124,27 @@ pub struct CliConfig {
     /// `cmd` is shell-words-split and appended to the resolved binary, e.g. `"--version"`.
     /// `contains` is matched case-insensitively against combined stdout+stderr.
     /// Example (registry): `identity_check = { cmd = "--version", contains = "blackbox" }`
+    ///
+    /// Diagnosis-only (probe/doctor, CB44) — never run on dispatch. CB85's
+    /// `identity_args`/`identity_pattern` below are the dispatch-enforced pair.
     #[serde(default)]
     pub identity_check: Option<IdentityCheck>,
+    /// CB85: argv that makes the resolved binary prove it is this platform,
+    /// run as `<binary> <identity_args...>` (e.g. `["--version"]`). Paired
+    /// with `identity_pattern`: both must be set (and non-empty) for the
+    /// check to run.
+    #[serde(default)]
+    pub identity_args: Option<Vec<String>>,
+    /// CB85: regex the combined stdout+stderr of
+    /// `<binary> <identity_args>` must match (e.g.
+    /// `(?i)blackbox ai|blackboxai`). A mismatch or a 5 s timeout makes the
+    /// platform "not installed" — `<platform>: '<path>' is not
+    /// <platform_display> (identity check failed: <first line of its
+    /// output>)` — on every surface that resolves the platform's binary
+    /// (probe, node dispatch, `agent_add` validation, doctor). The verdict
+    /// is cached per resolved path + mtime for the daemon's lifetime.
+    #[serde(default)]
+    pub identity_pattern: Option<String>,
     /// RGB accent color for this CLI's agents in the TUI.
     #[serde(default)]
     pub accent_color: Option<[u8; 3]>,
@@ -189,6 +241,12 @@ pub struct CliConfig {
     /// `DEFAULT_INFRA_BACKOFF_SECONDS` (30).
     #[serde(default)]
     pub infra_backoff_seconds: Option<u64>,
+    /// Extra headless flags for decision-model invocation (CB88), e.g. `"-p"`
+    /// for commandcode (`cmd -p -m <model>`, request JSON on stdin). `None`
+    /// means this platform offers no decision-model invocation; router nodes
+    /// with `decision: true` on it are refused. Registry-driven, `#[serde(default)]`.
+    #[serde(default)]
+    pub decision_args: Option<String>,
     /// Human product identity from the registry (canopy-registry PR #2).
     /// Optional: hand-added or pre-PR#2 entries lack them and render as slug.
     /// Identity/matching/storage always use `name`; these are display-only.
@@ -196,6 +254,62 @@ pub struct CliConfig {
     pub provider: Option<String>,
     #[serde(default)]
     pub tool_name: Option<String>,
+}
+
+/// Hand-written (not derived) so [`CliConfig::headless`] defaults to `true`,
+/// matching its serde default: a default-constructed `CliConfig` means an
+/// ordinary headless-capable platform, exactly like one deserialized from a
+/// registry entry that never mentions the field. Leaving the derived
+/// `Default` (which would give `headless = false`) would make every
+/// test/fixture that builds a platform with `..Default::default()` look
+/// interactive-only. Every other field keeps the derived default —
+/// including `paste_submit_presses = 0` (the serde default is 1, applied
+/// only on deserialization).
+impl Default for CliConfig {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            binary: String::new(),
+            headless_mode: String::new(),
+            headless: true,
+            ctrl_c_exits: false,
+            model_flag: None,
+            supports_working_dir: false,
+            working_dir_flag: None,
+            env_vars: std::collections::HashMap::new(),
+            interactive_args: None,
+            fallback_interactive_args: None,
+            resume_args: None,
+            session_list_cmd: None,
+            session_resume_cmd: None,
+            session_id_set_flag: None,
+            session_list_format_args: None,
+            session_id_pattern: None,
+            session_title_flag: None,
+            session_list_args: None,
+            session_end_args: None,
+            models_list_cmd: None,
+            identity_check: None,
+            identity_args: None,
+            identity_pattern: None,
+            accent_color: None,
+            yolo_flag: None,
+            trust_flag: None,
+            instruction_file: None,
+            prompt_via_stdin: false,
+            paste_submit_delay_ms: None,
+            paste_submit_key: None,
+            paste_submit_presses: 0,
+            invocation_template: None,
+            effort_declaration: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
+            decision_args: None,
+            provider: None,
+            tool_name: None,
+        }
+    }
 }
 
 /// Display string for a platform slug: "Provider · Tool" when both known,
@@ -300,6 +414,29 @@ pub fn model_rejection_reason(
             "platform '{platform}' cannot select a model; requested model '{model}' was not applied"
         ))
     }
+}
+
+/// The single wording every interactive-only rejection uses — a platform
+/// whose registry entry sets `headless = false` (freebuff v0.1.2). Produced
+/// here so `graph_add_node`/`graph_update_node`, the ensemble handlers,
+/// `agent_add`, `agent_probe` and `graph_preflight` can never drift apart on
+/// the message a caller sees (CM35).
+pub fn interactive_only_reason(platform: &str) -> String {
+    format!("platform '{platform}' is interactive-only (no headless mode)")
+}
+
+/// serde default for [`CliConfig::headless`]: a platform is headless-capable
+/// unless its registry entry explicitly says otherwise, so the field's
+/// absence leaves every existing platform's behaviour unchanged.
+fn default_headless() -> bool {
+    true
+}
+
+/// serde default for [`CliConfig::ctrl_c_exits`]: a platform exits on a single
+/// Ctrl+C only when its registry entry says so, so the field's absence leaves
+/// every existing platform's forwarding unchanged.
+fn default_ctrl_c_exits() -> bool {
+    false
 }
 
 fn default_paste_submit_presses() -> u8 {
@@ -489,6 +626,8 @@ mod tests {
             name: "opencode".to_string(),
             binary: "opencode".to_string(),
             headless_mode: "--headless".to_string(),
+            headless: true,
+            ctrl_c_exits: false,
             model_flag: Some("--model".to_string()),
             supports_working_dir: true,
             working_dir_flag: Some("--dir".to_string()),
@@ -501,8 +640,13 @@ mod tests {
             session_id_set_flag: None,
             session_list_format_args: None,
             session_id_pattern: None,
+            session_title_flag: None,
+            session_list_args: None,
+            session_end_args: None,
             models_list_cmd: None,
             identity_check: None,
+            identity_args: None,
+            identity_pattern: None,
             accent_color: None,
             yolo_flag: None,
             trust_flag: None,
@@ -516,6 +660,7 @@ mod tests {
             infra_retry_limit: None,
             infra_crash_max_seconds: None,
             infra_backoff_seconds: None,
+            decision_args: None,
             provider: None,
             tool_name: None,
         }
@@ -713,11 +858,61 @@ mod tests {
     }
 
     #[test]
+    fn session_end_fields_serde_roundtrip() {
+        let mut config = sample_cli_config();
+        config.session_title_flag = Some("--title".to_string());
+        config.session_list_args = Some(vec![
+            "session".to_string(),
+            "list".to_string(),
+            "--format".to_string(),
+            "json".to_string(),
+        ]);
+        config.session_end_args = Some(vec![
+            "api".to_string(),
+            "session.interrupt".to_string(),
+            "--param".to_string(),
+            "sessionID={session_id}".to_string(),
+        ]);
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: CliConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.session_title_flag.as_deref(), Some("--title"));
+        assert_eq!(
+            deserialized.session_list_args,
+            Some(vec![
+                "session".to_string(),
+                "list".to_string(),
+                "--format".to_string(),
+                "json".to_string(),
+            ])
+        );
+        assert_eq!(
+            deserialized.session_end_args,
+            Some(vec![
+                "api".to_string(),
+                "session.interrupt".to_string(),
+                "--param".to_string(),
+                "sessionID={session_id}".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn session_end_fields_absent_from_json_default_to_none() {
+        let config: CliConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(config.session_title_flag, None);
+        assert_eq!(config.session_list_args, None);
+        assert_eq!(config.session_end_args, None);
+    }
+
+    #[test]
     fn cli_config_default_construction() {
         let config = CliConfig::default();
         assert!(config.name.is_empty());
         assert!(config.binary.is_empty());
         assert!(config.headless_mode.is_empty());
+        // Hand-written `Default` matches the serde default here so a
+        // default-built platform is never mistaken for interactive-only.
+        assert!(config.headless);
         assert!(config.model_flag.is_none());
         assert!(!config.supports_working_dir);
         assert!(config.working_dir_flag.is_none());
@@ -773,6 +968,43 @@ mod tests {
         let config: CliConfig = serde_json::from_str("{}").unwrap();
         assert!(config.name.is_empty());
         assert!(config.binary.is_empty());
+    }
+
+    /// CM35: a registry entry that never mentions `headless` (every platform
+    /// but freebuff) is headless-capable. The serde default is what the
+    /// registry TOML path (`Platform::to_platform_with_cli`) exercises, so
+    /// this is the guarantee that the new field changes nothing for the
+    /// platforms that already exist.
+    #[test]
+    fn headless_defaults_to_true_when_absent() {
+        let config: CliConfig = serde_json::from_value(serde_json::json!({
+            "binary": "x",
+        }))
+        .unwrap();
+        assert!(config.headless);
+    }
+
+    /// CM35: `headless = false` parses to `false` — the field the freebuff
+    /// registry entry sets to mark itself interactive-only.
+    #[test]
+    fn headless_false_parses() {
+        let config: CliConfig = serde_json::from_value(serde_json::json!({
+            "binary": "x",
+            "headless": false,
+        }))
+        .unwrap();
+        assert!(!config.headless);
+    }
+
+    /// CM35: the exact wording every interactive-only rejection must carry,
+    /// byte-for-byte, as the spec mandates. Every call site routes through
+    /// [`interactive_only_reason`], so this pins the one string they share.
+    #[test]
+    fn interactive_only_reason_matches_spec_wording() {
+        assert_eq!(
+            interactive_only_reason("freebuff"),
+            "platform 'freebuff' is interactive-only (no headless mode)"
+        );
     }
 
     #[test]
@@ -1015,5 +1247,69 @@ mod tests {
         let back: CliConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(back.provider.as_deref(), Some("Mistral AI"));
         assert_eq!(back.tool_name.as_deref(), Some("Vibe"));
+    }
+
+    #[test]
+    fn identity_args_and_pattern_default_to_none() {
+        let config: CliConfig = serde_json::from_str(r#"{"name":"x"}"#).unwrap();
+        assert_eq!(config.identity_args, None);
+        assert_eq!(config.identity_pattern, None);
+    }
+
+    #[test]
+    fn identity_args_and_pattern_parse_and_roundtrip() {
+        let json = r#"{"name":"blackbox","binary":"blackbox","identity_args":["--version"],"identity_pattern":"(?i)blackbox ai|blackboxai"}"#;
+        let config: CliConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            config.identity_args.as_deref(),
+            Some(&["--version".to_string()][..])
+        );
+        assert_eq!(
+            config.identity_pattern.as_deref(),
+            Some("(?i)blackbox ai|blackboxai")
+        );
+
+        let roundtrip = serde_json::to_string(&config).unwrap();
+        let back: CliConfig = serde_json::from_str(&roundtrip).unwrap();
+        assert_eq!(
+            back.identity_args.as_deref(),
+            Some(&["--version".to_string()][..])
+        );
+        assert_eq!(
+            back.identity_pattern.as_deref(),
+            Some("(?i)blackbox ai|blackboxai")
+        );
+    }
+
+    /// CT26: the field's absence is the common case and must mean "keep
+    /// forwarding Ctrl+C", so a registry entry that never mentions it cannot
+    /// change any existing platform's behaviour.
+    #[test]
+    fn ctrl_c_exits_defaults_to_false_when_absent() {
+        let config: CliConfig = serde_json::from_value(serde_json::json!({"binary": "x"})).unwrap();
+        assert!(!config.ctrl_c_exits);
+    }
+
+    /// CT26: `ctrl_c_exits = true` parses and round-trips — the value the
+    /// opencode registry entry (canopy-registry ad52a0c) sets.
+    #[test]
+    fn ctrl_c_exits_true_parses_and_roundtrips() {
+        let config: CliConfig = serde_json::from_value(serde_json::json!({
+            "binary": "x",
+            "ctrl_c_exits": true,
+        }))
+        .unwrap();
+        assert!(config.ctrl_c_exits);
+        let json = serde_json::to_string(&config).unwrap();
+        let back: CliConfig = serde_json::from_str(&json).unwrap();
+        assert!(back.ctrl_c_exits);
+    }
+
+    /// CT26: the hand-written `Default` must agree with the serde default, so a
+    /// default-built platform is never mistaken for one that exits on a single
+    /// Ctrl+C (same rule as `headless`).
+    #[test]
+    fn ctrl_c_exits_default_matches_serde_default() {
+        assert!(!CliConfig::default().ctrl_c_exits);
     }
 }

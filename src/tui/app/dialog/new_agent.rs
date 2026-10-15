@@ -8,6 +8,8 @@ use crate::domain::models_db::{self, ModelCatalog, ModelEntry};
 use crate::tui::app::types::Focus;
 use crate::tui::ui::theme::Theme;
 
+pub(crate) mod dir_browser;
+
 /// Seed identity option for the agent creation dialog.
 #[derive(Clone, Debug)]
 pub enum SeedOption {
@@ -108,6 +110,14 @@ pub struct NewAgentDialog {
     pub yolo_mode: bool,
     /// Whether to launch in a sandbox (git worktree with instruction file).
     pub sandbox_mode: bool,
+    /// Delivery action for a background agent (CM53): run a CLI headlessly, or
+    /// deliver the prompt into a live interactive session.
+    pub background_action: super::background_action::BackgroundAction,
+    /// Index into `send_target_names` for the selected target session.
+    pub send_target_idx: usize,
+    /// Live session names offered as `send_to_session` targets, populated when
+    /// the dialog opens from the app's interactive session list.
+    pub send_target_names: Vec<String>,
     /// Index into `seed_options` for the selected seed identity.
     pub seed_index: usize,
     /// Available seed identity options.
@@ -180,6 +190,9 @@ impl NewAgentDialog {
             resume_sessions_empty: false,
             yolo_mode: false,
             sandbox_mode: false,
+            background_action: super::background_action::BackgroundAction::Headless,
+            send_target_idx: 0,
+            send_target_names: Vec::new(),
             seed_index: 0,
             seed_options,
         };
@@ -275,16 +288,22 @@ impl NewAgentDialog {
             .get(idx)
             .map(|c| c.as_str())
             .unwrap_or("");
-        let display = self
-            .cli_configs
-            .get(idx)
-            .and_then(|c| c.as_ref())
+        let config = self.cli_configs.get(idx).and_then(|c| c.as_ref());
+        let display = config
             .map(|c| c.display_name())
             .unwrap_or_else(|| slug.to_string());
-        if display == slug {
+        let base = if display == slug {
             display
         } else {
             format!("{display} ({slug})")
+        };
+        // CM35: interactive-only platforms stay selectable for a live
+        // session — never filtered out — but are marked so the user knows
+        // what this harness can and cannot do.
+        if config.is_some_and(|c| !c.headless) {
+            format!("{base} (interactive only)")
+        } else {
+            base
         }
     }
 
@@ -456,7 +475,7 @@ impl NewAgentDialog {
             .and_then(|c| c.as_ref())
             .and_then(|c| c.accent_color)
             .map(|[r, g, b]| Color::Rgb(r, g, b))
-            .unwrap_or(Color::Rgb(102, 187, 106))
+            .unwrap_or(crate::tui::ui::INTERACTIVE_COLOR)
     }
 
     pub fn set_cli_index(&mut self, idx: usize) {
@@ -579,133 +598,6 @@ impl NewAgentDialog {
         }
     }
 
-    pub fn refresh_dir_entries(&mut self) {
-        let Ok(entries) = std::fs::read_dir(&self.current_path) else {
-            self.dir_entries.clear();
-            return;
-        };
-
-        let include_files = self.task_type == NewTaskType::Background
-            && self.background_trigger == BackgroundTrigger::Watch;
-
-        let all: Vec<_> = entries.filter_map(|e| e.ok()).collect();
-        let mut dirs = collect_dir_names(&all);
-        let mut files = if include_files {
-            collect_file_names(&all)
-        } else {
-            Vec::new()
-        };
-        dirs.sort();
-        files.sort();
-        dirs.extend(files);
-
-        self.dir_entries = dirs;
-        self.dir_selected = 0;
-        self.dir_scroll = 0;
-        self.dir_filter.clear();
-    }
-
-    /// Return dir_entries filtered by dir_filter (case-insensitive).
-    pub fn filtered_dir_entries(&self) -> Vec<String> {
-        if self.dir_filter.is_empty() {
-            return self.dir_entries.clone();
-        }
-        let q = self.dir_filter.to_lowercase();
-        self.dir_entries
-            .iter()
-            .filter(|e| e.to_lowercase().contains(&q))
-            .cloned()
-            .collect()
-    }
-
-    /// Go up one directory level (← key).
-    /// Remembers the directory we came from and positions cursor on it.
-    pub fn go_up(&mut self) {
-        if self.current_path == "/" {
-            return;
-        }
-        // Remember the directory name we're leaving
-        let leaving_name = self.current_path.rfind('/').and_then(|pos| {
-            let name = &self.current_path[pos + 1..];
-            if name.is_empty() {
-                None
-            } else {
-                Some(name.to_string())
-            }
-        });
-        let new_path = if let Some(pos) = self.current_path.rfind('/') {
-            if pos == 0 {
-                "/".to_string()
-            } else {
-                self.current_path[..pos].to_string()
-            }
-        } else {
-            return;
-        };
-        self.current_path = new_path;
-        self.working_dir = self.current_path.clone();
-        if self.task_type == NewTaskType::Background
-            && self.background_trigger == BackgroundTrigger::Watch
-        {
-            self.watch_path = self.current_path.clone();
-        }
-        self.dir_filter.clear();
-        self.refresh_dir_entries();
-        // Position cursor on the directory we came from
-        if let Some(name) = leaving_name {
-            let target = format!("{name}/");
-            if let Some(idx) = self.dir_entries.iter().position(|e| e == &target) {
-                self.dir_selected = idx;
-            }
-        }
-    }
-
-    /// Update working_dir preview based on currently selected item in picker
-    /// This is called while navigating with ↑↓ to show real-time preview
-    pub fn update_dir_preview(&mut self) {
-        let filtered = self.filtered_dir_entries();
-        if self.dir_selected >= filtered.len() {
-            // Nothing selected, use current_path
-            self.working_dir = self.current_path.clone();
-            return;
-        }
-
-        let selected = filtered[self.dir_selected].clone();
-        let name = selected.strip_suffix('/').unwrap_or(selected.as_str());
-        let full_path = format!("{}/{}", self.current_path.trim_end_matches('/'), name);
-        self.working_dir = full_path;
-    }
-
-    /// Navigate into the selected directory entry (→ key).
-    pub fn navigate_to_selected(&mut self) {
-        let filtered = self.filtered_dir_entries();
-        if self.dir_selected >= filtered.len() {
-            return;
-        }
-
-        let selected = filtered[self.dir_selected].clone();
-        let name = selected.strip_suffix('/').unwrap_or(selected.as_str());
-        let full_path = format!("{}/{}", self.current_path.trim_end_matches('/'), name);
-        let is_dir = std::fs::metadata(&full_path)
-            .map(|m| m.is_dir())
-            .unwrap_or(false);
-
-        if is_dir {
-            self.current_path = full_path;
-            self.working_dir = self.current_path.clone();
-            if self.task_type == NewTaskType::Background
-                && self.background_trigger == BackgroundTrigger::Watch
-            {
-                self.watch_path = self.current_path.clone();
-            }
-            self.dir_filter.clear();
-            self.refresh_dir_entries();
-        } else {
-            // File selected (Watcher only) — set watch_path, stay in current dir
-            self.watch_path = full_path;
-        }
-    }
-
     /// Recompute the filtered model suggestions based on current CLI and query.
     pub fn refresh_model_suggestions(&mut self) {
         let Some(catalog) = &self.model_catalog else {
@@ -787,36 +679,6 @@ pub fn detect_available_shells() -> Vec<String> {
     }
 
     found
-}
-
-fn collect_dir_names(entries: &[std::fs::DirEntry]) -> Vec<String> {
-    entries
-        .iter()
-        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-        .filter_map(|e| {
-            let name = e.file_name().to_string_lossy().to_string();
-            if name.starts_with('.') {
-                None
-            } else {
-                Some(format!("{name}/"))
-            }
-        })
-        .collect()
-}
-
-fn collect_file_names(entries: &[std::fs::DirEntry]) -> Vec<String> {
-    entries
-        .iter()
-        .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
-        .filter_map(|e| {
-            let name = e.file_name().to_string_lossy().to_string();
-            if name.starts_with('.') {
-                None
-            } else {
-                Some(name)
-            }
-        })
-        .collect()
 }
 
 fn load_seed_options() -> Vec<SeedOption> {
@@ -1021,6 +883,8 @@ mod tests {
             name: "antigravity".into(),
             binary: "agy".into(),
             headless_mode: String::new(),
+            headless: true,
+            ctrl_c_exits: false,
             model_flag: None,
             supports_working_dir: false,
             working_dir_flag: None,
@@ -1033,8 +897,13 @@ mod tests {
             session_id_set_flag: None,
             session_list_format_args: None,
             session_id_pattern: None,
+            session_title_flag: None,
+            session_list_args: None,
+            session_end_args: None,
             models_list_cmd: None,
             identity_check: None,
+            identity_args: None,
+            identity_pattern: None,
             accent_color: None,
             yolo_flag: None,
             trust_flag: None,
@@ -1048,6 +917,7 @@ mod tests {
             infra_retry_limit: None,
             infra_crash_max_seconds: None,
             infra_backoff_seconds: None,
+            decision_args: None,
 
             provider: None,
             tool_name: None,
@@ -1171,6 +1041,44 @@ mod tests {
         assert_eq!(dialog.filtered_cli_indices(), vec![1]);
     }
 
+    /// CM35 FR3: an interactive-only platform (`headless = false`) stays
+    /// listed in the new-session picker — selectable for a live session —
+    /// but its label carries `(interactive only)`, while a headless-capable
+    /// platform's label is unchanged. Breaks if the marker is dropped or if
+    /// the list starts filtering interactive-only platforms out.
+    #[test]
+    fn cli_display_label_marks_interactive_only_platform() {
+        let mut dialog = NewAgentDialog::new(None);
+        dialog.available_clis = vec![Cli::new("freebuff"), Cli::new("claude")];
+        dialog.cli_configs = vec![
+            Some(crate::domain::cli_config::CliConfig {
+                name: "freebuff".into(),
+                provider: Some("Codebuff".into()),
+                tool_name: Some("Freebuff".into()),
+                headless: false,
+                ..Default::default()
+            }),
+            Some(crate::domain::cli_config::CliConfig {
+                name: "claude".into(),
+                provider: Some("Anthropic".into()),
+                tool_name: Some("Claude Code".into()),
+                headless: true,
+                ..Default::default()
+            }),
+        ];
+        assert_eq!(
+            dialog.cli_display_label(0),
+            "Codebuff · Freebuff (freebuff) (interactive only)"
+        );
+        assert_eq!(
+            dialog.cli_display_label(1),
+            "Anthropic · Claude Code (claude)"
+        );
+        // Both remain selectable — the picker never filters the list.
+        dialog.cli_index = 0;
+        assert_eq!(dialog.selected_cli().as_str(), "freebuff");
+    }
+
     // ── selected_args ────────────────────────────────────────────
 
     #[test]
@@ -1188,6 +1096,8 @@ mod tests {
             name: "test".into(),
             binary: "test".into(),
             headless_mode: String::new(),
+            headless: true,
+            ctrl_c_exits: false,
             model_flag: None,
             supports_working_dir: false,
             working_dir_flag: None,
@@ -1200,8 +1110,13 @@ mod tests {
             session_id_set_flag: None,
             session_list_format_args: None,
             session_id_pattern: None,
+            session_title_flag: None,
+            session_list_args: None,
+            session_end_args: None,
             models_list_cmd: None,
             identity_check: None,
+            identity_args: None,
+            identity_pattern: None,
             accent_color: None,
             yolo_flag: None,
             trust_flag: None,
@@ -1215,6 +1130,7 @@ mod tests {
             infra_retry_limit: None,
             infra_crash_max_seconds: None,
             infra_backoff_seconds: None,
+            decision_args: None,
 
             provider: None,
             tool_name: None,
@@ -1242,6 +1158,8 @@ mod tests {
             name: "test".into(),
             binary: "test".into(),
             headless_mode: String::new(),
+            headless: true,
+            ctrl_c_exits: false,
             model_flag: None,
             supports_working_dir: false,
             working_dir_flag: None,
@@ -1254,8 +1172,13 @@ mod tests {
             session_id_set_flag: None,
             session_list_format_args: None,
             session_id_pattern: None,
+            session_title_flag: None,
+            session_list_args: None,
+            session_end_args: None,
             models_list_cmd: None,
             identity_check: None,
+            identity_args: None,
+            identity_pattern: None,
             accent_color: None,
             yolo_flag: None,
             trust_flag: None,
@@ -1269,6 +1192,7 @@ mod tests {
             infra_retry_limit: None,
             infra_crash_max_seconds: None,
             infra_backoff_seconds: None,
+            decision_args: None,
 
             provider: None,
             tool_name: None,
@@ -1297,6 +1221,8 @@ mod tests {
             name: "test".into(),
             binary: "test".into(),
             headless_mode: String::new(),
+            headless: true,
+            ctrl_c_exits: false,
             model_flag: None,
             supports_working_dir: false,
             working_dir_flag: None,
@@ -1309,8 +1235,13 @@ mod tests {
             session_id_set_flag: None,
             session_list_format_args: None,
             session_id_pattern: None,
+            session_title_flag: None,
+            session_list_args: None,
+            session_end_args: None,
             models_list_cmd: None,
             identity_check: None,
+            identity_args: None,
+            identity_pattern: None,
             accent_color: None,
             yolo_flag: Some("--yolo".to_string()),
             trust_flag: None,
@@ -1324,6 +1255,7 @@ mod tests {
             infra_retry_limit: None,
             infra_crash_max_seconds: None,
             infra_backoff_seconds: None,
+            decision_args: None,
 
             provider: None,
             tool_name: None,
@@ -1371,6 +1303,8 @@ mod tests {
             name: "test".into(),
             binary: "test".into(),
             headless_mode: String::new(),
+            headless: true,
+            ctrl_c_exits: false,
             model_flag: None,
             supports_working_dir: false,
             working_dir_flag: None,
@@ -1383,8 +1317,13 @@ mod tests {
             session_id_set_flag: None,
             session_list_format_args: None,
             session_id_pattern: None,
+            session_title_flag: None,
+            session_list_args: None,
+            session_end_args: None,
             models_list_cmd: None,
             identity_check: None,
+            identity_args: None,
+            identity_pattern: None,
             accent_color: None,
             yolo_flag: None,
             trust_flag: None,
@@ -1398,6 +1337,7 @@ mod tests {
             infra_retry_limit: None,
             infra_crash_max_seconds: None,
             infra_backoff_seconds: None,
+            decision_args: None,
 
             provider: None,
             tool_name: None,
@@ -1586,6 +1526,8 @@ mod tests {
             name: "test".into(),
             binary: "test".into(),
             headless_mode: String::new(),
+            headless: true,
+            ctrl_c_exits: false,
             model_flag: None,
             supports_working_dir: false,
             working_dir_flag: None,
@@ -1598,8 +1540,13 @@ mod tests {
             session_id_set_flag: None,
             session_list_format_args: None,
             session_id_pattern: None,
+            session_title_flag: None,
+            session_list_args: None,
+            session_end_args: None,
             models_list_cmd: None,
             identity_check: None,
+            identity_args: None,
+            identity_pattern: None,
             accent_color: None,
             yolo_flag: None,
             trust_flag: None,
@@ -1613,6 +1560,7 @@ mod tests {
             infra_retry_limit: None,
             infra_crash_max_seconds: None,
             infra_backoff_seconds: None,
+            decision_args: None,
 
             provider: None,
             tool_name: None,
@@ -1629,6 +1577,8 @@ mod tests {
             name: "test".into(),
             binary: "test".into(),
             headless_mode: String::new(),
+            headless: true,
+            ctrl_c_exits: false,
             model_flag: None,
             supports_working_dir: false,
             working_dir_flag: None,
@@ -1641,8 +1591,13 @@ mod tests {
             session_id_set_flag: None,
             session_list_format_args: None,
             session_id_pattern: None,
+            session_title_flag: None,
+            session_list_args: None,
+            session_end_args: None,
             models_list_cmd: None,
             identity_check: None,
+            identity_args: None,
+            identity_pattern: None,
             accent_color: None,
             yolo_flag: None,
             trust_flag: None,
@@ -1656,6 +1611,7 @@ mod tests {
             infra_retry_limit: None,
             infra_crash_max_seconds: None,
             infra_backoff_seconds: None,
+            decision_args: None,
 
             provider: None,
             tool_name: None,
@@ -1672,6 +1628,8 @@ mod tests {
             name: "test".into(),
             binary: "test".into(),
             headless_mode: String::new(),
+            headless: true,
+            ctrl_c_exits: false,
             model_flag: None,
             supports_working_dir: false,
             working_dir_flag: None,
@@ -1684,8 +1642,13 @@ mod tests {
             session_id_set_flag: None,
             session_list_format_args: None,
             session_id_pattern: None,
+            session_title_flag: None,
+            session_list_args: None,
+            session_end_args: None,
             models_list_cmd: None,
             identity_check: None,
+            identity_args: None,
+            identity_pattern: None,
             accent_color: None,
             yolo_flag: None,
             trust_flag: None,
@@ -1699,6 +1662,7 @@ mod tests {
             infra_retry_limit: None,
             infra_crash_max_seconds: None,
             infra_backoff_seconds: None,
+            decision_args: None,
 
             provider: None,
             tool_name: None,
@@ -1715,6 +1679,8 @@ mod tests {
             name: "test".into(),
             binary: "test".into(),
             headless_mode: String::new(),
+            headless: true,
+            ctrl_c_exits: false,
             model_flag: None,
             supports_working_dir: false,
             working_dir_flag: None,
@@ -1727,8 +1693,13 @@ mod tests {
             session_id_set_flag: None,
             session_list_format_args: None,
             session_id_pattern: None,
+            session_title_flag: None,
+            session_list_args: None,
+            session_end_args: None,
             models_list_cmd: None,
             identity_check: None,
+            identity_args: None,
+            identity_pattern: None,
             accent_color: None,
             yolo_flag: None,
             trust_flag: None,
@@ -1742,6 +1713,7 @@ mod tests {
             infra_retry_limit: None,
             infra_crash_max_seconds: None,
             infra_backoff_seconds: None,
+            decision_args: None,
 
             provider: None,
             tool_name: None,
@@ -1758,6 +1730,8 @@ mod tests {
             name: "test".into(),
             binary: "test".into(),
             headless_mode: String::new(),
+            headless: true,
+            ctrl_c_exits: false,
             model_flag: None,
             supports_working_dir: false,
             working_dir_flag: None,
@@ -1770,8 +1744,13 @@ mod tests {
             session_id_set_flag: None,
             session_list_format_args: None,
             session_id_pattern: None,
+            session_title_flag: None,
+            session_list_args: None,
+            session_end_args: None,
             models_list_cmd: None,
             identity_check: None,
+            identity_args: None,
+            identity_pattern: None,
             accent_color: None,
             yolo_flag: None,
             trust_flag: None,
@@ -1785,6 +1764,7 @@ mod tests {
             infra_retry_limit: None,
             infra_crash_max_seconds: None,
             infra_backoff_seconds: None,
+            decision_args: None,
 
             provider: None,
             tool_name: None,
@@ -1802,6 +1782,8 @@ mod tests {
             name: "test".into(),
             binary: "test".into(),
             headless_mode: String::new(),
+            headless: true,
+            ctrl_c_exits: false,
             model_flag: None,
             supports_working_dir: false,
             working_dir_flag: None,
@@ -1814,8 +1796,13 @@ mod tests {
             session_id_set_flag: None,
             session_list_format_args: None,
             session_id_pattern: None,
+            session_title_flag: None,
+            session_list_args: None,
+            session_end_args: None,
             models_list_cmd: None,
             identity_check: None,
+            identity_args: None,
+            identity_pattern: None,
             accent_color: None,
             yolo_flag: None,
             trust_flag: None,
@@ -1829,6 +1816,7 @@ mod tests {
             infra_retry_limit: None,
             infra_crash_max_seconds: None,
             infra_backoff_seconds: None,
+            decision_args: None,
 
             provider: None,
             tool_name: None,
@@ -1867,7 +1855,7 @@ mod tests {
         let theme = Theme::classic();
         assert_eq!(
             dialog.selected_accent_color(&theme),
-            Color::Rgb(102, 187, 106)
+            crate::tui::ui::INTERACTIVE_COLOR
         );
     }
 
@@ -1879,6 +1867,8 @@ mod tests {
             name: "test".into(),
             binary: "test".into(),
             headless_mode: String::new(),
+            headless: true,
+            ctrl_c_exits: false,
             model_flag: None,
             supports_working_dir: false,
             working_dir_flag: None,
@@ -1891,8 +1881,13 @@ mod tests {
             session_id_set_flag: None,
             session_list_format_args: None,
             session_id_pattern: None,
+            session_title_flag: None,
+            session_list_args: None,
+            session_end_args: None,
             models_list_cmd: None,
             identity_check: None,
+            identity_args: None,
+            identity_pattern: None,
             accent_color: Some([255, 0, 0]),
             yolo_flag: None,
             trust_flag: None,
@@ -1906,6 +1901,7 @@ mod tests {
             infra_retry_limit: None,
             infra_crash_max_seconds: None,
             infra_backoff_seconds: None,
+            decision_args: None,
 
             provider: None,
             tool_name: None,
@@ -1926,6 +1922,8 @@ mod tests {
             name: "test".into(),
             binary: "test".into(),
             headless_mode: String::new(),
+            headless: true,
+            ctrl_c_exits: false,
             model_flag: None,
             supports_working_dir: false,
             working_dir_flag: None,
@@ -1938,8 +1936,13 @@ mod tests {
             session_id_set_flag: None,
             session_list_format_args: None,
             session_id_pattern: None,
+            session_title_flag: None,
+            session_list_args: None,
+            session_end_args: None,
             models_list_cmd: None,
             identity_check: None,
+            identity_args: None,
+            identity_pattern: None,
             accent_color: None,
             yolo_flag: None,
             trust_flag: None,
@@ -1953,6 +1956,7 @@ mod tests {
             infra_retry_limit: None,
             infra_crash_max_seconds: None,
             infra_backoff_seconds: None,
+            decision_args: None,
 
             provider: None,
             tool_name: None,
@@ -2000,6 +2004,8 @@ mod tests {
             name: "opencode".into(),
             binary: "opencode".into(),
             headless_mode: String::new(),
+            headless: true,
+            ctrl_c_exits: false,
             model_flag: None,
             supports_working_dir: false,
             working_dir_flag: None,
@@ -2012,8 +2018,13 @@ mod tests {
             session_id_set_flag: None,
             session_list_format_args: None,
             session_id_pattern: None,
+            session_title_flag: None,
+            session_list_args: None,
+            session_end_args: None,
             models_list_cmd: None,
             identity_check: None,
+            identity_args: None,
+            identity_pattern: None,
             accent_color: None,
             yolo_flag: Some("--yolo".to_string()),
             trust_flag: None,
@@ -2027,6 +2038,7 @@ mod tests {
             infra_retry_limit: None,
             infra_crash_max_seconds: None,
             infra_backoff_seconds: None,
+            decision_args: None,
 
             provider: None,
             tool_name: None,
@@ -2051,6 +2063,8 @@ mod tests {
             name: "opencode".into(),
             binary: "opencode".into(),
             headless_mode: String::new(),
+            headless: true,
+            ctrl_c_exits: false,
             model_flag: None,
             supports_working_dir: false,
             working_dir_flag: None,
@@ -2063,8 +2077,13 @@ mod tests {
             session_id_set_flag: None,
             session_list_format_args: None,
             session_id_pattern: None,
+            session_title_flag: None,
+            session_list_args: None,
+            session_end_args: None,
             models_list_cmd: None,
             identity_check: None,
+            identity_args: None,
+            identity_pattern: None,
             accent_color: None,
             yolo_flag: None,
             trust_flag: None,
@@ -2078,6 +2097,7 @@ mod tests {
             infra_retry_limit: None,
             infra_crash_max_seconds: None,
             infra_backoff_seconds: None,
+            decision_args: None,
 
             provider: None,
             tool_name: None,

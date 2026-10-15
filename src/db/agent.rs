@@ -4,14 +4,17 @@ use rusqlite::{params, OptionalExtension};
 
 use crate::application::ports::AgentRepository;
 use crate::db::Database;
-use crate::domain::models::{Agent, Cli, CorruptAgent, Trigger};
+use crate::domain::models::{Agent, AgentAction, Cli, CorruptAgent, Trigger};
 
 const AGENT_COLUMNS: &str = "id, prompt, trigger_type, trigger_config, cli, model, effort, working_dir, \
                              enabled, enable_at, created_at, log_path, timeout_minutes, expires_at, last_run_at, \
-                             last_run_ok, last_triggered_at, trigger_count";
+                             last_run_ok, last_triggered_at, trigger_count, action, target_session_id, \
+                             target_session_name";
 
 impl AgentRepository for Database {
     fn upsert_agent(&self, agent: &Agent) -> Result<()> {
+        agent.action.validate().map_err(anyhow::Error::msg)?;
+
         let conn = self
             .conn
             .lock()
@@ -38,7 +41,7 @@ impl AgentRepository for Database {
             .join(", ");
         conn.execute(
             &format!(
-                "INSERT INTO agents ({AGENT_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18) \
+                "INSERT INTO agents ({AGENT_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21) \
                  ON CONFLICT(id) DO UPDATE SET {set_clause}"
             ),
             params![
@@ -60,6 +63,9 @@ impl AgentRepository for Database {
                 agent.last_run_ok,
                 agent.last_triggered_at.map(|t| t.to_rfc3339()),
                 agent.trigger_count as i64,
+                agent.action.kind_str(),
+                agent.action.target_session_id(),
+                agent.action.target_session_name(),
             ],
         )?;
         Ok(())
@@ -326,6 +332,9 @@ struct AgentRow {
     last_run_ok: Option<bool>,
     last_triggered_at_str: Option<String>,
     trigger_count: i64,
+    action_str: Option<String>,
+    target_session_id: Option<String>,
+    target_session_name: Option<String>,
 }
 
 impl AgentRow {
@@ -349,6 +358,9 @@ impl AgentRow {
             last_run_ok: row.get(15)?,
             last_triggered_at_str: row.get(16)?,
             trigger_count: row.get(17)?,
+            action_str: row.get(18)?,
+            target_session_id: row.get(19)?,
+            target_session_name: row.get(20)?,
         })
     }
 
@@ -383,6 +395,13 @@ impl AgentRow {
             .map(|json| serde_json::from_str::<Trigger>(json))
             .transpose()?;
 
+        let action = AgentAction::from_columns(
+            self.action_str.as_deref(),
+            self.target_session_id,
+            self.target_session_name,
+        )
+        .map_err(anyhow::Error::msg)?;
+
         Ok(Agent {
             id: self.id,
             prompt: self.prompt,
@@ -401,6 +420,7 @@ impl AgentRow {
             last_run_ok: self.last_run_ok,
             last_triggered_at,
             trigger_count: self.trigger_count as u64,
+            action,
         })
     }
 }
@@ -464,6 +484,7 @@ mod tests {
             last_run_ok: None,
             last_triggered_at: None,
             trigger_count: 0,
+            action: crate::domain::models::AgentAction::Headless,
         }
     }
 

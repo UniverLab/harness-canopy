@@ -1,7 +1,8 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use chrono::Utc;
 
 use crate::application::ports::{AgentRepository, StateRepository};
 use crate::daemon::process::{
@@ -9,129 +10,149 @@ use crate::daemon::process::{
     DaemonState,
 };
 use crate::db::Database;
+use crate::domain::db_health::DbHealthStatus;
 use crate::domain::db_paths::database_path;
+use crate::domain::graphs::{
+    EnsembleDetails, GraphCompletionHook, GraphHookEvent, GraphNode, GraphStatus,
+};
+use crate::domain::validation::{find_stale_2x_names, StaleNameHit};
 
-/// Human-readable name for display in doctor messages.
-impl crate::rag::embedding_client::EmbeddingProvider {
-    pub fn name(&self) -> &'static str {
-        match self {
-            crate::rag::embedding_client::EmbeddingProvider::OpenAi => "OpenAI",
-            crate::rag::embedding_client::EmbeddingProvider::Gemini => "Gemini",
-            crate::rag::embedding_client::EmbeddingProvider::Local => "Local",
+mod service_unit;
+use service_unit::*;
+mod path_copies;
+use path_copies::*;
+mod rag_report;
+use rag_report::*;
+
+/// CB68 FR3: aggregated result of scanning every non-archived graph's
+/// node/ensemble prompts and hooks, and every scheduled agent's prompt, for a
+/// stale 2.x `loop_<name>` tool name or the gone `canopy loop` CLI. Grouped
+/// one entry per graph (not one per node) so doctor prints a readable line per
+/// graph. Pure over an already-open `Database` — no printing — so tests can
+/// assert on a fixture DB directly (stdout-fd capture is unreliable in CI; see
+/// the `#[ignore]` notes on the `run_doctor_*` fixture tests below).
+pub(crate) struct StaleNameReport {
+    pub graphs: Vec<StaleGraphNames>,
+    pub agents: Vec<StaleAgentNames>,
+}
+
+/// Distinct stale names found in one graph, with the total reference count
+/// (hits, not distinct pairs) and the graph's current top-level status.
+pub(crate) struct StaleGraphNames {
+    pub graph_name: String,
+    pub status: GraphStatus,
+    pub ref_count: usize,
+    pub names: Vec<StaleNameHit>,
+}
+
+/// Distinct stale names found in one scheduled agent's prompt.
+pub(crate) struct StaleAgentNames {
+    pub agent_id: String,
+    pub ref_count: usize,
+    pub names: Vec<StaleNameHit>,
+}
+
+/// Unique old→new pairs, preserving first-seen order. O(n²) but n < ~10.
+fn distinct_hits(hits: Vec<StaleNameHit>) -> Vec<StaleNameHit> {
+    let mut distinct: Vec<StaleNameHit> = Vec::new();
+    for hit in hits {
+        if !distinct.contains(&hit) {
+            distinct.push(hit);
         }
     }
+    distinct
 }
 
-/// CB19: classify the embeddings_model config before doctor prints or
-/// walks API-key / ONNX paths. Pure so unit tests can assert the
-/// "not configured" vs "configured but unrunnable" distinction without
-/// spinning up a full `run_doctor` (those black-box tests stay `#[ignore]`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum EmbeddingsConfigDiagnosis {
-    /// Empty model string — nothing is configured to judge.
-    NotConfigured,
-    /// A provider is named in config but this binary cannot serve it.
-    ProviderUnavailable { provider_name: &'static str },
-    /// Model string is non-empty and either maps to an available provider
-    /// or is unrecognized (caller continues into key / support checks).
-    Configured,
-}
-
-pub(crate) fn diagnose_embeddings_config(model: &str) -> EmbeddingsConfigDiagnosis {
-    if model.is_empty() {
-        return EmbeddingsConfigDiagnosis::NotConfigured;
-    }
-    match crate::rag::embedding_client::provider_for_model(model) {
-        Some(p) if !crate::rag::embedding_client::provider_available(p) => {
-            EmbeddingsConfigDiagnosis::ProviderUnavailable {
-                provider_name: p.name(),
-            }
-        }
-        Some(_) | None => EmbeddingsConfigDiagnosis::Configured,
-    }
-}
-
-/// CB68 FR3: scan every non-archived graph's node/ensemble prompts and
-/// hooks, and every scheduled agent's prompt, for a stale 2.x `loop_<name>`
-/// tool name or the gone `canopy loop` CLI. Pure over an already-open
-/// `Database` — no printing — so tests can assert on a fixture DB directly,
-/// the same reason `diagnose_embeddings_config` above is split out from
-/// `run_doctor` (stdout-fd capture is unreliable in CI; see the `#[ignore]`
-/// notes on the `run_doctor_*` fixture tests below).
-pub(crate) fn find_stale_2x_name_hits(db: &Database) -> anyhow::Result<Vec<String>> {
-    let mut hits = Vec::new();
+pub(crate) fn find_stale_2x_name_hits(db: &Database) -> anyhow::Result<StaleNameReport> {
+    let mut graphs = Vec::new();
     for graph in db.list_graphs(None, false)? {
         let Some(details) = db.get_graph_details(&graph.id)? else {
             continue;
         };
-        let all_nodes = details
-            .graph_nodes
-            .iter()
-            .chain(details.specs.iter().flat_map(|s| s.nodes.iter()));
-        for node in all_nodes {
-            for field in ["prompt_template", "command"] {
-                if let Some(text) = node.config.get(field).and_then(|v| v.as_str()) {
-                    for hit in crate::domain::validation::find_stale_2x_names(text) {
-                        hits.push(format!(
-                            "{} · {} · {} → {}",
-                            graph.name, node.name, hit.old, hit.new
-                        ));
-                    }
-                }
-            }
-        }
-        for (event, hook_list) in &details.lp.hooks {
-            for hook in hook_list {
-                for text in [hook.prompt.as_deref(), hook.command.as_deref()]
-                    .into_iter()
-                    .flatten()
-                {
-                    for hit in crate::domain::validation::find_stale_2x_names(text) {
-                        hits.push(format!(
-                            "{} · {} hook · {} → {}",
-                            graph.name,
-                            event.as_str(),
-                            hit.old,
-                            hit.new
-                        ));
-                    }
-                }
-            }
-        }
+        let mut hits: Vec<StaleNameHit> = Vec::new();
+        hits.extend(graph_node_hits(
+            details
+                .graph_nodes
+                .iter()
+                .chain(details.specs.iter().flat_map(|s| s.nodes.iter())),
+        ));
+        hits.extend(graph_hook_hits(&details.lp.hooks));
         let mut ensembles = db.list_ensembles_for_graph(&graph.id)?;
         for spec in &details.specs {
             ensembles.extend(db.list_ensembles_for_spec(&spec.spec.id)?);
         }
-        for ens in &ensembles {
-            for hit in crate::domain::validation::find_stale_2x_names(&ens.ensemble.prompt_template)
-            {
-                hits.push(format!(
-                    "{} · {} · {} → {}",
-                    graph.name, ens.ensemble.name, hit.old, hit.new
-                ));
-            }
-            for member in &ens.members {
-                let Some(prompt_override) = &member.prompt_override else {
-                    continue;
-                };
-                for hit in crate::domain::validation::find_stale_2x_names(prompt_override) {
-                    hits.push(format!(
-                        "{} · {} · {} → {}",
-                        graph.name, ens.ensemble.name, hit.old, hit.new
-                    ));
-                }
-            }
+        hits.extend(graph_ensemble_hits(&ensembles));
+        if !hits.is_empty() {
+            graphs.push(StaleGraphNames {
+                graph_name: graph.name,
+                status: details.lp.status,
+                ref_count: hits.len(),
+                names: distinct_hits(hits),
+            });
         }
     }
+
+    let mut agents = Vec::new();
     for agent in db.list_agents()? {
-        for hit in crate::domain::validation::find_stale_2x_names(&agent.prompt) {
-            hits.push(format!(
-                "{} · scheduled agent prompt · {} → {}",
-                agent.id, hit.old, hit.new
-            ));
+        let hits = find_stale_2x_names(&agent.prompt);
+        if !hits.is_empty() {
+            agents.push(StaleAgentNames {
+                agent_id: agent.id,
+                ref_count: hits.len(),
+                names: hits,
+            });
         }
     }
-    Ok(hits)
+
+    Ok(StaleNameReport { graphs, agents })
+}
+
+/// Stale-name hits in every node config of one graph: the top-level graph
+/// nodes and each spec's nodes, `prompt_template` then `command`.
+fn graph_node_hits<'a>(nodes: impl Iterator<Item = &'a GraphNode>) -> Vec<StaleNameHit> {
+    let mut hits = Vec::new();
+    for node in nodes {
+        for field in ["prompt_template", "command"] {
+            if let Some(text) = node.config.get(field).and_then(|v| v.as_str()) {
+                hits.extend(find_stale_2x_names(text));
+            }
+        }
+    }
+    hits
+}
+
+/// Stale-name hits in one graph's hooks, each hook's prompt then its command.
+fn graph_hook_hits(
+    hooks: &BTreeMap<GraphHookEvent, Vec<GraphCompletionHook>>,
+) -> Vec<StaleNameHit> {
+    let mut hits = Vec::new();
+    for hook_list in hooks.values() {
+        for hook in hook_list {
+            for text in [hook.prompt.as_deref(), hook.command.as_deref()]
+                .into_iter()
+                .flatten()
+            {
+                hits.extend(find_stale_2x_names(text));
+            }
+        }
+    }
+    hits
+}
+
+/// Stale-name hits in one graph's ensembles: the shared prompt first, then
+/// each member's prompt override.
+fn graph_ensemble_hits(ensembles: &[EnsembleDetails]) -> Vec<StaleNameHit> {
+    let mut hits = Vec::new();
+    for ens in ensembles {
+        hits.extend(find_stale_2x_names(&ens.ensemble.prompt_template));
+        for member in &ens.members {
+            let Some(prompt_override) = &member.prompt_override else {
+                continue;
+            };
+            hits.extend(find_stale_2x_names(prompt_override));
+        }
+    }
+    hits
 }
 
 /// Print doctor's "verified" line — the ✓ glyph reserved for a check that
@@ -165,9 +186,74 @@ pub(crate) async fn run_doctor() -> Result<()> {
 
     let mut issues: Vec<String> = Vec::new();
 
-    // capability: `exists()` is a live stat, not a cached/declared value —
-    // the fact asserted ("this directory is on disk right now") is exactly
-    // what's checked.
+    report_data_directory(&canopy_dir, &mut issues);
+    report_database(&db_path, &canopy_dir, &mut issues);
+
+    let config = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir);
+    report_configuration(&canopy_dir, &config);
+
+    let daemon = resolve_daemon_facts(&canopy_dir, &db_path);
+    report_daemon_status(&daemon, &mut issues);
+
+    // ── Legacy/new data layout split ────────────────────────────────
+    // `usage.toml` and `cache/` migrations defer deleting their legacy
+    // counterpart while a daemon may still be using it (see
+    // `usage_stats::migrate_legacy_json` / `models_db::migrate_legacy_caches`),
+    // so a lingering split is expected during that window — but it's the
+    // one thing an operator can actually observe from outside, and
+    // otherwise has no way to explain.
+    report_layout_split(&canopy_dir, daemon.state_pid, &mut issues);
+
+    // ── Service Unit ──────────────────────────────────────────────
+    // A unit that exists but points at a deleted/stale binary makes
+    // systemd/launchd retry-graph the daemon forever with nothing on the
+    // port — from here that's indistinguishable from "never started" unless
+    // doctor reads the unit itself and says so.
+    //
+    // CB73: the BROWSER check judges the *effective* environment (merged
+    // drop-ins via `systemctl show`), plus the environ of an orphaned port
+    // holder when that process isn't the unit's MainPID (CB72) — the
+    // running daemon's environment is the one harnesses actually inherit.
+    report_service_unit_section(&home, &daemon, &mut issues);
+
+    // ── Orphaned joins (CB52) ─────────────────────────────────────
+    // Databases damaged before the entry/exit FKs became RESTRICT hold join
+    // nodes with no ensemble row. Never auto-repaired (C1) — listed here
+    // per graph so the operator can delete or rewire them by hand.
+    report_orphan_joins(&canopy_dir, &mut issues);
+
+    // ── Duplicate Binaries (C17) ────────────────────────────────────
+    // A tool installed by both the install script (~/.local/bin) and
+    // `cargo install` (~/.cargo/bin) leaves two binaries on PATH — updating
+    // one and running the other produces old behaviour with nothing to
+    // explain it. Walk PATH the way the shell does and say which copy
+    // actually runs.
+    report_canopy_path_copies(&mut issues).await;
+
+    report_setup_completion(&config, &mut issues);
+    report_cli_resolution(&config, &mut issues);
+
+    // ── RAG Health ──────────────────────────────────────────────
+    // Re-read config.toml here: the RAG checks judge the file as it is now,
+    // not as it was when the sections above read it.
+    let config = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir);
+
+    report_embeddings(&config, &db_path, &canopy_dir, &mut issues);
+    report_rag_size_limit(&config, &mut issues);
+    report_rag_directories(&canopy_dir, &config, &mut issues);
+    report_ragignore(&canopy_dir);
+    report_vector_store(&config, &mut issues).await;
+    report_rag_queue(&db_path, &canopy_dir);
+    report_rag_store_health(&db_path, &canopy_dir, &config, &mut issues);
+    print_doctor_suggestions(&issues);
+
+    Ok(())
+}
+
+/// Doctor's data-directory stat. Capability: `exists()` is a live stat, not
+/// a cached/declared value — the fact asserted ("this directory is on disk
+/// right now") is exactly what's checked.
+fn report_data_directory(canopy_dir: &Path, issues: &mut Vec<String>) {
     if canopy_dir.exists() {
         success(format!("Data directory: {}", canopy_dir.display()));
     } else {
@@ -177,119 +263,283 @@ pub(crate) async fn run_doctor() -> Result<()> {
         );
         issues.push("Run 'canopy setup' to initialize".to_string());
     }
+}
 
-    // capability: the tick now requires the database to actually open, not
-    // just for its file to exist — a corrupt/unreadable db file used to
-    // print the same green line as a healthy one because the old code
-    // printed the tick before attempting `Database::new`.
-    if db_path.exists() {
-        match Database::new_safe(&db_path, &canopy_dir) {
-            Ok(db) => {
-                success(format!("Database: {}", db_path.display()));
-                if let Ok(agents) = db.list_agents() {
-                    let cron_count = agents.iter().filter(|a| a.is_cron()).count();
-                    let watch_count = agents.iter().filter(|a| a.is_watch()).count();
-                    println!(
-                        " Agents: {} (cron: {}, watch: {})",
-                        agents.len(),
-                        cron_count,
-                        watch_count
-                    );
-                }
-
-                // capability: `quick_check` is run here directly (same cheap
-                // PRAGMA `canopy clean` gates its reclaim on), distinct from
-                // the daemon's own daily `integrity_check` reported just
-                // below — doctor needs an answer in an interactive
-                // round-trip, so it can't afford the full scan.
-                match db.quick_check() {
-                    Ok(verdict) if verdict == "ok" => {
-                        success("Database quick_check: ok".to_string());
-                    }
-                    Ok(verdict) => {
-                        println!(
-                            " \x1b[31m✗\x1b[0m Database quick_check reported a problem: {verdict}"
-                        );
-                        issues.push(format!(
-                            "Database quick_check found a problem: {verdict}. Back up what you can and investigate."
-                        ));
-                    }
-                    Err(e) => {
-                        println!(" \x1b[33m⚠\x1b[0m Could not run quick_check: {e}");
-                    }
-                }
-
-                // declaration: this reports the daemon's daily health
-                // routine's *last recorded* outcome, not a check run here —
-                // "never run" must read distinctly from "ran and passed",
-                // which is exactly what `DbHealthStatus::last_run_at` being
-                // `None` vs `Some` distinguishes.
-                let health_status = crate::daemon::health_routine::load_status(&db);
-                match (health_status.last_run_at, health_status.outcome) {
-                    (Some(when), Some(crate::domain::db_health::DbHealthOutcome::Passed)) => {
-                        success(format!(
-                            "Daily health routine: passed (last run {})",
-                            when.to_rfc3339()
-                        ));
-                    }
-                    (Some(when), Some(outcome)) => {
-                        println!(
-                            " \x1b[31m✗\x1b[0m Daily health routine: {outcome:?} (last run {})",
-                            when.to_rfc3339()
-                        );
-                        if let Some(result) = &health_status.integrity_result {
-                            println!("     integrity_check: {result}");
-                        }
-                        issues.push(format!(
-                            "The daily database health routine last reported {outcome:?} at {} — run 'canopy daemon health-check' for details.",
-                            when.to_rfc3339()
-                        ));
-                    }
-                    _ => {
-                        println!(" \x1b[33m⚠\x1b[0m Daily health routine: never run");
-                    }
-                }
-
-                match find_stale_2x_name_hits(&db) {
-                    Ok(hits) if hits.is_empty() => {
-                        success("Stale 2.x names: none found");
-                    }
-                    Ok(hits) => {
-                        println!(" \x1b[31m✗\x1b[0m Stale 2.x names ({} found):", hits.len());
-                        for hit in &hits {
-                            println!("     {hit}");
-                        }
-                        issues.push(format!(
-                            "{} stale 2.x loop_*/canopy-loop reference(s) found in stored prompts, hooks, \
-                             or scheduled agent prompts (listed above) — not rewritten automatically, edit \
-                             them to the 3.x names shown.",
-                            hits.len()
-                        ));
-                    }
-                    Err(e) => {
-                        println!(" \x1b[33m⚠\x1b[0m Could not scan for stale 2.x names: {e}");
-                    }
-                }
-            }
-            Err(e) => {
-                println!(" \x1b[31m✗\x1b[0m Database exists but could not be opened: {e}");
-                issues.push(format!(
-                    "Database at {} could not be opened ({e}) — it may be corrupt.",
-                    db_path.display()
-                ));
-            }
-        }
-    } else {
+/// Doctor's database section: open, agent counts, `quick_check`, the daily
+/// health routine's last recorded outcome, and the stale-2.x-name scan.
+///
+/// Capability: the tick requires the database to actually open, not just
+/// for its file to exist — a corrupt/unreadable db file used to print the
+/// same green line as a healthy one because the old code printed the tick
+/// before attempting `Database::new`. Opening stays passive: a missing
+/// database is reported, never created.
+fn report_database(db_path: &PathBuf, canopy_dir: &Path, issues: &mut Vec<String>) {
+    if !db_path.exists() {
         println!(" \x1b[33m⚠\x1b[0m Database not found (will be created on setup)");
+        return;
+    }
+    match Database::new_safe(db_path, canopy_dir) {
+        Ok(db) => report_open_database(db_path, &db, issues),
+        Err(e) => {
+            println!(" \x1b[31m✗\x1b[0m Database exists but could not be opened: {e}");
+            issues.push(format!(
+                "Database at {} could not be opened ({e}) — it may be corrupt.",
+                db_path.display()
+            ));
+        }
+    }
+}
+
+/// Everything printed from an already-opened database handle, in order:
+/// agent counts, `quick_check`, the daily health verdict, stale 2.x names.
+fn report_open_database(db_path: &Path, db: &Database, issues: &mut Vec<String>) {
+    success(format!("Database: {}", db_path.display()));
+    if let Ok(agents) = db.list_agents() {
+        let cron_count = agents.iter().filter(|a| a.is_cron()).count();
+        let watch_count = agents.iter().filter(|a| a.is_watch()).count();
+        println!(
+            " Agents: {} (cron: {}, watch: {})",
+            agents.len(),
+            cron_count,
+            watch_count
+        );
     }
 
-    // declaration: `is_configured()` only checks a persisted marker
-    // (`configured_at.is_some()`) — the claim made here is exactly that
-    // marker's presence, nothing about setup's outcome, so no further
-    // verification applies. A config string existing is not a capability,
-    // so this stays informational (no tick) rather than routing through
-    // `success`.
-    let config = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir);
+    // capability: `quick_check` is run here directly (same cheap
+    // PRAGMA `canopy clean` gates its reclaim on), distinct from
+    // the daemon's own daily `integrity_check` reported just
+    // below — doctor needs an answer in an interactive
+    // round-trip, so it can't afford the full scan.
+    match db.quick_check() {
+        Ok(verdict) if verdict == "ok" => {
+            success("Database quick_check: ok".to_string());
+        }
+        Ok(verdict) => {
+            println!(" \x1b[31m✗\x1b[0m Database quick_check reported a problem: {verdict}");
+            issues.push(format!(
+                "Database quick_check found a problem: {verdict}. Back up what you can and investigate."
+            ));
+        }
+        Err(e) => {
+            println!(" \x1b[33m⚠\x1b[0m Could not run quick_check: {e}");
+        }
+    }
+
+    // declaration: this reports the daemon's daily health
+    // routine's *last recorded* outcome, not a check run here —
+    // "never run" must read distinctly from "ran and passed",
+    // which is exactly what `DbHealthStatus::last_run_at` being
+    // `None` vs `Some` distinguishes.
+    let health_status = crate::daemon::health_routine::load_status(db);
+    report_health_routine(&health_status, issues);
+
+    report_stale_names(db, issues);
+}
+
+/// The "Daily health routine" line and its follow-ups. Reports the daemon's
+/// last *recorded* outcome (never a check run here). CB93: a routine that has
+/// never completed but keeps being deferred (busy daemon) reads distinctly
+/// from a fresh install's "never run", and a completed run shows its backup's
+/// age and any deferrals since.
+fn report_health_routine(health_status: &DbHealthStatus, issues: &mut Vec<String>) {
+    let now = Utc::now();
+    match health_status.last_run_at {
+        None => {
+            if health_status.deferred_count > 0 {
+                let first = format_ts(health_status.first_deferred_at);
+                let last = format_ts(health_status.last_skip_at);
+                let busy = health_status
+                    .last_skip_reason
+                    .as_deref()
+                    .unwrap_or("unknown");
+                println!(
+                    " \x1b[33m⚠\x1b[0m Daily health routine: never completed — deferred {} times \
+                     since {}, last {} (busy: {}); it runs anyway after 72h of deferral",
+                    health_status.deferred_count, first, last, busy
+                );
+                issues.push(format!(
+                    "Daily database health routine has never completed — deferred {} times since \
+                     {} (busy: {}); run 'canopy daemon health-check' to run it now.",
+                    health_status.deferred_count, first, busy
+                ));
+            } else {
+                println!(" \x1b[33m⚠\x1b[0m Daily health routine: never run");
+            }
+        }
+        Some(when) => {
+            report_completed_health_routine(health_status, when, now, issues);
+        }
+    }
+}
+
+/// The rendering for a routine that has completed at least once: the outcome
+/// line, the backup path and its age (when a backup exists on disk), and the
+/// deferrals counted since that run.
+fn report_completed_health_routine(
+    health_status: &DbHealthStatus,
+    when: chrono::DateTime<Utc>,
+    now: chrono::DateTime<Utc>,
+    issues: &mut Vec<String>,
+) {
+    match health_status.outcome {
+        Some(crate::domain::db_health::DbHealthOutcome::Passed) => {
+            success(format!(
+                "Daily health routine: passed (last run {})",
+                when.to_rfc3339()
+            ));
+        }
+        Some(outcome) => {
+            println!(
+                " \x1b[31m✗\x1b[0m Daily health routine: {outcome:?} (last run {})",
+                when.to_rfc3339()
+            );
+            if let Some(result) = &health_status.integrity_result {
+                println!("     integrity_check: {result}");
+            }
+            issues.push(format!(
+                "The daily database health routine last reported {outcome:?} at {} — run 'canopy daemon health-check' for details.",
+                when.to_rfc3339()
+            ));
+        }
+        None => {
+            println!(
+                " \x1b[33m⚠\x1b[0m Daily health routine: last run {} (outcome unknown)",
+                when.to_rfc3339()
+            );
+        }
+    }
+    if let Some(age) = backup_age(health_status, now) {
+        println!("     backup: {age}");
+    }
+    if health_status.deferred_count > 0 {
+        println!(
+            "     deferred {} times since the last run",
+            health_status.deferred_count
+        );
+    }
+}
+
+/// "path (age: 2h)" for the routine's recorded backup, when that file still
+/// exists on disk and its mtime is readable. `None` otherwise — a stale path
+/// must not be printed as if a backup were there.
+fn backup_age(health_status: &DbHealthStatus, now: chrono::DateTime<Utc>) -> Option<String> {
+    let path = std::path::Path::new(health_status.backup_path.as_deref()?);
+    let mtime = path.metadata().ok()?.modified().ok()?;
+    let age = now
+        .signed_duration_since(chrono::DateTime::<Utc>::from(mtime))
+        .to_std()
+        .unwrap_or_default();
+    let age = crate::daemon::handler_formatting::format_duration_short(age);
+    Some(format!("{} (age: {})", path.display(), age))
+}
+
+fn format_ts(ts: Option<chrono::DateTime<Utc>>) -> String {
+    ts.map(|t| t.to_rfc3339())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// The stale-2.x-name section: one line per affected graph (not one per node),
+/// one line per affected scheduled agent, then the remediation suggestion.
+fn report_stale_names(db: &Database, issues: &mut Vec<String>) {
+    let report = match find_stale_2x_name_hits(db) {
+        Ok(r) => r,
+        Err(e) => {
+            println!(" \x1b[33m⚠\x1b[0m Could not scan for stale 2.x names: {e}");
+            return;
+        }
+    };
+    let graph_refs: usize = report.graphs.iter().map(|g| g.ref_count).sum();
+    let agent_refs: usize = report.agents.iter().map(|a| a.ref_count).sum();
+    let total = graph_refs + agent_refs;
+    if total == 0 {
+        success("Stale 2.x names: none found");
+        return;
+    }
+    if report.graphs.is_empty() {
+        // Only scheduled-agent prompts are stale (every affected graph is
+        // already archived): a "0 graph(s)" header would read as a bug.
+        println!(
+            " \x1b[31m✗\x1b[0m Stale 2.x names ({} found in {} scheduled agent(s)):",
+            total,
+            report.agents.len()
+        );
+    } else if report.agents.is_empty() {
+        println!(
+            " \x1b[31m✗\x1b[0m Stale 2.x names ({} found in {} graph(s)):",
+            total,
+            report.graphs.len()
+        );
+    } else {
+        println!(
+            " \x1b[31m✗\x1b[0m Stale 2.x names ({} found in {} graph(s), {} in scheduled agent(s)):",
+            total,
+            report.graphs.len(),
+            report.agents.len()
+        );
+    }
+    for g in &report.graphs {
+        println!(
+            "     • {} ({}, {} refs): {}",
+            g.graph_name,
+            g.status.as_str(),
+            g.ref_count,
+            format_hits(&g.names)
+        );
+    }
+    for a in &report.agents {
+        println!(
+            "     • scheduled agent '{}' ({} refs): {}",
+            a.agent_id,
+            a.ref_count,
+            format_hits(&a.names)
+        );
+    }
+    issues.push(stale_names_suggestion(&report, total));
+}
+
+fn format_hits(names: &[StaleNameHit]) -> String {
+    names
+        .iter()
+        .map(|n| format!("{} → {}", n.old, n.new))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// CB93 FR4: when every affected graph is completed/failed, archiving is the
+/// clean remediation (`graph_archive`, reversible with `graph_restore`); the
+/// scan already skips archived graphs, so archiving actually clears the
+/// report. Any graph in another status (or any scheduled agent) keeps the
+/// edit-to-3.x-names suggestion instead — archiving would not be enough.
+fn stale_names_suggestion(report: &StaleNameReport, total: usize) -> String {
+    let all_graphs_terminal = !report.graphs.is_empty()
+        && report
+            .graphs
+            .iter()
+            .all(|g| matches!(g.status, GraphStatus::Completed | GraphStatus::Failed));
+    if all_graphs_terminal && report.agents.is_empty() {
+        format!(
+            "{total} stale 2.x name(s) found in completed/failed graphs (listed above) — those \
+             graphs can be archived with `graph_archive` (reversible with `graph_restore`); the \
+             scan already skips archived graphs."
+        )
+    } else {
+        format!(
+            "{total} stale 2.x loop_*/canopy-loop reference(s) found in stored prompts, hooks, or \
+             scheduled agent prompts (listed above) — not rewritten automatically, edit them to \
+             the 3.x names shown."
+        )
+    }
+}
+
+/// Doctor's config.toml section: presence, harness list, legacy fallback.
+///
+/// declaration: `is_configured()` only checks a persisted marker
+/// (`configured_at.is_some()`) — the claim made here is exactly that
+/// marker's presence, nothing about setup's outcome, so no further
+/// verification applies. A config string existing is not a capability,
+/// so this stays informational (no tick) rather than routing through
+/// `success`.
+fn report_configuration(canopy_dir: &Path, config: &crate::domain::canopy_config::CanopyConfig) {
     if config.is_configured() {
         println!(" \x1b[90m–\x1b[0m Config: config.toml");
         if config.clis.is_empty() {
@@ -297,27 +547,68 @@ pub(crate) async fn run_doctor() -> Result<()> {
         } else {
             println!(" Harnesses: {}", config.cli_names().join(", "));
         }
-    } else {
-        let cli_config_path = canopy_dir.join("cli_config.json");
-        let configured_marker = canopy_dir.join(".configured");
-        if cli_config_path.exists() || configured_marker.exists() {
-            println!(
-                " \x1b[33m⚠\x1b[0m Legacy config files found (run setup to migrate to config.toml)"
-            );
-        } else {
-            println!(" \x1b[33m⚠\x1b[0m Config not found (run setup)");
-        }
+        report_settings_problems(canopy_dir);
+        return;
     }
 
-    // Same fact-check `canopy daemon status` runs (kept in one place per the
-    // service-unit spec): a PID file naming a live process isn't enough to
-    // call the daemon healthy if that process isn't actually the one
-    // holding the port, or isn't the one a service manager owns.
-    let raw_pid = read_pid(&canopy_dir);
+    let cli_config_path = canopy_dir.join("cli_config.json");
+    let configured_marker = canopy_dir.join(".configured");
+    if cli_config_path.exists() || configured_marker.exists() {
+        println!(
+            " \x1b[33m⚠\x1b[0m Legacy config files found (run setup to migrate to config.toml)"
+        );
+    } else {
+        println!(" \x1b[33m⚠\x1b[0m Config not found (run setup)");
+    }
+    report_settings_problems(canopy_dir);
+}
+
+/// CM51: surface every setting the file gets wrong — an invalid value (still
+/// running on its previous effective value) and a key nothing declares.
+fn report_settings_problems(canopy_dir: &Path) {
+    for row in crate::domain::settings::inspect::list(canopy_dir, None) {
+        match row.status {
+            crate::domain::settings::inspect::Status::Invalid(reason) => {
+                println!(" \x1b[33m⚠\x1b[0m Config: {} invalid: {reason}", row.key);
+            }
+            crate::domain::settings::inspect::Status::Unknown => {
+                println!(
+                    " \x1b[33m⚠\x1b[0m Config: unknown key {} (kept, not used)",
+                    row.key
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The daemon facts doctor reports on, gathered in one place so the status
+/// and service-unit sections judge the same state.
+struct DoctorDaemonFacts {
+    /// The PID the PID file names, before any liveness check.
+    raw_pid: Option<u32>,
+    /// The PID file's PID only if that process is actually alive.
+    state_pid: Option<u32>,
+    /// The process holding doctor's resolved port, if any.
+    port_pid: Option<u32>,
+    /// The service manager (if any) that claims to own the unit.
+    manager: Option<crate::daemon::process::ServiceManagerFacts>,
+}
+
+/// Gather the daemon facts in the order they've always been gathered: PID
+/// file → liveness → port (reading the persisted port state, falling back
+/// to `resolve_port`) → port holder → service manager.
+///
+/// Same fact-check `canopy daemon status` runs (kept in one place per the
+/// service-unit spec): a PID file naming a live process isn't enough to
+/// call the daemon healthy if that process isn't actually the one holding
+/// the port, or isn't the one a service manager owns.
+fn resolve_daemon_facts(canopy_dir: &Path, db_path: &PathBuf) -> DoctorDaemonFacts {
+    let raw_pid = read_pid(canopy_dir);
     let state_pid = raw_pid.filter(|&p| is_process_running(p));
     let port: u16 = db_path
         .exists()
-        .then(|| Database::new_safe(&db_path, &canopy_dir).ok())
+        .then(|| Database::new_safe(db_path, canopy_dir).ok())
         .flatten()
         .and_then(|db| db.get_state("port").ok().flatten())
         .and_then(|s| s.parse().ok())
@@ -325,9 +616,19 @@ pub(crate) async fn run_doctor() -> Result<()> {
     let port_pid = resolve_port_pid(port);
     let manager = service_manager_facts();
 
-    match diagnose_daemon(state_pid, port_pid, manager.as_ref()) {
+    DoctorDaemonFacts {
+        raw_pid,
+        state_pid,
+        port_pid,
+        manager,
+    }
+}
+
+/// Doctor's daemon-status section: stopped, running, or inconsistent.
+fn report_daemon_status(facts: &DoctorDaemonFacts, issues: &mut Vec<String>) {
+    match diagnose_daemon(facts.state_pid, facts.port_pid, facts.manager.as_ref()) {
         DaemonState::Stopped => {
-            if let Some(stale) = raw_pid {
+            if let Some(stale) = facts.raw_pid {
                 println!(
                     " \x1b[31m✗\x1b[0m Daemon not running (stale PID: {})",
                     stale
@@ -362,1313 +663,70 @@ pub(crate) async fn run_doctor() -> Result<()> {
             }
         }
     }
+}
 
-    // ── Legacy/new data layout split ────────────────────────────────
-    // `usage.toml` and `cache/` migrations defer deleting their legacy
-    // counterpart while a daemon may still be using it (see
-    // `usage_stats::migrate_legacy_json` / `models_db::migrate_legacy_caches`),
-    // so a lingering split is expected during that window — but it's the
-    // one thing an operator can actually observe from outside, and
-    // otherwise has no way to explain.
-    report_layout_split(&canopy_dir, state_pid, &mut issues);
-
-    // ── Service Unit ──────────────────────────────────────────────
-    // A unit that exists but points at a deleted/stale binary makes
-    // systemd/launchd retry-graph the daemon forever with nothing on the
-    // port — from here that's indistinguishable from "never started" unless
-    // doctor reads the unit itself and says so.
-    //
-    // CB73: the BROWSER check judges the *effective* environment (merged
-    // drop-ins via `systemctl show`), plus the environ of an orphaned port
-    // holder when that process isn't the unit's MainPID (CB72) — the
-    // running daemon's environment is the one harnesses actually inherit.
-    let port_pid_for_unit = port_pid;
-    let manager_pid_for_unit = manager.as_ref().and_then(|m| m.pid);
-    let show_out = if manager.is_some_and(|m| m.name == "systemd") {
+/// Probe what the service unit knows (effective `systemctl show`
+/// environment, the orphan's own `/proc/<pid>/environ`) and hand the result
+/// to the existing service-unit reporter.
+fn report_service_unit_section(home: &Path, facts: &DoctorDaemonFacts, issues: &mut Vec<String>) {
+    let manager_pid = facts.manager.as_ref().and_then(|m| m.pid);
+    let show_out = if facts.manager.is_some_and(|m| m.name == "systemd") {
         read_systemctl_show_environment()
     } else {
         None
     };
-    let is_orphan = port_pid_for_unit.is_some()
-        && manager_pid_for_unit != port_pid_for_unit
-        && manager.is_some();
+    let oom_policy_out = if facts.manager.is_some_and(|m| m.name == "systemd") {
+        read_systemctl_show_oom_policy()
+    } else {
+        None
+    };
+    let is_orphan =
+        facts.port_pid.is_some() && manager_pid != facts.port_pid && facts.manager.is_some();
     let orphan_env: Option<Vec<u8>> = if is_orphan {
-        port_pid_for_unit.and_then(read_proc_environ)
+        facts.port_pid.and_then(read_proc_environ)
     } else {
         None
     };
     report_service_unit(
-        &home,
-        port_pid_for_unit,
-        manager_pid_for_unit,
+        home,
+        facts.port_pid,
+        manager_pid,
         show_out.as_deref(),
         orphan_env.as_deref(),
-        &mut issues,
+        oom_policy_out.as_deref(),
+        issues,
     );
+}
 
-    // ── Orphaned joins (CB52) ─────────────────────────────────────
-    // Databases damaged before the entry/exit FKs became RESTRICT hold join
-    // nodes with no ensemble row. Never auto-repaired (C1) — listed here
-    // per graph so the operator can delete or rewire them by hand.
-    report_orphan_joins(&canopy_dir, &mut issues);
-
-    // ── Duplicate Binaries (C17) ────────────────────────────────────
-    // A tool installed by both the install script (~/.local/bin) and
-    // `cargo install` (~/.cargo/bin) leaves two binaries on PATH — updating
-    // one and running the other produces old behaviour with nothing to
-    // explain it. Walk PATH the way the shell does and say which copy
-    // actually runs.
-    report_canopy_path_copies(&mut issues).await;
-
-    // declaration: same marker as the "Config: config.toml" check above —
-    // kept as a separate line for readability, not a separate fact. Same
-    // reasoning applies: informational, not a tick.
+/// Doctor's setup-completion line.
+///
+/// declaration: same marker as the "Config: config.toml" check above —
+/// kept as a separate line for readability, not a separate fact. Same
+/// reasoning applies: informational, not a tick.
+fn report_setup_completion(
+    config: &crate::domain::canopy_config::CanopyConfig,
+    issues: &mut Vec<String>,
+) {
     if config.is_configured() {
         println!(" \x1b[90m–\x1b[0m Setup completed");
     } else {
         println!(" \x1b[33m⚠\x1b[0m Setup not completed");
         issues.push("Run 'canopy setup'".to_string());
     }
+}
 
-    // ── CLI Resolution (B40) ──────────────────────────────────
-    // Per-CLI report: resolved or not, by which step, absolute path.
-    // Also warns when a CLI is reachable from the current process's PATH
-    // but not from the daemon's captured PATH (different environments).
-    let daemon_path = crate::domain::cli_strategy::daemon_path();
-
-    if config.clis.is_empty() {
-        println!(" \x1b[33m⚠\x1b[0m No harnesses configured (run 'canopy setup')");
-        issues.push("Run 'canopy setup' to detect and configure harnesses".to_string());
-    } else {
-        for cli_config in &config.clis {
-            let label = doctor_cli_label(cli_config);
-            match cli_config.resolve() {
-                // declaration, partially: `resolve()`'s PATH-search step
-                // (`which`) does confirm a real file, but its absolute-path
-                // step accepts the string as-is without checking the file
-                // exists — so a stale absolute path in config.toml would
-                // otherwise resolve "Ok" and print a green tick for a
-                // binary that isn't there. `binary_is_executable` (the
-                // probe the service-unit check already uses) closes that
-                // gap instead of duplicating a second existence check.
-                Ok((resolved, step)) if !binary_is_executable(&resolved) => {
-                    println!(
-                        " \x1b[31m✗\x1b[0m {} → {} (via {} — file missing or not executable)",
-                        label,
-                        resolved.display(),
-                        step.label()
-                    );
-                    issues.push(format!(
-                        "'{}' resolved to {} but that file is missing or not executable.",
-                        cli_config.name,
-                        resolved.display()
-                    ));
-                }
-                Ok((resolved, step)) => {
-                    // CB44: identity check — the resolved binary may be a
-                    // different program answering to the same bare name
-                    // (e.g. `/usr/bin/blackbox` is the Blackbox X11 window
-                    // manager, not the Blackbox CLI). Runs once per doctor
-                    // invocation, never on dispatch. Platforms with no
-                    // declared check behave exactly as today.
-                    if let Some(wb) = diagnose_cli_identity(cli_config, &resolved) {
-                        let check = cli_config
-                            .identity_check
-                            .as_ref()
-                            .map_or("", |c| c.contains.as_str());
-                        println!(
-                            " \x1b[31m✗\x1b[0m {} → {} (via {} — wrong binary: expected '{}' in output; saw: {})",
-                            label,
-                            resolved.display(),
-                            step.label(),
-                            check,
-                            wb.output,
-                        );
-                        let check_cmd = cli_config
-                            .identity_check
-                            .as_ref()
-                            .map_or("", |c| c.cmd.as_str());
-                        issues.push(wb.report(&cli_config.binary, check_cmd));
-                        continue;
-                    }
-                    // Check daemon reachability: does the binary also
-                    // resolve under the daemon's captured PATH?
-                    let daemon_reachable = match &daemon_path {
-                        Some(dp) => cli_config.resolve_against(dp).is_ok(),
-                        // No daemon PATH (macOS/launchd) → no mismatch possible
-                        None => true,
-                    };
-                    if daemon_reachable {
-                        success(format!(
-                            "{} → {} (via {})",
-                            label,
-                            resolved.display(),
-                            step.label()
-                        ));
-                    } else {
-                        println!(
-                            " \x1b[33m⚠\x1b[0m {} → {} (via {} — reachable now but NOT from the daemon)",
-                            label,
-                            resolved.display(),
-                            step.label()
-                        );
-                        issues.push(format!(
-                            "'{}' is on your interactive PATH but not the daemon's. \
-                             Re-run `canopy daemon install` to update the daemon's PATH, \
-                             or add the directory to the systemd unit's Environment=PATH=.",
-                            cli_config.name
-                        ));
-                    }
-                }
-                Err(e) => {
-                    println!(" \x1b[31m✗\x1b[0m {} — not found ({})", label, e);
-                    issues.push(format!(
-                        "'{}' binary '{}' not found. {}",
-                        cli_config.name, e.binary, e.path
-                    ));
-                }
-            }
-        }
-    }
-
-    // ── RAG Health ──────────────────────────────────────────────
-    let config = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir);
-
-    // declaration: names the configured model string; whether it's actually
-    // usable is what the branches below (API key presence, provider
-    // capability) exist to verify. A config string is not a capability, so
-    // this is informational, not a tick.
-    match diagnose_embeddings_config(&config.embeddings_model) {
-        EmbeddingsConfigDiagnosis::NotConfigured => {
-            println!(" \x1b[31m✗\x1b[0m Embeddings model not configured (run 'canopy setup')");
-            issues.push("Configure embeddings model via 'canopy setup'".to_string());
-        }
-        EmbeddingsConfigDiagnosis::ProviderUnavailable { provider_name } => {
-            println!(
-                " \x1b[90m–\x1b[0m Embeddings model: {}",
-                config.embeddings_model
-            );
-            println!(" \x1b[31m✗\x1b[0m Provider '{provider_name}' is not available in this build");
-            issues.push(format!(
-                "The configured provider ({provider_name}) requires a build with 'local-embeddings'. \
-                 Either reinstall with that feature, or re-run setup and choose a cloud provider."
-            ));
-            // Capability gap is the verdict — skip API-key / ONNX checks that
-            // would only confuse ("no API key required" for a provider this
-            // binary cannot run).
-        }
-        EmbeddingsConfigDiagnosis::Configured => {
-            println!(
-                " \x1b[90m–\x1b[0m Embeddings model: {}",
-                config.embeddings_model
-            );
-
-            let provider =
-                crate::rag::embedding_client::provider_for_model(&config.embeddings_model);
-
-            // Check that the required API key is present (local models need none).
-            let api_key_info = match provider {
-                Some(crate::rag::embedding_client::EmbeddingProvider::OpenAi) => {
-                    Some(("OPENAI_API_KEY", std::env::var("OPENAI_API_KEY").is_ok()))
-                }
-                Some(crate::rag::embedding_client::EmbeddingProvider::Gemini) => {
-                    Some(("GEMINI_API_KEY", std::env::var("GEMINI_API_KEY").is_ok()))
-                }
-                Some(crate::rag::embedding_client::EmbeddingProvider::Local) => {
-                    // Configured + Local means this build can run it
-                    // (ProviderUnavailable would have caught the other case).
-                    #[cfg(all(feature = "local-embeddings", target_os = "linux"))]
-                    match crate::rag::ort_runtime::ort_runtime_path() {
-                        Some(path) => {
-                            success_nested(format!("ONNX Runtime loaded from {}", path.display()));
-                        }
-                        None => {
-                            println!(
-                                "  \x1b[33m⚠\x1b[0m ONNX Runtime not yet downloaded (will be fetched on first local RAG use)"
-                            );
-                        }
-                    }
-
-                    // Only open the DB if it already exists — doctor is a
-                    // passive diagnostic and must not create the database
-                    // as a side effect on a machine that's never run
-                    // setup.
-                    let acquisition = db_path
-                        .exists()
-                        .then(|| Database::new_safe(&db_path, &canopy_dir).ok())
-                        .flatten()
-                        .and_then(|db| {
-                            crate::rag::status::read_acquisition_state(
-                                &db,
-                                &config.embeddings_model,
-                            )
-                        });
-                    match acquisition {
-                        Some(crate::rag::status::AcquisitionState::Downloading { started_at }) => {
-                            println!(
-                                " \x1b[33m⬇\x1b[0m Local model downloading ({}s so far)",
-                                crate::rag::status::elapsed_secs(started_at)
-                            );
-                        }
-                        Some(crate::rag::status::AcquisitionState::Preparing { started_at }) => {
-                            println!(
-                                " \x1b[33m⚙\x1b[0m Local model preparing ({}s so far)",
-                                crate::rag::status::elapsed_secs(started_at)
-                            );
-                        }
-                        Some(crate::rag::status::AcquisitionState::Failed { reason }) => {
-                            println!(" \x1b[31m✗\x1b[0m Local model download failed — {reason}");
-                            issues.push(format!(
-                                "Local embedding model download failed: {reason}. \
-                                 Run 'canopy rag model retry' to try again."
-                            ));
-                        }
-                        None => {
-                            success("Local model — no API key required");
-                        }
-                    }
-                    None
-                }
-                None => {
-                    // provider_for_model returned None - unknown model
-                    println!(
-                        " \x1b[31m✗\x1b[0m Model '{}' is not supported. Run 'canopy setup' to pick a compatible model.",
-                        config.embeddings_model
-                    );
-                    issues.push(
-                        "Run 'canopy setup' and select a supported embedding model".to_string(),
-                    );
-                    None
-                }
-            };
-
-            // declaration: an env var being set doesn't prove it's a valid
-            // credential — only a real API call could confirm that, which is
-            // too expensive for an interactive check. This reports presence,
-            // not validity.
-            if let Some((key_var, present)) = api_key_info {
-                if present {
-                    success(format!("API key {key_var} is set"));
-                } else {
-                    println!(
-                        " \x1b[31m✗\x1b[0m {key_var} is NOT set — indexing will fail silently"
-                    );
-                    issues
-                        .push("Export the required API key before starting the daemon".to_string());
-                }
-            }
-        }
-    }
-
-    // Report the *configured* value's validity explicitly — rag_max_file_bytes()
-    // silently falls back to the default for an out-of-range config.toml value
-    // (indexing must never honor an unbounded/huge cap), but that fallback
-    // must not read as silently green here.
-    // capability: `validate_rag_max_file_mb` re-derives whether the
-    // configured value is actually the one indexing will use, rather than
-    // trusting the config.toml number at face value — that's what catches
-    // the silent-fallback case flagged below.
-    match crate::domain::canopy_config::validate_rag_max_file_mb(config.rag_max_file_mb) {
-        Ok(()) => {
-            success(format!(
-                "Indexing size limit: {} MB per file",
-                config.rag_max_file_mb
-            ));
-        }
-        Err(reason) => {
-            let effective_mb = config.rag_max_file_bytes() / (1024 * 1024);
-            println!(
-                " \x1b[31m✗\x1b[0m Indexing size limit: {} MB is invalid ({reason}) — \
-                 falling back to {effective_mb} MB",
-                config.rag_max_file_mb
-            );
-            issues.push(format!(
-                "config.toml's rag_max_file_mb ({}) is invalid: {reason}. Run 'canopy setup' or fix config.toml.",
-                config.rag_max_file_mb
-            ));
-        }
-    }
-
-    if config.rag_personal_dirs.is_empty() {
-        println!(" \x1b[33m⚠\x1b[0m No personal RAG directories configured");
-        issues.push("Add personal RAG directories via 'canopy setup'".to_string());
-    } else {
-        let max_bytes = config.rag_max_file_bytes();
-        let cap_mb = max_bytes as f64 / (1024.0 * 1024.0);
-
-        // Per-directory existence is reported line-by-line; the size
-        // accounting below is delegated to the shared scan so doctor and
-        // `canopy rag report` describe the same corpus with the same
-        // ragignore/extension rules.
-        for dir in &config.rag_personal_dirs {
-            if std::path::Path::new(dir).exists() {
-                success(format!("RAG dir: {dir}"));
-            } else {
-                println!(" \x1b[31m✗\x1b[0m RAG dir missing: {dir}");
-                issues.push("Personal RAG directory not found on disk".to_string());
-            }
-        }
-
-        // capability: walks the configured roots with the ingestion filters
-        // and counts by filesystem metadata only — never opening a file.
-        match crate::rag::size_report::scan(&canopy_dir, &config.rag_personal_dirs, max_bytes) {
-            Ok(scan) => {
-                let total_files = scan.indexable_files.len();
-                let oversize_files = scan.oversize_files.len();
-                if total_files == 0 {
-                    println!(
-                        " \x1b[33m⚠\x1b[0m No indexable files found (.md, .mdx, .pdf) in RAG directories"
-                    );
-                } else {
-                    success(format!("RAG corpus: {total_files} indexable file(s)"));
-                }
-                // Printed even at zero — a silent exclusion is exactly the bug.
-                let icon = if oversize_files > 0 {
-                    "\x1b[33m⚠\x1b[0m"
-                } else {
-                    "\x1b[90m–\x1b[0m"
-                };
-                println!(
-                    " {icon} {}",
-                    crate::rag::size_report::exclusion_summary(oversize_files, max_bytes)
-                );
-                if oversize_files > 0 {
-                    issues.push(format!(
-                        "{oversize_files} configured file(s) exceed the {cap_mb:.0} MB indexing \
-                         limit and are skipped — see 'canopy rag report', or raise \
-                         rag_max_file_mb in config.toml"
-                    ));
-                }
-            }
-            Err(err) => {
-                println!(
-                    " \x1b[33m⚠\x1b[0m Could not scan RAG directories for size exclusions: {err:#}"
-                );
-                issues.push(
-                    "Failed to scan personal RAG directories for size exclusions — resolve the \
-                     error above so the exclusion count is trustworthy"
-                        .to_string(),
-                );
-            }
-        }
-    }
-
-    // capability: presence of the file is exactly the claim made — ragignore
-    // has no separate "does it work" question beyond existing on disk.
-    let ragignore_path = canopy_dir.join("ragignore");
-    if ragignore_path.exists() {
-        success(format!("ragignore: {}", ragignore_path.display()));
-    } else {
-        println!(" \x1b[90m–\x1b[0m ragignore not found (optional — create ~/.canopy/ragignore to exclude files)");
-    }
-
-    // ── Vector Store ──────────────────────────────────────────────
-    // capability: this must open the store — a corrupt LanceDB manifest,
-    // for instance, previously left the directory on disk while every
-    // query against it failed, and the old check (`lancedb_path.exists()`)
-    // printed the same green tick for that as for a healthy store. Opening
-    // it is also what's needed to read the chunk count below, so the two
-    // checks that used to live in separate sections are merged into one
-    // capability probe.
-    let lancedb_path = match crate::rag::vector_store::VectorStore::default_lancedb_path() {
-        Ok(p) => p,
-        Err(_) => {
-            println!(" \x1b[33m⚠\x1b[0m Could not determine LanceDB path");
-            issues.push("Home directory not found".to_string());
-            dirs::home_dir()
-                .unwrap_or_default()
-                .join(".canopy/rag/vectors.lancedb")
-        }
-    };
-
-    // Opening the store requires knowing its embedding dimensionality,
-    // which only a resolvable embeddings model tells us.
-    let known_dimensions = (!config.embeddings_model.is_empty())
-        .then(|| crate::rag::embedding_client::model_dimensions(&config.embeddings_model).ok())
-        .flatten();
-
-    match known_dimensions {
-        None => {
-            // declaration: no embeddings model to open the store with, so
-            // this can only report whether something is present on disk —
-            // never a tick, since presence was never verified to work.
-            if lancedb_path.exists() {
-                println!(
-                    " \x1b[90m–\x1b[0m Vector store present at {} (cannot verify without a configured embeddings model)",
-                    lancedb_path.display()
-                );
-            } else {
-                println!(
-                    " \x1b[90m–\x1b[0m Vector store not yet created (will be created on first indexing)"
-                );
-            }
-        }
-        Some(dimensions) => match crate::rag::vector_store::VectorStore::new(
-            dimensions,
-            Some(config.rag_vector_cache_entries),
-        )
-        .await
-        {
-            Err(e) => {
-                println!(" \x1b[31m✗\x1b[0m Could not open LanceDB: {e}");
-                issues.push(
-                    "LanceDB open error — check if the embeddings model is supported".to_string(),
-                );
-            }
-            Ok(store) => match store.count_chunks().await {
-                Err(_) => {
-                    println!(" \x1b[90m–\x1b[0m Could not read chunk count from LanceDB");
-                }
-                Ok(total) => {
-                    success(format!("Vector store: {}", lancedb_path.display()));
-                    if total > 0 {
-                        success(format!("Indexed chunks: {total}"));
-                        if let Ok(unique) = store.count_unique_paths().await {
-                            success(format!("Indexed files: {unique}"));
-
-                            // Surface mismatch between files on disk and indexed files.
-                            let disk_files: usize = config
-                                .rag_personal_dirs
-                                .iter()
-                                .map(std::path::Path::new)
-                                .filter(|p| p.exists())
-                                .flat_map(|p| {
-                                    walkdir::WalkDir::new(p)
-                                        .follow_links(false)
-                                        .into_iter()
-                                        .filter_map(|e| e.ok())
-                                        .filter(|e| {
-                                            e.file_type().is_file()
-                                                && crate::rag::chunker::detect_lang(
-                                                    &e.path().to_string_lossy(),
-                                                )
-                                                .is_some()
-                                        })
-                                })
-                                .count();
-
-                            if disk_files > 0 && (unique as usize) < disk_files {
-                                let unindexed = disk_files - unique as usize;
-                                println!(
-                                    " \x1b[33m⚠\x1b[0m {disk_files} indexable file(s) on disk but only {unique} indexed — \
-                                     {unindexed} not yet indexed"
-                                );
-                                issues.push(format!(
-                                    "{unindexed} file(s) are not yet indexed — run 'canopy rag backfill' to index them"
-                                ));
-                            }
-                        }
-                    } else {
-                        println!(" \x1b[31m✗\x1b[0m No chunks indexed yet");
-                        if !config.rag_personal_dirs.is_empty() {
-                            let is_local = matches!(
-                                crate::rag::embedding_client::provider_for_model(
-                                    &config.embeddings_model
-                                ),
-                                Some(crate::rag::embedding_client::EmbeddingProvider::Local)
-                            );
-                            issues.push(
-                                if is_local {
-                                    "RAG directories are configured but nothing is indexed — \
-                                     ensure the daemon is running"
-                                } else {
-                                    "RAG directories are configured but nothing is indexed — \
-                                     ensure the daemon is running and the API key env var is set"
-                                }
-                                .to_string(),
-                            );
-                        }
-                    }
-                }
-            },
-        },
-    }
-
-    // Queue count from SQLite
-    if db_path.exists() {
-        if let Ok(db) = Database::new_safe(&db_path, &canopy_dir) {
-            if let Ok((queued, processing)) = db.rag_queue_counts() {
-                if queued > 0 || processing > 0 {
-                    if processing > 0 {
-                        println!(
-                            " \x1b[33m⚠\x1b[0m Pending queue: {queued} queued, {processing} indexing"
-                        );
-                    } else {
-                        println!(
-                            " \x1b[33m⚠\x1b[0m Pending queue: {queued} file(s) awaiting indexing"
-                        );
-                    }
-                }
-            }
-        }
-    }
-
+/// Doctor's footer: the accumulated suggestions, or the all-clear line,
+/// always followed by the closing blank line.
+fn print_doctor_suggestions(issues: &[String]) {
     if !issues.is_empty() {
         println!("\n \x1b[1;33m⚠ Suggestions:\x1b[0m");
-        for issue in &issues {
+        for issue in issues {
             println!(" • {}", issue);
         }
     } else {
         println!("\n \x1b[32m✅ All checks passed!\x1b[0m");
     }
     println!();
-
-    Ok(())
-}
-
-/// Where this platform's service unit lives, and which manager owns it.
-/// `None` on platforms with no supported service manager (doctor's
-/// service-unit section is then simply skipped).
-fn service_unit_location(home: &Path) -> Option<(&'static str, PathBuf)> {
-    if cfg!(target_os = "macos") {
-        Some((
-            "launchd",
-            home.join("Library/LaunchAgents/com.canopy.plist"),
-        ))
-    } else if cfg!(target_os = "linux") {
-        Some((
-            "systemd",
-            home.join(".config/systemd/user").join("canopy.service"),
-        ))
-    } else {
-        None
-    }
-}
-
-/// Extract the binary path named by a systemd unit's `ExecStart=` line — the
-/// first whitespace-separated token, before its arguments (`serve --port
-/// ...`). `None` when the unit has no `ExecStart=` line.
-fn parse_systemd_exec_start_binary(unit_content: &str) -> Option<PathBuf> {
-    unit_content
-        .lines()
-        .find_map(|line| line.strip_prefix("ExecStart="))
-        .and_then(|rest| rest.split_whitespace().next())
-        .map(PathBuf::from)
-}
-
-/// Extract the binary path named by a launchd plist's `ProgramArguments`
-/// array — its first `<string>` entry, before `serve`, `--port`, `<port>`.
-/// `None` when the plist has no `ProgramArguments` array or it's empty.
-fn parse_launchd_program_binary(plist_content: &str) -> Option<PathBuf> {
-    let after_key = plist_content.split_once("<key>ProgramArguments</key>")?.1;
-    let after_array = after_key.split_once("<array>")?.1;
-    let inside_string = after_array.split_once("<string>")?.1;
-    let (binary, _) = inside_string.split_once("</string>")?;
-    Some(PathBuf::from(binary.trim()))
-}
-
-/// Extract the binary a service unit's contents name, dispatching on which
-/// manager owns it. Pure — takes the unit's contents as a string rather than
-/// a path, so the systemd/launchd formats are tested without real unit
-/// files or a live service manager.
-fn parse_unit_binary(manager: &str, unit_content: &str) -> Option<PathBuf> {
-    match manager {
-        "launchd" => parse_launchd_program_binary(unit_content),
-        _ => parse_systemd_exec_start_binary(unit_content),
-    }
-}
-
-/// CB70: does this systemd unit's content define a non-empty Environment=BROWSER= ?
-/// Pure over &str so tests drive it without real unit files.
-fn unit_defines_browser(unit_content: &str) -> bool {
-    unit_content.lines().any(|line| {
-        // CB73: drop-in files are often hand-written with indented lines —
-        // accept ` Environment=BROWSER=...` the same as a flush-left one.
-        line.trim_start()
-            .strip_prefix("Environment=BROWSER=")
-            .is_some_and(|v| {
-                // Mirror parse_existing_browser_env: one layer of surrounding
-                // quotes is not a value — `Environment=BROWSER=""` is empty.
-                let unquoted = if v.len() >= 2 && v.starts_with('"') && v.ends_with('"') {
-                    &v[1..v.len() - 1]
-                } else {
-                    v
-                };
-                !unquoted.is_empty()
-            })
-    })
-}
-
-/// CB73 FR1: is BROWSER set in the *effective* environment systemd would
-/// launch the unit with? Parses the stdout of
-/// `systemctl --user show canopy.service -p Environment` — one
-/// `Environment=...` line that already merges every drop-in. Pure over
-/// &str so tests inject canned output instead of shelling out.
-fn browser_set_in_systemctl_show(output: &str) -> bool {
-    let Some(rest) = output
-        .lines()
-        .find_map(|line| line.strip_prefix("Environment="))
-    else {
-        return false;
-    };
-    split_env_tokens(rest).into_iter().any(|token| {
-        token.strip_prefix("BROWSER=").is_some_and(|v| {
-            // Same one-layer quote rule as `unit_defines_browser`: the
-            // quotes wrap a value, they aren't one.
-            let unquoted = if v.len() >= 2 && v.starts_with('"') && v.ends_with('"') {
-                &v[1..v.len() - 1]
-            } else {
-                v
-            };
-            !unquoted.is_empty()
-        })
-    })
-}
-
-/// Split an `Environment=` remainder into whitespace-separated tokens,
-/// keeping one layer of double quotes so `BROWSER="/x/my browser"` stays a
-/// single token. Tiny on purpose — no shell-word crate for one check.
-fn split_env_tokens(rest: &str) -> Vec<&str> {
-    let mut tokens = Vec::new();
-    let mut start: Option<usize> = None;
-    let mut in_quotes = false;
-    for (i, c) in rest.char_indices() {
-        if c == '"' {
-            in_quotes = !in_quotes;
-            if start.is_none() {
-                start = Some(i);
-            }
-        } else if c.is_whitespace() && !in_quotes {
-            if let Some(from) = start.take() {
-                tokens.push(&rest[from..i]);
-            }
-        } else if start.is_none() {
-            start = Some(i);
-        }
-    }
-    if let Some(from) = start {
-        tokens.push(&rest[from..]);
-    }
-    tokens
-}
-
-/// CB73 FR2: is BROWSER set in a process's raw `/proc/<pid>/environ`
-/// bytes? NUL-separated `KEY=value` entries; values are literal
-/// environment values, so no quote stripping applies here. Pure over
-/// `&[u8]` so tests inject bytes rather than reading `/proc`.
-fn browser_set_in_proc_environ(data: &[u8]) -> bool {
-    data.split(|&b| b == 0).any(|entry| {
-        entry.strip_prefix(b"BROWSER=").is_some_and(|v| {
-            // Environ values are literal (no quote rule); a stray trailing
-            // newline isn't part of the value.
-            !v.strip_suffix(b"\n").unwrap_or(v).is_empty()
-        })
-    })
-}
-
-/// CB73 FR2+FR3: the verdict doctor prints for the BROWSER check. An enum
-/// (not threaded booleans) so every combination of "unit effective
-/// environment" × "running daemon's environ" is an exhaustive, testable
-/// arm and the fix hint can only be attached to the arms where the
-/// effective unit value is missing.
-// The shared `Unit` prefix is deliberate: every variant is a verdict about
-// the unit's effective environment, so the prefix is meaning, not noise.
-#[allow(clippy::enum_variant_names)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BrowserEnvStatus {
-    /// No orphan to judge, and the effective environment has BROWSER —
-    /// success, no hint.
-    UnitSet,
-    /// No orphan to judge, and the effective environment lacks BROWSER —
-    /// warning + fix hint.
-    UnitMissing,
-    /// The orphan serving the port has BROWSER and so does the unit's
-    /// effective environment — success with both labels; no hint (FR3:
-    /// nothing is missing from the effective environment).
-    UnitSetOrphanSet,
-    /// Unit is fine but the orphan actually serving the port lacks
-    /// BROWSER — the daemon must be restarted through the unit. No
-    /// drop-in hint: the unit already defines it.
-    UnitSetOrphanMissing,
-    /// The orphan has BROWSER today but the unit's effective environment
-    /// lacks it — a restart through the unit would drop it. FR3 allows
-    /// the hint here (the effective unit environment IS missing).
-    UnitMissingOrphanSet,
-    /// Neither the effective unit environment nor the orphan's environ
-    /// has BROWSER — warning + fix hint + both labels.
-    UnitMissingOrphanMissing,
-}
-
-/// Combine the two observed facts into the verdict. `orphan_environ_set`
-/// is `None` when there is no orphan to judge (port holder is the unit's
-/// MainPID, nothing holds the port, or no manager), `Some(..)` otherwise.
-/// FR2: an orphan present means BOTH labels get reported whatever their
-/// values — every combination is its own arm, none collapsed, so a
-/// running daemon that HAS BROWSER is never printed as "missing".
-fn diagnose_browser_env(unit_set: bool, orphan_environ_set: Option<bool>) -> BrowserEnvStatus {
-    match (unit_set, orphan_environ_set) {
-        (true, None) => BrowserEnvStatus::UnitSet,
-        (false, None) => BrowserEnvStatus::UnitMissing,
-        (true, Some(true)) => BrowserEnvStatus::UnitSetOrphanSet,
-        (true, Some(false)) => BrowserEnvStatus::UnitSetOrphanMissing,
-        (false, Some(true)) => BrowserEnvStatus::UnitMissingOrphanSet,
-        (false, Some(false)) => BrowserEnvStatus::UnitMissingOrphanMissing,
-    }
-}
-
-/// What doctor should report about a service unit's binary, given facts a
-/// caller has already gathered by touching the filesystem/PATH. Pure
-/// comparison — no I/O — so every branch is reachable from synthetic inputs.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ServiceUnitBinaryStatus {
-    /// The unit's binary is missing or not executable — the exact failure
-    /// mode that leaves systemd/launchd retry-looping with nothing on the
-    /// port.
-    Missing,
-    /// The unit's binary exists but isn't the same file as the `canopy` on
-    /// PATH.
-    Skew(PathBuf),
-    /// The unit's binary exists and either matches the one on PATH, or
-    /// there's nothing on PATH to disagree with it.
-    Consistent,
-}
-
-fn diagnose_service_unit_binary(
-    unit_binary: &Path,
-    binary_exists: bool,
-    path_binary: Option<&Path>,
-) -> ServiceUnitBinaryStatus {
-    if !binary_exists {
-        return ServiceUnitBinaryStatus::Missing;
-    }
-    match path_binary {
-        Some(p) if p != unit_binary => ServiceUnitBinaryStatus::Skew(p.to_path_buf()),
-        _ => ServiceUnitBinaryStatus::Consistent,
-    }
-}
-
-/// Does `path` exist and carry an execute bit? Doctor only ever reads unit
-/// files and stats binaries — this never shells out to `systemctl`, so it
-/// works the same in a CI container as on a developer's machine.
-#[cfg(unix)]
-fn binary_is_executable(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path)
-        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
-}
-
-#[cfg(not(unix))]
-fn binary_is_executable(path: &Path) -> bool {
-    path.is_file()
-}
-
-/// Human label for a platform in doctor output: the product display name
-/// ("Provider · Tool" when the registry knows both), with the slug in
-/// brackets when it differs so the user still knows what to type in
-/// config.toml and flags. A platform with no provider/tool_name renders
-/// the legacy exact slug string. Delegates to `CliConfig::display_name`;
-/// never used for matching.
-fn doctor_cli_label(cli_config: &crate::domain::cli_config::CliConfig) -> String {
-    let display = cli_config.display_name();
-    if display == cli_config.name {
-        display
-    } else {
-        format!("{} [{}]", display, cli_config.name)
-    }
-}
-
-/// CB44: run the platform's registry-declared identity check against the
-/// already-resolved absolute path. `Some(error)` exactly when the binary
-/// does not identify as this platform (wrong program answering to the bare
-/// name); `None` when no check is declared (backward compatible) or the
-/// check passes. Pure diagnosis — never called on dispatch.
-pub(crate) fn diagnose_cli_identity(
-    cli_config: &crate::domain::cli_config::CliConfig,
-    resolved: &Path,
-) -> Option<crate::domain::cli_strategy::WrongBinaryError> {
-    let _check = cli_config.identity_check.as_ref()?;
-    crate::domain::cli_strategy::verify_identity(cli_config, resolved).err()
-}
-
-/// Best-effort `<binary> --version` output, trimmed. `None` on any failure —
-/// doctor reports a skew warning either way, just without a version string
-/// to show alongside a path that couldn't be run.
-fn binary_version(path: &Path) -> Option<String> {
-    let output = std::process::Command::new(path)
-        .arg("--version")
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    (!text.is_empty()).then_some(text)
-}
-
-/// Report a lingering legacy/new split for the data-layout migrations in
-/// `usage_stats` and `models_db`: `usage.json` next to `usage.toml`, or a
-/// legacy `models_cache.json` / `models_native_<cli>.json` next to their
-/// `cache/` counterparts. Both migrations defer deleting the legacy side
-/// while `state_pid` shows a daemon may still be using it, so this line is
-/// what lets an operator tell that expected, self-clearing wait apart from
-/// a migration that's actually stuck.
-fn report_layout_split(canopy_dir: &Path, state_pid: Option<u32>, issues: &mut Vec<String>) {
-    let usage_split =
-        canopy_dir.join("usage.json").exists() && canopy_dir.join("usage.toml").exists();
-
-    let legacy_native_caches: Vec<String> = std::fs::read_dir(canopy_dir)
-        .map(|entries| {
-            entries
-                .flatten()
-                .filter_map(|entry| {
-                    let name = entry.file_name().to_str()?.to_string();
-                    (name.starts_with("models_native_") && name.ends_with(".json")).then_some(name)
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    let legacy_catalog_cache = canopy_dir.join("models_cache.json").exists();
-    let cache_split = legacy_catalog_cache || !legacy_native_caches.is_empty();
-
-    if !usage_split && !cache_split {
-        return;
-    }
-
-    println!(" \x1b[33m⚠\x1b[0m Legacy/new data layout split detected:");
-    if usage_split {
-        println!("     usage.json (legacy) and usage.toml (current) both exist");
-    }
-    if legacy_catalog_cache {
-        println!(
-            "     models_cache.json (legacy) and cache/models_catalog.json (current) both exist"
-        );
-    }
-    for name in &legacy_native_caches {
-        println!("     {name} (legacy) and cache/{name} (current) both exist");
-    }
-
-    if let Some(pid) = state_pid {
-        println!(
-            "     a canopy daemon (PID: {pid}) is running, so cleanup of the legacy file(s) is deferred until it stops"
-        );
-        issues.push(
-            "Legacy/new data layout split detected, deferred because a daemon is running — it will clean up on a future run once no daemon is live.".to_string(),
-        );
-    } else {
-        issues.push(
-            "Legacy/new data layout split detected with no daemon running — re-run any canopy command to clean up the legacy file(s).".to_string(),
-        );
-    }
-}
-
-/// CB73 FR1 (I/O): the unit's *effective* environment as systemd reports
-/// it (`systemctl --user show canopy.service -p Environment` merges the
-/// unit file with every drop-in). `None` when `systemctl` is missing or
-/// fails — the check then falls back to parsing the files. Tests never
-/// call this; they inject a canned string into
-/// `read_effective_unit_browser` instead.
-fn read_systemctl_show_environment() -> Option<String> {
-    let output = std::process::Command::new("systemctl")
-        .args(["--user", "show", "canopy.service", "-p", "Environment"])
-        .output()
-        .ok()?;
-    output
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
-}
-
-/// CB73 FR2 (I/O): raw `/proc/<pid>/environ` bytes for the process
-/// holding the daemon port, or `None` if it is gone/unreadable. Tests
-/// never call this; they inject bytes into `report_service_unit`.
-fn read_proc_environ(pid: u32) -> Option<Vec<u8>> {
-    std::fs::read(format!("/proc/{pid}/environ")).ok()
-}
-
-/// CB73 FR1: BROWSER in the effective environment. The injected
-/// `systemctl show` output (systemd's own merged view) is authoritative;
-/// only when it is `None` (systemctl unavailable) does this fall back to
-/// the unit file plus every `*.conf` drop-in under the sibling
-/// `canopy.service.d/`, sorted by file name.
-fn read_effective_unit_browser(unit_path: &Path, systemctl_output: Option<&str>) -> bool {
-    if let Some(output) = systemctl_output {
-        return browser_set_in_systemctl_show(output);
-    }
-    let mut combined = std::fs::read_to_string(unit_path).unwrap_or_default();
-    if let Some(dir) = unit_path.parent() {
-        let dropin_dir = dir.join("canopy.service.d");
-        let mut dropins: Vec<PathBuf> = std::fs::read_dir(&dropin_dir)
-            .map(|entries| {
-                entries
-                    .flatten()
-                    .map(|entry| entry.path())
-                    .filter(|p| p.extension() == Some(std::ffi::OsStr::new("conf")))
-                    .collect()
-            })
-            .unwrap_or_default();
-        dropins.sort();
-        for dropin in dropins {
-            if let Ok(content) = std::fs::read_to_string(&dropin) {
-                combined.push('\n');
-                combined.push_str(&content);
-            }
-        }
-    }
-    unit_defines_browser(&combined)
-}
-
-/// Report on the systemd/launchd service unit, if any: its path, the binary
-/// it names, and whether that binary is the problem. Running the daemon by
-/// hand instead of via a unit is legitimate, so no unit at all is a neutral
-/// informational line, not a warning.
-///
-/// CB73: `port_pid`/`manager_pid` are the facts `run_doctor` already
-/// computed (no second /proc scan), `systemctl_output` is the injected
-/// `systemctl --user show -p Environment` stdout, and `orphan_environ` is
-/// the injected raw `/proc/<port_pid>/environ` bytes — present only when
-/// that port holder is an orphan (not the unit's MainPID). Tests inject
-/// these directly; production fills them via the thin readers below.
-fn report_service_unit(
-    home: &Path,
-    port_pid: Option<u32>,
-    manager_pid: Option<u32>,
-    systemctl_output: Option<&str>,
-    orphan_environ: Option<&[u8]>,
-    issues: &mut Vec<String>,
-) {
-    let Some((manager, unit_path)) = service_unit_location(home) else {
-        return;
-    };
-
-    let Ok(unit_content) = std::fs::read_to_string(&unit_path) else {
-        println!(
-            " \x1b[90m–\x1b[0m No {manager} service unit installed (running the daemon by hand is fine)"
-        );
-        return;
-    };
-
-    // declaration: the unit file being readable is exactly what's claimed
-    // here — whether the binary it points at actually works is the
-    // separate, capability-checked line below.
-    success(format!("Service unit ({manager}): {}", unit_path.display()));
-
-    let Some(unit_binary) = parse_unit_binary(manager, &unit_content) else {
-        println!("     \x1b[33m⚠\x1b[0m Could not find the binary the unit points at");
-        return;
-    };
-
-    let binary_exists = binary_is_executable(&unit_binary);
-    let path_binary = which::which("canopy").ok();
-
-    match diagnose_service_unit_binary(&unit_binary, binary_exists, path_binary.as_deref()) {
-        ServiceUnitBinaryStatus::Missing => {
-            println!(
-                "     \x1b[31m✗\x1b[0m Points at a missing or non-executable binary: {}",
-                unit_binary.display()
-            );
-            issues.push(format!(
-                "Service unit's binary is gone ({}) — run 'canopy daemon install' to reinstall the service so it points at the current binary.",
-                unit_binary.display()
-            ));
-        }
-        ServiceUnitBinaryStatus::Skew(path_binary) => {
-            let unit_version =
-                binary_version(&unit_binary).unwrap_or_else(|| "unknown".to_string());
-            let path_version =
-                binary_version(&path_binary).unwrap_or_else(|| "unknown".to_string());
-            println!("     \x1b[33m⚠\x1b[0m Unit binary differs from the canopy on PATH:");
-            println!("         Unit: {} ({unit_version})", unit_binary.display());
-            println!("         PATH: {} ({path_version})", path_binary.display());
-            issues.push(
-                "The service unit and the canopy on your PATH are different binaries — \
-                 run 'canopy daemon install' to update the service."
-                    .to_string(),
-            );
-        }
-        // capability: reached only when `binary_is_executable` confirmed
-        // the file on disk, not just that the unit names some path.
-        ServiceUnitBinaryStatus::Consistent => {
-            success_nested(format!("Binary: {}", unit_binary.display()));
-        }
-    }
-
-    if manager == "systemd" {
-        let unit_set = read_effective_unit_browser(&unit_path, systemctl_output);
-        // CB73 FR2: the environ bytes only count when they came from a
-        // real orphan — the port holder exists and is not the unit's
-        // MainPID. Otherwise there is no second opinion to report.
-        let orphan_set = match orphan_environ {
-            Some(environ) if port_pid.is_some() && manager_pid != port_pid => {
-                Some(browser_set_in_proc_environ(environ))
-            }
-            _ => None,
-        };
-        match diagnose_browser_env(unit_set, orphan_set) {
-            BrowserEnvStatus::UnitSet => {
-                success_nested(
-                    "Browser env: BROWSER is set (login/connection pages can open)".to_string(),
-                );
-            }
-            // FR2: an orphan means both labels are reported even when
-            // nothing is missing — the user must see WHOSE environment
-            // is actually carrying the daemon.
-            BrowserEnvStatus::UnitSetOrphanSet => {
-                success_nested(
-                    "Browser env: unit: set, running daemon: set (orphan) — BROWSER is set (login/connection pages can open)".to_string(),
-                );
-            }
-            BrowserEnvStatus::UnitMissing => {
-                println!("     \x1b[33m⚠\x1b[0m Unit defines no Environment=BROWSER= — harnesses and MCP servers started by the daemon cannot open login or connection pages");
-                println!("     Fix: mkdir -p ~/.config/systemd/user/canopy.service.d && printf '[Service]\\nEnvironment=BROWSER=<your-browser-cmd>\\n' > ~/.config/systemd/user/canopy.service.d/browser.conf && systemctl --user daemon-reload && systemctl --user restart canopy.service");
-                issues.push("Daemon unit has no BROWSER — harnesses/MCP servers cannot open login or connection pages. Re-run `canopy daemon install` with BROWSER set, or add the drop-in shown above.".to_string());
-            }
-            // The unit already defines BROWSER (the drop-in the fix hint
-            // would create exists) — so no hint; the defect is the orphan.
-            BrowserEnvStatus::UnitSetOrphanMissing => {
-                println!("     \x1b[33m⚠\x1b[0m unit: set, running daemon: missing (orphan) — restart the daemon through the unit so it inherits the drop-in");
-                issues.push("Running daemon is an orphan without BROWSER (unit: set, running daemon: missing (orphan)) — run 'canopy daemon stop' then start through systemd.".to_string());
-            }
-            // The orphan's environ HAS BROWSER today, but the unit's
-            // effective environment lacks it — FR2 requires reporting
-            // `running daemon: set`, never "missing"; FR3 allows the
-            // hint because the effective unit value IS missing.
-            BrowserEnvStatus::UnitMissingOrphanSet => {
-                println!("     \x1b[33m⚠\x1b[0m Unit defines no Environment=BROWSER= — harnesses and MCP servers started by the daemon cannot open login or connection pages");
-                println!("     \x1b[33m⚠\x1b[0m unit: missing, running daemon: set (orphan) — the running daemon has BROWSER but the unit does not; apply the fix and restart through the unit so a plain restart does not drop it");
-                println!("     Fix: mkdir -p ~/.config/systemd/user/canopy.service.d && printf '[Service]\\nEnvironment=BROWSER=<your-browser-cmd>\\n' > ~/.config/systemd/user/canopy.service.d/browser.conf && systemctl --user daemon-reload && systemctl --user restart canopy.service");
-                issues.push("Daemon unit has no BROWSER — harnesses/MCP servers cannot open login or connection pages. Re-run `canopy daemon install` with BROWSER set, or add the drop-in shown above.".to_string());
-            }
-            // Effective unit missing ⇒ the fix hint is allowed (FR3), and
-            // FR2 requires both labels on orphan reports.
-            BrowserEnvStatus::UnitMissingOrphanMissing => {
-                println!("     \x1b[33m⚠\x1b[0m Unit defines no Environment=BROWSER= — harnesses and MCP servers started by the daemon cannot open login or connection pages");
-                println!("     \x1b[33m⚠\x1b[0m unit: missing, running daemon: missing (orphan) — restart the daemon through the unit so it inherits the drop-in");
-                println!("     Fix: mkdir -p ~/.config/systemd/user/canopy.service.d && printf '[Service]\\nEnvironment=BROWSER=<your-browser-cmd>\\n' > ~/.config/systemd/user/canopy.service.d/browser.conf && systemctl --user daemon-reload && systemctl --user restart canopy.service");
-                issues.push("Daemon unit has no BROWSER — harnesses/MCP servers cannot open login or connection pages. Re-run `canopy daemon install` with BROWSER set, or add the drop-in shown above.".to_string());
-            }
-        }
-    }
-}
-
-/// CB52 FR5: list orphaned join nodes — `join`-kind nodes with no ensemble
-/// row, the state databases damaged before the entry/exit FKs became
-/// `RESTRICT` are left in — grouped per graph. Silent when there is no
-/// database yet, when it cannot be opened, or when nothing is orphaned.
-/// Never auto-repairs (C1): the issue pushed names the manual verbs.
-fn report_orphan_joins(canopy_dir: &Path, issues: &mut Vec<String>) {
-    let db_path = database_path(canopy_dir);
-    if !db_path.exists() {
-        return;
-    }
-    let Ok(db) = Database::new_safe(&db_path, canopy_dir) else {
-        return;
-    };
-    let Ok(orphans) = db.list_all_orphan_join_nodes() else {
-        return;
-    };
-    if orphans.is_empty() {
-        return;
-    }
-    println!(
-        " \x1b[31m✗\x1b[0m Orphaned join nodes (CB52): {} join node(s) belong to no ensemble",
-        orphans.len()
-    );
-    for node in &orphans {
-        let scope = match (&node.spec_id, &node.graph_id) {
-            (Some(spec_id), _) => match db.get_graph_spec(spec_id) {
-                Ok(Some(spec)) => format!("spec '{}' ({spec_id})", spec.name),
-                _ => format!("spec '{spec_id}'"),
-            },
-            (_, Some(graph_id)) => match db.get_graph(graph_id) {
-                Ok(Some(graph)) => format!("graph '{}' ({graph_id})", graph.name),
-                _ => format!("graph '{graph_id}'"),
-            },
-            _ => "no graph scope".to_string(),
-        };
-        println!(
-            "     - '{}' ({}) in {} — belongs to no ensemble",
-            node.name, node.id, scope
-        );
-    }
-    issues.push(
-        "Orphaned join nodes belong to no ensemble — run 'graph_get' to see orphan_join_warnings and delete them with graph_delete_node or repair via graph_update_ensemble (see CB52)."
-            .to_string(),
-    );
-}
-
-/// Every `canopy` executable found on `path_var`, in the order the shell
-/// would resolve them — first match wins. Backed by `which::which_in_all`,
-/// which already applies the rule this check needs: a PATH entry that
-/// doesn't exist or can't be read is skipped rather than failing the whole
-/// search, and a file named `canopy` without the execute bit (or, on
-/// Windows, without a recognized `PATHEXT` extension) is not a match.
-///
-/// `which_in_all` yields one candidate per matching `PATH` entry, not one
-/// per distinct file — a directory repeated in `PATH` (ordinary when a
-/// shell profile is sourced more than once), or a symlink alongside its
-/// own target, would otherwise be counted as separate binaries. Dedupe by
-/// canonical path, keeping the first `PATH` entry that reaches each file so
-/// resolution order — and which one is "the one that runs" — is preserved.
-/// A candidate whose canonical path can't be determined (broken symlink,
-/// permission error) is kept as its own distinct entry rather than dropped:
-/// a check that can silently lose a candidate on failure is worse than one
-/// that occasionally over-reports.
-fn find_canopy_copies(path_var: &str, cwd: &Path) -> Vec<PathBuf> {
-    let candidates: Vec<PathBuf> = which::which_in_all("canopy", Some(path_var), cwd)
-        .map(Iterator::collect)
-        .unwrap_or_default();
-
-    let mut seen = HashSet::new();
-    let mut copies = Vec::with_capacity(candidates.len());
-    for candidate in candidates {
-        let key = std::fs::canonicalize(&candidate).unwrap_or_else(|_| candidate.clone());
-        if seen.insert(key) {
-            copies.push(candidate);
-        }
-    }
-    copies
-}
-
-/// How long to wait on one copy's `--version` before giving up on it. This
-/// check walks every `canopy` found on PATH, so a hung or wrapper binary
-/// must not stall doctor for the rest of them.
-const PATH_COPY_VERSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
-
-/// Best-effort `<path> --version`, trimmed, bounded by
-/// `PATH_COPY_VERSION_TIMEOUT`. `None` on any failure, including a timeout —
-/// `kill_on_drop` ensures a timed-out child is reaped rather than left
-/// running, since dropping the in-flight `wait_with_output` future drops the
-/// `Child` that owns it.
-async fn probe_path_copy_version(path: &Path) -> Option<String> {
-    let mut command = tokio::process::Command::new(path);
-    command
-        .arg("--version")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true);
-    let child = command.spawn().ok()?;
-    let output = tokio::time::timeout(PATH_COPY_VERSION_TIMEOUT, child.wait_with_output())
-        .await
-        .ok()?
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    (!text.is_empty()).then_some(text)
-}
-
-/// What doctor should report about the `canopy` copies found on `$PATH`,
-/// given each copy's path (in PATH resolution order — index 0 is the one
-/// that runs) and its version if one could be determined. Pure — no I/O —
-/// so every branch is reachable from synthetic inputs without spawning real
-/// processes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum PathCopiesReport {
-    /// No `canopy` found on PATH at all (e.g. only ever run by absolute path).
-    None,
-    /// Exactly one copy — the normal case, nothing to warn about.
-    Single {
-        path: PathBuf,
-        version: Option<String>,
-    },
-    /// Two or more copies whose known versions all agree (or too few
-    /// versions could be determined to tell them apart) — harmless, and
-    /// reported plainly rather than as a warning.
-    Consistent {
-        copies: Vec<(PathBuf, Option<String>)>,
-    },
-    /// Two or more copies with at least two differing known versions — the
-    /// hazard this check exists to catch: the copy that runs may not be the
-    /// one that was last updated.
-    Diverging {
-        copies: Vec<(PathBuf, Option<String>)>,
-    },
-}
-
-/// Decide which [`PathCopiesReport`] variant `copies` (in PATH order)
-/// describes. A version that couldn't be determined is excluded from the
-/// agreement check rather than treated as "different" — an unknown version
-/// is not evidence of a mismatch, and a false warning here is exactly the
-/// noise the "silent when there's nothing to say" rule exists to prevent.
-fn diagnose_path_copies(copies: Vec<(PathBuf, Option<String>)>) -> PathCopiesReport {
-    match copies.len() {
-        0 => PathCopiesReport::None,
-        1 => {
-            let (path, version) = copies.into_iter().next().expect("len == 1");
-            PathCopiesReport::Single { path, version }
-        }
-        _ => {
-            let distinct_versions: HashSet<&str> =
-                copies.iter().filter_map(|(_, v)| v.as_deref()).collect();
-            if distinct_versions.len() > 1 {
-                PathCopiesReport::Diverging { copies }
-            } else {
-                PathCopiesReport::Consistent { copies }
-            }
-        }
-    }
-}
-
-/// One line describing a single copy: its path, version (or "version
-/// unknown" if the probe failed/timed out), and — for the copy at index 0,
-/// the one PATH resolution would actually run — a marker saying so.
-fn describe_path_copy(path: &Path, version: &Option<String>, is_winner: bool) -> String {
-    let label = version.as_deref().unwrap_or("version unknown");
-    let winner = if is_winner { " — this one runs" } else { "" };
-    format!("{} ({label}){winner}", path.display())
-}
-
-/// Render a [`PathCopiesReport`], pushing an issue only for the `Diverging`
-/// case — a single copy, or several at the same version, must produce no
-/// warning at all (the normal case must not read as something to worry
-/// about).
-fn print_path_copies_report(report: PathCopiesReport, issues: &mut Vec<String>) {
-    match report {
-        PathCopiesReport::None => {}
-        PathCopiesReport::Single { path, version } => {
-            success(format!(
-                "canopy on PATH: {}",
-                describe_path_copy(&path, &version, false)
-            ));
-        }
-        PathCopiesReport::Consistent { copies } => {
-            success(format!(
-                "{} copies of canopy on PATH, all at the same version:",
-                copies.len()
-            ));
-            for (i, (path, version)) in copies.iter().enumerate() {
-                println!("     {}", describe_path_copy(path, version, i == 0));
-            }
-        }
-        PathCopiesReport::Diverging { copies } => {
-            println!(
-                " \x1b[33m⚠\x1b[0m {} copies of canopy on PATH report different versions:",
-                copies.len()
-            );
-            for (i, (path, version)) in copies.iter().enumerate() {
-                println!("     {}", describe_path_copy(path, version, i == 0));
-            }
-            issues.push(
-                "Multiple `canopy` binaries are on your PATH at different versions — updating \
-                 one (self-update, cargo install, or the install script) doesn't update the \
-                 others. The copy marked \"this one runs\" above is the one actually in effect."
-                    .to_string(),
-            );
-        }
-    }
-}
-
-/// Resolve every `canopy` copy on `path_var` and probe each one's version,
-/// in PATH order. Split out from [`report_canopy_path_copies`] so tests can
-/// drive it over a synthetic PATH instead of the real one.
-async fn gather_path_copies_report(path_var: &str, cwd: &Path) -> PathCopiesReport {
-    let paths = find_canopy_copies(path_var, cwd);
-    let mut copies = Vec::with_capacity(paths.len());
-    for path in paths {
-        let version = probe_path_copy_version(&path).await;
-        copies.push((path, version));
-    }
-    diagnose_path_copies(copies)
-}
-
-/// Real-`$PATH` entry point for the duplicate-binary check (C17).
-async fn report_canopy_path_copies(issues: &mut Vec<String>) {
-    let path_var = std::env::var("PATH").unwrap_or_default();
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    print_path_copies_report(gather_path_copies_report(&path_var, &cwd).await, issues);
 }
 
 #[cfg(test)]
@@ -2002,6 +1060,12 @@ mod tests {
         issues.iter().filter(|i| i.contains("BROWSER")).collect()
     }
 
+    /// Mirror of `browser_issues` for the CB81 OOMPolicy check.
+    #[cfg(target_os = "linux")]
+    fn oom_policy_issues(issues: &[String]) -> Vec<&String> {
+        issues.iter().filter(|i| i.contains("OOMPolicy")).collect()
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn report_service_unit_no_browser_issue_when_effective_env_set() {
@@ -2017,6 +1081,7 @@ mod tests {
             None,
             None,
             Some("Environment=BROWSER=/x/wsl-browser\n"),
+            None,
             None,
             &mut issues,
         );
@@ -2038,6 +1103,7 @@ mod tests {
             None,
             Some("Environment=BROWSER=/x/wsl-browser\n"),
             Some(b"PATH=/usr/bin\0"),
+            None,
             &mut issues,
         );
         let browser = browser_issues(&issues);
@@ -2066,6 +1132,7 @@ mod tests {
             Some(99),
             Some("Environment=PATH=/usr/bin\n"),
             Some(b"BROWSER=/x/wsl-browser\0"),
+            None,
             &mut issues,
         );
         let browser = browser_issues(&issues);
@@ -2082,12 +1149,84 @@ mod tests {
         );
     }
 
+    /// CB81 FR3: pin the parse of `systemctl --user show -p OOMPolicy`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn oom_policy_is_stop_parser() {
+        assert!(oom_policy_is_stop("OOMPolicy=stop\n"));
+        assert!(oom_policy_is_stop("OOMPolicy=stop"));
+        assert!(!oom_policy_is_stop("OOMPolicy=continue\n"));
+        assert!(!oom_policy_is_stop("OOMPolicy=kill\n"));
+        assert!(!oom_policy_is_stop("Environment=PATH=/usr/bin\n"));
+        assert!(!oom_policy_is_stop(""));
+    }
+
+    /// CB81 FR3: an installed unit whose effective OOMPolicy is `stop`
+    /// warns with the verbatim fix wording.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn report_service_unit_warns_when_oom_policy_stop() {
+        let dir = tempfile::tempdir().unwrap();
+        write_minimal_unit(dir.path());
+        let mut issues = Vec::new();
+        report_service_unit(
+            dir.path(),
+            None,
+            None,
+            None,
+            None,
+            Some("OOMPolicy=stop\n"),
+            &mut issues,
+        );
+        let oom = oom_policy_issues(&issues);
+        assert_eq!(oom.len(), 1, "{issues:?}");
+        assert!(oom[0].contains("OOMPolicy=stop"));
+        assert!(oom[0].contains("a node that runs out of memory stops the daemon"));
+        assert!(oom[0].contains("reinstall the service (canopy daemon install)"));
+        assert!(oom[0].contains("OOMPolicy=continue"));
+    }
+
+    /// CB81 FR3: `OOMPolicy=continue` must not warn (no false positive).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn report_service_unit_silent_when_oom_policy_continue() {
+        let dir = tempfile::tempdir().unwrap();
+        write_minimal_unit(dir.path());
+        let mut issues = Vec::new();
+        report_service_unit(
+            dir.path(),
+            None,
+            None,
+            None,
+            None,
+            Some("OOMPolicy=continue\n"),
+            &mut issues,
+        );
+        assert!(oom_policy_issues(&issues).is_empty(), "{issues:?}");
+    }
+
+    /// CB81 FR3: systemctl unavailable (`None`) must not warn.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn report_service_unit_silent_when_oom_policy_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+        write_minimal_unit(dir.path());
+        let mut issues = Vec::new();
+        report_service_unit(dir.path(), None, None, None, None, None, &mut issues);
+        assert!(oom_policy_issues(&issues).is_empty(), "{issues:?}");
+    }
+
     #[test]
     fn doctor_renders_display_with_slug_suffix() {
         let mut cli = crate::domain::cli_config::CliConfig {
             name: "mistral".to_string(),
             provider: Some("Mistral AI".to_string()),
             tool_name: Some("Vibe".to_string()),
+            // Explicit: this fixture represents an ordinary headless-capable
+            // platform, which is what `CliConfig`'s hand-written `Default`
+            // (and the serde default) give — pinned here so the label test
+            // cannot pass by accident if that default ever changes.
+            headless: true,
             ..Default::default()
         };
         assert_eq!(super::doctor_cli_label(&cli), "Mistral AI · Vibe [mistral]");
@@ -2095,6 +1234,24 @@ mod tests {
         cli.tool_name = None;
         assert_eq!(cli.display_name(), "mistral");
         assert_eq!(super::doctor_cli_label(&cli), "mistral");
+    }
+
+    /// CM35: doctor marks a `headless = false` platform `(interactive only)`
+    /// without changing its display/slug rendering. Fails if the marker is
+    /// dropped.
+    #[test]
+    fn doctor_cli_label_marks_interactive_only_platform() {
+        let cli = crate::domain::cli_config::CliConfig {
+            name: "freebuff".to_string(),
+            provider: Some("Codebuff".to_string()),
+            tool_name: Some("Freebuff".to_string()),
+            headless: false,
+            ..Default::default()
+        };
+        assert_eq!(
+            super::doctor_cli_label(&cli),
+            "Codebuff · Freebuff [freebuff] (interactive only)"
+        );
     }
 
     #[test]
@@ -2220,6 +1377,64 @@ mod tests {
         let script = write_identity_script(&dir, "real-bb", "echo 'Blackbox CLI v1.2.3'\n");
         let cli = identity_cli_config(&script, Some("--version"), Some("Blackbox"));
         assert!(diagnose_cli_identity(&cli, &script).is_none());
+    }
+
+    fn binary_identity_cli_config(
+        binary: &std::path::Path,
+        args: Option<Vec<&str>>,
+        pattern: Option<&str>,
+    ) -> CliConfig {
+        CliConfig {
+            name: "blackbox".to_string(),
+            binary: binary.to_string_lossy().to_string(),
+            identity_args: args.map(|a| a.into_iter().map(String::from).collect()),
+            identity_pattern: pattern.map(String::from),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn doctor_reports_not_installed_when_identity_args_pattern_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = write_identity_script(
+            &dir,
+            "blackbox",
+            "if [ \"$1\" = \"--version\" ]; then echo \"blackbox: another window manager is already running on display ':0'\"; else echo \"$1\"; fi\n",
+        );
+        let cli =
+            binary_identity_cli_config(&script, Some(vec!["--version"]), Some("(?i)blackbox ?ai"));
+        let err = diagnose_binary_identity(&cli, &script)
+            .expect("a mismatch must be reported as not-installed");
+        let message = err.message();
+        assert!(
+            message.contains(&script.to_string_lossy().to_string()),
+            "must name the resolved path: {message}"
+        );
+        assert!(
+            message.contains("is not blackbox"),
+            "must say the binary is not the platform: {message}"
+        );
+        assert!(
+            message.contains("identity check failed: blackbox: another window manager"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn doctor_reports_nothing_when_identity_args_pattern_passes() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = write_identity_script(&dir, "real-bb", "echo 'blackbox ai 1.2.3'\n");
+        let cli =
+            binary_identity_cli_config(&script, Some(vec!["--version"]), Some("(?i)blackbox ?ai"));
+        assert!(diagnose_binary_identity(&cli, &script).is_none());
+    }
+
+    #[test]
+    fn doctor_reports_nothing_when_identity_fields_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = write_identity_script(&dir, "plain-cli", "echo \"$1\"\n");
+        let cli = binary_identity_cli_config(&script, None, None);
+        assert!(diagnose_binary_identity(&cli, &script).is_none());
     }
 
     #[test]
@@ -2491,6 +1706,7 @@ mod tests {
             last_run_ok: None,
             last_triggered_at: None,
             trigger_count: 0,
+            action: crate::domain::models::AgentAction::Headless,
         }
     }
 
@@ -2566,7 +1782,7 @@ mod tests {
             rag_personal_dirs: vec![rag_dir.to_string_lossy().to_string()],
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
 
         // ragignore present (optional but exercises the ✓ branch).
         std::fs::write(canopy_dir.join("ragignore"), "*.lock\n").unwrap();
@@ -2673,7 +1889,7 @@ mod tests {
         let config = CanopyConfig {
             configured_at: None, // config.toml won't even be written below —
             // is_configured() reads whatever CanopyConfig::load() sees, and
-            // we intentionally never call config.save() so the legacy-file
+            // we intentionally never call config.save_for_tests() so the legacy-file
             // branch (not the config.toml branch) is what fires.
             clis: vec![CliConfig {
                 name: "ghost-cli".to_string(),
@@ -2696,7 +1912,7 @@ mod tests {
         // "legacy config" (not "configured") message, so config.toml IS
         // saved but without configured_at — is_configured() only checks
         // `configured_at.is_some()`.
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
 
         let prev_key = std::env::var("OPENAI_API_KEY").ok();
         unsafe { std::env::remove_var("OPENAI_API_KEY") };
@@ -2740,7 +1956,7 @@ mod tests {
             embeddings_model: "some-unknown-model-9000".to_string(),
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
 
         let (result, output) = run_doctor_captured(home.path()).await;
 
@@ -2818,7 +2034,7 @@ mod tests {
             embeddings_model: "baai/bge-small-en-v1.5".to_string(),
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
 
         let (result, output) = run_doctor_captured(home.path()).await;
 
@@ -2850,7 +2066,7 @@ mod tests {
             embeddings_model: "baai/bge-small-en-v1.5".to_string(),
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
 
         let (result, output) = run_doctor_captured(home.path()).await;
 
@@ -2875,7 +2091,7 @@ mod tests {
             embeddings_model: "baai/bge-small-en-v1.5".to_string(),
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
 
         let db = Database::new(&canopy_dir.join("background_agents.db")).unwrap();
         crate::rag::status::mark_downloading(&db, "baai/bge-small-en-v1.5");
@@ -2905,7 +2121,7 @@ mod tests {
             embeddings_model: "baai/bge-small-en-v1.5".to_string(),
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
 
         let db = Database::new(&canopy_dir.join("background_agents.db")).unwrap();
         crate::rag::status::mark_failed(&db, "baai/bge-small-en-v1.5", "connection reset");
@@ -2935,7 +2151,7 @@ mod tests {
             embeddings_model: String::new(),
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
 
         let (result, output) = run_doctor_captured(home.path()).await;
 
@@ -2966,7 +2182,7 @@ mod tests {
             embeddings_model: "baai/bge-small-en-v1.5".to_string(),
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
 
         let (result, output) = run_doctor_captured(home.path()).await;
 
@@ -2996,7 +2212,7 @@ mod tests {
             embeddings_model: "text-embedding-3-small".to_string(),
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
 
         let prev_key = std::env::var("OPENAI_API_KEY").ok();
         unsafe { std::env::remove_var("OPENAI_API_KEY") };
@@ -3036,7 +2252,7 @@ mod tests {
             embeddings_model: "text-embedding-3-small".to_string(),
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
 
         // Put a plain file where VectorStore::open_at's `create_dir_all`
         // needs to make a directory — opening it must fail, the way a
@@ -3381,6 +2597,8 @@ mod tests {
                 queue_id: None,
                 workdir_override: None,
                 idea: None,
+
+                crew: None,
             }],
         );
         let graph_id = "graph-stale-prompt";
@@ -3425,27 +2643,139 @@ mod tests {
         agent.prompt = "run `canopy loop info` and alert on drift".to_string();
         db.upsert_agent(&agent).unwrap();
 
-        let hits = find_stale_2x_name_hits(&db).unwrap();
+        let report = find_stale_2x_name_hits(&db).unwrap();
+        assert_eq!(report.graphs.len(), 1, "one graph, one grouped line");
+        let graph = &report.graphs[0];
+        assert_eq!(graph.graph_name, "Resilience Graph");
+        assert_eq!(graph.ref_count, 2, "one node hit plus one hook hit");
         assert!(
-            hits.iter().any(|h| h.contains("Resilience")
-                && h.contains("loop_complete_node")
-                && h.contains("graph_complete_node")),
+            graph.names.contains(&StaleNameHit {
+                old: "loop_complete_node".to_string(),
+                new: "graph_complete_node".to_string(),
+            }),
+            "{:?}",
+            graph.names
+        );
+        assert!(
+            graph.names.contains(&StaleNameHit {
+                old: "loop_report_blocker".to_string(),
+                new: "graph_report_blocker".to_string(),
+            }),
+            "{:?}",
+            graph.names
+        );
+
+        assert_eq!(report.agents.len(), 1);
+        let agent = &report.agents[0];
+        assert_eq!(agent.agent_id, "loop-watchdog");
+        assert!(
+            agent.names.contains(&StaleNameHit {
+                old: "canopy loop".to_string(),
+                new: "canopy graph".to_string(),
+            }),
+            "{:?}",
+            agent.names
+        );
+    }
+
+    /// Covers the scanner sections the fixture above doesn't reach: a
+    /// hook's `command` (not just its prompt), an ensemble's shared prompt,
+    /// and a member's own prompt override.
+    #[test]
+    fn find_stale_2x_name_hits_scans_hook_commands_and_ensemble_prompts() {
+        use crate::domain::graphs::{
+            Ensemble, EnsembleDetails, EnsembleKind, EnsembleMember, GraphCompletionHook,
+            GraphEdgeCondition, GraphHookEvent,
+        };
+
+        let mut hooks = std::collections::BTreeMap::new();
+        hooks.insert(
+            GraphHookEvent::OnCompleted,
+            vec![GraphCompletionHook {
+                platform: None,
+                model: None,
+                effort: None,
+                prompt: None,
+                command: Some("canopy loop run daily".to_string()),
+                target_session_id: None,
+                target_session_name: None,
+                timeout_minutes: None,
+                target_graph_id: None,
+                queue_id: None,
+                workdir_override: None,
+                idea: None,
+
+                crew: None,
+            }],
+        );
+
+        let ensembles = vec![EnsembleDetails {
+            ensemble: Ensemble {
+                id: "ens-reviewers".to_string(),
+                spec_id: None,
+                graph_id: Some("graph-reviewers".to_string()),
+                name: "reviewers".to_string(),
+                prompt_template: "end with exactly one loop_complete_node call".to_string(),
+                join_node_id: "join-reviewers".to_string(),
+                entry_from_node: "entry-reviewers".to_string(),
+                entry_condition: GraphEdgeCondition::Always,
+                min_pass: 1,
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
+                timeout_minutes: 30,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
+                on_pass_to: "done".to_string(),
+                on_fail_to: None,
+                kind: EnsembleKind::Parallel,
+                round_robin_index: None,
+                commit_rights: false,
+                created_at: chrono::Utc::now(),
+
+                crew_id: None,
+                crew_name: None,
+                crew_version_applied: None,
+            },
+            members: vec![EnsembleMember {
+                ensemble_id: "ens-reviewers".to_string(),
+                node_id: "member-reviewer".to_string(),
+                position: 0,
+                platform: "claude".to_string(),
+                model: None,
+                prompt_override: Some("on failure, call loop_report_blocker".to_string()),
+                timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
+            }],
+        }];
+
+        let mut hits = graph_hook_hits(&hooks);
+        hits.extend(graph_ensemble_hits(&ensembles));
+
+        assert!(
+            hits.contains(&StaleNameHit {
+                old: "canopy loop".to_string(),
+                new: "canopy graph".to_string(),
+            }),
             "{hits:?}"
         );
         assert!(
-            hits.iter().any(|h| h.contains("loop-watchdog")
-                && h.contains("canopy loop")
-                && h.contains("canopy graph")),
+            hits.contains(&StaleNameHit {
+                old: "loop_complete_node".to_string(),
+                new: "graph_complete_node".to_string(),
+            }),
             "{hits:?}"
         );
-        // The hook hit must name the event it fires on — labelling every
-        // hook "completion hook" would send a reader to the wrong hook.
         assert!(
-            hits.iter().any(|h| h.contains("on_failed hook")
-                && h.contains("loop_report_blocker")
-                && h.contains("graph_report_blocker")),
+            hits.contains(&StaleNameHit {
+                old: "loop_report_blocker".to_string(),
+                new: "graph_report_blocker".to_string(),
+            }),
             "{hits:?}"
         );
+        assert_eq!(hits.len(), 3, "{hits:?}");
     }
 
     #[test]
@@ -3456,6 +2786,229 @@ mod tests {
         agent.prompt = "summarize the diff and open a PR".to_string();
         db.upsert_agent(&agent).unwrap();
 
-        assert!(find_stale_2x_name_hits(&db).unwrap().is_empty());
+        let report = find_stale_2x_name_hits(&db).unwrap();
+        assert!(report.graphs.is_empty());
+        assert!(report.agents.is_empty());
+    }
+
+    #[test]
+    fn stale_name_report_groups_several_nodes_in_one_graph() {
+        use crate::domain::graphs::{Graph, GraphNode, GraphNodeKind, GraphStatus};
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::new(&dir.path().join("test.db")).unwrap();
+        let graph_id = "graph-many-nodes";
+        db.insert_graph(&Graph {
+            archived: false,
+            paused_by_reconciliation: false,
+            allow_dirty_start: false,
+            infra_node_id: None,
+            id: graph_id.to_string(),
+            name: "Many Nodes".to_string(),
+            description: None,
+            workdir: "/tmp".to_string(),
+            status: GraphStatus::Completed,
+            trigger: None,
+            created_at: chrono::Utc::now(),
+            started_at: None,
+            completed_at: None,
+            autorun_at: None,
+            auto_continue_at: None,
+            auto_continue_action: None,
+            active_run_queue_id: None,
+            hooks: std::collections::BTreeMap::new(),
+        })
+        .unwrap();
+        for i in 0..3 {
+            db.insert_graph_node(&GraphNode {
+                id: format!("node-{i}"),
+                spec_id: None,
+                graph_id: Some(graph_id.to_string()),
+                name: format!("Node {i}"),
+                kind: GraphNodeKind::Agent,
+                config: serde_json::json!({
+                    "prompt_template": "finish with loop_complete_node",
+                }),
+                position: i,
+                created_at: chrono::Utc::now(),
+            })
+            .unwrap();
+        }
+
+        let report = find_stale_2x_name_hits(&db).unwrap();
+        assert_eq!(
+            report.graphs.len(),
+            1,
+            "three stale nodes in one graph must collapse to one entry"
+        );
+        assert_eq!(report.graphs[0].ref_count, 3);
+        assert_eq!(
+            report.graphs[0].names.len(),
+            1,
+            "the same old→new pair repeats: one distinct name"
+        );
+    }
+
+    #[test]
+    fn stale_names_suggestion_archives_when_all_graphs_terminal() {
+        let report = StaleNameReport {
+            graphs: vec![
+                StaleGraphNames {
+                    graph_name: "done-1".to_string(),
+                    status: GraphStatus::Completed,
+                    ref_count: 2,
+                    names: vec![],
+                },
+                StaleGraphNames {
+                    graph_name: "failed-1".to_string(),
+                    status: GraphStatus::Failed,
+                    ref_count: 1,
+                    names: vec![],
+                },
+            ],
+            agents: vec![],
+        };
+
+        let suggestion = stale_names_suggestion(&report, 3);
+        assert!(suggestion.contains("graph_archive"), "{suggestion}");
+        assert!(suggestion.contains("graph_restore"), "{suggestion}");
+        assert!(suggestion.contains("skips archived graphs"), "{suggestion}");
+    }
+
+    #[test]
+    fn stale_names_suggestion_edits_when_graph_not_terminal() {
+        let report = StaleNameReport {
+            graphs: vec![StaleGraphNames {
+                graph_name: "still-drafting".to_string(),
+                status: GraphStatus::Draft,
+                ref_count: 1,
+                names: vec![],
+            }],
+            agents: vec![],
+        };
+
+        let suggestion = stale_names_suggestion(&report, 1);
+        assert!(
+            suggestion.contains("edit them to the 3.x names"),
+            "{suggestion}"
+        );
+        assert!(!suggestion.contains("graph_archive"), "{suggestion}");
+    }
+
+    // ── CB93: doctor's daily-health-routine renderings ───────────────
+    // stdout-fd capture is unreliable in CI (see the `run_doctor_*` note
+    // above) — these work locally and are marked ignored.
+
+    fn fresh_home_with_db() -> (tempfile::TempDir, std::path::PathBuf, Database) {
+        let home = tempfile::tempdir().unwrap();
+        let canopy_dir = home.path().join(".canopy");
+        std::fs::create_dir_all(&canopy_dir).unwrap();
+        let db_path = canopy_dir.join("background_agents.db");
+        let db = Database::new(&db_path).unwrap();
+        db.upsert_agent(&sample_agent("agent-1")).unwrap();
+        (home, canopy_dir, db)
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn run_doctor_health_routine_never_run_never_deferred() {
+        let (home, _canopy_dir, _db) = fresh_home_with_db();
+
+        let (result, output) = run_doctor_captured(home.path()).await;
+
+        assert!(result.is_ok());
+        assert!(
+            output.contains("Daily health routine: never run"),
+            "{output}"
+        );
+        assert!(!output.contains("never completed"), "{output}");
+        assert!(!output.contains("72h"), "{output}");
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn run_doctor_health_routine_never_completed_but_deferred() {
+        let (home, _canopy_dir, db) = fresh_home_with_db();
+        crate::daemon::health_routine::save_status(
+            &db,
+            &DbHealthStatus {
+                last_run_at: None,
+                deferred_count: 3,
+                first_deferred_at: Some(Utc::now() - chrono::Duration::hours(2)),
+                last_skip_at: Some(Utc::now() - chrono::Duration::hours(1)),
+                last_skip_reason: Some("2 graph(s) currently running".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let (result, output) = run_doctor_captured(home.path()).await;
+
+        assert!(result.is_ok());
+        assert!(
+            output.contains("never completed — deferred 3 times since"),
+            "{output}"
+        );
+        assert!(output.contains("it runs anyway after 72h"), "{output}");
+        assert!(output.contains("canopy daemon health-check"), "{output}");
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn run_doctor_health_routine_ran_with_backup_and_deferral() {
+        let (home, canopy_dir, db) = fresh_home_with_db();
+        let backup = canopy_dir.join("background_agents.db.backup");
+        std::fs::write(&backup, b"backup bytes").unwrap();
+        crate::daemon::health_routine::save_status(
+            &db,
+            &DbHealthStatus {
+                last_run_at: Some(Utc::now() - chrono::Duration::hours(1)),
+                outcome: Some(crate::domain::db_health::DbHealthOutcome::Passed),
+                integrity_result: Some("ok".to_string()),
+                backup_path: Some(backup.display().to_string()),
+                deferred_count: 4,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let (result, output) = run_doctor_captured(home.path()).await;
+
+        assert!(result.is_ok());
+        assert!(
+            output.contains("Daily health routine: passed (last run"),
+            "{output}"
+        );
+        assert!(output.contains(&backup.display().to_string()), "{output}");
+        assert!(output.contains("age:"), "{output}");
+        assert!(
+            output.contains("deferred 4 times since the last run"),
+            "{output}"
+        );
+    }
+
+    /// Agents-only stale names (every affected graph already archived): the
+    /// header must count the agents without also printing a "0 graph(s)"
+    /// clause, and the agent line still lists the distinct old→new pair.
+    #[tokio::test]
+    #[ignore]
+    async fn run_doctor_stale_names_header_counts_agents_when_no_graph_is_affected() {
+        let (home, _canopy_dir, db) = fresh_home_with_db();
+        let mut agent = sample_agent("agent-1");
+        agent.prompt = "run `canopy loop info` and alert on drift".to_string();
+        db.upsert_agent(&agent).unwrap();
+
+        let (result, output) = run_doctor_captured(home.path()).await;
+
+        assert!(result.is_ok());
+        assert!(
+            output.contains("Stale 2.x names (1 found in 1 scheduled agent(s)):"),
+            "{output}"
+        );
+        assert!(!output.contains("0 graph(s)"), "{output}");
+        assert!(
+            output.contains("scheduled agent 'agent-1' (1 refs): canopy loop → canopy graph"),
+            "{output}"
+        );
     }
 }

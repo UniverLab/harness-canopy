@@ -25,40 +25,57 @@ impl InteractiveAgent {
     /// Captures the input and the current scrollback depth as the start
     /// of the response range (visible screen content starts at max_sb).
     pub fn record_prompt(&self, input: &str) {
+        let history_depth = self.scrollback_history_depth();
+        let Ok(mut history) = self.prompt_history.lock() else {
+            return;
+        };
+        self.close_last_prompt_range(&mut history, history_depth);
+        history.push_back(PromptEntry {
+            input: input.to_string(),
+            output_range: (history_depth, history_depth),
+            timestamp: Utc::now(),
+        });
+        while history.len() > MAX_PROMPT_HISTORY {
+            history.pop_front();
+        }
+    }
+
+    /// Total scrollback depth (max), used as the start of the response range.
+    /// Returns 0 when the vt lock is poisoned.
+    fn scrollback_history_depth(&self) -> usize {
+        let Ok(mut vt) = self.vt.lock() else {
+            return 0;
+        };
         // Use scrollback depth only — visible screen lines are indexed from max_sb
         // upward, so this is the correct start for the response range.
-        let history_depth = if let Ok(mut vt) = self.vt.lock() {
-            let prev = vt.screen().scrollback();
-            vt.screen_mut().set_scrollback(usize::MAX);
-            let depth = vt.screen().scrollback();
-            vt.screen_mut().set_scrollback(prev);
-            depth
-        } else {
-            0
-        };
+        let prev = vt.screen().scrollback();
+        vt.screen_mut().set_scrollback(usize::MAX);
+        let depth = vt.screen().scrollback();
+        vt.screen_mut().set_scrollback(prev);
+        depth
+    }
 
-        if let Ok(mut history) = self.prompt_history.lock() {
-            // Close out the previous entry's response range using total_depth
-            // so that visible screen lines (not yet in scrollback) are included.
-            if let Some(last) = history.back_mut() {
-                last.output_range.1 = history_depth + {
-                    // Re-lock vt to get rows for total depth
-                    if let Ok(vt) = self.vt.lock() {
-                        vt.screen().size().0 as usize
-                    } else {
-                        0
-                    }
-                };
-            }
-            history.push_back(PromptEntry {
-                input: input.to_string(),
-                output_range: (history_depth, history_depth),
-                timestamp: Utc::now(),
-            });
-            while history.len() > MAX_PROMPT_HISTORY {
-                history.pop_front();
-            }
-        }
+    /// Visible screen rows at the time of recording. Returns 0 when the vt lock
+    /// is poisoned.
+    fn visible_screen_rows(&self) -> usize {
+        let Ok(vt) = self.vt.lock() else {
+            return 0;
+        };
+        // Re-lock vt to get rows for total depth.
+        vt.screen().size().0 as usize
+    }
+
+    /// Close out the previous entry's response range using total_depth so that
+    /// visible screen lines (not yet in scrollback) are included.
+    fn close_last_prompt_range(
+        &self,
+        history: &mut std::collections::VecDeque<PromptEntry>,
+        history_depth: usize,
+    ) {
+        let Some(last) = history.back_mut() else {
+            return;
+        };
+        last.output_range.1 = history_depth + self.visible_screen_rows();
     }
 
     /// Detect if the agent appears to be waiting for user input / confirmation.
@@ -817,6 +834,54 @@ mod forward_mouse_scroll_tests {
             .expect("forward_mouse should not error");
 
         assert!(consumed);
+        agent.kill();
+    }
+
+    #[test]
+    fn record_prompt_closes_previous_response_range() {
+        let mut agent = spawn_cat_agent();
+        // Produce some visible output so the screen has rows.
+        agent
+            .vt
+            .lock()
+            .expect("vt lock")
+            .process(b"hello\r\nworld\r\n");
+        agent.record_prompt("first");
+        // More output between prompts.
+        agent.vt.lock().expect("vt lock").process(b"more\r\n");
+        agent.record_prompt("second");
+
+        let history = agent.prompt_history.lock().expect("history lock");
+        assert_eq!(history.len(), 2);
+        let first = history.iter().next().expect("first entry");
+        let second = history.iter().nth(1).expect("second entry");
+        assert_eq!(first.input, "first");
+        assert_eq!(second.input, "second");
+        // The first entry's response range end must be >= its start.
+        assert!(first.output_range.1 >= first.output_range.0);
+        drop(history);
+        agent.kill();
+    }
+
+    #[test]
+    fn record_prompt_caps_history_at_max() {
+        let mut agent = spawn_cat_agent();
+        agent.vt.lock().expect("vt lock").process(b"init\r\n");
+        // Record more than MAX_PROMPT_HISTORY entries.
+        for i in 0..(crate::tui::agent::MAX_PROMPT_HISTORY + 2) {
+            agent.record_prompt(&format!("prompt-{i}"));
+        }
+        let history = agent.prompt_history.lock().expect("history lock");
+        assert_eq!(history.len(), crate::tui::agent::MAX_PROMPT_HISTORY);
+        // The oldest survivors are the newest ones recorded.
+        let first = history.iter().next().expect("first survivor");
+        assert!(first.input.starts_with("prompt-"));
+        let last = history.iter().last().expect("last survivor");
+        assert_eq!(
+            last.input,
+            format!("prompt-{}", crate::tui::agent::MAX_PROMPT_HISTORY + 1)
+        );
+        drop(history);
         agent.kill();
     }
 }

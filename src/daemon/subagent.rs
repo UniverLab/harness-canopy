@@ -4,7 +4,7 @@ use anyhow::Result;
 use chrono::Utc;
 
 use crate::daemon::process;
-use crate::db::{Database, SubagentRunRecord};
+use crate::db::{Database, NewSubagentRun, SubagentRunRecord};
 use crate::domain::models::Cli;
 use crate::domain::subagent_mcp::synthesize_mcp_config;
 use crate::setup_module::models::Platform;
@@ -189,15 +189,15 @@ pub async fn spawn_subagent(
     let started_at = now.to_rfc3339();
     let expires_at = (now + chrono::Duration::minutes(ttl_minutes as i64)).to_rfc3339();
 
-    db.insert_subagent_run(
-        &run_id,
-        platform_name,
-        resolved_model,
+    db.insert_subagent_run(NewSubagentRun {
+        id: &run_id,
+        platform: platform_name,
+        model: resolved_model,
         prompt,
         workdir,
-        &started_at,
-        &expires_at,
-    )?;
+        started_at: &started_at,
+        expires_at: &expires_at,
+    })?;
 
     let has_template = strategy.invocation_template.is_some();
     let mcp_config_path_str = synthesized.path.to_string_lossy().to_string();
@@ -215,6 +215,7 @@ pub async fn spawn_subagent(
         Some(workdir),
         mcp_config_arg,
         effort,
+        None,
     )?;
 
     command.stdout(std::process::Stdio::piped());
@@ -312,15 +313,15 @@ pub async fn spawn_subagent_blocking(
     let expires_at = (now + chrono::Duration::minutes(ttl_minutes as i64)).to_rfc3339();
 
     // NFR: drop conn guard before await so other MCP tools progress.
-    db.insert_subagent_run(
-        &run_id,
-        platform_name,
-        resolved_model,
+    db.insert_subagent_run(NewSubagentRun {
+        id: &run_id,
+        platform: platform_name,
+        model: resolved_model,
         prompt,
         workdir,
-        &started_at,
-        &expires_at,
-    )?;
+        started_at: &started_at,
+        expires_at: &expires_at,
+    })?;
 
     let has_template = strategy.invocation_template.is_some();
     let mcp_config_path_str = synthesized.path.to_string_lossy().to_string();
@@ -338,6 +339,7 @@ pub async fn spawn_subagent_blocking(
         Some(workdir),
         mcp_config_arg,
         effort,
+        None,
     )?;
 
     command.stdout(std::process::Stdio::piped());
@@ -451,10 +453,15 @@ mod tests {
             session_list_cmd: None,
             session_list_format_args: None,
             session_id_pattern: None,
+            session_title_flag: None,
+            session_list_args: None,
+            session_end_args: None,
             session_resume_cmd: None,
             trust_flag: None,
             invocation_template: None,
             effort_declaration: decl,
+            decision_args: None,
+            identity: None,
         }
     }
 
@@ -522,8 +529,16 @@ mod tests {
     fn insert_running_run(db: &Database, id: &str) {
         let now = chrono::Utc::now().to_rfc3339();
         let expires = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
-        db.insert_subagent_run(id, "opencode", None, "p", "/tmp", &now, &expires)
-            .unwrap();
+        db.insert_subagent_run(NewSubagentRun {
+            id,
+            platform: "opencode",
+            model: None,
+            prompt: "p",
+            workdir: "/tmp",
+            started_at: &now,
+            expires_at: &expires,
+        })
+        .unwrap();
     }
 
     #[tokio::test]

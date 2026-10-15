@@ -34,14 +34,18 @@ use daemon::agent_cli::{handle_agent_action, AgentAction};
 use daemon::bridge::run_bridge;
 use daemon::clean_cli::handle_clean_action;
 use daemon::cli::{handle_daemon_action, DaemonAction};
+use daemon::crew_cli::{handle_crew_action, CrewAction};
 use daemon::doctor::run_doctor;
 use daemon::graph_cli::{handle_graph_action, GraphAction};
 use daemon::models_cli::{handle_models_action, ModelsAction};
 use daemon::project_cli::{handle_project_action, ProjectAction};
 use daemon::prompts_cli::{handle_prompts_action, PromptsAction};
+use daemon::queue_cli::{handle_queue_action, QueueAction};
 use daemon::rag_cli::{handle_rag_action, RagAction};
+use daemon::roster_cli::{handle_roster_action, RosterAction};
 use daemon::sandbox_cli::{handle_sandbox_action, SandboxAction};
 use daemon::server::{run_http_server, run_stdio_server};
+use daemon::settings_cli::{handle_settings_action, SettingsAction};
 use daemon::spec_cli::{handle_spec_action, SpecAction};
 use daemon::subagent_cli::{handle_subagent_action, SubagentAction};
 use std::path::PathBuf;
@@ -65,7 +69,7 @@ enum Commands {
     },
     /// Check for a newer stable release and install it (asks first; refuses cargo installs).
     Update {
-        /// Only print whether an update exists; exit 1 when one does, 0 otherwise. Changes nothing.
+        /// Only print whether an update exists; exit 0 up to date, 1 update available, 2 check failed. Changes nothing.
         #[arg(long)]
         check: bool,
         /// Skip the confirmation prompt.
@@ -132,6 +136,26 @@ enum Commands {
     Spec {
         #[command(subcommand)]
         action: SpecAction,
+    },
+    /// Declare platform/model availability for graph dispatch.
+    Roster {
+        #[command(subcommand)]
+        action: RosterAction,
+    },
+    /// Manage crews — named, ordered member lists ensembles and nodes bind to.
+    Crew {
+        #[command(subcommand)]
+        action: CrewAction,
+    },
+    /// Inspect and change settings in config.toml.
+    Config {
+        #[command(subcommand)]
+        action: SettingsAction,
+    },
+    /// Manage spec queues.
+    Queue {
+        #[command(subcommand)]
+        action: QueueAction,
     },
     /// Inspect or refresh the `agent_models` catalog cache.
     Models {
@@ -256,6 +280,10 @@ async fn main() -> Result<()> {
         Some(Commands::Graph { action }) => handle_graph_action(action, cli.port).await,
         Some(Commands::Agent { action }) => handle_agent_action(action).await,
         Some(Commands::Spec { action }) => handle_spec_action(action, cli.port).await,
+        Some(Commands::Roster { action }) => handle_roster_action(action, cli.port).await,
+        Some(Commands::Crew { action }) => handle_crew_action(action, cli.port).await,
+        Some(Commands::Config { action }) => handle_settings_action(action, cli.port).await,
+        Some(Commands::Queue { action }) => handle_queue_action(action, cli.port).await,
         Some(Commands::Models { action }) => handle_models_action(action).await,
         Some(Commands::Project { action }) => handle_project_action(action).await,
         Some(Commands::Clean {

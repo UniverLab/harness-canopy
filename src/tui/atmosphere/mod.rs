@@ -151,27 +151,32 @@ impl SceneManager {
                 continue;
             }
             for p in event.scene.particles() {
-                if p.col < area.x
-                    || p.row < area.y
-                    || p.col >= area.x + area.width
-                    || p.row >= area.y + area.height
-                {
-                    continue;
-                }
-                let cell = buf.cell_mut((p.col, p.row));
-                if let Some(cell) = cell {
-                    cell.set_symbol(p.symbol);
-                    cell.set_fg(p.color);
-                    if let Some(bg) = p.bg {
-                        cell.set_bg(bg);
-                    }
-                }
+                paint_particle(buf, area, &p);
             }
         }
     }
 
     /// Notify the atmosphere about mouse movement (forwarded via ctx on next tick).
     pub fn notify_mouse(&mut self, _col: u16, _row: u16, _delta_col: i16, _delta_row: i16) {}
+}
+
+/// Draw a single particle into `buf` when it falls inside `area`.
+fn paint_particle(buf: &mut Buffer, area: Rect, p: &Particle) {
+    if p.col < area.x
+        || p.row < area.y
+        || p.col >= area.x + area.width
+        || p.row >= area.y + area.height
+    {
+        return;
+    }
+    let Some(cell) = buf.cell_mut((p.col, p.row)) else {
+        return;
+    };
+    cell.set_symbol(p.symbol);
+    cell.set_fg(p.color);
+    if let Some(bg) = p.bg {
+        cell.set_bg(bg);
+    }
 }
 
 // ── Renderer (top-level draw call) ───────────────────────────────

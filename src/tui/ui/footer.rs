@@ -12,103 +12,46 @@ use crate::tui::event::focused_child_claimed_keyboard;
 
 pub(super) fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let activity_available = app.activity_panel_available();
-    let hints = match app.focus {
-        Focus::Home => {
-            let mut h = vec![("↑↓", "select"), ("n", "new")];
-            if activity_available {
-                h.push(("F3", "activity"));
-                h.push(("F6", "panel"));
-            }
-            h.push(("Shift+←→", "panels"));
-            h.push(("F10", "preview"));
-            h.push(("F1", "stats"));
-            h
-        }
-        Focus::Preview => {
-            if app.playground_active {
-                vec![
-                    ("type", "search"),
-                    ("↑↓", "results"),
-                    ("Enter", "search/open"),
-                    ("Shift+↑↓", "agents"),
-                    ("Ctrl+T", "transfer"),
-                    ("Esc", "close"),
-                ]
-            } else if app.sidebar_layer == SidebarLayer::Knowledge {
-                let mut h = vec![
-                    ("↑↓", "highlight"),
-                    ("Enter", "open project"),
-                    ("Shift+←→", "tab"),
-                ];
-                h.push(("Esc", "home"));
-                h
-            } else {
-                let on_graph = app.sidebar_layer == SidebarLayer::Automation
-                    && app.automation_kind == AutomationKind::Graph;
-                let is_bg = matches!(app.selected_agent(), Some(AgentEntry::Agent(_)));
-                // CT24: on the graph face, Enter/Esc are how manual mode is
-                // reached/left, so advertise them; the spec strip keeps plain
-                // `Enter focus` (it is driven by Tab/←→, not Enter/Esc).
-                let mut h: Vec<(&str, &str)> = if on_graph
-                    && app.graph_live_focus == crate::tui::app::types::GraphLiveFocus::Graph
-                {
-                    if app.graph_live_follow {
-                        vec![("↑↓", "nav"), ("Enter", "manual"), ("Shift+←→", "tab")]
-                    } else {
-                        vec![("↑↓", "nav"), ("Esc", "auto"), ("Shift+←→", "tab")]
-                    }
-                } else {
-                    vec![("↑↓", "nav"), ("Enter", "focus"), ("Shift+←→", "tab")]
-                };
-                if on_graph && app.graph_live_focus == crate::tui::app::types::GraphLiveFocus::Graph
-                {
-                    h.push(("←→", "graph ↑↓"));
-                }
-                if on_graph {
-                    // Run-time controls apply only to the live (non-archived)
-                    // list — an archived graph is inert until restored.
-                    if !app.graph_view_archived {
-                        if let Some(lp) = app.selected_graph() {
-                            for action in
-                                crate::tui::app::dialog::available_graph_actions(lp.status)
-                            {
-                                h.push((action.key(), action.label()));
-                            }
-                            h.push(("a", "autorun"));
-                        }
-                    }
-                    h.push(("e", "edit"));
-                    if app.graph_view_archived {
-                        h.push(("R", "restore"));
-                        h.push(("F4", "delete forever"));
-                    } else {
-                        h.push(("F4", "archive"));
-                    }
-                    h.push((
-                        "A",
-                        if app.graph_view_archived {
-                            "graphs"
-                        } else if app.archived_graph_count > 0 {
-                            "archived"
-                        } else {
-                            "archive"
-                        },
-                    ));
-                } else if is_bg {
-                    h.push(("e", "edit"));
-                    h.push(("d", "toggle"));
-                    h.push(("F4", "delete"));
-                    h.push(("r", "rerun"));
-                }
-                h.push(("n", "new"));
-                if activity_available {
-                    h.push(("F3", "activity"));
-                    h.push(("F6", "panel"));
-                }
-                h.push(("Esc", "home"));
-                h
-            }
-        }
+    // The Knowledge arm of `footer_hints` wins over the playground check, so
+    // hoisting the check here must keep the same precedence: an agent-face
+    // playground footer only replaces the normal hints when the sidebar is
+    // not on the Knowledge layer.
+    if matches!(app.focus, Focus::Agent)
+        && app.sidebar_layer != SidebarLayer::Knowledge
+        && app.playground_active
+    {
+        return draw_footer_playground(frame, area, app, activity_available, theme);
+    }
+    let hints = footer_hints(app, activity_available);
+    let spans = footer_hint_spans(&hints, theme);
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+
+    let split_label = footer_split_label(app);
+    let version = if app.daemon_version.is_empty() {
+        String::new()
+    } else {
+        format!(" v{} ", app.daemon_version)
+    };
+    let update_notice = app
+        .update_available
+        .as_deref()
+        .map(|tag| format!(" canopy {tag} available — run canopy update"))
+        .unwrap_or_default();
+    draw_footer_right(
+        frame,
+        area,
+        split_label.as_deref(),
+        &version,
+        &update_notice,
+        theme,
+    );
+}
+
+/// Hint pairs for the current focus.
+fn footer_hints(app: &App, activity_available: bool) -> Vec<(&'static str, &'static str)> {
+    match app.focus {
+        Focus::Home => footer_hints_home(app, activity_available),
+        Focus::Preview => footer_hints_preview(app, activity_available),
         Focus::NewAgentDialog => vec![
             ("↑↓", "fields"),
             ("←→", "cycle"),
@@ -123,95 +66,9 @@ pub(super) fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Them
             ("Esc", "cancel"),
         ],
         Focus::Agent if app.sidebar_layer == SidebarLayer::Knowledge => {
-            let mut h = vec![
-                ("Tab/]/[", "tab"),
-                ("Shift+←→", "tab"),
-                ("o/b/k/h", "jump tab"),
-                ("↑↓", "nav list"),
-            ];
-            if app.project_focus == Some(ProjectTab::Knowledge) {
-                h.push(("/", "filter"));
-            }
-            h.push(("Esc", "back"));
-            h
+            footer_hints_agent_knowledge(app)
         }
-        Focus::Agent => {
-            if app.playground_active {
-                return draw_footer_playground(frame, area, app, activity_available, theme);
-            }
-
-            let is_pty = matches!(
-                app.selected_agent(),
-                Some(AgentEntry::Interactive(_))
-                    | Some(AgentEntry::Terminal(_))
-                    | Some(AgentEntry::Group(_))
-            );
-            let in_split = app.active_split_id.is_some();
-            if is_pty {
-                // While the focused child has claimed the keyboard (alternate
-                // screen or Kitty keyboard protocol), every canopy shortcut
-                // below yields to it except F10, the Shift+arrow frame
-                // navigation, Ctrl+T, and Shift+F4 (end) — see
-                // `agent_focus::RESERVED_FOCUS_KEYS`. Reflect that here so a
-                // shortcut that "did nothing" is explainable instead of
-                // looking broken.
-                let child_claimed = focused_child_claimed_keyboard(app);
-                let mut h = vec![("F10", "preview"), ("Esc", "home")];
-                if child_claimed {
-                    // Frame navigation stays with canopy even then, so it is
-                    // still worth showing: only the content shortcuts yield.
-                    // Shift+F4 is the one session action that also survives a
-                    // claimed keyboard (see agent_focus::RESERVED_FOCUS_KEYS) —
-                    // plain F4 still belongs to the child while claimed.
-                    h.push(("Shift+↑↓", "agents/rag"));
-                    h.push(("Shift+←→", if in_split { "split focus" } else { "tab" }));
-                    h.push(("Ctrl+T", "context"));
-                    h.push(("Shift+F4", "end"));
-                } else {
-                    h.push(("Shift+↑↓", "agents/rag"));
-                    h.push(("Ctrl+T", "context"));
-                    if in_split {
-                        h.push(("F4", "dissolve"));
-                        h.push(("Shift+F4", "end"));
-                        h.push(("Shift+←→", "split focus"));
-                    } else {
-                        h.push(("F4", "end"));
-                        h.push(("Shift+←→", "tab"));
-                    }
-                }
-                if matches!(app.selected_agent(), Some(AgentEntry::Terminal(_))) {
-                    h.push(("Tab", "catalog"));
-                    h.push(("Ctrl+W", "wrap"));
-                }
-                if matches!(app.selected_agent(), Some(AgentEntry::Interactive(_))) {
-                    h.push(("Ctrl+B", "prompt"));
-                }
-                if activity_available {
-                    h.push(("F3", "activity"));
-                    h.push(("F6", "panel"));
-                }
-                h.push(("Ctrl+N", "new"));
-                if !child_claimed {
-                    h.push(("F1", "legend"));
-                }
-                h
-            } else {
-                let mut h = vec![("F10", "preview"), ("Esc", "home")];
-                if !app.agents_rag_focused {
-                    h.push(("e", "edit"));
-                }
-                if !in_split {
-                    h.push(("Shift+←→", "tab"));
-                }
-                if activity_available {
-                    h.push(("F3", "activity"));
-                    h.push(("F6", "panel"));
-                }
-                h.push(("Ctrl+N", "new"));
-                h.push(("F1", "legend"));
-                h
-            }
-        }
+        Focus::Agent => footer_hints_agent(app, activity_available),
         Focus::ContextTransfer => vec![
             ("↑↓", "select"),
             ("Tab/Enter", "next step"),
@@ -251,8 +108,236 @@ pub(super) fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Them
             ("Enter", "next/save"),
             ("Esc", "cancel"),
         ],
-    };
+    }
+}
 
+/// Hint pairs for the home face.
+fn footer_hints_home(_app: &App, activity_available: bool) -> Vec<(&'static str, &'static str)> {
+    let mut h = vec![("↑↓", "select"), ("n", "new")];
+    if activity_available {
+        h.push(("F3", "activity"));
+        h.push(("F6", "panel"));
+    }
+    h.push(("Shift+←→", "panels"));
+    h.push(("F10", "preview"));
+    h.push(("F1", "hub"));
+    h
+}
+
+/// Hint pairs for the preview face — playground, knowledge layer, or main sidebar.
+fn footer_hints_preview(app: &App, activity_available: bool) -> Vec<(&'static str, &'static str)> {
+    if app.playground_active {
+        return vec![
+            ("type", "search"),
+            ("↑↓", "results"),
+            ("Enter", "search/open"),
+            ("Shift+↑↓", "agents"),
+            ("Ctrl+T", "transfer"),
+            ("Esc", "close"),
+        ];
+    }
+    if app.sidebar_layer == SidebarLayer::Knowledge {
+        return footer_hints_preview_knowledge(app);
+    }
+    footer_hints_preview_main(app, activity_available)
+}
+
+/// Hint pairs for the preview face's knowledge sidebar layer.
+fn footer_hints_preview_knowledge(_app: &App) -> Vec<(&'static str, &'static str)> {
+    let mut h = vec![
+        ("↑↓", "highlight"),
+        ("Enter", "open project"),
+        ("Shift+←→", "tab"),
+    ];
+    h.push(("Esc", "home"));
+    h
+}
+
+/// Hint pairs for the preview face's automation / project sidebar.
+fn footer_hints_preview_main(
+    app: &App,
+    activity_available: bool,
+) -> Vec<(&'static str, &'static str)> {
+    let on_graph = app.sidebar_layer == SidebarLayer::Automation
+        && app.automation_kind == AutomationKind::Graph;
+    let is_bg = matches!(app.selected_agent(), Some(AgentEntry::Agent(_)));
+    // CT24: on the graph face, Enter/Esc are how manual mode is
+    // reached/left, so advertise them; the spec strip keeps plain
+    // `Enter focus` (it is driven by Tab/←→, not Enter/Esc).
+    let mut h: Vec<(&'static str, &'static str)> =
+        if on_graph && app.graph_live_focus == crate::tui::app::types::GraphLiveFocus::Graph {
+            if app.graph_live_follow {
+                vec![("↑↓", "nav"), ("Enter", "manual"), ("Shift+←→", "tab")]
+            } else {
+                vec![("↑↓", "nav"), ("Esc", "auto"), ("Shift+←→", "tab")]
+            }
+        } else {
+            vec![("↑↓", "nav"), ("Enter", "focus"), ("Shift+←→", "tab")]
+        };
+    if on_graph && app.graph_live_focus == crate::tui::app::types::GraphLiveFocus::Graph {
+        h.push(("←→", "graph ↑↓"));
+    }
+    if on_graph {
+        push_graph_run_hints(&mut h, app);
+    } else if is_bg {
+        h.push(("e", "edit"));
+        h.push(("d", "toggle"));
+        h.push(("F4", "delete"));
+        h.push(("r", "rerun"));
+    }
+    h.push(("n", "new"));
+    if activity_available {
+        h.push(("F3", "activity"));
+        h.push(("F6", "panel"));
+    }
+    h.push(("Esc", "home"));
+    h
+}
+
+/// Graph run-time controls — they apply only to the live (non-archived)
+/// list, because an archived graph is inert until restored.
+fn push_graph_run_hints(h: &mut Vec<(&'static str, &'static str)>, app: &App) {
+    if !app.graph_view_archived {
+        if let Some(lp) = app.selected_graph() {
+            for action in crate::tui::app::dialog::available_graph_actions(lp.status) {
+                h.push((action.key(), action.label()));
+            }
+            h.push(("a", "autorun"));
+        }
+    }
+    h.push(("e", "edit"));
+    if app.graph_view_archived {
+        h.push(("R", "restore"));
+        h.push(("F4", "delete forever"));
+    } else {
+        h.push(("F4", "archive"));
+    }
+    h.push((
+        "A",
+        if app.graph_view_archived {
+            "graphs"
+        } else if app.archived_graph_count > 0 {
+            "archived"
+        } else {
+            "archive"
+        },
+    ));
+}
+
+/// Hint pairs for the knowledge sidebar layer while an agent is selected.
+fn footer_hints_agent_knowledge(app: &App) -> Vec<(&'static str, &'static str)> {
+    let mut h = vec![
+        ("Tab/]/[", "tab"),
+        ("Shift+←→", "tab"),
+        ("o/b/k/h", "jump tab"),
+        ("↑↓", "nav list"),
+    ];
+    if app.project_focus == Some(ProjectTab::Knowledge) {
+        h.push(("/", "filter"));
+    }
+    h.push(("Esc", "back"));
+    h
+}
+
+/// Hint pairs for a selected agent — pty sessions or plain background agents.
+fn footer_hints_agent(app: &App, activity_available: bool) -> Vec<(&'static str, &'static str)> {
+    let is_pty = matches!(
+        app.selected_agent(),
+        Some(AgentEntry::Interactive(_))
+            | Some(AgentEntry::Terminal(_))
+            | Some(AgentEntry::Group(_))
+    );
+    let in_split = app.active_split_id.is_some();
+    if !is_pty {
+        return footer_hints_agent_plain(app, activity_available, in_split);
+    }
+    let child_claimed = focused_child_claimed_keyboard(app);
+    footer_hints_agent_pty(app, activity_available, in_split, child_claimed)
+}
+
+/// Hint pairs for a selected pty session (interactive / terminal / group).
+fn footer_hints_agent_pty(
+    app: &App,
+    activity_available: bool,
+    in_split: bool,
+    child_claimed: bool,
+) -> Vec<(&'static str, &'static str)> {
+    // While the focused child has claimed the keyboard (alternate
+    // screen or Kitty keyboard protocol), every canopy shortcut
+    // below yields to it except F10, the Shift+arrow frame
+    // navigation, Ctrl+T, and Shift+F4 (end) — see
+    // `agent_focus::RESERVED_FOCUS_KEYS`. Reflect that here so a
+    // shortcut that "did nothing" is explainable instead of
+    // looking broken.
+    let mut h = vec![("F10", "preview"), ("Esc", "home")];
+    if child_claimed {
+        // Frame navigation stays with canopy even then, so it is
+        // still worth showing: only the content shortcuts yield.
+        // Shift+F4 is the one session action that also survives a
+        // claimed keyboard (see agent_focus::RESERVED_FOCUS_KEYS) —
+        // plain F4 still belongs to the child while claimed.
+        h.push(("Shift+↑↓", "agents/rag"));
+        h.push(("Shift+←→", if in_split { "split focus" } else { "tab" }));
+        h.push(("Ctrl+T", "context"));
+        h.push(("Shift+F4", "end"));
+    } else {
+        h.push(("Shift+↑↓", "agents/rag"));
+        h.push(("Ctrl+T", "context"));
+        if in_split {
+            h.push(("F4", "dissolve"));
+            h.push(("Shift+F4", "end"));
+            h.push(("Shift+←→", "split focus"));
+        } else {
+            h.push(("F4", "end"));
+            h.push(("Shift+←→", "tab"));
+        }
+    }
+    if matches!(app.selected_agent(), Some(AgentEntry::Terminal(_))) {
+        h.push(("Tab", "catalog"));
+        h.push(("Ctrl+W", "wrap"));
+    }
+    if matches!(app.selected_agent(), Some(AgentEntry::Interactive(_))) {
+        h.push(("Ctrl+B", "prompt"));
+    }
+    // The plain-drag copy is invisible until you try it. Naming it here is what
+    // keeps the user from reaching for Shift — the terminal's own selection,
+    // which canopy cannot see — and the fatal Ctrl+C that follows it.
+    h.push(("drag", "to copy"));
+    if activity_available {
+        h.push(("F3", "activity"));
+        h.push(("F6", "panel"));
+    }
+    h.push(("Ctrl+N", "new"));
+    if !child_claimed {
+        h.push(("F1", "hub"));
+    }
+    h
+}
+
+/// Hint pairs for a selected plain (non-pty) background agent.
+fn footer_hints_agent_plain(
+    app: &App,
+    activity_available: bool,
+    in_split: bool,
+) -> Vec<(&'static str, &'static str)> {
+    let mut h = vec![("F10", "preview"), ("Esc", "home")];
+    if !app.agents_rag_focused {
+        h.push(("e", "edit"));
+    }
+    if !in_split {
+        h.push(("Shift+←→", "tab"));
+    }
+    if activity_available {
+        h.push(("F3", "activity"));
+        h.push(("F6", "panel"));
+    }
+    h.push(("Ctrl+N", "new"));
+    h.push(("F1", "hub"));
+    h
+}
+
+/// Turn hint pairs into the styled footer spans.
+fn footer_hint_spans(hints: &[(&'static str, &'static str)], theme: &Theme) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     spans.push(Span::raw("  "));
     for (i, (key, desc)) in hints.iter().enumerate() {
@@ -268,77 +353,72 @@ pub(super) fn draw_footer(frame: &mut Frame, area: Rect, app: &App, theme: &Them
         spans.push(Span::raw(" "));
         spans.push(Span::styled(*desc, Style::default().fg(theme.dim_text)));
     }
+    spans
+}
 
-    // Show split session names when in split view
-    let split_label = if let Some(ref split_id) = app.active_split_id {
-        app.split_groups
-            .iter()
-            .find(|g| g.id == *split_id)
-            .map(|g| {
-                let left_marker = if app.split_right_focused { " " } else { "●" };
-                let right_marker = if app.split_right_focused { "●" } else { " " };
-                format!(
-                    " {left_marker} {} │ {} {right_marker} ",
-                    g.session_a, g.session_b
-                )
-            })
-    } else {
-        None
-    };
+/// Split session names shown while in split view.
+fn footer_split_label(app: &App) -> Option<String> {
+    let split_id = app.active_split_id.as_ref()?;
+    app.split_groups
+        .iter()
+        .find(|g| g.id == *split_id)
+        .map(|g| {
+            let left_marker = if app.split_right_focused { " " } else { "●" };
+            let right_marker = if app.split_right_focused { "●" } else { " " };
+            format!(
+                " {left_marker} {} │ {} {right_marker} ",
+                g.session_a, g.session_b
+            )
+        })
+}
 
-    let version = if app.daemon_version.is_empty() {
-        String::new()
-    } else {
-        format!(" v{} ", app.daemon_version)
-    };
-    let update_notice = app
-        .update_available
-        .as_deref()
-        .map(|tag| format!(" canopy {tag} available — run canopy update"))
-        .unwrap_or_default();
-
-    let hints_line = Line::from(spans);
-    let hints_p = Paragraph::new(hints_line);
-    frame.render_widget(hints_p, area);
-
-    // Render split label + version + update notice on the right side.
-    let right_text = match &split_label {
+/// Render split label + version + update notice on the right side.
+fn draw_footer_right(
+    frame: &mut Frame,
+    area: Rect,
+    split_label: Option<&str>,
+    version: &str,
+    update_notice: &str,
+    theme: &Theme,
+) {
+    let right_text = match split_label {
         Some(sl) => format!("{sl}{version}{update_notice}"),
         None => format!("{version}{update_notice}"),
     };
     let right_w = right_text.len() as u16;
 
-    if right_w > 0 && area.width > right_w {
-        let right_area = Rect::new(area.x + area.width - right_w, area.y, right_w, 1);
-
-        let mut right_spans = Vec::new();
-        if let Some(ref sl) = split_label {
-            right_spans.push(Span::styled(
-                sl.as_str(),
-                Style::default()
-                    .fg(theme.header_color)
-                    .add_modifier(Modifier::BOLD),
-            ));
-        }
-        if !version.is_empty() {
-            right_spans.push(Span::styled(
-                &version,
-                Style::default()
-                    .fg(theme.dim_text)
-                    .add_modifier(Modifier::BOLD),
-            ));
-        }
-        if !update_notice.is_empty() {
-            right_spans.push(Span::styled(
-                &update_notice,
-                Style::default()
-                    .fg(theme.header_color)
-                    .add_modifier(Modifier::BOLD),
-            ));
-        }
-        let right_p = Paragraph::new(Line::from(right_spans));
-        frame.render_widget(right_p, right_area);
+    if right_w == 0 || area.width <= right_w {
+        return;
     }
+    let right_area = Rect::new(area.x + area.width - right_w, area.y, right_w, 1);
+
+    let mut right_spans = Vec::new();
+    if let Some(sl) = split_label {
+        right_spans.push(Span::styled(
+            sl,
+            Style::default()
+                .fg(theme.header_color)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    if !version.is_empty() {
+        right_spans.push(Span::styled(
+            version,
+            Style::default()
+                .fg(theme.dim_text)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    if !update_notice.is_empty() {
+        right_spans.push(Span::styled(
+            update_notice,
+            Style::default()
+                .fg(theme.header_color)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    let right_p = Paragraph::new(Line::from(right_spans));
+    frame.render_widget(right_p, right_area);
 }
 
 fn draw_footer_playground(
@@ -934,6 +1014,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn footer_knowledge_layer_wins_over_playground_in_agent_focus() {
+        // The Knowledge match arm precedes the playground check inside the
+        // `Focus::Agent` arm, so with both the Knowledge layer and the
+        // playground active the knowledge hints must be drawn — not the
+        // playground footer. The refactor hoisted the playground check above
+        // the match, which would have inverted this precedence.
+        let mut app = make_app();
+        app.focus = Focus::Agent;
+        app.sidebar_layer = SidebarLayer::Knowledge;
+        app.playground_active = true;
+        let theme = Theme::classic();
+        let text = render_footer_to_text(120, 1, |frame, area| {
+            draw_footer(frame, area, &app, &theme);
+        });
+        assert!(
+            text.contains("jump tab"),
+            "Knowledge layer must keep its own hints: {text}"
+        );
+        assert!(
+            !text.contains("search"),
+            "the playground footer must not replace the Knowledge hints: {text}"
+        );
+    }
+
     fn graph_with_status(
         status: crate::domain::graphs::GraphStatus,
     ) -> crate::domain::graphs::Graph {
@@ -1066,5 +1171,42 @@ mod tests {
         });
         assert!(text.contains("Esc auto"), "{text}");
         assert!(!text.contains("Enter focus"), "{text}");
+    }
+
+    #[test]
+    fn footer_in_agent_focus_advertises_drag_to_copy() {
+        // CT26 (FR3): the plain-drag copy is discoverable from the session
+        // pane's key-hint row, so the user never has to reach for Shift.
+        let agent = crate::tui::agent::InteractiveAgent::spawn(
+            crate::domain::models::Cli::new("cat"),
+            ".",
+            80,
+            24,
+            None,
+            None,
+            Color::Reset,
+            Some("drag-copy-hint-agent"),
+            &[],
+            None,
+            None,
+            None,
+        )
+        .expect("spawn cat as a stand-in interactive child");
+        let mut app = make_app();
+        app.interactive_agents = vec![agent];
+        app.agents = vec![crate::tui::app::types::AgentEntry::Interactive(0)];
+        app.selected = 0;
+        app.focus = Focus::Agent;
+
+        let theme = Theme::classic();
+        let text = render_footer_to_text(200, 1, |frame, area| {
+            draw_footer(frame, area, &app, &theme);
+        });
+
+        assert!(
+            text.contains("drag to copy"),
+            "agent-focus footer must advertise the plain-drag copy: {text}"
+        );
+        app.interactive_agents[0].kill();
     }
 }

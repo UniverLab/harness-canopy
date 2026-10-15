@@ -5,6 +5,8 @@ use crate::tui::app::types::{AgentEntry, App, Focus, GraphLiveFocus, ProjectTab,
 
 // ── Home: screensaver — arrows enter Preview ────────────────────────
 
+// ── Home: screensaver — arrows enter Preview ────────────────────────
+
 pub fn handle_home_key(app: &mut App, code: KeyCode, _modifiers: KeyModifiers) -> Result<()> {
     // Quit-confirmation overlay intercepts all keys
     if app.quit_confirm {
@@ -40,7 +42,7 @@ pub fn handle_home_key(app: &mut App, code: KeyCode, _modifiers: KeyModifiers) -
             }
         }
         KeyCode::F(1) => {
-            app.show_legend = true;
+            app.open_hub();
         }
         KeyCode::Down | KeyCode::Char('j') if has_sidebar_preview => {
             app.dismiss_brain();
@@ -68,130 +70,8 @@ pub fn handle_home_key(app: &mut App, code: KeyCode, _modifiers: KeyModifiers) -
 // ── Preview: navigate agents, Enter → Focus ─────────────────────────
 
 pub fn handle_preview_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> Result<()> {
-    // Modal delete confirm intercepts all keys
-    if app.delete_project_confirm {
-        match code {
-            KeyCode::Char('y') | KeyCode::Enter => {
-                let _ = app.delete_selected_project();
-                app.delete_project_confirm = false;
-            }
-            KeyCode::Char('n') | KeyCode::Esc => {
-                app.delete_project_confirm = false;
-            }
-            _ => {}
-        }
-        return Ok(());
-    }
-    if app.archive_graph_confirm {
-        match code {
-            KeyCode::Char('y') | KeyCode::Enter => {
-                let _ = app.archive_selected_graph();
-                app.archive_graph_confirm = false;
-            }
-            KeyCode::Char('n') | KeyCode::Esc => {
-                app.archive_graph_confirm = false;
-            }
-            _ => {}
-        }
-        return Ok(());
-    }
-    if app.permanent_delete_graph_confirm {
-        match code {
-            KeyCode::Char('y') | KeyCode::Enter => {
-                let _ = app.permanent_delete_selected_archived_graph();
-                app.permanent_delete_graph_confirm = false;
-            }
-            KeyCode::Char('n') | KeyCode::Esc => {
-                app.permanent_delete_graph_confirm = false;
-            }
-            _ => {}
-        }
-        return Ok(());
-    }
-    if app.graph_reset_confirm {
-        match code {
-            KeyCode::Char('y') | KeyCode::Enter => {
-                app.confirm_reset_selected_graph();
-                app.graph_reset_confirm = false;
-            }
-            KeyCode::Char('n') | KeyCode::Esc => {
-                app.graph_reset_confirm = false;
-            }
-            _ => {}
-        }
-        return Ok(());
-    }
-    if app.graph_autorun_dialog.is_some() {
-        use crate::tui::app::dialog::GraphAutorunMode;
-        match code {
-            KeyCode::Esc => app.close_graph_autorun_dialog(),
-            KeyCode::Enter => app.submit_graph_autorun_dialog(),
-            // Tab switches between picking a time and typing a raw
-            // quota-reset message — the two mutually exclusive submit paths.
-            KeyCode::Tab | KeyCode::BackTab => {
-                if let Some(dialog) = app.graph_autorun_dialog.as_mut() {
-                    dialog.toggle_mode();
-                }
-            }
-            KeyCode::Up
-                if app.graph_autorun_dialog.as_ref().map(|d| d.mode)
-                    == Some(GraphAutorunMode::Picker) =>
-            {
-                if let Some(dialog) = app.graph_autorun_dialog.as_mut() {
-                    dialog.picker.adjust(1);
-                    dialog.error = None;
-                }
-            }
-            KeyCode::Down
-                if app.graph_autorun_dialog.as_ref().map(|d| d.mode)
-                    == Some(GraphAutorunMode::Picker) =>
-            {
-                if let Some(dialog) = app.graph_autorun_dialog.as_mut() {
-                    dialog.picker.adjust(-1);
-                    dialog.error = None;
-                }
-            }
-            KeyCode::Left
-                if app.graph_autorun_dialog.as_ref().map(|d| d.mode)
-                    == Some(GraphAutorunMode::Picker) =>
-            {
-                if let Some(dialog) = app.graph_autorun_dialog.as_mut() {
-                    dialog.picker.move_field(-1);
-                }
-            }
-            KeyCode::Right
-                if app.graph_autorun_dialog.as_ref().map(|d| d.mode)
-                    == Some(GraphAutorunMode::Picker) =>
-            {
-                if let Some(dialog) = app.graph_autorun_dialog.as_mut() {
-                    dialog.picker.move_field(1);
-                }
-            }
-            KeyCode::Backspace => {
-                if let Some(dialog) = app.graph_autorun_dialog.as_mut() {
-                    if dialog.mode == GraphAutorunMode::QuotaMessage {
-                        dialog.quota_input.pop();
-                    }
-                }
-            }
-            KeyCode::Char(c) if !modifiers.contains(KeyModifiers::CONTROL) => {
-                if let Some(dialog) = app.graph_autorun_dialog.as_mut() {
-                    match dialog.mode {
-                        GraphAutorunMode::Picker => {
-                            if let Some(digit) = c.to_digit(10) {
-                                dialog.picker.type_digit(digit);
-                                dialog.error = None;
-                            }
-                        }
-                        GraphAutorunMode::QuotaMessage => {
-                            dialog.quota_input.push(c);
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-        return Ok(());
+    if let Some(res) = preview_modal_intercept(app, code, modifiers) {
+        return res;
     }
     if handle_playground_key(app, code, modifiers) {
         return Ok(());
@@ -204,179 +84,424 @@ pub fn handle_preview_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers)
     let on_graph = app.sidebar_layer == SidebarLayer::Automation
         && app.automation_kind == crate::tui::app::AutomationKind::Graph;
 
+    if preview_frame_shift_nav_key(app, code, modifiers) {
+        return Ok(());
+    }
+    if preview_esc_graph_key(app, code, on_graph) {
+        return Ok(());
+    }
+    if preview_enter_key(app, code, on_graph) {
+        return Ok(());
+    }
+    if preview_plain_scroll_key(app, code, on_graph) {
+        return Ok(());
+    }
+    if preview_tail_pane_key(app, code, on_graph) {
+        return Ok(());
+    }
+    if preview_tail_toggle_key(app, code, on_graph, modifiers) {
+        return Ok(());
+    }
+    if preview_manual_nav_key(app, code, on_graph) {
+        return Ok(());
+    }
+    if preview_strip_spec_key(app, code, on_graph) {
+        return Ok(());
+    }
+    if preview_edit_key(app, code, on_graph) {
+        return Ok(());
+    }
+    if preview_graph_control_key(app, code, on_graph) {
+        return Ok(());
+    }
+    if preview_agent_misc_key(app, code, on_graph) {
+        return Ok(());
+    }
+    if preview_graph_meta_key(app, code, on_graph) {
+        return Ok(());
+    }
+    if preview_function_key(app, code, modifiers, on_graph) {
+        return Ok(());
+    }
+    if preview_esc_home_key(app, code) {
+        return Ok(());
+    }
+    Ok(())
+}
+
+// ── Preview key-group helpers (extracted from handle_preview_key) ───────
+
+fn preview_modal_intercept(
+    app: &mut App,
+    code: KeyCode,
+    modifiers: KeyModifiers,
+) -> Option<Result<()>> {
+    if app.delete_project_confirm {
+        return Some(preview_delete_project_confirm_key(app, code));
+    }
+    if app.archive_graph_confirm {
+        return Some(preview_archive_graph_confirm_key(app, code));
+    }
+    if app.permanent_delete_graph_confirm {
+        return Some(preview_permanent_delete_graph_confirm_key(app, code));
+    }
+    if app.graph_reset_confirm {
+        return Some(preview_graph_reset_confirm_key(app, code));
+    }
+    if app.graph_autorun_dialog.is_some() {
+        return Some(preview_graph_autorun_dialog_key(app, code, modifiers));
+    }
+    None
+}
+
+fn preview_delete_project_confirm_key(app: &mut App, code: KeyCode) -> Result<()> {
     match code {
-        // CT23: Shift+↑/↓ are reserved frame navigation (RESERVED_FOCUS_KEYS
-        // in src/tui/event/agent_focus.rs) — they move the sidebar selection
-        // between graphs from anywhere in the graph view, including while a
-        // graph is entered (manual mode). Matched first, before any of the
-        // graph's own Up/Down arms below, or they get swallowed as internal
-        // sibling navigation instead (the CT23 bug).
-        KeyCode::Down if modifiers.contains(KeyModifiers::SHIFT) => {
-            app.select_next();
+        KeyCode::Char('y') | KeyCode::Enter => {
+            let _ = app.delete_selected_project();
+            app.delete_project_confirm = false;
         }
-        KeyCode::Up if modifiers.contains(KeyModifiers::SHIFT) => {
-            app.select_prev();
+        KeyCode::Char('n') | KeyCode::Esc => {
+            app.delete_project_confirm = false;
         }
-        // CT3: an open tail dialog intercepts Esc first — dismissing a
-        // diagnostic viewer never touches the run or the graph state below.
-        KeyCode::Esc if on_graph && app.node_tail_dialog_active() => {
-            app.close_node_tail_dialog();
+        _ => {}
+    }
+    Ok(())
+}
+
+fn preview_archive_graph_confirm_key(app: &mut App, code: KeyCode) -> Result<()> {
+    match code {
+        KeyCode::Char('y') | KeyCode::Enter => {
+            let _ = app.archive_selected_graph();
+            app.archive_graph_confirm = false;
         }
-        // A spec-strip selection intercepts Esc first (back to the graph
-        // sub-focus, selection cleared); manual node inspection in the
-        // graph intercepts a following Esc to return to auto-follow; only
-        // then does Esc fall through to the general "back to Home" below.
-        KeyCode::Esc if on_graph && app.graph_live_focus == GraphLiveFocus::SpecStrip => {
-            app.graph_live_focus = GraphLiveFocus::Graph;
-            app.graph_spec_strip_selected = None;
+        KeyCode::Char('n') | KeyCode::Esc => {
+            app.archive_graph_confirm = false;
         }
-        KeyCode::Esc if on_graph && !app.graph_live_follow => {
-            app.graph_live_reset_follow();
+        _ => {}
+    }
+    Ok(())
+}
+
+fn preview_permanent_delete_graph_confirm_key(app: &mut App, code: KeyCode) -> Result<()> {
+    match code {
+        KeyCode::Char('y') | KeyCode::Enter => {
+            let _ = app.permanent_delete_selected_archived_graph();
+            app.permanent_delete_graph_confirm = false;
         }
-        KeyCode::Esc | KeyCode::Char('h') => {
-            app.focus = Focus::Home;
+        KeyCode::Char('n') | KeyCode::Esc => {
+            app.permanent_delete_graph_confirm = false;
         }
-        // CT23: Enter on a selected graph enters its manual navigation — the
-        // only way to reach manual mode (functional requirement 4, no
-        // separate toggle). 'l' is untouched below: it keeps opening the
-        // node editor.
-        KeyCode::Enter if on_graph => {
-            app.graph_live_enter();
-            return Ok(());
+        _ => {}
+    }
+    Ok(())
+}
+
+fn preview_graph_reset_confirm_key(app: &mut App, code: KeyCode) -> Result<()> {
+    match code {
+        KeyCode::Char('y') | KeyCode::Enter => {
+            app.confirm_reset_selected_graph();
+            app.graph_reset_confirm = false;
         }
-        KeyCode::Enter | KeyCode::Char('l') => {
-            if app.agents_rag_focused {
-                app.activate_playground();
-                return Ok(());
+        KeyCode::Char('n') | KeyCode::Esc => {
+            app.graph_reset_confirm = false;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn preview_graph_autorun_dialog_key(
+    app: &mut App,
+    code: KeyCode,
+    modifiers: KeyModifiers,
+) -> Result<()> {
+    use crate::tui::app::dialog::GraphAutorunMode;
+    match code {
+        KeyCode::Esc => app.close_graph_autorun_dialog(),
+        KeyCode::Enter => app.submit_graph_autorun_dialog(),
+        KeyCode::Tab | KeyCode::BackTab => {
+            if let Some(dialog) = app.graph_autorun_dialog.as_mut() {
+                dialog.toggle_mode();
             }
-            if app.sidebar_layer == SidebarLayer::Knowledge {
-                app.enter_project_focus(ProjectTab::Overview);
-                app.focus = Focus::Agent;
-                return Ok(());
-            }
-            if on_graph {
-                let _ = app.open_graph_editor_dialog();
-                return Ok(());
-            }
-            // For Group entries: Enter activates the split and enters focus
-            if let Some(AgentEntry::Group(idx)) = app.selected_agent() {
-                let idx = *idx;
-                if let Some(group) = app.split_groups.get(idx) {
-                    let id = group.id.clone();
-                    app.active_split_id = Some(id);
-                    app.split_right_focused = false;
-                }
-                app.focus = Focus::Agent;
-                return Ok(());
-            }
-            app.log_scroll = 0;
-            app.focus = Focus::Agent;
-        }
-        // CT23: the `!graph_live_follow` clause alone would let this arm
-        // steal plain Down/Up from the tail dialog whenever it's opened in
-        // auto mode (dialog open doesn't require entering the graph first),
-        // reaching this arm before the dedicated tail-scroll arms below —
-        // the explicit `node_tail_dialog_active()` exclusion keeps the
-        // dialog's scroll working regardless of entered/not-entered state.
-        KeyCode::Down | KeyCode::Char('j')
-            if !(on_graph
-                && app.graph_live_focus == GraphLiveFocus::Graph
-                && !app.graph_live_follow)
-                && !(on_graph && app.node_tail_dialog_active()) =>
-        {
-            app.select_next();
-        }
-        KeyCode::Up | KeyCode::Char('k')
-            if !(on_graph
-                && app.graph_live_focus == GraphLiveFocus::Graph
-                && !app.graph_live_follow)
-                && !(on_graph && app.node_tail_dialog_active()) =>
-        {
-            app.select_prev();
-        }
-        // CT3: while the tail dialog is open, Up/Down scroll its output
-        // instead of driving graph navigation underneath.
-        KeyCode::Down if on_graph && app.node_tail_dialog_active() => {
-            app.node_tail_scroll(true);
-        }
-        KeyCode::Up if on_graph && app.node_tail_dialog_active() => {
-            app.node_tail_scroll(false);
-        }
-        // CT3: `t` toggles the live tail for the highlighted node. Opens
-        // only for a currently-running node (no empty panes); closing is a
-        // pure viewer dismiss. Guarded against Ctrl+T (context transfer).
-        KeyCode::Char('t') if on_graph && !modifiers.contains(KeyModifiers::CONTROL) => {
-            if app.node_tail_dialog_active() {
-                app.close_node_tail_dialog();
-            } else if let Some(node_id) = app.graph_live_highlighted_node_id().map(str::to_string) {
-                let _ = app.open_node_tail_dialog(&node_id);
-            }
-        }
-        // Graph navigation: Right = child (forward along edges, pass first),
-        // Left = parent (back along incoming), Up/Down = sibling in DFS order.
-        // Documented: "next" at a branch = pass > fail > always > route(alpha) > error.
-        KeyCode::Right
-            if on_graph
-                && app.graph_live_focus == GraphLiveFocus::Graph
-                && !app.graph_live_follow =>
-        {
-            app.graph_live_navigate_child();
-        }
-        KeyCode::Left
-            if on_graph
-                && app.graph_live_focus == GraphLiveFocus::Graph
-                && !app.graph_live_follow =>
-        {
-            app.graph_live_navigate_parent();
-        }
-        KeyCode::Down
-            if on_graph
-                && app.graph_live_focus == GraphLiveFocus::Graph
-                && !app.graph_live_follow =>
-        {
-            app.graph_live_navigate_sibling(true);
         }
         KeyCode::Up
-            if on_graph
-                && app.graph_live_focus == GraphLiveFocus::Graph
-                && !app.graph_live_follow =>
+            if app.graph_autorun_dialog.as_ref().map(|d| d.mode)
+                == Some(GraphAutorunMode::Picker) =>
         {
-            app.graph_live_navigate_sibling(false);
+            if let Some(dialog) = app.graph_autorun_dialog.as_mut() {
+                dialog.picker.adjust(1);
+                dialog.error = None;
+            }
         }
-        // Plain Tab/BackTab hand arrow-key ownership between the graph and
-        // the spec marker strip — the strip participates in the panel's
-        // existing focus order rather than a bespoke mode. Shift+←/→ is
-        // already claimed globally for the sidebar tab strip (see
-        // `sidebar_tab_step_applies`), so this uses plain Tab instead.
-        KeyCode::Tab | KeyCode::BackTab if on_graph => {
+        KeyCode::Down
+            if app.graph_autorun_dialog.as_ref().map(|d| d.mode)
+                == Some(GraphAutorunMode::Picker) =>
+        {
+            if let Some(dialog) = app.graph_autorun_dialog.as_mut() {
+                dialog.picker.adjust(-1);
+                dialog.error = None;
+            }
+        }
+        KeyCode::Left
+            if app.graph_autorun_dialog.as_ref().map(|d| d.mode)
+                == Some(GraphAutorunMode::Picker) =>
+        {
+            if let Some(dialog) = app.graph_autorun_dialog.as_mut() {
+                dialog.picker.move_field(-1);
+            }
+        }
+        KeyCode::Right
+            if app.graph_autorun_dialog.as_ref().map(|d| d.mode)
+                == Some(GraphAutorunMode::Picker) =>
+        {
+            if let Some(dialog) = app.graph_autorun_dialog.as_mut() {
+                dialog.picker.move_field(1);
+            }
+        }
+        KeyCode::Backspace => {
+            if let Some(dialog) = app.graph_autorun_dialog.as_mut() {
+                if dialog.mode == GraphAutorunMode::QuotaMessage {
+                    dialog.quota_input.pop();
+                }
+            }
+        }
+        KeyCode::Char(c) if !modifiers.contains(KeyModifiers::CONTROL) => {
+            if let Some(dialog) = app.graph_autorun_dialog.as_mut() {
+                match dialog.mode {
+                    GraphAutorunMode::Picker => {
+                        if let Some(digit) = c.to_digit(10) {
+                            dialog.picker.type_digit(digit);
+                            dialog.error = None;
+                        }
+                    }
+                    GraphAutorunMode::QuotaMessage => {
+                        dialog.quota_input.push(c);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn graph_view_owns_plain_arrows(app: &App, on_graph: bool) -> bool {
+    on_graph && app.graph_live_focus == GraphLiveFocus::Graph && !app.graph_live_follow
+}
+
+fn preview_frame_shift_nav_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
+    if !modifiers.contains(KeyModifiers::SHIFT) {
+        return false;
+    }
+    match code {
+        KeyCode::Down => {
+            app.select_next();
+        }
+        KeyCode::Up => {
+            app.select_prev();
+        }
+        _ => return false,
+    }
+    true
+}
+
+fn preview_esc_graph_key(app: &mut App, code: KeyCode, on_graph: bool) -> bool {
+    if code != KeyCode::Esc || !on_graph {
+        return false;
+    }
+    if app.node_tail_dialog_active() {
+        app.close_node_tail_dialog();
+        return true;
+    }
+    if app.graph_live_focus == GraphLiveFocus::SpecStrip {
+        app.graph_live_focus = GraphLiveFocus::Graph;
+        app.graph_spec_strip_selected = None;
+        return true;
+    }
+    if !app.graph_live_follow {
+        app.graph_live_reset_follow();
+        return true;
+    }
+    false
+}
+
+fn preview_esc_home_key(app: &mut App, code: KeyCode) -> bool {
+    if matches!(code, KeyCode::Esc | KeyCode::Char('h')) {
+        app.focus = Focus::Home;
+        return true;
+    }
+    false
+}
+
+fn preview_enter_key(app: &mut App, code: KeyCode, on_graph: bool) -> bool {
+    if code == KeyCode::Enter && on_graph {
+        // CT28: Enter in follow mode enters manual mode (CT24). Enter in
+        // manual mode with the pane open closes it; otherwise opens the pane
+        // on the highlighted node.
+        if app.graph_live_follow {
+            app.graph_live_enter();
+        } else if app.node_tail_dialog_active() {
+            app.close_node_tail_dialog();
+        } else {
+            app.open_node_tail_pane();
+        }
+        return true;
+    }
+    if !matches!(code, KeyCode::Enter | KeyCode::Char('l')) {
+        return false;
+    }
+    if app.agents_rag_focused {
+        app.activate_playground();
+        return true;
+    }
+    if app.sidebar_layer == SidebarLayer::Knowledge {
+        app.enter_project_focus(ProjectTab::Overview);
+        app.focus = Focus::Agent;
+        return true;
+    }
+    if on_graph {
+        let _ = app.open_graph_editor_dialog();
+        return true;
+    }
+    if let Some(AgentEntry::Group(idx)) = app.selected_agent() {
+        let idx = *idx;
+        if let Some(group) = app.split_groups.get(idx) {
+            let id = group.id.clone();
+            app.active_split_id = Some(id);
+            app.split_right_focused = false;
+        }
+        app.focus = Focus::Agent;
+        return true;
+    }
+    app.log_scroll = 0;
+    app.focus = Focus::Agent;
+    true
+}
+
+fn preview_plain_scroll_key(app: &mut App, code: KeyCode, on_graph: bool) -> bool {
+    if !matches!(
+        code,
+        KeyCode::Down | KeyCode::Char('j') | KeyCode::Up | KeyCode::Char('k')
+    ) {
+        return false;
+    }
+    if graph_view_owns_plain_arrows(app, on_graph) {
+        match code {
+            KeyCode::Down | KeyCode::Char('j') => app.graph_live_navigate_sibling(true),
+            KeyCode::Up | KeyCode::Char('k') => app.graph_live_navigate_sibling(false),
+            _ => unreachable!(),
+        }
+        return true;
+    }
+    match code {
+        KeyCode::Down | KeyCode::Char('j') => app.select_next(),
+        KeyCode::Up | KeyCode::Char('k') => app.select_prev(),
+        _ => unreachable!(),
+    }
+    true
+}
+
+fn preview_tail_toggle_key(
+    app: &mut App,
+    code: KeyCode,
+    on_graph: bool,
+    modifiers: KeyModifiers,
+) -> bool {
+    if !on_graph || !matches!(code, KeyCode::Char('t')) || modifiers.contains(KeyModifiers::CONTROL)
+    {
+        return false;
+    }
+    if app.node_tail_dialog_active() {
+        app.close_node_tail_dialog();
+    } else {
+        app.open_node_tail_pane();
+    }
+    true
+}
+
+/// CT28: pane-specific keys while the pane is open on the graph view.
+/// `PageUp`/`PageDown` scroll by half the body height, `End` returns to the
+/// live edge, `,`/`.` move the ensemble member cursor.
+fn preview_tail_pane_key(app: &mut App, code: KeyCode, on_graph: bool) -> bool {
+    if !on_graph || !app.node_tail_dialog_active() {
+        return false;
+    }
+    match code {
+        KeyCode::PageUp => {
+            let half = app.node_tail_pane_body_height / 2;
+            app.node_tail_scroll_by(-(half as isize));
+            true
+        }
+        KeyCode::PageDown => {
+            let half = app.node_tail_pane_body_height / 2;
+            app.node_tail_scroll_by(half as isize);
+            true
+        }
+        KeyCode::End => {
+            app.node_tail_scroll_to_live();
+            true
+        }
+        KeyCode::Char(',') => {
+            app.node_tail_member_step(-1);
+            true
+        }
+        KeyCode::Char('.') => {
+            app.node_tail_member_step(1);
+            true
+        }
+        _ => false,
+    }
+}
+
+fn preview_manual_nav_key(app: &mut App, code: KeyCode, on_graph: bool) -> bool {
+    if !on_graph || app.graph_live_focus != GraphLiveFocus::Graph || app.graph_live_follow {
+        return false;
+    }
+    match code {
+        KeyCode::Right => app.graph_live_navigate_child(),
+        KeyCode::Left => app.graph_live_navigate_parent(),
+        KeyCode::Down => app.graph_live_navigate_sibling(true),
+        KeyCode::Up => app.graph_live_navigate_sibling(false),
+        _ => return false,
+    }
+    true
+}
+
+fn preview_strip_spec_key(app: &mut App, code: KeyCode, on_graph: bool) -> bool {
+    if !on_graph {
+        return false;
+    }
+    match code {
+        KeyCode::Tab | KeyCode::BackTab => {
             app.graph_live_toggle_focus();
         }
-        KeyCode::Left if on_graph && app.graph_live_focus == GraphLiveFocus::SpecStrip => {
+        KeyCode::Left if app.graph_live_focus == GraphLiveFocus::SpecStrip => {
             app.graph_spec_strip_move_selection(false);
         }
-        KeyCode::Right if on_graph && app.graph_live_focus == GraphLiveFocus::SpecStrip => {
+        KeyCode::Right if app.graph_live_focus == GraphLiveFocus::SpecStrip => {
             app.graph_spec_strip_move_selection(true);
         }
-        KeyCode::Char('[') if on_graph => {
-            app.cycle_graph_spec(false);
-        }
-        KeyCode::Char(']') if on_graph => {
-            app.cycle_graph_spec(true);
-        }
+        KeyCode::Char('[') => app.cycle_graph_spec(false),
+        KeyCode::Char(']') => app.cycle_graph_spec(true),
+        _ => return false,
+    }
+    true
+}
+
+fn preview_edit_key(app: &mut App, code: KeyCode, on_graph: bool) -> bool {
+    match code {
         KeyCode::Char('e') if !app.agents_rag_focused => {
             if on_graph {
                 let _ = app.open_graph_editor_dialog();
             } else if app.sidebar_layer != SidebarLayer::Knowledge {
                 app.open_edit_dialog();
+            } else {
+                return false;
             }
         }
         KeyCode::Char('d') if on_graph => {
-            // U10: duplicate the highlighted graph node in place.
             let _ = app.duplicate_selected_graph_node();
         }
-        // Edit the highlighted node's outgoing pass/fail/always edges
-        // (retarget or delete) — a router's route edges stay under 'e'/
-        // Enter's RouterRoutes dialog instead.
         KeyCode::Char('w') if on_graph => {
             let _ = app.open_graph_edges_dialog();
         }
@@ -385,61 +510,83 @@ pub fn handle_preview_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers)
         {
             let _ = app.toggle_enable();
         }
-        // Graph run-time controls (run/pause/continue/reset/autorun),
-        // delegated to the daemon's MCP tools — see
-        // `app::dialog::graph_control`. Only the action valid for the
-        // focused graph's current status actually does anything; the others
-        // are simply absent from the footer's hints.
-        KeyCode::Char('r') if on_graph => {
-            app.run_selected_graph();
+        _ => return false,
+    }
+    true
+}
+
+fn preview_graph_control_key(app: &mut App, code: KeyCode, on_graph: bool) -> bool {
+    if !on_graph {
+        return false;
+    }
+    match code {
+        KeyCode::Char('r') => app.run_selected_graph(),
+        KeyCode::Char('p') => app.pause_selected_graph(),
+        KeyCode::Char('c') => app.continue_selected_graph_retry(),
+        KeyCode::Char('C') => app.continue_selected_graph_skip(),
+        KeyCode::Char('x') => app.open_graph_reset_confirm(),
+        KeyCode::Char('a') => app.open_graph_autorun_dialog(),
+        _ => return false,
+    }
+    true
+}
+
+fn preview_agent_misc_key(app: &mut App, code: KeyCode, on_graph: bool) -> bool {
+    if !matches!(
+        code,
+        KeyCode::Char('r') | KeyCode::Char('p') | KeyCode::Char('n')
+    ) {
+        return false;
+    }
+    if !app.agents_rag_focused
+        && app.sidebar_layer != SidebarLayer::Knowledge
+        && matches!(code, KeyCode::Char('r'))
+    {
+        let _ = app.rerun_selected();
+    } else if app.agents_rag_focused && matches!(code, KeyCode::Char('p')) {
+        app.toggle_rag_pause();
+    } else if matches!(code, KeyCode::Char('n')) {
+        if on_graph {
+            app.open_new_graph_dialog();
+        } else if app.sidebar_layer != SidebarLayer::Knowledge {
+            app.open_new_agent_dialog();
+        } else {
+            return false;
         }
-        KeyCode::Char('p') if on_graph => {
-            app.pause_selected_graph();
-        }
-        KeyCode::Char('c') if on_graph => {
-            app.continue_selected_graph_retry();
-        }
-        KeyCode::Char('C') if on_graph => {
-            app.continue_selected_graph_skip();
-        }
-        KeyCode::Char('x') if on_graph => {
-            app.open_graph_reset_confirm();
-        }
-        KeyCode::Char('a') if on_graph => {
-            app.open_graph_autorun_dialog();
-        }
-        KeyCode::Char('r')
-            if !app.agents_rag_focused && app.sidebar_layer != SidebarLayer::Knowledge =>
-        {
-            let _ = app.rerun_selected();
-        }
+    } else {
+        return false;
+    }
+    true
+}
+
+fn preview_graph_meta_key(app: &mut App, code: KeyCode, on_graph: bool) -> bool {
+    match code {
         KeyCode::Char('R') if app.sidebar_layer == SidebarLayer::Knowledge => {
             let _ = app.open_project_relation_dialog();
         }
-        KeyCode::Char('p') if app.agents_rag_focused => {
-            app.toggle_rag_pause();
-        }
-        KeyCode::Char('n') => {
-            if on_graph {
-                app.open_new_graph_dialog();
-            } else if app.sidebar_layer != SidebarLayer::Knowledge {
-                app.open_new_agent_dialog();
-            }
-        }
-        KeyCode::Char('E') if on_graph => {
-            app.open_edit_graph_dialog();
-        }
-        // 'A' toggles the Graphs section between the main list and the
-        // archive — the archive's only entry point, deliberately a toggle
-        // on the existing section rather than a separate sidebar layer, so
-        // archived graphs stay in the same mental place as active ones.
-        KeyCode::Char('A') if on_graph => {
-            app.toggle_graph_archive_view();
-        }
-        // 'R' restores the highlighted archived graph back to the main list.
         KeyCode::Char('R') if on_graph && app.graph_view_archived => {
             let _ = app.restore_selected_archived_graph();
         }
+        KeyCode::Char('E') if on_graph => app.open_edit_graph_dialog(),
+        KeyCode::Char('A') if on_graph => app.toggle_graph_archive_view(),
+        _ => return false,
+    }
+    true
+}
+
+fn preview_function_key(
+    app: &mut App,
+    code: KeyCode,
+    modifiers: KeyModifiers,
+    on_graph: bool,
+) -> bool {
+    if !matches!(
+        code,
+        KeyCode::Char('t') | KeyCode::F(4) | KeyCode::F(10) | KeyCode::F(1)
+    ) {
+        return false;
+    }
+    match code {
         KeyCode::Char('t') if modifiers.contains(KeyModifiers::CONTROL) => {
             if matches!(
                 app.selected_agent(),
@@ -452,8 +599,6 @@ pub fn handle_preview_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers)
             if app.sidebar_layer == SidebarLayer::Knowledge {
                 app.delete_project_confirm = true;
             } else if on_graph && app.graph_view_archived {
-                // Permanent deletion is reachable only from the archive, on
-                // an already-archived graph — never the first press of F4.
                 app.permanent_delete_graph_confirm = true;
             } else if on_graph {
                 app.archive_graph_confirm = true;
@@ -461,15 +606,11 @@ pub fn handle_preview_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers)
                 let _ = app.delete_selected();
             }
         }
-        KeyCode::F(10) => {
-            app.focus = Focus::Home;
-        }
-        KeyCode::F(1) => {
-            app.show_legend = true;
-        }
-        _ => {}
+        KeyCode::F(10) => app.focus = Focus::Home,
+        KeyCode::F(1) => app.open_hub(),
+        _ => return false,
     }
-    Ok(())
+    true
 }
 
 pub(super) fn handle_playground_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> bool {
@@ -650,6 +791,7 @@ mod playground_key_tests {
             last_run_ok: None,
             last_triggered_at: None,
             trigger_count: 0,
+            action: crate::domain::models::AgentAction::Headless,
         }
     }
 
@@ -998,6 +1140,7 @@ mod home_key_tests {
             last_run_ok: None,
             last_triggered_at: None,
             trigger_count: 0,
+            action: crate::domain::models::AgentAction::Headless,
         }
     }
 
@@ -1104,9 +1247,9 @@ mod home_key_tests {
     fn home_f1_shows_legend() {
         let mut app = app_with_agents();
         app.focus = Focus::Home;
-        app.show_legend = false;
+        app.hub_open = false;
         handle_home_key(&mut app, KeyCode::F(1), KeyModifiers::NONE).unwrap();
-        assert!(app.show_legend);
+        assert!(app.hub_open);
     }
 
     #[test]
@@ -1156,6 +1299,7 @@ mod preview_key_tests {
             last_run_ok: None,
             last_triggered_at: None,
             trigger_count: 0,
+            action: crate::domain::models::AgentAction::Headless,
         }
     }
 
@@ -1273,9 +1417,9 @@ mod preview_key_tests {
     fn preview_f1_shows_legend() {
         let mut app = app_with_agents();
         app.focus = Focus::Preview;
-        app.show_legend = false;
+        app.hub_open = false;
         handle_preview_key(&mut app, KeyCode::F(1), KeyModifiers::NONE).unwrap();
-        assert!(app.show_legend);
+        assert!(app.hub_open);
     }
 
     #[test]
@@ -1498,7 +1642,6 @@ mod preview_key_tests {
             current_node_status: None,
             current_node_started_at: None,
             current_node_iteration: None,
-            current_node_output_tail: None,
         }
     }
 
@@ -1573,15 +1716,21 @@ mod preview_key_tests {
     fn app_with_open_tail() -> App {
         let mut app = app_on_graph(crate::domain::graphs::GraphStatus::Running);
         app.node_tail_dialog = Some(crate::tui::app::dialog::NodeTailDialog {
-            run_id: "run1".to_string(),
-            node_id: "node1".to_string(),
+            run_id: Some("run1".to_string()),
             node_name: "Node node1".to_string(),
             stdout_lines: vec!["out".to_string()],
             stderr_lines: Vec::new(),
-            status: crate::domain::graphs::GraphRunStatus::Running,
+            status: Some(crate::domain::graphs::GraphRunStatus::Running),
             timed_out: false,
-            started_at: chrono::Utc::now(),
+            started_at: Some(chrono::Utc::now()),
             scroll: 0,
+            member_pos: None,
+            platform: None,
+            model: None,
+            member_cursor: 0,
+            member_count: 0,
+            no_run_spec_name: None,
+            last_resolved: None,
         });
         app
     }
@@ -1601,10 +1750,13 @@ mod preview_key_tests {
     }
 
     #[test]
-    fn preview_t_with_no_highlighted_node_is_a_noop() {
-        // No live state, so nothing is highlighted: `t` must not open a
-        // dialog, panic, or disturb the graph view.
+    fn preview_t_with_no_highlighted_node_opens_the_pane() {
+        // CT28: `t` toggles the pane in both modes. With nothing highlighted it
+        // still opens (showing the waiting line), superseding CT3 decision 3
+        // which refused non-running nodes.
         let mut app = app_on_graph(crate::domain::graphs::GraphStatus::Running);
+        handle_preview_key(&mut app, KeyCode::Char('t'), KeyModifiers::NONE).unwrap();
+        assert!(app.node_tail_dialog_active());
         handle_preview_key(&mut app, KeyCode::Char('t'), KeyModifiers::NONE).unwrap();
         assert!(!app.node_tail_dialog_active());
     }
@@ -1621,12 +1773,344 @@ mod preview_key_tests {
     }
 
     #[test]
-    fn preview_up_down_scroll_open_tail_instead_of_graph() {
+    fn preview_page_up_down_scroll_open_tail_pane() {
+        // CT28: Up/Down keep their graph meaning while the pane is open;
+        // PageUp/PageDown scroll the pane body by half its height.
         let mut app = app_with_open_tail();
-        handle_preview_key(&mut app, KeyCode::Up, KeyModifiers::NONE).unwrap();
-        assert_eq!(app.node_tail_dialog.as_ref().unwrap().scroll, 3);
+        app.node_tail_pane_body_height = 20;
+        let before = app.node_tail_dialog.as_ref().unwrap().scroll;
+        handle_preview_key(&mut app, KeyCode::PageUp, KeyModifiers::NONE).unwrap();
+        assert_eq!(
+            app.node_tail_dialog.as_ref().unwrap().scroll,
+            before + 10,
+            "PageUp should scroll the pane body back by half height"
+        );
+        handle_preview_key(&mut app, KeyCode::PageDown, KeyModifiers::NONE).unwrap();
+        assert_eq!(
+            app.node_tail_dialog.as_ref().unwrap().scroll,
+            before,
+            "PageDown should scroll forward by half height"
+        );
+    }
+
+    // ── CT28: pane follows the highlight ───────────────────────────
+
+    /// Seed graph `lp1` + spec `s1` + the given Agent nodes so the pane has
+    /// runs to resolve (the temp DB the test App holds is otherwise empty).
+    fn seed_live_graph(db: &Database, node_ids: &[&str]) {
+        db.insert_graph(&crate::domain::graphs::Graph {
+            archived: false,
+            paused_by_reconciliation: false,
+            allow_dirty_start: false,
+            infra_node_id: None,
+            id: "lp1".to_string(),
+            name: "Nightly review".to_string(),
+            description: None,
+            workdir: "/tmp".to_string(),
+            status: crate::domain::graphs::GraphStatus::Running,
+            trigger: None,
+            created_at: Utc::now(),
+            started_at: None,
+            completed_at: None,
+            autorun_at: None,
+            auto_continue_at: None,
+            auto_continue_action: None,
+            active_run_queue_id: None,
+            hooks: std::collections::BTreeMap::new(),
+        })
+        .unwrap();
+        db.insert_graph_spec(&crate::domain::graphs::GraphSpec {
+            id: "s1".to_string(),
+            graph_id: Some("lp1".to_string()),
+            name: "Spec".to_string(),
+            description: None,
+            position: 0,
+            parallelizable: false,
+            status: crate::domain::graphs::GraphSpecStatus::Running,
+            started_at: None,
+            completed_at: None,
+            spec_start_head: None,
+            spec_start_dirty: None,
+            spec_end_dirty: None,
+            spec_end_dirty_paths: None,
+            spec_committed_head: None,
+            workdir: None,
+            completed_via: None,
+            completed_via_reason: None,
+            completed_via_at: None,
+        })
+        .unwrap();
+        for (i, id) in node_ids.iter().enumerate() {
+            db.insert_graph_node(&crate::domain::graphs::GraphNode {
+                id: id.to_string(),
+                spec_id: Some("s1".to_string()),
+                graph_id: None,
+                name: format!("Node {id}"),
+                kind: crate::domain::graphs::GraphNodeKind::Agent,
+                config: serde_json::json!({}),
+                position: i as i64,
+                created_at: Utc::now(),
+            })
+            .unwrap();
+        }
+    }
+
+    fn insert_live_run(
+        db: &Database,
+        run_id: &str,
+        node_id: &str,
+        status: crate::domain::graphs::GraphRunStatus,
+        started_at: chrono::DateTime<Utc>,
+    ) {
+        db.insert_graph_run(&crate::domain::graphs::GraphNodeRun {
+            id: run_id.to_string(),
+            graph_id: "lp1".to_string(),
+            spec_id: "s1".to_string(),
+            node_id: node_id.to_string(),
+            status,
+            input: None,
+            output: None,
+            started_at,
+            completed_at: None,
+            iteration: 1,
+            pid: None,
+            boot_id: None,
+            session_id: None,
+            executed_platform: None,
+            executed_model: None,
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn follow_mode_node_transition_switches_pane_run_and_resets_scroll() {
+        let mut app = app_on_graph(crate::domain::graphs::GraphStatus::Running);
+        seed_live_graph(&app.db, &["n1", "n2"]);
+        insert_live_run(
+            &app.db,
+            "run-n1",
+            "n1",
+            crate::domain::graphs::GraphRunStatus::Running,
+            Utc::now(),
+        );
+        insert_live_run(
+            &app.db,
+            "run-n2",
+            "n2",
+            crate::domain::graphs::GraphRunStatus::Running,
+            Utc::now(),
+        );
+        let mut state = running_live_state();
+        state.current_spec_id = Some("s1".to_string());
+        state.current_node_id = Some("n1".to_string());
+        app.graph_live_state = Some(state);
+        app.graph_live_follow = true;
+
+        app.open_node_tail_pane();
+        assert_eq!(
+            app.node_tail_dialog.as_ref().unwrap().run_id.as_deref(),
+            Some("run-n1")
+        );
+        app.node_tail_scroll_by(-7);
+        assert_eq!(app.node_tail_dialog.as_ref().unwrap().scroll, 7);
+
+        // The engine moves to the next node: auto-follow retargets the pane.
+        app.graph_live_state.as_mut().unwrap().current_node_id = Some("n2".to_string());
+        app.poll_node_tail_dialog();
+        let dialog = app.node_tail_dialog.as_ref().unwrap();
+        assert_eq!(
+            dialog.run_id.as_deref(),
+            Some("run-n2"),
+            "the pane must follow the run to the next node"
+        );
+        assert_eq!(
+            dialog.scroll, 0,
+            "a node transition returns the pane to the live edge"
+        );
+    }
+
+    #[test]
+    fn manual_enter_toggles_pane_on_selected_node() {
+        // CT28 req 6: Enter in manual mode toggles the pane on the selected
+        // node (follow mode keeps CT24's enter-manual behaviour — covered by
+        // manual_down_moves_selection_and_pane_follows).
+        let mut app = app_on_graph(crate::domain::graphs::GraphStatus::Running);
+        seed_live_graph(&app.db, &["n1"]);
+        insert_live_run(
+            &app.db,
+            "run-n1",
+            "n1",
+            crate::domain::graphs::GraphRunStatus::Running,
+            Utc::now(),
+        );
+        let mut state = running_live_state();
+        state.current_spec_id = Some("s1".to_string());
+        state.current_node_id = Some("n1".to_string());
+        app.graph_live_state = Some(state);
+        app.graph_live_follow = false;
+        app.graph_live_selected_node = Some("n1".to_string());
+
+        handle_preview_key(&mut app, KeyCode::Enter, KeyModifiers::NONE).unwrap();
+        assert!(app.node_tail_dialog_active(), "Enter must open the pane");
+        assert_eq!(
+            app.node_tail_dialog.as_ref().unwrap().run_id.as_deref(),
+            Some("run-n1"),
+            "the pane must bind to the selected node's run"
+        );
+
+        handle_preview_key(&mut app, KeyCode::Enter, KeyModifiers::NONE).unwrap();
+        assert!(!app.node_tail_dialog_active(), "Enter must close the pane");
+    }
+
+    #[test]
+    fn manual_down_moves_selection_and_pane_follows() {
+        let mut app = app_on_graph(crate::domain::graphs::GraphStatus::Running);
+        seed_live_graph(&app.db, &["n1", "n2"]);
+        insert_live_run(
+            &app.db,
+            "run-n1",
+            "n1",
+            crate::domain::graphs::GraphRunStatus::Running,
+            Utc::now(),
+        );
+        insert_live_run(
+            &app.db,
+            "run-n2",
+            "n2",
+            crate::domain::graphs::GraphRunStatus::Running,
+            Utc::now(),
+        );
+        let mut state = running_live_state();
+        state.current_spec_id = Some("s1".to_string());
+        state.current_node_id = Some("n1".to_string());
+        app.graph_live_state = Some(state);
+        app.graph_live_follow = true;
+
+        // Enter -> manual mode, seeded at the current node n1.
+        handle_preview_key(&mut app, KeyCode::Enter, KeyModifiers::NONE).unwrap();
+        assert!(!app.graph_live_follow);
+        app.open_node_tail_pane();
+        assert_eq!(
+            app.node_tail_dialog.as_ref().unwrap().run_id.as_deref(),
+            Some("run-n1")
+        );
+
+        // Down moves the manual selection; the pane follows on the next poll.
         handle_preview_key(&mut app, KeyCode::Down, KeyModifiers::NONE).unwrap();
-        assert_eq!(app.node_tail_dialog.as_ref().unwrap().scroll, 0);
+        assert_eq!(app.graph_live_selected_node.as_deref(), Some("n2"));
+        app.poll_node_tail_dialog();
+        assert_eq!(
+            app.node_tail_dialog.as_ref().unwrap().run_id.as_deref(),
+            Some("run-n2"),
+            "in manual mode the pane shows the selected node's run"
+        );
+    }
+
+    #[test]
+    fn ensemble_dot_cycles_through_all_three_members() {
+        let mut app = app_on_graph(crate::domain::graphs::GraphStatus::Running);
+        seed_live_graph(&app.db, &["m1", "m2", "m3", "j1"]);
+        let base = Utc::now();
+        insert_live_run(
+            &app.db,
+            "run-m1",
+            "m1",
+            crate::domain::graphs::GraphRunStatus::Running,
+            base,
+        );
+        insert_live_run(
+            &app.db,
+            "run-m2",
+            "m2",
+            crate::domain::graphs::GraphRunStatus::Pass,
+            base + chrono::Duration::seconds(9),
+        );
+        insert_live_run(
+            &app.db,
+            "run-m3",
+            "m3",
+            crate::domain::graphs::GraphRunStatus::Pass,
+            base + chrono::Duration::seconds(2),
+        );
+
+        let mut state = running_live_state();
+        state.current_spec_id = Some("s1".to_string());
+        state.current_node_id = Some("m1".to_string());
+        state.effective_nodes = ["m1", "m2", "m3", "j1"]
+            .iter()
+            .enumerate()
+            .map(|(i, id)| crate::domain::graphs::GraphNode {
+                id: id.to_string(),
+                spec_id: Some("s1".to_string()),
+                graph_id: None,
+                name: format!("Node {id}"),
+                kind: crate::domain::graphs::GraphNodeKind::Agent,
+                config: serde_json::json!({}),
+                position: i as i64,
+                created_at: Utc::now(),
+            })
+            .collect();
+        state.effective_edges = ["m1", "m2", "m3"]
+            .iter()
+            .map(|m| crate::domain::graphs::GraphEdge {
+                id: format!("e-{m}"),
+                spec_id: None,
+                graph_id: Some("lp1".to_string()),
+                from_node: (*m).to_string(),
+                to_node: "j1".to_string(),
+                condition: crate::domain::graphs::GraphEdgeCondition::Always,
+            })
+            .collect();
+        state.ensembles = vec![crate::tui::app::graph_live_state::EnsembleLiveInfo {
+            ensemble_id: "e1".to_string(),
+            name: "Ensemble".to_string(),
+            join_node_id: "j1".to_string(),
+            members: ["m1", "m2", "m3"]
+                .iter()
+                .map(
+                    |m| crate::tui::app::graph_live_state::EnsembleMemberLiveInfo {
+                        node_id: (*m).to_string(),
+                        label: (*m).to_string(),
+                        status: None,
+                    },
+                )
+                .collect(),
+            straggler_timeout_minutes: None,
+            quorum_grace_minutes: None,
+        }];
+        app.graph_live_state = Some(state);
+        app.graph_live_follow = true;
+
+        app.open_node_tail_pane();
+        assert_eq!(
+            app.node_tail_dialog.as_ref().unwrap().run_id.as_deref(),
+            Some("run-m1"),
+            "the running member is shown first"
+        );
+
+        handle_preview_key(&mut app, KeyCode::Char('.'), KeyModifiers::NONE).unwrap();
+        app.poll_node_tail_dialog();
+        assert_eq!(
+            app.node_tail_dialog.as_ref().unwrap().run_id.as_deref(),
+            Some("run-m2"),
+            "`.` steps to the newest finished member"
+        );
+
+        handle_preview_key(&mut app, KeyCode::Char('.'), KeyModifiers::NONE).unwrap();
+        app.poll_node_tail_dialog();
+        assert_eq!(
+            app.node_tail_dialog.as_ref().unwrap().run_id.as_deref(),
+            Some("run-m3"),
+            "`.` steps to the older finished member"
+        );
+
+        handle_preview_key(&mut app, KeyCode::Char('.'), KeyModifiers::NONE).unwrap();
+        app.poll_node_tail_dialog();
+        assert_eq!(
+            app.node_tail_dialog.as_ref().unwrap().run_id.as_deref(),
+            Some("run-m1"),
+            "`.` wraps back to the running member"
+        );
     }
 
     #[test]
@@ -1716,6 +2200,32 @@ mod preview_key_tests {
     }
 
     #[test]
+    fn graph_autorun_dialog_picker_arrows_and_digit_keep_editing() {
+        use crate::tui::app::dialog::GraphAutorunMode;
+        let mut app = app_on_graph(crate::domain::graphs::GraphStatus::Failed);
+        handle_preview_key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE).unwrap();
+        assert_eq!(
+            app.graph_autorun_dialog.as_ref().unwrap().mode,
+            GraphAutorunMode::Picker
+        );
+
+        // Move focus across fields, nudge the value, then type a digit: the
+        // picker must stay open in Picker mode without dispatching.
+        handle_preview_key(&mut app, KeyCode::Right, KeyModifiers::NONE).unwrap();
+        handle_preview_key(&mut app, KeyCode::Left, KeyModifiers::NONE).unwrap();
+        handle_preview_key(&mut app, KeyCode::Down, KeyModifiers::NONE).unwrap();
+        handle_preview_key(&mut app, KeyCode::Up, KeyModifiers::NONE).unwrap();
+        handle_preview_key(&mut app, KeyCode::Char('7'), KeyModifiers::NONE).unwrap();
+
+        assert!(app.graph_autorun_dialog.is_some());
+        assert_eq!(
+            app.graph_autorun_dialog.as_ref().unwrap().mode,
+            GraphAutorunMode::Picker
+        );
+        assert!(!app.graph_action_pending);
+    }
+
+    #[test]
     fn entering_a_graph_lets_plain_arrows_navigate_it() {
         // CT23 FR2/FR3: before Enter, plain arrows must not touch the
         // graph's internal navigation; after Enter, they must.
@@ -1769,7 +2279,6 @@ mod preview_key_tests {
             current_node_status: None,
             current_node_started_at: None,
             current_node_iteration: None,
-            current_node_output_tail: None,
         });
 
         assert!(app.graph_live_follow);
@@ -1947,7 +2456,6 @@ mod preview_key_tests {
             current_node_status: None,
             current_node_started_at: None,
             current_node_iteration: None,
-            current_node_output_tail: None,
         });
         app.graph_live_follow = true;
         app.graph_live_selected_node = None;
@@ -2033,7 +2541,6 @@ mod preview_key_tests {
             current_node_status: None,
             current_node_started_at: None,
             current_node_iteration: None,
-            current_node_output_tail: None,
         });
         app.graph_live_follow = true;
         app.graph_live_selected_node = None;

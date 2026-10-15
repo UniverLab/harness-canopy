@@ -22,7 +22,13 @@ pub(super) fn clear_update_tag_for_tests() {
 /// Spawn the TUI's throttled, read-only release lookup.  The thread never
 /// downloads or replaces anything, and all network failures are silent.
 pub(crate) fn maybe_spawn_update_notice() {
-    if !super::should_check() {
+    let canopy_dir = crate::domain::prompts::canopy_dir();
+    let update = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir).update;
+    if !update.check_enabled {
+        return;
+    }
+    let interval_secs = update.check_interval_hours.saturating_mul(3600);
+    if !super::should_check(interval_secs) {
         return;
     }
 

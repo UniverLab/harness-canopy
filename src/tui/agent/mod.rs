@@ -302,7 +302,7 @@ impl InteractiveAgent {
         drop(pair.slave);
 
         let writer = pair.master.take_writer()?;
-        let mut reader = pair.master.try_clone_reader()?;
+        let reader = pair.master.try_clone_reader()?;
         let master = pair.master;
 
         let vt = Arc::new(Mutex::new(vt100::Parser::new_with_callbacks(
@@ -321,37 +321,13 @@ impl InteractiveAgent {
         let kitty_keyboard_flags_clone = Arc::clone(&kitty_keyboard_flags);
 
         // Background thread: read PTY output → feed into vt100 parser
-        std::thread::spawn(move || {
-            let mut tmp = [0u8; 4096];
-            loop {
-                match reader.read(&mut tmp) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        if let Ok(mut parser) = vt_clone.lock() {
-                            parser.process(&tmp[..n]);
-                        }
-                        if let Some(flags) = input::parse_kitty_keyboard_push(&tmp[..n]) {
-                            if let Ok(mut f) = kitty_keyboard_flags_clone.lock() {
-                                *f = Some(flags);
-                            }
-                        }
-                        // Stamp last output time so is_waiting_for_input()
-                        // can detect idle — unless this output falls inside a
-                        // post-resize suppression window (a repaint, not real
-                        // activity — B21).
-                        let suppressed = suppressed_until_clone
-                            .lock()
-                            .map(|until| Utc::now() < *until)
-                            .unwrap_or(false);
-                        if !suppressed {
-                            if let Ok(mut t) = last_output_at_clone.lock() {
-                                *t = Utc::now();
-                            }
-                        }
-                    }
-                }
-            }
-        });
+        Self::spawn_pty_reader_thread(
+            reader,
+            vt_clone,
+            last_output_at_clone,
+            suppressed_until_clone,
+            kitty_keyboard_flags_clone,
+        );
 
         Ok(Self {
             id,
@@ -427,7 +403,7 @@ impl InteractiveAgent {
         drop(pair.slave);
 
         let writer = pair.master.take_writer()?;
-        let mut reader = pair.master.try_clone_reader()?;
+        let reader = pair.master.try_clone_reader()?;
         let master = pair.master;
 
         let vt = Arc::new(Mutex::new(vt100::Parser::new_with_callbacks(
@@ -445,35 +421,15 @@ impl InteractiveAgent {
         let kitty_keyboard_flags = Arc::new(Mutex::new(None));
         let kitty_keyboard_flags_clone = Arc::clone(&kitty_keyboard_flags);
 
-        std::thread::spawn(move || {
-            let mut tmp = [0u8; 4096];
-            loop {
-                match reader.read(&mut tmp) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        if let Ok(mut parser) = vt_clone.lock() {
-                            parser.process(&tmp[..n]);
-                        }
-                        if let Some(flags) = input::parse_kitty_keyboard_push(&tmp[..n]) {
-                            if let Ok(mut f) = kitty_keyboard_flags_clone.lock() {
-                                *f = Some(flags);
-                            }
-                        }
-                        // See the sibling reader thread above: repaint bursts
-                        // inside a post-resize window are not activity (B21).
-                        let suppressed = suppressed_until_clone
-                            .lock()
-                            .map(|until| Utc::now() < *until)
-                            .unwrap_or(false);
-                        if !suppressed {
-                            if let Ok(mut t) = last_output_at_clone.lock() {
-                                *t = Utc::now();
-                            }
-                        }
-                    }
-                }
-            }
-        });
+        // See the sibling reader thread above: repaint bursts inside a
+        // post-resize window are not activity (B21).
+        Self::spawn_pty_reader_thread(
+            reader,
+            vt_clone,
+            last_output_at_clone,
+            suppressed_until_clone,
+            kitty_keyboard_flags_clone,
+        );
 
         let cli = Cli::new(shell);
 
@@ -508,6 +464,61 @@ impl InteractiveAgent {
             warp_passthrough: false,
             kitty_keyboard_flags,
         })
+    }
+
+    /// Process one chunk of PTY bytes: feed the vt100 parser, record any Kitty
+    /// keyboard push, and stamp `last_output_at` unless the output falls inside
+    /// a post-resize suppression window (a repaint, not real activity — B21).
+    fn process_pty_chunk(
+        chunk: &[u8],
+        vt: &Mutex<Vt>,
+        kitty_keyboard_flags: &Mutex<Option<u8>>,
+        last_output_at: &Mutex<DateTime<Utc>>,
+        activity_suppressed_until: &Mutex<DateTime<Utc>>,
+    ) {
+        if let Ok(mut parser) = vt.lock() {
+            parser.process(chunk);
+        }
+        if let Some(flags) = input::parse_kitty_keyboard_push(chunk) {
+            if let Ok(mut f) = kitty_keyboard_flags.lock() {
+                *f = Some(flags);
+            }
+        }
+        let suppressed = activity_suppressed_until
+            .lock()
+            .map(|until| Utc::now() < *until)
+            .unwrap_or(false);
+        if !suppressed {
+            if let Ok(mut t) = last_output_at.lock() {
+                *t = Utc::now();
+            }
+        }
+    }
+
+    /// Spawn the background PTY reader thread that feeds chunks into
+    /// [`Self::process_pty_chunk`]. Breaks on EOF (`Ok(0)`) or read error.
+    fn spawn_pty_reader_thread(
+        mut reader: Box<dyn std::io::Read + Send>,
+        vt: Arc<Mutex<Vt>>,
+        last_output_at: Arc<Mutex<DateTime<Utc>>>,
+        activity_suppressed_until: Arc<Mutex<DateTime<Utc>>>,
+        kitty_keyboard_flags: Arc<Mutex<Option<u8>>>,
+    ) {
+        std::thread::spawn(move || {
+            let mut tmp = [0u8; 4096];
+            loop {
+                match reader.read(&mut tmp) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => Self::process_pty_chunk(
+                        &tmp[..n],
+                        &vt,
+                        &kitty_keyboard_flags,
+                        &last_output_at,
+                        &activity_suppressed_until,
+                    ),
+                }
+            }
+        });
     }
 
     /// Mark the agent as having been viewed/attended by the user.
@@ -618,8 +629,12 @@ pub use screen::ScreenSnapshot;
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_osc52_payload, preserve_rows_on_shrink, ClipboardForwarder};
+    use super::{
+        decode_osc52_payload, preserve_rows_on_shrink, ClipboardForwarder, InteractiveAgent,
+        VT_SCROLLBACK_LINES,
+    };
     use base64::Engine as _;
+    use chrono::Utc;
 
     /// A parser wired the way `InteractiveAgent` builds its `vt` (see the
     /// `new_with_callbacks` call in `InteractiveAgent::new`).
@@ -815,5 +830,134 @@ mod tests {
         assert_eq!(scrollback_len(&mut parser), 0);
         let live = parser.screen().contents();
         assert!(live.contains("real line 9") && live.contains("real line 0"));
+    }
+
+    // ── process_pty_chunk tests ────────────────────────────────────────
+    // The function is private but has three distinct branches that must be
+    // covered: (1) kitty keyboard push detection, (2) activity suppression
+    // window (output inside window does not update last_output_at),
+    // (3) normal activity stamping (output outside window updates last_output_at).
+
+    #[test]
+    fn process_pty_chunk_feeds_vt_parser() {
+        use crate::tui::agent::ClipboardForwarder;
+        use std::sync::{Arc, Mutex};
+        use vt100::Parser;
+
+        let vt = Arc::new(Mutex::new(Parser::new_with_callbacks(
+            24,
+            80,
+            VT_SCROLLBACK_LINES,
+            ClipboardForwarder,
+        )));
+        let kitty_flags = Arc::new(Mutex::new(None));
+        let last_output = Arc::new(Mutex::new(Utc::now()));
+        let suppressed_until = Arc::new(Mutex::new(Utc::now()));
+
+        // Feed some plain text - should go to parser
+        InteractiveAgent::process_pty_chunk(
+            b"hello\r\n",
+            &vt,
+            &kitty_flags,
+            &last_output,
+            &suppressed_until,
+        );
+
+        let parser = vt.lock().unwrap();
+        let contents = parser.screen().contents();
+        assert!(contents.contains("hello"));
+    }
+
+    #[test]
+    fn process_pty_chunk_detects_kitty_keyboard_push() {
+        use crate::tui::agent::ClipboardForwarder;
+        use std::sync::{Arc, Mutex};
+        use vt100::Parser;
+
+        let vt = Arc::new(Mutex::new(Parser::new_with_callbacks(
+            24,
+            80,
+            VT_SCROLLBACK_LINES,
+            ClipboardForwarder,
+        )));
+        let kitty_flags = Arc::new(Mutex::new(None));
+        let last_output = Arc::new(Mutex::new(Utc::now()));
+        let suppressed_until = Arc::new(Mutex::new(Utc::now()));
+
+        // CSI > 1 u  — Kitty keyboard protocol push with flags=1
+        InteractiveAgent::process_pty_chunk(
+            b"\x1b[>1u",
+            &vt,
+            &kitty_flags,
+            &last_output,
+            &suppressed_until,
+        );
+
+        let flags = kitty_flags.lock().unwrap();
+        assert_eq!(*flags, Some(1));
+    }
+
+    #[test]
+    fn process_pty_chunk_respects_activity_suppression() {
+        use crate::tui::agent::ClipboardForwarder;
+        use chrono::Utc;
+        use std::sync::{Arc, Mutex};
+        use vt100::Parser;
+
+        let vt = Arc::new(Mutex::new(Parser::new_with_callbacks(
+            24,
+            80,
+            VT_SCROLLBACK_LINES,
+            ClipboardForwarder,
+        )));
+        let kitty_flags = Arc::new(Mutex::new(None));
+        let last_output = Arc::new(Mutex::new(Utc::now()));
+        // Suppression window in the future — output now should be suppressed
+        let suppressed_until = Arc::new(Mutex::new(Utc::now() + chrono::Duration::seconds(10)));
+
+        let before = *last_output.lock().unwrap();
+        InteractiveAgent::process_pty_chunk(
+            b"output\r\n",
+            &vt,
+            &kitty_flags,
+            &last_output,
+            &suppressed_until,
+        );
+
+        // last_output_at should NOT be updated because we're inside the suppression window
+        let after = *last_output.lock().unwrap();
+        assert_eq!(after, before);
+    }
+
+    #[test]
+    fn process_pty_chunk_updates_last_output_when_not_suppressed() {
+        use crate::tui::agent::ClipboardForwarder;
+        use chrono::Utc;
+        use std::sync::{Arc, Mutex};
+        use vt100::Parser;
+
+        let vt = Arc::new(Mutex::new(Parser::new_with_callbacks(
+            24,
+            80,
+            VT_SCROLLBACK_LINES,
+            ClipboardForwarder,
+        )));
+        let kitty_flags = Arc::new(Mutex::new(None));
+        let last_output = Arc::new(Mutex::new(Utc::now()));
+        // Suppression window in the past — output now should update last_output_at
+        let suppressed_until = Arc::new(Mutex::new(Utc::now() - chrono::Duration::seconds(10)));
+
+        let before = *last_output.lock().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        InteractiveAgent::process_pty_chunk(
+            b"output\r\n",
+            &vt,
+            &kitty_flags,
+            &last_output,
+            &suppressed_until,
+        );
+
+        let after = *last_output.lock().unwrap();
+        assert!(after > before);
     }
 }

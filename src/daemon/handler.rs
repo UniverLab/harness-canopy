@@ -5,18 +5,130 @@
 
 use std::sync::Arc;
 
-use axum::http::request::Parts;
+use crate::application::notification_service::NotificationService;
+use crate::db::Database;
+use crate::executor::Executor;
+use crate::graph_engine::GraphEngine;
+use crate::rag::rate_limiter::RateLimiter;
+use crate::sync_manager::SyncManager;
+use crate::watchers::WatcherEngine;
 use rmcp::handler::server::common::AsRequestContext;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::model::*;
-use rmcp::tool;
 use rmcp::tool_handler;
-use rmcp::tool_router;
 use rmcp::ErrorData as McpError;
 use rmcp::ServerHandler;
 use tokio::sync::Notify;
 
-#[derive(Clone, Debug)]
+// The inline `#[cfg(test)]` modules below reference the handler family's
+// helpers through `use super::{…}` / `use super::*`. Production code no
+// longer calls those helpers directly (each family module owns its own
+// imports), so these imports and re-exports exist for the test build only.
+#[cfg(test)]
+use crate::application::ports::{AgentRepository, RunRepository};
+#[cfg(test)]
+#[allow(unused_imports)]
+use crate::daemon::handler_formatting::make_log_path;
+#[cfg(test)]
+use crate::daemon::helpers::error_result;
+#[cfg(test)]
+use crate::daemon::params::*;
+#[cfg(test)]
+use crate::domain::blueprints::{validate_blueprint_deletable, Blueprint};
+#[cfg(test)]
+#[allow(unused_imports)]
+use crate::domain::graphs::{
+    Ensemble, EnsembleKind, Graph, GraphEdge, GraphEdgeCondition, GraphNode, GraphNodeKind,
+    GraphNodeRun, GraphRunStatus, GraphSpec, GraphSpecStatus, GraphStatus,
+};
+#[cfg(test)]
+use crate::domain::models::Trigger;
+#[cfg(test)]
+use crate::domain::queues::{Queue, QueueDetails};
+#[cfg(test)]
+use crate::shared::sync_identity::header_str;
+
+pub(crate) use crate::daemon::handler_graphs::build_graph_trigger;
+pub(crate) use crate::daemon::handler_nodes::validate_node_config;
+pub(crate) use crate::daemon::handler_read::{active_graph_spec_context, ActiveGraphSpec};
+pub(crate) use crate::daemon::handler_run_exec::{
+    handle_retry_current_node, handle_skip_next_spec,
+};
+pub(crate) use crate::daemon::handler_seeds_skills::redact_secrets;
+pub(crate) use crate::daemon::handler_validate::{
+    delete_graph_edge_checked, retarget_graph_edge, validate_absolute_dir, validate_non_empty,
+};
+
+#[cfg(test)]
+pub(crate) use crate::daemon::handler_blueprints::blueprint_json;
+#[cfg(test)]
+pub(crate) use crate::daemon::handler_copy::{node_copy_note, plan_ensemble_copy, plan_node_copy};
+#[cfg(test)]
+pub(crate) use crate::daemon::handler_edges::resolve_graph_target;
+#[cfg(test)]
+pub(crate) use crate::daemon::handler_ensemble_core::{
+    build_ensemble_unit, effective_member_prompt, member_node_config, validate_ensemble_members,
+    BuiltEnsembleUnit, EnsembleUnitSpec,
+};
+#[cfg(test)]
+pub(crate) use crate::daemon::handler_formatting::transport_details;
+#[cfg(test)]
+pub(crate) use crate::daemon::handler_formatting::{
+    append_temporal_agents_section, build_graph_update_response, build_id_result,
+    build_json_result, build_spec_update_response, format_duration_short, format_system_time,
+};
+#[cfg(test)]
+pub(crate) use crate::daemon::handler_graphs::build_graph_completion_hook;
+#[cfg(test)]
+pub(crate) use crate::daemon::handler_meta::{build_get_tools_response, rag_result_json};
+#[cfg(test)]
+pub(crate) use crate::daemon::handler_models_probes::{
+    clamp_max_recent_pairs, display_for_slug, format_recent_usage_section, model_result_footer,
+    prepend_recent_usage,
+};
+#[cfg(test)]
+pub(crate) use crate::daemon::handler_nodes::{
+    resolve_node_kind_and_config, unknown_config_keys, validate_blueprint_exists,
+};
+#[cfg(test)]
+pub(crate) use crate::daemon::handler_preflight_review::{
+    build_preflight_reviewer_prompt, resolve_reviewer_skill_section,
+};
+#[cfg(test)]
+pub(crate) use crate::daemon::handler_queues::{
+    queue_details_json, validate_queue_exists, validate_queue_member_removable,
+    validate_queue_not_consumed, validate_queue_reorder, validate_queue_reorder_locking,
+};
+#[cfg(test)]
+pub(crate) use crate::daemon::handler_read::{
+    build_graph_summary_json, ensemble_details_json, graph_completion_hook_json,
+    graph_completion_hook_run_json, graph_details_json, graph_edge_json, graph_node_json,
+    graph_trigger_json,
+};
+#[cfg(test)]
+pub(crate) use crate::daemon::handler_run_exec::{
+    find_in_flight_run, graph_run_blocker, graph_run_json, graph_run_status_guard,
+    in_flight_run_error, node_name_for_error, queue_running_spec, resolve_reported_run,
+};
+#[cfg(test)]
+pub(crate) use crate::daemon::handler_run_history::{
+    graph_node_run_detail_json, graph_node_run_summary_json,
+};
+#[cfg(test)]
+pub(crate) use crate::daemon::handler_run_lifecycle::perform_graph_reset;
+#[cfg(test)]
+pub(crate) use crate::daemon::handler_specs::{spec_summary_json, validate_at_least_one_bool};
+#[cfg(test)]
+pub(crate) use crate::daemon::handler_sync::TaggedProjectKnowledge;
+#[cfg(test)]
+pub(crate) use crate::daemon::handler_validate::{
+    json_value_kind_name, validate_edge_condition, validate_edge_condition_with_route,
+    validate_node_kind, validate_node_not_ensemble_owned, validate_node_position_conflict,
+    validate_not_join_kind, validate_position_conflict, validate_route_edge_target,
+    validate_spec_deletable, validate_spec_exists, validate_spec_set_status_target,
+    validate_spec_status, validate_spec_workdir,
+};
+
 pub struct OptionalExtension<T>(pub Option<T>);
 
 impl<C, T> rmcp::handler::server::common::FromContextPart<C> for OptionalExtension<T>
@@ -30,54 +142,6 @@ where
         ))
     }
 }
-
-use crate::application::notification_service::NotificationService;
-use crate::application::ports::{AgentRepository, RunRepository, StateRepository};
-use crate::daemon::handler_formatting::{
-    agent_detail_json, format_agent_info, format_catalog_models, format_log_output,
-    format_native_models, format_platform_models, format_temporal_agents, format_uptime,
-    internal_error, make_log_path, recent_runs_output, resolve_log_path,
-};
-use crate::daemon::handler_helpers::{
-    apply_scalar_updates, apply_trigger_updates, handle_timed_out_run, load_bound_seed_identity,
-    map_action_result, new_agent_base, parse_report_status, prepare_cron_task, prepare_watch_task,
-    resolve_effective_project_hash, update_agent_last_run, validate_report_summary,
-    validate_run_transition, watcher_restart_needed,
-};
-use crate::daemon::helpers::{
-    data_dir, error_result, notify_run_result, success_result, with_deprecated_note,
-};
-use crate::daemon::params::*;
-use crate::daemon::params_extract::Parameters;
-use crate::db::intelligence::IntelligenceNodeRecord;
-use crate::db::scheduled_sends::ScheduledSendProvenance;
-use crate::db::session::InteractiveSession;
-use crate::db::Database;
-use crate::domain::blueprints::{merge_blueprint_config, validate_blueprint_deletable, Blueprint};
-use crate::domain::graphs::{
-    validate_router_edges_declared, validate_router_route_coverage, validate_router_routes,
-    validate_spec_description_template, ArchiveGraphOutcome, Ensemble, EnsembleKind,
-    EnsembleMember, EnsembleMemberSpec, Graph, GraphCompletionHook, GraphDetails, GraphEdge,
-    GraphEdgeCondition, GraphHookEvent, GraphNode, GraphNodeKind, GraphNodeRun, GraphResetOutcome,
-    GraphRunStatus, GraphSpec, GraphSpecStatus, GraphStatus, RouterRoute, SpecAdminStatusOutcome,
-};
-use crate::domain::models::{Agent, Trigger};
-use crate::domain::queues::{Queue, QueueDetails};
-use crate::domain::specs::{
-    convert_legacy_spec_description, extract_spec_section, parse_spec_description,
-    ParsedSpecDescription, SpecSection, SpecSectionResult,
-};
-use crate::domain::sync::{MessageKind, MissionImpact, WorkspaceStatus};
-use crate::domain::validation::validate_id;
-use crate::executor::Executor;
-use crate::graph_engine::{GraphEngine, GRAPH_HOOK_BINDINGS};
-use crate::rag::rate_limiter::RateLimiter;
-use crate::shared::sync_identity::{
-    header_str, CANOPY_AGENT_ID_ENV, CANOPY_AGENT_ID_HEADER, CANOPY_CLIENT_NAME_ENV,
-    CANOPY_CLIENT_NAME_HEADER,
-};
-use crate::sync_manager::SyncManager;
-use crate::watchers::WatcherEngine;
 
 const MISSING_SYNC_IDENTITY_MESSAGE: &str =
     "Missing Canopy session identity. Launch via `canopy bridge --id <AGENT_ID>` so requests include Canopy identity headers.";
@@ -99,8 +163,10 @@ const SPEC_LIST_COMPACT_ROW_BYTES: usize = 200;
 /// compact row estimate leaves room for long names while keeping the default
 /// response within the result budget.
 const SESSION_LIST_COMPACT_ROW_BYTES: usize = 160;
+
 pub(crate) const SESSION_LIST_DEFAULT_LIMIT: u32 =
     MCP_RESULT_BUDGET_BYTES as u32 / SESSION_LIST_COMPACT_ROW_BYTES as u32;
+
 const _: () = assert!(
     SESSION_LIST_DEFAULT_LIMIT >= 1 && SESSION_LIST_DEFAULT_LIMIT <= 200,
     "session_list default page must stay within [1, 200]"
@@ -112,6 +178,7 @@ const _: () = assert!(
 /// clamp is vacuous and the lower clamp is enforced by the const assert).
 pub(crate) const SPEC_LIST_DEFAULT_LIMIT: u32 =
     MCP_RESULT_BUDGET_BYTES as u32 / SPEC_LIST_COMPACT_ROW_BYTES as u32;
+
 const _: () = assert!(
     SPEC_LIST_DEFAULT_LIMIT >= 1 && SPEC_LIST_DEFAULT_LIMIT <= 200,
     "spec_list default page must stay within [1, 200]"
@@ -126,2724 +193,19 @@ const _: () = assert!(
 /// following the same derivation `SPEC_LIST_DEFAULT_LIMIT` and
 /// `SESSION_LIST_DEFAULT_LIMIT` already use.
 const INTELLIGENCE_DUPLICATE_CANDIDATE_ROW_BYTES: usize = 450;
+
 pub(crate) const INTELLIGENCE_DUPLICATE_CANDIDATES_CAP: usize =
     MCP_RESULT_BUDGET_BYTES / INTELLIGENCE_DUPLICATE_CANDIDATE_ROW_BYTES;
+
 const _: () = assert!(
     INTELLIGENCE_DUPLICATE_CANDIDATES_CAP >= 1 && INTELLIGENCE_DUPLICATE_CANDIDATES_CAP <= 200,
     "intelligence_upsert duplicate-candidates cap must stay within [1, 200]"
 );
 
-fn missing_sync_identity_error() -> McpError {
+pub(crate) fn missing_sync_identity_error() -> McpError {
     McpError::invalid_params(MISSING_SYNC_IDENTITY_MESSAGE.to_string(), None)
 }
 
-/// Whether an interactive session is attached to a live CLI process on this
-/// host right now (CM16). `true` only when provable: the row was recorded on
-/// the current boot AND its PID is still alive. A different boot id, a NULL
-/// boot id, or a missing/dead PID all read as `false` — the session may
-/// still be a valid hook target (an enqueued send is delivered when a TUI
-/// next attaches), it just is not attached at this moment. Side-effect-free:
-/// no PTY touched, no session woken.
-fn session_is_attached(session: &InteractiveSession) -> bool {
-    match (
-        session.boot_id.as_deref(),
-        crate::system::boot_id().as_deref(),
-    ) {
-        (Some(stored), Some(current)) if stored == current => session
-            .pid
-            .map(crate::system::process_is_alive)
-            .unwrap_or(false),
-        _ => false,
-    }
-}
-
-pub(crate) fn validate_non_empty(value: &str, field: &str) -> Result<(), String> {
-    if value.trim().is_empty() {
-        Err(format!("{field} must not be empty."))
-    } else {
-        Ok(())
-    }
-}
-
-pub(crate) fn validate_absolute_dir(path: &str) -> Result<(), String> {
-    let p = std::path::Path::new(path);
-    if !p.is_absolute() {
-        return Err("Graph workdir must be an absolute path.".into());
-    }
-    if !p.is_dir() {
-        return Err("Graph workdir must point to an existing directory.".into());
-    }
-    Ok(())
-}
-
-/// Unlike [`validate_absolute_dir`], a spec's `workdir` tag doesn't require
-/// the directory to exist yet — a backlog spec can be authored for a workdir
-/// before that project is cloned or a graph targeting it is created. It's
-/// only ever used for filtering (`spec_list`), never to drive execution.
-fn validate_spec_workdir(path: &str) -> Result<(), String> {
-    if !std::path::Path::new(path).is_absolute() {
-        return Err("Spec workdir must be an absolute path.".into());
-    }
-    Ok(())
-}
-
-fn resolve_prefix_or_error(
-    db: &Database,
-    raw: &str,
-    resolver: fn(&Database, &str) -> anyhow::Result<Option<String>>,
-    kind_name: &str,
-) -> Result<String, CallToolResult> {
-    match resolver(db, raw) {
-        Ok(Some(full_id)) => Ok(full_id),
-        Ok(None) => Err(error_result(&format!("{kind_name} '{raw}' not found."))),
-        Err(e) => Err(error_result(&e.to_string())),
-    }
-}
-
-/// Build a graph [`Trigger`] from MCP parameters, reusing the same cron/watch
-/// validation as agents. Returns `Ok(None)` for a manual graph (no trigger or
-/// `kind = "manual"`), and an `Err(message)` for invalid input.
-pub(crate) fn build_graph_trigger(
-    params: &Option<GraphTriggerParams>,
-) -> Result<Option<Trigger>, String> {
-    let Some(params) = params else {
-        return Ok(None);
-    };
-
-    match params.kind.trim().to_ascii_lowercase().as_str() {
-        "" | "manual" => Ok(None),
-        "cron" => {
-            let schedule = params
-                .schedule
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .ok_or("A cron trigger requires a 'schedule' expression.")?;
-            if !crate::scheduler::validate_cron(schedule) {
-                return Err(format!("Invalid cron expression: '{schedule}'."));
-            }
-            Ok(Some(Trigger::Cron {
-                schedule_expr: schedule.to_string(),
-            }))
-        }
-        "watch" => {
-            let path = params
-                .path
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .ok_or("A watch trigger requires a 'path'.")?;
-            if !std::path::Path::new(path).is_absolute() {
-                return Err("Watch trigger 'path' must be absolute.".into());
-            }
-            let event_strs = params
-                .events
-                .clone()
-                .filter(|events| !events.is_empty())
-                .ok_or("A watch trigger requires at least one event.")?;
-            let events = crate::domain::models::WatchEvent::parse_list(&event_strs)?;
-            Ok(Some(Trigger::Watch {
-                path: path.to_string(),
-                events,
-                debounce_seconds: params.debounce_seconds.unwrap_or(2),
-                recursive: params.recursive.unwrap_or(false),
-            }))
-        }
-        other => Err(format!(
-            "Unknown trigger kind '{other}'. Use 'cron', 'watch', or 'manual'."
-        )),
-    }
-}
-
-/// Build a validated [`crate::domain::graphs::GraphCompletionHook`] from MCP
-/// params — an agent payload (platform + prompt), a command, an
-/// interactive message (prompt + target_session_id), or a graph launch
-/// (target_graph_id). Exactly one mode must be configured; any other
-/// combination is rejected.
-fn validate_graph_hook_templates(params: &GraphCompletionHookParams) -> Result<(), String> {
-    let templates = [
-        ("prompt", params.prompt.as_deref()),
-        ("command", params.command.as_deref()),
-        ("idea", params.idea.as_deref()),
-    ];
-    for (field, template) in templates {
-        let Some(template) = template else {
-            continue;
-        };
-        let unknown =
-            crate::domain::prompts::unbindable_placeholders(template, GRAPH_HOOK_BINDINGS);
-        if !unknown.is_empty() {
-            return Err(format!(
-                "Hook {field} contains unknown placeholder(s): {}. Supported graph hook placeholders: {}.",
-                unknown.join(", "),
-                GRAPH_HOOK_BINDINGS
-                    .iter()
-                    .map(|name| format!("{{{{{name}}}}}"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn build_graph_completion_hook(
-    params: &GraphCompletionHookParams,
-) -> Result<crate::domain::graphs::GraphCompletionHook, String> {
-    validate_graph_hook_templates(params)?;
-
-    let has_platform = params
-        .platform
-        .as_deref()
-        .is_some_and(|s| !s.trim().is_empty());
-    let has_command = params
-        .command
-        .as_deref()
-        .is_some_and(|s| !s.trim().is_empty());
-    let has_target = params
-        .target_session_id
-        .as_deref()
-        .is_some_and(|s| !s.trim().is_empty());
-    let has_target_name = params
-        .target_session_name
-        .as_deref()
-        .is_some_and(|s| !s.trim().is_empty());
-    let has_model = params
-        .model
-        .as_deref()
-        .is_some_and(|s| !s.trim().is_empty());
-    let has_effort = params
-        .effort
-        .as_deref()
-        .is_some_and(|s| !s.trim().is_empty());
-    let has_prompt = params
-        .prompt
-        .as_deref()
-        .is_some_and(|s| !s.trim().is_empty());
-    let has_target_graph = params
-        .target_graph_id
-        .as_deref()
-        .is_some_and(|s| !s.trim().is_empty());
-
-    if has_target_graph {
-        if has_platform || has_command || has_target || has_target_name || has_model || has_effort {
-            return Err(
-                "Graph hook ('target_graph_id') must not set 'platform', 'command', \
-                 'target_session_id', 'target_session_name', 'model', or 'effort'. Configure exactly one hook mode."
-                    .to_string(),
-            );
-        }
-        let queue_id = params
-            .queue_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string);
-        let idea = params
-            .idea
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string);
-        if queue_id.is_some() && idea.is_some() {
-            return Err("Graph hook: 'queue_id' and 'idea' are mutually exclusive.".to_string());
-        }
-        let target_graph_id = params
-            .target_graph_id
-            .as_deref()
-            .unwrap()
-            .trim()
-            .to_string();
-        return Ok(crate::domain::graphs::GraphCompletionHook {
-            platform: None,
-            model: None,
-            effort: None,
-            prompt: None,
-            command: None,
-            target_session_id: None,
-            target_session_name: None,
-            timeout_minutes: None,
-            target_graph_id: Some(target_graph_id),
-            queue_id,
-            workdir_override: params
-                .workdir_override
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string),
-            idea,
-        });
-    }
-
-    // CM27: 'target_session_id' and 'target_session_name' are alternative
-    // ways to say the same thing (an interactive hook's destination) — never
-    // both, and if the caller clearly means an interactive hook (they set
-    // `prompt` but no other mode), never neither either. One message covers
-    // both misconfigurations because "set exactly one of X or Y" is true
-    // whether zero or two of them are set.
-    if has_target && has_target_name {
-        return Err(
-            "Interactive hook requires exactly one of 'target_session_id' \
-             or 'target_session_name', not both."
-                .to_string(),
-        );
-    }
-    if has_prompt
-        && !has_target
-        && !has_target_name
-        && params.platform.is_none()
-        && params.command.is_none()
-    {
-        return Err(
-            "Interactive hook requires exactly one of 'target_session_id' \
-             or 'target_session_name'."
-                .to_string(),
-        );
-    }
-
-    if has_target || has_target_name {
-        if has_platform || has_command || has_model || has_effort {
-            return Err(
-                "Interactive hook ('target_session_id'/'target_session_name' + 'prompt') must not \
-                 set 'platform', 'model', 'effort', or 'command'. Configure exactly one hook mode."
-                    .to_string(),
-            );
-        }
-        if !has_prompt {
-            return Err("Interactive hook 'prompt' must not be empty.".to_string());
-        }
-        let (target_session_id, target_session_name) = if has_target {
-            (
-                Some(
-                    params
-                        .target_session_id
-                        .as_deref()
-                        .unwrap()
-                        .trim()
-                        .to_string(),
-                ),
-                None,
-            )
-        } else {
-            (
-                None,
-                Some(
-                    params
-                        .target_session_name
-                        .as_deref()
-                        .unwrap()
-                        .trim()
-                        .to_string(),
-                ),
-            )
-        };
-        let prompt = params.prompt.as_deref().unwrap().trim().to_string();
-        return Ok(crate::domain::graphs::GraphCompletionHook {
-            platform: None,
-            model: None,
-            effort: None,
-            prompt: Some(prompt),
-            command: None,
-            target_session_id,
-            timeout_minutes: params.timeout_minutes,
-            target_graph_id: None,
-            queue_id: None,
-            workdir_override: None,
-            idea: None,
-            target_session_name,
-        });
-    }
-
-    if has_platform && has_command {
-        return Err("Hook cannot have both a 'command' and an agent payload \
-             ('platform'/'prompt'). Configure exactly one."
-            .to_string());
-    }
-    if !has_platform && !has_command {
-        return Err("Hook must have either a 'command', an agent payload \
-             ('platform' + 'prompt'), an interactive payload \
-             ('target_session_id' + 'prompt'), or a graph payload \
-             ('target_graph_id'). Configure exactly one."
-            .to_string());
-    }
-
-    if has_platform {
-        let platform = params.platform.as_deref().unwrap().trim().to_string();
-        let prompt = params
-            .prompt
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| "Agent hook 'prompt' must not be empty.".to_string())?
-            .to_string();
-        let model = params
-            .model
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string);
-        let effort = params
-            .effort
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string);
-
-        return Ok(crate::domain::graphs::GraphCompletionHook {
-            platform: Some(platform),
-            model,
-            effort,
-            prompt: Some(prompt),
-            command: None,
-            target_session_id: None,
-            target_session_name: None,
-            timeout_minutes: params.timeout_minutes,
-            target_graph_id: None,
-            queue_id: None,
-            workdir_override: None,
-            idea: None,
-        });
-    }
-
-    // Command mode
-    let command = params.command.as_deref().unwrap().trim().to_string();
-    Ok(crate::domain::graphs::GraphCompletionHook {
-        platform: None,
-        model: None,
-        effort: None,
-        prompt: None,
-        command: Some(command),
-        target_session_id: None,
-        target_session_name: None,
-        timeout_minutes: params.timeout_minutes,
-        target_graph_id: None,
-        queue_id: None,
-        workdir_override: None,
-        idea: None,
-    })
-}
-
-const ENSEMBLE_MIN_MEMBERS: usize = 2;
-const ENSEMBLE_MAX_MEMBERS: usize = 8;
-const DEFAULT_ENSEMBLE_MEMBER_TIMEOUT_MINUTES: i64 = 30;
-
-fn validate_ensemble_members(
-    members: &[EnsembleMemberParams],
-    kind: EnsembleKind,
-) -> Result<Vec<EnsembleMemberSpec>, String> {
-    let min = match kind {
-        EnsembleKind::Parallel => ENSEMBLE_MIN_MEMBERS,
-        EnsembleKind::Cascade | EnsembleKind::RoundRobin => 1,
-    };
-    if members.len() < min || members.len() > ENSEMBLE_MAX_MEMBERS {
-        return Err(format!(
-            "A {} ensemble must have {min}-{ENSEMBLE_MAX_MEMBERS} members, got {}.",
-            kind.as_str(),
-            members.len()
-        ));
-    }
-    members
-        .iter()
-        .map(|member| {
-            let platform = member.platform.trim();
-            if platform.is_empty() {
-                return Err("Ensemble member 'platform' must not be empty.".to_string());
-            }
-            let model = member
-                .model
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string);
-            let prompt_override = member
-                .prompt_override
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string);
-            if let Some(timeout_minutes) = member.timeout_minutes {
-                if timeout_minutes < 0 {
-                    return Err(
-                        "Ensemble member 'timeout_minutes' must not be negative.".to_string()
-                    );
-                }
-            }
-            for (field_name, value) in [
-                ("infra_retry_limit", member.infra_retry_limit),
-                ("infra_crash_max_seconds", member.infra_crash_max_seconds),
-                ("infra_backoff_seconds", member.infra_backoff_seconds),
-            ] {
-                if value.is_some_and(|v| v < 0) {
-                    return Err(format!(
-                        "Ensemble member '{field_name}' must not be negative."
-                    ));
-                }
-            }
-            Ok((
-                platform.to_string(),
-                model,
-                prompt_override,
-                member.timeout_minutes,
-                member.infra_retry_limit,
-                member.infra_crash_max_seconds,
-                member.infra_backoff_seconds,
-            ))
-        })
-        .collect()
-}
-
-/// This member's effective prompt: its own `prompt_override` if it has one,
-/// else the ensemble's shared `prompt_template`.
-fn effective_member_prompt<'a>(prompt_override: Option<&'a str>, shared: &'a str) -> &'a str {
-    prompt_override.unwrap_or(shared)
-}
-
-/// Build a member agent node's `config` — its effective prompt (its own
-/// override, or the shared ensemble prompt) plus this member's own
-/// platform/model, the same shape `validate_node_config`'s `Agent` arm
-/// expects.
-fn member_node_config(
-    platform: &str,
-    model: Option<&str>,
-    effective_prompt: &str,
-    timeout_minutes: i64,
-    infra_retry_limit: Option<i64>,
-    infra_crash_max_seconds: Option<i64>,
-    infra_backoff_seconds: Option<i64>,
-) -> serde_json::Value {
-    let mut config = serde_json::json!({
-        "platform": platform,
-        "model": model,
-        "prompt_template": effective_prompt,
-        "timeout_minutes": timeout_minutes,
-    });
-    if let serde_json::Value::Object(ref mut map) = config {
-        if let Some(v) = infra_retry_limit {
-            map.insert("infra_retry_limit".to_string(), serde_json::json!(v));
-        }
-        if let Some(v) = infra_crash_max_seconds {
-            map.insert("infra_crash_max_seconds".to_string(), serde_json::json!(v));
-        }
-        if let Some(v) = infra_backoff_seconds {
-            map.insert("infra_backoff_seconds".to_string(), serde_json::json!(v));
-        }
-    }
-    config
-}
-
-/// Validated inputs for assembling one ensemble unit — see
-/// [`build_ensemble_unit`]. All wiring targets (`entry_from_node`,
-/// `on_pass_to`, `on_fail_to`) must already have been checked to exist in the
-/// target graph by the caller.
-struct EnsembleUnitSpec<'a> {
-    spec_id: Option<String>,
-    graph_id: Option<String>,
-    name: &'a str,
-    prompt_template: &'a str,
-    members: &'a [EnsembleMemberSpec],
-    entry_from_node: &'a str,
-    entry_condition: GraphEdgeCondition,
-    on_pass_to: &'a str,
-    /// When the pass exit chains into another ensemble: that ensemble's
-    /// member ids — the quorum fans out to all of them while `on_pass_to`
-    /// holds the target's quorum id. `None` means a plain single-node exit.
-    on_pass_fan_out: Option<Vec<String>>,
-    on_fail_to: Option<&'a str>,
-    /// Same as `on_pass_fan_out`, for the fail exit.
-    on_fail_fan_out: Option<Vec<String>>,
-    min_pass: i64,
-    timeout_minutes: i64,
-    straggler_timeout_minutes: Option<i64>,
-    quorum_grace_minutes: Option<i64>,
-    infra_retry_limit: Option<i64>,
-    infra_crash_max_seconds: Option<i64>,
-    infra_backoff_seconds: Option<i64>,
-    start_position: i64,
-    kind: EnsembleKind,
-    commit_rights: bool,
-}
-
-/// The concrete graph pieces of one ensemble unit, all with fresh ids: the
-/// join node, member nodes, wiring edges (entry fan-out, member→join fan-in,
-/// join exit routing), the ensemble row, and its member rows.
-#[derive(Debug)]
-struct BuiltEnsembleUnit {
-    ensemble: Ensemble,
-    members: Vec<EnsembleMember>,
-    member_nodes: Vec<GraphNode>,
-    join_node: GraphNode,
-    edges: Vec<GraphEdge>,
-}
-
-/// Assemble an ensemble unit from validated inputs. Shared by
-/// `graph_add_ensemble` and `graph_copy_ensemble` so the two can never drift in
-/// how members, the join, and the wiring are laid out. Purely constructs
-/// in-memory values (fresh ids, no runtime state) — persistence is the
-/// caller's `insert_ensemble_unit`.
-fn build_ensemble_unit(spec: &EnsembleUnitSpec) -> BuiltEnsembleUnit {
-    let ensemble_id = uuid::Uuid::new_v4().to_string();
-    let join_node_id = uuid::Uuid::new_v4().to_string();
-    let now = chrono::Utc::now();
-    let mut next_position = spec.start_position;
-
-    let mut member_nodes = Vec::with_capacity(spec.members.len());
-    let mut ensemble_members = Vec::with_capacity(spec.members.len());
-    let mut edges = Vec::new();
-
-    for (
-        index,
-        (
-            platform,
-            model,
-            prompt_override,
-            member_timeout_minutes,
-            member_infra_retry_limit,
-            member_infra_crash_max_seconds,
-            member_infra_backoff_seconds,
-        ),
-    ) in spec.members.iter().enumerate()
-    {
-        let node_id = uuid::Uuid::new_v4().to_string();
-        let effective_prompt =
-            effective_member_prompt(prompt_override.as_deref(), spec.prompt_template);
-        let effective_timeout_minutes = member_timeout_minutes.unwrap_or(spec.timeout_minutes);
-        let effective_infra_retry_limit = member_infra_retry_limit.or(spec.infra_retry_limit);
-        let effective_infra_crash_max_seconds =
-            member_infra_crash_max_seconds.or(spec.infra_crash_max_seconds);
-        let effective_infra_backoff_seconds =
-            member_infra_backoff_seconds.or(spec.infra_backoff_seconds);
-        member_nodes.push(GraphNode {
-            id: node_id.clone(),
-            spec_id: spec.spec_id.clone(),
-            graph_id: spec.graph_id.clone(),
-            name: format!("{} [{}]", spec.name, index + 1),
-            kind: GraphNodeKind::Agent,
-            config: member_node_config(
-                platform,
-                model.as_deref(),
-                effective_prompt,
-                effective_timeout_minutes,
-                effective_infra_retry_limit,
-                effective_infra_crash_max_seconds,
-                effective_infra_backoff_seconds,
-            ),
-            position: next_position,
-            created_at: now,
-        });
-        edges.push(GraphEdge {
-            id: uuid::Uuid::new_v4().to_string(),
-            spec_id: spec.spec_id.clone(),
-            graph_id: spec.graph_id.clone(),
-            from_node: spec.entry_from_node.to_string(),
-            to_node: node_id.clone(),
-            condition: spec.entry_condition.clone(),
-        });
-        edges.push(GraphEdge {
-            id: uuid::Uuid::new_v4().to_string(),
-            spec_id: spec.spec_id.clone(),
-            graph_id: spec.graph_id.clone(),
-            from_node: node_id.clone(),
-            to_node: join_node_id.clone(),
-            condition: GraphEdgeCondition::Always,
-        });
-        ensemble_members.push(EnsembleMember {
-            ensemble_id: ensemble_id.clone(),
-            node_id,
-            position: index as i64,
-            platform: platform.clone(),
-            model: model.clone(),
-            prompt_override: prompt_override.clone(),
-            timeout_minutes: *member_timeout_minutes,
-            infra_retry_limit: *member_infra_retry_limit,
-            infra_crash_max_seconds: *member_infra_crash_max_seconds,
-            infra_backoff_seconds: *member_infra_backoff_seconds,
-        });
-        next_position += 1;
-    }
-
-    let join_node = GraphNode {
-        id: join_node_id.clone(),
-        spec_id: spec.spec_id.clone(),
-        graph_id: spec.graph_id.clone(),
-        name: format!("{} (quorum)", spec.name),
-        kind: GraphNodeKind::Join,
-        config: serde_json::json!({ "ensemble_id": ensemble_id }),
-        position: next_position,
-        created_at: now,
-    };
-
-    // Quorum exits: one edge to the target node — or, when chained into
-    // another ensemble, one edge per member of that ensemble (no intermediate
-    // node). The `ensembles` row still holds the single `on_pass_to`/
-    // `on_fail_to` value (the node id, or the target's quorum id).
-    let pass_targets = spec
-        .on_pass_fan_out
-        .clone()
-        .unwrap_or_else(|| vec![spec.on_pass_to.to_string()]);
-    for to_node in &pass_targets {
-        edges.push(GraphEdge {
-            id: uuid::Uuid::new_v4().to_string(),
-            spec_id: spec.spec_id.clone(),
-            graph_id: spec.graph_id.clone(),
-            from_node: join_node_id.clone(),
-            to_node: to_node.clone(),
-            condition: GraphEdgeCondition::Pass,
-        });
-    }
-    if let Some(on_fail_to) = spec.on_fail_to {
-        let fail_targets = spec
-            .on_fail_fan_out
-            .clone()
-            .unwrap_or_else(|| vec![on_fail_to.to_string()]);
-        for to_node in &fail_targets {
-            edges.push(GraphEdge {
-                id: uuid::Uuid::new_v4().to_string(),
-                spec_id: spec.spec_id.clone(),
-                graph_id: spec.graph_id.clone(),
-                from_node: join_node_id.clone(),
-                to_node: to_node.clone(),
-                condition: GraphEdgeCondition::Fail,
-            });
-        }
-    }
-
-    let ensemble = Ensemble {
-        id: ensemble_id,
-        spec_id: spec.spec_id.clone(),
-        graph_id: spec.graph_id.clone(),
-        name: spec.name.to_string(),
-        prompt_template: spec.prompt_template.to_string(),
-        join_node_id,
-        entry_from_node: spec.entry_from_node.to_string(),
-        entry_condition: spec.entry_condition.clone(),
-        min_pass: spec.min_pass,
-        straggler_timeout_minutes: spec.straggler_timeout_minutes,
-        quorum_grace_minutes: spec.quorum_grace_minutes,
-        timeout_minutes: spec.timeout_minutes,
-        infra_retry_limit: spec.infra_retry_limit,
-        infra_crash_max_seconds: spec.infra_crash_max_seconds,
-        infra_backoff_seconds: spec.infra_backoff_seconds,
-        on_pass_to: spec.on_pass_to.to_string(),
-        on_fail_to: spec.on_fail_to.map(str::to_string),
-        kind: spec.kind,
-        round_robin_index: if spec.kind == EnsembleKind::RoundRobin {
-            Some(0)
-        } else {
-            None
-        },
-        commit_rights: spec.commit_rights,
-        created_at: now,
-    };
-
-    BuiltEnsembleUnit {
-        ensemble,
-        members: ensemble_members,
-        member_nodes,
-        join_node,
-        edges,
-    }
-}
-
-fn validate_graph_exists(db: &Database, graph_id: &str) -> Result<(), String> {
-    db.get_graph(graph_id)
-        .map_err(|e| e.to_string())?
-        .is_some()
-        .then_some(())
-        .ok_or_else(|| format!("Graph '{graph_id}' not found."))
-}
-
-fn validate_spec_exists(db: &Database, spec_id: &str) -> Result<GraphSpec, String> {
-    db.get_graph_spec(spec_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Spec '{spec_id}' not found."))
-}
-
-fn validate_node_exists(db: &Database, node_id: &str) -> Result<GraphNode, String> {
-    db.get_graph_node(node_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Graph node '{node_id}' not found."))
-}
-
-fn validate_edge_exists(db: &Database, edge_id: &str) -> Result<GraphEdge, String> {
-    db.get_graph_edge(edge_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Graph edge '{edge_id}' not found."))
-}
-
-/// Where a graph node/edge belongs: a spec's own graph, or a graph's
-/// top-level graph (shared across every spec in that graph).
-#[derive(Debug)]
-enum GraphTarget {
-    Spec(String),
-    Graph(String),
-}
-
-/// Resolve `spec_id`/`graph_id` MCP params into exactly one validated
-/// [`GraphTarget`]. Empty/whitespace-only strings are treated as absent, so
-/// a client that always sends both fields (one blank) still gets a clean
-/// "provide exactly one" error instead of a confusing "not found".
-fn resolve_graph_target(
-    db: &Database,
-    spec_id: Option<&str>,
-    graph_id: Option<&str>,
-) -> Result<GraphTarget, String> {
-    let spec_id = spec_id.map(str::trim).filter(|s| !s.is_empty());
-    let graph_id = graph_id.map(str::trim).filter(|s| !s.is_empty());
-    match (spec_id, graph_id) {
-        (Some(_), Some(_)) => {
-            Err("Provide exactly one of spec_id or graph_id, not both.".to_string())
-        }
-        (None, None) => Err("Provide exactly one of spec_id or graph_id.".to_string()),
-        (Some(spec_id), None) => {
-            let resolved = db
-                .resolve_spec_id_by_prefix(spec_id)
-                .map_err(|e| e.to_string())?;
-            let full_id = resolved.as_deref().unwrap_or(spec_id);
-            validate_spec_exists(db, full_id)?;
-            Ok(GraphTarget::Spec(full_id.to_string()))
-        }
-        (None, Some(graph_id)) => {
-            let resolved = db
-                .resolve_graph_id_by_prefix(graph_id)
-                .map_err(|e| e.to_string())?;
-            let full_id = resolved.as_deref().unwrap_or(graph_id);
-            validate_graph_exists(db, full_id)?;
-            Ok(GraphTarget::Graph(full_id.to_string()))
-        }
-    }
-}
-
-fn validate_position_conflict(
-    db: &Database,
-    graph_id: Option<&str>,
-    exclude_spec_id: &str,
-    position: i64,
-) -> Result<(), String> {
-    // A standalone spec (no graph yet) has no sibling positions to conflict
-    // with — position only matters once it's ordered within a graph.
-    let Some(graph_id) = graph_id else {
-        return Ok(());
-    };
-    let conflict = db
-        .list_graph_specs(graph_id)
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .any(|s| s.id != exclude_spec_id && s.position == position);
-    if conflict {
-        Err(format!(
-            "Graph '{graph_id}' already has a spec at position {position}."
-        ))
-    } else {
-        Ok(())
-    }
-}
-
-/// Refuse to delete a spec that's still bound to a graph, with an actionable
-/// message pointing at the fix (detach it, or delete the graph instead).
-///
-/// Note: a spec that's a member of a [`Queue`] can still be deleted — the
-/// `queue_members` row cascades away with it (see `queues` table). Queues are
-/// just queues over specs that already exist; they don't own them the way a
-/// graph owns its bound specs.
-fn validate_spec_deletable(spec: &GraphSpec) -> Result<(), String> {
-    if let Some(graph_id) = &spec.graph_id {
-        return Err(format!(
-            "Spec '{}' is bound to graph '{graph_id}'; use graph_remove_spec to unbind it from the graph first (or delete the graph), then delete the spec.",
-            spec.id
-        ));
-    }
-    Ok(())
-}
-
-fn validate_spec_unbindable(_db: &Database, spec: &GraphSpec) -> Result<(), String> {
-    if spec.graph_id.is_none() {
-        return Err(format!(
-            "Spec '{}' is not bound to any graph; nothing to unbind.",
-            spec.id
-        ));
-    }
-    if spec.status == GraphSpecStatus::Running {
-        return Err(format!(
-            "Spec '{}' is currently running and cannot be unbound from its graph; wait for it to finish, or pause the graph, first.",
-            spec.id
-        ));
-    }
-    Ok(())
-}
-
-/// Check a node's sibling graph — its spec's nodes, or its graph's top-level
-/// graph nodes — for a position conflict. `node` targets exactly one of
-/// `spec_id`/`graph_id` (the DB layer enforces it), so exactly one branch runs.
-fn validate_node_position_conflict(
-    db: &Database,
-    node: &GraphNode,
-    exclude_node_id: &str,
-    position: i64,
-) -> Result<(), String> {
-    let (siblings, owner) = if let Some(spec_id) = &node.spec_id {
-        (
-            db.list_graph_nodes(spec_id).map_err(|e| e.to_string())?,
-            format!("Spec '{spec_id}'"),
-        )
-    } else if let Some(graph_id) = &node.graph_id {
-        (
-            db.list_graph_nodes_for_graph(graph_id)
-                .map_err(|e| e.to_string())?,
-            format!("Graph '{graph_id}'"),
-        )
-    } else {
-        return Ok(());
-    };
-    let conflict = siblings
-        .iter()
-        .any(|n| n.id != exclude_node_id && n.position == position);
-    if conflict {
-        Err(format!(
-            "{owner} already has a node at position {position}."
-        ))
-    } else {
-        Ok(())
-    }
-}
-
-fn validate_edge_condition(condition: &str) -> Result<GraphEdgeCondition, String> {
-    GraphEdgeCondition::from_str(condition.trim()).ok_or_else(|| {
-        "Graph edge condition must be one of: pass, fail, always, error.".to_string()
-    })
-}
-
-/// [`validate_edge_condition`] plus `route` support for
-/// `graph_add_edge`/`graph_update_edge`: a `"route"` condition requires a
-/// non-empty `route` param naming the label. `pass`/`fail`/`always` are
-/// unaffected — delegated straight to [`validate_edge_condition`].
-fn validate_edge_condition_with_route(
-    condition: &str,
-    route: Option<&str>,
-) -> Result<GraphEdgeCondition, String> {
-    if condition.trim() == "route" {
-        let label = route
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| {
-                "Graph edge condition 'route' requires a non-empty 'route' label.".to_string()
-            })?;
-        return Ok(GraphEdgeCondition::Route(label.to_string()));
-    }
-    validate_edge_condition(condition).map_err(|_| {
-        "Graph edge condition must be one of: pass, fail, always, route, error.".to_string()
-    })
-}
-
-/// If `condition` is a `Route`, validate that its label names a route
-/// actually declared by the router node `from_node_id` — never accepted
-/// free-form. Every other condition is a no-op.
-fn validate_route_edge_target(
-    db: &Database,
-    from_node_id: &str,
-    condition: &GraphEdgeCondition,
-) -> Result<(), String> {
-    let Some(label) = condition.route_label() else {
-        return Ok(());
-    };
-    let from_node = validate_node_exists(db, from_node_id)?;
-    if from_node.kind != GraphNodeKind::Router {
-        return Err(format!(
-            "Edge condition 'route' requires from_node '{from_node_id}' to be a router node, not '{}'.",
-            from_node.kind.display_str()
-        ));
-    }
-    let (routes, _fallback) = parse_router_routes(&from_node.config)?;
-    if !routes.iter().any(|route| route.label == label) {
-        return Err(format!(
-            "Edge names undeclared route '{label}'. Router '{from_node_id}' declares: {}.",
-            routes
-                .iter()
-                .map(|route| route.label.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
-    }
-    Ok(())
-}
-
-fn validate_node_kind(kind: &str) -> Result<GraphNodeKind, String> {
-    GraphNodeKind::from_str(kind.trim())
-        .ok_or_else(|| "Graph node kind must be one of: agent, check, gate, router.".to_string())
-}
-
-/// `graph_add_node`/`graph_update_node`'s `kind: "join"` guard — a quorum node is
-/// engine-managed and only ever created as part of `graph_add_ensemble`'s
-/// one-call expansion, never directly.
-fn validate_not_join_kind(kind: GraphNodeKind) -> Result<(), String> {
-    if kind == GraphNodeKind::Join {
-        return Err(
-            "Graph node kind 'quorum' is engine-managed; it can only be created via graph_add_ensemble."
-                .to_string(),
-        );
-    }
-    Ok(())
-}
-
-/// Refuse to edit a node directly with `graph_update_node`/`graph_add_edge` if
-/// it belongs to an ensemble (member or quorum) — a member's prompt/platform/
-/// model (including its optional `prompt_override`) and the quorum's own
-/// config are all owned by the ensemble unit, so every edit goes through
-/// `graph_update_ensemble`, never a direct node/edge tool. Deleting the whole
-/// unit is `graph_delete_ensemble`'s job, never `graph_delete_node`'s.
-fn validate_node_not_ensemble_owned(db: &Database, node_id: &str) -> Result<(), String> {
-    if let Some(details) = db
-        .get_ensemble_by_member_node(node_id)
-        .map_err(|e| e.to_string())?
-    {
-        return Err(format!(
-            "Node '{node_id}' is a member of ensemble '{}' ('{}'); edit it via graph_update_ensemble instead (entry wiring: from_node/add_entry_from/remove_entry_from; commit rights: the commit_rights field, applying to whichever member the strategy runs), and delete the whole unit with graph_delete_ensemble instead of this node.",
-            details.ensemble.id, details.ensemble.name
-        ));
-    }
-    if let Some(details) = db
-        .get_ensemble_by_join_node(node_id)
-        .map_err(|e| e.to_string())?
-    {
-        return Err(format!(
-            "Node '{node_id}' is the quorum of ensemble '{}' ('{}'); edit it via graph_update_ensemble instead (exit wiring: on_pass_to/on_fail_to), and delete the whole unit with graph_delete_ensemble instead of this node.",
-            details.ensemble.id, details.ensemble.name
-        ));
-    }
-    Ok(())
-}
-
-/// CB52: refuse to delete a plain node that an ensemble references without
-/// owning — as primary entry (`entry_from_node`), as an extra entry source,
-/// or as an exit target (`on_pass_to`/`on_fail_to`). Before this guard the
-/// `ensembles` FKs were `ON DELETE CASCADE`, so the delete silently removed
-/// the ensemble row (and its `ensemble_members` rows) while the member/join
-/// nodes survived as orphans; the next dispatch then died with an
-/// "ambiguous outgoing edges" message naming none of the cause. The schema
-/// is now `ON DELETE RESTRICT` as the last line; this check is the readable
-/// first line, naming each ensemble, the role, and the detaching verbs.
-fn validate_node_not_ensemble_referenced(db: &Database, node_id: &str) -> Result<(), String> {
-    let refs = db
-        .ensembles_referencing_node(node_id)
-        .map_err(|e| e.to_string())?;
-    if refs.is_empty() {
-        return Ok(());
-    }
-    let parts: Vec<String> = refs
-        .iter()
-        .map(|(details, role)| {
-            format!(
-                "Node '{node_id}' is referenced by ensemble '{}' ('{}') as {role}; detach it first with graph_update_ensemble (entry wiring: from_node/add_entry_from/remove_entry_from for entry_from_node/entry_source; exit wiring: on_pass_to/on_fail_to for on_pass_to/on_fail_to). Deleting this node would silently delete the ensemble and orphan its members/join.",
-                details.ensemble.name, details.ensemble.id
-            )
-        })
-        .collect();
-    Err(parts.join("; "))
-}
-
-/// Resolve the [`GraphStatus`] (and id) of the graph that owns a spec-scoped or
-/// graph-scoped graph object. A node/edge always has exactly one of
-/// `spec_id`/`graph_id` set. `None` means the object belongs to a standalone
-/// spec not yet bound to any graph — nothing running to guard against.
-fn resolve_owning_graph_status(
-    db: &Database,
-    spec_id: Option<&str>,
-    graph_id: Option<&str>,
-) -> Result<Option<(String, GraphStatus)>, String> {
-    if let Some(graph_id) = graph_id {
-        let lp = db
-            .get_graph(graph_id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("Graph '{graph_id}' not found."))?;
-        return Ok(Some((lp.id, lp.status)));
-    }
-    if let Some(spec_id) = spec_id {
-        let spec = validate_spec_exists(db, spec_id)?;
-        if let Some(graph_id) = &spec.graph_id {
-            let lp = db
-                .get_graph(graph_id)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("Graph '{graph_id}' not found."))?;
-            return Ok(Some((lp.id, lp.status)));
-        }
-    }
-    Ok(None)
-}
-
-/// Reject a topology mutation (retargeting/deleting an edge, deleting a
-/// node) while the owning graph is `running`. Deliberately stricter than node
-/// CONFIG edits. Since CM15 the engine re-reads a node's config (and an
-/// ensemble's member set) from the database at each dispatch
-/// (`GraphEngine::run_spec`), so a `graph_update_node` / `graph_update_ensemble`
-/// config edit takes effect on that node's next dispatch within the same running
-/// spec. Topology is different: a node's `kind`/`position`, the ensemble `kind`,
-/// and entry/exit wiring (edges) are resolved once from the per-run snapshot and
-/// never re-read, so an edit to them mid-run would make execution and routing
-/// disagree — those are refused here.
-fn validate_topology_mutation_allowed(
-    db: &Database,
-    spec_id: Option<&str>,
-    graph_id: Option<&str>,
-) -> Result<(), String> {
-    if let Some((graph_id, GraphStatus::Running)) =
-        resolve_owning_graph_status(db, spec_id, graph_id)?
-    {
-        return Err(format!(
-            "Graph '{graph_id}' is running; call graph_pause first, then retry this topology change."
-        ));
-    }
-    Ok(())
-}
-
-/// `to_node` must exist in the same spec/graph as `edge` — a
-/// cross-graph retarget would leave the edge's `spec_id`/`graph_id` naming one
-/// graph while `to_node` lives in another.
-fn validate_edge_retarget_destination(
-    db: &Database,
-    edge: &GraphEdge,
-    to_node: &str,
-) -> Result<(), String> {
-    let nodes = if let Some(spec_id) = &edge.spec_id {
-        db.list_graph_nodes(spec_id).map_err(|e| e.to_string())?
-    } else if let Some(graph_id) = &edge.graph_id {
-        db.list_graph_nodes_for_graph(graph_id)
-            .map_err(|e| e.to_string())?
-    } else {
-        Vec::new()
-    };
-    if !nodes.iter().any(|n| n.id == to_node) {
-        return Err(format!(
-            "Node '{to_node}' does not belong to the same graph as edge '{}'; retargeting across specs/graphs is not allowed.",
-            edge.id
-        ));
-    }
-    Ok(())
-}
-
-/// Whether `node` is the computed entry point of its graph (spec-scoped or
-/// graph-scoped) — see [`crate::graph_engine::find_entry_node`]. A graph with
-/// no *confirmed* single entry (e.g. `find_entry_node` errors on multiple
-/// sources) never blocks deletion here; only a confirmed single entry does.
-fn validate_node_not_entry_point(db: &Database, node: &GraphNode) -> Result<(), String> {
-    let (nodes, edges) = if let Some(spec_id) = &node.spec_id {
-        (
-            db.list_graph_nodes(spec_id).map_err(|e| e.to_string())?,
-            db.list_graph_edges(spec_id).map_err(|e| e.to_string())?,
-        )
-    } else if let Some(graph_id) = &node.graph_id {
-        (
-            db.list_graph_nodes_for_graph(graph_id)
-                .map_err(|e| e.to_string())?,
-            db.list_graph_edges_for_graph(graph_id)
-                .map_err(|e| e.to_string())?,
-        )
-    } else {
-        return Ok(());
-    };
-    if let Ok(entry_id) = crate::graph_engine::find_entry_node(&nodes, &edges, "graph") {
-        if entry_id == node.id {
-            return Err(format!(
-                "Node '{}' is the entry point of its graph; deleting it would leave the graph \
-                 unable to run. Wire a different node as the entry first.",
-                node.id
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// Validated retarget of an existing edge's `to_node` — the shared path used
-/// by both the `graph_update_edge` MCP tool and the TUI's edge editor, so an
-/// ordinary `pass`/`fail` edge gets the same checks a router's route edges
-/// have always had.
-pub(crate) fn retarget_graph_edge(
-    db: &Database,
-    edge_id: &str,
-    to_node: &str,
-) -> Result<GraphEdge, String> {
-    let edge = validate_edge_exists(db, edge_id)?;
-    validate_topology_mutation_allowed(db, edge.spec_id.as_deref(), edge.graph_id.as_deref())?;
-    validate_node_not_ensemble_owned(db, &edge.from_node)?;
-    validate_node_not_ensemble_owned(db, to_node)?;
-    validate_edge_retarget_destination(db, &edge, to_node)?;
-    db.update_graph_edge_target(&edge.id, to_node)
-        .map_err(|e| e.to_string())?;
-    Ok(GraphEdge {
-        to_node: to_node.to_string(),
-        ..edge
-    })
-}
-
-/// Validated deletion of a single edge — the shared path used by both the
-/// `graph_delete_edge` MCP tool and the TUI's edge editor.
-pub(crate) fn delete_graph_edge_checked(db: &Database, edge_id: &str) -> Result<GraphEdge, String> {
-    let edge = validate_edge_exists(db, edge_id)?;
-    validate_topology_mutation_allowed(db, edge.spec_id.as_deref(), edge.graph_id.as_deref())?;
-    db.delete_graph_edge(&edge.id).map_err(|e| e.to_string())?;
-    Ok(edge)
-}
-
-/// Validated deletion of a node — cascades (at the DB layer, via `ON DELETE
-/// CASCADE` foreign keys on `graph_edges.from_node`/`to_node`) to every edge
-/// naming it. The shared path used by both the `graph_delete_node` MCP tool
-/// and the TUI's graph editor.
-pub(crate) fn delete_graph_node_checked(db: &Database, node_id: &str) -> Result<GraphNode, String> {
-    let node = validate_node_exists(db, node_id)?;
-    validate_topology_mutation_allowed(db, node.spec_id.as_deref(), node.graph_id.as_deref())?;
-    validate_node_not_ensemble_owned(db, &node.id)?;
-    validate_node_not_ensemble_referenced(db, &node.id)?;
-    validate_node_not_entry_point(db, &node)?;
-    db.delete_graph_node(&node.id).map_err(|e| e.to_string())?;
-    Ok(node)
-}
-
-/// Unlike [`GraphSpecStatus::from_str`] (infallible, defaults to `Pending`
-/// for callers that already trust the value came from the DB), a
-/// `spec_list` status filter comes from the caller — an unrecognized value
-/// should be rejected, not silently reinterpreted as "pending".
-fn validate_spec_status(status: &str) -> Result<GraphSpecStatus, String> {
-    match status.trim().to_lowercase().as_str() {
-        "pending" => Ok(GraphSpecStatus::Pending),
-        "running" => Ok(GraphSpecStatus::Running),
-        "completed" => Ok(GraphSpecStatus::Completed),
-        "failed" => Ok(GraphSpecStatus::Failed),
-        "skipped" => Ok(GraphSpecStatus::Skipped),
-        "interrupted" => Ok(GraphSpecStatus::Interrupted),
-        _ => Err(
-            "Spec status must be one of: pending, running, completed, failed, skipped, interrupted."
-                .to_string(),
-        ),
-    }
-}
-
-fn validate_spec_set_status_target(status: &str) -> Result<GraphSpecStatus, String> {
-    match status.trim().to_lowercase().as_str() {
-        "pending" => Ok(GraphSpecStatus::Pending),
-        "completed" => Ok(GraphSpecStatus::Completed),
-        "skipped" => Ok(GraphSpecStatus::Skipped),
-        _ => Err("Spec set_status target must be one of: pending, completed, skipped.".to_string()),
-    }
-}
-
-fn json_value_kind_name(value: &serde_json::Value) -> &'static str {
-    match value {
-        serde_json::Value::Null => "null",
-        serde_json::Value::Bool(_) => "a boolean",
-        serde_json::Value::Number(_) => "a number",
-        serde_json::Value::String(_) => "a JSON-encoded string",
-        serde_json::Value::Array(_) => "an array",
-        serde_json::Value::Object(_) => "an object",
-    }
-}
-
-/// Whether an agent node's config names a harness — a non-empty `platform`
-/// or `cli` field. Shared by [`validate_node_config`]'s `Agent` arm (the
-/// general "this config can run" gate) and `resolve_node_kind_and_config`'s
-/// blueprint branch (which needs the same check before merge, to give a
-/// blueprint-specific error instead of the generic one).
-fn config_has_agent_harness(map: &serde_json::Map<String, serde_json::Value>) -> bool {
-    let has_non_empty_str = |field: &str| {
-        map.get(field)
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|s| !s.trim().is_empty())
-    };
-    has_non_empty_str("platform") || has_non_empty_str("cli")
-}
-
-/// Every config key an `agent` node is actually read for — see
-/// `execute_agent_node`/`resolve_node_prompt_template` in `graph_engine.rs`.
-/// Notably absent: `prompt`. An agent's prompt is `prompt_template` (or
-/// `prompt_preset`); `prompt` is a plain node never reads, and a node that
-/// carries it silently runs on the bare fallback template instead — the
-/// defect this allowlist exists to catch. `commit_rights` (B37) is accepted
-/// on every kind since the engine checks it uniformly regardless of which
-/// node in the graph actually moves HEAD. `require_report` (boolean, default
-/// `false`) exists because a harness can exit 0 having done nothing — see
-/// `agent_finished_execution` in `graph_engine.rs`. CM30:
-/// `infra_retry_limit`/`infra_crash_max_seconds`/`infra_backoff_seconds`
-/// override the infra-crash retry budget for this node alone (validated as
-/// non-negative integers); absent, the platform's config.toml value applies,
-/// then the engine default (2/60/30).
-const AGENT_CONFIG_KEYS: &[&str] = &[
-    "platform",
-    "cli",
-    "model",
-    "effort",
-    "timeout_minutes",
-    "resume",
-    "resume_prompt",
-    "prompt_template",
-    "prompt_preset",
-    "require_report",
-    "commit_rights",
-    "skills",
-    "infra_retry_limit",
-    "infra_crash_max_seconds",
-    "infra_backoff_seconds",
-];
-/// Every config key a `check` node is read for — see `execute_check_node`.
-const CHECK_CONFIG_KEYS: &[&str] = &[
-    "command",
-    "success_condition",
-    "timeout_seconds",
-    "commit_rights",
-];
-/// Every config key a `gate` node is read for — see `execute_gate_node`.
-const GATE_CONFIG_KEYS: &[&str] = &["evaluate", "value", "commit_rights"];
-/// Every config key a `router` node is read for — see `parse_router_routes`.
-const ROUTER_CONFIG_KEYS: &[&str] = &["routes", "fallback", "commit_rights"];
-
-/// The config keys a node's kind is actually read for, or `None` for `Join`
-/// (engine-managed — see `validate_node_config`'s `Join` arm — so there is
-/// no caller-supplied key to check against). Shared by
-/// [`validate_known_config_keys`] (write-time rejection) and
-/// [`unknown_config_keys`] (read-only detection of already-stored nodes via
-/// the `graph_audit_node_configs` tool), so the two can never name a
-/// different accepted set for the same kind.
-fn allowed_config_keys(kind: GraphNodeKind) -> Option<&'static [&'static str]> {
-    match kind {
-        GraphNodeKind::Agent => Some(AGENT_CONFIG_KEYS),
-        GraphNodeKind::Check => Some(CHECK_CONFIG_KEYS),
-        GraphNodeKind::Gate => Some(GATE_CONFIG_KEYS),
-        GraphNodeKind::Router => Some(ROUTER_CONFIG_KEYS),
-        GraphNodeKind::Join => None,
-    }
-}
-
-/// Every key in `map` that `kind` will never read, sorted. Empty for `Join`
-/// (see [`allowed_config_keys`]) and for a config that only carries
-/// recognized keys. Pure read-only classification — no error message, no
-/// early return — so it doubles as both [`validate_known_config_keys`]'s
-/// rejection check and `graph_audit_node_configs`'s detection query over
-/// nodes that predate this validation.
-fn unknown_config_keys(
-    kind: GraphNodeKind,
-    map: &serde_json::Map<String, serde_json::Value>,
-) -> Vec<String> {
-    let Some(allowed) = allowed_config_keys(kind) else {
-        return Vec::new();
-    };
-    let mut unknown: Vec<String> = map
-        .keys()
-        .filter(|key| !allowed.contains(&key.as_str()))
-        .cloned()
-        .collect();
-    unknown.sort_unstable();
-    unknown
-}
-
-/// Reject any config key a node's kind will never read. This is what makes
-/// `{ "platform": "claude", "prompt": "..." }` on an agent node fail loudly
-/// at write time instead of being accepted, stored, and silently run on the
-/// bare fallback template (`resolve_node_prompt_template`'s default) — the
-/// exact incident this check exists to prevent. `prompt` on an agent node
-/// gets its own message naming `prompt_template` as the field that actually
-/// gets read; every other unrecognized key gets the generic message naming
-/// what the kind does accept.
-fn validate_known_config_keys(
-    kind: GraphNodeKind,
-    map: &serde_json::Map<String, serde_json::Value>,
-) -> Result<(), String> {
-    let unknown = unknown_config_keys(kind, map);
-    let Some(bad_key) = unknown.first() else {
-        return Ok(());
-    };
-    // `allowed_config_keys` is `None` only for `Join`, for which
-    // `unknown_config_keys` always returns empty — so reaching here means
-    // it returned `Some`.
-    let allowed = allowed_config_keys(kind).expect("non-empty unknown keys implies Some(allowed)");
-    let mut accepted = allowed.to_vec();
-    accepted.sort_unstable();
-
-    if kind == GraphNodeKind::Agent && bad_key == "prompt" {
-        return Err(format!(
-            "Graph node config for kind 'agent' does not read a 'prompt' key; use 'prompt_template' (or 'prompt_preset') instead. Accepted keys: {}.",
-            accepted.join(", ")
-        ));
-    }
-    Err(format!(
-        "Graph node config for kind '{}' has unrecognized key '{bad_key}'. Accepted keys: {}.",
-        kind.as_str(),
-        accepted.join(", ")
-    ))
-}
-
-/// Validate that a graph node's config is a JSON object with the fields its
-/// kind needs at execution time. This exists because a double-encoded config
-/// (e.g. `"{\"platform\": \"mimo\"}"` instead of `{"platform": "mimo"}`) used
-/// to be accepted at creation time and only surfaced as an engine crash
-/// ("Agent node ... is missing a platform/cli") mid-run, long after the node
-/// was saved. It also rejects any key the node's kind will never read (see
-/// [`validate_known_config_keys`]) — the same "surfaced at write time, not
-/// run time" guarantee, for the case where the config shape is otherwise
-/// valid but carries a key like `prompt` that a typo or a wrong mental model
-/// (confusing it with the graph completion hook's own `prompt` field) put
-/// there instead of `prompt_template`.
-pub(crate) fn validate_node_config(
-    kind: GraphNodeKind,
-    config: &serde_json::Value,
-) -> Result<(), String> {
-    let Some(map) = config.as_object() else {
-        return Err(format!(
-            "Graph node config must be a JSON object, not {}. Pass an object (e.g. {{\"platform\": \"claude\"}}) rather than a JSON-encoded string.",
-            json_value_kind_name(config)
-        ));
-    };
-
-    validate_known_config_keys(kind, map)?;
-
-    let has_non_empty_str = |field: &str| {
-        map.get(field)
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|s| !s.trim().is_empty())
-    };
-
-    match kind {
-        GraphNodeKind::Agent => {
-            if !config_has_agent_harness(map) {
-                return Err(
-                    "Graph node config for kind 'agent' must include a non-empty 'platform' (or 'cli') field.".to_string(),
-                );
-            }
-            for key in [
-                "infra_retry_limit",
-                "infra_crash_max_seconds",
-                "infra_backoff_seconds",
-            ] {
-                if let Some(value) = map.get(key) {
-                    if value.as_u64().is_none() {
-                        return Err(format!(
-                            "Graph node config field '{key}' must be a non-negative integer."
-                        ));
-                    }
-                }
-            }
-        }
-        GraphNodeKind::Check => {
-            if !has_non_empty_str("command") {
-                return Err(
-                    "Graph node config for kind 'check' must include a non-empty 'command' field."
-                        .to_string(),
-                );
-            }
-        }
-        GraphNodeKind::Gate => {
-            let evaluate = map
-                .get("evaluate")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("output_contains");
-            if evaluate == "output_contains" && !has_non_empty_str("value") {
-                return Err(
-                    "Graph node config for kind 'gate' must include a non-empty 'value' field when 'evaluate' is 'output_contains'.".to_string(),
-                );
-            }
-        }
-        // A join node's config is engine-managed (see `graph_add_ensemble`) —
-        // there is nothing for a caller to validate, and callers can never
-        // reach this arm anyway since `graph_add_node`/`graph_update_node`
-        // refuse `kind: "join"` outright.
-        GraphNodeKind::Join => {}
-        GraphNodeKind::Router => {
-            let (routes, fallback) = parse_router_routes(config)?;
-            validate_router_routes(&routes, &fallback)?;
-        }
-    }
-
-    Ok(())
-}
-
-/// Parse a router node's `config` into its declared routes + fallback
-/// label. Shared by [`validate_node_config`]'s config-shape check and by
-/// edge validation (`graph_add_edge`/`graph_update_edge`/`graph_update_node`),
-/// which need to check a route name against what a router actually
-/// declares.
-fn parse_router_routes(config: &serde_json::Value) -> Result<(Vec<RouterRoute>, String), String> {
-    let map = config.as_object().ok_or_else(|| {
-        format!(
-            "Graph node config must be a JSON object, not {}. Pass an object (e.g. {{\"routes\": [...]}}) rather than a JSON-encoded string.",
-            json_value_kind_name(config)
-        )
-    })?;
-    let routes_value = map.get("routes").ok_or_else(|| {
-        "Graph node config for kind 'router' must include a 'routes' array.".to_string()
-    })?;
-    let routes_array = routes_value
-        .as_array()
-        .ok_or_else(|| "Graph node config field 'routes' must be an array.".to_string())?;
-    let routes = routes_array
-        .iter()
-        .map(|entry| {
-            let obj = entry.as_object().ok_or_else(|| {
-                "Each router route must be an object with 'label' and 'description' fields."
-                    .to_string()
-            })?;
-            let label = obj
-                .get("label")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let description = obj
-                .get("description")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            Ok(RouterRoute { label, description })
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-    let fallback = map
-        .get("fallback")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    Ok((routes, fallback))
-}
-
-/// Look up a blueprint by name, or an actionable error listing every
-/// available blueprint name (builtin and custom) so the caller can pick a
-/// valid one without a separate `blueprint_list` round trip.
-fn validate_blueprint_exists(db: &Database, name: &str) -> Result<Blueprint, String> {
-    match db.get_blueprint_by_name(name).map_err(|e| e.to_string())? {
-        Some(blueprint) => Ok(blueprint),
-        None => {
-            let available = db
-                .list_blueprints()
-                .map_err(|e| e.to_string())?
-                .iter()
-                .map(|b| b.name.clone())
-                .collect::<Vec<_>>()
-                .join(", ");
-            Err(format!(
-                "Unknown blueprint '{name}'. Available blueprints: {available}."
-            ))
-        }
-    }
-}
-
-/// Resolve a `graph_add_node` call's kind/config, either from an explicit
-/// `kind`+`config` pair or from a named blueprint (optionally shallow-merged
-/// with `config_overrides`). Exactly one of `config`/`blueprint` must be
-/// usable — this is the "blueprint as an alternative to a full config"
-/// surface described in R7.
-fn resolve_node_kind_and_config(
-    db: &Database,
-    kind: Option<&str>,
-    config: Option<serde_json::Map<String, serde_json::Value>>,
-    blueprint: Option<&str>,
-    config_overrides: Option<serde_json::Map<String, serde_json::Value>>,
-) -> Result<(GraphNodeKind, serde_json::Value), String> {
-    let blueprint_name = blueprint.map(str::trim).filter(|s| !s.is_empty());
-    let explicit_kind = kind.map(str::trim).filter(|s| !s.is_empty());
-
-    match blueprint_name {
-        Some(blueprint_name) => {
-            let bp = validate_blueprint_exists(db, blueprint_name)?;
-            let node_kind = match explicit_kind {
-                Some(explicit) => validate_node_kind(explicit)?,
-                None => bp.kind,
-            };
-            let overrides = config_overrides.map(serde_json::Value::Object);
-            let merged = merge_blueprint_config(&bp.config, overrides.as_ref());
-            // Blueprints intentionally carry no platform/cli (see
-            // `builtin_blueprint_specs`) — which harness runs a node is the
-            // caller's decision, supplied here via `config_overrides`, never
-            // a default this resolver falls back to. Catching the missing
-            // case here (rather than only via `validate_node_config`'s
-            // generic message) lets the error name the blueprint and say
-            // *why* the field is missing instead of just that it is.
-            if node_kind == GraphNodeKind::Agent {
-                let has_harness = merged.as_object().is_some_and(config_has_agent_harness);
-                if !has_harness {
-                    return Err(format!(
-                        "Blueprint '{blueprint_name}' intentionally does not provide a platform (or cli) — which harness runs a node is the caller's decision, not the blueprint's. Pass config_overrides with a non-empty 'platform' (and 'model' if that platform needs one) to select the harness."
-                    ));
-                }
-            }
-            Ok((node_kind, merged))
-        }
-        None => {
-            let node_kind = validate_node_kind(
-                explicit_kind
-                    .ok_or_else(|| "Provide 'kind' when not using a blueprint.".to_string())?,
-            )?;
-            let config = config
-                .map(serde_json::Value::Object)
-                .ok_or_else(|| "Provide either 'config' or 'blueprint'.".to_string())?;
-            Ok((node_kind, config))
-        }
-    }
-}
-
-fn validate_queue_exists(db: &Database, queue_id: &str) -> Result<Queue, String> {
-    db.get_queue(queue_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Queue '{queue_id}' not found."))
-}
-
-/// Refuse to start a queue run when one of the queue's specs is already
-/// `running` under a different graph. A queue spec's own `graph_id` stays
-/// `None` (queue membership never binds it), so ownership is read off the
-/// spec's most recent `graph_runs` row instead — the graph that most recently
-/// touched the spec is the only one that could have set it `running`.
-///
-/// This is a start-time check, not a lock: two `graph_run` calls issued in
-/// the same instant, before either has run a single node, can still race.
-fn validate_queue_not_consumed(
-    db: &Database,
-    queue_id: &str,
-    requesting_graph_id: &str,
-) -> Result<(), String> {
-    for spec_id in db
-        .list_queue_member_spec_ids(queue_id)
-        .map_err(|e| e.to_string())?
-    {
-        let Some(spec) = db.get_graph_spec(&spec_id).map_err(|e| e.to_string())? else {
-            continue;
-        };
-        if spec.status != GraphSpecStatus::Running {
-            continue;
-        }
-
-        let runs = db
-            .list_graph_runs_for_spec(&spec_id)
-            .map_err(|e| e.to_string())?;
-        let owner_graph_id = runs.last().map(|run| run.graph_id.clone());
-        if owner_graph_id.as_deref() != Some(requesting_graph_id) {
-            let owner = owner_graph_id.unwrap_or_else(|| "another graph".to_string());
-            return Err(format!(
-                "Queue '{queue_id}' spec '{spec_id}' is already running under graph '{owner}'; wait for it to finish, or pause that graph, before starting a new run against this queue."
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// Validate that `spec_ids` is a total permutation of `current`: same
-/// length, same set, no duplicates, no unknown ids. This rejects any partial
-/// reorder (a subset, or a list with an unrecognized id) so the operation is
-/// always "here is the whole new order," never a swap of two entries applied
-/// on top of unknown existing state.
-fn validate_queue_reorder(current: &[String], spec_ids: &[String]) -> Result<(), String> {
-    if spec_ids.len() != current.len() {
-        return Err(format!(
-            "Reorder must list all {} queue spec(s) exactly once; got {}.",
-            current.len(),
-            spec_ids.len()
-        ));
-    }
-
-    let mut seen = std::collections::HashSet::new();
-    for id in spec_ids {
-        if !seen.insert(id.as_str()) {
-            return Err(format!("Reorder lists spec '{id}' more than once."));
-        }
-        if !current.iter().any(|existing| existing == id) {
-            return Err(format!("Queue has no spec '{id}'."));
-        }
-    }
-    Ok(())
-}
-
-/// Live queues (R6): refuse to remove a queue member that is currently
-/// `running` — the tool-layer half of the same lock `queue_reorder` enforces
-/// via [`validate_queue_reorder_locking`]. A spec that isn't a queue member at
-/// all, or isn't found, is left for [`Database::remove_queue_member`]'s own
-/// "no such spec" error — this only ever blocks a positive `running` match.
-fn validate_queue_member_removable(
-    db: &Database,
-    queue_id: &str,
-    spec_id: &str,
-) -> Result<(), String> {
-    if let Some(spec) = db.get_graph_spec(spec_id).map_err(|e| e.to_string())? {
-        if spec.status == GraphSpecStatus::Running {
-            return Err(format!(
-                "Spec '{spec_id}' is currently running and cannot be removed from queue '{queue_id}'; wait for it to finish, or pause the graph, first."
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// Live queues (R6): the currently running spec and every already-executed
-/// one (`completed`/`failed`/`skipped`) are immutable in the queue's order —
-/// only `pending` members may move. Call after [`validate_queue_reorder`] has
-/// already confirmed `spec_ids` is a total permutation of `current`: under
-/// that guarantee, a locked member "doesn't move" iff it sits at the same
-/// index in both slices, since moving it necessarily displaces whatever now
-/// occupies its old slot.
-fn validate_queue_reorder_locking(
-    db: &Database,
-    current: &[String],
-    spec_ids: &[String],
-) -> Result<(), String> {
-    for (index, spec_id) in current.iter().enumerate() {
-        let status = db
-            .get_graph_spec(spec_id)
-            .map_err(|e| e.to_string())?
-            .map(|spec| spec.status)
-            .unwrap_or(GraphSpecStatus::Pending);
-        if status == GraphSpecStatus::Pending {
-            continue;
-        }
-        if spec_ids.get(index) != Some(spec_id) {
-            return Err(format!(
-                "Spec '{spec_id}' is {} and cannot be moved by a reorder; only pending members may be reordered.",
-                status.as_str()
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn queue_details_json(details: &QueueDetails, include_descriptions: bool) -> serde_json::Value {
-    serde_json::json!({
-        "id": details.queue.id,
-        "name": details.queue.name,
-        "members": details
-            .members
-            .iter()
-            .enumerate()
-            .map(|(index, spec)| {
-                let mut value = spec_summary_json(spec, include_descriptions);
-                value["queue_position"] = serde_json::json!(index + 1);
-                if let Some(Some(group)) = details.member_groups.get(&spec.id) {
-                    value["group"] = serde_json::json!(group);
-                }
-                value
-            })
-            .collect::<Vec<_>>(),
-    })
-}
-
-fn validate_at_least_one_bool(updates: &[bool], field_name: &str) -> Result<(), String> {
-    if updates.iter().all(|&b| !b) {
-        Err(format!(
-            "{field_name} requires at least one field to update."
-        ))
-    } else {
-        Ok(())
-    }
-}
-
-fn build_graph_update_response(graph_id: &str) -> CallToolResult {
-    success_result(&format!("Graph '{graph_id}' updated."))
-}
-
-/// Whether `graph_run` accepts relaunching a graph in `status`, factored out as
-/// a pure function so the guard (and its wording) can be unit-tested without
-/// building a full `TaskTriggerHandler`.
-///
-/// `graph_run` refuses `failed`/`completed` graphs outright — `graph_reset` (or,
-/// for a `failed` graph, `graph_schedule_autorun`'s auto-reset-and-resume) is
-/// the sanctioned way out, mirroring [`Database::reset_graph`].
-fn graph_run_status_guard(graph_id: &str, status: GraphStatus) -> Result<(), String> {
-    match status {
-        GraphStatus::Running | GraphStatus::Pausing => {
-            Err(format!("Graph '{graph_id}' is already running."))
-        }
-        GraphStatus::Completed | GraphStatus::Failed => Err(
-            "Completed or failed graphs cannot be resumed directly; call graph_reset first, \
-             then graph_run — or, for a failed graph, graph_schedule_autorun to have it \
-             auto-reset and resume once its schedule fires."
-                .to_string(),
-        ),
-        GraphStatus::Draft | GraphStatus::Paused => Ok(()),
-    }
-}
-
-/// Ground truth for "is this graph actually busy right now": any `graph_runs`
-/// row still `running` under it, regardless of what the graph's own `status`
-/// column says. Status and a run's lifetime are independent — a sibling
-/// node's `graph_report_blocker` can flip status to `paused` while a
-/// different node under the same graph keeps executing — so `graph_run` and
-/// [`Database::reset_graph`] both consult this (the latter internally, since
-/// the scheduler's autorun also calls it directly) instead of trusting
-/// status alone. One indexed query (`idx_graph_runs_graph_started`) at
-/// dispatch time.
-///
-/// Returns the first still-`running` row found — an actionable pointer for a
-/// human operator (wait or kill), not an exhaustive list.
-fn find_in_flight_run(db: &Database, graph_id: &str) -> Result<Option<GraphNodeRun>, String> {
-    Ok(db
-        .list_running_graph_runs(graph_id)
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .next())
-}
-
-/// The actionable refusal text for a `graph_run`/`graph_reset` call blocked by
-/// [`find_in_flight_run`] (or [`Database::reset_graph`]'s own equivalent
-/// check): names the node and run still executing, and since when, because
-/// the caller's next decision is to wait for it or terminate it.
-fn in_flight_run_error(
-    graph_id: &str,
-    run_id: &str,
-    node_name: &str,
-    started_at: chrono::DateTime<chrono::Utc>,
-) -> String {
-    format!(
-        "Graph '{graph_id}' has node '{node_name}' (run '{run_id}') still executing, running \
-         since {} — wait for it to finish, or terminate it, before retrying.",
-        started_at.to_rfc3339()
-    )
-}
-
-/// `node_id`'s display name, falling back to the raw id if the node row is
-/// somehow gone (e.g. deleted out from under a still-running attempt) — used
-/// to build [`in_flight_run_error`]'s message from a bare `GraphNodeRun`.
-fn node_name_for_error(db: &Database, node_id: &str) -> Result<String, String> {
-    Ok(db
-        .get_graph_node(node_id)
-        .map_err(|e| e.to_string())?
-        .map(|node| node.name)
-        .unwrap_or_else(|| node_id.to_string()))
-}
-
-/// Validate every ensemble (F1) reachable by a `graph_run` call — the graph's
-/// own top-level graph, plus the own graph of every spec that could actually
-/// run (the graph's bound specs, and a queue's members when `queue_id` is
-/// given). A spec with no nodes of its own falls back to the top-level
-/// graph at execution time (see `GraphEngine::run_spec`), so it's skipped
-/// here rather than double-validated.
-fn validate_graph_ensembles_for_run(
-    db: &Database,
-    graph_id: &str,
-    queue_id: Option<&str>,
-) -> Result<(), String> {
-    let graph_nodes = db
-        .list_graph_nodes_for_graph(graph_id)
-        .map_err(|e| e.to_string())?;
-    let graph_edges = db
-        .list_graph_edges_for_graph(graph_id)
-        .map_err(|e| e.to_string())?;
-    let graph_ensembles = db
-        .list_ensembles_for_graph(graph_id)
-        .map_err(|e| e.to_string())?;
-    crate::domain::validation::validate_ensembles_in_graph(
-        &graph_ensembles,
-        &graph_nodes,
-        &graph_edges,
-    )?;
-
-    let mut spec_ids: Vec<String> = db
-        .list_graph_specs(graph_id)
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .map(|spec| spec.id)
-        .collect();
-    if let Some(queue_id) = queue_id {
-        spec_ids.extend(
-            db.list_queue_member_spec_ids(queue_id)
-                .map_err(|e| e.to_string())?,
-        );
-    }
-
-    for spec_id in spec_ids {
-        let nodes = db.list_graph_nodes(&spec_id).map_err(|e| e.to_string())?;
-        if nodes.is_empty() {
-            continue;
-        }
-        let edges = db.list_graph_edges(&spec_id).map_err(|e| e.to_string())?;
-        let ensembles = db
-            .list_ensembles_for_spec(&spec_id)
-            .map_err(|e| e.to_string())?;
-        crate::domain::validation::validate_ensembles_in_graph(&ensembles, &nodes, &edges)?;
-    }
-
-    Ok(())
-}
-
-/// Core logic for `graph_reset`, factored out of the tool method so it only
-/// needs `&Database` (no engine/executor) and can be unit-tested directly.
-///
-/// Delegates the actual state transition to [`Database::reset_graph`] — the
-/// scheduler's auto-reset-and-resume of a `failed` graph on autorun goes
-/// through the same function, so this tool and that background path can
-/// never drift apart.
-fn perform_graph_reset(
-    db: &Database,
-    graph_id: &str,
-    specs: Option<&[String]>,
-) -> Result<CallToolResult, McpError> {
-    match db.reset_graph(graph_id, specs).map_err(internal_error)? {
-        GraphResetOutcome::NotFound => Ok(error_result(&format!("Graph '{graph_id}' not found."))),
-        GraphResetOutcome::InFlight {
-            run_id,
-            node_id,
-            started_at,
-        } => {
-            let node_name = node_name_for_error(db, &node_id).map_err(internal_error)?;
-            Ok(error_result(&in_flight_run_error(
-                graph_id, &run_id, &node_name, started_at,
-            )))
-        }
-        GraphResetOutcome::InvalidSpec(id) => Ok(error_result(&format!(
-            "Spec '{id}' does not belong to graph '{graph_id}'."
-        ))),
-        GraphResetOutcome::Reset {
-            spec_count,
-            skipped_count,
-        } => {
-            let skipped_note = if skipped_count > 0 {
-                format!(" {skipped_count} skipped spec(s) preserved.")
-            } else {
-                String::new()
-            };
-            Ok(success_result(&format!(
-                "Graph '{graph_id}' reset to pending; {spec_count} spec(s) reset.{skipped_note}"
-            )))
-        }
-    }
-}
-
-/// Resolve the exact node run a `graph_complete_node`/`graph_report_blocker`
-/// report belongs to (B12). A node can be retried, so more than one run can
-/// exist for the same `node_id` over a spec's lifetime — matching on
-/// `node_id` alone (as this used to) means a report arriving late from a
-/// killed/superseded attempt (e.g. a timed-out or paused agent that ignores
-/// its own termination and calls the tool anyway) would get silently applied
-/// to whatever newer run is now active for that node. Requiring the exact
-/// `run_id` and verifying it's both still `running` and actually for the
-/// claimed `node_id` closes that gap: anything else is rejected outright
-/// rather than guessed at.
-///
-/// Returns `Err(McpError)` only for a genuine DB failure; a stale/malformed
-/// report is a normal `Ok(Err(CallToolResult))` — the tool call succeeded at
-/// the protocol level, it's just telling the caller its report didn't stick.
-fn resolve_reported_run(
-    db: &Database,
-    run_id: &str,
-    node_id: &str,
-) -> Result<Result<GraphNodeRun, CallToolResult>, McpError> {
-    let resolved_run_id = match db
-        .resolve_run_id_by_prefix(run_id)
-        .map_err(|e| e.to_string())
-    {
-        Ok(Some(id)) => id,
-        Ok(None) => run_id.to_string(),
-        Err(e) => return Ok(Err(error_result(&e))),
-    };
-    let resolved_node_id = match db
-        .resolve_graph_node_id_by_prefix(node_id)
-        .map_err(|e| e.to_string())
-    {
-        Ok(Some(id)) => id,
-        Ok(None) => node_id.to_string(),
-        Err(e) => return Ok(Err(error_result(&e))),
-    };
-    let run = db.get_graph_run(&resolved_run_id).map_err(internal_error)?;
-    let Some(run) = run else {
-        return Ok(Err(error_result(&format!(
-            "No graph run found with id '{resolved_run_id}'."
-        ))));
-    };
-    if run.node_id != resolved_node_id {
-        return Ok(Err(error_result(&format!(
-            "Run '{resolved_run_id}' belongs to node '{}', not '{resolved_node_id}'.",
-            run.node_id
-        ))));
-    }
-    if run.status != GraphRunStatus::Running {
-        return Ok(Err(error_result(&format!(
-            "Run '{resolved_run_id}' for node '{resolved_node_id}' is no longer active (status: {}); this report \
-             is stale — the run was already finalized (timed out, paused, reset, superseded by \
-             a retry, or already reported) — and was rejected.",
-            run.status.as_str()
-        ))));
-    }
-    Ok(Ok(run))
-}
-
-fn build_spec_update_response(spec_id: &str) -> CallToolResult {
-    success_result(&format!("Graph spec '{spec_id}' updated."))
-}
-
-/// Summary JSON for `spec_list` — no run/blocker info, since a standalone
-/// (unassigned) spec has never run. Compare [`graph_spec_details_json`],
-/// which adds that runtime detail for specs already inside a graph.
-fn spec_summary_json(spec: &GraphSpec, include_descriptions: bool) -> serde_json::Value {
-    if include_descriptions {
-        let mut obj = serde_json::json!({
-            "id": spec.id,
-            "graph_id": spec.graph_id,
-            "name": spec.name,
-            "description": spec.description,
-            "workdir": spec.workdir,
-            "position": spec.position,
-            "parallelizable": spec.parallelizable,
-            "status": spec.status.as_str(),
-        });
-        if let Some(via) = &spec.completed_via {
-            obj["completed_via"] = serde_json::json!(via);
-        }
-        obj
-    } else {
-        serde_json::json!({
-            "id": spec.id,
-            "graph_id": spec.graph_id,
-            "name": spec.name,
-            "status": spec.status.as_str(),
-            "workdir": spec.workdir,
-        })
-    }
-}
-
-fn blueprint_json(blueprint: &Blueprint) -> serde_json::Value {
-    serde_json::json!({
-        "id": blueprint.id,
-        "name": blueprint.name,
-        "kind": blueprint.kind.as_str(),
-        "config": blueprint.config,
-        "builtin": blueprint.builtin,
-    })
-}
-
-fn build_node_update_response_with_changes(
-    node_id: &str,
-    changed_keys: &[String],
-) -> CallToolResult {
-    if changed_keys.is_empty() {
-        return success_result(&format!(
-            "Graph node '{node_id}' updated (no config changes)."
-        ));
-    }
-    let mut map = serde_json::Map::new();
-    map.insert("node_id".to_string(), serde_json::json!(node_id));
-    map.insert(
-        "changed_config_keys".to_string(),
-        serde_json::json!(changed_keys),
-    );
-    CallToolResult::success(vec![Content::text(
-        serde_json::to_string_pretty(&serde_json::Value::Object(map)).unwrap_or_default(),
-    )])
-}
-
-fn build_id_result(id: &str, key: &str) -> CallToolResult {
-    let mut map = serde_json::Map::new();
-    map.insert(key.to_string(), serde_json::json!(id));
-    CallToolResult::success(vec![Content::text(
-        serde_json::to_string_pretty(&serde_json::Value::Object(map)).unwrap_or_default(),
-    )])
-}
-
-/// Return an arbitrary JSON value as a tool result — used by the copy tools
-/// (`graph_copy_node`/`graph_copy_ensemble`) whose response carries an explicit
-/// old→new id mapping and a wiring report, not just a single id.
-fn build_json_result(value: &serde_json::Value) -> CallToolResult {
-    CallToolResult::success(vec![Content::text(
-        serde_json::to_string_pretty(value).unwrap_or_default(),
-    )])
-}
-
-/// A graph target split into `(spec_id, graph_id, existing_nodes)` — exactly one
-/// of the ids is set. Returned by [`graph_target_parts`].
-type GraphParts = (Option<String>, Option<String>, Vec<GraphNode>);
-
-/// Resolve the target graph for a copy: an explicit `spec_id`/`graph_id`, or —
-/// when both are absent — the source's own graph. Cross-graph copies are
-/// allowed; the source graph is only a default, never a constraint.
-fn resolve_copy_target(
-    db: &Database,
-    spec_id: Option<&str>,
-    graph_id: Option<&str>,
-    source_spec_id: &Option<String>,
-    source_graph_id: &Option<String>,
-) -> Result<GraphTarget, String> {
-    let spec_id = spec_id.map(str::trim).filter(|s| !s.is_empty());
-    let graph_id = graph_id.map(str::trim).filter(|s| !s.is_empty());
-    match (spec_id, graph_id) {
-        (Some(_), Some(_)) => Err("Provide at most one of spec_id or graph_id.".to_string()),
-        (Some(spec_id), None) => {
-            let resolved = db
-                .resolve_spec_id_by_prefix(spec_id)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("Spec '{spec_id}' not found."))?;
-            validate_spec_exists(db, &resolved)?;
-            Ok(GraphTarget::Spec(resolved))
-        }
-        (None, Some(graph_id)) => {
-            let resolved = db
-                .resolve_graph_id_by_prefix(graph_id)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("Graph '{graph_id}' not found."))?;
-            validate_graph_exists(db, &resolved)?;
-            Ok(GraphTarget::Graph(resolved))
-        }
-        (None, None) => {
-            if let Some(spec_id) = source_spec_id {
-                Ok(GraphTarget::Spec(spec_id.clone()))
-            } else if let Some(graph_id) = source_graph_id {
-                Ok(GraphTarget::Graph(graph_id.clone()))
-            } else {
-                Err(
-                    "Source belongs to no graph and no target spec_id/graph_id was given."
-                        .to_string(),
-                )
-            }
-        }
-    }
-}
-
-/// Split a [`GraphTarget`] into `(spec_id, graph_id)` (exactly one set) plus the
-/// target graph's current nodes — used by the copy planners to place the copy
-/// at the next free position and to validate wiring targets against that graph.
-fn graph_target_parts(db: &Database, target: &GraphTarget) -> Result<GraphParts, String> {
-    match target {
-        GraphTarget::Spec(spec_id) => {
-            let nodes = db.list_graph_nodes(spec_id).map_err(|e| e.to_string())?;
-            Ok((Some(spec_id.clone()), None, nodes))
-        }
-        GraphTarget::Graph(graph_id) => {
-            let nodes = db
-                .list_graph_nodes_for_graph(graph_id)
-                .map_err(|e| e.to_string())?;
-            Ok((None, Some(graph_id.clone()), nodes))
-        }
-    }
-}
-
-/// A planned single-node copy: the new node, its optional wiring edges, and a
-/// report of the wiring actually applied. Pure of side effects — the caller
-/// persists it with [`Database::insert_node_with_edges`]. Split out from
-/// `graph_copy_node` so the copy/override/wiring logic is unit-testable with
-/// just a `Database`.
-#[derive(Debug)]
-struct NodeCopyPlan {
-    source_id: String,
-    node: GraphNode,
-    edges: Vec<GraphEdge>,
-    wiring: serde_json::Map<String, serde_json::Value>,
-}
-
-fn plan_node_copy(db: &Database, params: &GraphCopyNodeParams) -> Result<NodeCopyPlan, String> {
-    let source_id = db
-        .resolve_graph_node_id_by_prefix(params.source_node_id.trim())
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Node '{}' not found.", params.source_node_id.trim()))?;
-    let source = validate_node_exists(db, &source_id)?;
-    if source.kind == GraphNodeKind::Join {
-        return Err(
-            "Cannot copy a quorum node directly; copy its ensemble with graph_copy_ensemble."
-                .to_string(),
-        );
-    }
-    if let Err(e) = validate_node_not_ensemble_owned(db, &source_id) {
-        return Err(format!(
-            "Cannot copy an ensemble-owned node directly; copy the whole ensemble with graph_copy_ensemble instead. {e}"
-        ));
-    }
-
-    let target = resolve_copy_target(
-        db,
-        params.spec_id.as_deref(),
-        params.graph_id.as_deref(),
-        &source.spec_id,
-        &source.graph_id,
-    )?;
-    let (spec_id, graph_id, existing_nodes) = graph_target_parts(db, &target)?;
-
-    // Copy the source config, then shallow-merge any override keys over it.
-    let mut config = source.config.clone();
-    if let Some(overrides) = &params.config_overrides {
-        match config.as_object_mut() {
-            Some(map) => {
-                for (key, value) in overrides {
-                    map.insert(key.clone(), value.clone());
-                }
-            }
-            None => config = serde_json::Value::Object(overrides.clone()),
-        }
-    }
-    validate_node_config(source.kind, &config)?;
-
-    let name = params
-        .name
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or(source.name.as_str())
-        .to_string();
-
-    let new_id = uuid::Uuid::new_v4().to_string();
-    let next_position = existing_nodes
-        .last()
-        .map(|node| node.position + 1)
-        .unwrap_or(1);
-    let node = GraphNode {
-        id: new_id.clone(),
-        spec_id: spec_id.clone(),
-        graph_id: graph_id.clone(),
-        name,
-        kind: source.kind,
-        config,
-        position: next_position,
-        created_at: chrono::Utc::now(),
-    };
-
-    let node_exists = |id: &str| existing_nodes.iter().any(|n| n.id == id);
-    let mut edges = Vec::new();
-    let mut wiring = serde_json::Map::new();
-
-    if let Some(from) = params
-        .entry_from_node
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        if !node_exists(from) {
-            return Err(format!(
-                "entry_from_node '{from}' not found in the target graph."
-            ));
-        }
-        let condition = match params.entry_condition.as_deref() {
-            Some(value) => validate_edge_condition(value)?,
-            None => GraphEdgeCondition::Always,
-        };
-        wiring.insert("entry_from_node".into(), serde_json::json!(from));
-        wiring.insert(
-            "entry_condition".into(),
-            serde_json::json!(condition.as_str()),
-        );
-        edges.push(GraphEdge {
-            id: uuid::Uuid::new_v4().to_string(),
-            spec_id: spec_id.clone(),
-            graph_id: graph_id.clone(),
-            from_node: from.to_string(),
-            to_node: new_id.clone(),
-            condition,
-        });
-    }
-    for (field, target_node, cond) in [
-        ("on_pass_to", &params.on_pass_to, GraphEdgeCondition::Pass),
-        ("on_fail_to", &params.on_fail_to, GraphEdgeCondition::Fail),
-    ] {
-        if let Some(to) = target_node
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            if !node_exists(to) {
-                return Err(format!("{field} '{to}' not found in the target graph."));
-            }
-            edges.push(GraphEdge {
-                id: uuid::Uuid::new_v4().to_string(),
-                spec_id: spec_id.clone(),
-                graph_id: graph_id.clone(),
-                from_node: new_id.clone(),
-                to_node: to.to_string(),
-                condition: cond,
-            });
-            wiring.insert(field.to_string(), serde_json::json!(to));
-        }
-    }
-
-    Ok(NodeCopyPlan {
-        source_id,
-        node,
-        edges,
-        wiring,
-    })
-}
-
-/// The `note` line a `graph_copy_node` response carries. An unwired copy is a
-/// valid outcome, but callers must never assume edges exist — so the note says
-/// so explicitly and points at how to wire it.
-fn node_copy_note(source_id: &str, new_id: &str, wired: bool) -> String {
-    if wired {
-        format!("Copied node config from '{source_id}' into a new node '{new_id}'.")
-    } else {
-        format!(
-            "Unwired copy of '{source_id}': the new node '{new_id}' has NO incoming or \
-             outgoing edges yet. Wire it with graph_add_edge, or pass \
-             entry_from_node/on_pass_to/on_fail_to."
-        )
-    }
-}
-
-/// A planned ensemble copy: the fully-built new unit plus the metadata needed
-/// to report the old→new id mapping and the applied wiring. Pure of side
-/// effects — the caller persists `built` with [`Database::insert_ensemble_unit`].
-#[derive(Debug)]
-struct EnsembleCopyPlan {
-    source_ensemble_id: String,
-    source_join_node_id: String,
-    /// Source member node ids in position order — paired with the new member
-    /// nodes for the mapping when members were not replaced.
-    source_member_node_ids: Vec<String>,
-    members_replaced: bool,
-    built: BuiltEnsembleUnit,
-    entry_from_node: String,
-    entry_condition: GraphEdgeCondition,
-    on_pass_to: String,
-    on_fail_to: Option<String>,
-}
-
-fn plan_ensemble_copy(
-    db: &Database,
-    params: &GraphCopyEnsembleParams,
-) -> Result<EnsembleCopyPlan, String> {
-    let source_id = db
-        .resolve_ensemble_id_by_prefix(params.source_ensemble_id.trim())
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Ensemble '{}' not found.", params.source_ensemble_id.trim()))?;
-    let details = db
-        .get_ensemble_details(&source_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Ensemble '{source_id}' not found."))?;
-    let source = &details.ensemble;
-
-    let target = resolve_copy_target(
-        db,
-        params.spec_id.as_deref(),
-        params.graph_id.as_deref(),
-        &source.spec_id,
-        &source.graph_id,
-    )?;
-    let (spec_id, graph_id, existing_nodes) = graph_target_parts(db, &target)?;
-    let node_exists = |id: &str| existing_nodes.iter().any(|n| n.id == id);
-
-    let name = params
-        .name
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| format!("{} (copy)", source.name));
-    let prompt_template = params
-        .prompt_template
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or(source.prompt_template.as_str())
-        .to_string();
-
-    let members_replaced = params.members.is_some();
-    let copy_kind = source.kind;
-    let members: Vec<EnsembleMemberSpec> = match &params.members {
-        Some(explicit) => validate_ensemble_members(explicit, copy_kind)?,
-        None => details
-            .members
-            .iter()
-            .map(|m| {
-                (
-                    m.platform.clone(),
-                    m.model.clone(),
-                    m.prompt_override.clone(),
-                    m.timeout_minutes,
-                    m.infra_retry_limit,
-                    m.infra_crash_max_seconds,
-                    m.infra_backoff_seconds,
-                )
-            })
-            .collect(),
-    };
-
-    let entry_from_node = params
-        .from_node
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or(source.entry_from_node.as_str())
-        .to_string();
-    let entry_condition = match params
-        .condition
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        Some(value) => validate_edge_condition(value)?,
-        None => source.entry_condition.clone(),
-    };
-    let on_pass_to = params
-        .on_pass_to
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or(source.on_pass_to.as_str())
-        .to_string();
-    let on_fail_to = match params
-        .on_fail_to
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        Some(value) => Some(value.to_string()),
-        None => source.on_fail_to.clone(),
-    };
-
-    // Wiring targets must exist in the TARGET graph (respecting the target
-    // graph's own validation for a cross-graph copy) and must not be
-    // ensemble-owned — the same rules graph_add_ensemble enforces.
-    for (label, id) in [("from_node", &entry_from_node), ("on_pass_to", &on_pass_to)] {
-        if !node_exists(id) {
-            return Err(format!(
-                "Wiring node '{id}' ({label}) not found in the target graph. Pass {label} \
-                 that exists there (required for a cross-graph copy)."
-            ));
-        }
-        if let Err(e) = validate_node_not_ensemble_owned(db, id) {
-            return Err(format!(
-                "Cannot wire an ensemble to an ensemble-owned node ({label}): {e}"
-            ));
-        }
-    }
-    if let Some(fail) = &on_fail_to {
-        if !node_exists(fail) {
-            return Err(format!(
-                "Wiring node '{fail}' (on_fail_to) not found in the target graph."
-            ));
-        }
-        if let Err(e) = validate_node_not_ensemble_owned(db, fail) {
-            return Err(format!(
-                "Cannot wire an ensemble to an ensemble-owned node (on_fail_to): {e}"
-            ));
-        }
-    }
-
-    let min_pass = params.min_pass.unwrap_or(source.min_pass);
-    if min_pass < 1 || min_pass > members.len() as i64 {
-        return Err(format!(
-            "min_pass must be between 1 and {} (the member count), got {min_pass}.",
-            members.len()
-        ));
-    }
-    let timeout_minutes = params.timeout_minutes.unwrap_or(source.timeout_minutes);
-    if timeout_minutes < 0 {
-        return Err("timeout_minutes must not be negative.".to_string());
-    }
-    let infra_retry_limit = source.infra_retry_limit;
-    let infra_crash_max_seconds = source.infra_crash_max_seconds;
-    let infra_backoff_seconds = source.infra_backoff_seconds;
-    let straggler_timeout_minutes = params
-        .straggler_timeout_minutes
-        .or(source.straggler_timeout_minutes);
-    if let Some(straggler) = straggler_timeout_minutes {
-        if straggler < 0 {
-            return Err("straggler_timeout_minutes must not be negative.".to_string());
-        }
-    }
-    let quorum_grace_minutes = params.quorum_grace_minutes.or(source.quorum_grace_minutes);
-    if let Some(grace) = quorum_grace_minutes {
-        if grace < 0 {
-            return Err("quorum_grace_minutes must not be negative.".to_string());
-        }
-    }
-
-    let start_position = existing_nodes
-        .last()
-        .map(|node| node.position + 1)
-        .unwrap_or(1);
-    let built = build_ensemble_unit(&EnsembleUnitSpec {
-        spec_id,
-        graph_id,
-        name: &name,
-        prompt_template: &prompt_template,
-        members: &members,
-        entry_from_node: &entry_from_node,
-        entry_condition: entry_condition.clone(),
-        on_pass_to: &on_pass_to,
-        on_pass_fan_out: None,
-        on_fail_to: on_fail_to.as_deref(),
-        on_fail_fan_out: None,
-        min_pass,
-        timeout_minutes,
-        straggler_timeout_minutes,
-        quorum_grace_minutes,
-        infra_retry_limit,
-        infra_crash_max_seconds,
-        infra_backoff_seconds,
-        start_position,
-        kind: copy_kind,
-        // CM28: never copied from the source — graph_copy_ensemble is out of
-        // scope for commit rights, and silently duplicating the designation
-        // would create two committers by accident. Set explicitly afterward
-        // via graph_update_ensemble if the copy should also commit.
-        commit_rights: false,
-    });
-
-    Ok(EnsembleCopyPlan {
-        source_ensemble_id: source.id.clone(),
-        source_join_node_id: source.join_node_id.clone(),
-        source_member_node_ids: details.members.iter().map(|m| m.node_id.clone()).collect(),
-        members_replaced,
-        built,
-        entry_from_node,
-        entry_condition,
-        on_pass_to,
-        on_fail_to,
-    })
-}
-
-/// Where one quorum exit (pass or fail) points: a plain node, or a whole
-/// other ensemble — the chained case, where the quorum fans out to every
-/// member of the target with no intermediate node. The `ensembles` row keeps
-/// naming the target in the same column either way (a node id, or the target
-/// ensemble's quorum id when chained), so reads never need a new column.
-#[derive(Debug)]
-enum EnsembleExitTarget {
-    Node(String),
-    Ensemble {
-        join_node_id: String,
-        member_ids: Vec<String>,
-    },
-}
-
-impl EnsembleExitTarget {
-    /// Edge targets for the fan-out: the single node, or every member of the
-    /// chained ensemble.
-    fn edge_targets(&self) -> Vec<String> {
-        match self {
-            EnsembleExitTarget::Node(id) => vec![id.clone()],
-            EnsembleExitTarget::Ensemble { member_ids, .. } => member_ids.clone(),
-        }
-    }
-
-    /// Value stored in the `ensembles` row's `on_pass_to`/`on_fail_to`
-    /// column: the node id, or the chained ensemble's quorum id.
-    fn row_target(&self) -> String {
-        match self {
-            EnsembleExitTarget::Node(id) => id.clone(),
-            EnsembleExitTarget::Ensemble { join_node_id, .. } => join_node_id.clone(),
-        }
-    }
-}
-
-/// If `raw` names an ensemble (by id or prefix), resolve it as a chained exit
-/// target: the target must live in the same graph (`owner_spec_id`/
-/// `owner_graph_id`) and must not be the source ensemble itself. Returns
-/// `Ok(None)` when `raw` names no ensemble, so the caller falls through to
-/// its plain-node handling — node ids and unknown ids both take that path.
-fn resolve_chained_exit_ensemble(
-    db: &Database,
-    raw: &str,
-    source_ensemble_id: &str,
-    owner_spec_id: Option<&str>,
-    owner_graph_id: Option<&str>,
-) -> Result<Option<EnsembleExitTarget>, String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Ok(None);
-    }
-    let Some(target_id) = db
-        .resolve_ensemble_id_by_prefix(trimmed)
-        .map_err(|e| e.to_string())?
-    else {
-        return Ok(None);
-    };
-    let details = db
-        .get_ensemble_details(&target_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Ensemble '{target_id}' not found."))?;
-    if !source_ensemble_id.is_empty() && details.ensemble.id == source_ensemble_id {
-        return Err(
-            "An ensemble's exit cannot target itself; pass a different ensemble id or a node id."
-                .to_string(),
-        );
-    }
-    if details.ensemble.spec_id.as_deref() != owner_spec_id
-        || details.ensemble.graph_id.as_deref() != owner_graph_id
-    {
-        return Err(format!(
-            "Ensemble '{}' ('{}') is not in this ensemble's graph; chained exits stay within one graph.",
-            details.ensemble.id, details.ensemble.name
-        ));
-    }
-    if details.members.is_empty() {
-        return Err(format!(
-            "Ensemble '{}' ('{}') has no members to route into.",
-            details.ensemble.id, details.ensemble.name
-        ));
-    }
-    Ok(Some(EnsembleExitTarget::Ensemble {
-        join_node_id: details.ensemble.join_node_id.clone(),
-        member_ids: details.members.iter().map(|m| m.node_id.clone()).collect(),
-    }))
-}
-
-struct SpecRunInfo {
-    name: String,
-    current_node: Option<String>,
-    blocker: Option<String>,
-    /// C19: how many separate graph executions this spec has failed with a
-    /// genuine verdict — the persisted counter behind the cross-run attempt
-    /// budget. Surfaced so an operator can see a spec approaching the limit
-    /// before it actually blocks the graph, not just after.
-    cross_run_attempts: i64,
-}
-
-fn build_spec_run_info(db: &Database, spec: &GraphSpec) -> Result<SpecRunInfo, McpError> {
-    let runs = db
-        .list_graph_runs_for_spec(&spec.id)
-        .map_err(internal_error)?;
-    let current_node = runs
-        .iter()
-        .rev()
-        .find(|run| run.status == GraphRunStatus::Running)
-        .or_else(|| runs.last())
-        .map(|run| run.node_id.clone());
-    let blocker = runs.last().and_then(graph_run_blocker);
-    let cross_run_attempts = db
-        .get_graph_spec_cross_run_attempts(&spec.id)
-        .map_err(internal_error)?;
-    Ok(SpecRunInfo {
-        name: spec.name.clone(),
-        current_node,
-        blocker,
-        cross_run_attempts,
-    })
-}
-
-fn build_graph_summary_json(db: &Database, lp: &Graph) -> Result<serde_json::Value, McpError> {
-    // CB30: one helper decides "what spec is this graph on" — never the
-    // raw bound list, whose queue/idea runs read as a nameless placeholder.
-    let current_spec = match active_graph_spec_context(db, lp).map_err(internal_error)? {
-        ActiveGraphSpec::Bound(spec) | ActiveGraphSpec::QueueMember { spec, .. } => Some(spec),
-        ActiveGraphSpec::Idea { .. } | ActiveGraphSpec::None => None,
-    }
-    .map(|spec| build_spec_run_info(db, &spec))
-    .transpose()?;
-
-    let mut out = serde_json::json!({
-        "id": lp.id,
-        "name": lp.name,
-        "status": lp.status.as_str(),
-        "trigger": graph_trigger_json(lp),
-        "current_spec": current_spec.as_ref().map(|v| &v.name),
-        "current_node": current_spec.as_ref().and_then(|v| v.current_node.as_ref()),
-        "blocked": current_spec.as_ref().is_some_and(|v| v.blocker.is_some()),
-        "blocker": current_spec.as_ref().and_then(|v| v.blocker.clone()),
-        "spec_attempts": current_spec.as_ref().map(|v| v.cross_run_attempts),
-        "created_at": lp.created_at.to_rfc3339(),
-        "workdir": lp.workdir,
-        "archived": lp.archived,
-    });
-    // CB30: when the graph draws from a queue, say so and name it, so the
-    // reader knows where the sequence comes from.
-    if let Some(queue_id) = lp.active_run_queue_id.as_deref() {
-        if let Some(queue) = db.get_queue(queue_id).map_err(internal_error)? {
-            out["queue"] = serde_json::json!({ "id": queue.id, "name": queue.name });
-        }
-    }
-    Ok(out)
-}
-
-/// Serialize a graph's trigger for MCP responses: always a `type` label, plus
-/// the cron schedule or watch path/events when applicable.
-fn graph_trigger_json(lp: &Graph) -> serde_json::Value {
-    let mut out = serde_json::json!({ "type": lp.trigger_type_label() });
-    if let Some(schedule) = lp.schedule_expr() {
-        out["schedule"] = serde_json::json!(schedule);
-    }
-    if let Some(path) = lp.watch_path() {
-        out["path"] = serde_json::json!(path);
-        if let Some(events) = lp.watch_events() {
-            out["events"] =
-                serde_json::json!(events.iter().map(|e| e.to_string()).collect::<Vec<_>>());
-        }
-    }
-    out
-}
-
-fn build_graph_list_json(
-    db: &Database,
-    graphs: &[Graph],
-) -> Result<Vec<serde_json::Value>, McpError> {
-    graphs
-        .iter()
-        .map(|lp| build_graph_summary_json(db, lp))
-        .collect()
-}
-
-fn build_get_tools_response(scope: &str) -> serde_json::Value {
-    match scope {
-        "session_start" => serde_json::json!({
-            "scope": "session_start",
-            "risk": "low",
-            "protocol": [
-                "1. Call intelligence_get_context(scope=\"light\") to load workspace brief.",
-                "2. Check active_missions in sync context — align your work with open missions.",
-                "3. If starting a new thread of work, call sync_declare_intent to register your mission.",
-                "4. Respond to the user with context in hand."
-            ],
-            "tools": [
-                "intelligence_get_context — pull session history, facts, patterns",
-                "sync_get_context — check active missions and workspace vibe",
-                "sync_declare_intent — announce your mission (impact: low/high/breaking)"
-            ]
-        }),
-        "file_write" => serde_json::json!({
-            "scope": "file_write",
-            "risk": "high",
-            "protocol": [
-                "1. Call sync_get_context(workdir=...) — check for conflicting missions on this path.",
-                "2. If no conflict, call sync_declare_intent(impact=\"high\", mission=\"...\").",
-                "3. Modify the file.",
-                "4. Call sync_report_status(status=\"stable\", message=\"Changes complete: ...\")."
-            ],
-            "tools": [
-                "sync_get_context — check active missions, detect conflicts",
-                "sync_declare_intent — announce what you're changing and why",
-                "sync_report_status — report stable/unstable/testing after the change"
-            ]
-        }),
-        "test_run" => serde_json::json!({
-            "scope": "test_run",
-            "risk": "medium",
-            "protocol": [
-                "1. Call sync_broadcast(kind=\"info\", message=\"Running tests: <suite/command>\").",
-                "2. Run the tests.",
-                "3. Call sync_broadcast(kind=\"info\", message=\"Tests complete: PASSED/FAILED — <summary>\").",
-                "4. If failed, call sync_report_status(status=\"unstable\", message=\"Test failure: ...\")."
-            ],
-            "tools": [
-                "sync_broadcast — announce test start and result to peer agents",
-                "sync_report_status — mark workspace unstable if tests fail"
-            ]
-        }),
-        "close_session" => serde_json::json!({
-            "scope": "close_session",
-            "risk": "low",
-            "protocol": [
-                "1. Call intelligence_upsert(kind=\"session\", title=\"<mission>\", body=\"<what was done>\", \
-                   metadata={workdir, summary, ...}) — store session summary in project context.",
-                "2. Call sync_report_status(status=\"stable\", message=\"Mission complete: <summary>\") \
-                   — the daemon closes your mission automatically on exit.",
-                "3. Do NOT manually call any close/shutdown tool — daemon handles it."
-            ],
-            "tools": [
-                "intelligence_upsert — persist session summary as a 'session' node in project context",
-                "sync_report_status — leave a clean 'stable' marker for the next agent"
-            ]
-        }),
-        "multi_agent" => serde_json::json!({
-            "scope": "multi_agent",
-            "risk": "varies",
-            "protocol": [
-                "Follow the action-risk table: low=execute and broadcast if notable, high=declare+execute+report, breaking=same as high with impact=breaking.",
-                "Always non-blocking — act on last-known state, never wait for responses.",
-                "Communicate intent not implementation — missions explain what and why, not how."
-            ],
-            "tools": [
-                "sync_get_context — check active missions and workspace vibe (call first)",
-                "sync_declare_intent — announce mission (impact: low/high/breaking)",
-                "sync_broadcast — send info/query/answer messages to peers",
-                "sync_report_status — report stable/unstable/testing after actions",
-                "intelligence_get_context(scope=\"full\") — deep project-context pull for architecture work",
-                "intelligence_upsert — persist facts, patterns, session summaries",
-                "intelligence_search — find prior art or decisions in project context"
-            ]
-        }),
-        _ => unreachable!(),
-    }
-}
-
-fn rag_result_json(r: &crate::rag::vector_store::SearchResult) -> serde_json::Value {
-    serde_json::json!({
-        "source": r.file_path,
-        "content": r.content,
-        "distance": r.distance,
-    })
-}
-
-#[derive(Clone)]
 pub struct TaskTriggerHandler {
     pub db: Arc<Database>,
     pub executor: Arc<Executor>,
@@ -2867,170 +229,41 @@ pub struct TaskTriggerHandler {
     tool_router: ToolRouter<Self>,
 }
 
-#[tool_router]
-#[allow(clippy::too_many_arguments)]
+#[derive(Clone)]
+pub struct HandlerDeps {
+    pub db: Arc<Database>,
+    pub executor: Arc<Executor>,
+    pub watcher_engine: Arc<WatcherEngine>,
+    pub scheduler_notify: Arc<Notify>,
+    pub graph_engine: Arc<GraphEngine>,
+    pub notification_service: Arc<dyn NotificationService>,
+    pub sync_manager: Arc<SyncManager>,
+    pub ingestion: Arc<crate::rag::ingestion::IngestionManager>,
+    pub dynamic_skills: Arc<crate::dynamic_skills::SkillStore>,
+    /// CB83: the daemon process start instant, captured once when the
+    /// daemon starts (see `run_http_server` / `stdio_server_startup` in
+    /// `server.rs`) and handed to every handler. `agent_status` `Uptime`
+    /// must report the daemon's age, not the MCP session's.
+    pub start_time: std::time::Instant,
+    pub port: u16,
+}
+
 impl TaskTriggerHandler {
-    fn resolve_sync_agent_id(&self, parts: Option<&Parts>) -> Result<String, McpError> {
-        if let Some(parts) = parts {
-            if let Some(agent_id) = header_str(parts, CANOPY_AGENT_ID_HEADER) {
-                return Ok(agent_id.to_string());
-            }
-        }
-        if let Ok(agent_id) = std::env::var(CANOPY_AGENT_ID_ENV) {
-            let trimmed = agent_id.trim();
-            if !trimmed.is_empty() {
-                return Ok(trimmed.to_string());
-            }
-        }
-        Err(missing_sync_identity_error())
-    }
+    pub fn with_deps(deps: HandlerDeps) -> Self {
+        let HandlerDeps {
+            db,
+            executor,
+            watcher_engine,
+            scheduler_notify,
+            graph_engine,
+            notification_service,
+            sync_manager,
+            ingestion,
+            dynamic_skills,
+            start_time,
+            port,
+        } = deps;
 
-    fn resolve_sync_client_name(&self, parts: Option<&Parts>) -> Option<String> {
-        if let Some(parts) = parts {
-            if let Some(client_name) = header_str(parts, CANOPY_CLIENT_NAME_HEADER) {
-                return Some(client_name.to_string());
-            }
-        }
-        std::env::var(CANOPY_CLIENT_NAME_ENV)
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-    }
-
-    fn reject_if_nursery(&self, parts: Option<&Parts>) -> Result<(), McpError> {
-        let agent_id = self.resolve_sync_agent_id(parts)?;
-        match self.db.get_session_type(&agent_id) {
-            Ok(Some(st)) if st == "nursery" => {
-                Err(McpError::invalid_params(
-                    "This tool is not available during a seed creation session (nursery). Complete the seed identity interview first.".to_string(),
-                    None,
-                ))
-            }
-            Ok(_) => Ok(()),
-            Err(e) => Err(McpError::internal_error(e.to_string(), None)),
-        }
-    }
-
-    /// Resolve the project hash a delete tool should scope itself to: an
-    /// explicit `provided` value always wins (the same override the read
-    /// tools allow), otherwise it's auto-detected from the caller's session
-    /// workdir. Returns `None` if neither is available.
-    fn effective_project_hash_for_delete(
-        &self,
-        parts: Option<&Parts>,
-        provided: Option<&str>,
-    ) -> Option<String> {
-        if let Some(project_hash) = provided {
-            return Some(project_hash.to_string());
-        }
-        let agent_id = self.resolve_sync_agent_id(parts).ok()?;
-        resolve_effective_project_hash(&self.db, None, &agent_id)
-    }
-
-    /// `Some(error result)` if `node` belongs to a project other than
-    /// `effective_project_hash`, `None` if deletion may proceed. Nodes
-    /// without a `project_hash` aren't project-scoped, so they're always in
-    /// scope.
-    fn check_intelligence_delete_scope(
-        &self,
-        node: &crate::db::intelligence::IntelligenceNodeRecord,
-        effective_project_hash: Option<&str>,
-    ) -> Option<CallToolResult> {
-        let node_project_hash = node.project_hash.as_deref()?;
-        if effective_project_hash == Some(node_project_hash) {
-            return None;
-        }
-        Some(error_result(&format!(
-            "Intelligence node '{}' belongs to project '{}', which is outside the caller's \
-             active project scope. Pass project_hash explicitly to operate on it anyway.",
-            node.id, node_project_hash
-        )))
-    }
-
-    /// Fetch knowledge for the context endpoint, traversing the project graph.
-    /// Returns (generic session nodes, tagged project knowledge, traversal info).
-    /// Each tagged row is (record, via_project_hash, via_relation): root rows
-    /// carry `via_relation: None` (direct); reached rows carry the edge
-    /// relation that reached them. Bounded: per-project cap + total cap of 60.
-    /// The root project keeps the historic single-project limit so a project
-    /// with no edges reads exactly as before (modulo additive via_* fields).
-    fn fetch_context_knowledge(
-        &self,
-        project_hash: Option<&str>,
-        scope: &str,
-        depth: usize,
-    ) -> Result<
-        (
-            Vec<crate::db::intelligence::IntelligenceNodeRecord>,
-            TaggedProjectKnowledge,
-            serde_json::Value,
-        ),
-        String,
-    > {
-        const TOTAL_CAP: usize = 60;
-        let root_limit = if scope == "full" { 50 } else { 20 };
-        let per_project_limit = if scope == "full" { 20 } else { 8 };
-        if let Some(ph) = project_hash {
-            let traversal = self
-                .db
-                .traverse_project_scope(ph, depth)
-                .map_err(|e| e.to_string())?;
-            let mut tagged = Vec::new();
-            for tp in &traversal.projects {
-                let limit = if tp.via_relation.is_none() {
-                    root_limit
-                } else {
-                    per_project_limit
-                };
-                let rows = self
-                    .db
-                    .list_project_knowledge(&tp.hash, None, limit)
-                    .map_err(|e| e.to_string())?;
-                for row in rows {
-                    if tagged.len() >= TOTAL_CAP {
-                        break;
-                    }
-                    tagged.push((row, tp.hash.clone(), tp.via_relation.clone()));
-                }
-                if tagged.len() >= TOTAL_CAP {
-                    break;
-                }
-            }
-            let info = serde_json::json!({
-                "depth": depth.min(crate::db::intelligence::MAX_TRAVERSAL_DEPTH),
-                "projects_reached": traversal.projects.len(),
-                "total_cap": TOTAL_CAP,
-            });
-            let generic: Vec<crate::db::intelligence::IntelligenceNodeRecord> = self
-                .db
-                .list_operational_sessions(if scope == "full" { 20 } else { 5 })
-                .map_err(|e| e.to_string())?
-                .into_iter()
-                .map(|r| r.into_intelligence_node_record())
-                .collect();
-            Ok((generic, tagged, info))
-        } else {
-            let knowledge_limit = if scope == "full" { 20 } else { 5 };
-            let generic = self
-                .db
-                .list_intelligence_nodes(None, knowledge_limit)
-                .map_err(|e| e.to_string())?;
-            Ok((generic, Vec::new(), serde_json::json!({})))
-        }
-    }
-
-    pub fn new(
-        db: Arc<Database>,
-        executor: Arc<Executor>,
-        watcher_engine: Arc<WatcherEngine>,
-        scheduler_notify: Arc<Notify>,
-        graph_engine: Arc<GraphEngine>,
-        notification_service: Arc<dyn NotificationService>,
-        sync_manager: Arc<SyncManager>,
-        ingestion: Arc<crate::rag::ingestion::IngestionManager>,
-        dynamic_skills: Arc<crate::dynamic_skills::SkillStore>,
-        port: u16,
-    ) -> Self {
         Self {
             db,
             executor,
@@ -3042,9083 +275,46 @@ impl TaskTriggerHandler {
             ingestion,
             rag_limiters: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             dynamic_skills,
-            start_time: std::time::Instant::now(),
+            start_time,
             port,
             tool_router: Self::tool_router(),
         }
     }
 
-    /// Create or update an agent. Supports cron triggers (schedule), watch triggers
-    /// (path + events), or manual-only agents (no trigger). When updating an existing
-    /// agent, only the fields you provide are changed.
-    #[tool(
-        name = "agent_add",
-        description = "Create or update a scheduled background_agent. \
-         Use agent_models to see available model options. \
-         The schedule field must be a standard 5-field cron expression. \
-         Common patterns: '*/5 * * * *' (every 5 min), '0 9 * * *' (daily 9am), \
-         '0 9 * * 1-5' (weekdays 9am), '0 */2 * * *' (every 2 hours), \
-         '30 14 1,15 * *' (1st and 15th at 2:30pm). \
-         Fields: minute(0-59) hour(0-23) day(1-31) month(1-12) weekday(0-6, 0=Sun). \
-         Use duration_minutes for temporary agents that auto-expire. \
-         The cli parameter is optional — if omitted, auto-detects from registry. \
-         The model parameter is optional — if omitted, the CLI uses its configured default."
-    )]
-    async fn task_add(
-        &self,
-        Parameters(params): Parameters<TaskAddParams>,
-    ) -> Result<CallToolResult, McpError> {
-        use crate::scheduler::validate_cron;
-
-        let prepared = match prepare_cron_task(&params, &validate_cron) {
-            Ok(prepared) => prepared,
-            Err(e) => return Ok(error_result(&e)),
-        };
-
-        let log_path = make_log_path(&params.id)?;
-        let mut agent = new_agent_base(
-            params.id.clone(),
-            params.prompt,
-            prepared.cli,
-            params.model,
-            params.working_dir,
-            params.timeout_minutes,
-            log_path,
-        );
-        agent.effort = params.effort;
-        agent.trigger = Some(Trigger::Cron {
-            schedule_expr: prepared.schedule_expr.clone(),
-        });
-        agent.expires_at = prepared.expires_at;
-
-        self.db.upsert_agent(&agent).map_err(internal_error)?;
-        if let Some(workdir) = agent.working_dir.as_deref() {
-            if crate::domain::project::should_auto_register(std::path::Path::new(workdir)) {
-                if let Err(e) = self.db.register_project_path(std::path::Path::new(workdir)) {
-                    tracing::debug!("Could not register project at {workdir}: {e}");
-                }
-            }
-        }
-        self.scheduler_notify.notify_one();
-
-        Ok(success_result(&format!(
-            "Agent '{}' registered with schedule '{}'{}\nThe daemon's internal scheduler will execute this agent automatically.",
-            agent.id,
-            prepared.schedule_expr,
-            agent
-                .expires_at
-                .map(|expires_at| format!(" (expires: {})", expires_at.to_rfc3339()))
-                .unwrap_or_default()
-        )))
-    }
-
-    /// Register a file or directory watcher.
-    #[tool(
-        name = "agent_watch",
-        description = "Watch a file or directory for changes and execute a prompt when events occur. \
-         The cli parameter is optional — if omitted, auto-detects from registry. \
-         The model parameter is optional — if omitted, the CLI uses its configured default model."
-    )]
-    async fn task_watch(
-        &self,
-        Parameters(params): Parameters<TaskWatchParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let prepared = match prepare_watch_task(&params) {
-            Ok(prepared) => prepared,
-            Err(e) => return Ok(error_result(&e)),
-        };
-
-        let log_path = make_log_path(&params.id)?;
-        let mut agent = new_agent_base(
-            params.id.clone(),
-            params.prompt,
-            prepared.cli,
-            params.model,
-            None,
-            params.timeout_minutes,
-            log_path,
-        );
-        agent.effort = params.effort;
-        agent.trigger = Some(Trigger::Watch {
-            path: params.path.clone(),
-            events: prepared.events,
-            debounce_seconds: prepared.debounce_seconds,
-            recursive: prepared.recursive,
-        });
-
-        self.db.upsert_agent(&agent).map_err(internal_error)?;
-
-        if let Err(e) = self.watcher_engine.start_watcher(&agent).await {
-            tracing::warn!("Watcher '{}' saved but failed to start: {}", agent.id, e);
-            return Ok(CallToolResult::success(vec![Content::text(format!(
-                "Watcher '{}' registered but could not start watching '{}': {}. It will be retried on daemon restart.",
-                agent.id, params.path, e
-            ))]));
-        }
-
-        Ok(success_result(&format!(
-            "Watcher '{}' active on '{}' for events: {:?}",
-            agent.id, params.path, params.events
-        )))
-    }
-
-    /// List all registered agents with status.
-    #[tool(
-        name = "agent_list",
-        description = "List all registered scheduled agents with their current status"
-    )]
-    async fn task_list(&self) -> Result<CallToolResult, McpError> {
-        let agents = self
-            .db
-            .list_agents()
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        let corrupt = self
-            .db
-            .list_corrupt_agents()
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-
-        if agents.is_empty() && corrupt.is_empty() {
-            return Ok(success_result("No agents registered."));
-        }
-
-        let mut lines = vec![format!(
-            "Found {} agent(s){}:\n",
-            agents.len(),
-            if corrupt.is_empty() {
-                String::new()
-            } else {
-                format!(" ({} corrupt)", corrupt.len())
-            }
-        )];
-
-        for a in &agents {
-            let mut info = format_agent_info(a);
-
-            if a.is_watch() {
-                let runtime_active = self.watcher_engine.is_active(&a.id).await;
-                let watch_status = if !a.enabled {
-                    "paused"
-                } else if runtime_active {
-                    "active"
-                } else {
-                    "registered (not running)"
-                };
-                info.push_str(&format!("  Watch status: {}\n", watch_status));
-            }
-
-            lines.push(info);
-        }
-
-        for c in &corrupt {
-            lines.push(format!(
-                "- **{}** [corrupt config] — trigger_config failed to parse: {}\n",
-                c.id, c.error
-            ));
-        }
-
-        Ok(CallToolResult::success(vec![Content::text(
-            lines.join("\n"),
-        )]))
-    }
-
-    /// Get one agent's full stored definition.
-    #[tool(
-        name = "agent_get",
-        description = "Get one agent's complete stored definition as JSON — every field including the full, untruncated prompt. agent_list truncates the prompt to ~80 characters; call this with an agent's id when you need the exact prompt text (e.g. to fix a stale command reference before agent_update) or any other stored field: trigger_type, trigger_config (parsed), cli, model, effort, working_dir, enabled, timeout_minutes, expires_at, enable_at, notify_on_success, log_path, created_at, last_run_at, last_run_ok, last_triggered_at, trigger_count. Read-only."
-    )]
-    async fn agent_get(
-        &self,
-        Parameters(IdParam { id }): Parameters<IdParam>,
-    ) -> Result<CallToolResult, McpError> {
-        let Some(agent) = self.db.get_agent(&id).map_err(internal_error)? else {
-            return Ok(error_result(&format!("agent '{}' not found", id)));
-        };
-        let notify = self
-            .db
-            .agent_notify_on_success(&id)
-            .map_err(internal_error)?;
-        Ok(build_json_result(&agent_detail_json(&agent, notify)))
-    }
-
-    fn format_session_info(session: &InteractiveSession) -> String {
-        let attached = if session_is_attached(session) {
-            "yes"
-        } else {
-            "no"
-        };
-        let hook_target = if session.status == "active" {
-            "yes".to_string()
-        } else {
-            format!(
-                "no (status: {} — an interactive hook rejects this id until the session is live again)",
-                session.status
-            )
-        };
-        format!(
-            "- id: {} | name: {} | platform: {} | workdir: {} | attached: {} | hook_target: {}",
-            session.id, session.name, session.cli, session.working_dir, attached, hook_target
-        )
-    }
-
-    /// List interactive sessions that an interactive hook can address.
-    #[tool(
-        name = "session_list",
-        description = "List live interactive sessions with the exact ids an interactive graph hook's target_session_id accepts. Pass session_id to look one up; read-only, no session is woken."
-    )]
-    async fn session_list(
-        &self,
-        Parameters(params): Parameters<SessionListParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let limit = params
-            .limit
-            .unwrap_or(SESSION_LIST_DEFAULT_LIMIT)
-            .clamp(1, 200) as i64;
-
-        let session_id = params.session_id.as_deref().map(str::trim);
-        if let Some(session_id) = session_id {
-            if session_id.is_empty() {
-                return Ok(error_result("No session found with ID ''"));
-            }
-
-            let session = self
-                .db
-                .get_hookable_session(session_id)
-                .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-            let Some(session) = session else {
-                return Ok(error_result(&format!(
-                    "No session found with ID '{session_id}'"
-                )));
-            };
-
-            return Ok(success_result(&Self::format_session_info(&session)));
-        }
-
-        let sessions = self
-            .db
-            .list_hookable_sessions(limit)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        if sessions.is_empty() {
-            return Ok(success_result("No live interactive sessions found."));
-        }
-
-        let mut lines = vec![format!(
-            "Found {} live interactive session(s):\n",
-            sessions.len()
-        )];
-        lines.extend(sessions.iter().map(Self::format_session_info));
-        Ok(CallToolResult::success(vec![Content::text(
-            lines.join("\n"),
-        )]))
-    }
-
-    /// Schedule a prompt for future delivery to an interactive session
-    /// (CM22). Exposes the same `scheduled_sends` mechanism the
-    /// promptbuilder and graph hooks already use: delivery happens on the
-    /// TUI's next refresh tick, a dead target is preserved in
-    /// `failed_scheduled_sends`, and a message enqueued while no TUI is
-    /// running simply waits.
-    #[tool(
-        name = "scheduled_send_create",
-        description = "Schedule a prompt for delivery to an interactive session at a future time — the way to have an agent wake itself (or another session) later instead of polling on a cron. Omit `target_session_id` to target your own session. Give exactly one of `at` (ISO 8601, e.g. \"2026-07-10T09:00:00Z\") or `in_seconds` (relative delay, e.g. 2400 for \"in 40 minutes\"). Delivery happens on the target's next TUI refresh tick — if no TUI is attached when the time arrives, the send waits rather than being lost. Refused immediately if the target session does not exist. Returns the new scheduled send's id."
-    )]
-    async fn scheduled_send_create(
-        &self,
-        Parameters(params): Parameters<ScheduledSendCreateParams>,
-        OptionalExtension(parts): OptionalExtension<Parts>,
-    ) -> Result<CallToolResult, McpError> {
-        self.reject_if_nursery(parts.as_ref())?;
-        let agent_id = self.resolve_sync_agent_id(parts.as_ref())?;
-
-        if let Err(e) = crate::domain::validation::validate_prompt(&params.prompt) {
-            return Ok(error_result(&e));
-        }
-
-        if params.at.is_some() && params.in_seconds.is_some() {
-            return Ok(error_result("Pass either `at` or `in_seconds`, not both."));
-        }
-        let fire_at = if let Some(at) = params.at.as_deref() {
-            match chrono::DateTime::parse_from_rfc3339(at) {
-                Ok(dt) => dt.with_timezone(&chrono::Utc),
-                Err(e) => {
-                    return Ok(error_result(&format!(
-                        "Invalid ISO 8601 timestamp '{}': {}",
-                        at, e
-                    )));
-                }
-            }
-        } else if let Some(secs) = params.in_seconds {
-            if secs < 0 {
-                return Ok(error_result("`in_seconds` must be zero or positive."));
-            }
-            chrono::Utc::now() + chrono::Duration::seconds(secs)
-        } else {
-            return Ok(error_result(
-                "Provide either `at` (an ISO 8601 timestamp) or `in_seconds` (a relative delay in seconds).",
-            ));
-        };
-
-        let target_session_id = match params
-            .target_session_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            Some(id) => id.to_string(),
-            None => agent_id.clone(),
-        };
-
-        let Some(target_session) = self
-            .db
-            .get_hookable_session(&target_session_id)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?
-        else {
-            return Ok(error_result(&format!(
-                "No live interactive session found with ID '{}'.",
-                target_session_id
-            )));
-        };
-
-        let provenance = ScheduledSendProvenance::agent(&agent_id);
-        let workdir_opt =
-            (!target_session.working_dir.is_empty()).then_some(target_session.working_dir.as_str());
-        let id = format!("ss-{}", uuid::Uuid::new_v4());
-
-        self.db
-            .insert_scheduled_send(
-                &id,
-                &params.prompt,
-                &target_session_id,
-                workdir_opt,
-                fire_at,
-                None,
-                Some(&provenance),
-            )
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-
-        Ok(success_result(&format!(
-            "Scheduled send '{}' created for session '{}' — fires at {}.",
-            id,
-            target_session_id,
-            fire_at.to_rfc3339()
-        )))
-    }
-
-    /// List pending scheduled sends for a session (CM22).
-    #[tool(
-        name = "scheduled_send_list",
-        description = "List pending (not yet fired) scheduled sends for a session, soonest first. Omit `session_id` to list your own session's pending sends. A send disappears from this list once delivered or cancelled."
-    )]
-    async fn scheduled_send_list(
-        &self,
-        Parameters(params): Parameters<ScheduledSendListParams>,
-        OptionalExtension(parts): OptionalExtension<Parts>,
-    ) -> Result<CallToolResult, McpError> {
-        let session_id = match params
-            .session_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            Some(id) => id.to_string(),
-            None => {
-                self.reject_if_nursery(parts.as_ref())?;
-                self.resolve_sync_agent_id(parts.as_ref())?
-            }
-        };
-
-        let pending = self
-            .db
-            .list_pending_scheduled_sends_for_session(&session_id)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-
-        if pending.is_empty() {
-            return Ok(success_result(&format!(
-                "No pending scheduled sends for session '{}'.",
-                session_id
-            )));
-        }
-
-        let mut lines = vec![format!(
-            "Found {} pending scheduled send(s) for session '{}':\n",
-            pending.len(),
-            session_id
-        )];
-        lines.extend(pending.iter().map(|send| {
-            let preview: String = send.prompt.chars().take(80).collect();
-            let ellipsis = if send.prompt.chars().count() > 80 {
-                "…"
-            } else {
-                ""
-            };
-            let origin = match send.provenance.as_ref().map(|p| p.kind.as_str()) {
-                Some("agent") => " | origin: agent",
-                Some("hook") => " | origin: hook",
-                _ => "",
-            };
-            format!(
-                "- id: {} | fire_at: {}{} | prompt: {}{}",
-                send.id,
-                send.fire_at.to_rfc3339(),
-                origin,
-                preview,
-                ellipsis
-            )
-        }));
-        Ok(CallToolResult::success(vec![Content::text(
-            lines.join("\n"),
-        )]))
-    }
-
-    /// Cancel a pending scheduled send by id (CM22).
-    #[tool(
-        name = "scheduled_send_cancel",
-        description = "Cancel a pending scheduled send by id before it fires. Errors if the id is unknown or already fired — cancellation is not retroactive."
-    )]
-    async fn scheduled_send_cancel(
-        &self,
-        Parameters(ScheduledSendCancelParams { id }): Parameters<ScheduledSendCancelParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let deleted = self
-            .db
-            .delete_scheduled_send(&id)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-
-        if !deleted {
-            return Ok(error_result(&format!(
-                "No pending scheduled send found with ID '{}'.",
-                id
-            )));
-        }
-        Ok(success_result(&format!(
-            "Scheduled send '{}' cancelled.",
-            id
-        )))
-    }
-
-    /// Remove an agent completely.
-    #[tool(
-        name = "agent_remove",
-        description = "Remove an agent completely — deletes from database and stops any active watcher"
-    )]
-    async fn task_remove(
-        &self,
-        Parameters(IdParam { id }): Parameters<IdParam>,
-    ) -> Result<CallToolResult, McpError> {
-        let _ = self.watcher_engine.stop_watcher(&id).await;
-
-        // Deletes by id without parsing the stored row, so a corrupt row
-        // (e.g. malformed trigger_config) can always be removed — it must
-        // never block its own repair.
-        let deleted = self
-            .db
-            .delete_agent(&id)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-
-        if !deleted {
-            return Ok(error_result(&format!("No agent found with ID '{}'", id)));
-        }
-
-        self.scheduler_notify.notify_one();
-        Ok(success_result(&format!("Agent '{}' removed", id)))
-    }
-
-    /// Enable a disabled agent.
-    #[tool(
-        name = "agent_enable",
-        description = "Enable a disabled agent — resumes scheduling or file watching"
-    )]
-    async fn task_enable(
-        &self,
-        Parameters(IdParam { id }): Parameters<IdParam>,
-    ) -> Result<CallToolResult, McpError> {
-        let Some(existing) = self
-            .db
-            .get_agent(&id)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?
-        else {
-            return Ok(error_result(&format!("No agent found with ID '{}'", id)));
-        };
-
-        if existing.is_expired() {
-            let mut updated = existing.clone();
-            updated.expires_at = None;
-            self.db
-                .upsert_agent(&updated)
-                .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        }
-
-        self.db
-            .update_agent_enabled(&id, true)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-
-        self.scheduler_notify.notify_one();
-
-        if existing.is_watch() {
-            let _ = self.watcher_engine.start_watcher(&existing).await;
-        }
-
-        Ok(success_result(&format!("Agent '{}' enabled", id)))
-    }
-
-    /// Schedule a one-shot future enable for a disabled agent.
-    #[tool(
-        name = "agent_schedule_enable",
-        description = "Schedule a one-shot enable for an agent at a future ISO 8601 time — the agent stays disabled until then, when the scheduler enables it and clears the schedule"
-    )]
-    async fn task_schedule_enable(
-        &self,
-        Parameters(AgentScheduleEnableParams { id, at }): Parameters<AgentScheduleEnableParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let Some(_existing) = self
-            .db
-            .get_agent(&id)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?
-        else {
-            return Ok(error_result(&format!("No agent found with ID '{}'", id)));
-        };
-
-        let at = match chrono::DateTime::parse_from_rfc3339(&at) {
-            Ok(dt) => dt.with_timezone(&chrono::Utc),
-            Err(e) => {
-                return Ok(error_result(&format!(
-                    "Invalid ISO 8601 timestamp '{}': {}",
-                    at, e
-                )));
-            }
-        };
-
-        self.db
-            .schedule_agent_enable(&id, at)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-
-        self.scheduler_notify.notify_one();
-
-        Ok(success_result(&format!(
-            "Agent '{}' scheduled to enable at {}",
-            id,
-            at.to_rfc3339()
-        )))
-    }
-
-    /// Disable an agent without removing it.
-    #[tool(
-        name = "agent_disable",
-        description = "Disable an agent without removing it — pauses scheduling or file watching"
-    )]
-    async fn task_disable(
-        &self,
-        Parameters(IdParam { id }): Parameters<IdParam>,
-    ) -> Result<CallToolResult, McpError> {
-        let Some(existing) = self
-            .db
-            .get_agent(&id)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?
-        else {
-            return Ok(error_result(&format!("No agent found with ID '{}'", id)));
-        };
-
-        self.db
-            .update_agent_enabled(&id, false)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-
-        if existing.is_watch() {
-            let _ = self.watcher_engine.stop_watcher(&id).await;
-        }
-
-        self.scheduler_notify.notify_one();
-        Ok(success_result(&format!("Agent '{}' disabled", id)))
-    }
-
-    /// Execute an agent immediately, outside its schedule.
-    #[tool(
-        name = "agent_run",
-        description = "Execute an agent immediately outside its schedule — useful for testing"
-    )]
-    async fn agent_run(
-        &self,
-        Parameters(IdParam { id }): Parameters<IdParam>,
-    ) -> Result<CallToolResult, McpError> {
-        let existing = self
-            .db
-            .get_agent(&id)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-
-        let Some(agent) = existing else {
-            return Ok(error_result(&format!("No agent found with ID '{}'", id)));
-        };
-
-        let executor = Arc::clone(&self.executor);
-        let notification_service = self.notification_service.clone();
-        let agent_id = id.clone();
-
-        tokio::spawn(async move {
-            let result = executor.execute_agent(&agent, true).await;
-            notify_run_result(&notification_service, &agent_id, result);
-        });
-
-        Ok(success_result(&format!(
-            "Agent '{}' launched in background. Use agent_logs to check progress.",
-            id
-        )))
-    }
-
-    /// Get daemon status and statistics.
-    #[tool(
-        name = "agent_status",
-        description = "Get overall daemon health, scheduler state, and statistics"
-    )]
-    async fn task_status(&self) -> Result<CallToolResult, McpError> {
-        let agents = self
-            .db
-            .list_agents()
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-
-        let active_agents = agents
-            .iter()
-            .filter(|a| a.enabled && !a.is_expired())
-            .count();
-        let active_watchers = self.watcher_engine.active_count().await;
-        let uptime_str = format_uptime(self.start_time.elapsed().as_secs());
-        let log_dir = data_dir()
-            .map(|d| d.join("logs").to_string_lossy().to_string())
-            .unwrap_or_else(|_| "unknown".to_string());
-
-        let cron_count = agents.iter().filter(|a| a.is_cron()).count();
-        let watch_count = agents.iter().filter(|a| a.is_watch()).count();
-        let manual_count = agents.len() - cron_count - watch_count;
-
-        let (transport, port_str) = transport_details(self.port);
-
-        let mut status = format!(
-            "canopy v{}\n\
-             Uptime: {}\n\
-             Transport: {}\n\
-             Port: {}\n\
-             Scheduler: internal (tokio)\n\
-             Active agents: {} / {} (cron: {}, watch: {}, manual: {})\n\
-             Active watchers: {}\n\
-             Log directory: {}",
-            env!("CARGO_PKG_VERSION"),
-            uptime_str,
-            transport,
-            port_str,
-            active_agents,
-            agents.len(),
-            cron_count,
-            watch_count,
-            manual_count,
-            active_watchers,
-            log_dir,
-        );
-
-        append_temporal_agents_section(&mut status, &agents);
-
-        Ok(CallToolResult::success(vec![Content::text(status)]))
-    }
-
-    /// List available AI models.
-    #[tool(
-        name = "agent_models",
-        description = "List AI models available for use with agents. Pass an optional `platform` (e.g. \"opencode\") to filter to the models that platform can reach; pass `refresh: true` to force a fresh fetch instead of serving a cache that's within its TTL (`canopy models refresh` does the same from the CLI, for one platform or all). Every returned model id is the literal string that platform's CLI accepts for its model field — for a universal gateway that is the provider-prefixed form (opencode/big-pickle), for claude the bare form (claude-opus-4-8) — so an id can be copied verbatim into the model field of agent_add or agent_watch. Platform-scoped listings (with `platform` set) return every model the platform can reach, uncapped; the `full` flag only affects the unfiltered (no-platform) listing. Includes cache provenance (source: cache|live|stale, fetched_at, age, and whether a refresh is due) — the TTL itself is configurable in config.toml under `[models]`."
-    )]
-    async fn task_models(
-        &self,
-        Parameters(params): Parameters<TaskModelsParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let force_refresh = params.refresh.unwrap_or(false);
-        let full = params.full.unwrap_or(false);
-
-        // Optional platform filter, validated against the platforms actually
-        // configured in canopy (registry-driven) when that config is present.
-        let platform = params
-            .platform
-            .as_deref()
-            .map(str::trim)
-            .filter(|p| !p.is_empty());
-
-        if let Some(platform) = platform {
-            if let Some(err) = validate_platform_configured(platform) {
-                return Ok(error_result(&err));
-            }
-            // Registry-driven: a platform that can enumerate its own models is
-            // the authoritative source of passable ids (each line is the literal
-            // string its model flag accepts, prefix and all). models.dev cannot
-            // know a gateway's provider-prefixed form or its private catalog, so
-            // when the registry gives us an enumeration command we use it and
-            // skip models.dev entirely — never requiring it to be reachable.
-            if let Some((binary, args)) = platform_enumeration_cmd(platform) {
-                let mut result =
-                    native_models_result(platform, binary, args, force_refresh, full).await;
-                prepend_recent_usage(&mut result, &recent_usage_section(&self.db));
-                return Ok(result);
-            }
-        }
-
-        // models.dev-derived path: the all-providers listing, or a platform
-        // without native enumeration (e.g. claude, whose bare ids are correct).
-        let mut result = catalogue_models_result(platform, force_refresh, full).await;
-        prepend_recent_usage(&mut result, &recent_usage_section(&self.db));
-        Ok(result)
-    }
-
-    /// Get log output for an agent.
-    #[tool(
-        name = "agent_logs",
-        description = "Get the log output for an agent with optional line and time filters"
-    )]
-    async fn task_logs(
-        &self,
-        Parameters(params): Parameters<TaskLogsParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let log_path = resolve_log_path(&self.db, &params.id)?;
-        let path = std::path::Path::new(&log_path);
-        if !path.exists() {
-            return Ok(success_result(&format!(
-                "No logs found for '{}'. The agent has not been executed yet.",
-                params.id
-            )));
-        }
-
-        let output = format_log_output(
-            path,
-            &params.id,
-            params.since.as_deref(),
-            params.lines.unwrap_or(50),
-        )?;
-        let Some(run_info) = recent_runs_output(&self.db, &params.id) else {
-            return Ok(CallToolResult::success(vec![Content::text(output)]));
-        };
-
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "{output}{run_info}"
-        ))]))
-    }
-
-    /// Update fields of an existing agent without recreating it.
-    #[tool(
-        name = "agent_update",
-        description = "Modify an existing agent. Only the provided fields are updated — omitted fields remain unchanged. Auto-detects whether the agent is a cron or watch agent and applies the appropriate fields."
-    )]
-    async fn task_update(
-        &self,
-        Parameters(params): Parameters<TaskUpdateParams>,
-    ) -> Result<CallToolResult, McpError> {
-        use crate::scheduler::validate_cron;
-
-        if let Err(e) = validate_id(&params.id) {
-            return Ok(error_result(&e));
-        }
-
-        let Some(mut agent) = self.db.get_agent(&params.id).map_err(internal_error)? else {
-            return Ok(error_result(&format!(
-                "No agent found with ID '{}'",
-                params.id
-            )));
-        };
-
-        if let Some(new_id) = params.new_id.as_deref() {
-            if new_id != params.id {
-                if let Err(e) = validate_id(new_id) {
-                    return Ok(error_result(&e));
-                }
-                let new_log_path = make_log_path(new_id)?;
-
-                if agent.is_watch() {
-                    let _ = self.watcher_engine.stop_watcher(&params.id).await;
-                }
-
-                if let Err(e) = self.db.rename_agent(&params.id, new_id, &new_log_path) {
-                    return Ok(error_result(&e.to_string()));
-                }
-
-                agent.id = new_id.to_string();
-                agent.log_path = new_log_path;
-            }
-        }
-
-        if let Err(e) = apply_scalar_updates(&mut agent, &params) {
-            return Ok(error_result(&e));
-        }
-        if let Err(e) = apply_trigger_updates(&mut agent, &params, &validate_cron) {
-            return Ok(error_result(&e));
-        }
-
-        self.db.upsert_agent(&agent).map_err(internal_error)?;
-        // Success-notification opt-in (B27) lives outside the agent row's
-        // upserted columns, so set it separately when the caller provided it.
-        if let Some(notify_on_success) = params.notify_on_success {
-            self.db
-                .set_agent_notify_on_success(&agent.id, notify_on_success)
-                .map_err(internal_error)?;
-        }
-        if agent.is_cron() {
-            self.scheduler_notify.notify_one();
-        }
-
-        if let Some(result) = self.restart_updated_watcher(&params, &agent).await? {
-            return Ok(result);
-        }
-
-        Ok(success_result(&format!(
-            "Agent '{}' updated successfully.",
-            agent.id
-        )))
-    }
-
-    /// Report execution status from within a running agent.
-    #[tool(
-        name = "agent_report",
-        description = "Report execution status for a running agent. The run_id is provided in the agent execution prompt. Call with status='in_progress' immediately when starting, then status='success' or status='error' with a summary when finished."
-    )]
-    async fn task_report(
-        &self,
-        Parameters(params): Parameters<TaskReportParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let status = match parse_report_status(&params.status) {
-            Ok(status) => status,
-            Err(e) => return Ok(error_result(e)),
-        };
-        if let Err(e) = validate_report_summary(status, params.summary.as_deref()) {
-            return Ok(error_result(e));
-        }
-
-        let Some(run) = self.db.get_run(&params.run_id).map_err(internal_error)? else {
-            return Err(internal_error(format!(
-                "Run '{}' not found.",
-                params.run_id
-            )));
-        };
-        if let Some(result) = handle_timed_out_run(&self.db, &params.run_id, &run) {
-            return Ok(result);
-        }
-        if let Err(e) = validate_run_transition(run.status, status) {
-            return Ok(error_result(&e));
-        }
-
-        let updated = self
-            .db
-            .update_run_status(&params.run_id, status, params.summary.as_deref())
-            .map_err(internal_error)?;
-        if !updated {
-            return Ok(error_result(&format!(
-                "Failed to update run '{}'.",
-                params.run_id
-            )));
-        }
-
-        update_agent_last_run(&self.db, &run, status);
-        Ok(success_result(&format!(
-            "Run '{}' status updated to '{}'.",
-            params.run_id, status
-        )))
-    }
-
-    #[tool(
-        name = "sync_declare_intent",
-        description = "Declare a high-level mission for the current workdir. Non-blocking. \
-         Use this to announce major work before you start changing things. \
-         The actor identity is resolved automatically from the current Canopy session."
-    )]
-    async fn sync_declare_intent(
-        &self,
-        Parameters(params): Parameters<SyncDeclareIntentParams>,
-        OptionalExtension(parts): OptionalExtension<Parts>,
-    ) -> Result<CallToolResult, McpError> {
-        self.reject_if_nursery(parts.as_ref())?;
-        let Some(impact) = MissionImpact::from_str(&params.impact) else {
-            return Ok(error_result(
-                "Invalid impact. Must be: low, high, breaking.",
-            ));
-        };
-        let agent_id = self.resolve_sync_agent_id(parts.as_ref())?;
-        let client_name = self.resolve_sync_client_name(parts.as_ref());
-
-        Ok(map_action_result(
-            self.sync_manager
-                .declare_intent(
-                    &params.workdir,
-                    &agent_id,
-                    client_name.as_deref(),
-                    &params.mission,
-                    impact,
-                    &params.description,
-                )
-                .await,
-            "Intent declared.",
-        ))
-    }
-
-    #[tool(
-        name = "sync_report_status",
-        description = "Report the current workspace status for your mission. Non-blocking. \
-         status: stable | unstable | testing. The actor identity is resolved \
-         automatically from the current Canopy session."
-    )]
-    async fn sync_report_status(
-        &self,
-        Parameters(params): Parameters<SyncReportStatusParams>,
-        OptionalExtension(parts): OptionalExtension<Parts>,
-    ) -> Result<CallToolResult, McpError> {
-        self.reject_if_nursery(parts.as_ref())?;
-        let Some(status) = WorkspaceStatus::from_str(&params.status) else {
-            return Ok(error_result(
-                "Invalid status. Must be: stable, unstable, testing.",
-            ));
-        };
-        let agent_id = self.resolve_sync_agent_id(parts.as_ref())?;
-        let client_name = self.resolve_sync_client_name(parts.as_ref());
-
-        Ok(map_action_result(
-            self.sync_manager
-                .report_status(
-                    &params.workdir,
-                    &agent_id,
-                    client_name.as_deref(),
-                    status,
-                    &params.message,
-                )
-                .await,
-            "Status reported.",
-        ))
-    }
-
-    /// Broadcast a message to the workdir sync channel (non-blocking).
-    #[tool(
-        name = "sync_broadcast",
-        description = "Broadcast a message to the workdir sync channel. Non-blocking. \
-         kind: info | query | answer. The actor identity is resolved \
-         automatically from the current Canopy session."
-    )]
-    async fn sync_broadcast(
-        &self,
-        Parameters(params): Parameters<SyncBroadcastParams>,
-        OptionalExtension(parts): OptionalExtension<Parts>,
-    ) -> Result<CallToolResult, McpError> {
-        self.reject_if_nursery(parts.as_ref())?;
-        let Some(kind) = MessageKind::from_str(&params.kind) else {
-            return Ok(error_result("Invalid kind. Must be: info, query, answer."));
-        };
-        if !kind.is_chatter() {
-            return Ok(error_result(
-                "sync_broadcast only accepts: info, query, answer.",
-            ));
-        }
-
-        let payload = params
-            .metadata
-            .as_ref()
-            .map(|metadata| metadata.to_string());
-        let agent_id = self.resolve_sync_agent_id(parts.as_ref())?;
-        let client_name = self.resolve_sync_client_name(parts.as_ref());
-        Ok(map_action_result(
-            self.sync_manager
-                .broadcast(
-                    &params.workdir,
-                    &agent_id,
-                    client_name.as_deref(),
-                    kind,
-                    &params.message,
-                    payload.as_deref(),
-                )
-                .await,
-            "Message broadcast.",
-        ))
-    }
-
-    #[tool(
-        name = "sync_get_context",
-        description = "Get active missions, recent sync chatter, and current workspace vibe for a workdir."
-    )]
-    async fn sync_get_context(
-        &self,
-        Parameters(params): Parameters<SyncGetContextParams>,
-        OptionalExtension(parts): OptionalExtension<Parts>,
-    ) -> Result<CallToolResult, McpError> {
-        self.reject_if_nursery(parts.as_ref())?;
-        let limit = params.limit.unwrap_or(10);
-
-        let context = self
-            .sync_manager
-            .get_context(&params.workdir, limit)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-
-        let intents_json: Vec<serde_json::Value> = context
-            .active_intents
-            .iter()
-            .map(|intent| {
-                serde_json::json!({
-                    "agent_id": intent.agent_id,
-                    "agent_name": intent.agent_name,
-                    "mission": intent.mission,
-                    "impact": intent.impact.as_str(),
-                    "description": intent.description,
-                    "status": intent.status.as_str(),
-                    "since": intent.since,
-                })
-            })
-            .collect();
-
-        let chatter_json: Vec<serde_json::Value> = context
-            .recent_chatter
-            .iter()
-            .map(|message| {
-                serde_json::json!({
-                    "agent_id": message.agent_id,
-                    "agent_name": message.agent_name,
-                    "kind": message.kind.as_str(),
-                    "message": message.message,
-                    "ts": message.created_at,
-                })
-            })
-            .collect();
-
-        let summary = if context.active_intents.is_empty() {
-            "No active missions.".to_owned()
-        } else {
-            let parts: Vec<String> = context
-                .active_intents
-                .iter()
-                .map(|intent| format!("{}: {}", intent.agent_name, intent.mission))
-                .collect();
-            parts.join("; ")
-        };
-
-        let out = serde_json::json!({
-            "active_intents": intents_json,
-            "recent_chatter": chatter_json,
-            "vibe": context.vibe.as_str(),
-            "summary": summary,
-        });
-
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&out).unwrap_or_default(),
-        )]))
-    }
-
-    #[tool(
-        name = "intelligence_get_context",
-        description = "Return project context at the requested scope: light or full. \
-         When project_hash is provided (or auto-detected from session workdir), \
-         returns project-scoped facts and patterns instead of generic knowledge."
-    )]
-    async fn intelligence_get_context(
-        &self,
-        Parameters(params): Parameters<IntelligenceGetContextParams>,
-        OptionalExtension(parts): OptionalExtension<Parts>,
-    ) -> Result<CallToolResult, McpError> {
-        self.reject_if_nursery(parts.as_ref())?;
-        let scope = params.scope.trim().to_lowercase();
-        let (session_limit, _knowledge_limit, sync_limit, dependency_limit) = match scope.as_str() {
-            "light" => (2, 5, 8, 0),
-            "full" => (10, 20, 25, 30),
-            _ => return Ok(error_result("Invalid scope. Must be: light or full.")),
-        };
-
-        // Auto-detect project_hash from session workdir if not provided.
-        let resolved_agent_id = self.resolve_sync_agent_id(parts.as_ref()).ok();
-        let effective_project_hash = resolved_agent_id.as_deref().and_then(|agent_id| {
-            resolve_effective_project_hash(&self.db, params.project_hash.as_deref(), agent_id)
-        });
-        let depth = params
-            .depth
-            .unwrap_or(1)
-            .min(crate::db::intelligence::MAX_TRAVERSAL_DEPTH);
-
-        let sessions: Vec<crate::db::intelligence::IntelligenceNodeRecord> = self
-            .db
-            .list_operational_sessions(session_limit)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?
-            .into_iter()
-            .map(|r| r.into_intelligence_node_record())
-            .collect();
-
-        let (knowledge, project_knowledge, traversal) = self
-            .fetch_context_knowledge(effective_project_hash.as_deref(), &scope, depth)
-            .map_err(|e| McpError::internal_error(e, None))?;
-
-        let sync_messages = self
-            .db
-            .list_recent_sync_messages(sync_limit)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        // Bitácora: recent activity for the resolved project (or across all
-        // workdirs when no project resolved), readable without the TUI.
-        let activity_workdir: Option<String> = effective_project_hash
-            .as_deref()
-            .and_then(|hash| self.db.get_project(hash).ok().flatten().map(|p| p.path));
-        let activity_entries: Vec<crate::db::activity_log::ActivityLogEntry> =
-            match activity_workdir {
-                Some(ref workdir) => self
-                    .db
-                    .list_activity_log_entries(workdir, sync_limit)
-                    .map_err(|e| McpError::internal_error(e.to_string(), None))?,
-                None => self
-                    .db
-                    .list_recent_activity_log_entries(sync_limit)
-                    .map_err(|e| McpError::internal_error(e.to_string(), None))?,
-            };
-        let cross_project_dependencies = if scope == "full" {
-            self.db
-                .list_cross_project_dependencies(dependency_limit)
-                .map_err(|e| McpError::internal_error(e.to_string(), None))?
-        } else {
-            Vec::new()
-        };
-
-        let related_projects = if scope == "full" {
-            if let Some(ref ph) = effective_project_hash {
-                self.db
-                    .list_related_projects(ph, 10)
-                    .map_err(|e| McpError::internal_error(e.to_string(), None))?
-            } else {
-                Vec::new()
-            }
-        } else {
-            Vec::new()
-        };
-
-        // Impact warning (full scope only — keeps light cheap): which projects
-        // declare a dependency on the targeted project. Inbound dependents
-        // never pull context; they only warn.
-        let dependents = if scope == "full" {
-            if let Some(ref ph) = effective_project_hash {
-                self.db
-                    .list_project_dependents(ph)
-                    .map_err(|e| McpError::internal_error(e.to_string(), None))?
-            } else {
-                Vec::new()
-            }
-        } else {
-            Vec::new()
-        };
-
-        let summary_prefix = if scope == "light" {
-            "Light context"
-        } else {
-            "Full context"
-        };
-
-        let mut out = serde_json::json!({
-            "scope": scope,
-            "summary": format!(
-                "{}: {} session node(s), {} knowledge node(s), {} sync message(s).",
-                summary_prefix,
-                sessions.len(),
-                knowledge.len(),
-                sync_messages.len()
-            ),
-            "sessions": sessions.iter().map(intelligence_node_json).collect::<Vec<_>>(),
-            "knowledge": knowledge.iter().map(intelligence_node_json).collect::<Vec<_>>(),
-            "sync_messages": sync_messages.iter().map(sync_message_json).collect::<Vec<_>>(),
-            "activity": activity_entries.iter().map(activity_log_entry_json).collect::<Vec<_>>(),
-            "cross_project_dependencies": cross_project_dependencies,
-        });
-
-        inject_project_context(
-            &mut out,
-            effective_project_hash.as_deref(),
-            &project_knowledge,
-            &related_projects,
-            &traversal,
-            &dependents,
-        );
-        inject_seed_identity(
-            &mut out,
-            &self.db,
-            parts.as_ref(),
-            resolved_agent_id.as_deref(),
-        );
-
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&out).unwrap_or_default(),
-        )]))
-    }
-
-    #[tool(
-        name = "intelligence_upsert",
-        description = "Create or update an intelligence node and optional relations. \
-         project_hash is auto-detected from the session workdir if not provided."
-    )]
-    async fn intelligence_upsert(
-        &self,
-        Parameters(params): Parameters<IntelligenceUpsertParams>,
-        OptionalExtension(parts): OptionalExtension<Parts>,
-    ) -> Result<CallToolResult, McpError> {
-        self.reject_if_nursery(parts.as_ref())?;
-        // Track an explicit id that resolved to nothing: the caller almost
-        // certainly mistyped or truncated the id of a node they meant to
-        // update, so a bare `created: true` (which also fires for the normal
-        // auto-generated-id path) is not a loud enough signal — see CB13.
-        let mut unresolved_explicit_id: Option<String> = None;
-        let resolved_id = match &params.node_data.id {
-            Some(raw_id) if !raw_id.trim().is_empty() => {
-                let raw_id = raw_id.trim();
-                match self.db.resolve_node_id_by_prefix(raw_id) {
-                    Ok(Some(full)) => Some(full),
-                    Ok(None) => {
-                        unresolved_explicit_id = Some(raw_id.to_string());
-                        Some(raw_id.to_string())
-                    }
-                    Err(e) => return Ok(error_result(&e.to_string())),
-                }
-            }
-            _ => params.node_data.id.clone(),
-        };
-
-        // Whether this write will update an existing node. An omitted
-        // project_hash leaves the stored value untouched on update, but is
-        // still auto-detected from the session workdir on create.
-        let updating_existing = resolved_id
-            .as_deref()
-            .and_then(|id| self.db.get_intelligence_node(id).ok())
-            .flatten()
-            .is_some();
-        let project_hash: Option<Option<String>> = match params.node_data.project_hash {
-            Some(explicit) => Some(explicit),
-            None if updating_existing => None,
-            None => {
-                let detected = self
-                    .resolve_sync_agent_id(parts.as_ref())
-                    .ok()
-                    .and_then(|agent_id| self.db.get_session_workdir(&agent_id).ok())
-                    .flatten()
-                    .map(|workdir| crate::domain::project::workdir_hash(&workdir));
-                Some(detected)
-            }
-        };
-
-        let node = crate::db::intelligence::IntelligenceNodeInput {
-            id: resolved_id,
-            kind: params.node_data.kind,
-            status: params.node_data.status,
-            title: params.node_data.title,
-            body: params.node_data.body,
-            body_replace: params.node_data.body_replace.map(|br| {
-                crate::db::intelligence::BodyReplace {
-                    fragment: br.fragment,
-                    replacement: br.replacement,
-                }
-            }),
-            metadata: params.node_data.metadata,
-            project_hash,
-            session_id: params.node_data.session_id,
-            relations: params.node_data.relations.map(|relations| {
-                relations
-                    .into_iter()
-                    .map(
-                        |relation| crate::db::intelligence::IntelligenceRelationInput {
-                            to_node_id: relation.to_node_id,
-                            relation: relation.relation,
-                            weight: relation.weight,
-                        },
-                    )
-                    .collect()
-            }),
-        };
-
-        let result = self
-            .db
-            .upsert_intelligence_node(node)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        let crate::db::intelligence::UpsertResult {
-            record,
-            created,
-            duplicates: duplicate_candidates,
-            undeclared_references,
-            changed_fields,
-        } = result;
-
-        let mut out = serde_json::json!({
-            "node": intelligence_node_json(&record),
-            "created": created,
-            "changed_fields": changed_fields,
-            "duplicate_detection_note":
-                crate::db::intelligence::LEXICAL_DUPLICATE_LIMITATION,
-        });
-        if created {
-            if let Some(bad_id) = unresolved_explicit_id {
-                out["warning"] = serde_json::json!(format!(
-                    "Created a NEW node with id '{}'. No existing node matched that id or \
-                     prefix, so nothing was updated. If you meant to update an existing node, \
-                     the id you passed is wrong — look it up with intelligence_search first.",
-                    bad_id
-                ));
-            }
-        }
-        if !duplicate_candidates.is_empty() {
-            let total_duplicates = duplicate_candidates.len();
-            let visible_duplicates = &duplicate_candidates
-                [..total_duplicates.min(INTELLIGENCE_DUPLICATE_CANDIDATES_CAP)];
-            out["duplicate_candidates"] = serde_json::json!(visible_duplicates
-                .iter()
-                .map(intelligence_duplicate_candidate_json)
-                .collect::<Vec<_>>());
-            out["duplicate_warning"] = serde_json::json!(
-                "Potential duplicate(s) found; review duplicate_candidates before recording another node."
-            );
-            let duplicates_omitted = total_duplicates.saturating_sub(visible_duplicates.len());
-            if duplicates_omitted > 0 {
-                out["duplicate_candidates_truncated"] = serde_json::json!(true);
-                out["duplicate_candidates_omitted"] = serde_json::json!(duplicates_omitted);
-            }
-        }
-        if !undeclared_references.is_empty() {
-            out["undeclared_references"] = serde_json::json!(undeclared_references);
-        }
-
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&out).unwrap_or_default(),
-        )]))
-    }
-
-    #[tool(
-        name = "intelligence_search",
-        description = "Search intelligence nodes by free text and optional kind. \
-         Pass project_hash to scope the search to that project plus the projects \
-         it reaches via outbound project-graph edges (depth, default 1, max 5); \
-         otherwise the project is auto-detected from the session workdir. \
-         Scoped hits carry via_relation; unscoped search is unchanged."
-    )]
-    async fn intelligence_search(
-        &self,
-        Parameters(params): Parameters<IntelligenceSearchParams>,
-        OptionalExtension(parts): OptionalExtension<Parts>,
-    ) -> Result<CallToolResult, McpError> {
-        self.reject_if_nursery(parts.as_ref())?;
-        let limit = params.limit.unwrap_or(10).min(50);
-        let depth = params
-            .depth
-            .unwrap_or(1)
-            .min(crate::db::intelligence::MAX_TRAVERSAL_DEPTH);
-
-        // Scoped when an explicit hash is given, else auto-detect (same
-        // precedence as the other read tools).
-        let resolved_agent_id = self.resolve_sync_agent_id(parts.as_ref()).ok();
-        let scoped_hash = resolved_agent_id.as_deref().and_then(|agent_id| {
-            resolve_effective_project_hash(&self.db, params.project_hash.as_deref(), agent_id)
-        });
-
-        if let Some(ph) = scoped_hash {
-            let traversal = self
-                .db
-                .traverse_project_scope(&ph, depth)
-                .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-            let hashes: Vec<String> = traversal.projects.iter().map(|p| p.hash.clone()).collect();
-            let via_by_hash: std::collections::HashMap<&str, Option<&str>> = traversal
-                .projects
-                .iter()
-                .map(|p| (p.hash.as_str(), p.via_relation.as_deref()))
-                .collect();
-            let search_result = self
-                .db
-                .search_intelligence_nodes_scoped(
-                    &params.query,
-                    params.kind.as_deref(),
-                    limit,
-                    &hashes,
-                )
-                .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-
-            let results: Vec<serde_json::Value> = search_result
-                .results
-                .iter()
-                .map(|node| {
-                    let mut value = intelligence_node_json(node);
-                    let via_relation = node
-                        .project_hash
-                        .as_deref()
-                        .and_then(|h| via_by_hash.get(h).copied().flatten());
-                    let via_relation = match via_relation {
-                        None => serde_json::Value::Null,
-                        Some("contains") => serde_json::json!("inherited:contains"),
-                        Some(other) => serde_json::json!(other),
-                    };
-                    if let Some(obj) = value.as_object_mut() {
-                        obj.insert("via_relation".to_string(), via_relation);
-                    }
-                    value
-                })
-                .collect();
-            let out = serde_json::json!({
-                "query": params.query,
-                "kind": params.kind,
-                "project_hash": ph,
-                "depth": depth,
-                "projects_reached": traversal.projects.len(),
-                "traversal": {
-                    "depth": depth,
-                    "projects_reached": traversal.projects.len(),
-                },
-                "count": results.len(),
-                "examined_count": search_result.examined_count,
-                "results": results,
-            });
-            return Ok(CallToolResult::success(vec![Content::text(
-                serde_json::to_string_pretty(&out).unwrap_or_default(),
-            )]));
-        }
-
-        let search_result = self
-            .db
-            .search_intelligence_nodes(&params.query, params.kind.as_deref(), limit)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-
-        let out = serde_json::json!({
-            "query": params.query,
-            "kind": params.kind,
-            "count": search_result.results.len(),
-            "examined_count": search_result.examined_count,
-            "projects_reached": 1,
-            "results": search_result.results.iter().map(intelligence_node_json).collect::<Vec<_>>(),
-        });
-
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&out).unwrap_or_default(),
-        )]))
-    }
-
-    #[tool(
-        name = "intelligence_graph_walk",
-        description = "Walk the project-context graph from a node up to the requested depth. \
-         Default is compact mode (nodes omit body/metadata; pass compact: false for full bodies). \
-         The root is returned in `root` only, never duplicated in `nodes`."
-    )]
-    async fn intelligence_graph_walk(
-        &self,
-        Parameters(params): Parameters<IntelligenceGraphWalkParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let depth = params.depth.unwrap_or(2).min(8);
-        let compact = params.compact.unwrap_or(true);
-        let effective_id = match self.db.resolve_node_id_by_prefix(&params.node_id) {
-            Ok(Some(full)) => full,
-            Ok(None) => {
-                return Ok(error_result(&format!(
-                    "Intelligence node '{}' not found.",
-                    params.node_id
-                )))
-            }
-            Err(e) => return Ok(error_result(&e.to_string())),
-        };
-        let graph = match self.db.walk_intelligence_graph(&effective_id, depth) {
-            Ok(Some(g)) => g,
-            Ok(None) => {
-                return Ok(error_result(&format!(
-                    "Intelligence node '{}' not found.",
-                    params.node_id
-                )))
-            }
-            Err(e) => return Err(McpError::internal_error(e.to_string(), None)),
-        };
-
-        // The database layer returns whole nodes including the root inside
-        // `nodes`; the projection happens here at the MCP boundary, where
-        // the budget lives, and the root is returned in `root` only.
-        let project_node = |node: &crate::db::intelligence::IntelligenceNodeRecord| {
-            if compact {
-                intelligence_node_compact_json(node)
-            } else {
-                intelligence_node_json(node)
-            }
-        };
-        let nodes: Vec<serde_json::Value> = graph
-            .nodes
-            .iter()
-            .filter(|n| n.id != graph.root.id)
-            .map(project_node)
-            .collect();
-        let edges: Vec<serde_json::Value> =
-            graph.edges.iter().map(intelligence_edge_json).collect();
-        let node_count = nodes.len();
-        let edge_count = edges.len();
-
-        let mut out = serde_json::json!({
-            "root": project_node(&graph.root),
-            "nodes": nodes,
-            "edges": edges,
-            "node_count": node_count,
-            "edge_count": edge_count,
-            "compact": compact,
-        });
-        if compact {
-            out["bodies_omitted"] = serde_json::json!(true);
-            out["hint"] = serde_json::json!(
-                "Node bodies/metadata omitted in compact mode (default); pass {\"compact\": false} for full bodies."
-            );
-        }
-
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&out).unwrap_or_default(),
-        )]))
-    }
-
-    #[tool(
-        name = "intelligence_delete_node",
-        description = "Delete an intelligence node and every relation touching it, in one \
-         transaction (hard delete — the graph is meant to be able to forget). project_hash is \
-         auto-detected from the session workdir like the read tools; pass it explicitly to \
-         delete a node belonging to a different project. Returns a clear error, not a silent \
-         success, if the node does not exist."
-    )]
-    async fn intelligence_delete_node(
-        &self,
-        Parameters(params): Parameters<IntelligenceDeleteNodeParams>,
-        OptionalExtension(parts): OptionalExtension<Parts>,
-    ) -> Result<CallToolResult, McpError> {
-        self.reject_if_nursery(parts.as_ref())?;
-        if let Err(e) = validate_non_empty(&params.node_id, "node_id") {
-            return Ok(error_result(&e));
-        }
-
-        let effective_project_hash =
-            self.effective_project_hash_for_delete(parts.as_ref(), params.project_hash.as_deref());
-
-        let effective_id = match self.db.resolve_node_id_by_prefix(&params.node_id) {
-            Ok(Some(full)) => full,
-            Ok(None) => {
-                return Ok(error_result(&format!(
-                    "Intelligence node '{}' not found.",
-                    params.node_id
-                )))
-            }
-            Err(e) => return Ok(error_result(&e.to_string())),
-        };
-
-        let node = match self.db.get_intelligence_node(&effective_id) {
-            Ok(Some(node)) => node,
-            Ok(None) => {
-                return Ok(error_result(&format!(
-                    "Intelligence node '{}' not found.",
-                    params.node_id
-                )))
-            }
-            Err(e) => return Err(McpError::internal_error(e.to_string(), None)),
-        };
-
-        if let Some(scope_error) =
-            self.check_intelligence_delete_scope(&node, effective_project_hash.as_deref())
-        {
-            return Ok(scope_error);
-        }
-
-        let relations_removed = match self.db.delete_intelligence_node(&effective_id) {
-            Ok(Some(count)) => count,
-            Ok(None) => {
-                return Ok(error_result(&format!(
-                    "Intelligence node '{}' not found.",
-                    params.node_id
-                )))
-            }
-            Err(e) => return Err(McpError::internal_error(e.to_string(), None)),
-        };
-
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&serde_json::json!({
-                "deleted_node_id": effective_id,
-                "relations_removed": relations_removed,
-            }))
-            .unwrap_or_default(),
-        )]))
-    }
-
-    #[tool(
-        name = "intelligence_delete_relation",
-        description = "Delete a single relation (edge) by ID, leaving both endpoint nodes \
-         intact. project_hash is auto-detected from the session workdir like the read tools; \
-         pass it explicitly to delete a relation touching a different project's nodes. Returns \
-         a clear error, not a silent success, if the relation does not exist."
-    )]
-    async fn intelligence_delete_relation(
-        &self,
-        Parameters(params): Parameters<IntelligenceDeleteRelationParams>,
-        OptionalExtension(parts): OptionalExtension<Parts>,
-    ) -> Result<CallToolResult, McpError> {
-        self.reject_if_nursery(parts.as_ref())?;
-
-        let effective_project_hash =
-            self.effective_project_hash_for_delete(parts.as_ref(), params.project_hash.as_deref());
-
-        let edge = match self.db.get_intelligence_edge(params.edge_id) {
-            Ok(Some(edge)) => edge,
-            Ok(None) => {
-                return Ok(error_result(&format!(
-                    "Intelligence relation '{}' not found.",
-                    params.edge_id
-                )))
-            }
-            Err(e) => return Err(McpError::internal_error(e.to_string(), None)),
-        };
-
-        for node_id in [&edge.from_node_id, &edge.to_node_id] {
-            if let Ok(Some(node)) = self.db.get_intelligence_node(node_id) {
-                if let Some(scope_error) =
-                    self.check_intelligence_delete_scope(&node, effective_project_hash.as_deref())
-                {
-                    return Ok(scope_error);
-                }
-            }
-        }
-
-        let removed = self
-            .db
-            .delete_intelligence_edge(params.edge_id)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-
-        if !removed {
-            return Ok(error_result(&format!(
-                "Intelligence relation '{}' not found.",
-                params.edge_id
-            )));
-        }
-
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&serde_json::json!({
-                "deleted_edge_id": params.edge_id,
-            }))
-            .unwrap_or_default(),
-        )]))
-    }
-
-    #[tool(
-        name = "get_identity",
-        description = "Read the agent's own structured identity contract (identity.toml). \
-         Returns the full TOML content including name, directives, and traits."
-    )]
-    async fn get_identity(
-        &self,
-        OptionalExtension(parts): OptionalExtension<Parts>,
-    ) -> Result<CallToolResult, McpError> {
-        self.reject_if_nursery(parts.as_ref())?;
-        let agent_id = self.resolve_sync_agent_id(parts.as_ref())?;
-        let (_, identity) = load_bound_seed_identity(&self.db, parts.as_ref(), &agent_id)
-            .map_err(|e| McpError::invalid_params(e, None))?;
-        let toml_str = identity
-            .to_toml()
-            .map_err(|e| McpError::internal_error(e, None))?;
-        Ok(CallToolResult::success(vec![Content::text(toml_str)]))
-    }
-
-    #[tool(
-        name = "evolve_identity",
-        description = "Suggest refinements to the agent's directives or traits based on \
-         the current session's learnings. The Daemon validates updates against the schema \
-         and the 4KB size cap, then overwrites the global identity.toml."
-    )]
-    async fn evolve_identity(
-        &self,
-        Parameters(params): Parameters<EvolveIdentityParams>,
-        OptionalExtension(parts): OptionalExtension<Parts>,
-    ) -> Result<CallToolResult, McpError> {
-        self.reject_if_nursery(parts.as_ref())?;
-        let agent_id = self.resolve_sync_agent_id(parts.as_ref())?;
-        let (seed_id, mut identity) = load_bound_seed_identity(&self.db, parts.as_ref(), &agent_id)
-            .map_err(|e| McpError::invalid_params(e, None))?;
-        identity
-            .evolve(params.new_directives, params.new_traits)
-            .map_err(|e| McpError::invalid_params(e, None))?;
-        crate::domain::seeds::save_seed(&seed_id, &identity)
-            .map_err(|e| McpError::internal_error(e, None))?;
-        let _ = self.db.set_state("gamification:identity_evolved", "1");
-        Ok(success_result("Identity evolved and saved successfully."))
-    }
-
-    #[tool(
-        name = "list_seeds",
-        description = "List all existing seed identities. Returns seed IDs and their names."
-    )]
-    async fn list_seeds(&self) -> Result<CallToolResult, McpError> {
-        let seed_ids =
-            crate::domain::seeds::list_seeds().map_err(|e| McpError::internal_error(e, None))?;
-        let mut seeds_info = Vec::new();
-        for seed_id in &seed_ids {
-            if let Ok(identity) = crate::domain::seeds::load_seed(seed_id) {
-                seeds_info.push(serde_json::json!({
-                    "id": seed_id,
-                    "name": identity.name,
-                }));
-            }
-        }
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&seeds_info).unwrap_or_default(),
-        )]))
-    }
-
-    #[tool(
-        name = "create_seed",
-        description = "Create a new seed identity. Validates name uniqueness, structure, and 4KB size cap."
-    )]
-    async fn create_seed(
-        &self,
-        Parameters(params): Parameters<CreateSeedParams>,
-        OptionalExtension(parts): OptionalExtension<Parts>,
-    ) -> Result<CallToolResult, McpError> {
-        self.reject_if_nursery(parts.as_ref())?;
-        let seed_id = crate::domain::nursery::slugify(&params.name);
-        let identity = crate::domain::seeds::SeedIdentity {
-            name: params.name,
-            created_at: chrono::Utc::now(),
-            directives: params.directives.unwrap_or_default(),
-            traits: params.traits.unwrap_or_default(),
-        };
-        crate::domain::seeds::save_seed(&seed_id, &identity)
-            .map_err(|e| McpError::invalid_params(e, None))?;
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Seed '{seed_id}' created successfully."
-        ))]))
-    }
-
-    #[tool(
-        name = "remove_seed",
-        description = "Remove a seed identity completely by ID."
-    )]
-    async fn remove_seed(
-        &self,
-        Parameters(params): Parameters<RemoveSeedParams>,
-    ) -> Result<CallToolResult, McpError> {
-        crate::domain::seeds::remove_seed(&params.seed_id)
-            .map_err(|e| McpError::invalid_params(e, None))?;
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Seed '{}' removed successfully.",
-            params.seed_id
-        ))]))
-    }
-
-    #[tool(
-        name = "skill_list",
-        description = "List skills available to this agent from the dynamic skill store — the \
-         union of skills already fetched into ~/.canopy/skills/ and the catalogs of every \
-         git source configured under [skills] in ~/.canopy/config.toml. Each entry reports \
-         name, one-line description, source URL, and whether it is already installed \
-         (fetched locally, served instantly) or merely available (fetch it on demand with \
-         skill_get, which clones it into the store transparently). Call this first to \
-         discover what's available before deciding which skill_get to call — this system \
-         works across every harness, not just one platform's local skills folder."
-    )]
-    async fn skill_list(&self) -> Result<CallToolResult, McpError> {
-        let store = Arc::clone(&self.dynamic_skills);
-        let entries = tokio::task::spawn_blocking(move || store.list())
-            .await
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&entries).unwrap_or_default(),
-        )]))
-    }
-
-    #[tool(
-        name = "skill_get",
-        description = "Fetch a skill's full instructions by name from the dynamic skill \
-         store. If the skill isn't in the local store yet, clones it on demand from its \
-         configured git source; if it is present but its TTL has expired, transparently \
-         checks the source for updates and refreshes the local copy first (network failures \
-         during that check are non-fatal — the last-known-good copy is served). Returns the \
-         SKILL.md/INSTRUCTIONS.md instructions plus any reference files (inlined when small, \
-         otherwise listed by store path). Call skill_list first to find valid skill names."
-    )]
-    async fn skill_get(
-        &self,
-        Parameters(params): Parameters<SkillGetParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let store = Arc::clone(&self.dynamic_skills);
-        let content = tokio::task::spawn_blocking(move || store.get(&params.name))
-            .await
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?
-            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&content).unwrap_or_default(),
-        )]))
-    }
-
-    #[tool(
-        name = "intelligence_list_projects",
-        description = "List all indexed projects for the project picker. \
-         Returns project nodes with their hash, name, and description. \
-         Supports optional query filtering by name/body."
-    )]
-    async fn intelligence_list_projects(
-        &self,
-        Parameters(params): Parameters<IntelligenceListProjectsParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let limit = params.limit.unwrap_or(20).min(100);
-        let projects = self
-            .db
-            .list_intelligence_projects(params.query.as_deref(), limit)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-
-        let projects_json: Vec<serde_json::Value> = projects
-            .iter()
-            .map(|p| {
-                serde_json::json!({
-                    "id": p.id,
-                    "title": p.title,
-                    "body": p.body,
-                    "project_hash": p.project_hash,
-                    "metadata": p.metadata.as_ref().and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok()),
-                    "updated_at": p.updated_at,
-                })
-            })
-            .collect();
-
-        let out = serde_json::json!({
-            "count": projects_json.len(),
-            "projects": projects_json,
-        });
-
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&out).unwrap_or_default(),
-        )]))
-    }
-
-    #[tool(
-        name = "intelligence_link_projects",
-        description = "Create a typed relationship between two indexed projects. \
-         Relation must be one of: depends_on, complements, extends, publishes \
-         (relates_to is accepted as legacy). 'contains' is derived from registry \
-         paths and rejected here. Both projects must exist as kind='project' \
-         nodes in the intelligence graph."
-    )]
-    async fn intelligence_link_projects(
-        &self,
-        Parameters(params): Parameters<IntelligenceLinkProjectsParams>,
-    ) -> Result<CallToolResult, McpError> {
-        if let Err(e) = validate_non_empty(&params.from_project_hash, "from_project_hash") {
-            return Ok(error_result(&e));
-        }
-        if let Err(e) = validate_non_empty(&params.to_project_hash, "to_project_hash") {
-            return Ok(error_result(&e));
-        }
-
-        let relation = params.relation.as_deref().unwrap_or("relates_to");
-        if let Err(e) = validate_non_empty(relation, "Relation") {
-            return Ok(error_result(&e));
-        }
-        if let Err(e) = crate::domain::project::validate_project_relation(relation) {
-            return Ok(error_result(&e.to_string()));
-        }
-        if relation == "contains" {
-            return Ok(error_result(
-                "relation 'contains' is derived from registry paths — it cannot be hand-linked",
-            ));
-        }
-
-        let edge = self
-            .db
-            .link_projects(
-                &params.from_project_hash,
-                &params.to_project_hash,
-                relation,
-                params.weight,
-            )
-            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-
-        let out = serde_json::json!({
-            "edge_id": edge.id,
-            "from_node_id": edge.from_node_id,
-            "to_node_id": edge.to_node_id,
-            "relation": edge.relation,
-            "weight": edge.weight,
-        });
-
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&out).unwrap_or_default(),
-        )]))
-    }
-
-    #[tool(
-        name = "graph_create",
-        description = "Create a graph container for a background graph of specs and nodes. \
-        Hooks are not retroactive — a hook registered after its event has already happened does not fire."
-    )]
-    async fn graph_create(
-        &self,
-        Parameters(params): Parameters<GraphCreateParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let name = params.name.trim();
-        if let Err(e) = validate_non_empty(name, "Graph name") {
-            return Ok(error_result(&e));
-        }
-        let workdir = params.workdir.trim();
-        if let Err(e) = validate_non_empty(workdir, "Graph workdir") {
-            return Ok(error_result(&e));
-        }
-        if let Err(e) = validate_absolute_dir(workdir) {
-            return Ok(error_result(&e));
-        }
-
-        let trigger = match build_graph_trigger(&params.trigger) {
-            Ok(trigger) => trigger,
-            Err(e) => return Ok(error_result(&e)),
-        };
-
-        let lp = Graph {
-            archived: false,
-            paused_by_reconciliation: false,
-            infra_node_id: params
-                .infra_node_id
-                .filter(|value| !value.trim().is_empty()),
-            allow_dirty_start: params.allow_dirty_start,
-            id: uuid::Uuid::new_v4().to_string(),
-            name: name.to_string(),
-            description: params.description.filter(|value| !value.trim().is_empty()),
-            workdir: workdir.to_string(),
-            status: GraphStatus::Draft,
-            trigger,
-            created_at: chrono::Utc::now(),
-            started_at: None,
-            completed_at: None,
-            autorun_at: None,
-            auto_continue_at: None,
-            auto_continue_action: None,
-            active_run_queue_id: None,
-            hooks: std::collections::BTreeMap::new(),
-        };
-
-        self.db.insert_graph(&lp).map_err(internal_error)?;
-        if crate::domain::project::should_auto_register(std::path::Path::new(workdir)) {
-            if let Err(error) = self.db.register_project_path(std::path::Path::new(workdir)) {
-                tracing::debug!("Could not register graph project at {workdir}: {error}");
-            }
-        }
-        self.activate_graph_trigger(&lp).await;
-
-        Ok(build_id_result(&lp.id, "graph_id"))
-    }
-
-    #[tool(
-        name = "graph_update",
-        description = "Update graph metadata such as name, description, or workdir. \
-        Hooks are not retroactive — a hook registered after its event has already happened does not fire."
-    )]
-    async fn graph_update(
-        &self,
-        Parameters(params): Parameters<GraphUpdateParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let graph_id = match resolve_prefix_or_error(
-            &self.db,
-            params.graph_id.trim(),
-            Database::resolve_graph_id_by_prefix,
-            "graph",
-        ) {
-            Ok(id) => id,
-            Err(e) => return Ok(e),
-        };
-        if let Err(e) = validate_non_empty(&graph_id, "Graph ID") {
-            return Ok(error_result(&e));
-        }
-        if let Err(e) = validate_graph_exists(&self.db, &graph_id) {
-            return Ok(error_result(&e));
-        }
-
-        let name = match params.name.as_deref().map(str::trim) {
-            Some("") => return Ok(error_result("Graph name must not be empty.")),
-            Some(value) => Some(value),
-            None => None,
-        };
-        let description = params.description.as_ref().map(|value| {
-            value
-                .as_deref()
-                .map(str::trim)
-                .filter(|description| !description.is_empty())
-        });
-        let workdir = match params.workdir.as_deref().map(str::trim) {
-            Some("") => return Ok(error_result("Graph workdir must not be empty.")),
-            Some(value) => {
-                if let Err(e) = validate_absolute_dir(value) {
-                    return Ok(error_result(&e));
-                }
-                Some(value)
-            }
-            None => None,
-        };
-
-        // A provided `trigger` param (even kind = "manual") counts as an update.
-        let new_trigger = if params.trigger.is_some() {
-            match build_graph_trigger(&params.trigger) {
-                Ok(trigger) => Some(trigger),
-                Err(e) => return Ok(error_result(&e)),
-            }
-        } else {
-            None
-        };
-
-        // A provided `on_completed` param (even `null`, to clear it) counts
-        // as an update — same `Option<Option<_>>` shape as `description`.
-        let new_completion_hook = match &params.on_completed {
-            None => None,
-            Some(None) => Some(None),
-            Some(Some(hook_params)) => match build_graph_completion_hook(hook_params) {
-                Ok(hook) => Some(Some(hook)),
-                Err(e) => return Ok(error_result(&e)),
-            },
-        };
-
-        // Parse the new event-keyed `hooks` parameter. Each key must be a
-        // valid event name; each value is an ordered array of hook configs.
-        let new_hooks = match &params.hooks {
-            None => None,
-            Some(map) => {
-                let mut parsed =
-                    std::collections::BTreeMap::<GraphHookEvent, Vec<GraphCompletionHook>>::new();
-                for (event_name, hooks) in map {
-                    let Some(event) = GraphHookEvent::from_str(event_name) else {
-                        return Ok(error_result(&format!(
-                            "Invalid hook event '{}'. Must be one of: on_completed, on_failed, on_blocked, on_spec_completed.",
-                            event_name
-                        )));
-                    };
-                    let mut hook_list = Vec::new();
-                    for hook_params in hooks {
-                        match build_graph_completion_hook(hook_params) {
-                            Ok(hook) => hook_list.push(hook),
-                            Err(e) => return Ok(error_result(&e)),
-                        }
-                    }
-                    parsed.insert(event, hook_list);
-                }
-                Some(parsed)
-            }
-        };
-
-        let new_infra_node_id = match &params.infra_node_id {
-            None => None,
-            Some(None) => Some(None),
-            Some(Some(value)) => {
-                let trimmed = value.trim();
-                if trimmed.is_empty() {
-                    Some(None)
-                } else {
-                    Some(Some(trimmed.to_string()))
-                }
-            }
-        };
-
-        if let Err(e) = validate_at_least_one_bool(
-            &[
-                name.is_some(),
-                description.is_some(),
-                workdir.is_some(),
-                new_trigger.is_some(),
-                new_completion_hook.is_some(),
-                new_hooks.is_some(),
-                new_infra_node_id.is_some(),
-                params.allow_dirty_start.is_some(),
-            ],
-            "graph_update",
-        ) {
-            return Ok(error_result(&e));
-        }
-
-        self.db
-            .update_graph_details(&graph_id, name, description, workdir)
-            .map_err(internal_error)?;
-
-        if let Some(trigger) = new_trigger {
-            self.db
-                .update_graph_trigger(&graph_id, trigger.as_ref())
-                .map_err(internal_error)?;
-            let _ = self.watcher_engine.stop_graph_watcher(&graph_id).await;
-            if let Ok(Some(lp)) = self.db.get_graph(&graph_id) {
-                self.activate_graph_trigger(&lp).await;
-            }
-        }
-
-        if let Some(hooks_map) = new_hooks {
-            // Merge legacy `on_completed` into the hooks map if both are provided
-            let mut final_hooks = hooks_map;
-            if let Some(Some(hook)) = new_completion_hook {
-                final_hooks
-                    .entry(GraphHookEvent::OnCompleted)
-                    .or_default()
-                    .push(hook);
-            } else if let Some(None) = new_completion_hook {
-                // Explicitly clear on_completed when legacy param is null
-                final_hooks.remove(&GraphHookEvent::OnCompleted);
-            }
-            self.db
-                .update_graph_hooks(&graph_id, &final_hooks)
-                .map_err(internal_error)?;
-        } else if let Some(hook) = new_completion_hook {
-            // Legacy path: only update on_completed, preserve other events
-            self.db
-                .update_graph_completion_hook(&graph_id, hook.as_ref())
-                .map_err(internal_error)?;
-        }
-
-        if let Some(infra_node_id) = new_infra_node_id {
-            self.db
-                .update_graph_infra_node_id(&graph_id, infra_node_id.as_deref())
-                .map_err(internal_error)?;
-        }
-
-        if let Some(value) = params.allow_dirty_start {
-            self.db
-                .update_graph_allow_dirty_start(&graph_id, value)
-                .map_err(internal_error)?;
-        }
-
-        Ok(build_graph_update_response(&graph_id))
-    }
-
-    /// Reconcile a graph's live trigger wiring after create/update: wake the
-    /// cron scheduler for cron graphs, and start the file watcher for watch
-    /// graphs. Manual graphs need no wiring.
-    async fn activate_graph_trigger(&self, lp: &Graph) {
-        if lp.is_cron() {
-            self.scheduler_notify.notify_one();
-        } else if lp.is_watch() {
-            if let Err(e) = self.watcher_engine.start_graph_watcher(lp).await {
-                tracing::warn!("Graph '{}' saved but watcher failed to start: {}", lp.id, e);
-            }
-        }
-    }
-
-    #[tool(
-        name = "graph_add_spec",
-        description = "Add an ordered spec to an existing graph."
-    )]
-    async fn graph_add_spec(
-        &self,
-        Parameters(params): Parameters<GraphAddSpecParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let name = params.name.trim();
-        if let Err(e) = validate_non_empty(name, "Graph spec name") {
-            return Ok(error_result(&e));
-        }
-        let graph_id = match resolve_prefix_or_error(
-            &self.db,
-            params.graph_id.trim(),
-            Database::resolve_graph_id_by_prefix,
-            "graph",
-        ) {
-            Ok(id) => id,
-            Err(e) => return Ok(e),
-        };
-        if let Err(e) = validate_graph_exists(&self.db, &graph_id) {
-            return Ok(error_result(&e));
-        }
-
-        let existing_specs = self
-            .db
-            .list_graph_specs(&graph_id)
-            .map_err(internal_error)?;
-        if existing_specs
-            .iter()
-            .any(|spec| spec.position == params.position)
-        {
-            return Ok(error_result(&format!(
-                "Graph '{graph_id}' already has a spec at position {}.",
-                params.position
-            )));
-        }
-        let Some(description) = params.description.as_deref().map(str::trim) else {
-            return Ok(error_result(
-                "Graph spec description is required and must follow the minimum template.",
-            ));
-        };
-        if let Err(error) = validate_spec_description_template(description) {
-            return Ok(error_result(&error));
-        }
-
-        let spec = GraphSpec {
-            id: uuid::Uuid::new_v4().to_string(),
-            graph_id: Some(graph_id),
-            name: name.to_string(),
-            description: Some(description.to_string()),
-            position: params.position,
-            parallelizable: params.parallelizable,
-            status: GraphSpecStatus::Pending,
-            started_at: None,
-            completed_at: None,
-            spec_start_head: None,
-            spec_start_dirty: None,
-            spec_end_dirty: None,
-            spec_end_dirty_paths: None,
-            spec_committed_head: None,
-            workdir: None,
-            completed_via: None,
-            completed_via_reason: None,
-            completed_via_at: None,
-        };
-        self.db.insert_graph_spec(&spec).map_err(internal_error)?;
-
-        Ok(build_id_result(&spec.id, "spec_id"))
-    }
-
-    #[tool(
-        name = "graph_update_spec",
-        description = "Update an existing graph spec."
-    )]
-    async fn graph_update_spec(
-        &self,
-        Parameters(params): Parameters<GraphUpdateSpecParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let spec_id = match resolve_prefix_or_error(
-            &self.db,
-            params.spec_id.trim(),
-            Database::resolve_spec_id_by_prefix,
-            "spec",
-        ) {
-            Ok(id) => id,
-            Err(e) => return Ok(e),
-        };
-        let spec = match validate_spec_exists(&self.db, &spec_id) {
-            Ok(spec) => spec,
-            Err(e) => return Ok(error_result(&e)),
-        };
-
-        let name = match params.name.as_deref().map(str::trim) {
-            Some("") => return Ok(error_result("Graph spec name must not be empty.")),
-            Some(value) => Some(value),
-            None => None,
-        };
-        let description = match params.description.as_deref().map(str::trim) {
-            Some("") => {
-                return Ok(error_result(
-                    "Graph spec description must not be empty and must follow the template.",
-                ))
-            }
-            Some(value) => {
-                if let Err(error) = validate_spec_description_template(value) {
-                    return Ok(error_result(&error));
-                }
-                Some(value)
-            }
-            None => None,
-        };
-
-        if let Some(position) = params.position {
-            if let Err(e) =
-                validate_position_conflict(&self.db, spec.graph_id.as_deref(), &spec_id, position)
-            {
-                return Ok(error_result(&e));
-            }
-        }
-
-        if let Err(e) = validate_at_least_one_bool(
-            &[
-                name.is_some(),
-                description.is_some(),
-                params.position.is_some(),
-                params.parallelizable.is_some(),
-            ],
-            "graph_update_spec",
-        ) {
-            return Ok(error_result(&e));
-        }
-
-        self.db
-            .update_graph_spec_details(
-                &spec_id,
-                name,
-                description,
-                params.position,
-                params.parallelizable,
-            )
-            .map_err(internal_error)?;
-
-        Ok(build_spec_update_response(&spec_id))
-    }
-
-    #[tool(
-        name = "graph_remove_spec",
-        description = "Unbind a spec from a graph, making it a standalone backlog spec. The spec's execution history is preserved. Refuses if the spec is currently running."
-    )]
-    async fn graph_remove_spec(
-        &self,
-        Parameters(params): Parameters<GraphRemoveSpecParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let graph_id = match resolve_prefix_or_error(
-            &self.db,
-            params.graph_id.trim(),
-            Database::resolve_graph_id_by_prefix,
-            "graph",
-        ) {
-            Ok(id) => id,
-            Err(e) => return Ok(e),
-        };
-        let spec_id = match resolve_prefix_or_error(
-            &self.db,
-            params.spec_id.trim(),
-            Database::resolve_spec_id_by_prefix,
-            "spec",
-        ) {
-            Ok(id) => id,
-            Err(e) => return Ok(e),
-        };
-        self.do_graph_remove_spec(&graph_id, &spec_id).await
-    }
-
-    #[tool(
-        name = "spec_create",
-        description = "Create a standalone spec (a backlog item) not yet assigned to any graph. Optionally tag it to a workdir for later filtering."
-    )]
-    async fn spec_create(
-        &self,
-        Parameters(params): Parameters<SpecCreateParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let name = params.name.trim();
-        if let Err(e) = validate_non_empty(name, "Spec name") {
-            return Ok(error_result(&e));
-        }
-        let description = params.description.trim();
-        if let Err(e) = validate_non_empty(description, "Spec description") {
-            return Ok(error_result(&e));
-        }
-        if let Err(error) = validate_spec_description_template(description) {
-            return Ok(error_result(&error));
-        }
-        let workdir = match params.workdir.as_deref().map(str::trim) {
-            Some("") | None => None,
-            Some(value) => {
-                if let Err(e) = validate_spec_workdir(value) {
-                    return Ok(error_result(&e));
-                }
-                Some(value.to_string())
-            }
-        };
-
-        let spec = GraphSpec {
-            id: uuid::Uuid::new_v4().to_string(),
-            graph_id: None,
-            name: name.to_string(),
-            description: Some(description.to_string()),
-            position: 0,
-            parallelizable: false,
-            status: GraphSpecStatus::Pending,
-            started_at: None,
-            completed_at: None,
-            spec_start_head: None,
-            spec_start_dirty: None,
-            spec_end_dirty: None,
-            spec_end_dirty_paths: None,
-            spec_committed_head: None,
-            workdir,
-            completed_via: None,
-            completed_via_reason: None,
-            completed_via_at: None,
-        };
-        self.db.insert_graph_spec(&spec).map_err(internal_error)?;
-
-        Ok(build_id_result(&spec.id, "spec_id"))
-    }
-
-    #[tool(
-        name = "spec_list",
-        description = "List standalone/backlog specs, optionally filtered by workdir tag, status, or unassigned-only. \
-         Supports limit/offset pagination; the default page fits the result budget. \
-         Pass offset to page past it."
-    )]
-    async fn spec_list(
-        &self,
-        Parameters(params): Parameters<SpecListParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let status = match params.status.as_deref().map(str::trim) {
-            Some(value) => match validate_spec_status(value) {
-                Ok(status) => Some(status),
-                Err(e) => return Ok(error_result(&e)),
-            },
-            None => None,
-        };
-
-        let specs: Vec<_> = self
-            .db
-            .list_specs(
-                params.workdir.as_deref(),
-                status,
-                params.unassigned_only.unwrap_or(false),
-            )
-            .map_err(internal_error)?
-            .into_iter()
-            // The blank-name row a spec-less / idea-driven run binds to its
-            // graph to carry `{{spec_content}}` is engine bookkeeping, not work
-            // — never a user-authored spec (`graph_add_spec` rejects an empty
-            // name), so it must not surface here. Trimmed to match the
-            // engine's bookkeeping sentinel (`is_no_spec_placeholder`).
-            .filter(|s| !s.name.trim().is_empty())
-            .collect();
-
-        let include_descriptions = params.include_descriptions.unwrap_or(false);
-        let limit = params
-            .limit
-            .unwrap_or(SPEC_LIST_DEFAULT_LIMIT)
-            .clamp(1, 200) as usize;
-        let offset = params.offset.unwrap_or(0) as usize;
-        let total = specs.len();
-        let visible: Vec<_> = specs.iter().skip(offset).take(limit).collect();
-        let returned = visible.len();
-        let remaining = total.saturating_sub(offset.saturating_add(returned));
-        let truncated = remaining > 0;
-        let omitted = remaining;
-
-        let mut body = serde_json::json!({
-            "specs": visible.iter().map(|s| spec_summary_json(s, include_descriptions)).collect::<Vec<_>>(),
-            "total": total,
-            "limit": limit,
-            "offset": offset,
-            "returned": returned,
-        });
-        if truncated {
-            body["truncated"] = serde_json::json!(true);
-            body["omitted"] = serde_json::json!(omitted);
-        }
-
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&body).unwrap_or_default(),
-        )]))
-    }
-
-    #[tool(
-        name = "spec_update",
-        description = "Update a standalone spec's name, description, and/or workdir tag."
-    )]
-    async fn spec_update(
-        &self,
-        Parameters(params): Parameters<SpecUpdateParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let spec_id = match resolve_prefix_or_error(
-            &self.db,
-            params.spec_id.trim(),
-            Database::resolve_spec_id_by_prefix,
-            "spec",
-        ) {
-            Ok(id) => id,
-            Err(e) => return Ok(e),
-        };
-        if let Err(e) = validate_spec_exists(&self.db, &spec_id) {
-            return Ok(error_result(&e));
-        }
-
-        let name = match params.name.as_deref().map(str::trim) {
-            Some("") => return Ok(error_result("Spec name must not be empty.")),
-            Some(value) => Some(value),
-            None => None,
-        };
-        let description = match params.description.as_deref().map(str::trim) {
-            Some("") => {
-                return Ok(error_result(
-                    "Spec description must not be empty and must follow the template.",
-                ))
-            }
-            Some(value) => {
-                if let Err(error) = validate_spec_description_template(value) {
-                    return Ok(error_result(&error));
-                }
-                Some(value)
-            }
-            None => None,
-        };
-        let workdir = match &params.workdir {
-            Some(Some(value)) => {
-                let trimmed = value.trim();
-                if let Err(e) = validate_spec_workdir(trimmed) {
-                    return Ok(error_result(&e));
-                }
-                Some(Some(trimmed))
-            }
-            Some(None) => Some(None),
-            None => None,
-        };
-
-        if let Err(e) = validate_at_least_one_bool(
-            &[name.is_some(), description.is_some(), workdir.is_some()],
-            "spec_update",
-        ) {
-            return Ok(error_result(&e));
-        }
-
-        self.db
-            .update_spec_tag_details(&spec_id, name, description, workdir)
-            .map_err(internal_error)?;
-
-        Ok(build_spec_update_response(&spec_id))
-    }
-
-    #[tool(
-        name = "spec_set_status",
-        description = "Administratively transition a standalone spec's status (completed, skipped, or pending). Rejects if the spec is bound to a graph or has an active run."
-    )]
-    async fn spec_set_status(
-        &self,
-        Parameters(params): Parameters<SpecSetStatusParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let spec_id = match resolve_prefix_or_error(
-            &self.db,
-            params.spec_id.trim(),
-            Database::resolve_spec_id_by_prefix,
-            "spec",
-        ) {
-            Ok(id) => id,
-            Err(e) => return Ok(e),
-        };
-        if let Err(e) = validate_spec_exists(&self.db, &spec_id) {
-            return Ok(error_result(&e));
-        }
-
-        let status = match validate_spec_set_status_target(params.status.as_str()) {
-            Ok(s) => s,
-            Err(e) => return Ok(error_result(&e)),
-        };
-
-        let reason = params.reason.trim();
-        if reason.is_empty() {
-            return Ok(error_result("Reason must not be empty."));
-        }
-
-        match self.db.set_spec_admin_status(&spec_id, status, reason)
-            .map_err(internal_error)? {
-            SpecAdminStatusOutcome::Success => {
-                Ok(success_result(&format!(
-                    "Spec '{spec_id}' set to '{}' (admin): {reason}",
-                    status.as_str()
-                )))
-            },
-            SpecAdminStatusOutcome::NotFound => {
-                Ok(error_result(&format!("Spec '{spec_id}' not found.")))
-            },
-            SpecAdminStatusOutcome::NotStandalone(graph_id) => {
-                Ok(error_result(&format!(
-                    "Spec '{spec_id}' is bound to graph '{graph_id}'; spec_set_status only \
-                     administers standalone specs."
-                )))
-            },
-            SpecAdminStatusOutcome::ActiveRun { graph_id, run_id } => {
-                Ok(error_result(&format!(
-                    "Spec '{spec_id}' is attached to an active run (graph '{graph_id}', run '{run_id}'); \
-                     it cannot be administratively transitioned while running."
-                )))
-            },
-        }
-    }
-
-    #[tool(
-        name = "spec_delete",
-        description = "Delete a standalone spec. Refuses to delete a spec that's bound to a graph."
-    )]
-    async fn spec_delete(
-        &self,
-        Parameters(params): Parameters<SpecDeleteParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let spec_id = match resolve_prefix_or_error(
-            &self.db,
-            params.spec_id.trim(),
-            Database::resolve_spec_id_by_prefix,
-            "spec",
-        ) {
-            Ok(id) => id,
-            Err(e) => return Ok(e),
-        };
-        let spec = match validate_spec_exists(&self.db, &spec_id) {
-            Ok(spec) => spec,
-            Err(e) => return Ok(error_result(&e)),
-        };
-        if let Err(e) = validate_spec_deletable(&spec) {
-            return Ok(error_result(&e));
-        }
-
-        self.db
-            .delete_graph_spec(&spec_id)
-            .map_err(internal_error)?;
-
-        Ok(success_result(&format!("Spec '{spec_id}' deleted.")))
-    }
-
-    #[tool(
-        name = "spec_section_get",
-        description = "Extract a single section from a spec by its canonical tag name. Returns the markdown body of the requested section."
-    )]
-    async fn spec_section_get(
-        &self,
-        Parameters(params): Parameters<SpecSectionGetParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let spec_id = match resolve_prefix_or_error(
-            &self.db,
-            params.spec_id.trim(),
-            Database::resolve_spec_id_by_prefix,
-            "spec",
-        ) {
-            Ok(id) => id,
-            Err(e) => return Ok(e),
-        };
-        let spec = match validate_spec_exists(&self.db, &spec_id) {
-            Ok(spec) => spec,
-            Err(e) => return Ok(error_result(&e)),
-        };
-
-        let section_name = params.section.trim();
-        let Some(section) = SpecSection::from_tag(section_name) else {
-            let valid = SpecSection::all()
-                .iter()
-                .map(|s| format!("<{}>", s.tag()))
-                .collect::<Vec<_>>()
-                .join(", ");
-            return Ok(error_result(&format!(
-                "unknown section '{}'. Valid sections: {}",
-                section_name, valid
-            )));
-        };
-
-        let description = spec.description.as_deref().unwrap_or("");
-        match extract_spec_section(description, section) {
-            Ok(SpecSectionResult::Tagged { content, present }) => {
-                let body = serde_json::json!({
-                    "spec_id": spec_id,
-                    "section": section.tag(),
-                    "content": content,
-                    "present": present,
-                    "needs_conversion": false,
-                });
-                Ok(CallToolResult::success(vec![Content::text(
-                    serde_json::to_string_pretty(&body).unwrap_or_default(),
-                )]))
-            }
-            Ok(SpecSectionResult::Legacy { content, present }) => {
-                let body = serde_json::json!({
-                    "spec_id": spec_id,
-                    "section": section.tag(),
-                    "content": content,
-                    "present": present,
-                    "needs_conversion": true,
-                });
-                Ok(CallToolResult::success(vec![Content::text(
-                    serde_json::to_string_pretty(&body).unwrap_or_default(),
-                )]))
-            }
-            Err(e) => Ok(error_result(&format!(
-                "failed to extract section <{}> from spec '{}': {}",
-                section.tag(),
-                spec_id,
-                e
-            ))),
-        }
-    }
-
-    #[tool(
-        name = "spec_convert",
-        description = "Convert all legacy heading-format specs to the tagged <spec> format. Skips already-tagged specs and running specs. Returns a structured report."
-    )]
-    async fn spec_convert(&self) -> Result<CallToolResult, McpError> {
-        let all_specs = self
-            .db
-            .list_all_specs_for_conversion()
-            .map_err(internal_error)?;
-
-        let mut scanned = 0u64;
-        let mut converted = 0u64;
-        let mut already_tagged = 0u64;
-        let mut deferred_running = 0u64;
-        let mut invalid_legacy = 0u64;
-        let mut converted_ids: Vec<String> = Vec::new();
-        let mut deferred: Vec<serde_json::Value> = Vec::new();
-        let mut errors: Vec<serde_json::Value> = Vec::new();
-
-        for spec in &all_specs {
-            scanned += 1;
-            let description = spec.description.as_deref().unwrap_or("");
-
-            if description.trim().is_empty() {
-                continue;
-            }
-
-            match parse_spec_description(description) {
-                Ok(ParsedSpecDescription::Tagged(_)) => {
-                    already_tagged += 1;
-                }
-                Ok(ParsedSpecDescription::Legacy(_)) => {
-                    if spec.status == GraphSpecStatus::Running {
-                        deferred_running += 1;
-                        deferred.push(serde_json::json!({
-                            "spec_id": spec.id,
-                            "reason": "spec is running; conversion deferred so a running graph cannot observe a mid-flight format change",
-                        }));
-                        continue;
-                    }
-                    match convert_legacy_spec_description(description) {
-                        Ok(new_body) => {
-                            match self
-                                .db
-                                .update_spec_description_if_not_running(&spec.id, &new_body)
-                            {
-                                Ok(true) => {
-                                    converted += 1;
-                                    converted_ids.push(spec.id.clone());
-                                }
-                                Ok(false) => {
-                                    deferred_running += 1;
-                                    deferred.push(serde_json::json!({
-                                        "spec_id": spec.id,
-                                        "reason": "spec became running before the write; conversion deferred",
-                                    }));
-                                }
-                                Err(e) => {
-                                    invalid_legacy += 1;
-                                    errors.push(serde_json::json!({
-                                        "spec_id": spec.id,
-                                        "error": e.to_string(),
-                                    }));
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            invalid_legacy += 1;
-                            errors.push(serde_json::json!({
-                                "spec_id": spec.id,
-                                "error": e.to_string(),
-                            }));
-                        }
-                    }
-                }
-                Err(_) => {
-                    if spec.status == GraphSpecStatus::Running {
-                        deferred_running += 1;
-                        deferred.push(serde_json::json!({
-                            "spec_id": spec.id,
-                            "reason": "spec is running and body does not parse; left untouched for human repair after it stops running",
-                        }));
-                    } else {
-                        invalid_legacy += 1;
-                        errors.push(serde_json::json!({
-                            "spec_id": spec.id,
-                            "error": "unparseable spec body",
-                        }));
-                    }
-                }
-            }
-        }
-
-        let report = serde_json::json!({
-            "scanned": scanned,
-            "converted": converted,
-            "already_tagged": already_tagged,
-            "deferred_running": deferred_running,
-            "invalid_legacy": invalid_legacy,
-            "converted_ids": converted_ids,
-            "deferred": deferred,
-            "errors": errors,
-        });
-
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&report).unwrap_or_default(),
-        )]))
-    }
-
-    #[tool(
-        name = "blueprint_list",
-        description = "List every node blueprint (builtin and custom) — predesigned, reusable node templates for graph_add_node."
-    )]
-    async fn blueprint_list(&self) -> Result<CallToolResult, McpError> {
-        let blueprints = self.db.list_blueprints().map_err(internal_error)?;
-
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&serde_json::json!({
-                "blueprints": blueprints.iter().map(blueprint_json).collect::<Vec<_>>(),
-            }))
-            .unwrap_or_default(),
-        )]))
-    }
-
-    #[tool(
-        name = "blueprint_create",
-        description = "Create a custom node blueprint: a reusable {name, kind, config template} that graph_add_node can reference by name."
-    )]
-    async fn blueprint_create(
-        &self,
-        Parameters(params): Parameters<BlueprintCreateParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let name = params.name.trim();
-        if let Err(e) = validate_non_empty(name, "Blueprint name") {
-            return Ok(error_result(&e));
-        }
-        if self
-            .db
-            .get_blueprint_by_name(name)
-            .map_err(internal_error)?
-            .is_some()
-        {
-            return Ok(error_result(&format!(
-                "Blueprint '{name}' already exists; choose a different name."
-            )));
-        }
-
-        let kind = match validate_node_kind(params.kind.trim()) {
-            Ok(kind) => kind,
-            Err(e) => return Ok(error_result(&e)),
-        };
-        let config = serde_json::Value::Object(params.config);
-        if let Err(e) = validate_node_config(kind, &config) {
-            return Ok(error_result(&e));
-        }
-
-        let blueprint = Blueprint {
-            id: uuid::Uuid::new_v4().to_string(),
-            name: name.to_string(),
-            kind,
-            config,
-            builtin: false,
-            created_at: chrono::Utc::now(),
-        };
-        self.db
-            .insert_blueprint(&blueprint)
-            .map_err(internal_error)?;
-
-        Ok(build_id_result(&blueprint.id, "blueprint_id"))
-    }
-
-    #[tool(
-        name = "blueprint_delete",
-        description = "Delete a custom node blueprint. Refuses to delete a builtin."
-    )]
-    async fn blueprint_delete(
-        &self,
-        Parameters(params): Parameters<BlueprintDeleteParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let name = params.name.trim();
-        let Some(blueprint) = self
-            .db
-            .get_blueprint_by_name(name)
-            .map_err(internal_error)?
-        else {
-            return Ok(error_result(&format!("Blueprint '{name}' not found.")));
-        };
-        if let Err(e) = validate_blueprint_deletable(&blueprint) {
-            return Ok(error_result(&e));
-        }
-
-        self.db
-            .delete_blueprint_by_name(name)
-            .map_err(internal_error)?;
-
-        Ok(success_result(&format!("Blueprint '{name}' deleted.")))
-    }
-
-    #[tool(
-        name = "graph_add_node",
-        description = "Add a graph node to an existing graph spec, or (via graph_id instead of spec_id) to the graph's top-level graph. Provide either a full 'config' (with 'kind'), or a 'blueprint' name (see blueprint_list) optionally shallow-merged with 'config_overrides'. An agent node also accepts `infra_retry_limit`/`infra_crash_max_seconds`/`infra_backoff_seconds` (defaults 2/60/30) to override the infra-crash retry budget for this node alone, taking precedence over its platform's config.toml value."
-    )]
-    async fn graph_add_node(
-        &self,
-        Parameters(params): Parameters<GraphAddNodeParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let name = params.name.trim();
-        if let Err(e) = validate_non_empty(name, "Graph node name") {
-            return Ok(error_result(&e));
-        }
-        let target = match resolve_graph_target(
-            &self.db,
-            params.spec_id.as_deref(),
-            params.graph_id.as_deref(),
-        ) {
-            Ok(target) => target,
-            Err(e) => return Ok(error_result(&e)),
-        };
-
-        let (kind, config) = match resolve_node_kind_and_config(
-            &self.db,
-            params.kind.as_deref(),
-            params.config,
-            params.blueprint.as_deref(),
-            params.config_overrides,
-        ) {
-            Ok(result) => result,
-            Err(e) => return Ok(error_result(&e)),
-        };
-        if let Err(e) = validate_not_join_kind(kind) {
-            return Ok(error_result(&e));
-        }
-        if let Err(e) = validate_node_config(kind, &config) {
-            return Ok(error_result(&e));
-        }
-
-        let (spec_id, graph_id, next_position) = match &target {
-            GraphTarget::Spec(spec_id) => {
-                let next_position = self
-                    .db
-                    .list_graph_nodes(spec_id)
-                    .map_err(internal_error)?
-                    .last()
-                    .map(|node| node.position + 1)
-                    .unwrap_or(1);
-                (Some(spec_id.clone()), None, next_position)
-            }
-            GraphTarget::Graph(graph_id) => {
-                let next_position = self
-                    .db
-                    .list_graph_nodes_for_graph(graph_id)
-                    .map_err(internal_error)?
-                    .last()
-                    .map(|node| node.position + 1)
-                    .unwrap_or(1);
-                (None, Some(graph_id.clone()), next_position)
-            }
-        };
-
-        let node = GraphNode {
-            id: uuid::Uuid::new_v4().to_string(),
-            spec_id,
-            graph_id: graph_id.clone(),
-            name: name.to_string(),
-            kind,
-            config,
-            position: next_position,
-            created_at: chrono::Utc::now(),
-        };
-        self.db.insert_graph_node(&node).map_err(internal_error)?;
-
-        // CM2: auto-wire a `Error` edge to the graph's infra node if set.
-        if let Some(ref lid) = graph_id {
-            if let Ok(Some(lp)) = self.db.get_graph(lid) {
-                if let Some(ref infra_node_id) = lp.infra_node_id {
-                    let edge = GraphEdge {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        spec_id: node.spec_id.clone(),
-                        graph_id: Some(lid.clone()),
-                        from_node: node.id.clone(),
-                        to_node: infra_node_id.clone(),
-                        condition: GraphEdgeCondition::Error,
-                    };
-                    let _ = self.db.insert_graph_edge(&edge);
-                }
-            }
-        }
-
-        Ok(build_id_result(&node.id, "node_id"))
-    }
-
-    #[tool(
-        name = "graph_update_node",
-        description = "Update an existing graph node. Config merges with the stored config by default (partial update: keys present are changed, keys absent are left as-is). Set `config_replace` to `true` to replace the entire config instead."
-    )]
-    async fn graph_update_node(
-        &self,
-        Parameters(params): Parameters<GraphUpdateNodeParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let node_id = match resolve_prefix_or_error(
-            &self.db,
-            params.node_id.trim(),
-            Database::resolve_graph_node_id_by_prefix,
-            "node",
-        ) {
-            Ok(id) => id,
-            Err(e) => return Ok(e),
-        };
-        let node = match validate_node_exists(&self.db, &node_id) {
-            Ok(node) => node,
-            Err(e) => return Ok(error_result(&e)),
-        };
-        if let Err(e) = validate_node_not_ensemble_owned(&self.db, &node_id) {
-            return Ok(error_result(&e));
-        }
-        // CM15 / FR5: `kind` and `position` are graph TOPOLOGY — the running
-        // engine resolves routing, entry-node selection and router-route
-        // coverage from a per-run snapshot and never re-reads them mid-run.
-        // Only node CONFIG (platform/model/effort/prompt/timeout/commit_rights/
-        // resume) is read fresh per dispatch. Accepting a kind/position change on
-        // a running graph would silently fail to affect routing — the exact
-        // "silent success" this spec removes — so refuse it, naming the graph's
-        // state. `name` and `config` stay editable while running.
-        if params.kind.is_some() || params.position.is_some() {
-            if let Err(e) = validate_topology_mutation_allowed(
-                &self.db,
-                node.spec_id.as_deref(),
-                node.graph_id.as_deref(),
-            ) {
-                return Ok(error_result(&e));
-            }
-        }
-
-        let name = match params.name.as_deref().map(str::trim) {
-            Some("") => return Ok(error_result("Graph node name must not be empty.")),
-            Some(value) => Some(value),
-            None => None,
-        };
-        let kind = match params.kind.as_deref().map(str::trim) {
-            Some("") => return Ok(error_result("Graph node kind must not be empty.")),
-            Some(value) => match validate_node_kind(value) {
-                Ok(kind) => Some(kind),
-                Err(e) => return Ok(error_result(&e)),
-            },
-            None => None,
-        };
-        if let Some(kind) = kind {
-            if let Err(e) = validate_not_join_kind(kind) {
-                return Ok(error_result(&e));
-            }
-        }
-
-        if let Some(position) = params.position {
-            if let Err(e) = validate_node_position_conflict(&self.db, &node, &node_id, position) {
-                return Ok(error_result(&e));
-            }
-        }
-
-        if let Err(e) = validate_at_least_one_bool(
-            &[
-                name.is_some(),
-                kind.is_some(),
-                params.config.is_some(),
-                params.position.is_some(),
-            ],
-            "graph_update_node",
-        ) {
-            return Ok(error_result(&e));
-        }
-
-        let config_replace = params.config_replace.unwrap_or(false);
-        let (effective_config, changed_keys) = match (&params.config, config_replace) {
-            (Some(provided), false) => {
-                let mut merged = node.config.as_object().cloned().unwrap_or_default();
-                let mut changed = Vec::new();
-                for (key, value) in provided {
-                    let old_value = merged.get(key);
-                    if old_value != Some(value) {
-                        changed.push(key.clone());
-                    }
-                    merged.insert(key.clone(), value.clone());
-                }
-                (serde_json::Value::Object(merged), changed)
-            }
-            (Some(provided), true) => {
-                let mut changed = Vec::new();
-                let default_map = serde_json::Map::new();
-                let stored_map = node.config.as_object().unwrap_or(&default_map);
-                for (key, value) in provided {
-                    if stored_map.get(key) != Some(value) {
-                        changed.push(key.clone());
-                    }
-                }
-                for key in stored_map.keys() {
-                    if !provided.contains_key(key) {
-                        changed.push(key.clone());
-                    }
-                }
-                (serde_json::Value::Object(provided.clone()), changed)
-            }
-            (None, _) => (node.config.clone(), Vec::new()),
-        };
-
-        if kind.is_some() || params.config.is_some() {
-            let effective_kind = kind.unwrap_or(node.kind);
-            if let Err(e) = validate_node_config(effective_kind, &effective_config) {
-                return Ok(error_result(&e));
-            }
-            // A router's routes must stay consistent with whatever edges
-            // already name them: no edge left pointing at a route that was
-            // just removed, and (once wiring has started) no declared route
-            // left without one — see `validate_router_route_coverage`.
-            if effective_kind == GraphNodeKind::Router {
-                let (routes, _fallback) = match parse_router_routes(&effective_config) {
-                    Ok(parsed) => parsed,
-                    Err(e) => return Ok(error_result(&e)),
-                };
-                let edges = match (&node.spec_id, &node.graph_id) {
-                    (Some(spec_id), _) => {
-                        self.db.list_graph_edges(spec_id).map_err(internal_error)?
-                    }
-                    (_, Some(graph_id)) => self
-                        .db
-                        .list_graph_edges_for_graph(graph_id)
-                        .map_err(internal_error)?,
-                    (None, None) => Vec::new(),
-                };
-                if let Err(e) = validate_router_edges_declared(&routes, &node_id, &edges) {
-                    return Ok(error_result(&e));
-                }
-                if let Err(e) = validate_router_route_coverage(&routes, &node_id, &edges) {
-                    return Ok(error_result(&e));
-                }
-            }
-        }
-
-        let config_to_store = if params.config.is_some() {
-            Some(&effective_config)
-        } else {
-            None
-        };
-
-        self.db
-            .update_graph_node_details(&node_id, name, kind, config_to_store, params.position)
-            .map_err(internal_error)?;
-
-        Ok(build_node_update_response_with_changes(
-            &node_id,
-            &changed_keys,
-        ))
-    }
-
-    #[tool(
-        name = "graph_add_edge",
-        description = "Connect two nodes with a routing condition, inside a graph spec's graph or (via graph_id instead of spec_id) the graph's top-level graph."
-    )]
-    async fn graph_add_edge(
-        &self,
-        Parameters(params): Parameters<GraphAddEdgeParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let condition = match validate_edge_condition_with_route(
-            params.condition.trim(),
-            params.route.as_deref(),
-        ) {
-            Ok(c) => c,
-            Err(e) => return Ok(error_result(&e)),
-        };
-        let from_node = match resolve_prefix_or_error(
-            &self.db,
-            params.from_node.trim(),
-            Database::resolve_graph_node_id_by_prefix,
-            "node",
-        ) {
-            Ok(id) => id,
-            Err(e) => return Ok(e),
-        };
-        let to_node = match resolve_prefix_or_error(
-            &self.db,
-            params.to_node.trim(),
-            Database::resolve_graph_node_id_by_prefix,
-            "node",
-        ) {
-            Ok(id) => id,
-            Err(e) => return Ok(e),
-        };
-        let target = match resolve_graph_target(
-            &self.db,
-            params.spec_id.as_deref(),
-            params.graph_id.as_deref(),
-        ) {
-            Ok(target) => target,
-            Err(e) => return Ok(error_result(&e)),
-        };
-
-        let nodes = match &target {
-            GraphTarget::Spec(spec_id) => {
-                self.db.list_graph_nodes(spec_id).map_err(internal_error)?
-            }
-            GraphTarget::Graph(graph_id) => self
-                .db
-                .list_graph_nodes_for_graph(graph_id)
-                .map_err(internal_error)?,
-        };
-        let has_from = nodes.iter().any(|node| node.id == from_node);
-        let has_to = nodes.iter().any(|node| node.id == to_node);
-        if !has_from || !has_to {
-            return Ok(error_result(
-                "Both graph edge endpoints must belong to the same spec or graph as the edge.",
-            ));
-        }
-        if let Err(e) = validate_node_not_ensemble_owned(&self.db, &from_node) {
-            return Ok(error_result(&e));
-        }
-        if let Err(e) = validate_node_not_ensemble_owned(&self.db, &to_node) {
-            return Ok(error_result(&e));
-        }
-        if let Err(e) = validate_route_edge_target(&self.db, &from_node, &condition) {
-            return Ok(error_result(&e));
-        }
-
-        let (spec_id, graph_id) = match target {
-            GraphTarget::Spec(spec_id) => (Some(spec_id), None),
-            GraphTarget::Graph(graph_id) => (None, Some(graph_id)),
-        };
-        let edge = GraphEdge {
-            id: uuid::Uuid::new_v4().to_string(),
-            spec_id,
-            graph_id,
-            from_node,
-            to_node,
-            condition,
-        };
-        self.db.insert_graph_edge(&edge).map_err(internal_error)?;
-
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&serde_json::json!({ "ok": true })).unwrap_or_default(),
-        )]))
-    }
-
-    #[tool(
-        name = "graph_update_edge",
-        description = "Update the routing condition and/or destination node of an existing graph edge. Omit to_node to leave the edge's target unchanged; provide it to retarget the edge in place (preserving its id and run history) instead of recreating it."
-    )]
-    async fn graph_update_edge(
-        &self,
-        Parameters(params): Parameters<GraphUpdateEdgeParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let edge_id = match resolve_prefix_or_error(
-            &self.db,
-            params.edge_id.trim(),
-            Database::resolve_edge_id_by_prefix,
-            "edge",
-        ) {
-            Ok(id) => id,
-            Err(e) => return Ok(e),
-        };
-        let edge = match validate_edge_exists(&self.db, &edge_id) {
-            Ok(e) => e,
-            Err(e) => return Ok(error_result(&e)),
-        };
-        if let Err(e) = validate_node_not_ensemble_owned(&self.db, &edge.from_node) {
-            return Ok(error_result(&e));
-        }
-        if let Err(e) = validate_node_not_ensemble_owned(&self.db, &edge.to_node) {
-            return Ok(error_result(&e));
-        }
-        let condition = match validate_edge_condition_with_route(
-            params.condition.trim(),
-            params.route.as_deref(),
-        ) {
-            Ok(c) => c,
-            Err(e) => return Ok(error_result(&e)),
-        };
-        if let Err(e) = validate_route_edge_target(&self.db, &edge.from_node, &condition) {
-            return Ok(error_result(&e));
-        }
-
-        let to_node = match &params.to_node {
-            Some(raw) => {
-                let trimmed = raw.trim();
-                if trimmed.is_empty() {
-                    None
-                } else {
-                    match resolve_prefix_or_error(
-                        &self.db,
-                        trimmed,
-                        Database::resolve_graph_node_id_by_prefix,
-                        "node",
-                    ) {
-                        Ok(id) => Some(id),
-                        Err(e) => return Ok(e),
-                    }
-                }
-            }
-            None => None,
-        };
-        let target_changed = to_node
-            .as_deref()
-            .is_some_and(|value| value != edge.to_node);
-        if target_changed {
-            if let Err(e) = retarget_graph_edge(&self.db, &edge.id, to_node.as_deref().unwrap()) {
-                return Ok(error_result(&e));
-            }
-        }
-
-        let condition_changed = edge.condition != condition;
-        if condition_changed {
-            self.db
-                .update_graph_edge_condition(&edge.id, &condition)
-                .map_err(internal_error)?;
-        }
-
-        if !condition_changed && !target_changed {
-            return Ok(success_result(&format!(
-                "Graph edge '{}' already uses condition '{}' and target unchanged.",
-                edge.id,
-                condition.as_str()
-            )));
-        }
-
-        Ok(success_result(&format!(
-            "Graph edge '{}' updated.",
-            edge.id
-        )))
-    }
-
-    #[tool(
-        name = "graph_delete_edge",
-        description = "Delete a single graph edge by id. Rejected while the owning graph is running — pause it first."
-    )]
-    async fn graph_delete_edge(
-        &self,
-        Parameters(params): Parameters<GraphDeleteEdgeParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let edge_id = match resolve_prefix_or_error(
-            &self.db,
-            params.edge_id.trim(),
-            Database::resolve_edge_id_by_prefix,
-            "edge",
-        ) {
-            Ok(id) => id,
-            Err(e) => return Ok(e),
-        };
-        match delete_graph_edge_checked(&self.db, &edge_id) {
-            Ok(edge) => Ok(success_result(&format!(
-                "Graph edge '{}' deleted.",
-                edge.id
-            ))),
-            Err(e) => Ok(error_result(&e)),
-        }
-    }
-
-    #[tool(
-        name = "graph_delete_node",
-        description = "Delete a graph node by id, cascading to every edge that names it as from_node or to_node. Rejected if the node is the graph's entry point, or while the owning graph is running — pause it first."
-    )]
-    async fn graph_delete_node(
-        &self,
-        Parameters(params): Parameters<GraphDeleteNodeParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let node_id = match resolve_prefix_or_error(
-            &self.db,
-            params.node_id.trim(),
-            Database::resolve_graph_node_id_by_prefix,
-            "node",
-        ) {
-            Ok(id) => id,
-            Err(e) => return Ok(e),
-        };
-        match delete_graph_node_checked(&self.db, &node_id) {
-            Ok(node) => Ok(success_result(&format!(
-                "Graph node '{}' deleted.",
-                node.id
-            ))),
-            Err(e) => Ok(error_result(&e)),
-        }
-    }
-
-    #[tool(
-        name = "graph_add_ensemble",
-        description = "Create an ensemble in ONE call: N (2-8) parallel agent-node members sharing one prompt by default, plus the quorum that waits for all of them, consolidates their outputs (attributed per member), and routes onward. Set `commit_rights: true` to make this ensemble the graph's designated committer (B37) — whichever member the running strategy dispatches becomes the committer for that run. Members differ by platform/model, and each may set its own prompt_override to review the same input from a different angle instead of sharing the template. Each member may also set its own timeout_minutes, overriding the ensemble's shared value for that member only. Each member (and the ensemble as a whole) may also set `infra_retry_limit`/`infra_crash_max_seconds`/`infra_backoff_seconds`, overriding the platform's config.toml value (then the engine default 2/60/30) for the infra-crash retry budget — member wins over ensemble. (Formerly called 'fusion' — retired to avoid colliding with OpenRouter's fusion technology.) on_pass_to/on_fail_to accept a node id or another ensemble's id (chained: the quorum fans out to every member of that ensemble, no intermediate node). Entry rewiring, extra entry sources, and deletion are graph_update_ensemble/graph_delete_ensemble."
-    )]
-    async fn graph_add_ensemble(
-        &self,
-        Parameters(params): Parameters<GraphAddEnsembleParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let name = params.name.trim();
-        if let Err(e) = validate_non_empty(name, "Ensemble name") {
-            return Ok(error_result(&e));
-        }
-
-        let blueprint_name = params
-            .blueprint
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty());
-        let blueprint = match blueprint_name {
-            Some(blueprint_name) => match self
-                .db
-                .get_ensemble_blueprint_by_name(blueprint_name)
-                .map_err(internal_error)?
-            {
-                Some(bp) => Some(bp),
-                None => {
-                    return Ok(error_result(&format!(
-                        "Unknown ensemble blueprint '{blueprint_name}'."
-                    )))
-                }
-            },
-            None => None,
-        };
-
-        let prompt_template: String = match params
-            .prompt_template
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            Some(explicit) => explicit.to_string(),
-            None => match &blueprint {
-                Some(bp) => bp.prompt_template.clone(),
-                None => {
-                    return Ok(error_result(
-                        "Provide prompt_template, or a blueprint that supplies one.",
-                    ))
-                }
-            },
-        };
-        let prompt_template = prompt_template.as_str();
-
-        let kind = match params.kind.as_deref().map(str::trim).unwrap_or("parallel") {
-            "parallel" => EnsembleKind::Parallel,
-            "cascade" => EnsembleKind::Cascade,
-            "round_robin" => EnsembleKind::RoundRobin,
-            other => {
-                return Ok(error_result(&format!(
-                "Invalid ensemble kind '{other}'. Must be one of: parallel, cascade, round_robin."
-            )))
-            }
-        };
-
-        let members: Vec<EnsembleMemberSpec> = match &params.members {
-            Some(explicit) => match validate_ensemble_members(explicit, kind) {
-                Ok(members) => members,
-                Err(e) => return Ok(error_result(&e)),
-            },
-            None => match &blueprint {
-                Some(bp) => bp.members.clone(),
-                None => {
-                    return Ok(error_result(
-                        "Provide members, or a blueprint that supplies them.",
-                    ))
-                }
-            },
-        };
-        let condition = match validate_edge_condition(params.condition.trim()) {
-            Ok(c) => c,
-            Err(e) => return Ok(error_result(&e)),
-        };
-
-        let target = match resolve_graph_target(
-            &self.db,
-            params.spec_id.as_deref(),
-            params.graph_id.as_deref(),
-        ) {
-            Ok(target) => target,
-            Err(e) => return Ok(error_result(&e)),
-        };
-        let existing_nodes = match &target {
-            GraphTarget::Spec(spec_id) => {
-                self.db.list_graph_nodes(spec_id).map_err(internal_error)?
-            }
-            GraphTarget::Graph(graph_id) => self
-                .db
-                .list_graph_nodes_for_graph(graph_id)
-                .map_err(internal_error)?,
-        };
-        let node_exists = |id: &str| existing_nodes.iter().any(|node| node.id == id);
-
-        let from_node = match resolve_prefix_or_error(
-            &self.db,
-            params.from_node.trim(),
-            Database::resolve_graph_node_id_by_prefix,
-            "node",
-        ) {
-            Ok(id) => id,
-            Err(e) => return Ok(e),
-        };
-        if !node_exists(&from_node) {
-            return Ok(error_result(&format!(
-                "Graph node '{from_node}' not found in the target graph."
-            )));
-        }
-        if let Err(e) = validate_node_not_ensemble_owned(&self.db, &from_node) {
-            return Ok(error_result(&format!(
-                "Cannot wire an ensemble's entry from an ensemble-owned node: {e} To chain ensembles, create this one from a plain node and then route the upstream ensemble's exit into it (graph_update_ensemble on_pass_to/on_fail_to accept an ensemble id)."
-            )));
-        }
-
-        let (owner_spec_id, owner_graph_id): (Option<String>, Option<String>) = match &target {
-            GraphTarget::Spec(spec_id) => (Some(spec_id.clone()), None),
-            GraphTarget::Graph(graph_id) => (None, Some(graph_id.clone())),
-        };
-        // An exit target is a plain node — or, to chain ensembles with no
-        // intermediate node, another ensemble's id (the quorum fans out to
-        // every member of that ensemble).
-        let on_pass_target = match resolve_chained_exit_ensemble(
-            &self.db,
-            params.on_pass_to.trim(),
-            "",
-            owner_spec_id.as_deref(),
-            owner_graph_id.as_deref(),
-        ) {
-            Ok(Some(target)) => target,
-            Ok(None) => {
-                let on_pass_to = match resolve_prefix_or_error(
-                    &self.db,
-                    params.on_pass_to.trim(),
-                    Database::resolve_graph_node_id_by_prefix,
-                    "node",
-                ) {
-                    Ok(id) => id,
-                    Err(e) => return Ok(e),
-                };
-                if let Err(e) = validate_non_empty(&on_pass_to, "on_pass_to") {
-                    return Ok(error_result(&e));
-                }
-                if !node_exists(&on_pass_to) {
-                    return Ok(error_result(&format!(
-                        "Graph node '{on_pass_to}' not found in the target graph."
-                    )));
-                }
-                if let Err(e) = validate_node_not_ensemble_owned(&self.db, &on_pass_to) {
-                    return Ok(error_result(&format!(
-                            "Cannot wire an ensemble's exit directly into another ensemble's members/quorum: {e} To route into the whole ensemble, pass its ensemble id as on_pass_to instead of a member/quorum node id."
-                        )));
-                }
-                EnsembleExitTarget::Node(on_pass_to)
-            }
-            Err(e) => return Ok(error_result(&e)),
-        };
-
-        let on_fail_target: Option<EnsembleExitTarget> = match &params.on_fail_to {
-            Some(raw) => {
-                match resolve_chained_exit_ensemble(
-                    &self.db,
-                    raw.trim(),
-                    "",
-                    owner_spec_id.as_deref(),
-                    owner_graph_id.as_deref(),
-                ) {
-                    Ok(Some(target)) => Some(target),
-                    Ok(None) => {
-                        match resolve_prefix_or_error(
-                            &self.db,
-                            raw.trim(),
-                            Database::resolve_graph_node_id_by_prefix,
-                            "node",
-                        ) {
-                            Ok(id) => {
-                                if !node_exists(&id) {
-                                    return Ok(error_result(&format!(
-                                        "Graph node '{id}' not found in the target graph."
-                                    )));
-                                }
-                                if let Err(e) = validate_node_not_ensemble_owned(&self.db, &id) {
-                                    return Ok(error_result(&format!(
-                                    "Cannot wire an ensemble's exit directly into another ensemble's members/quorum: {e} To route into the whole ensemble, pass its ensemble id as on_fail_to instead of a member/quorum node id."
-                                    )));
-                                }
-                                Some(EnsembleExitTarget::Node(id))
-                            }
-                            Err(e) => return Ok(e),
-                        }
-                    }
-                    Err(e) => return Ok(error_result(&e)),
-                }
-            }
-            None => None,
-        };
-
-        let min_pass = params
-            .min_pass
-            .or_else(|| blueprint.as_ref().and_then(|bp| bp.min_pass))
-            .unwrap_or(members.len() as i64);
-        if let Err(e) =
-            crate::domain::validation::validate_ensemble_min_pass(name, min_pass, members.len())
-        {
-            return Ok(error_result(&e));
-        }
-        let timeout_minutes = params
-            .timeout_minutes
-            .unwrap_or(DEFAULT_ENSEMBLE_MEMBER_TIMEOUT_MINUTES);
-        if timeout_minutes < 0 {
-            return Ok(error_result("timeout_minutes must not be negative."));
-        }
-        if let Some(straggler) = params.straggler_timeout_minutes {
-            if straggler < 0 {
-                return Ok(error_result(
-                    "straggler_timeout_minutes must not be negative.",
-                ));
-            }
-            // CB67/FR3: a parallel-quorum concept — meaningless once members
-            // run one at a time.
-            if kind != EnsembleKind::Parallel {
-                return Ok(error_result(&format!(
-                    "straggler_timeout_minutes has no meaning for a {} ensemble (it only bounds how long a parallel quorum waits for stragglers); omit it, or set kind: \"parallel\".",
-                    kind.as_str()
-                )));
-            }
-        }
-        let quorum_grace_minutes = params
-            .quorum_grace_minutes
-            .or_else(|| blueprint.as_ref().and_then(|bp| bp.quorum_grace_minutes));
-        if let Some(grace) = quorum_grace_minutes {
-            if grace < 0 {
-                return Ok(error_result("quorum_grace_minutes must not be negative."));
-            }
-            // CB67/FR3: applies only once a parallel quorum is met.
-            if kind != EnsembleKind::Parallel {
-                return Ok(error_result(&format!(
-                    "quorum_grace_minutes has no meaning for a {} ensemble (it only applies once a parallel quorum is met); omit it, or set kind: \"parallel\".",
-                    kind.as_str()
-                )));
-            }
-        }
-        for (field_name, value) in [
-            ("infra_retry_limit", params.infra_retry_limit),
-            ("infra_crash_max_seconds", params.infra_crash_max_seconds),
-            ("infra_backoff_seconds", params.infra_backoff_seconds),
-        ] {
-            if value.is_some_and(|v| v < 0) {
-                return Ok(error_result(&format!("{field_name} must not be negative.")));
-            }
-        }
-
-        let (spec_id, graph_id) = match &target {
-            GraphTarget::Spec(spec_id) => (Some(spec_id.clone()), None),
-            GraphTarget::Graph(graph_id) => (None, Some(graph_id.clone())),
-        };
-        let start_position = existing_nodes
-            .last()
-            .map(|node| node.position + 1)
-            .unwrap_or(1);
-
-        let on_pass_row = on_pass_target.row_target();
-        let on_pass_fan_out = match &on_pass_target {
-            EnsembleExitTarget::Node(_) => None,
-            EnsembleExitTarget::Ensemble { .. } => Some(on_pass_target.edge_targets()),
-        };
-        let (on_fail_row, on_fail_fan_out): (Option<String>, Option<Vec<String>>) =
-            match &on_fail_target {
-                None => (None, None),
-                Some(EnsembleExitTarget::Node(id)) => (Some(id.clone()), None),
-                Some(target) => (Some(target.row_target()), Some(target.edge_targets())),
-            };
-        let built = build_ensemble_unit(&EnsembleUnitSpec {
-            spec_id,
-            graph_id,
-            name,
-            prompt_template,
-            members: &members,
-            entry_from_node: &from_node,
-            entry_condition: condition,
-            on_pass_to: &on_pass_row,
-            on_pass_fan_out,
-            on_fail_to: on_fail_row.as_deref(),
-            on_fail_fan_out,
-            min_pass,
-            timeout_minutes,
-            straggler_timeout_minutes: params.straggler_timeout_minutes,
-            quorum_grace_minutes,
-            infra_retry_limit: params.infra_retry_limit,
-            infra_crash_max_seconds: params.infra_crash_max_seconds,
-            infra_backoff_seconds: params.infra_backoff_seconds,
-            start_position,
-            kind,
-            commit_rights: params.commit_rights.unwrap_or(false),
-        });
-
-        self.db
-            .insert_ensemble_unit(
-                &built.ensemble,
-                &built.members,
-                &built.member_nodes,
-                &built.join_node,
-                &built.edges,
-            )
-            .map_err(internal_error)?;
-
-        Ok(build_id_result(&built.ensemble.id, "ensemble_id"))
-    }
-
-    #[tool(
-        name = "graph_copy_node",
-        description = "Duplicate a graph node's CONFIG (never its runtime state) into a graph — the source's own by default, or a different spec/graph for a cross-graph copy. Optional overrides: name, and config_overrides shallow-merged over the copied config (e.g. swap prompt_template, platform, model, timeout_minutes). Optional wiring: entry_from_node/entry_condition (incoming edge) and on_pass_to/on_fail_to (outgoing edges). All ids are new. An unwired copy is valid and is reported as such — no edges are assumed."
-    )]
-    async fn graph_copy_node(
-        &self,
-        Parameters(params): Parameters<GraphCopyNodeParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let plan = match plan_node_copy(&self.db, &params) {
-            Ok(plan) => plan,
-            Err(e) => return Ok(error_result(&e)),
-        };
-
-        self.db
-            .insert_node_with_edges(&plan.node, &plan.edges)
-            .map_err(internal_error)?;
-
-        // CM2: auto-wire a `Error` edge to the graph's infra node if set.
-        if let Some(ref lid) = plan.node.graph_id {
-            if let Ok(Some(lp)) = self.db.get_graph(lid) {
-                if let Some(ref infra_node_id) = lp.infra_node_id {
-                    let already_has_error = plan.edges.iter().any(|e| {
-                        e.from_node == plan.node.id && e.condition == GraphEdgeCondition::Error
-                    });
-                    if !already_has_error {
-                        let edge = GraphEdge {
-                            id: uuid::Uuid::new_v4().to_string(),
-                            spec_id: plan.node.spec_id.clone(),
-                            graph_id: Some(lid.clone()),
-                            from_node: plan.node.id.clone(),
-                            to_node: infra_node_id.clone(),
-                            condition: GraphEdgeCondition::Error,
-                        };
-                        let _ = self.db.insert_graph_edge(&edge);
-                    }
-                }
-            }
-        }
-
-        let wired = !plan.edges.is_empty();
-        let mut mapping = serde_json::Map::new();
-        mapping.insert(plan.source_id.clone(), serde_json::json!(plan.node.id));
-        let note = node_copy_note(&plan.source_id, &plan.node.id, wired);
-        Ok(build_json_result(&serde_json::json!({
-            "node_id": plan.node.id,
-            "mapping": mapping,
-            "wired": wired,
-            "wiring": plan.wiring,
-            "copied_runtime_state": false,
-            "note": note,
-        })))
-    }
-
-    #[tool(
-        name = "graph_copy_ensemble",
-        description = "Duplicate a whole ensemble unit (members + quorum + shared prompt) — CONFIG only, never runtime state — in one call. Optional overrides: name, prompt_template (e.g. swap a proposer prompt for a review prompt), members (2-8 replacement), min_pass, timeout_minutes, straggler_timeout_minutes, and wiring (from_node/condition entry, on_pass_to/on_fail_to exit). Wiring defaults to the source's; for a cross-graph copy pass wiring that exists in the target graph. Every id is new; the response returns the full old→new id mapping and the wiring actually applied."
-    )]
-    async fn graph_copy_ensemble(
-        &self,
-        Parameters(params): Parameters<GraphCopyEnsembleParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let plan = match plan_ensemble_copy(&self.db, &params) {
-            Ok(plan) => plan,
-            Err(e) => return Ok(error_result(&e)),
-        };
-        let built = &plan.built;
-
-        self.db
-            .insert_ensemble_unit(
-                &built.ensemble,
-                &built.members,
-                &built.member_nodes,
-                &built.join_node,
-                &built.edges,
-            )
-            .map_err(internal_error)?;
-
-        // Full old→new id mapping. Member nodes map by position only when the
-        // members weren't replaced (otherwise there's no 1:1 correspondence).
-        let mut mapping = serde_json::Map::new();
-        mapping.insert(
-            plan.source_ensemble_id.clone(),
-            serde_json::json!(built.ensemble.id),
-        );
-        mapping.insert(
-            plan.source_join_node_id.clone(),
-            serde_json::json!(built.join_node.id),
-        );
-        if !plan.members_replaced {
-            for (old_id, new_node) in plan
-                .source_member_node_ids
-                .iter()
-                .zip(built.member_nodes.iter())
-            {
-                mapping.insert(old_id.clone(), serde_json::json!(new_node.id));
-            }
-        }
-        let new_member_node_ids: Vec<&str> = built
-            .member_nodes
-            .iter()
-            .map(|node| node.id.as_str())
-            .collect();
-
-        Ok(build_json_result(&serde_json::json!({
-            "ensemble_id": built.ensemble.id,
-            "join_node_id": built.join_node.id,
-            "mapping": mapping,
-            "members_replaced": plan.members_replaced,
-            "member_node_ids": new_member_node_ids,
-            "wiring": {
-                "entry_from_node": plan.entry_from_node,
-                "entry_condition": plan.entry_condition.as_str(),
-                "on_pass_to": plan.on_pass_to,
-                "on_fail_to": plan.on_fail_to,
-            },
-            "copied_runtime_state": false,
-            "note": format!(
-                "Copied ensemble '{}' as '{}' — wired from '{}' to '{}'{}.",
-                plan.source_ensemble_id,
-                built.ensemble.id,
-                plan.entry_from_node,
-                plan.on_pass_to,
-                plan.on_fail_to.as_deref().map(|f| format!(" (fail → '{f}')")).unwrap_or_default(),
-            ),
-        })))
-    }
-
-    #[tool(
-        name = "graph_update_ensemble",
-        description = "Update an ensemble's shared prompt (propagated to every member without its own prompt_override), member list (platform/model/prompt_override/timeout_minutes/infra_retry_limit/infra_crash_max_seconds/infra_backoff_seconds — added/removed/replaced by position), quorum config (min_pass, straggler_timeout_minutes, timeout_minutes, infra_retry_limit, infra_crash_max_seconds, infra_backoff_seconds — clearable with null like straggler_timeout_minutes), entry wiring (from_node/condition replaces every entry; add_entry_from/remove_entry_from add or detach one entry source so several nodes can enter with no relay), and/or exit wiring (on_pass_to/on_fail_to take a node id or another ensemble's id to chain quorums with no intermediate node) — all in one call, without touching individual member nodes directly. `commit_rights` sets whether this ensemble is the graph's designated committer (B37); editable on a running graph, same as prompt/quorum config."
-    )]
-    async fn graph_update_ensemble(
-        &self,
-        Parameters(params): Parameters<GraphUpdateEnsembleParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let ensemble_id = match resolve_prefix_or_error(
-            &self.db,
-            params.ensemble_id.trim(),
-            Database::resolve_ensemble_id_by_prefix,
-            "ensemble",
-        ) {
-            Ok(id) => id,
-            Err(e) => return Ok(e),
-        };
-        let Some(mut details) = self
-            .db
-            .get_ensemble_details(&ensemble_id)
-            .map_err(internal_error)?
-        else {
-            return Ok(error_result(&format!(
-                "Ensemble '{ensemble_id}' not found."
-            )));
-        };
-
-        if let Err(e) = validate_at_least_one_bool(
-            &[
-                params.kind.is_some(),
-                params.prompt_template.is_some(),
-                params.members.is_some(),
-                params.min_pass.is_some(),
-                params.straggler_timeout_minutes.is_some(),
-                params.quorum_grace_minutes.is_some(),
-                params.timeout_minutes.is_some(),
-                params.infra_retry_limit.is_some(),
-                params.infra_crash_max_seconds.is_some(),
-                params.infra_backoff_seconds.is_some(),
-                params.on_pass_to.is_some(),
-                params.on_fail_to.is_some(),
-                params.from_node.is_some(),
-                params.condition.is_some(),
-                params.add_entry_from.is_some(),
-                params.add_entry_condition.is_some(),
-                params.remove_entry_from.is_some(),
-                params.commit_rights.is_some(),
-            ],
-            "graph_update_ensemble",
-        ) {
-            return Ok(error_result(&e));
-        }
-
-        // CM30: validated here, before the member-resize/propagate branches
-        // below read these values to bake them into member configs and write
-        // them via `replace_ensemble_members`/`update_graph_node_details` — a
-        // rejected value must never land in the DB first. (The join-config
-        // block further down still owns straggler_timeout_minutes/
-        // quorum_grace_minutes/timeout_minutes, which only ever get written
-        // in that same block, so their late validation has no such gap.)
-        for (field_name, value) in [
-            ("infra_retry_limit", params.infra_retry_limit),
-            ("infra_crash_max_seconds", params.infra_crash_max_seconds),
-            ("infra_backoff_seconds", params.infra_backoff_seconds),
-        ] {
-            if let Some(Some(v)) = value {
-                if v < 0 {
-                    return Ok(error_result(&format!("{field_name} must not be negative.")));
-                }
-            }
-        }
-
-        // ── CB40 / FR1–FR4: refuse a write whose RESULTING (min_pass, member count)
-        // pair is one `graph_import` would reject. Pure arithmetic on values already in
-        // hand; runs before any row is written, so a refusal changes nothing (FR4).
-        // Only guards calls that actually touch `members` or `min_pass` (FR2) — an
-        // unrelated edit to a legacy-invalid ensemble is left for `graph_preflight`.
-        if params.members.is_some() || params.min_pass.is_some() {
-            let resulting_member_count = params
-                .members
-                .as_ref()
-                .map(|m| m.len())
-                .unwrap_or(details.members.len());
-            let resulting_min_pass = params.min_pass.unwrap_or(details.ensemble.min_pass);
-            if let Err(e) = crate::domain::validation::validate_ensemble_min_pass(
-                &details.ensemble.name,
-                resulting_min_pass,
-                resulting_member_count,
-            ) {
-                return Ok(error_result(&e));
-            }
-        }
-
-        // CM15 / FR5: the ensemble's execution strategy (`kind`) selects the
-        // fan-out path (`execute_ensemble` match on `ensemble.kind`) from the
-        // per-run snapshot and is not re-read mid-run. Its members, shared
-        // prompt and quorum config ARE read fresh per dispatch, so those stay
-        // editable on a running graph — repairing a dead member mid-run is the
-        // whole point. `kind` is refused here; entry and exit wiring (also
-        // topology, also snapshot-pinned) are refused further down, each next
-        // to the code that applies it. Every refusal names the graph's state.
-        if params.kind.is_some() {
-            if let Err(e) = validate_topology_mutation_allowed(
-                &self.db,
-                details.ensemble.spec_id.as_deref(),
-                details.ensemble.graph_id.as_deref(),
-            ) {
-                return Ok(error_result(&e));
-            }
-        }
-
-        if let Some(prompt_template) = &params.prompt_template {
-            if let Err(e) = validate_non_empty(prompt_template.trim(), "Ensemble prompt_template") {
-                return Ok(error_result(&e));
-            }
-        }
-
-        let new_kind: Option<EnsembleKind> = match params.kind.as_deref().map(str::trim) {
-            Some("parallel") => Some(EnsembleKind::Parallel),
-            Some("cascade") => Some(EnsembleKind::Cascade),
-            Some("round_robin") => Some(EnsembleKind::RoundRobin),
-            Some(other) => {
-                return Ok(error_result(&format!(
-                "Invalid ensemble kind '{other}'. Must be one of: parallel, cascade, round_robin."
-            )))
-            }
-            None => None,
-        };
-        let effective_kind = new_kind.unwrap_or(details.ensemble.kind);
-
-        // CB67/FR3: validated here, before any write below, same principle
-        // as the CM30 infra-field validation above — a rejected value must
-        // never land in the DB first. An explicit `null` (`Some(None)`) to
-        // CLEAR either field is allowed on any kind; only an explicit
-        // non-null value on a cascade/round_robin ensemble is rejected.
-        if effective_kind != EnsembleKind::Parallel {
-            if matches!(params.straggler_timeout_minutes, Some(Some(_))) {
-                return Ok(error_result(&format!(
-                    "straggler_timeout_minutes has no meaning for a {} ensemble (it only bounds how long a parallel quorum waits for stragglers); omit it, pass null to clear it, or keep/set kind: \"parallel\".",
-                    effective_kind.as_str()
-                )));
-            }
-            if matches!(params.quorum_grace_minutes, Some(Some(_))) {
-                return Ok(error_result(&format!(
-                    "quorum_grace_minutes has no meaning for a {} ensemble (it only applies once a parallel quorum is met); omit it, pass null to clear it, or keep/set kind: \"parallel\".",
-                    effective_kind.as_str()
-                )));
-            }
-        }
-
-        let mut cleared_grace_fields_for_kind_change = false;
-        if let Some(kind) = new_kind {
-            let rri = if kind == EnsembleKind::RoundRobin {
-                Some(Some(details.ensemble.round_robin_index.unwrap_or(0)))
-            } else {
-                Some(None)
-            };
-            self.db
-                .update_ensemble_kind(&ensemble_id, Some(kind), rri)
-                .map_err(internal_error)?;
-            details.ensemble.kind = kind;
-            if kind == EnsembleKind::RoundRobin {
-                details.ensemble.round_robin_index =
-                    Some(details.ensemble.round_robin_index.unwrap_or(0));
-            } else {
-                details.ensemble.round_robin_index = None;
-            }
-
-            // CB67/FR3: switching to a sequential kind retires any stored
-            // straggler_timeout_minutes/quorum_grace_minutes from this
-            // ensemble's parallel days — left in place they would silently
-            // reappear if someone switches back to parallel later, no longer
-            // matching what this call's caller sees today. The reject-block
-            // above already returned on an explicit non-null attempt, so from
-            // here every path leaves both fields None: an untouched field is
-            // auto-cleared here, an explicit null is cleared by the
-            // join-config block below like any other explicit clear.
-            if kind != EnsembleKind::Parallel
-                && (details.ensemble.straggler_timeout_minutes.is_some()
-                    || details.ensemble.quorum_grace_minutes.is_some())
-            {
-                let clear_straggler = params.straggler_timeout_minutes.is_none()
-                    && details.ensemble.straggler_timeout_minutes.is_some();
-                let clear_grace = params.quorum_grace_minutes.is_none()
-                    && details.ensemble.quorum_grace_minutes.is_some();
-                if clear_straggler || clear_grace {
-                    self.db
-                        .update_ensemble_join_config(
-                            &ensemble_id,
-                            None,
-                            clear_straggler.then_some(None),
-                            clear_grace.then_some(None),
-                            None,
-                            None,
-                            None,
-                            None,
-                        )
-                        .map_err(internal_error)?;
-                    if clear_straggler {
-                        details.ensemble.straggler_timeout_minutes = None;
-                    }
-                    if clear_grace {
-                        details.ensemble.quorum_grace_minutes = None;
-                    }
-                }
-                cleared_grace_fields_for_kind_change = true;
-            }
-        }
-
-        // CM28: `commit_rights` is CONFIG, not topology — free to edit on a
-        // running graph, same as prompt/quorum config, so deliberately not
-        // gated by `validate_topology_mutation_allowed`.
-        if let Some(commit_rights) = params.commit_rights {
-            self.db
-                .update_ensemble_commit_rights(&ensemble_id, commit_rights)
-                .map_err(internal_error)?;
-            details.ensemble.commit_rights = commit_rights;
-        }
-
-        let owner_nodes = match (&details.ensemble.spec_id, &details.ensemble.graph_id) {
-            (Some(spec_id), None) => self.db.list_graph_nodes(spec_id).map_err(internal_error)?,
-            (None, Some(graph_id)) => self
-                .db
-                .list_graph_nodes_for_graph(graph_id)
-                .map_err(internal_error)?,
-            _ => Vec::new(),
-        };
-
-        // ── member list resize/replace (add/remove/replace by position) ──
-        if let Some(new_members) = &params.members {
-            let members = match validate_ensemble_members(new_members, effective_kind) {
-                Ok(members) => members,
-                Err(e) => return Ok(error_result(&e)),
-            };
-            let prompt_template = params
-                .prompt_template
-                .as_deref()
-                .unwrap_or(&details.ensemble.prompt_template);
-            let timeout_minutes = params
-                .timeout_minutes
-                .unwrap_or(details.ensemble.timeout_minutes);
-            let infra_retry_limit = match params.infra_retry_limit {
-                Some(inner) => inner,
-                None => details.ensemble.infra_retry_limit,
-            };
-            let infra_crash_max_seconds = match params.infra_crash_max_seconds {
-                Some(inner) => inner,
-                None => details.ensemble.infra_crash_max_seconds,
-            };
-            let infra_backoff_seconds = match params.infra_backoff_seconds {
-                Some(inner) => inner,
-                None => details.ensemble.infra_backoff_seconds,
-            };
-
-            let old_members = details.members.clone();
-            let old_len = old_members.len();
-            let new_len = members.len();
-            let start_position = owner_nodes
-                .last()
-                .map(|node| node.position + 1)
-                .unwrap_or(1);
-            let mut resulting_members = Vec::with_capacity(new_len);
-            let mut resulting_nodes = Vec::with_capacity(new_len);
-            for (
-                index,
-                (
-                    platform,
-                    model,
-                    prompt_override,
-                    member_timeout_minutes,
-                    member_infra_retry_limit,
-                    member_infra_crash_max_seconds,
-                    member_infra_backoff_seconds,
-                ),
-            ) in members.iter().enumerate()
-            {
-                let effective_prompt =
-                    effective_member_prompt(prompt_override.as_deref(), prompt_template);
-                let effective_timeout_minutes = member_timeout_minutes.unwrap_or(timeout_minutes);
-                let effective_infra_retry_limit = member_infra_retry_limit.or(infra_retry_limit);
-                let effective_infra_crash_max_seconds =
-                    member_infra_crash_max_seconds.or(infra_crash_max_seconds);
-                let effective_infra_backoff_seconds =
-                    member_infra_backoff_seconds.or(infra_backoff_seconds);
-                let node_id = old_members
-                    .get(index)
-                    .map(|member| member.node_id.clone())
-                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-                let existing_node = owner_nodes.iter().find(|node| node.id == node_id);
-                let position = match existing_node {
-                    Some(node) => node.position,
-                    None => start_position + (index - old_len) as i64,
-                };
-                let node = GraphNode {
-                    id: node_id.clone(),
-                    spec_id: details.ensemble.spec_id.clone(),
-                    graph_id: details.ensemble.graph_id.clone(),
-                    name: existing_node
-                        .map(|node| node.name.clone())
-                        .unwrap_or_else(|| format!("{} [{}]", details.ensemble.name, index + 1)),
-                    kind: GraphNodeKind::Agent,
-                    config: member_node_config(
-                        platform,
-                        model.as_deref(),
-                        effective_prompt,
-                        effective_timeout_minutes,
-                        effective_infra_retry_limit,
-                        effective_infra_crash_max_seconds,
-                        effective_infra_backoff_seconds,
-                    ),
-                    position,
-                    created_at: existing_node
-                        .map(|node| node.created_at)
-                        .unwrap_or_else(chrono::Utc::now),
-                };
-                resulting_members.push(EnsembleMember {
-                    ensemble_id: ensemble_id.to_string(),
-                    node_id,
-                    position: index as i64,
-                    platform: platform.clone(),
-                    model: model.clone(),
-                    prompt_override: prompt_override.clone(),
-                    timeout_minutes: *member_timeout_minutes,
-                    infra_retry_limit: *member_infra_retry_limit,
-                    infra_crash_max_seconds: *member_infra_crash_max_seconds,
-                    infra_backoff_seconds: *member_infra_backoff_seconds,
-                });
-                resulting_nodes.push(node);
-            }
-            self.db
-                .replace_ensemble_members(&ensemble_id, &resulting_members, &resulting_nodes)
-                .map_err(internal_error)?;
-
-            details = self
-                .db
-                .get_ensemble_details(&ensemble_id)
-                .map_err(internal_error)?
-                .ok_or_else(|| {
-                    internal_error(format!("Ensemble '{ensemble_id}' vanished mid-update."))
-                })?;
-        } else if params.prompt_template.is_some()
-            || params.timeout_minutes.is_some()
-            || params.infra_retry_limit.is_some()
-            || params.infra_crash_max_seconds.is_some()
-            || params.infra_backoff_seconds.is_some()
-        {
-            // Prompt and/or shared timeout changed without a member-list
-            // resize: propagate onto every existing member's config as-is,
-            // except a member with its own prompt_override keeps rendering
-            // that instead of the (possibly just-changed) shared prompt.
-            let prompt_template = params
-                .prompt_template
-                .as_deref()
-                .unwrap_or(&details.ensemble.prompt_template);
-            let timeout_minutes = params
-                .timeout_minutes
-                .unwrap_or(details.ensemble.timeout_minutes);
-            let infra_retry_limit = match params.infra_retry_limit {
-                Some(inner) => inner,
-                None => details.ensemble.infra_retry_limit,
-            };
-            let infra_crash_max_seconds = match params.infra_crash_max_seconds {
-                Some(inner) => inner,
-                None => details.ensemble.infra_crash_max_seconds,
-            };
-            let infra_backoff_seconds = match params.infra_backoff_seconds {
-                Some(inner) => inner,
-                None => details.ensemble.infra_backoff_seconds,
-            };
-            for member in &details.members {
-                let effective_prompt =
-                    effective_member_prompt(member.prompt_override.as_deref(), prompt_template);
-                let effective_timeout_minutes = member.timeout_minutes.unwrap_or(timeout_minutes);
-                let effective_infra_retry_limit = member.infra_retry_limit.or(infra_retry_limit);
-                let effective_infra_crash_max_seconds =
-                    member.infra_crash_max_seconds.or(infra_crash_max_seconds);
-                let effective_infra_backoff_seconds =
-                    member.infra_backoff_seconds.or(infra_backoff_seconds);
-                let config = member_node_config(
-                    &member.platform,
-                    member.model.as_deref(),
-                    effective_prompt,
-                    effective_timeout_minutes,
-                    effective_infra_retry_limit,
-                    effective_infra_crash_max_seconds,
-                    effective_infra_backoff_seconds,
-                );
-                self.db
-                    .update_graph_node_details(&member.node_id, None, None, Some(&config), None)
-                    .map_err(internal_error)?;
-            }
-        }
-
-        if let Some(prompt_template) = params.prompt_template.as_deref() {
-            self.db
-                .update_ensemble_prompt(&ensemble_id, prompt_template.trim())
-                .map_err(internal_error)?;
-        }
-
-        // ── join config: min_pass / straggler_timeout_minutes / quorum_grace_minutes / timeout_minutes / infra_retry_* ──
-        if params.min_pass.is_some()
-            || params.timeout_minutes.is_some()
-            || params.straggler_timeout_minutes.is_some()
-            || params.quorum_grace_minutes.is_some()
-            || params.infra_retry_limit.is_some()
-            || params.infra_crash_max_seconds.is_some()
-            || params.infra_backoff_seconds.is_some()
-        {
-            if let Some(Some(straggler)) = params.straggler_timeout_minutes {
-                if straggler < 0 {
-                    return Ok(error_result(
-                        "straggler_timeout_minutes must not be negative.",
-                    ));
-                }
-            }
-            if let Some(Some(grace)) = params.quorum_grace_minutes {
-                if grace < 0 {
-                    return Ok(error_result("quorum_grace_minutes must not be negative."));
-                }
-            }
-            if let Some(timeout_minutes) = params.timeout_minutes {
-                if timeout_minutes < 0 {
-                    return Ok(error_result("timeout_minutes must not be negative."));
-                }
-            }
-            // infra_retry_limit/infra_crash_max_seconds/infra_backoff_seconds
-            // are already validated above, before the member-resize/propagate
-            // branches that read them.
-            self.db
-                .update_ensemble_join_config(
-                    &ensemble_id,
-                    params.min_pass,
-                    params.straggler_timeout_minutes,
-                    params.quorum_grace_minutes,
-                    params.timeout_minutes,
-                    params.infra_retry_limit,
-                    params.infra_crash_max_seconds,
-                    params.infra_backoff_seconds,
-                )
-                .map_err(internal_error)?;
-        }
-
-        // ── entry wiring: from_node/condition (replace), add_entry_from,
-        // remove_entry_from ─────────────────────────────────────────────
-        // Entry edges are the only ensemble wiring `graph_add_edge` can never
-        // express (members refuse direct edges), so they are all managed here
-        // as one unit: the caller names source nodes, never member ids.
-        if params.from_node.is_some()
-            || params.condition.is_some()
-            || params.add_entry_from.is_some()
-            || params.add_entry_condition.is_some()
-            || params.remove_entry_from.is_some()
-        {
-            if let Err(e) = validate_topology_mutation_allowed(
-                &self.db,
-                details.ensemble.spec_id.as_deref(),
-                details.ensemble.graph_id.as_deref(),
-            ) {
-                return Ok(error_result(&e));
-            }
-            if params.from_node.is_some()
-                && (params.add_entry_from.is_some() || params.remove_entry_from.is_some())
-            {
-                return Ok(error_result(
-                    "from_node replaces every entry edge on its own; pass add_entry_from/remove_entry_from in a separate graph_update_ensemble call.",
-                ));
-            }
-            if params.condition.is_some() && params.from_node.is_none() {
-                return Ok(error_result(
-                    "condition only applies alongside from_node; pass both, or omit condition to keep the current entry condition.",
-                ));
-            }
-            if params.add_entry_condition.is_some() && params.add_entry_from.is_none() {
-                return Ok(error_result(
-                    "add_entry_condition only applies alongside add_entry_from; pass both, or omit add_entry_condition (it defaults to always).",
-                ));
-            }
-            // `owner_nodes` from the member block above is still in scope and
-            // still current — entry ops move edges, never nodes.
-            let node_exists = |id: &str| owner_nodes.iter().any(|node| node.id == id);
-            let resolve_entry_source = |raw: &str, field: &str| -> Result<String, String> {
-                if raw.trim().is_empty() {
-                    return Err(format!("{field} must not be empty."));
-                }
-                let id = self
-                    .db
-                    .resolve_graph_node_id_by_prefix(raw.trim())
-                    .map_err(|e| e.to_string())?
-                    .ok_or_else(|| format!("Graph node '{}' not found.", raw.trim()))?;
-                if !node_exists(&id) {
-                    return Err(format!(
-                        "Graph node '{id}' not found in the ensemble's graph."
-                    ));
-                }
-                if let Err(e) = validate_node_not_ensemble_owned(&self.db, &id) {
-                    return Err(format!(
-                        "Cannot wire an ensemble's entry from an ensemble-owned node: {e} To chain ensembles, route the upstream ensemble's exit into this one instead (graph_update_ensemble on_pass_to/on_fail_to accept an ensemble id)."
-                    ));
-                }
-                Ok(id)
-            };
-
-            if let Some(raw_from) = params.from_node.as_deref() {
-                let from_node = match resolve_entry_source(raw_from, "from_node") {
-                    Ok(id) => id,
-                    Err(e) => return Ok(error_result(&e)),
-                };
-                let entry_condition = match params.condition.as_deref() {
-                    Some(raw) => match validate_edge_condition(raw.trim()) {
-                        Ok(condition) => condition,
-                        Err(e) => return Ok(error_result(&e)),
-                    },
-                    None => details.ensemble.entry_condition.clone(),
-                };
-                if let Err(e) =
-                    self.db
-                        .rewire_ensemble_entry(&ensemble_id, &from_node, &entry_condition)
-                {
-                    return Ok(error_result(&e.to_string()));
-                }
-                details.ensemble.entry_from_node = from_node;
-                details.ensemble.entry_condition = entry_condition;
-            }
-
-            if let Some(raw_remove) = params.remove_entry_from.as_deref() {
-                let remove_from = match resolve_entry_source(raw_remove, "remove_entry_from") {
-                    Ok(id) => id,
-                    Err(e) => return Ok(error_result(&e)),
-                };
-                if let Err(e) = self
-                    .db
-                    .remove_ensemble_entry_source(&ensemble_id, &remove_from)
-                {
-                    return Ok(error_result(&e.to_string()));
-                }
-                if details.ensemble.entry_from_node == remove_from {
-                    details = self
-                        .db
-                        .get_ensemble_details(&ensemble_id)
-                        .map_err(internal_error)?
-                        .ok_or_else(|| {
-                            internal_error(format!("Ensemble '{ensemble_id}' vanished mid-update."))
-                        })?;
-                }
-            }
-
-            if let Some(raw_add) = params.add_entry_from.as_deref() {
-                let add_from = match resolve_entry_source(raw_add, "add_entry_from") {
-                    Ok(id) => id,
-                    Err(e) => return Ok(error_result(&e)),
-                };
-                let add_condition = match params.add_entry_condition.as_deref() {
-                    Some(raw) => match validate_edge_condition(raw.trim()) {
-                        Ok(condition) => condition,
-                        Err(e) => return Ok(error_result(&e)),
-                    },
-                    None => GraphEdgeCondition::Always,
-                };
-                if let Err(e) =
-                    self.db
-                        .add_ensemble_entry_source(&ensemble_id, &add_from, &add_condition)
-                {
-                    return Ok(error_result(&e.to_string()));
-                }
-            }
-        }
-
-        // ── exit wiring: on_pass_to / on_fail_to ──────────────────────
-        // Each target is a plain node id — or another ensemble's id, chaining
-        // the quorum directly into that ensemble (one edge per member, no
-        // intermediate node). Both go through the atomic
-        // `retarget_ensemble_exit`, so a failed retarget leaves the previous
-        // edges intact.
-        if params.on_pass_to.is_some() || params.on_fail_to.is_some() {
-            // CM15 / FR5: exit edges are graph TOPOLOGY. The engine routes a
-            // finished quorum with `select_next_step` against the per-run
-            // `edges` snapshot (see `GraphEngine::run_spec`), which is captured
-            // once at launch and never re-read — so an `on_pass_to`/`on_fail_to`
-            // retarget mid-run would return success and change nothing until the
-            // next launch. Refuse it while running, exactly as entry wiring is
-            // refused above, and name the graph's state.
-            if let Err(e) = validate_topology_mutation_allowed(
-                &self.db,
-                details.ensemble.spec_id.as_deref(),
-                details.ensemble.graph_id.as_deref(),
-            ) {
-                return Ok(error_result(&e));
-            }
-            let owner_nodes = match (&details.ensemble.spec_id, &details.ensemble.graph_id) {
-                (Some(spec_id), None) => {
-                    self.db.list_graph_nodes(spec_id).map_err(internal_error)?
-                }
-                (None, Some(graph_id)) => self
-                    .db
-                    .list_graph_nodes_for_graph(graph_id)
-                    .map_err(internal_error)?,
-                _ => Vec::new(),
-            };
-            let node_exists = |id: &str| owner_nodes.iter().any(|node| node.id == id);
-            let resolve_exit_target = |raw: &str,
-                                       field: &str|
-             -> Result<EnsembleExitTarget, String> {
-                match resolve_chained_exit_ensemble(
-                    &self.db,
-                    raw.trim(),
-                    &ensemble_id,
-                    details.ensemble.spec_id.as_deref(),
-                    details.ensemble.graph_id.as_deref(),
-                ) {
-                    Ok(Some(target)) => Ok(target),
-                    Ok(None) => {
-                        let trimmed = raw.trim();
-                        if trimmed.is_empty() {
-                            return Err(format!("{field} must not be empty."));
-                        }
-                        if !node_exists(trimmed) {
-                            return Err(format!(
-                                "Graph node '{trimmed}' not found in the ensemble's graph."
-                            ));
-                        }
-                        if let Err(e) = validate_node_not_ensemble_owned(&self.db, trimmed) {
-                            return Err(format!(
-                                    "Cannot wire an ensemble's exit directly into another ensemble's members/quorum: {e} To route into the whole ensemble, pass its ensemble id as {field} instead of a member/quorum node id."
-                                ));
-                        }
-                        Ok(EnsembleExitTarget::Node(trimmed.to_string()))
-                    }
-                    Err(e) => Err(e),
-                }
-            };
-
-            if let Some(on_pass_to) = params.on_pass_to.as_deref() {
-                let target = match resolve_exit_target(on_pass_to, "on_pass_to") {
-                    Ok(target) => target,
-                    Err(e) => return Ok(error_result(&e)),
-                };
-                if let Err(e) = self.db.retarget_ensemble_exit(
-                    &ensemble_id,
-                    &GraphEdgeCondition::Pass,
-                    &target.edge_targets(),
-                    Some(&target.row_target()),
-                ) {
-                    return Ok(error_result(&e.to_string()));
-                }
-            }
-
-            if let Some(on_fail_to) = &params.on_fail_to {
-                match on_fail_to
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|v| !v.is_empty())
-                {
-                    None => {
-                        // Clear to a dead end on fail.
-                        self.db
-                            .delete_graph_edges_from_node_with_condition(
-                                &details.ensemble.join_node_id,
-                                &GraphEdgeCondition::Fail,
-                            )
-                            .map_err(internal_error)?;
-                        self.db
-                            .update_ensemble_exit_wiring(&ensemble_id, None, Some(None))
-                            .map_err(internal_error)?;
-                    }
-                    Some(target_raw) => {
-                        let target = match resolve_exit_target(target_raw, "on_fail_to") {
-                            Ok(target) => target,
-                            Err(e) => return Ok(error_result(&e)),
-                        };
-                        if let Err(e) = self.db.retarget_ensemble_exit(
-                            &ensemble_id,
-                            &GraphEdgeCondition::Fail,
-                            &target.edge_targets(),
-                            Some(&target.row_target()),
-                        ) {
-                            return Ok(error_result(&e.to_string()));
-                        }
-                    }
-                }
-            }
-        }
-
-        let note = if cleared_grace_fields_for_kind_change {
-            format!(
-                " Cleared straggler_timeout_minutes/quorum_grace_minutes: not meaningful for a {} ensemble.",
-                effective_kind.as_str()
-            )
-        } else {
-            String::new()
-        };
-        Ok(success_result(&format!(
-            "Ensemble '{ensemble_id}' updated.{note}"
-        )))
-    }
-
-    #[tool(
-        name = "graph_delete_ensemble",
-        description = "Delete an ensemble — its members, its quorum, and every edge naming any of them — as one operation. Refused while the owning graph is running, like the other topology tools. Refused while another ensemble's exit is chained into it (rewire that exit with graph_update_ensemble first)."
-    )]
-    async fn graph_delete_ensemble(
-        &self,
-        Parameters(params): Parameters<GraphDeleteEnsembleParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let ensemble_id = match resolve_prefix_or_error(
-            &self.db,
-            params.ensemble_id.trim(),
-            Database::resolve_ensemble_id_by_prefix,
-            "ensemble",
-        ) {
-            Ok(id) => id,
-            Err(e) => return Ok(e),
-        };
-        let Some(details) = self
-            .db
-            .get_ensemble_details(&ensemble_id)
-            .map_err(internal_error)?
-        else {
-            return Ok(error_result(&format!(
-                "Ensemble '{ensemble_id}' not found."
-            )));
-        };
-        if let Err(e) = validate_topology_mutation_allowed(
-            &self.db,
-            details.ensemble.spec_id.as_deref(),
-            details.ensemble.graph_id.as_deref(),
-        ) {
-            return Ok(error_result(&e));
-        }
-        // Another ensemble chained into this one holds exit edges from its
-        // quorum to these members and names this quorum in its row — deleting
-        // here would strand both. Rewire there first.
-        let siblings = match (&details.ensemble.spec_id, &details.ensemble.graph_id) {
-            (Some(spec_id), None) => self
-                .db
-                .list_ensembles_for_spec(spec_id)
-                .map_err(internal_error)?,
-            (None, Some(graph_id)) => self
-                .db
-                .list_ensembles_for_graph(graph_id)
-                .map_err(internal_error)?,
-            _ => Vec::new(),
-        };
-        let join_node_id = details.ensemble.join_node_id.as_str();
-        if let Some(blocker) = siblings.iter().find(|sibling| {
-            sibling.ensemble.id != ensemble_id
-                && (sibling.ensemble.on_pass_to.as_str() == join_node_id
-                    || sibling.ensemble.on_fail_to.as_deref() == Some(join_node_id))
-        }) {
-            return Ok(error_result(&format!(
-                "Ensemble '{ensemble_id}' cannot be deleted while ensemble '{}' ('{}') routes its exit into it; rewire that exit with graph_update_ensemble first.",
-                blocker.ensemble.id, blocker.ensemble.name
-            )));
-        }
-
-        match self.db.delete_ensemble_unit(&ensemble_id) {
-            Ok(deleted) => Ok(success_result(&format!(
-                "Ensemble '{}' deleted: {} member(s), its quorum '{}', and {} edge(s) naming them.",
-                deleted.ensemble_id,
-                deleted.member_node_ids.len(),
-                deleted.join_node_id,
-                deleted.deleted_edge_count,
-            ))),
-            Err(e) => Ok(error_result(&e.to_string())),
-        }
-    }
-
-    // ---- Queue tools (Q1) --------------------------------------------------
-    //
-    // A "queue" is an ordered list of existing specs, decoupled from any one
-    // graph.
-
-    async fn do_queue_create(&self, name: &str) -> Result<CallToolResult, McpError> {
-        let name = name.trim();
-        if let Err(e) = validate_non_empty(name, "Queue name") {
-            return Ok(error_result(&e));
-        }
-
-        let queue = Queue {
-            id: uuid::Uuid::new_v4().to_string(),
-            name: name.to_string(),
-            created_at: chrono::Utc::now(),
-        };
-        self.db.insert_queue(&queue).map_err(internal_error)?;
-
-        Ok(build_id_result(&queue.id, "queue_id"))
-    }
-
-    async fn do_queue_add_spec(
-        &self,
-        queue_id: &str,
-        spec_id: &str,
-        group: Option<&str>,
-    ) -> Result<CallToolResult, McpError> {
-        let queue_id = queue_id.trim();
-        if let Err(e) = validate_queue_exists(&self.db, queue_id) {
-            return Ok(error_result(&e));
-        }
-        let spec_id = spec_id.trim();
-        if let Err(e) = validate_spec_exists(&self.db, spec_id) {
-            return Ok(error_result(&e));
-        }
-        let already_member = self
-            .db
-            .queue_has_member(queue_id, spec_id)
-            .map_err(internal_error)?;
-        if already_member {
-            return Ok(error_result(&format!(
-                "Spec '{spec_id}' is already in queue '{queue_id}'."
-            )));
-        }
-
-        // An all-whitespace or empty `group` is treated as ungrouped.
-        let group = group.map(str::trim).filter(|g| !g.is_empty());
-
-        self.db
-            .append_queue_member(queue_id, spec_id, group)
-            .map_err(internal_error)?;
-
-        let group_note = group
-            .map(|g| format!(" in group '{g}'"))
-            .unwrap_or_default();
-        Ok(success_result(&format!(
-            "Spec '{spec_id}' added to queue '{queue_id}'{group_note}."
-        )))
-    }
-
-    async fn do_queue_list(
-        &self,
-        queue_id: Option<&str>,
-        include_descriptions: bool,
-    ) -> Result<CallToolResult, McpError> {
-        let queue_id = queue_id.map(str::trim).filter(|s| !s.is_empty());
-
-        let body = match queue_id {
-            Some(queue_id) => {
-                let details = match self.db.get_queue_details(queue_id) {
-                    Ok(Some(details)) => details,
-                    Ok(None) => return Ok(error_result(&format!("Queue '{queue_id}' not found."))),
-                    Err(e) => return Err(internal_error(e.to_string())),
-                };
-                let total = details.members.len();
-                let cap = 200usize;
-                let truncated = total > cap;
-                let omitted = total.saturating_sub(cap);
-                let visible_members = &details.members[..details.members.len().min(cap)];
-                let visible_groups: std::collections::HashMap<_, _> = details
-                    .member_groups
-                    .iter()
-                    .filter(|(id, _)| visible_members.iter().any(|m| &m.id == *id))
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect();
-                let trimmed_details = QueueDetails {
-                    queue: details.queue,
-                    members: visible_members.to_vec(),
-                    member_groups: visible_groups,
-                };
-                let mut qobj = queue_details_json(&trimmed_details, include_descriptions);
-                qobj["total_members"] = serde_json::json!(total);
-                if truncated {
-                    qobj["truncated"] = serde_json::json!(true);
-                    qobj["omitted"] = serde_json::json!(omitted);
-                }
-                serde_json::json!({ "queue": qobj })
-            }
-            None => {
-                let queues = self.db.list_queues().map_err(internal_error)?;
-                serde_json::json!({
-                    "queues": queues
-                        .iter()
-                        .map(|queue| serde_json::json!({
-                            "id": queue.id,
-                            "name": queue.name,
-                        }))
-                        .collect::<Vec<_>>(),
-                })
-            }
-        };
-
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&body).unwrap_or_default(),
-        )]))
-    }
-
-    async fn do_queue_remove_spec(
-        &self,
-        queue_id: &str,
-        spec_id: &str,
-    ) -> Result<CallToolResult, McpError> {
-        let queue_id = queue_id.trim();
-        if let Err(e) = validate_queue_exists(&self.db, queue_id) {
-            return Ok(error_result(&e));
-        }
-        let spec_id = spec_id.trim();
-        if let Err(e) = validate_queue_member_removable(&self.db, queue_id, spec_id) {
-            return Ok(error_result(&e));
-        }
-        let removed = self
-            .db
-            .remove_queue_member(queue_id, spec_id)
-            .map_err(internal_error)?;
-        if !removed {
-            return Ok(error_result(&format!(
-                "Queue '{queue_id}' has no spec '{spec_id}'."
-            )));
-        }
-
-        Ok(success_result(&format!(
-            "Spec '{spec_id}' removed from queue '{queue_id}'."
-        )))
-    }
-
-    async fn do_graph_remove_spec(
-        &self,
-        graph_id: &str,
-        spec_id: &str,
-    ) -> Result<CallToolResult, McpError> {
-        let spec_id = spec_id.trim();
-        let spec = match validate_spec_exists(&self.db, spec_id) {
-            Ok(s) => s,
-            Err(e) => return Ok(error_result(&e)),
-        };
-        if let Some(ref bound_graph) = spec.graph_id {
-            if bound_graph != graph_id {
-                return Ok(error_result(&format!(
-                    "Spec '{spec_id}' is bound to graph '{bound_graph}', not '{graph_id}'."
-                )));
-            }
-        } else {
-            return Ok(error_result(&format!(
-                "Spec '{spec_id}' is not bound to any graph; nothing to unbind."
-            )));
-        }
-        if let Err(e) = validate_spec_unbindable(&self.db, &spec) {
-            return Ok(error_result(&e));
-        }
-        self.db.unbind_graph_spec(spec_id).map_err(internal_error)?;
-        Ok(success_result(&format!(
-            "Spec '{spec_id}' unbound from graph '{graph_id}'. It is now a standalone spec."
-        )))
-    }
-
-    async fn do_queue_reorder(
-        &self,
-        queue_id: &str,
-        spec_ids: &[String],
-    ) -> Result<CallToolResult, McpError> {
-        let queue_id = queue_id.trim();
-        if let Err(e) = validate_queue_exists(&self.db, queue_id) {
-            return Ok(error_result(&e));
-        }
-        let current = self
-            .db
-            .list_queue_member_spec_ids(queue_id)
-            .map_err(internal_error)?;
-        if let Err(e) = validate_queue_reorder(&current, spec_ids) {
-            return Ok(error_result(&e));
-        }
-        if let Err(e) = validate_queue_reorder_locking(&self.db, &current, spec_ids) {
-            return Ok(error_result(&e));
-        }
-
-        self.db
-            .reorder_queue_members(queue_id, spec_ids)
-            .map_err(internal_error)?;
-
-        Ok(success_result(&format!("Queue '{queue_id}' reordered.")))
-    }
-
-    #[tool(
-        name = "queue_create",
-        description = "Create a queue: an ordered list of existing specs, decoupled from any one graph."
-    )]
-    async fn queue_create(
-        &self,
-        Parameters(params): Parameters<QueueCreateParams>,
-    ) -> Result<CallToolResult, McpError> {
-        self.do_queue_create(&params.name).await
-    }
-
-    #[tool(
-        name = "queue_add_spec",
-        description = "Append an existing spec to the end of a queue."
-    )]
-    async fn queue_add_spec(
-        &self,
-        Parameters(params): Parameters<QueueAddSpecParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let queue_id = match resolve_prefix_or_error(
-            &self.db,
-            params.queue_id.trim(),
-            Database::resolve_queue_id_by_prefix,
-            "queue",
-        ) {
-            Ok(id) => id,
-            Err(e) => return Ok(e),
-        };
-        let spec_id = match resolve_prefix_or_error(
-            &self.db,
-            params.spec_id.trim(),
-            Database::resolve_spec_id_by_prefix,
-            "spec",
-        ) {
-            Ok(id) => id,
-            Err(e) => return Ok(e),
-        };
-        self.do_queue_add_spec(&queue_id, &spec_id, params.group.as_deref())
-            .await
-    }
-
-    #[tool(
-        name = "queue_list",
-        description = "List a queue's ordered members, or every queue (summary only) if queue_id is omitted."
-    )]
-    async fn queue_list(
-        &self,
-        Parameters(params): Parameters<QueueListParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let resolved_queue_id = match &params.queue_id {
-            Some(qid) => {
-                match resolve_prefix_or_error(
-                    &self.db,
-                    qid.trim(),
-                    Database::resolve_queue_id_by_prefix,
-                    "queue",
-                ) {
-                    Ok(id) => Some(id),
-                    Err(e) => return Ok(e),
-                }
-            }
-            None => None,
-        };
-        self.do_queue_list(
-            resolved_queue_id.as_deref(),
-            params.include_descriptions.unwrap_or(false),
-        )
-        .await
-    }
-
-    #[tool(
-        name = "queue_remove_spec",
-        description = "Remove a spec from a queue."
-    )]
-    async fn queue_remove_spec(
-        &self,
-        Parameters(params): Parameters<QueueRemoveSpecParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let queue_id = match resolve_prefix_or_error(
-            &self.db,
-            params.queue_id.trim(),
-            Database::resolve_queue_id_by_prefix,
-            "queue",
-        ) {
-            Ok(id) => id,
-            Err(e) => return Ok(e),
-        };
-        let spec_id = match resolve_prefix_or_error(
-            &self.db,
-            params.spec_id.trim(),
-            Database::resolve_spec_id_by_prefix,
-            "spec",
-        ) {
-            Ok(id) => id,
-            Err(e) => return Ok(e),
-        };
-        self.do_queue_remove_spec(&queue_id, &spec_id).await
-    }
-
-    #[tool(
-        name = "queue_reorder",
-        description = "Reorder a queue. `spec_ids` must list every queue member exactly once, in the desired order — a total replacement, not a partial swap."
-    )]
-    async fn queue_reorder(
-        &self,
-        Parameters(params): Parameters<QueueReorderParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let queue_id = match resolve_prefix_or_error(
-            &self.db,
-            params.queue_id.trim(),
-            Database::resolve_queue_id_by_prefix,
-            "queue",
-        ) {
-            Ok(id) => id,
-            Err(e) => return Ok(e),
-        };
-        let mut resolved_spec_ids = Vec::with_capacity(params.spec_ids.len());
-        for sid in &params.spec_ids {
-            match resolve_prefix_or_error(
-                &self.db,
-                sid.trim(),
-                Database::resolve_spec_id_by_prefix,
-                "spec",
-            ) {
-                Ok(id) => resolved_spec_ids.push(id),
-                Err(e) => return Ok(e),
-            }
-        }
-        self.do_queue_reorder(&queue_id, &resolved_spec_ids).await
-    }
-
-    #[tool(
-        name = "graph_get",
-        description = "Return a graph with its ordered specs, nodes, and edges. Hooks are not retroactive — a hook registered after its event has already happened does not fire."
-    )]
-    async fn graph_get(
-        &self,
-        Parameters(params): Parameters<GraphGetParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let graph_id = match resolve_prefix_or_error(
-            &self.db,
-            params.graph_id.trim(),
-            Database::resolve_graph_id_by_prefix,
-            "graph",
-        ) {
-            Ok(id) => id,
-            Err(e) => return Ok(e),
-        };
-        let lp = match self.db.get_graph_details(&graph_id) {
-            Ok(Some(w)) => w,
-            Ok(None) => return Ok(error_result(&format!("Graph '{}' not found.", graph_id))),
-            Err(e) => return Err(internal_error(e.to_string())),
-        };
-
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(
-                &graph_details_json(&self.db, &lp).map_err(internal_error)?,
-            )
-            .unwrap_or_default(),
-        )]))
-    }
-
-    #[tool(
-        name = "graph_export",
-        description = "Export a graph's design — name, description, nodes, edges, and ensembles — as a portable JSON document, so it can be shared as a file and recreated elsewhere with graph_import. Never includes ids, workdir, specs, or run/status state. Includes platform/model for every agent node and ensemble member, and each ensemble's kind ('cascade'/'round_robin'; omitted for the 'parallel' default); format_version 4. Ensembles carry every entry source: the primary in 'entry_from_node'/'entry_condition' plus 'extra_entry_sources' (node + condition) for sources added with 'add_entry_from' (omitted when there are none)."
-    )]
-    async fn graph_export(
-        &self,
-        Parameters(params): Parameters<GraphExportParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let graph_id = match resolve_prefix_or_error(
-            &self.db,
-            params.graph_id.trim(),
-            Database::resolve_graph_id_by_prefix,
-            "graph",
-        ) {
-            Ok(id) => id,
-            Err(e) => return Ok(e),
-        };
-        let Some(lp) = self.db.get_graph(&graph_id).map_err(internal_error)? else {
-            return Ok(error_result(&format!("Graph '{graph_id}' not found.")));
-        };
-        let graph_nodes = self
-            .db
-            .list_graph_nodes_for_graph(&graph_id)
-            .map_err(internal_error)?;
-        let graph_edges = self
-            .db
-            .list_graph_edges_for_graph(&graph_id)
-            .map_err(internal_error)?;
-        let ensembles = self
-            .db
-            .list_ensembles_for_graph(&graph_id)
-            .map_err(internal_error)?;
-
-        let document = match crate::domain::graph_transfer::build_export_document(
-            &lp,
-            &graph_nodes,
-            &graph_edges,
-            &ensembles,
-        ) {
-            Ok(document) => document,
-            Err(e) => return Ok(error_result(&e)),
-        };
-
-        Ok(build_json_result(
-            &serde_json::to_value(&document).map_err(internal_error)?,
-        ))
-    }
-
-    #[tool(
-        name = "graph_import",
-        description = "Create a new graph from an exported document (the object graph_export returns). Always creates a new graph — never updates or overwrites an existing one; if the name is already taken in workdir, a numeric suffix is applied and the response says which name was used. Validates the document exactly as graph_add_node/graph_add_edge/graph_add_ensemble would, all-or-nothing: nothing is written if any part is rejected. Accepts format_version 1 (members with no binding, reported as missing a platform), 2 (bindings restored), 3 (graph/error vocabulary), and 4 (every ensemble entry source: 'extra_entry_sources' restores each 'add_entry_from' source with its own condition). Restores each ensemble's kind, commit_rights, timeouts, member overrides, and entry/exit wiring exactly; a document field this build does not know how to restore — including an unknown 'kind' value — is a refusal naming the field, never a silent default. The response lists every agent node left without a platform so the caller knows what to fill in before running the graph."
-    )]
-    async fn graph_import(
-        &self,
-        Parameters(params): Parameters<GraphImportParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let workdir = params.workdir.trim();
-        if let Err(e) = validate_non_empty(workdir, "Graph workdir") {
-            return Ok(error_result(&e));
-        }
-        if let Err(e) = validate_absolute_dir(workdir) {
-            return Ok(error_result(&e));
-        }
-
-        let document =
-            match crate::domain::graph_transfer::parse_export_document_value(&params.document) {
-                Ok(document) => document,
-                Err(e) => return Ok(error_result(&e)),
-            };
-
-        for node in &document.nodes {
-            if let Some(map) = node.config.as_object() {
-                if let Err(e) = validate_known_config_keys(node.kind, map) {
-                    return Ok(error_result(&e));
-                }
-            }
-        }
-
-        let desired_name = params
-            .name
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or(document.name.trim());
-        if let Err(e) = validate_non_empty(desired_name, "Graph name") {
-            return Ok(error_result(&e));
-        }
-
-        let graph_id = uuid::Uuid::new_v4().to_string();
-        let plan = match crate::domain::graph_transfer::build_import_plan(&document, &graph_id) {
-            Ok(plan) => plan,
-            Err(e) => return Ok(error_result(&e)),
-        };
-        let missing_platform = crate::domain::graph_transfer::agent_nodes_missing_platform(&plan);
-
-        let existing_names: Vec<String> = self
-            .db
-            .list_graphs(Some(workdir), true)
-            .map_err(internal_error)?
-            .into_iter()
-            .map(|lp| lp.name)
-            .collect();
-        let final_name =
-            crate::domain::graph_transfer::resolve_unique_graph_name(&existing_names, desired_name);
-
-        let lp = Graph {
-            archived: false,
-            paused_by_reconciliation: false,
-            allow_dirty_start: false,
-            infra_node_id: plan.infra_node_id.clone(),
-            id: graph_id.clone(),
-            name: final_name.clone(),
-            description: document
-                .description
-                .clone()
-                .filter(|value| !value.trim().is_empty()),
-            workdir: workdir.to_string(),
-            status: GraphStatus::Draft,
-            trigger: None,
-            created_at: chrono::Utc::now(),
-            started_at: None,
-            completed_at: None,
-            autorun_at: None,
-            auto_continue_at: None,
-            auto_continue_action: None,
-            active_run_queue_id: None,
-            hooks: std::collections::BTreeMap::new(),
-        };
-
-        self.db.import_graph(&lp, &plan).map_err(internal_error)?;
-        if crate::domain::project::should_auto_register(std::path::Path::new(workdir)) {
-            if let Err(error) = self.db.register_project_path(std::path::Path::new(workdir)) {
-                tracing::debug!(
-                    "Could not register imported graph's project at {workdir}: {error}"
-                );
-            }
-        }
-        self.activate_graph_trigger(&lp).await;
-
-        Ok(build_json_result(&serde_json::json!({
-            "graph_id": lp.id,
-            "name": lp.name,
-            "nodes_missing_platform": missing_platform,
-            "terminals": plan.terminals,
-        })))
-    }
-
-    #[tool(
-        name = "graph_audit_node_configs",
-        description = "Scan every graph node in the database for a config key its kind will never read (e.g. 'prompt' on an agent node, which the engine silently ignores in favor of 'prompt_template'). Write-time validation (graph_add_node/graph_update_node) rejects this going forward; this tool finds nodes that predate it and are still silently degraded. Also lists every agent node/member whose effective infra-retry budget (infra_retry_limit/infra_crash_max_seconds/infra_backoff_seconds) differs from its platform's own value."
-    )]
-    async fn graph_audit_node_configs(&self) -> Result<CallToolResult, McpError> {
-        let nodes = self.db.list_all_graph_nodes().map_err(internal_error)?;
-
-        let mut flagged = Vec::new();
-        for node in &nodes {
-            let Some(map) = node.config.as_object() else {
-                continue;
-            };
-            let unknown = unknown_config_keys(node.kind, map);
-            if unknown.is_empty() {
-                continue;
-            }
-            // A spec-scoped node's own row has no `graph_id` (only the spec
-            // does) — resolve it so a flagged node can be traced back to the
-            // graph that owns it without a second round-trip.
-            let graph_id = match &node.graph_id {
-                Some(graph_id) => Some(graph_id.clone()),
-                None => match &node.spec_id {
-                    Some(spec_id) => self
-                        .db
-                        .get_graph_spec(spec_id)
-                        .map_err(internal_error)?
-                        .and_then(|spec| spec.graph_id),
-                    None => None,
-                },
-            };
-            flagged.push(serde_json::json!({
-                "node_id": node.id,
-                "name": node.name,
-                "kind": node.kind.display_str(),
-                "spec_id": node.spec_id,
-                "graph_id": graph_id,
-                "unknown_keys": unknown,
-            }));
-        }
-
-        let mut infra_overrides = Vec::new();
-        for node in &nodes {
-            if node.kind != GraphNodeKind::Agent {
-                continue;
-            }
-            let effective = crate::graph_engine::resolve_node_infra_config(node);
-            let platform = node
-                .config
-                .get("platform")
-                .or_else(|| node.config.get("cli"))
-                .and_then(serde_json::Value::as_str);
-            let baseline = crate::graph_engine::resolve_platform_only_infra_config(platform);
-            let differs = effective.retry_limit.value != baseline.retry_limit.value
-                || effective.crash_max_seconds.value != baseline.crash_max_seconds.value
-                || effective.backoff_seconds.value != baseline.backoff_seconds.value;
-            if !differs {
-                continue;
-            }
-            let graph_id = match &node.graph_id {
-                Some(graph_id) => Some(graph_id.clone()),
-                None => match &node.spec_id {
-                    Some(spec_id) => self
-                        .db
-                        .get_graph_spec(spec_id)
-                        .map_err(internal_error)?
-                        .and_then(|spec| spec.graph_id),
-                    None => None,
-                },
-            };
-            infra_overrides.push(serde_json::json!({
-                "node_id": node.id,
-                "name": node.name,
-                "spec_id": node.spec_id,
-                "graph_id": graph_id,
-                "platform": platform,
-                "infra_retry_limit": { "value": effective.retry_limit.value, "source": effective.retry_limit.source, "platform_value": baseline.retry_limit.value },
-                "infra_crash_max_seconds": { "value": effective.crash_max_seconds.value, "source": effective.crash_max_seconds.source, "platform_value": baseline.crash_max_seconds.value },
-                "infra_backoff_seconds": { "value": effective.backoff_seconds.value, "source": effective.backoff_seconds.source, "platform_value": baseline.backoff_seconds.value },
-            }));
-        }
-
-        let commit_rights_nodes: Vec<serde_json::Value> = nodes
-            .iter()
-            .filter(|n| n.config.get("commit_rights").and_then(|v| v.as_bool()) == Some(true))
-            .map(|n| {
-                serde_json::json!({
-                    "node_id": n.id,
-                    "name": n.name,
-                    "spec_id": n.spec_id,
-                    "graph_id": n.graph_id,
-                })
-            })
-            .collect();
-        let all_ensembles = self.db.list_all_ensembles().map_err(internal_error)?;
-        let commit_rights_ensembles: Vec<serde_json::Value> = all_ensembles
-            .iter()
-            .filter(|e| e.ensemble.commit_rights)
-            .map(|e| {
-                serde_json::json!({
-                    "ensemble_id": e.ensemble.id,
-                    "name": e.ensemble.name,
-                    "spec_id": e.ensemble.spec_id,
-                    "graph_id": e.ensemble.graph_id,
-                })
-            })
-            .collect();
-
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&serde_json::json!({
-                "flagged_nodes": flagged,
-                "commit_rights_nodes": commit_rights_nodes,
-                "commit_rights_ensembles": commit_rights_ensembles,
-                "infra_config_overrides": infra_overrides,
-            }))
-            .unwrap_or_default(),
-        )]))
-    }
-
-    #[tool(
-        name = "graph_list",
-        description = "List graphs, optionally filtered by workdir."
-    )]
-    async fn graph_list(
-        &self,
-        Parameters(params): Parameters<GraphListParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let graphs = self
-            .db
-            .list_graphs(
-                params.workdir.as_deref(),
-                params.include_archived.unwrap_or(false),
-            )
-            .map_err(internal_error)?;
-
-        let out = build_graph_list_json(&self.db, &graphs)?;
-
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&out).unwrap_or_default(),
-        )]))
-    }
-
-    #[tool(
-        name = "graph_node_runs_list",
-        description = "List a graph's node run history — what `graph_get` omits (it only carries a graph's *bound* specs, empty for a queue-driven run). Defaults to the most recent runs first, so the run that failed a `failed` graph is normally the very first result without knowing any node id ahead of time. Narrow to one spec or node with `spec_id`/`node_id`. Output/input are omitted here since they can be large; fetch a specific run's full output with graph_node_run_get using its `id`."
-    )]
-    async fn graph_node_runs_list(
-        &self,
-        Parameters(params): Parameters<GraphNodeRunsListParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let graph_id = match resolve_prefix_or_error(
-            &self.db,
-            params.graph_id.trim(),
-            Database::resolve_graph_id_by_prefix,
-            "graph",
-        ) {
-            Ok(id) => id,
-            Err(e) => return Ok(e),
-        };
-        let resolved_spec_id = match &params.spec_id {
-            Some(sid) => {
-                match resolve_prefix_or_error(
-                    &self.db,
-                    sid.trim(),
-                    Database::resolve_spec_id_by_prefix,
-                    "spec",
-                ) {
-                    Ok(id) => Some(id),
-                    Err(e) => return Ok(e),
-                }
-            }
-            None => None,
-        };
-        let resolved_node_id = match &params.node_id {
-            Some(nid) => {
-                match resolve_prefix_or_error(
-                    &self.db,
-                    nid.trim(),
-                    Database::resolve_graph_node_id_by_prefix,
-                    "node",
-                ) {
-                    Ok(id) => Some(id),
-                    Err(e) => return Ok(e),
-                }
-            }
-            None => None,
-        };
-
-        if self
-            .db
-            .get_graph(&graph_id)
-            .map_err(internal_error)?
-            .is_none()
-        {
-            return Ok(error_result(&format!("Graph '{}' not found.", graph_id)));
-        }
-
-        let limit = params.limit.unwrap_or(20).clamp(1, 200) as i64;
-        let offset = params.offset.unwrap_or(0) as i64;
-
-        let compact = params.compact.unwrap_or(false);
-
-        let runs = self
-            .db
-            .list_graph_node_runs(
-                &graph_id,
-                resolved_spec_id.as_deref(),
-                resolved_node_id.as_deref(),
-                limit,
-                offset,
-            )
-            .map_err(internal_error)?;
-
-        let total = self
-            .db
-            .count_graph_node_runs_filtered(
-                &graph_id,
-                resolved_spec_id.as_deref(),
-                resolved_node_id.as_deref(),
-            )
-            .map_err(internal_error)?;
-
-        let out = runs
-            .iter()
-            .map(|run| graph_node_run_summary_json(&self.db, run, compact))
-            .collect::<Vec<_>>();
-
-        let returned = out.len() as i64;
-        let remaining = (total - offset).saturating_sub(returned);
-        let truncated = remaining > 0;
-
-        let mut body = serde_json::json!({
-            "graph_id": graph_id,
-            "limit": limit,
-            "offset": offset,
-            "runs": out,
-            "total": total,
-        });
-        if truncated {
-            body["truncated"] = serde_json::json!(true);
-            body["omitted"] = serde_json::json!(remaining);
-        }
-
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&body).unwrap_or_default(),
-        )]))
-    }
-
-    #[tool(
-        name = "graph_node_run_get",
-        description = "Fetch one node run's full stored input/output by run id (see graph_node_runs_list). This is the second step of failure diagnosis: list to find the offending run, then fetch its output here — the exact stderr/stdout/reported_output the engine recorded, including `infra_attempt`/`infra_crash` markers when present. Secret-shaped substrings (API keys, tokens, private key blocks) are redacted before the output crosses this boundary."
-    )]
-    async fn graph_node_run_get(
-        &self,
-        Parameters(params): Parameters<GraphNodeRunGetParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let run_id = match resolve_prefix_or_error(
-            &self.db,
-            params.run_id.trim(),
-            Database::resolve_run_id_by_prefix,
-            "run",
-        ) {
-            Ok(id) => id,
-            Err(e) => return Ok(e),
-        };
-        let Some(run) = self.db.get_graph_run(&run_id).map_err(internal_error)? else {
-            return Ok(error_result(&format!("Node run '{}' not found.", run_id)));
-        };
-        let node_name = self
-            .db
-            .get_graph_node(&run.node_id)
-            .map_err(internal_error)?
-            .map(|node| node.name);
-        let resumed_from_run_id = match run.session_id.as_deref() {
-            Some(sid) => self
-                .db
-                .find_resumed_from_run_id(&run.id, &run.node_id, sid)
-                .map_err(internal_error)?,
-            None => None,
-        };
-
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&graph_node_run_detail_json(
-                &run,
-                node_name.as_deref(),
-                resumed_from_run_id.as_deref(),
-            ))
-            .unwrap_or_default(),
-        )]))
-    }
-
-    #[tool(
-        name = "agent_probe",
-        description = "Actually invoke a configured platform headlessly with a trivial prompt and report whether a real, usable response comes back — the verdict is based on the response content, not the exit code, so a harness that prints its own error and exits 0 is reported broken rather than healthy, and a harness that silently answers with a different model than the one requested (its own \"falling back\" warning) is reported substituted rather than reachable. A failure whose text is the CLI's own argument-parser usage/error output (e.g. \"cannot be used with\", \"unrecognized flag\", \"unexpected argument\", \"unknown option\") is reported misconfigured, not broken: the platform answered, canopy called it wrong — the fix is the registry's invocation template, never a retry with a permuted command line. Omit `platform` to probe every platform configured in canopy (each with its own default model); pass `platform` alone to probe its default model, or `platform`+`model` together to validate the exact pair a graph node would use. If the platform's CLI has no way to select a model explicitly, the specific pair can't be validated end to end and is reported unknown, never reachable. On any failure where a command was actually run, reports the harness's own error text and the exact argv canopy invoked (both redacted of secrets) so you learn *why* (missing API key vs. wrong model name vs. a malformed invocation vs. it never answered) and can reproduce the exact call. Spends real tokens/quota per platform probed — call this explicitly, never automatically or on a schedule."
-    )]
-    async fn agent_probe(
-        &self,
-        Parameters(params): Parameters<AgentProbeParams>,
-    ) -> Result<CallToolResult, McpError> {
-        if params.model.is_some() && params.platform.is_none() {
-            return Ok(error_result(
-                "`model` requires `platform` — omit both to probe every configured platform's \
-                 default model.",
-            ));
-        }
-
-        let Some(home) = dirs::home_dir() else {
-            return Err(internal_error("No home directory"));
-        };
-        let config = crate::domain::canopy_config::CanopyConfig::load(&home.join(".canopy"));
-
-        let targets: Vec<crate::daemon::probe::ProbeTarget> = match params.platform.as_deref() {
-            Some(platform) => vec![crate::daemon::probe::ProbeTarget {
-                platform: platform.to_string(),
-                model: params.model.clone(),
-                effort: None,
-            }],
-            None => config
-                .clis
-                .iter()
-                .map(|cli| crate::daemon::probe::ProbeTarget {
-                    platform: cli.name.clone(),
-                    model: None,
-                    effort: None,
-                })
-                .collect(),
-        };
-
-        if targets.is_empty() {
-            return Ok(error_result(
-                "No platforms configured in canopy. Run 'canopy setup'.",
-            ));
-        }
-
-        let timeout_secs = clamp_probe_timeout(params.timeout_seconds);
-        let reports = crate::daemon::probe::probe_targets(
-            &config,
-            &targets,
-            None,
-            std::time::Duration::from_secs(timeout_secs),
-        )
-        .await;
-
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&serde_json::json!({
-                "timeout_seconds": timeout_secs,
-                "would_fail": crate::daemon::probe::would_fail_count(&reports),
-                "unknown": crate::daemon::probe::unknown_count(&reports),
-                "probes": reports.iter().map(|r| {
-                    let mut v = r.to_json();
-                    v["platform_display"] = serde_json::json!(display_for_slug(&config, &r.platform));
-                    v
-                }).collect::<Vec<_>>(),
-            }))
-            .unwrap_or_default(),
-        )]))
-    }
-
-    #[tool(
-        name = "agent_probe_recent",
-        description = "Sweep every distinct platform+model pair this installation actually used recently and probe each exactly once, naming every graph node, completion hook, background agent, or subagent spawn that used it. Failures come first; confirmed failures and unvalidated pairs remain separate, and substituted models are not reachable. Accepts per-probe timeout and a maximum pair count. Spends real tokens/quota once per distinct pair — a sweep is several probes, not one — and is strictly manual: it never runs automatically or changes configuration."
-    )]
-    async fn agent_probe_recent(
-        &self,
-        Parameters(params): Parameters<AgentProbeRecentParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let since = chrono::Utc::now()
-            - chrono::Duration::days(crate::db::graphs::RECENT_USAGE_WINDOW_DAYS);
-        let sources = self
-            .db
-            .list_recent_platform_model_usage_sources(since)
-            .map_err(|e| internal_error(e.to_string()))?;
-        let mut grouped = crate::daemon::probe::group_recent_usage(&sources);
-        let pairs_considered = grouped.len();
-        let max_pairs = clamp_max_recent_pairs(params.max_pairs);
-        grouped.truncate(max_pairs);
-        if grouped.is_empty() {
-            return Ok(CallToolResult::success(vec![Content::text(
-                serde_json::json!({
-                    "window_days": crate::db::graphs::RECENT_USAGE_WINDOW_DAYS,
-                    "pairs_considered": 0,
-                    "pairs_probed": 0,
-                    "message": "Nothing to sweep: no recently-used platform+model pairs were recorded.",
-                }).to_string(),
-            )]));
-        }
-
-        let home = dirs::home_dir().ok_or_else(|| internal_error("No home directory"))?;
-        let config = crate::domain::canopy_config::CanopyConfig::load(&home.join(".canopy"));
-        let targets: Vec<_> = grouped.iter().map(|pair| pair.target.clone()).collect();
-        let timeout_secs = clamp_probe_timeout(params.timeout_seconds);
-        let reports = crate::daemon::probe::probe_targets(
-            &config,
-            &targets,
-            None,
-            std::time::Duration::from_secs(timeout_secs),
-        )
-        .await;
-        let mut combined: Vec<_> = reports.iter().zip(grouped.iter()).collect();
-        combined.sort_by_key(|(report, _)| {
-            if report.outcome == crate::daemon::probe::ProbeOutcome::Unknown {
-                1
-            } else if !report.outcome.reachable() {
-                0
-            } else {
-                2
-            }
-        });
-        let probes = combined
-            .iter()
-            .map(|(report, pair)| {
-                let mut value = report.to_json();
-                if let serde_json::Value::Object(map) = &mut value {
-                    map.insert("used_by".into(), serde_json::json!(pair.used_by));
-                    map.insert(
-                        "platform_display".into(),
-                        serde_json::json!(display_for_slug(&config, &report.platform)),
-                    );
-                    map.insert(
-                        "last_run".into(),
-                        serde_json::json!(pair.last_run.to_rfc3339()),
-                    );
-                    map.insert("run_count".into(), serde_json::json!(pair.run_count));
-                    map.insert("last_outcome".into(), serde_json::json!(pair.last_outcome));
-                }
-                value
-            })
-            .collect::<Vec<_>>();
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&serde_json::json!({
-                "window_days": crate::db::graphs::RECENT_USAGE_WINDOW_DAYS,
-                "pairs_considered": pairs_considered,
-                "pairs_probed": grouped.len(),
-                "max_pairs": max_pairs,
-                "timeout_seconds": timeout_secs,
-                "would_fail": crate::daemon::probe::would_fail_count(&reports),
-                "unknown": crate::daemon::probe::unknown_count(&reports),
-                "probes": probes,
-            }))
-            .unwrap_or_default(),
-        )]))
-    }
-
-    #[tool(
-        name = "graph_preflight",
-        description = "Probe every distinct platform+model pair a graph's agent nodes, ensemble members, and on_completed hook reference — before spending a real graph_run on a harness that's installed and configured but can't actually produce a response. A platform used by several nodes is probed once, not once per node; the result names every node/hook that references a failing pair. Verdict is based on response content, not exit code (see agent_probe): a pair the harness silently answers with a substituted model, or one whose CLI has no way to select a model explicitly, is never reported reachable — `would_fail` counts confirmed failures and `unknown` counts pairs that couldn't be validated, kept separate so an unvalidated pair is never mistaken for a passing one. A pair whose harness answered with its own argument-parser usage/error text (canopy's invocation was malformed, not the platform) is reported misconfigured rather than broken, with the same node/ensemble naming and the exact argv canopy ran, redacted of secrets. Spends real tokens/quota per distinct pair — call this explicitly before graph_run, never automatically. When 'reviewer' names a platform+model pair, additionally spawns a background design-review agent (see 'review' in the output); collect it with subagent_collect. The review never blocks or fails the probe results."
-    )]
-    async fn graph_preflight(
-        &self,
-        Parameters(params): Parameters<GraphPreflightParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let details = match self.db.get_graph_details(&params.graph_id) {
-            Ok(Some(details)) => details,
-            Ok(None) => {
-                return Ok(error_result(&format!(
-                    "Graph '{}' not found.",
-                    params.graph_id
-                )))
-            }
-            Err(e) => return Err(internal_error(e.to_string())),
-        };
-
-        let dirty_workdir_warning: Option<serde_json::Value> = {
-            let (dirty, _paths) =
-                crate::graph_engine::capture_workdir_dirty_with_paths(&details.lp.workdir).await;
-            dirty.filter(|n| *n > 0).map(|count| {
-                let plural = if count == 1 { "y" } else { "ies" };
-                serde_json::json!({
-                    "count": count,
-                    "warning": format!(
-                        "Workdir '{}' has {} uncommitted git entr{}.",
-                        details.lp.workdir, count, plural
-                    ),
-                })
-            })
-        };
-
-        // Graph-level structural validation (CB8) — same validate_graph
-        // used by graph_import, before spending quota on platform probes.
-        let (terminal_list, graph_warnings): (Vec<String>, Vec<serde_json::Value>) = {
-            let router_labels: Vec<Vec<String>> = details
-                .graph_nodes
-                .iter()
-                .map(|n| {
-                    if n.kind == crate::domain::graphs::GraphNodeKind::Router {
-                        n.config
-                            .get("routes")
-                            .and_then(|v| v.as_array())
-                            .map(|arr| {
-                                arr.iter()
-                                    .filter_map(|entry| {
-                                        entry
-                                            .get("label")
-                                            .and_then(|v| v.as_str())
-                                            .map(|s| s.to_string())
-                                    })
-                                    .collect()
-                            })
-                            .unwrap_or_default()
-                    } else {
-                        Vec::new()
-                    }
-                })
-                .collect();
-            let node_views: Vec<crate::domain::validation::GraphNodeView> = details
-                .graph_nodes
-                .iter()
-                .enumerate()
-                .map(|(idx, n)| crate::domain::validation::GraphNodeView {
-                    id: &n.id,
-                    kind: n.kind,
-                    route_labels: &router_labels[idx],
-                })
-                .collect();
-            let edge_views: Vec<crate::domain::validation::GraphEdgeView> = details
-                .graph_edges
-                .iter()
-                .map(|e| crate::domain::validation::GraphEdgeView {
-                    from: &e.from_node,
-                    to: &e.to_node,
-                    condition: &e.condition,
-                })
-                .collect();
-            let validation_report =
-                match crate::domain::validation::validate_graph(&node_views, &edge_views) {
-                    Ok(report) => report,
-                    Err(e) => {
-                        // The validator names nodes by id; a live graph's ids are
-                        // opaque UUIDs, so enrich with the display name where we can
-                        // (same treatment graph_import gives its message).
-                        let mut enriched = e;
-                        for n in &details.graph_nodes {
-                            if enriched.contains(n.id.as_str()) {
-                                enriched = enriched
-                                    .replace(n.id.as_str(), &format!("{} ({})", n.name, n.id));
-                            }
-                        }
-                        return Ok(error_result(&enriched));
-                    }
-                };
-            // Terminal exits are informational: a state with no outgoing edge
-            // ends the run there (the engine treats a missing edge as an
-            // ending). Name nodes the way the operator sees them — by name,
-            // with the id in parentheses, matching the error text's shape.
-            let terminal_list: Vec<String> = validation_report
-                .terminals
-                .iter()
-                .map(|t| {
-                    let display = details
-                        .graph_nodes
-                        .iter()
-                        .find(|n| n.id == t.node_id)
-                        .map(|n| format!("{} ({})", n.name, n.id))
-                        .unwrap_or_else(|| t.node_id.clone());
-                    format!("{} ends on '{}'", display, t.state)
-                })
-                .collect();
-            // CM19: non-terminal agent/check/gate nodes whose `fail` status
-            // has nowhere to go. A warning, never a refusal — the graph may be
-            // exactly what its author meant. Deliberate terminals are already
-            // excluded upstream (they land in `terminals`, not here).
-            let graph_warnings: Vec<serde_json::Value> = validation_report
-                .fail_dead_ends
-                .iter()
-                .map(|d| {
-                    let node = details.graph_nodes.iter().find(|n| n.id == d.node_id);
-                    let name = node.map(|n| n.name.clone()).unwrap_or_default();
-                    let kind = node.map(|n| n.kind.as_str()).unwrap_or("node");
-                    let display = node
-                        .map(|n| format!("{} ({})", n.name, n.id))
-                        .unwrap_or_else(|| d.node_id.clone());
-                    let infra_clause = if d.has_error_path {
-                        " Its 'error' edge still routes infrastructure failures, but a genuine 'fail' verdict is not."
-                    } else {
-                        " It has no 'error' edge either, so an infrastructure failure would dead-end here as well."
-                    };
-                    serde_json::json!({
-                        "node_id": d.node_id,
-                        "node_name": name,
-                        "kind": kind,
-                        "missing_edge": "fail",
-                        "has_error_path": d.has_error_path,
-                        "warning": format!(
-                            "Node {display} [{kind}] has no outgoing 'fail' edge. If it returns a fail verdict the spec terminates at this node with \"no outgoing edge for that status\" and the run stays blocked until a human intervenes.{infra_clause} Add a 'fail' or 'always' edge with graph_add_edge if this failure should route somewhere.",
-                        ),
-                    })
-                })
-                .collect();
-            (terminal_list, graph_warnings)
-        };
-
-        // CB68 FR2: warn (never rewrite — FR4) about every node, ensemble and
-        // hook whose prompt/command still names a removed 2.x `loop_<tool>` or
-        // `canopy loop`, so a graph built before 3.0.0 doesn't silently produce
-        // an agent that calls a tool that no longer exists.
-        let stale_name_warnings: Vec<serde_json::Value> = {
-            let mut out = Vec::new();
-            let all_nodes = details
-                .graph_nodes
-                .iter()
-                .chain(details.specs.iter().flat_map(|s| s.nodes.iter()));
-            for node in all_nodes {
-                for field in ["prompt_template", "command"] {
-                    if let Some(text) = node.config.get(field).and_then(|v| v.as_str()) {
-                        for hit in crate::domain::validation::find_stale_2x_names(text) {
-                            out.push(serde_json::json!({
-                                "kind": "node",
-                                "id": node.id,
-                                "name": node.name,
-                                "old_name": hit.old,
-                                "new_name": hit.new,
-                                "warning": format!(
-                                    "Node '{}' {} mentions '{}', which no longer exists since 3.0.0 — use '{}'.",
-                                    node.name, field, hit.old, hit.new
-                                ),
-                            }));
-                        }
-                    }
-                }
-            }
-            for (event, hook_list) in &details.lp.hooks {
-                for hook in hook_list {
-                    for text in [hook.prompt.as_deref(), hook.command.as_deref()]
-                        .into_iter()
-                        .flatten()
-                    {
-                        for hit in crate::domain::validation::find_stale_2x_names(text) {
-                            out.push(serde_json::json!({
-                                "kind": "hook",
-                                "event": event.as_str(),
-                                "old_name": hit.old,
-                                "new_name": hit.new,
-                                "warning": format!(
-                                    "A {} hook mentions '{}', which no longer exists since 3.0.0 — use '{}'.",
-                                    event.as_str(), hit.old, hit.new
-                                ),
-                            }));
-                        }
-                    }
-                }
-            }
-            let mut ensembles = self
-                .db
-                .list_ensembles_for_graph(&details.lp.id)
-                .map_err(internal_error)?;
-            for spec in &details.specs {
-                ensembles.extend(
-                    self.db
-                        .list_ensembles_for_spec(&spec.spec.id)
-                        .map_err(internal_error)?,
-                );
-            }
-            for ens in &ensembles {
-                for hit in
-                    crate::domain::validation::find_stale_2x_names(&ens.ensemble.prompt_template)
-                {
-                    out.push(serde_json::json!({
-                        "kind": "ensemble",
-                        "id": ens.ensemble.id,
-                        "name": ens.ensemble.name,
-                        "old_name": hit.old,
-                        "new_name": hit.new,
-                        "warning": format!(
-                            "Ensemble '{}' prompt mentions '{}', which no longer exists since 3.0.0 — use '{}'.",
-                            ens.ensemble.name, hit.old, hit.new
-                        ),
-                    }));
-                }
-                for member in &ens.members {
-                    let Some(prompt_override) = &member.prompt_override else {
-                        continue;
-                    };
-                    for hit in crate::domain::validation::find_stale_2x_names(prompt_override) {
-                        out.push(serde_json::json!({
-                            "kind": "ensemble",
-                            "id": ens.ensemble.id,
-                            "name": ens.ensemble.name,
-                            "old_name": hit.old,
-                            "new_name": hit.new,
-                            "warning": format!(
-                                "Ensemble '{}' member prompt override mentions '{}', which no longer exists since 3.0.0 — use '{}'.",
-                                ens.ensemble.name, hit.old, hit.new
-                            ),
-                        }));
-                    }
-                }
-            }
-            out
-        };
-
-        // CM1: validate {{output:NodeName}} references
-        {
-            let node_names: Vec<String> =
-                details.graph_nodes.iter().map(|n| n.name.clone()).collect();
-            for node in &details.graph_nodes {
-                if let Some(prompt) = node.config.get("prompt_template").and_then(|v| v.as_str()) {
-                    let mut rest = prompt;
-                    while let Some(start) = rest.find("{{output:") {
-                        let after_prefix = &rest[start + 9..];
-                        if let Some(end) = after_prefix.find("}}") {
-                            let referenced_name = &after_prefix[..end];
-                            if !node_names.iter().any(|n| n == referenced_name) {
-                                return Ok(error_result(&format!(
-                                    "Node '{}' references unknown node '{}' in {{{{output:{}}}}}.",
-                                    node.name, referenced_name, referenced_name
-                                )));
-                            }
-                            rest = &after_prefix[end + 2..];
-                        } else {
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Ensemble-owned wiring must be complete before any platform probes
-        // spend quota. This is the same structural check graph_run performs.
-        if let Err(e) = validate_graph_ensembles_for_run(&self.db, &details.lp.id, None) {
-            return Ok(error_result(&format!("Preflight: {e}")));
-        }
-
-        // ── CB40: report pre-existing ensembles with invalid min_pass (FR5) ──────────
-        // These were stored before the write-time validation existed. Report them as
-        // errors rather than spending probe quota on a graph that will fail on export.
-        {
-            let graph_ensembles = self
-                .db
-                .list_ensembles_for_graph(&details.lp.id)
-                .map_err(internal_error)?;
-            for ens in &graph_ensembles {
-                if let Err(e) = crate::domain::validation::validate_ensemble_min_pass(
-                    &ens.ensemble.name,
-                    ens.ensemble.min_pass,
-                    ens.members.len(),
-                ) {
-                    return Ok(error_result(&format!(
-                        "Preflight: {e} Fix with graph_update_ensemble (ensemble_id '{}', min_pass ≤ {}).",
-                        ens.ensemble.id,
-                        ens.members.len()
-                    )));
-                }
-            }
-            for spec in &details.specs {
-                let spec_ensembles = self
-                    .db
-                    .list_ensembles_for_spec(&spec.spec.id)
-                    .map_err(internal_error)?;
-                for ens in &spec_ensembles {
-                    if let Err(e) = crate::domain::validation::validate_ensemble_min_pass(
-                        &ens.ensemble.name,
-                        ens.ensemble.min_pass,
-                        ens.members.len(),
-                    ) {
-                        return Ok(error_result(&format!(
-                            "Preflight: {e} Fix with graph_update_ensemble (ensemble_id '{}', min_pass ≤ {}).",
-                            ens.ensemble.id,
-                            ens.members.len()
-                        )));
-                    }
-                }
-            }
-        }
-
-        // ── CB52 FR4: refuse a graph with orphaned joins before spending ──
-        // probe quota on it. A join node with no ensemble row means the next
-        // dispatch through that point dies with "ambiguous outgoing edges" —
-        // report the cause instead. List it with graph_get's
-        // orphan_join_warnings and delete it with graph_delete_node, or
-        // repair the graph manually (never auto-repaired, C1).
-        {
-            let mut orphans = self
-                .db
-                .list_orphan_join_nodes_for_graph(&details.lp.id)
-                .map_err(internal_error)?;
-            for spec in &details.specs {
-                orphans.extend(
-                    self.db
-                        .list_orphan_join_nodes_for_spec(&spec.spec.id)
-                        .map_err(internal_error)?,
-                );
-            }
-            if !orphans.is_empty() {
-                let parts: Vec<String> = orphans.iter().map(orphan_join_warning_text).collect();
-                return Ok(error_result(&format!(
-                    "Preflight: {}. List it with graph_get's orphan_join_warnings and delete it with graph_delete_node, or repair the graph manually.",
-                    parts.join("; ")
-                )));
-            }
-        }
-
-        // CM28 / FR3: name whichever node or ensemble in this graph holds commit
-        // rights, across the top-level graph and every spec's own graph. A node
-        // owned by an ensemble is never listed on its own — only the ensemble is.
-        let commit_rights_holders: Vec<serde_json::Value> = {
-            fn holders_for(
-                nodes: &[crate::domain::graphs::GraphNode],
-                ensembles: &[crate::domain::graphs::EnsembleDetails],
-            ) -> Vec<serde_json::Value> {
-                let owned_ids: std::collections::HashSet<&str> = ensembles
-                    .iter()
-                    .flat_map(|d| {
-                        d.members
-                            .iter()
-                            .map(|m| m.node_id.as_str())
-                            .chain(std::iter::once(d.ensemble.join_node_id.as_str()))
-                    })
-                    .collect();
-                let mut out = Vec::new();
-                for node in nodes {
-                    if owned_ids.contains(node.id.as_str()) {
-                        continue;
-                    }
-                    if node.config.get("commit_rights").and_then(|v| v.as_bool()) == Some(true) {
-                        out.push(
-                            serde_json::json!({ "kind": "node", "id": node.id, "name": node.name }),
-                        );
-                    }
-                }
-                for details in ensembles {
-                    if details.ensemble.commit_rights {
-                        out.push(serde_json::json!({
-                            "kind": "ensemble",
-                            "id": details.ensemble.id,
-                            "name": details.ensemble.name,
-                        }));
-                    }
-                }
-                out
-            }
-            let graph_ensembles_for_report = self
-                .db
-                .list_ensembles_for_graph(&details.lp.id)
-                .map_err(internal_error)?;
-            let mut holders = holders_for(&details.graph_nodes, &graph_ensembles_for_report);
-            for spec in &details.specs {
-                let spec_ensembles = self
-                    .db
-                    .list_ensembles_for_spec(&spec.spec.id)
-                    .map_err(internal_error)?;
-                holders.extend(holders_for(&spec.nodes, &spec_ensembles));
-            }
-            holders
-        };
-
-        // (CB22) Bound-spec content warnings: advisory only, never a tool
-        // error and never spending probe quota. Computed before the
-        // no-target early return so a graph with no agent nodes still reports
-        // its blank specs.
-        let spec_warnings: Vec<serde_json::Value> = details
-            .specs
-            .iter()
-            .filter(|s| !crate::graph_engine::GraphEngine::spec_has_content(&s.spec))
-            .map(|s| {
-                let display = if s.spec.name.trim().is_empty() {
-                    s.spec.id.clone()
-                } else {
-                    s.spec.name.clone()
-                };
-                serde_json::json!({
-                    "spec_id": s.spec.id,
-                    "warning": format!(
-                        "Spec '{}' (id '{}') has no content: both name and description are empty. Give the spec a name or description before running.",
-                        display, s.spec.id
-                    ),
-                })
-            })
-            .collect();
-
-        let graph_targets = crate::daemon::probe::distinct_targets_for_graph(&details);
-
-        // FR4/CM31: reject before spending any probe quota — this is a static
-        // defect in the platform's template, not a runtime reachability
-        // question, so there is nothing a probe could tell us that changes the
-        // verdict.
-        {
-            let Some(home) = dirs::home_dir() else {
-                return Err(internal_error("No home directory"));
-            };
-            let config = crate::domain::canopy_config::CanopyConfig::load(&home.join(".canopy"));
-            let mut seen_platforms = std::collections::HashSet::new();
-            for gt in &graph_targets {
-                let platform = gt.target.platform.as_str();
-                if !seen_platforms.insert(platform) {
-                    continue;
-                }
-                let Some(cli) = config.get_cli(platform) else {
-                    continue;
-                };
-                let Some(template) = cli.invocation_template.as_deref() else {
-                    continue;
-                };
-                if let Some(msg) =
-                    crate::domain::cli_strategy::CliStrategy::unsafe_optional_model_token(
-                        template, platform,
-                    )
-                {
-                    return Ok(error_result(&format!("Preflight: {msg}")));
-                }
-            }
-        }
-
-        // (CB25) Spawn the design reviewer BEFORE the no-target early return
-        // so a review is available on both success shapes. `spawn_subagent`
-        // returns an id immediately and never blocks, so the reviewer works
-        // while the probes run below. Failures degrade to `not_spawned` and
-        // never fail the preflight itself.
-        let reviewer_out: Option<serde_json::Value> = match &params.reviewer {
-            None => None,
-            Some(r) => Some(
-                spawn_preflight_reviewer(
-                    self,
-                    &details.lp.id,
-                    details.lp.active_run_queue_id.as_deref(),
-                    &details.lp.workdir,
-                    &r.platform,
-                    r.model.as_deref(),
-                )
-                .await,
-            ),
-        };
-        if graph_targets.is_empty() {
-            return Ok(CallToolResult::success(vec![Content::text(
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "graph_id": params.graph_id,
-                    "message": format!(
-                        "Graph '{}' has no agent nodes, ensemble members, or on_completed hook to probe.",
-                        params.graph_id
-                    ),
-                    "spec_warnings": spec_warnings,
-                    "graph_warnings": graph_warnings,
-                    "stale_name_warnings": stale_name_warnings,
-                    "dirty_workdir_warning": dirty_workdir_warning.clone(),
-                    "review": reviewer_out,
-                    "terminals": terminal_list,
-                    "commit_rights_holders": commit_rights_holders,
-                }))
-                .unwrap_or_default(),
-            )]));
-        }
-
-        let Some(home) = dirs::home_dir() else {
-            return Err(internal_error("No home directory"));
-        };
-        let config = crate::domain::canopy_config::CanopyConfig::load(&home.join(".canopy"));
-
-        let timeout_secs = clamp_probe_timeout(params.timeout_seconds);
-        let targets: Vec<crate::daemon::probe::ProbeTarget> =
-            graph_targets.iter().map(|t| t.target.clone()).collect();
-        let reports = crate::daemon::probe::probe_targets(
-            &config,
-            &targets,
-            Some(&details.lp.workdir),
-            std::time::Duration::from_secs(timeout_secs),
-        )
-        .await;
-
-        let probes: Vec<serde_json::Value> = reports
-            .iter()
-            .zip(graph_targets.iter())
-            .map(|(report, graph_target)| {
-                let mut value = report.to_json();
-                if let serde_json::Value::Object(map) = &mut value {
-                    map.insert(
-                        "used_by".to_string(),
-                        serde_json::json!(graph_target.used_by),
-                    );
-                    map.insert(
-                        "platform_display".to_string(),
-                        serde_json::json!(display_for_slug(&config, &report.platform)),
-                    );
-                    if let Some(effort) = graph_target.target.effort.as_deref() {
-                        if let Some(reason) = crate::domain::cli_config::effort_rejection_reason(
-                            config
-                                .get_cli(&graph_target.target.platform)
-                                .and_then(|c| c.effort_declaration.as_ref()),
-                            &graph_target.target.platform,
-                            effort,
-                        ) {
-                            map.insert("effort_not_applied".to_string(), serde_json::json!(reason));
-                        }
-                    }
-                }
-                value
-            })
-            .collect();
-
-        let effort_warnings: Vec<serde_json::Value> = graph_targets
-            .iter()
-            .filter_map(|lt| {
-                let effort = lt.target.effort.as_deref()?;
-                let reason = crate::domain::cli_config::effort_rejection_reason(
-                    config
-                        .get_cli(&lt.target.platform)
-                        .and_then(|c| c.effort_declaration.as_ref()),
-                    &lt.target.platform,
-                    effort,
-                )?;
-                Some(serde_json::json!({
-                    "used_by": lt.used_by,
-                    "platform": lt.target.platform,
-                    "effort": effort,
-                    "warning": reason,
-                }))
-            })
-            .collect();
-
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&serde_json::json!({
-                "graph_id": params.graph_id,
-                "timeout_seconds": timeout_secs,
-                "pairs_checked": reports.len(),
-                "would_fail": crate::daemon::probe::would_fail_count(&reports),
-                "unknown": crate::daemon::probe::unknown_count(&reports),
-                "probes": probes,
-                "effort_warnings": effort_warnings,
-                "spec_warnings": spec_warnings,
-                "graph_warnings": graph_warnings,
-                "stale_name_warnings": stale_name_warnings,
-                "dirty_workdir_warning": dirty_workdir_warning,
-                "review": reviewer_out,
-                "terminals": terminal_list,
-                "commit_rights_holders": commit_rights_holders,
-            }))
-            .unwrap_or_default(),
-        )]))
-    }
-
-    #[tool(
-        name = "graph_run",
-        description = "Run a graph in the background, spec by spec. With `queue_id`, runs the queue's pending specs (in queue order) through the graph instead of the graph's own bound specs. `workdir` overrides the graph's workdir for this run only. `idea` is free-form text fed to nodes as `{{spec_content}}` when the graph has no bound specs and no queue (mutually exclusive with `queue_id`)."
-    )]
-    async fn graph_run(
-        &self,
-        Parameters(params): Parameters<GraphRunParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let graph_id = match resolve_prefix_or_error(
-            &self.db,
-            params.graph_id.trim(),
-            Database::resolve_graph_id_by_prefix,
-            "graph",
-        ) {
-            Ok(id) => id,
-            Err(e) => return Ok(e),
-        };
-        let lp = match self.db.get_graph(&graph_id) {
-            Ok(Some(w)) => w,
-            Ok(None) => return Ok(error_result(&format!("Graph '{}' not found.", graph_id))),
-            Err(e) => return Err(internal_error(e.to_string())),
-        };
-
-        if let Err(message) = graph_run_status_guard(&graph_id, lp.status) {
-            return Ok(error_result(&message));
-        }
-
-        // C19: a graph paused with an active blocker (whether from
-        // `graph_report_blocker` or from a spec exceeding its cross-run
-        // attempt budget) needs a human, not another relaunch —
-        // `graph_run_status_guard` alone still accepts `Paused` (that's the
-        // normal resume-after-`graph_pause` path), so this is a second,
-        // narrower check on top of it. `graph_reset` always clears the
-        // graph's own status back to `draft` regardless of which specs it
-        // targeted, so this only ever refuses the exact window FR4 asks
-        // for: still-`paused`-and-blocked, not yet reset.
-        if lp.status == GraphStatus::Paused {
-            let summary = build_graph_summary_json(&self.db, &lp)?;
-            if let Some(blocker) = summary.get("blocker").and_then(|v| v.as_str()) {
-                return Ok(error_result(&format!(
-                    "Graph '{}' is blocked and cannot be relaunched via graph_run: {blocker}. \
-                     Resolve it, then graph_reset the affected spec (naming it explicitly \
-                     clears its cross-run attempt count) before relaunching.",
-                    graph_id
-                )));
-            }
-        }
-
-        if let Some(run) = find_in_flight_run(&self.db, &graph_id).map_err(internal_error)? {
-            let node_name = node_name_for_error(&self.db, &run.node_id).map_err(internal_error)?;
-            return Ok(error_result(&in_flight_run_error(
-                &graph_id,
-                &run.id,
-                &node_name,
-                run.started_at,
-            )));
-        }
-
-        let queue_id = params
-            .queue_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty());
-
-        let idea = params
-            .idea
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string);
-
-        if idea.is_some() && queue_id.is_some() {
-            return Ok(error_result(
-                "`idea` and `queue_id` are mutually exclusive: an idea feeds {{spec_content}} directly, a queue provides its own specs.",
-            ));
-        }
-
-        if let Some(queue_id) = queue_id {
-            if let Err(e) = validate_queue_exists(&self.db, queue_id) {
-                return Ok(error_result(&e));
-            }
-            if let Err(e) = validate_queue_not_consumed(&self.db, queue_id, &graph_id) {
-                return Ok(error_result(&e));
-            }
-        }
-
-        let workdir = params
-            .workdir
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty());
-        if let Some(workdir) = workdir {
-            if let Err(e) = validate_absolute_dir(workdir) {
-                return Ok(error_result(&e));
-            }
-        }
-
-        if let Err(e) = validate_graph_ensembles_for_run(&self.db, &graph_id, queue_id) {
-            return Ok(error_result(&e));
-        }
-
-        // (CB22) Synchronous launch validation: the same check the engine's
-        // dispatch runs, so the TUI receives "what is missing" immediately
-        // instead of a misleading successful background-launch response. A
-        // run with no bound specs and no queue is refused here — the TUI
-        // must not manufacture a blank spec to fill the gap.
-        match self
-            .graph_engine
-            .empty_launch_check(&graph_id, queue_id, idea.as_deref())
-        {
-            Ok(Some(message)) => return Ok(error_result(&message)),
-            Ok(None) => {}
-            Err(e) => return Err(internal_error(e.to_string())),
-        }
-
-        let effective_workdir = workdir.unwrap_or(&lp.workdir);
-        let next_spec_preview = self
-            .graph_engine
-            .preview_next_spec_id(&graph_id, queue_id)
-            .map_err(internal_error)?;
-        let mut launch_warning: Option<String> = None;
-        match self
-            .graph_engine
-            .dirty_start_check(
-                &graph_id,
-                effective_workdir,
-                next_spec_preview.as_deref(),
-                lp.allow_dirty_start,
-            )
-            .await
-            .map_err(internal_error)?
-        {
-            Some(notice) if notice.refuse => {
-                return Ok(error_result(&format!(
-                    "Refusing to launch graph '{}': {}",
-                    graph_id, notice.message
-                )));
-            }
-            Some(notice) => launch_warning = Some(notice.message),
-            None => {}
-        }
-
-        let sandbox = if params.sandbox == Some(true) {
-            // The instruction file is per-worktree and the worktree is shared
-            // across the graph's nodes, so it must carry the *first* agent
-            // node's platform filename (CLAUDE.md / GEMINI.md / …) — a
-            // hardcoded "opencode" would write AGENTS.md and leave a
-            // claude/gemini node with no protocol file at all.
-            let cli_name = {
-                let details = self.db.get_graph_details(&graph_id).ok().flatten();
-                details
-                    .as_ref()
-                    .and_then(|d| {
-                        let mut agents: Vec<&GraphNode> = d
-                            .graph_nodes
-                            .iter()
-                            .chain(d.specs.iter().flat_map(|s| s.nodes.iter()))
-                            .filter(|n| n.kind == GraphNodeKind::Agent)
-                            .collect();
-                        agents.sort_by_key(|n| n.position);
-                        agents.iter().find_map(|n| {
-                            n.config
-                                .get("platform")
-                                .or_else(|| n.config.get("cli"))
-                                .and_then(|v| v.as_str())
-                                .map(str::to_string)
-                        })
-                    })
-                    .unwrap_or_else(|| "opencode".to_string())
-            };
-            let protocol = crate::domain::sandbox::canopy_protocol_block();
-            let effective_workdir = workdir.unwrap_or(&lp.workdir);
-            match crate::domain::sandbox::create_sandbox(effective_workdir, &cli_name, protocol)
-                .await
-            {
-                Ok(sb) => {
-                    let _ = self.db.insert_sandbox_run(&sb, "graph", &graph_id);
-                    Some(sb)
-                }
-                Err(e) => {
-                    return Ok(error_result(&format!("Failed to create sandbox: {e}")));
-                }
-            }
-        } else {
-            None
-        };
-
-        Arc::clone(&self.graph_engine).start_background_run(
-            graph_id.clone(),
-            queue_id.map(str::to_string),
-            workdir.map(str::to_string),
-            idea,
-            sandbox,
-        );
-        Ok(success_result(&match launch_warning {
-            Some(warning) => format!(
-                "Graph '{}' launched in background. WARNING: {}",
-                graph_id, warning
-            ),
-            None => format!("Graph '{}' launched in background.", graph_id),
-        }))
-    }
-
-    /// Reset a `completed`/`failed` (or otherwise stalled) graph back to
-    /// `pending` so it can be relaunched via `graph_run`, which otherwise
-    /// refuses to resume a completed or failed graph.
-    ///
-    /// This is also the exact state transition the scheduler uses to
-    /// auto-reset a `failed` graph when its `graph_schedule_autorun` fires —
-    /// both paths call [`crate::db::Database::reset_graph`], so a human
-    /// calling this tool and the scheduler resuming a failed graph on its own
-    /// can never diverge in behavior.
-    #[tool(
-        name = "graph_reset",
-        description = "Reset a completed/failed graph back to pending so graph_run can relaunch it. Without `specs`, resets every non-completed spec, leaving already-completed ones untouched so graph_run resumes at the first pending spec. With `specs`, resets exactly those spec IDs, even if they were completed. If the graph's last run was against a queue, its queue members are what get reset (same semantics), since a queue run's own bound specs are typically empty. Rejects a `running` graph — call graph_pause first. Note: a `failed` graph with a pending graph_schedule_autorun resets and resumes itself automatically when the schedule fires — call this manually only to reset sooner, reset a `completed` graph, or reset specific spec IDs."
-    )]
-    async fn graph_reset(
-        &self,
-        Parameters(params): Parameters<GraphResetParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let graph_id = match resolve_prefix_or_error(
-            &self.db,
-            params.graph_id.trim(),
-            Database::resolve_graph_id_by_prefix,
-            "graph",
-        ) {
-            Ok(id) => id,
-            Err(e) => return Ok(e),
-        };
-        perform_graph_reset(&self.db, &graph_id, params.specs.as_deref())
-    }
-
-    /// Schedule a one-shot future resume for a graph (e.g. a graph that failed
-    /// on a quota can reschedule itself at the exact reset time instead of
-    /// relying on a blindly polling cron). The scheduler fires it once the
-    /// time is reached and the graph is fireable, then clears the schedule.
-    ///
-    /// Firing on a `failed` graph performs an explicit, logged
-    /// auto-reset-and-resume: it runs the same transition as `graph_reset`
-    /// (see [`crate::db::Database::reset_graph`]) and then resumes execution —
-    /// this is the sanctioned way a quota-failed graph revives itself
-    /// unattended. Firing on a `completed` graph does not re-run it: that is
-    /// a human decision, made via `graph_reset` + `graph_run`.
-    #[tool(
-        name = "graph_schedule_autorun",
-        description = "Schedule a one-shot resume for a graph at a future ISO 8601 time, or cancel a pending one. When the scheduler reaches that time: a `failed` graph is auto-reset (same transition as graph_reset) and resumed — useful for a graph that failed on a quota to reschedule its own resumption at the exact reset time; a `completed` graph is left alone (the schedule is cleared but the graph is not re-run — use graph_reset + graph_run to re-run a finished graph); any other fireable status launches normally. If the graph's last run was against a queue, the resume targets that same queue (its pending members, in queue order) instead of the graph's own bound specs. The schedule always clears after firing (one-shot). Omit both `at` and `quota_reset_message` to cancel any pending autorun instead of scheduling one — valid regardless of the graph's current status, and a no-op (not an error) if nothing was scheduled. After a quota failure, prefer `quota_reset_message` (the raw CLI text, e.g. \"resets 1pm (America/Bogota)\") over computing `at` yourself — the engine parses the stated local time/timezone and converts it deterministically, avoiding scheduling errors from doing that arithmetic by hand."
-    )]
-    async fn graph_schedule_autorun(
-        &self,
-        Parameters(params): Parameters<GraphScheduleAutorunParams>,
-    ) -> Result<CallToolResult, McpError> {
-        self.schedule_autorun_impl(params.graph_id, params.at, params.quota_reset_message)
-            .await
-    }
-
-    #[tool(
-        name = "loop_schedule_autorun",
-        description = "Deprecated: renamed graph_schedule_autorun in 3.0.0. Same parameters and \
-        behaviour as graph_schedule_autorun; `loop_id` is still accepted as the graph id. Hidden \
-        from tool listings; call graph_schedule_autorun instead."
-    )]
-    async fn loop_schedule_autorun(
-        &self,
-        Parameters(params): Parameters<LoopScheduleAutorunParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let result = self
-            .schedule_autorun_impl(params.graph_id, params.at, params.quota_reset_message)
-            .await?;
-        Ok(with_deprecated_note(
-            result,
-            "loop_schedule_autorun was renamed graph_schedule_autorun in 3.0.0",
-        ))
-    }
-
-    async fn schedule_autorun_impl(
-        &self,
-        raw_graph_id: String,
-        at: Option<String>,
-        quota_reset_message: Option<String>,
-    ) -> Result<CallToolResult, McpError> {
-        let graph_id = match resolve_prefix_or_error(
-            &self.db,
-            raw_graph_id.trim(),
-            Database::resolve_graph_id_by_prefix,
-            "graph",
-        ) {
-            Ok(id) => id,
-            Err(e) => return Ok(e),
-        };
-        let Some(existing) = self
-            .db
-            .get_graph(&graph_id)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?
-        else {
-            return Ok(error_result(&format!(
-                "No graph found with ID '{}'",
-                graph_id
-            )));
-        };
-
-        if at.is_some() && quota_reset_message.is_some() {
-            return Ok(error_result(
-                "Pass either `at` or `quota_reset_message`, not both.",
-            ));
-        }
-
-        // B — deterministic, engine-side conversion: a raw CLI quota message
-        // ("resets 1pm (America/Bogota)") is parsed and converted to UTC
-        // here, in code, rather than trusting the calling model's own
-        // local-time arithmetic (the source of a +2h scheduling error on
-        // 2026-07-24 — see `domain::quota_reset`).
-        if let Some(message) = quota_reset_message {
-            let at = match crate::domain::quota_reset::parse_quota_reset_instant(
-                &message,
-                chrono::Utc::now(),
-            ) {
-                Ok(at) => at,
-                Err(e) => {
-                    return Ok(error_result(&format!(
-                        "Could not compute a reset instant from '{}': {}",
-                        message, e
-                    )));
-                }
-            };
-            return self.commit_graph_autorun(&graph_id, at);
-        }
-
-        let Some(at) = at else {
-            let previously_scheduled = existing.autorun_at;
-            self.db
-                .clear_graph_autorun(&graph_id)
-                .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-            return Ok(success_result(&match previously_scheduled {
-                Some(previous_at) => format!(
-                    "Graph '{}' autorun scheduled for {} was cancelled.",
-                    graph_id,
-                    previous_at.to_rfc3339()
-                ),
-                None => format!("Graph '{}' had no pending autorun to cancel.", graph_id),
-            }));
-        };
-
-        let at = match chrono::DateTime::parse_from_rfc3339(&at) {
-            Ok(dt) => dt.with_timezone(&chrono::Utc),
-            Err(e) => {
-                return Ok(error_result(&format!(
-                    "Invalid ISO 8601 timestamp '{}': {}",
-                    at, e
-                )));
-            }
-        };
-
-        self.commit_graph_autorun(&graph_id, at)
-    }
-
-    /// Shared tail of `graph_schedule_autorun`'s two entry points (`at` and
-    /// `quota_reset_message`): persist the schedule (idempotent — a retry
-    /// with the same `graph_id`/`at` after a lost ack just re-overwrites the
-    /// same single-column schedule, never creating a second pending
-    /// schedule) and wake the scheduler.
-    fn commit_graph_autorun(
-        &self,
-        graph_id: &str,
-        at: chrono::DateTime<chrono::Utc>,
-    ) -> Result<CallToolResult, McpError> {
-        self.db
-            .schedule_graph_autorun(graph_id, at)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-
-        self.scheduler_notify.notify_one();
-
-        Ok(success_result(&format!(
-            "Graph '{}' scheduled to autorun at {}",
-            graph_id,
-            at.to_rfc3339()
-        )))
-    }
-
-    /// Schedule a one-shot deferred resume for a graph that is (or will be)
-    /// `Paused` — the counterpart to `graph_schedule_autorun` for a graph a
-    /// user paused on purpose (e.g. to stop burning quota right now) rather
-    /// than one that failed. When the scheduler reaches `at` and the graph is
-    /// still `Paused`, it fires the exact `graph_continue` action requested
-    /// here — preserving the paused cursor/context — instead of
-    /// `autorun_at`'s reset-and-relaunch. If the graph is no longer `Paused`
-    /// by then (resumed manually, failed, completed, running), the schedule
-    /// is cleared without firing; it never double-runs. Always one-shot.
-    #[tool(
-        name = "graph_schedule_continue",
-        description = "Schedule a one-shot deferred graph_continue for a paused graph at a future ISO 8601 time, or cancel a pending one. When the scheduler reaches that time and the graph is still `paused`, it fires graph_continue with `action` (retry_current_node by default, or skip_next_spec) — resuming with the paused cursor/context intact, never resetting or relaunching. If the graph is no longer paused by then (already continued manually, failed, completed, running), the schedule is cleared without firing. The schedule always clears after firing (one-shot). Omit `at` (or pass null) to cancel any pending auto-continue instead of scheduling one — a no-op (not an error) if nothing was scheduled. Use this instead of graph_schedule_autorun to defer resuming a graph you paused on purpose, e.g. to stop burning quota now and pick back up automatically at a later time."
-    )]
-    async fn graph_schedule_continue(
-        &self,
-        Parameters(GraphScheduleContinueParams {
-            graph_id: raw_graph_id,
-            at,
-            action,
-        }): Parameters<GraphScheduleContinueParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let graph_id = match resolve_prefix_or_error(
-            &self.db,
-            raw_graph_id.trim(),
-            Database::resolve_graph_id_by_prefix,
-            "graph",
-        ) {
-            Ok(id) => id,
-            Err(e) => return Ok(e),
-        };
-        let Some(existing) = self
-            .db
-            .get_graph(&graph_id)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?
-        else {
-            return Ok(error_result(&format!(
-                "No graph found with ID '{}'",
-                graph_id
-            )));
-        };
-
-        let Some(at) = at else {
-            let previously_scheduled = existing.auto_continue_at;
-            self.db
-                .clear_graph_auto_continue(&graph_id)
-                .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-            return Ok(success_result(&match previously_scheduled {
-                Some(previous_at) => format!(
-                    "Graph '{}' auto-continue scheduled for {} was cancelled.",
-                    graph_id,
-                    previous_at.to_rfc3339()
-                ),
-                None => format!(
-                    "Graph '{}' had no pending auto-continue to cancel.",
-                    graph_id
-                ),
-            }));
-        };
-
-        let action = action.unwrap_or_else(|| "retry_current_node".to_string());
-        if action != "retry_current_node" && action != "skip_next_spec" {
-            return Ok(error_result(
-                "graph_schedule_continue action must be retry_current_node or skip_next_spec.",
-            ));
-        }
-
-        let at = match chrono::DateTime::parse_from_rfc3339(&at) {
-            Ok(dt) => dt.with_timezone(&chrono::Utc),
-            Err(e) => {
-                return Ok(error_result(&format!(
-                    "Invalid ISO 8601 timestamp '{}': {}",
-                    at, e
-                )));
-            }
-        };
-
-        self.db
-            .schedule_graph_auto_continue(&graph_id, at, Some(&action))
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-
-        self.scheduler_notify.notify_one();
-
-        Ok(success_result(&format!(
-            "Graph '{}' scheduled to auto-continue ({}) at {}",
-            graph_id,
-            action,
-            at.to_rfc3339()
-        )))
-    }
-
-    #[tool(
-        name = "graph_pause",
-        description = "Pause a running graph. By default, waits for the current node to finish before pausing. Set `interrupt: true` to immediately stop the running node (marked as interrupted, not failed)."
-    )]
-    async fn graph_pause(
-        &self,
-        Parameters(params): Parameters<GraphPauseParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let graph_id = match resolve_prefix_or_error(
-            &self.db,
-            params.graph_id.trim(),
-            Database::resolve_graph_id_by_prefix,
-            "graph",
-        ) {
-            Ok(id) => id,
-            Err(e) => return Ok(e),
-        };
-        let interrupt = params.interrupt.unwrap_or(false);
-        let paused = self
-            .graph_engine
-            .request_pause(&graph_id, interrupt)
-            .map_err(internal_error)?;
-        if paused {
-            if interrupt {
-                Ok(success_result(&format!(
-                    "Graph '{}' paused (running node interrupted).",
-                    graph_id
-                )))
-            } else {
-                Ok(success_result(&format!(
-                    "Graph '{}' will pause after the current node finishes.",
-                    graph_id
-                )))
-            }
-        } else {
-            Ok(error_result(&format!(
-                "Graph '{}' is not running or does not exist.",
-                graph_id
-            )))
-        }
-    }
-
-    #[tool(
-        name = "graph_archive",
-        description = "Archive a graph: it leaves the main graph_list/sidebar view but its row, specs, and full run history are untouched (never deleted, never moved to another table) and it can be restored with graph_restore at any time. Refuses a `running` graph — pause it first. Permanent deletion is a separate, deliberate act on an already-archived graph, not something F4/this tool does."
-    )]
-    async fn graph_archive(
-        &self,
-        Parameters(params): Parameters<GraphArchiveParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let graph_id = match resolve_prefix_or_error(
-            &self.db,
-            params.graph_id.trim(),
-            Database::resolve_graph_id_by_prefix,
-            "graph",
-        ) {
-            Ok(id) => id,
-            Err(e) => return Ok(e),
-        };
-        match self.db.archive_graph(&graph_id).map_err(internal_error)? {
-            ArchiveGraphOutcome::Archived => Ok(success_result(&format!(
-                "Graph '{}' archived. Its specs and run history are intact; restore it with graph_restore.",
-                graph_id
-            ))),
-            ArchiveGraphOutcome::AlreadyArchived => Ok(error_result(&format!(
-                "Graph '{}' is already archived.",
-                graph_id
-            ))),
-            ArchiveGraphOutcome::Running => Ok(error_result(&format!(
-                "Graph '{}' is running — pause it before archiving.",
-                graph_id
-            ))),
-            ArchiveGraphOutcome::NotFound => Ok(error_result(&format!(
-                "Graph '{}' not found.",
-                graph_id
-            ))),
-        }
-    }
-
-    #[tool(
-        name = "graph_restore",
-        description = "Restore an archived graph back to the main graph_list/sidebar view. The graph's row, specs, and run history were never touched by archiving, so this is a plain flag flip."
-    )]
-    async fn graph_restore(
-        &self,
-        Parameters(params): Parameters<GraphRestoreParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let graph_id = match resolve_prefix_or_error(
-            &self.db,
-            params.graph_id.trim(),
-            Database::resolve_graph_id_by_prefix,
-            "graph",
-        ) {
-            Ok(id) => id,
-            Err(e) => return Ok(e),
-        };
-        let restored = self.db.restore_graph(&graph_id).map_err(internal_error)?;
-        if restored {
-            Ok(success_result(&format!(
-                "Graph '{}' restored to the main list.",
-                graph_id
-            )))
-        } else {
-            Ok(error_result(&format!(
-                "Graph '{}' not found or not archived.",
-                graph_id
-            )))
-        }
-    }
-
-    #[tool(
-        name = "graph_continue",
-        description = "Continue a paused graph by retrying the current node or skipping to the next spec."
-    )]
-    async fn graph_continue(
-        &self,
-        Parameters(params): Parameters<GraphContinueParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let graph_id = match resolve_prefix_or_error(
-            &self.db,
-            params.graph_id.trim(),
-            Database::resolve_graph_id_by_prefix,
-            "graph",
-        ) {
-            Ok(id) => id,
-            Err(e) => return Ok(e),
-        };
-        let lp = match self.db.get_graph(&graph_id) {
-            Ok(Some(w)) => w,
-            Ok(None) => return Ok(error_result(&format!("Graph '{}' not found.", graph_id))),
-            Err(e) => return Err(internal_error(e.to_string())),
-        };
-        if lp.status != GraphStatus::Paused {
-            return Ok(error_result(&format!(
-                "Graph '{}' is not paused.",
-                graph_id
-            )));
-        }
-
-        match params.action.trim() {
-            "retry_current_node" => {
-                handle_retry_current_node(&self.db, &graph_id)?;
-            }
-            "skip_next_spec" => handle_skip_next_spec(&self.db, &graph_id)?,
-            _ => {
-                return Ok(error_result(
-                    "graph_continue action must be retry_current_node or skip_next_spec.",
-                ));
-            }
-        }
-
-        Arc::clone(&self.graph_engine).resume_background(graph_id.clone());
-
-        Ok(success_result(&format!(
-            "Graph '{}' resumed with action '{}'.",
-            graph_id, params.action
-        )))
-    }
-
-    #[tool(
-        name = "graph_complete_node",
-        description = "Mark the active run for a graph node as pass or fail and attach its output."
-    )]
-    async fn graph_complete_node(
-        &self,
-        Parameters(params): Parameters<GraphCompleteNodeParams>,
-    ) -> Result<CallToolResult, McpError> {
-        self.complete_node_impl(params).await
-    }
-
-    #[tool(
-        name = "loop_complete_node",
-        description = "Deprecated: renamed graph_complete_node in 3.0.0. Same parameters and \
-        behaviour as graph_complete_node — kept working for the whole 3.x line so a prompt \
-        still written against the 2.x name doesn't end unreported. Hidden from tool listings; \
-        call graph_complete_node instead."
-    )]
-    async fn loop_complete_node(
-        &self,
-        Parameters(params): Parameters<GraphCompleteNodeParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let result = self.complete_node_impl(params).await?;
-        Ok(with_deprecated_note(
-            result,
-            "loop_complete_node was renamed graph_complete_node in 3.0.0",
-        ))
-    }
-
-    /// Shared body of `graph_complete_node` and the deprecated
-    /// `loop_complete_node` alias (CB68) — identical params, identical
-    /// behaviour; only the alias's response gets a `deprecated` note.
-    async fn complete_node_impl(
-        &self,
-        params: GraphCompleteNodeParams,
-    ) -> Result<CallToolResult, McpError> {
-        let status = match params.status.trim() {
-            "pass" => Some(GraphRunStatus::Pass),
-            "fail" => Some(GraphRunStatus::Fail),
-            _ => None,
-        };
-        let Some(status) = status else {
-            return Ok(error_result(
-                "graph_complete_node status must be pass or fail.",
-            ));
-        };
-        let run = match resolve_reported_run(&self.db, &params.run_id, &params.node_id)? {
-            Ok(run) => run,
-            Err(result) => return Ok(result),
-        };
-
-        self.db
-            .update_graph_run_result(
-                &run.id,
-                status,
-                Some(&serde_json::json!({
-                    "reported_output": params.output,
-                    "summary": params.summary,
-                })),
-                Some(chrono::Utc::now()),
-            )
-            .map_err(internal_error)?;
-
-        Ok(success_result("Graph node result recorded."))
-    }
-
-    #[tool(
-        name = "graph_report_blocker",
-        description = "Pause a graph because the active node is blocked and needs human intervention."
-    )]
-    async fn graph_report_blocker(
-        &self,
-        Parameters(params): Parameters<GraphReportBlockerParams>,
-    ) -> Result<CallToolResult, McpError> {
-        self.report_blocker_impl(params).await
-    }
-
-    #[tool(
-        name = "loop_report_blocker",
-        description = "Deprecated: renamed graph_report_blocker in 3.0.0. Same parameters and \
-        behaviour as graph_report_blocker. Hidden from tool listings; call graph_report_blocker \
-        instead."
-    )]
-    async fn loop_report_blocker(
-        &self,
-        Parameters(params): Parameters<GraphReportBlockerParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let result = self.report_blocker_impl(params).await?;
-        Ok(with_deprecated_note(
-            result,
-            "loop_report_blocker was renamed graph_report_blocker in 3.0.0",
-        ))
-    }
-
-    async fn report_blocker_impl(
-        &self,
-        params: GraphReportBlockerParams,
-    ) -> Result<CallToolResult, McpError> {
-        let run = match resolve_reported_run(&self.db, &params.run_id, &params.node_id)? {
-            Ok(run) => run,
-            Err(result) => return Ok(result),
-        };
-
-        self.db
-            .update_graph_run_result(
-                &run.id,
-                GraphRunStatus::Fail,
-                Some(&serde_json::json!({
-                    "blocker": params.description,
-                })),
-                Some(chrono::Utc::now()),
-            )
-            .map_err(internal_error)?;
-        self.db
-            .update_graph_status(&run.graph_id, GraphStatus::Paused, None, None)
-            .map_err(internal_error)?;
-        self.graph_engine
-            .notify_blocked(&run.graph_id, &params.description)
-            .map_err(internal_error)?;
-        // Resolve the human-readable node name for {{node}} before firing,
-        // falling back to the raw node id when the node row is gone.
-        let node_name = self
-            .db
-            .get_graph_node(&run.node_id)
-            .ok()
-            .flatten()
-            .map(|node| node.name)
-            .unwrap_or_else(|| run.node_id.clone());
-        self.graph_engine
-            .fire_on_blocked_hooks(&run.graph_id, &params.description, Some(&node_name))
-            .await;
-
-        Ok(success_result("Graph blocker recorded and graph paused."))
-    }
-
-    /// Returns the recommended tools and step-by-step protocol for a given action scope.
-    /// Use this at session start, before file writes, before test runs, and on session close.
-    #[tool(
-        name = "get_tools",
-        description = "Return the right tools and action protocol for the requested scope. \
-        Scopes: session_start (what to do first), file_write (conflict check before modifying), \
-        test_run (broadcast before/after running), close_session (wrap up + summary), \
-        multi_agent (full sync toolkit). Call this before acting — it tells you exactly what to use."
-    )]
-    async fn get_tools(
-        &self,
-        Parameters(params): Parameters<GetToolsParams>,
-        OptionalExtension(parts): OptionalExtension<Parts>,
-    ) -> Result<CallToolResult, McpError> {
-        let scope = params.scope.trim().to_lowercase();
-        if !matches!(
-            scope.as_str(),
-            "session_start" | "file_write" | "test_run" | "close_session" | "multi_agent"
-        ) {
-            return Ok(error_result(
-                "Invalid scope. Must be one of: session_start, file_write, test_run, close_session, multi_agent.",
-            ));
-        }
-
-        if self.resolve_sync_agent_id(parts.as_ref()).is_ok() {
-            self.reject_if_nursery(parts.as_ref())?;
-        }
-
-        let mut out = if scope == "file_write" {
-            let mut result = build_get_tools_response(&scope);
-            if let Some(obj) = result.as_object_mut() {
-                obj.insert(
-                    "path".to_string(),
-                    serde_json::json!(params.path.as_deref().unwrap_or("(not specified)")),
-                );
-            }
-            result
-        } else {
-            build_get_tools_response(&scope)
-        };
-
-        if scope == "session_start" {
-            if let Some(obj) = out.as_object_mut() {
-                if let Ok(session_id) = self.resolve_sync_agent_id(parts.as_ref()) {
-                    obj.insert("session_id".to_string(), serde_json::json!(session_id));
-                    obj.insert(
-                        "session_hint".to_string(),
-                        serde_json::json!(format!(
-                            "Your interactive session id is '{}'. It is the exact string an interactive graph hook's 'target_session_id' accepts. Call session_list to see every live session.",
-                            session_id
-                        )),
-                    );
-                }
-            }
-        }
-
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&out).unwrap_or_default(),
-        )]))
-    }
-
-    /// Search registered projects by name or description.
-    #[tool(
-        name = "project_search",
-        description = "Search projects by name/description, returns workdir_hash and metadata."
-    )]
-    async fn project_search(
-        &self,
-        Parameters(params): Parameters<ProjectSearchParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let projects = self
-            .db
-            .search_projects(&params.query)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-
-        if projects.is_empty() {
-            return Ok(success_result("No projects found matching the query."));
-        }
-
-        let out: Vec<serde_json::Value> = projects
-            .iter()
-            .map(|p| {
-                serde_json::json!({
-                    "workdir_hash": p.hash,
-                    "name": p.name,
-                    "path": p.path,
-                    "description": p.description,
-                    "tags": p.tags,
-                })
-            })
-            .collect();
-
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&out).unwrap_or_default(),
-        )]))
-    }
-
-    /// Update project metadata (description, tags).
-    #[tool(
-        name = "project_update",
-        description = "Update project metadata. Agents can enrich description and tags discovered during a session."
-    )]
-    async fn project_update(
-        &self,
-        Parameters(params): Parameters<ProjectUpdateParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let updated = self
-            .db
-            .update_project_meta(
-                &params.project_hash,
-                params.description.as_deref(),
-                params.tags.as_deref(),
-            )
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-
-        if updated {
-            Ok(success_result(&format!(
-                "Project '{}' metadata updated.",
-                params.project_hash
-            )))
-        } else {
-            Ok(error_result(&format!(
-                "Project '{}' not found.",
-                params.project_hash
-            )))
-        }
-    }
-
-    /// Point a project at a new workdir after its directory was renamed or
-    /// moved, keeping its sessions and history instead of orphaning them.
-    #[tool(
-        name = "project_remap",
-        description = "Remap a project whose directory was renamed or moved to its new path, \
-        re-keying its sessions/graphs/history instead of losing them. MOVE if nothing is \
-        registered at the new path, MERGE (folding into it, removing the stale row) if a \
-        project already exists there. Refuses a new_path that doesn't exist unless force=true. \
-        Set dry_run=true to preview without changing anything."
-    )]
-    async fn project_remap(
-        &self,
-        Parameters(params): Parameters<ProjectRemapParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let new_path = std::path::Path::new(&params.new_path);
-        let resolved =
-            match crate::db::project::resolve_remap_path(new_path, params.force.unwrap_or(false)) {
-                Ok(resolved) => resolved,
-                Err(e) => return Ok(error_result(&e.to_string())),
-            };
-
-        let outcome = if params.dry_run.unwrap_or(false) {
-            self.db.remap_preview(&params.project_hash, &resolved)
-        } else {
-            self.db.remap_project(&params.project_hash, &resolved)
-        };
-
-        match outcome {
-            Ok(outcome) => {
-                let kind = match outcome.kind {
-                    crate::domain::project::RemapKind::Move => "move",
-                    crate::domain::project::RemapKind::Merge => "merge",
-                };
-                let out = serde_json::json!({
-                    "kind": kind,
-                    "dry_run": params.dry_run.unwrap_or(false),
-                    "old_hash": outcome.old_hash,
-                    "new_hash": outcome.new_hash,
-                    "new_path": outcome.new_path,
-                    "rows_moved": outcome.counts.total(),
-                    "counts": {
-                        "interactive_sessions": outcome.counts.interactive_sessions,
-                        "terminal_sessions": outcome.counts.terminal_sessions,
-                        "graphs": outcome.counts.graphs,
-                        "graph_specs": outcome.counts.graph_specs,
-                        "sync_messages": outcome.counts.sync_messages,
-                        "sync_locks": outcome.counts.sync_locks,
-                        "last_prompts": outcome.counts.last_prompts,
-                        "scheduled_sends": outcome.counts.scheduled_sends,
-                        "failed_scheduled_sends": outcome.counts.failed_scheduled_sends,
-                        "agents": outcome.counts.agents,
-                        "intelligence_nodes": outcome.counts.intelligence_nodes,
-                    },
-                });
-                Ok(CallToolResult::success(vec![Content::text(
-                    serde_json::to_string_pretty(&out).unwrap_or_default(),
-                )]))
-            }
-            Err(e) => Ok(error_result(&e.to_string())),
-        }
-    }
-
-    /// Explicitly register a project directory (no marker file required).
-    #[tool(
-        name = "project_register",
-        description = "Explicitly register a project directory in the registry. \
-        Unlike automatic registration (which requires a `.canopy-project` marker \
-        file in the directory), this call registers any existing directory."
-    )]
-    async fn project_register(
-        &self,
-        Parameters(params): Parameters<ProjectRegisterParams>,
-    ) -> Result<CallToolResult, McpError> {
-        if let Err(e) = validate_non_empty(&params.path, "path") {
-            return Ok(error_result(&e));
-        }
-        let raw = std::path::Path::new(&params.path);
-        let canonical = match std::fs::canonicalize(raw) {
-            Ok(canonical) => canonical,
-            Err(e) => {
-                return Ok(error_result(&format!(
-                    "Path '{}' does not exist ({e})",
-                    params.path
-                )))
-            }
-        };
-        match self.db.register_project_explicit(&canonical) {
-            Ok(project) => {
-                let out = serde_json::json!({
-                    "workdir_hash": project.hash,
-                    "name": project.name,
-                    "path": project.path,
-                });
-                Ok(CallToolResult::success(vec![Content::text(
-                    serde_json::to_string_pretty(&out).unwrap_or_default(),
-                )]))
-            }
-            Err(e) => Ok(error_result(&e.to_string())),
-        }
-    }
-
-    /// Full-text search over personal RAG chunks (LanceDB vector search). Rate-limited: 10/min per agent.
-    #[tool(
-        name = "rag_search",
-        description = "Search indexed personal content (markdown and PDF files) using semantic \
-        vector search. Default limit: 5. Rate-limited to 10 calls/min per agent. \
-        Usage examples: 'search RAG for X', 'find documents about Y', \
-        'consult RAG about Z', 'what does the RAG say about W'."
-    )]
-    async fn rag_search(
-        &self,
-        Parameters(params): Parameters<RagSearchParams>,
-        OptionalExtension(parts): OptionalExtension<Parts>,
-    ) -> Result<CallToolResult, McpError> {
-        self.reject_if_nursery(parts.as_ref())?;
-        if let Some(result) = self.check_rag_rate_limit(&params).await {
-            return Ok(result);
-        }
-
-        let limit = params.limit.unwrap_or(5).min(20);
-        let data_dir_path = data_dir().map_err(internal_error)?;
-        let config = crate::domain::canopy_config::CanopyConfig::load(&data_dir_path);
-
-        let model = config.embeddings_model.trim();
-        if model.is_empty() {
-            return Ok(success_result("No embeddings model configured."));
-        }
-
-        let dimensions = match crate::rag::embedding_client::model_dimensions(model) {
-            Ok(d) => d,
-            Err(e) => return Ok(error_result(&format!("Unknown model dimensions: {e}"))),
-        };
-
-        // B22: go through the shared ingestion cache instead of building a
-        // throwaway client — queries reuse the already-loaded model (no
-        // reload per search) and the persisted model-loaded status flips to
-        // "ready" for the CLI/TUI, exactly like an indexing pass does.
-        let embedding_client = match self.ingestion.get_embedding_client(&config).await {
-            Ok(client) => client,
-            Err(e) => return Ok(error_result(&format!("Embedding client error: {e}"))),
-        };
-
-        let query = params.query.clone();
-        let query_vec = tokio::task::spawn_blocking(move || embedding_client.embed(&query))
-            .await
-            .map_err(|e| internal_error(e.to_string()))?
-            .map_err(|e| internal_error(e.to_string()))?;
-
-        let store = crate::rag::vector_store::VectorStore::new(
-            dimensions,
-            Some(config.rag_vector_cache_entries),
-        )
-        .await
-        .map_err(|e| internal_error(e.to_string()))?;
-
-        let results = store
-            .search_similar(&query_vec, limit)
-            .await
-            .map_err(|e| internal_error(e.to_string()))?;
-
-        if results.is_empty() {
-            return Ok(success_result("No results found."));
-        }
-
-        self.record_rag_search_missions(&results);
-
-        let out: Vec<serde_json::Value> = results.iter().map(rag_result_json).collect();
-
-        Ok(CallToolResult::success(vec![Content::text(
-            serde_json::to_string_pretty(&out).unwrap_or_default(),
-        )]))
-    }
-
-    /// Flag one-shot RAG missions for the TUI to pick up via shared state,
-    /// mirroring the `gamification:identity_evolved` mechanism.
-    fn record_rag_search_missions(&self, results: &[crate::rag::vector_store::SearchResult]) {
-        if results.iter().any(|r| r.distance.is_some_and(|d| d < 0.2)) {
-            let _ = self.db.set_state("gamification:deep_rag_search", "1");
-        }
-
-        let month_ago = chrono::Utc::now().timestamp() - 30 * 24 * 3600;
-        if results.iter().any(|r| r.created_at < month_ago) {
-            let _ = self.db.set_state("gamification:digital_archeologist", "1");
-        }
-    }
-
-    #[tool(
-        name = "subagent_spawn",
-        description = "Launch an ephemeral subagent. By default returns an ID \
-         immediately (async); poll subagent_collect for the result. Pass \
-         `blocking: true` to wait for the subagent to finish and return its \
-         result directly — the shape is identical to what subagent_collect \
-         would return, and no collect call is needed. Blocking respects \
-         `timeout_minutes` and returns a timeout as a result, not as an error. \
-         No agent, schedule, or permanent state is registered."
-    )]
-    async fn subagent_spawn(
-        &self,
-        Parameters(params): Parameters<SubagentSpawnParams>,
-        OptionalExtension(parts): OptionalExtension<Parts>,
-    ) -> Result<CallToolResult, McpError> {
-        // Block spawning mid seed-creation interview — but only for a synced
-        // agent caller. The `canopy subagent` CLI reaches this tool through
-        // the daemon with no sync identity, and `reject_if_nursery` would
-        // otherwise hard-fail it on identity resolution alone.
-        if self.resolve_sync_agent_id(parts.as_ref()).is_ok() {
-            self.reject_if_nursery(parts.as_ref())?;
-        }
-
-        let platform = params.cli.as_deref().unwrap_or("opencode");
-        let workdir = params
-            .workdir
-            .clone()
-            .filter(|value| !value.trim().is_empty())
-            .or_else(|| {
-                self.resolve_sync_agent_id(parts.as_ref())
-                    .ok()
-                    .and_then(|agent_id| resolve_effective_project_hash(&self.db, None, &agent_id))
-            })
-            .or_else(|| {
-                std::env::current_dir()
-                    .ok()
-                    .and_then(|p| p.to_str().map(String::from))
-            })
-            .unwrap_or_else(|| "/tmp".to_string());
-
-        let mcp_servers = params.mcp_servers.unwrap_or_default();
-        let timeout_minutes = params.timeout_minutes.unwrap_or(15);
-        let ttl_minutes = params.ttl_minutes.unwrap_or(60);
-        let blocking = params.blocking.unwrap_or(false);
-
-        let db = Arc::clone(&self.db);
-        let prompt = params.prompt.clone();
-        let model = params.model.clone();
-        let effort = params.effort.clone();
-        let workdir_clone = workdir.clone();
-
-        // CM18: blocking stays opt-in; absent/false is today's async path,
-        // unchanged. The blocking wait holds no DB guard across its await
-        // (see `spawn_subagent_blocking`), so other MCP work progresses.
-        if blocking {
-            match crate::daemon::subagent::spawn_subagent_blocking(
-                &db,
-                platform,
-                &prompt,
-                model.as_deref(),
-                &workdir_clone,
-                &mcp_servers,
-                timeout_minutes,
-                ttl_minutes,
-                effort.as_deref(),
-            )
-            .await
-            {
-                Ok(blocking_result) => {
-                    // Identical shape to `subagent_collect` (guideline), plus
-                    // the wait accounting FR3 requires on timeouts.
-                    let result = blocking_result.result;
-                    let mut json = serde_json::json!({
-                        "id": result.id,
-                        "status": result.status,
-                        "exit_code": result.exit_code,
-                        "stdout": result.stdout,
-                        "stderr": result.stderr,
-                        "mcp_surface": result.mcp_surface,
-                        "platform": result.platform,
-                        "model": result.model,
-                        "waited_secs": blocking_result.waited_secs,
-                        "waited_minutes": timeout_minutes,
-                        "timed_out": blocking_result.timed_out,
-                    });
-                    if let Some(reason) = blocking_result.effort_not_applied {
-                        json["effort_not_applied"] = serde_json::json!(reason);
-                    }
-                    Ok(CallToolResult::success(vec![Content::text(
-                        serde_json::to_string_pretty(&json).unwrap_or_default(),
-                    )]))
-                }
-                Err(e) => Ok(error_result(&e.to_string())),
-            }
-        } else {
-            match crate::daemon::subagent::spawn_subagent(
-                &db,
-                platform,
-                &prompt,
-                model.as_deref(),
-                &workdir_clone,
-                &mcp_servers,
-                timeout_minutes,
-                ttl_minutes,
-                effort.as_deref(),
-            )
-            .await
-            {
-                Ok((id, effort_not_applied)) => {
-                    let mut result = serde_json::json!({
-                        "id": id,
-                        "status": "running",
-                        "handle": id,
-                    });
-                    if let Some(reason) = effort_not_applied {
-                        result["effort_not_applied"] = serde_json::json!(reason);
-                    }
-                    Ok(CallToolResult::success(vec![Content::text(
-                        serde_json::to_string_pretty(&result).unwrap_or_default(),
-                    )]))
-                }
-                Err(e) => Ok(error_result(&e.to_string())),
-            }
-        }
-    }
-
-    #[tool(
-        name = "subagent_collect",
-        description = "Collect the result of an ephemeral subagent. \
-         Returns the result and marks it for cleanup. Returns status='running' \
-         if the subagent hasn't finished yet."
-    )]
-    async fn subagent_collect(
-        &self,
-        Parameters(params): Parameters<SubagentCollectParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let db = Arc::clone(&self.db);
-        match crate::daemon::subagent::collect_subagent(&db, &params.id) {
-            Ok(Some(result)) => {
-                let json = serde_json::json!({
-                    "id": result.id,
-                    "status": result.status,
-                    "exit_code": result.exit_code,
-                    "stdout": result.stdout,
-                    "stderr": result.stderr,
-                    "mcp_surface": result.mcp_surface,
-                    "platform": result.platform,
-                    "model": result.model,
-                });
-                Ok(CallToolResult::success(vec![Content::text(
-                    serde_json::to_string_pretty(&json).unwrap_or_default(),
-                )]))
-            }
-            Ok(None) => {
-                // CM18: a blocking spawn delivers its result inline and
-                // deletes the row, leaving a tombstone — report that it was
-                // already delivered rather than that it is missing (FR4).
-                if db.is_delivered_tombstone(&params.id).unwrap_or(false) {
-                    return Ok(error_result(
-                        &crate::daemon::subagent::already_delivered_message(&params.id),
-                    ));
-                }
-                Ok(error_result(&format!(
-                    "Subagent run '{}' not found",
-                    params.id
-                )))
-            }
-            Err(e) => Ok(error_result(&e.to_string())),
-        }
-    }
-}
-
-/// (CB25) Build the design-review prompt for a `graph_preflight` reviewer.
-/// The full audit checklist lives in the `graph-reviewer` skill — never
-/// duplicated here. The fallback checklist below is used ONLY when the
-/// skill cannot be resolved, and names the areas, not the checks.
-fn build_preflight_reviewer_prompt(
-    graph_id: &str,
-    queue_id: Option<&str>,
-    skill_section: &str,
-) -> String {
-    let mut prompt = String::from(
-        "You are auditing a canopy graph's DESIGN, not its reachability. Audit ONLY: do not modify the graph, the specs, or any file (no graph_* mutation tools, no file writes).",
-    );
-    prompt.push_str(&format!(" Target: graph_id='{graph_id}'"));
-    if let Some(qid) = queue_id {
-        prompt.push_str(&format!(" queue_id='{qid}'."));
-    } else {
-        prompt.push('.');
-    }
-    prompt.push_str(
-        " Read the graph with graph_get (and queue_list for the queue) through the MCP surface.",
-    );
-    prompt.push_str(
-        " Load the 'graph-reviewer' skill with skill_get; if the skill text is appended below under '## Skill: graph-reviewer', that IS its content — do not fetch again.",
-    );
-    prompt.push_str(skill_section);
-    prompt.push_str(
-        " Fallback areas (only if the skill is missing): graph (single entry, no unreachable node, pass+fail on every agent node, paired ops balanced); specs (decided, one repo each, seven sections, one language, no unsourced factual claims); model economy (expensive model placement, cost of one rejection, resume, commit rights, context groups, pinned skills); prompts (finish the turn, continue from work on disk).",
-    );
-    prompt.push_str(
-        " Order findings by severity, name the SINGLE item to fix first, and close with an advisory verdict. Your verdict does not block the run — the caller decides.",
-    );
-    prompt
-}
-
-/// (CB25) Resolve the `graph-reviewer` skill for the preflight reviewer
-/// prompt. Success inlines the instructions under the pinned-skill
-/// delimiter; anything else degrades to the unresolved note and the
-/// reviewer still spawns. Blocking (git/network), so the caller runs it
-/// via `spawn_blocking`.
-fn resolve_reviewer_skill_section(store: &crate::dynamic_skills::SkillStore) -> String {
-    match store.get("graph-reviewer") {
-        Ok(content) => format!("\n\n## Skill: graph-reviewer\n{}", content.instructions),
-        Err(_) => "\n\n## Skill: graph-reviewer\n_Could not resolve pinned skill 'graph-reviewer' — continuing without it._"
-            .to_string(),
-    }
-}
-
-/// (CB25) Spawn the `graph_preflight` design reviewer. NEVER returns Err:
-/// every failure degrades to a `not_spawned` note so the reviewer can
-/// never fail the preflight itself.
-async fn spawn_preflight_reviewer(
-    handler: &TaskTriggerHandler,
-    graph_id: &str,
-    queue_id: Option<&str>,
-    workdir: &str,
-    platform: &str,
-    model: Option<&str>,
-) -> serde_json::Value {
-    let pair = format!("{platform}/{}", model.unwrap_or("default"));
-    // `Cli::strategy()` panics for a platform missing from the canopy
-    // config (and `find_platform` errors for names outside the registry),
-    // so pre-validate here: an unconfigured reviewer platform degrades to
-    // `not_spawned` instead of panicking the preflight itself. Mirrors
-    // `Cli::strategy`'s home resolution (`CANOPY_HOME_OVERRIDE` first).
-    let home = std::env::var_os("CANOPY_HOME_OVERRIDE")
-        .map(std::path::PathBuf::from)
-        .or_else(dirs::home_dir);
-    let configured =
-        home.map(|h| crate::domain::canopy_config::CanopyConfig::load(&h.join(".canopy")));
-    if configured
-        .as_ref()
-        .and_then(|c| c.get_cli(platform))
-        .is_none()
-    {
-        return serde_json::json!({
-            "status": "not_spawned",
-            "platform": platform,
-            "model": model,
-            "pair": pair,
-            "note": format!("Reviewer platform '{platform}' is not configured in canopy; probes above are unaffected."),
-        });
-    }
-    let store = Arc::clone(&handler.dynamic_skills);
-    let skill_section =
-        match tokio::task::spawn_blocking(move || resolve_reviewer_skill_section(&store)).await {
-            Ok(section) => section,
-            Err(_) => resolve_reviewer_skill_section(&handler.dynamic_skills),
-        };
-    let prompt = build_preflight_reviewer_prompt(graph_id, queue_id, &skill_section);
-    // Run the spawn in its own task so a panic inside `spawn_subagent`
-    // (e.g. `fetch_registry`'s `reqwest::blocking` client, which cannot
-    // drop its runtime in an async context under `debug_assertions`)
-    // is captured as a `JoinError` and degrades to `not_spawned`
-    // instead of taking down the preflight. Owned clones keep the
-    // future `'static`; the monitor task it leaves behind still joins
-    // the shared runtime, so a successful spawn is unaffected.
-    let db = Arc::clone(&handler.db);
-    let platform_owned = platform.to_string();
-    let model_owned = model.map(str::to_string);
-    let workdir_owned = workdir.to_string();
-    let spawned = tokio::spawn(async move {
-        crate::daemon::subagent::spawn_subagent(
-            &db,
-            &platform_owned,
-            &prompt,
-            model_owned.as_deref(),
-            &workdir_owned,
-            &["canopy".to_string()],
-            15,
-            60,
-            None,
-        )
-        .await
-    })
-    .await;
-    match spawned {
-        Ok(Ok((id, _))) => serde_json::json!({
-            "status": "running",
-            "id": id,
-            "platform": platform,
-            "model": model,
-            "pair": pair,
-            "collect_with": "subagent_collect",
-            "note": format!("Cost: ran on '{pair}'. Advisory only — does not affect probe results."),
-        }),
-        Ok(Err(e)) => serde_json::json!({
-            "status": "not_spawned",
-            "platform": platform,
-            "model": model,
-            "pair": pair,
-            "note": format!("Reviewer could not start ({e}); probes above are unaffected."),
-        }),
-        Err(join_err) => serde_json::json!({
-            "status": "not_spawned",
-            "platform": platform,
-            "model": model,
-            "pair": pair,
-            "note": format!("Reviewer could not start ({join_err}); probes above are unaffected."),
-        }),
-    }
-}
-
-/// Resolve `agent_probe`/`graph_preflight`'s `timeout_seconds` param to an
-/// actual bound: the configured default when omitted, clamped to
-/// `[MIN_PROBE_TIMEOUT_SECS, MAX_PROBE_TIMEOUT_SECS]` otherwise — a probe is
-/// a liveness check, not a capability benchmark, so callers can't ask for an
-/// unbounded wait.
-fn clamp_probe_timeout(requested: Option<u64>) -> u64 {
-    requested
-        .unwrap_or(crate::daemon::probe::DEFAULT_PROBE_TIMEOUT_SECS)
-        .clamp(
-            crate::daemon::probe::MIN_PROBE_TIMEOUT_SECS,
-            crate::daemon::probe::MAX_PROBE_TIMEOUT_SECS,
-        )
-}
-
-fn clamp_max_recent_pairs(requested: Option<u32>) -> usize {
-    requested.unwrap_or(15).clamp(1, 50) as usize
-}
-
-/// Human display string for a platform slug ("Provider · Tool" when the
-/// registry knows both, slug otherwise). Probe JSON keeps `"platform"` as
-/// the slug and carries this as the sibling `"platform_display"` key —
-/// display is never matched on or accepted as input.
-fn display_for_slug(config: &crate::domain::canopy_config::CanopyConfig, slug: &str) -> String {
-    config
-        .get_cli(slug)
-        .map(|c| c.display_name())
-        .unwrap_or_else(|| slug.to_string())
-}
-
-/// Validate a requested `agent_models` platform against the CLIs actually
-/// configured in canopy (registry-driven, from `~/.canopy/config.toml`).
-/// Returns `Some(error_message)` if config exists and the platform isn't among
-/// the configured CLIs; `None` when the platform is configured, or when no
-/// config is present yet (stay lenient rather than rejecting everything).
-fn validate_platform_configured(platform: &str) -> Option<String> {
-    let home = dirs::home_dir()?;
-    let config = crate::domain::canopy_config::CanopyConfig::load(&home.join(".canopy"));
-    let configured = config.cli_names();
-    if configured.is_empty() || configured.contains(&platform) {
-        return None;
-    }
-    Some(format!(
-        "Platform '{platform}' is not configured in canopy. Configured platforms: {}. \
-         Omit `platform` to list all providers.",
-        configured.join(", ")
-    ))
-}
-
-fn platform_model_selection_warning(platform: &str) -> Option<String> {
-    let home = dirs::home_dir()?;
-    let config = crate::domain::canopy_config::CanopyConfig::load(&home.join(".canopy"));
-    let cli = config.get_cli(platform)?;
-    if crate::domain::cli_config::model_flag_selects_model(cli.model_flag.as_deref()) {
-        return None;
-    }
-    Some(format!(
-        "Platform '{}' does not support model selection (no model_flag configured).\n\
-         This platform addresses named agents, not models.\n\
-         Omit the `model` field when using this platform — the CLI will use its own default.\n\
-         \n\
-         The ids listed below are NOT valid input for the `model` field.",
-        platform
-    ))
-}
-
-/// The `(binary, enumeration args)` for a platform that can list its own
-/// models, read straight from its registry-driven `CliConfig` — `None` when the
-/// platform has no such command configured (so nothing is inferred from the CLI
-/// name). This is the seam that decides opencode enumerates via `opencode
-/// models` while claude does not.
-fn platform_enumeration_cmd(platform: &str) -> Option<(String, String)> {
-    let home = dirs::home_dir()?;
-    let config = crate::domain::canopy_config::CanopyConfig::load(&home.join(".canopy"));
-    let cli = config.get_cli(platform)?;
-    let args = cli.models_list_cmd.as_deref()?.trim();
-    if args.is_empty() || cli.binary.is_empty() {
-        return None;
-    }
-    Some((cli.binary.clone(), args.to_string()))
-}
-
-/// Build the `agent_models` result from a platform's native enumeration. The
-/// CLI run happens off the async executor (it may spawn a process); a fresh
-/// cache returns with no CLI call at all.
-async fn native_models_result(
-    platform: &str,
-    binary: String,
-    args: String,
-    force_refresh: bool,
-    full: bool,
-) -> CallToolResult {
-    let platform_owned = platform.to_string();
-    let ttl = configured_models().native_ttl();
-    let load = tokio::task::spawn_blocking(move || {
-        crate::domain::models_db::load_native_models(
-            &platform_owned,
-            &binary,
-            &args,
-            force_refresh,
-            ttl,
-        )
-    })
-    .await
-    .ok()
-    .flatten();
-
-    let Some(load) = load else {
-        // Enumeration failed — fall back to the provider catalogue rather than
-        // returning a hard error, per FR3. The NOTE tells the caller what
-        // happened; the catalogue path provides whatever models.dev knows about.
-        let note = format!(
-            "NOTE: '{platform}' model enumeration failed (CLI unreachable); showing \
-             the provider catalogue instead.\n\n"
-        );
-        let fallback_text = catalogue_models_text(Some(platform), force_refresh, full).await;
-        return match fallback_text {
-            Ok(text) => CallToolResult::success(vec![Content::text(format!("{note}{text}"))]),
-            Err(_) => error_result(&format!(
-                "Could not enumerate '{platform}' models and no provider catalogue \
-                 is available as fallback. Retry once the CLI is reachable."
-            )),
-        };
-    };
-    let crate::domain::models_db::NativeLoad { catalog, source } = load;
-
-    let (listing, truncation) = format_native_models(&catalog.ids, full);
-    let mut listing = format!(
-        "Models available to platform '{platform}' (enumerated from the CLI — ids are \
-         passable verbatim):\n{listing}"
-    );
-    // FR4: a platform can expose a `models_list_cmd` while still addressing
-    // named agents rather than models (no `model_flag`) — the 2026-08-13
-    // `mistral` shape. In that case the ids above are not valid `model`
-    // input regardless of where they were enumerated from, so the same
-    // warning the models.dev path prints must lead here too.
-    if let Some(warning) = platform_model_selection_warning(platform) {
-        listing = format!("{warning}\n\n{listing}");
-    }
-    CallToolResult::success(vec![Content::text(model_result_footer(
-        &listing,
-        source,
-        catalog.fetched_at,
-        ttl,
-        &truncation,
-        true,
-    ))])
-}
-
-/// Why [`catalogue_models_text`] could not produce a listing — the two cases
-/// have different remedies, so the caller must tell them apart.
-enum CatalogTextError {
-    /// `platform` has no models.dev provider mapping at all, so no id list can
-    /// be derived from the catalogue. Not a transient outage — retrying or
-    /// `refresh: true` will not help.
-    NoProviderMapping,
-    /// models.dev is unreachable and no local cache exists.
-    Unavailable,
-}
-
-/// Format the models.dev provider catalogue as text (without wrapping in a
-/// `CallToolResult`). Returns [`CatalogTextError`] when no listing can be
-/// produced. Used by both `catalogue_models_result` (normal path) and
-/// `native_models_result` (enumeration-failure fallback).
-async fn catalogue_models_text(
-    platform: Option<&str>,
-    force_refresh: bool,
-    full: bool,
-) -> Result<String, CatalogTextError> {
-    let ttl = configured_models().catalog_ttl();
-    let load = tokio::task::spawn_blocking(move || {
-        crate::domain::models_db::load_catalog_with_source(force_refresh, ttl)
-    })
-    .await
-    .ok()
-    .flatten()
-    .ok_or(CatalogTextError::Unavailable)?;
-
-    let crate::domain::models_db::CatalogLoad { catalog, source } = load;
-
-    let (listing, truncation) = match platform {
-        Some(platform) => {
-            let providers = crate::domain::models_db::providers_for_cli(platform);
-            if providers.is_empty() {
-                return Err(CatalogTextError::NoProviderMapping);
-            }
-            let (formatted, trunc) = format_platform_models(&catalog, providers, full);
-            let mut listing = format!(
-                "Models available to platform '{platform}' (providers: {}):\n{formatted}",
-                providers.join(", ")
-            );
-            if let Some(warning) = platform_model_selection_warning(platform) {
-                listing = format!("{warning}\n\n{listing}");
-            }
-            (listing, trunc)
-        }
-        None => {
-            let (formatted, trunc) = format_catalog_models(&catalog, full);
-            (
-                format!("Available models (use the model id as the model field):\n{formatted}"),
-                trunc,
-            )
-        }
-    };
-
-    Ok(model_result_footer(
-        &listing,
-        source,
-        catalog.fetched_at,
-        ttl,
-        &truncation,
-        false,
-    ))
-}
-
-/// Build the `agent_models` result from the models.dev provider catalogue.
-/// Used by `task_models` for platforms without native enumeration.
-async fn catalogue_models_result(
-    platform: Option<&str>,
-    force_refresh: bool,
-    full: bool,
-) -> CallToolResult {
-    match catalogue_models_text(platform, force_refresh, full).await {
-        Ok(text) => CallToolResult::success(vec![Content::text(text)]),
-        Err(CatalogTextError::NoProviderMapping) => error_result(&format!(
-            "No known model providers are mapped for platform '{}'. \
-             Omit `platform` to list all providers.",
-            platform.unwrap_or_default(),
-        )),
-        Err(CatalogTextError::Unavailable) => error_result(
-            "Model catalog unavailable: could not reach models.dev and no local \
-             cache exists at ~/.canopy/cache/models_catalog.json. Omit the model field to \
-             use the CLI's default, or retry once network access is restored.",
-        ),
-    }
-}
-
-/// This daemon's `[models]` TTL configuration, read fresh from
-/// `~/.canopy/config.toml` on every call (like `rag_max_file_bytes`) so a
-/// config edit is picked up on the next `agent_models` call without
-/// restarting the daemon. Falls back to the compiled defaults when no home
-/// directory or config file can be found.
-fn configured_models() -> crate::domain::canopy_config::ModelsConfig {
-    dirs::home_dir()
-        .map(|home| crate::domain::canopy_config::CanopyConfig::load(&home.join(".canopy")).models)
-        .unwrap_or_default()
-}
-
-/// CB43: the "recently used" section that leads `agent_models` output — one
-/// line per platform+model pair this installation has run in the last 30
-/// days (most recent first, capped at fifteen): when it last ran, how many
-/// times, and how the most recent run ended. Computed only from this
-/// installation's own runs; a pair never run here never appears. The
-/// catalogue below is unchanged.
-fn recent_usage_section(db: &Database) -> String {
-    let since =
-        chrono::Utc::now() - chrono::Duration::days(crate::db::graphs::RECENT_USAGE_WINDOW_DAYS);
-    match db.list_recent_platform_model_usage(since, 15) {
-        Ok(rows) => format_recent_usage_section(&rows),
-        Err(_) => String::new(),
-    }
-}
-
-/// CB43: render the section (testable without a database). A NULL model is
-/// the CLI's default. The last outcome is what keeps the list honest: a
-/// pair used forty times whose last run timed out must not read as a
-/// recommendation.
-fn format_recent_usage_section(rows: &[crate::db::graphs::RecentModelUsage]) -> String {
-    const HEADER: &str =
-        "Recently used on this machine (last 30 days) — from this installation's own runs:";
-    if rows.is_empty() {
-        return format!("{HEADER}\nNo models have run on this installation in the last 30 days.");
-    }
-    let now = chrono::Utc::now();
-    let mut out = String::from(HEADER);
-    for row in rows {
-        let model = row
-            .model
-            .as_deref()
-            .filter(|model| !model.is_empty())
-            .unwrap_or("(default)");
-        let age = now
-            .signed_duration_since(row.last_run)
-            .to_std()
-            .map(format_duration_short)
-            .unwrap_or_else(|_| "0s".to_string());
-        out.push_str(&format!(
-            "\n- {}/{}: last used {} ago ({}), {} runs, last outcome: {}",
-            row.platform,
-            model,
-            age,
-            row.last_run.to_rfc3339(),
-            row.count,
-            row.last_outcome,
-        ));
-    }
-    out
-}
-
-/// CB43: lead a successful `agent_models` result with the recently-used
-/// section. Error results (unknown platform, unreachable catalogue) are left
-/// untouched — the section informs a model choice, and there is no choice
-/// on offer when the listing itself failed.
-fn prepend_recent_usage(result: &mut CallToolResult, section: &str) {
-    if section.is_empty() || result.is_error == Some(true) {
-        return;
-    }
-    let existing = result
-        .content
-        .first()
-        .and_then(|content| content.as_text().map(|text| text.text.clone()));
-    if let Some(existing) = existing {
-        if !result.content.is_empty() {
-            result.content[0] = Content::text(format!("{section}\n\n{existing}"));
-        }
-    }
-}
-
-/// The shared provenance/footer block for `agent_models`, used by both the
-/// models.dev and native-enumeration paths. States the cache's age and
-/// whether a refresh is due, not just its timestamp — and when the source was
-/// unreachable, folds how stale the served cache is into that same notice.
-fn model_result_footer(
-    listing: &str,
-    source: crate::domain::models_db::CatalogSource,
-    fetched_at: std::time::SystemTime,
-    ttl: std::time::Duration,
-    truncation: &crate::daemon::handler_formatting::ModelTruncation,
-    from_cli: bool,
-) -> String {
-    let age = fetched_at.elapsed().unwrap_or_default();
-    let age_str = format_duration_short(age);
-    let ttl_str = format_duration_short(ttl);
-    let refresh_due = age >= ttl;
-
-    let provenance_note = if source == crate::domain::models_db::CatalogSource::Stale {
-        format!(
-            " (source unreachable — serving a cache that is already {age_str} old, past \
-             the {ttl_str} refresh interval; retry with refresh: true once it's reachable)"
-        )
-    } else if refresh_due {
-        " (refresh due — pass refresh: true to update now)".to_string()
-    } else {
-        String::new()
-    };
-
-    let truncation_notice = truncation
-        .notice()
-        .map(|n| format!("\n{n}"))
-        .unwrap_or_default();
-    if from_cli {
-        format!(
-            "{listing}\n\n\
-             Source: CLI enumeration — every id above is accepted verbatim by this \
-             platform's model flag. {}{provenance_note} · age: {age_str} \
-             (refresh interval {ttl_str}) · fetched_at: {}{truncation_notice}",
-            source.as_str(),
-            format_system_time(fetched_at),
-        )
-    } else {
-        format!(
-            "{listing}\n\n\
-             Source: provider catalogue (models.dev) — advertised, not \
-             account-verified. {}{provenance_note} · age: {age_str} \
-             (refresh interval {ttl_str}) · fetched_at: {}\n\
-             WARNING: This lists the PROVIDER'S CATALOG, not what your account can use.\n\
-             Actual availability depends on your API key tier, account type, and region.\n\
-             A model listed here may still fail at runtime — use `agent_probe` or `graph_preflight`\n\
-             to validate a specific platform+model pair before relying on it.{truncation_notice}",
-            source.as_str(),
-            format_system_time(fetched_at),
-        )
-    }
-}
-
-/// Format a `SystemTime` as an RFC 3339 / ISO 8601 UTC timestamp for the
-/// `agent_models` cache metadata.
-fn format_system_time(time: std::time::SystemTime) -> String {
-    chrono::DateTime::<chrono::Utc>::from(time).to_rfc3339()
-}
-
-/// Render a `Duration` as a short human-readable age/TTL (`45s`, `12m`,
-/// `2h15m`, `3d4h`) for the `agent_models` footer — coarse on purpose, since
-/// the footer only needs to convey rough freshness, not precise timing.
-fn format_duration_short(d: std::time::Duration) -> String {
-    let secs = d.as_secs();
-    if secs < 60 {
-        return format!("{secs}s");
-    }
-    let mins = secs / 60;
-    if mins < 60 {
-        return format!("{mins}m");
-    }
-    let hours = mins / 60;
-    let rem_mins = mins % 60;
-    if hours < 24 {
-        return if rem_mins == 0 {
-            format!("{hours}h")
-        } else {
-            format!("{hours}h{rem_mins}m")
-        };
-    }
-    let days = hours / 24;
-    let rem_hours = hours % 24;
-    if rem_hours == 0 {
-        format!("{days}d")
-    } else {
-        format!("{days}d{rem_hours}h")
-    }
-}
-
-/// Find and skip `graph_id`'s currently `running` spec — its own bound spec,
-/// or, for a queue-driven run, the queue member currently in flight. A queue
-/// member's `graph_id` column stays `None` (queue membership never binds it),
-/// so `list_graph_specs(graph_id)` alone can't see it (B18): the graph's
-/// persisted `active_run_queue_id` is what names the queue to look in instead.
-pub(crate) fn handle_skip_next_spec(db: &Database, graph_id: &str) -> Result<(), McpError> {
-    let bound_running = db
-        .list_graph_specs(graph_id)
-        .map_err(internal_error)?
-        .into_iter()
-        .find(|spec| spec.status == GraphSpecStatus::Running);
-
-    let current_spec = match bound_running {
-        Some(spec) => spec,
-        None => queue_running_spec(db, graph_id)?.ok_or_else(|| {
-            McpError::invalid_params(
-                "No running spec found to skip from this paused graph.",
-                None,
-            )
-        })?,
-    };
-
-    db.update_graph_spec_status(
-        &current_spec.id,
-        GraphSpecStatus::Skipped,
-        None,
-        Some(chrono::Utc::now()),
-    )
-    .map_err(internal_error)?;
-    Ok(())
-}
-
-/// Validate that a resumable spec exists for `retry_current_node` — `Running`
-/// or `Interrupted` (see [`GraphSpecStatus::is_resumable`], CB50), the same
-/// lookup shape as [`handle_skip_next_spec`] but only checks, never mutates.
-/// When nothing resumable is found, the error names whichever spec IS
-/// current (if any) and its status, and points at the verb that does apply —
-/// `loop_run` to restart a non-`Failed` spec from its entry node, `loop_reset`
-/// for a `Failed` one (FR5) — rather than a bare "not found".
-pub(crate) fn handle_retry_current_node(db: &Database, graph_id: &str) -> Result<(), McpError> {
-    let bound_specs = db.list_graph_specs(graph_id).map_err(internal_error)?;
-    if bound_specs.iter().any(|spec| spec.status.is_resumable()) {
-        return Ok(());
-    }
-    let queue_spec = queue_current_spec(db, graph_id)?;
-    if let Some(spec) = &queue_spec {
-        if spec.status.is_resumable() {
-            return Ok(());
-        }
-    }
-
-    let current = bound_specs
-        .into_iter()
-        .find(|spec| {
-            !matches!(
-                spec.status,
-                GraphSpecStatus::Completed | GraphSpecStatus::Skipped
-            )
-        })
-        .or(queue_spec);
-
-    Err(match current {
-        Some(spec) if spec.status == GraphSpecStatus::Failed => McpError::invalid_params(
-            format!(
-                "Graph '{graph_id}': current spec '{}' is 'failed', not resumable by \
-                 loop_continue. Use loop_reset to reset it.",
-                spec.name
-            ),
-            None,
-        ),
-        Some(spec) => McpError::invalid_params(
-            format!(
-                "Graph '{graph_id}': current spec '{}' is '{}', not resumable by \
-                 loop_continue. Use loop_run to restart it from its entry node.",
-                spec.name,
-                spec.status.as_str()
-            ),
-            None,
-        ),
-        None => McpError::invalid_params(
-            "No running spec found to retry from this paused graph.",
-            None,
-        ),
-    })
-}
-
-/// The `running` member of `graph_id`'s currently active queue run, if any —
-/// `None` if the graph isn't drawing from a queue, or no member is `running`.
-fn queue_running_spec(db: &Database, graph_id: &str) -> Result<Option<GraphSpec>, McpError> {
-    let Some(queue_id) = db
-        .get_graph(graph_id)
-        .map_err(internal_error)?
-        .and_then(|lp| lp.active_run_queue_id)
-    else {
-        return Ok(None);
-    };
-    for spec_id in db
-        .list_queue_member_spec_ids(&queue_id)
-        .map_err(internal_error)?
-    {
-        if let Some(spec) = db.get_graph_spec(&spec_id).map_err(internal_error)? {
-            if spec.status == GraphSpecStatus::Running {
-                return Ok(Some(spec));
-            }
-        }
-    }
-    Ok(None)
-}
-
-/// The current member of `graph_id`'s active queue: the first `Running` or
-/// `Interrupted` member (either is resumable — CB50), found in queue
-/// position order. If none is resumable, falls back to the first member not
-/// yet `Completed`/`Skipped`, purely so callers building an error message
-/// (FR5) have a spec to name instead of nothing. `None` if the graph isn't
-/// drawing from a queue, or every member is terminal.
-fn queue_current_spec(db: &Database, graph_id: &str) -> Result<Option<GraphSpec>, McpError> {
-    let Some(queue_id) = db
-        .get_graph(graph_id)
-        .map_err(internal_error)?
-        .and_then(|lp| lp.active_run_queue_id)
-    else {
-        return Ok(None);
-    };
-    let mut fallback: Option<GraphSpec> = None;
-    for spec_id in db
-        .list_queue_member_spec_ids(&queue_id)
-        .map_err(internal_error)?
-    {
-        let Some(spec) = db.get_graph_spec(&spec_id).map_err(internal_error)? else {
-            continue;
-        };
-        if spec.status.is_resumable() {
-            return Ok(Some(spec));
-        }
-        if fallback.is_none()
-            && !matches!(
-                spec.status,
-                GraphSpecStatus::Completed | GraphSpecStatus::Skipped
-            )
-        {
-            fallback = Some(spec);
-        }
-    }
-    Ok(fallback)
-}
-
-/// What a graph is actually working on (CB30).
-///
-/// `list_graph_specs` returns the graph's *bound* specs, which for a queue or
-/// idea run is the blank-name placeholder row the engine inserts as
-/// `graph_runs.spec_id` bookkeeping — never the work itself. Every display
-/// surface must go through [`active_graph_spec_context`] instead of reading
-/// the bound list directly, so `graph_get`, `graph list` and `canopy graph
-/// info` agree on the answer.
-#[derive(Debug)]
-pub(crate) enum ActiveGraphSpec {
-    /// A normal bound spec (never a placeholder).
-    Bound(GraphSpec),
-    /// A queue member spec currently in flight.
-    QueueMember {
-        spec: GraphSpec,
-        queue_id: String,
-        queue_name: String,
-    },
-    /// An idea-driven run: a placeholder exists but must not be shown.
-    Idea { placeholder_id: String },
-    /// Nothing running (all done, or nothing queued yet).
-    None,
-}
-
-/// The single answer to "what spec is this graph on", shared by `graph_get`
-/// ([`graph_details_json`]), `graph list` ([`build_graph_summary_json`]) and
-/// `canopy graph info` (`handle_graph_info` in `daemon/graph_cli.rs`).
-///
-/// The placeholder is hidden, never relabelled: a fabricated name would
-/// replace a confusing answer with a false one.
-pub(crate) fn active_graph_spec_context(
-    db: &Database,
-    lp: &Graph,
-) -> anyhow::Result<ActiveGraphSpec> {
-    if let Some(queue_id) = lp.active_run_queue_id.as_deref() {
-        if let Some(queue_name) = db.get_queue(queue_id)?.map(|queue| queue.name) {
-            let mut running: Option<GraphSpec> = None;
-            let mut pending: Option<GraphSpec> = None;
-            for spec_id in db.list_queue_member_spec_ids(queue_id)? {
-                if let Some(spec) = db.get_graph_spec(&spec_id)? {
-                    if spec.status == GraphSpecStatus::Running {
-                        if running.is_none() {
-                            running = Some(spec);
-                        }
-                    // Same fallback shape as `build_graph_summary_json`'s
-                    // bound-spec search: the next runnable (or stalled)
-                    // member in queue order when nothing is `Running`.
-                    } else if pending.is_none()
-                        && matches!(
-                            spec.status,
-                            GraphSpecStatus::Pending
-                                | GraphSpecStatus::Interrupted
-                                | GraphSpecStatus::Failed
-                        )
-                    {
-                        pending = Some(spec);
-                    }
-                }
-            }
-            // A `Running` member anywhere beats an earlier pending one:
-            // dispatch is sequential, so a running member means everything
-            // before it already completed.
-            if let Some(spec) = running.or(pending) {
-                return Ok(ActiveGraphSpec::QueueMember {
-                    spec,
-                    queue_id: queue_id.to_string(),
-                    queue_name,
-                });
-            }
-            // Queue drained (or empty): fall through to the bound/idea
-            // logic so a finished queue graph reports `None` rather than a
-            // stale member. Callers still render the queue link itself from
-            // `active_run_queue_id`.
-        }
-    }
-    let mut placeholder_id: Option<String> = None;
-    let mut current: Option<GraphSpec> = None;
-    // `list_graph_specs` returns position order, so the first non-terminal
-    // real spec is the one dispatch is on — the same pick
-    // `build_graph_summary_json` historically made, minus the placeholder.
-    for spec in db.list_graph_specs(&lp.id)? {
-        if crate::graph_engine::is_no_spec_placeholder(&spec) {
-            if placeholder_id.is_none() {
-                placeholder_id = Some(spec.id.clone());
-            }
-            continue;
-        }
-        if current.is_none()
-            && matches!(
-                spec.status,
-                GraphSpecStatus::Running
-                    | GraphSpecStatus::Pending
-                    | GraphSpecStatus::Interrupted
-                    | GraphSpecStatus::Failed
-            )
-        {
-            current = Some(spec);
-        }
-    }
-    if let Some(spec) = current {
-        return Ok(ActiveGraphSpec::Bound(spec));
-    }
-    if let Some(placeholder_id) = placeholder_id {
-        // CB30: a completed queue-driven graph still has `active_run_queue_id`
-        // set (B31 keeps it as last-run context) and only the placeholder in
-        // its bound specs. Without this guard, we'd report `Idea` for a
-        // finished queue — replacing one false answer with another.
-        if lp.active_run_queue_id.is_some() {
-            return Ok(ActiveGraphSpec::None);
-        }
-        return Ok(ActiveGraphSpec::Idea { placeholder_id });
-    }
-    Ok(ActiveGraphSpec::None)
-}
-
-impl TaskTriggerHandler {
-    async fn restart_updated_watcher(
-        &self,
-        params: &TaskUpdateParams,
-        agent: &Agent,
-    ) -> Result<Option<CallToolResult>, McpError> {
-        // A rename always needs the watcher to end up running under the new
-        // id, even if no other watch-related field changed.
-        let renamed = agent.id != params.id;
-        if !agent.is_watch() || (!watcher_restart_needed(params) && !renamed) {
-            return Ok(None);
-        }
-
-        // The watcher for a renamed agent may already have been stopped
-        // under the old id before the rename; stopping it again here is a
-        // harmless no-op.
-        let _ = self.watcher_engine.stop_watcher(&params.id).await;
-        if !agent.enabled {
-            return Ok(None);
-        }
-
-        let Err(e) = self.watcher_engine.start_watcher(agent).await else {
-            return Ok(Some(success_result(&format!(
-                "Agent '{}' updated successfully. Watcher restarted with new configuration.",
-                agent.id
-            ))));
-        };
-
-        Ok(Some(CallToolResult::success(vec![Content::text(format!(
-            "Agent '{}' updated but watcher failed to restart: {}. It will be retried on daemon restart.",
-            agent.id, e
-        ))])))
-    }
-
-    async fn check_rag_rate_limit(&self, params: &RagSearchParams) -> Option<CallToolResult> {
-        let limiter_key = params
-            .agent_id
-            .clone()
-            .unwrap_or_else(|| "global".to_owned());
-        let mut limiters = self.rag_limiters.lock().await;
-        let limiter = limiters
-            .entry(limiter_key)
-            .or_insert_with(|| crate::rag::rate_limiter::RateLimiter::new(10));
-
-        limiter
-            .check()
-            .err()
-            .map(|retry_after| error_result(&format!("rate_limited: retry_after={retry_after}s")))
-    }
-}
-
-/// Project knowledge rows tagged with traversal origin: (record,
-/// via_project_hash, via_relation). Root rows carry `via_relation: None`.
-type TaggedProjectKnowledge = Vec<(
-    crate::db::intelligence::IntelligenceNodeRecord,
-    String,
-    Option<String>,
-)>;
-
-fn intelligence_node_json(
-    node: &crate::db::intelligence::IntelligenceNodeRecord,
-) -> serde_json::Value {
-    serde_json::json!({
-        "id": node.id,
-        "kind": node.kind,
-        "status": node.status,
-        "title": node.title,
-        "body": node.body,
-        "metadata": node.metadata,
-        "project_hash": node.project_hash,
-        "session_id": node.session_id,
-        "created_at": node.created_at,
-        "updated_at": node.updated_at,
-    })
-}
-
-/// Compact projection of an intelligence node for `intelligence_graph_walk`:
-/// `id`, `kind`, `title`, `created_at`, `updated_at` and `project_hash`,
-/// omitting `body` and `metadata`. Uses the same field names as the rows
-/// `intelligence_search` emits where the fields overlap — no second compact
-/// shape for the same entity. The database layer keeps returning whole
-/// nodes; this projection happens at the MCP boundary, where the budget
-/// lives.
-fn intelligence_node_compact_json(
-    node: &crate::db::intelligence::IntelligenceNodeRecord,
-) -> serde_json::Value {
-    serde_json::json!({
-        "id": node.id,
-        "kind": node.kind,
-        "title": node.title,
-        "project_hash": node.project_hash,
-        "created_at": node.created_at,
-        "updated_at": node.updated_at,
-    })
-}
-
-/// JSON for one `intelligence_upsert` duplicate candidate — id, kind,
-/// title, project_hash and a short excerpt, never the full body. CB45.
-fn intelligence_duplicate_candidate_json(
-    candidate: &crate::db::intelligence::DuplicateCandidate,
-) -> serde_json::Value {
-    serde_json::json!({
-        "id": candidate.id,
-        "kind": candidate.kind,
-        "title": candidate.title,
-        "project_hash": candidate.project_hash,
-        "excerpt": candidate.excerpt,
-    })
-}
-
-fn intelligence_edge_json(
-    edge: &crate::db::intelligence::IntelligenceEdgeRecord,
-) -> serde_json::Value {
-    serde_json::json!({
-        "id": edge.id,
-        "from_node_id": edge.from_node_id,
-        "to_node_id": edge.to_node_id,
-        "relation": edge.relation,
-        "weight": edge.weight,
-        "created_at": edge.created_at,
-    })
-}
-
-fn activity_log_entry_json(entry: &crate::db::activity_log::ActivityLogEntry) -> serde_json::Value {
-    serde_json::json!({
-        "id": entry.id,
-        "workdir": entry.workdir,
-        "source": entry.source,
-        "source_id": entry.source_id,
-        "kind": entry.kind,
-        "message": entry.message,
-        "payload": entry.payload,
-        "created_at": entry.created_at,
-    })
-}
-
-fn sync_message_json(message: &crate::domain::sync::SyncMessage) -> serde_json::Value {
-    serde_json::json!({
-        "id": message.id,
-        "workdir": message.workdir,
-        "agent_id": message.agent_id,
-        "agent_name": message.agent_name,
-        "kind": message.kind.as_str(),
-        "message": message.message,
-        "payload": message.payload,
-        "created_at": message.created_at,
-    })
-}
-
-/// CB52 FR4: one `orphan_join_warnings` entry for a join node with no
-/// ensemble row. Shared by `graph_get` (advisory, always reported) and
-/// `graph_preflight` (refusal — a graph in this state would die with
-/// "ambiguous outgoing edges", so no probe quota is spent on it).
-fn orphan_join_warning_text(node: &GraphNode) -> String {
-    format!(
-        "join node '{}' ({}) belongs to no ensemble — it was orphaned when an ensemble that owned or referenced its entry/exit was deleted. Delete this orphan node with graph_delete_node or wire it into a repaired graph; do not re-create an ensemble around it automatically. (canopy doctor also lists orphaned joins per graph.)",
-        node.name, node.id
-    )
-}
-
-fn orphan_join_warning_json(node: &GraphNode) -> serde_json::Value {
-    serde_json::json!({
-        "node_id": node.id,
-        "name": node.name,
-        "kind": "join",
-        "spec_id": node.spec_id,
-        "graph_id": node.graph_id,
-        "warning": orphan_join_warning_text(node),
-    })
-}
-
-fn graph_details_json(db: &Database, lp: &GraphDetails) -> anyhow::Result<serde_json::Value> {
-    let mut specs = lp
-        .specs
-        .iter()
-        // Skip the blank-name placeholder an idea-driven run binds to the
-        // graph to carry `{{spec_content}}`: it's engine bookkeeping (purged
-        // once terminal on the next dispatch) and must not read as work.
-        // Trimmed to match the engine's bookkeeping sentinel.
-        .filter(|spec| !spec.spec.name.trim().is_empty())
-        .map(|spec| graph_spec_details_json(db, spec, lp.lp.status))
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    // CB30: while the graph draws from a queue, the bound list above is just
-    // the placeholder — name the queue spec actually running instead, so
-    // this surface agrees with `graph_node_runs_list`.
-    let ctx = active_graph_spec_context(db, &lp.lp)?;
-    match &ctx {
-        ActiveGraphSpec::QueueMember { spec, .. } => {
-            if !specs
-                .iter()
-                .any(|s| s.get("id").and_then(|v| v.as_str()) == Some(spec.id.as_str()))
-            {
-                let details = crate::domain::graphs::GraphSpecDetails {
-                    nodes: db.list_graph_nodes(&spec.id)?,
-                    edges: db.list_graph_edges(&spec.id)?,
-                    spec: spec.clone(),
-                };
-                specs.push(graph_spec_details_json(db, &details, lp.lp.status)?);
-            }
-        }
-        // The placeholder id is engine bookkeeping (a bound row like any
-        // other); it is read here only to assert the sentinel invariant —
-        // the row itself is never rendered.
-        ActiveGraphSpec::Idea { placeholder_id } => {
-            debug_assert!(!placeholder_id.is_empty());
-        }
-        ActiveGraphSpec::Bound(_) | ActiveGraphSpec::None => {}
-    }
-    let ensembles = db
-        .list_ensembles_for_graph(&lp.lp.id)?
-        .iter()
-        .map(|details| ensemble_details_json(details, &lp.graph_edges))
-        .collect::<Vec<_>>();
-
-    // CB52 FR4: join nodes that belong to no ensemble — the state left
-    // behind when an ensemble row was deleted (pre-fix: silently, via `ON
-    // DELETE CASCADE` from a referenced node) while its member/join nodes
-    // survived. Never an error here: the graph must stay inspectable so the
-    // operator can repair it. Never auto-repaired (C1).
-    let mut orphan_join_warnings = Vec::new();
-    for node in db.list_orphan_join_nodes_for_graph(&lp.lp.id)? {
-        orphan_join_warnings.push(orphan_join_warning_json(&node));
-    }
-    for spec in &lp.specs {
-        for node in db.list_orphan_join_nodes_for_spec(&spec.spec.id)? {
-            orphan_join_warnings.push(orphan_join_warning_json(&node));
-        }
-    }
-
-    let mut out = serde_json::json!({
-        "id": lp.lp.id,
-        "name": lp.lp.name,
-        "description": lp.lp.description,
-        "workdir": lp.lp.workdir,
-        "status": lp.lp.status.as_str(),
-        "trigger": graph_trigger_json(&lp.lp),
-        "created_at": lp.lp.created_at.to_rfc3339(),
-        "started_at": lp.lp.started_at.map(|value| value.to_rfc3339()),
-        "completed_at": lp.lp.completed_at.map(|value| value.to_rfc3339()),
-        "autorun_at": lp.lp.autorun_at.map(|value| value.to_rfc3339()),
-        "archived": lp.lp.archived,
-        "graph": {
-            "nodes": lp.graph_nodes.iter().map(|node| graph_node_json(node, &lp.graph_edges)).collect::<Vec<_>>(),
-            "edges": lp.graph_edges.iter().map(graph_edge_json).collect::<Vec<_>>(),
-            "ensembles": ensembles,
-        },
-        "specs": specs,
-        "on_completed": lp.lp.hooks.get(&crate::domain::graphs::GraphHookEvent::OnCompleted)
-            .and_then(|hooks| hooks.first())
-            .map(graph_completion_hook_json),
-        "hooks": lp.lp.hooks.iter().map(|(event, hooks)| {
-            serde_json::json!({
-                "event": event.as_str(),
-                "hooks": hooks.iter().map(graph_completion_hook_json).collect::<Vec<_>>(),
-            })
-        }).collect::<Vec<_>>(),
-        "completion_hook_runs": lp
-            .completion_hook_runs
-            .iter()
-            .map(graph_completion_hook_run_json)
-            .collect::<Vec<_>>(),
-        "orphan_join_warnings": orphan_join_warnings,
-    });
-    // CB30: when the graph draws from a queue, say so and name it; when it
-    // runs a loose idea, say that instead of leaving an empty `specs` to be
-    // misread as "nothing running".
-    match &ctx {
-        ActiveGraphSpec::QueueMember {
-            queue_id,
-            queue_name,
-            ..
-        } => {
-            out["queue"] = serde_json::json!({ "id": queue_id, "name": queue_name });
-        }
-        ActiveGraphSpec::Bound(_) | ActiveGraphSpec::Idea { .. } | ActiveGraphSpec::None => {
-            if let Some(queue_id) = lp.lp.active_run_queue_id.as_deref() {
-                if let Some(queue) = db.get_queue(queue_id)? {
-                    out["queue"] = serde_json::json!({ "id": queue.id, "name": queue.name });
-                }
-            }
-        }
-    }
-    if matches!(ctx, ActiveGraphSpec::Idea { .. }) && out.get("queue").is_none() {
-        out["mode"] = serde_json::json!("idea");
-    }
-    Ok(out)
-}
-
-/// Serialize an ensemble (F1) as the one unit `graph_get`/`graph_update_ensemble`
-/// address — members in position order alongside the join's own config, so a
-/// client can render/edit it without reconstructing it from the underlying
-/// nodes/edges itself. `edges` is the owning graph's full edge list, from
-/// which every entry source (not just the primary `entry_from_node`) is
-/// derived — an ensemble entered from several places shows all of them.
-fn ensemble_details_json(
-    details: &crate::domain::graphs::EnsembleDetails,
-    edges: &[GraphEdge],
-) -> serde_json::Value {
-    let ensemble = &details.ensemble;
-    let entry_sources = crate::db::ensembles::ensemble_entry_sources(
-        &details.members,
-        &ensemble.join_node_id,
-        edges,
-    );
-    serde_json::json!({
-        "id": ensemble.id,
-        "name": ensemble.name,
-        "kind": ensemble.kind.as_str(),
-        "commit_rights": ensemble.commit_rights,
-        "prompt_template": ensemble.prompt_template,
-        "join_node_id": ensemble.join_node_id,
-        "entry_from_node": ensemble.entry_from_node,
-        "entry_condition": ensemble.entry_condition.as_str(),
-        "entry_sources": entry_sources.iter().map(|(node_id, condition)| serde_json::json!({
-            "node_id": node_id,
-            "condition": condition.as_str(),
-        })).collect::<Vec<_>>(),
-        "min_pass": ensemble.min_pass,
-        "straggler_timeout_minutes": ensemble.straggler_timeout_minutes,
-        "effective_straggler_timeout_minutes": ensemble.effective_straggler_timeout_minutes(),
-        "quorum_grace_minutes": ensemble.quorum_grace_minutes,
-        "timeout_minutes": ensemble.timeout_minutes,
-        "infra_retry_limit": ensemble.infra_retry_limit,
-        "infra_crash_max_seconds": ensemble.infra_crash_max_seconds,
-        "infra_backoff_seconds": ensemble.infra_backoff_seconds,
-        "on_pass_to": ensemble.on_pass_to,
-        "on_fail_to": ensemble.on_fail_to,
-        "round_robin_index": ensemble.round_robin_index,
-        "created_at": ensemble.created_at.to_rfc3339(),
-        "members": details.members.iter().map(|member| serde_json::json!({
-            "node_id": member.node_id,
-            "position": member.position,
-            "platform": member.platform,
-            "model": member.model,
-            "prompt_override": member.prompt_override,
-            // Which prompt this member actually renders — "override" (its own
-            // prompt_override) or "shared" (the ensemble's prompt_template) —
-            // so a client can tell the two apart without diffing member config
-            // against the ensemble row itself.
-            "prompt_source": if member.prompt_override.is_some() { "override" } else { "shared" },
-            "infra_retry_limit_override": member.infra_retry_limit,
-            "infra_crash_max_seconds_override": member.infra_crash_max_seconds,
-            "infra_backoff_seconds_override": member.infra_backoff_seconds,
-        })).collect::<Vec<_>>(),
-    })
-}
-
-fn graph_completion_hook_json(
-    hook: &crate::domain::graphs::GraphCompletionHook,
-) -> serde_json::Value {
-    serde_json::json!({
-        "platform": hook.platform,
-        "model": hook.model,
-        "effort": hook.effort,
-        "prompt": hook.prompt,
-        "command": hook.command,
-        "target_session_id": hook.target_session_id,
-        "target_session_name": hook.target_session_name,
-        "timeout_minutes": hook.timeout_minutes,
-        "target_graph_id": hook.target_graph_id,
-        "queue_id": hook.queue_id,
-        "workdir_override": hook.workdir_override,
-        "idea": hook.idea,
-    })
-}
-
-fn graph_completion_hook_run_json(
-    run: &crate::domain::graphs::GraphCompletionHookRun,
-) -> serde_json::Value {
-    serde_json::json!({
-        "id": run.id,
-        "graph_id": run.graph_id,
-        "event": run.event.as_str(),
-        "hook_index": run.hook_index,
-        "status": run.status.as_str(),
-        "output": run.output,
-        "summary": run.summary,
-        "started_at": run.started_at.to_rfc3339(),
-        "completed_at": run.completed_at.map(|value| value.to_rfc3339()),
-    })
-}
-
-fn graph_spec_details_json(
-    db: &Database,
-    spec: &crate::domain::graphs::GraphSpecDetails,
-    graph_status: GraphStatus,
-) -> anyhow::Result<serde_json::Value> {
-    let runs = db.list_graph_runs_for_spec(&spec.spec.id)?;
-    let current_run = runs
-        .iter()
-        .rev()
-        .find(|run| run.status == GraphRunStatus::Running)
-        .or_else(|| runs.last());
-    let blocker = runs.last().and_then(graph_run_blocker);
-    let resume_actions =
-        if graph_status == GraphStatus::Paused && spec.spec.status == GraphSpecStatus::Running {
-            vec!["retry_current_node", "skip_next_spec"]
-        } else {
-            Vec::new()
-        };
-    let runs = runs.iter().map(graph_run_json).collect::<Vec<_>>();
-    let ensembles = db
-        .list_ensembles_for_spec(&spec.spec.id)?
-        .iter()
-        .map(|details| ensemble_details_json(details, &spec.edges))
-        .collect::<Vec<_>>();
-
-    Ok(serde_json::json!({
-        "id": spec.spec.id,
-        "graph_id": spec.spec.graph_id,
-        "name": spec.spec.name,
-        "description": spec.spec.description,
-        "position": spec.spec.position,
-        "parallelizable": spec.spec.parallelizable,
-        "status": spec.spec.status.as_str(),
-        "current_node": current_run.map(|run| run.node_id.clone()),
-        "blocked": blocker.is_some(),
-        "blocker": blocker,
-        "resume_actions": resume_actions,
-        // The baseline `{{spec_start_head}}` resolved to for this spec's
-        // current attempt (B10) — lets debugging see exactly which HEAD a
-        // check node's commit-detection compared against.
-        "spec_start_head": spec.spec.spec_start_head,
-        // The HEAD this attempt's own `commit_rights: true` node last left
-        // behind (C15), if any — `{{spec_committed_head}}` in a check node.
-        // `null` means no node this run trusts to commit has moved HEAD yet.
-        "spec_committed_head": spec.spec.spec_committed_head,
-        "spec_start_dirty": spec.spec.spec_start_dirty,
-        "spec_end_dirty": spec.spec.spec_end_dirty,
-        "spec_end_dirty_paths": spec.spec.spec_end_dirty_paths,
-        "started_at": spec.spec.started_at.map(|value| value.to_rfc3339()),
-        "completed_at": spec.spec.completed_at.map(|value| value.to_rfc3339()),
-        "nodes": spec.nodes.iter().map(|node| graph_node_json(node, &spec.edges)).collect::<Vec<_>>(),
-        "edges": spec.edges.iter().map(graph_edge_json).collect::<Vec<_>>(),
-        "ensembles": ensembles,
-        "runs": runs,
-    }))
-}
-
-fn graph_node_json(node: &GraphNode, edges: &[GraphEdge]) -> serde_json::Value {
-    serde_json::json!({
-        "id": node.id,
-        "spec_id": node.spec_id,
-        "graph_id": node.graph_id,
-        "name": node.name,
-        "kind": node.kind.display_str(),
-        "config": node.config,
-        "position": node.position,
-        "created_at": node.created_at.to_rfc3339(),
-        "routes": router_routes_json(node, edges),
-        "prompt_source": agent_prompt_source_json(node),
-        "infra_config": infra_config_json(node),
-    })
-}
-
-/// CM30/FR3: an agent node's effective infra-retry config plus where each
-/// field came from — `"node"` (this node's own config key, which for an
-/// ensemble member may be a baked-in member/ensemble override — see the
-/// ensemble's own `infra_retry_limit`/members[].infra_retry_limit_override
-/// fields for which), `"platform"`, or `"default"`. `None` for every other
-/// node kind.
-fn infra_config_json(node: &GraphNode) -> Option<serde_json::Value> {
-    if node.kind != GraphNodeKind::Agent {
-        return None;
-    }
-    let resolved = crate::graph_engine::resolve_node_infra_config(node);
-    Some(serde_json::json!({
-        "infra_retry_limit": {
-            "value": resolved.retry_limit.value,
-            "source": resolved.retry_limit.source,
-        },
-        "infra_crash_max_seconds": {
-            "value": resolved.crash_max_seconds.value,
-            "source": resolved.crash_max_seconds.source,
-        },
-        "infra_backoff_seconds": {
-            "value": resolved.backoff_seconds.value,
-            "source": resolved.backoff_seconds.source,
-        },
-    }))
-}
-
-/// For an agent node, which branch of `resolve_node_prompt_template`'s
-/// precedence it will actually run on — `"explicit"`, `"preset"`, or
-/// `"default_fallback"` (see `graph_engine::agent_prompt_source`) — so
-/// `graph_get` makes a node quietly running on the bare fallback template
-/// (no `prompt_template`, no `prompt_preset`) visible without requiring a
-/// run first. `None` for every other node kind, same convention as
-/// [`router_routes_json`].
-fn agent_prompt_source_json(node: &GraphNode) -> Option<&'static str> {
-    if node.kind != GraphNodeKind::Agent {
-        return None;
-    }
-    Some(crate::graph_engine::agent_prompt_source(&node.config))
-}
-
-/// For a router node, every declared route alongside the edge (if any) that
-/// currently serves it — `graph_get`'s view into "which edge serves each
-/// route". `None` for every other node kind (or if the router's `config`
-/// somehow fails to parse — `graph_get` should never fail outright over a
-/// display concern).
-fn router_routes_json(node: &GraphNode, edges: &[GraphEdge]) -> Option<serde_json::Value> {
-    if node.kind != GraphNodeKind::Router {
-        return None;
-    }
-    let (routes, fallback) = parse_router_routes(&node.config).ok()?;
-    Some(serde_json::json!(routes
-        .iter()
-        .map(|route| {
-            let serving_edge = edges.iter().find(|edge| {
-                edge.from_node == node.id
-                    && edge.condition.route_label() == Some(route.label.as_str())
-            });
-            serde_json::json!({
-                "label": route.label,
-                "description": route.description,
-                "fallback": route.label == fallback,
-                "edge_id": serving_edge.map(|edge| edge.id.clone()),
-                "to_node": serving_edge.map(|edge| edge.to_node.clone()),
-            })
-        })
-        .collect::<Vec<_>>()))
-}
-
-fn graph_edge_json(edge: &GraphEdge) -> serde_json::Value {
-    serde_json::json!({
-        "id": edge.id,
-        "spec_id": edge.spec_id,
-        "graph_id": edge.graph_id,
-        "from_node": edge.from_node,
-        "to_node": edge.to_node,
-        "condition": edge.condition.as_str(),
-        "route": edge.condition.route_label(),
-    })
-}
-
-fn graph_run_json(run: &crate::domain::graphs::GraphNodeRun) -> serde_json::Value {
-    serde_json::json!({
-        "id": run.id,
-        "graph_id": run.graph_id,
-        "spec_id": run.spec_id,
-        "node_id": run.node_id,
-        "status": run.status.as_str(),
-        "input": run.input,
-        "output": run.output,
-        "started_at": run.started_at.to_rfc3339(),
-        "completed_at": run.completed_at.map(|value| value.to_rfc3339()),
-        "iteration": run.iteration,
-    })
-}
-
-fn graph_run_blocker(run: &crate::domain::graphs::GraphNodeRun) -> Option<String> {
-    run.output
-        .as_ref()
-        .and_then(|output| output.get("blocker"))
-        .and_then(serde_json::Value::as_str)
-        .map(ToOwned::to_owned)
-}
-
-/// One row of `graph_node_runs_list` — deliberately excludes `input`/`output`
-/// (can be large; a caller wanting them calls `graph_node_run_get` with this
-/// row's `id`) but resolves `node_name` so a caller isn't left matching a
-/// bare node id back to the graph by hand.
-fn graph_node_run_summary_json(
-    db: &Database,
-    run: &GraphNodeRun,
-    compact: bool,
-) -> serde_json::Value {
-    let node_name = db
-        .get_graph_node(&run.node_id)
-        .ok()
-        .flatten()
-        .map(|node| node.name);
-    // CB43: the pair resolved at dispatch. Keys are omitted (not null) when
-    // the run predates the recording, so old rows read exactly as before.
-    let mut executed = serde_json::Map::new();
-    if let Some(platform) = run.executed_platform.as_deref() {
-        executed.insert(
-            "platform".to_string(),
-            serde_json::Value::String(platform.to_string()),
-        );
-    }
-    if let Some(model) = run.executed_model.as_deref() {
-        executed.insert(
-            "model".to_string(),
-            serde_json::Value::String(model.to_string()),
-        );
-    }
-    let spec = db.get_graph_spec(&run.spec_id).ok().flatten();
-    let spec_end_dirty = spec.as_ref().and_then(|s| s.spec_end_dirty);
-    let spec_end_dirty_paths = spec.as_ref().and_then(|s| s.spec_end_dirty_paths.clone());
-    if compact {
-        let spec_name = spec.as_ref().map(|s| s.name.clone());
-        let mut obj = serde_json::Map::from_iter([
-            ("id".to_string(), serde_json::json!(run.id)),
-            (
-                "node_name".to_string(),
-                node_name
-                    .map(serde_json::Value::String)
-                    .unwrap_or(serde_json::Value::Null),
-            ),
-            ("status".to_string(), serde_json::json!(run.status.as_str())),
-            ("iteration".to_string(), serde_json::json!(run.iteration)),
-            (
-                "spec_name".to_string(),
-                spec_name
-                    .map(serde_json::Value::String)
-                    .unwrap_or(serde_json::Value::Null),
-            ),
-            (
-                "started_at".to_string(),
-                serde_json::json!(run.started_at.to_rfc3339()),
-            ),
-            (
-                "completed_at".to_string(),
-                serde_json::json!(run.completed_at.map(|value| value.to_rfc3339())),
-            ),
-            (
-                "spec_end_dirty".to_string(),
-                spec_end_dirty
-                    .map(serde_json::Value::from)
-                    .unwrap_or(serde_json::Value::Null),
-            ),
-            (
-                "spec_end_dirty_paths".to_string(),
-                spec_end_dirty_paths
-                    .map(|paths| serde_json::json!(paths))
-                    .unwrap_or(serde_json::Value::Null),
-            ),
-        ]);
-        obj.extend(executed);
-        serde_json::Value::Object(obj)
-    } else {
-        let mut obj = serde_json::Map::from_iter([
-            ("id".to_string(), serde_json::json!(run.id)),
-            ("spec_id".to_string(), serde_json::json!(run.spec_id)),
-            ("node_id".to_string(), serde_json::json!(run.node_id)),
-            (
-                "node_name".to_string(),
-                node_name
-                    .map(serde_json::Value::String)
-                    .unwrap_or(serde_json::Value::Null),
-            ),
-            ("status".to_string(), serde_json::json!(run.status.as_str())),
-            ("iteration".to_string(), serde_json::json!(run.iteration)),
-            (
-                "started_at".to_string(),
-                serde_json::json!(run.started_at.to_rfc3339()),
-            ),
-            (
-                "completed_at".to_string(),
-                serde_json::json!(run.completed_at.map(|value| value.to_rfc3339())),
-            ),
-            ("session_id".to_string(), serde_json::json!(run.session_id)),
-            (
-                "spec_end_dirty".to_string(),
-                spec_end_dirty
-                    .map(serde_json::Value::from)
-                    .unwrap_or(serde_json::Value::Null),
-            ),
-            (
-                "spec_end_dirty_paths".to_string(),
-                spec_end_dirty_paths
-                    .map(|paths| serde_json::json!(paths))
-                    .unwrap_or(serde_json::Value::Null),
-            ),
-        ]);
-        obj.extend(executed);
-        serde_json::Value::Object(obj)
-    }
-}
-
-/// The `graph_node_run_get` response: everything `graph_node_run_summary_json`
-/// carries, plus the full `input`/`output` the engine stored — redacted
-/// (see [`redact_sensitive_value`]) since either can carry secret-shaped
-/// content echoed by the wrapped CLI. `output` preserves whatever the engine
-/// wrote verbatim otherwise, including the B19 `infra_attempt`/`infra_crash`
-/// markers a caller needs to tell an infra retry from a semantic failure.
-fn graph_node_run_detail_json(
-    run: &GraphNodeRun,
-    node_name: Option<&str>,
-    resumed_from_run_id: Option<&str>,
-) -> serde_json::Value {
-    let mut obj = serde_json::Map::from_iter([
-        ("id".to_string(), serde_json::json!(run.id)),
-        ("graph_id".to_string(), serde_json::json!(run.graph_id)),
-        ("spec_id".to_string(), serde_json::json!(run.spec_id)),
-        ("node_id".to_string(), serde_json::json!(run.node_id)),
-        ("node_name".to_string(), serde_json::json!(node_name)),
-        ("status".to_string(), serde_json::json!(run.status.as_str())),
-        ("iteration".to_string(), serde_json::json!(run.iteration)),
-        (
-            "input".to_string(),
-            run.input
-                .as_ref()
-                .map(redact_sensitive_value)
-                .unwrap_or(serde_json::Value::Null),
-        ),
-        (
-            "output".to_string(),
-            run.output
-                .as_ref()
-                .map(redact_sensitive_value)
-                .unwrap_or(serde_json::Value::Null),
-        ),
-        (
-            "started_at".to_string(),
-            serde_json::json!(run.started_at.to_rfc3339()),
-        ),
-        (
-            "completed_at".to_string(),
-            serde_json::json!(run.completed_at.map(|value| value.to_rfc3339())),
-        ),
-        ("session_id".to_string(), serde_json::json!(run.session_id)),
-        (
-            "resumed_from_run_id".to_string(),
-            serde_json::json!(resumed_from_run_id),
-        ),
-    ]);
-    // CB43: omit (not null) when the run predates the recording.
-    if let Some(platform) = run.executed_platform.as_deref() {
-        obj.insert(
-            "platform".to_string(),
-            serde_json::Value::String(platform.to_string()),
-        );
-    }
-    if let Some(model) = run.executed_model.as_deref() {
-        obj.insert(
-            "model".to_string(),
-            serde_json::Value::String(model.to_string()),
-        );
-    }
-    serde_json::Value::Object(obj)
-}
-
-/// Secret-shaped substrings a node run's stored input/output can carry
-/// through whatever CLI it wrapped (an API key echoed into a shell command,
-/// a leaked token in stderr, a pasted private key). Compiled once and
-/// applied uniformly to every string leaf in the run's JSON — see
-/// [`redact_sensitive_value`] — rather than to specific fields like `stdout`
-/// or `command`, since sensitive content can land in any of them alike and a
-/// per-field allowlist would miss the next field name that carries it.
-static SECRET_PATTERNS: std::sync::LazyLock<Vec<regex::Regex>> = std::sync::LazyLock::new(|| {
-    [
-        // Anthropic/OpenAI-style API keys: sk-..., sk-ant-...
-        r"sk-[A-Za-z0-9_-]{16,}",
-        // GitHub personal/app/oauth/refresh tokens.
-        r"gh[pousr]_[A-Za-z0-9]{20,}",
-        // AWS access key IDs.
-        r"AKIA[0-9A-Z]{16}",
-        // Bearer tokens in an Authorization header or similar.
-        r"(?i)bearer\s+[A-Za-z0-9._-]{16,}",
-        // key/value assignments: api_key=..., "password": "...", token: ...
-        r#"(?i)(api[_-]?key|secret|password|access[_-]?token|token)["']?\s*[:=]\s*["']?[A-Za-z0-9._\-/+]{8,}"#,
-        // PEM private key blocks.
-        r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----",
-    ]
-    .iter()
-    .map(|pattern| regex::Regex::new(pattern).expect("valid redaction regex"))
-    .collect()
-});
-
-pub(crate) fn redact_secrets(text: &str) -> String {
-    let mut result = text.to_string();
-    for pattern in SECRET_PATTERNS.iter() {
-        result = pattern.replace_all(&result, "[REDACTED]").into_owned();
-    }
-    result
-}
-
-/// Recursively redacts every string leaf of a node run's stored `input`/
-/// `output` before it crosses the MCP boundary via `graph_node_run_get`.
-fn redact_sensitive_value(value: &serde_json::Value) -> serde_json::Value {
-    match value {
-        serde_json::Value::String(s) => serde_json::Value::String(redact_secrets(s)),
-        serde_json::Value::Array(items) => {
-            serde_json::Value::Array(items.iter().map(redact_sensitive_value).collect())
-        }
-        serde_json::Value::Object(map) => serde_json::Value::Object(
-            map.iter()
-                .map(|(k, v)| (k.clone(), redact_sensitive_value(v)))
-                .collect(),
-        ),
-        other => other.clone(),
-    }
-}
-
-fn transport_details(port: u16) -> (&'static str, String) {
-    if port > 0 {
-        ("Streamable HTTP", port.to_string())
-    } else {
-        ("stdio", "N/A".to_owned())
-    }
-}
-
-fn append_temporal_agents_section(status: &mut String, agents: &[Agent]) {
-    let temporal = format_temporal_agents(agents);
-    if temporal.is_empty() {
-        return;
-    }
-
-    status.push_str("\n\nTemporal agents:\n");
-    status.push_str(&temporal);
-}
-
-// ── Context injection helpers ────────────────────────────────────
-
-fn inject_project_context(
-    out: &mut serde_json::Value,
-    project_hash: Option<&str>,
-    project_knowledge: &[(IntelligenceNodeRecord, String, Option<String>)],
-    related_projects: &[(
-        IntelligenceNodeRecord,
-        crate::db::intelligence::IntelligenceEdgeRecord,
-    )],
-    traversal: &serde_json::Value,
-    dependents: &[crate::db::intelligence::IntelligenceProjectDependencyRecord],
-) {
-    if let Some(ph) = project_hash {
-        if let Some(obj) = out.as_object_mut() {
-            obj.insert("project_hash".to_string(), serde_json::json!(ph));
-        }
-    }
-
-    if !project_knowledge.is_empty() {
-        let pk_json: Vec<serde_json::Value> = project_knowledge
-            .iter()
-            .map(|(n, via_project, via_relation)| {
-                // `contains` hops read as upward inheritance, never a silent merge.
-                let via_relation = match via_relation.as_deref() {
-                    None => serde_json::Value::Null,
-                    Some("contains") => serde_json::json!("inherited:contains"),
-                    Some(other) => serde_json::json!(other),
-                };
-                serde_json::json!({
-                    "id": n.id,
-                    "kind": n.kind,
-                    "title": n.title,
-                    "body": n.body,
-                    "project_hash": n.project_hash,
-                    "via_project": via_project,
-                    "via_relation": via_relation,
-                })
-            })
-            .collect();
-        if let Some(obj) = out.as_object_mut() {
-            obj.insert(
-                "project_knowledge".to_string(),
-                serde_json::Value::Array(pk_json),
-            );
-            if let Some(summary) = obj.get("summary").and_then(|s| s.as_str()) {
-                let new_summary = format!(
-                    "{} (+ {} project fact(s)/pattern(s))",
-                    summary,
-                    project_knowledge.len()
-                );
-                obj.insert(
-                    "summary".to_string(),
-                    serde_json::Value::String(new_summary),
-                );
-            }
-        }
-    }
-
-    if let Some(obj) = out.as_object_mut() {
-        if project_hash.is_some()
-            && traversal.is_object()
-            && !traversal.as_object().map(|o| o.is_empty()).unwrap_or(true)
-        {
-            obj.insert("traversal".to_string(), traversal.clone());
-        }
-    }
-
-    if !dependents.is_empty() {
-        let target = project_hash.unwrap_or_default();
-        let dep_json: Vec<serde_json::Value> = dependents
-            .iter()
-            .map(|d| {
-                serde_json::json!({
-                    "from_node_id": d.from_node_id,
-                    "from_title": d.from_title,
-                    "from_project_hash": d.from_project_hash,
-                    "relation": d.relation,
-                })
-            })
-            .collect();
-        if let Some(obj) = out.as_object_mut() {
-            obj.insert(
-                "dependency_impact".to_string(),
-                serde_json::json!({
-                    "target": target,
-                    "dependents": dep_json,
-                }),
-            );
-        }
-    }
-
-    if !related_projects.is_empty() {
-        let rp_json: Vec<serde_json::Value> = related_projects
-            .iter()
-            .map(|(node, edge)| {
-                serde_json::json!({
-                    "project": {
-                        "id": node.id,
-                        "title": node.title,
-                        "project_hash": node.project_hash,
-                    },
-                    "relation": edge.relation,
-                    "weight": edge.weight,
-                })
-            })
-            .collect();
-        if let Some(obj) = out.as_object_mut() {
-            obj.insert(
-                "related_projects".to_string(),
-                serde_json::Value::Array(rp_json),
-            );
-        }
-    }
-}
-
-fn inject_seed_identity(
-    out: &mut serde_json::Value,
-    db: &crate::db::Database,
-    parts: Option<&axum::http::request::Parts>,
-    agent_id: Option<&str>,
-) {
-    let Some(agent_id) = agent_id else {
-        return;
-    };
-    if let Ok((_, identity)) = load_bound_seed_identity(db, parts, agent_id) {
-        if let Some(obj) = out.as_object_mut() {
-            obj.insert(
-                "seed_identity".to_string(),
-                serde_json::json!({
-                    "name": identity.name,
-                    "directives": identity.directives.general,
-                    "traits": serde_json::json!({
-                        "tone": identity.traits.tone,
-                        "focus": identity.traits.focus,
-                    }),
-                    "prompt_injection": identity.prompt_injection(),
-                }),
-            );
-        }
+    /// Merge every family tool router into the single MCP router.
+    /// Family order follows the original `handler.rs` tool order; the
+    /// advertised order is alphabetical regardless
+    /// (`ToolRouter::list_all` sorts by name).
+    pub(crate) fn tool_router() -> ToolRouter<Self> {
+        let mut router = ToolRouter::new();
+        router.merge(TaskTriggerHandler::tool_router_agents());
+        router.merge(TaskTriggerHandler::tool_router_scheduled_sends());
+        router.merge(TaskTriggerHandler::tool_router_models_probes());
+        router.merge(TaskTriggerHandler::tool_router_sync());
+        router.merge(TaskTriggerHandler::tool_router_intel());
+        router.merge(TaskTriggerHandler::tool_router_seeds_skills());
+        router.merge(TaskTriggerHandler::tool_router_graphs());
+        router.merge(TaskTriggerHandler::tool_router_graph_crew());
+        router.merge(TaskTriggerHandler::tool_router_specs());
+        router.merge(TaskTriggerHandler::tool_router_blueprints());
+        router.merge(TaskTriggerHandler::tool_router_queues());
+        router.merge(TaskTriggerHandler::tool_router_nodes());
+        router.merge(TaskTriggerHandler::tool_router_notes());
+        router.merge(TaskTriggerHandler::tool_router_roster());
+        router.merge(TaskTriggerHandler::tool_router_crew());
+        router.merge(TaskTriggerHandler::tool_router_edges());
+        router.merge(TaskTriggerHandler::tool_router_ensemble_core());
+        router.merge(TaskTriggerHandler::tool_router_copy());
+        router.merge(TaskTriggerHandler::tool_router_ensemble_update());
+        router.merge(TaskTriggerHandler::tool_router_read());
+        router.merge(TaskTriggerHandler::tool_router_transfer());
+        router.merge(TaskTriggerHandler::tool_router_run_history());
+        router.merge(TaskTriggerHandler::tool_router_preflight());
+        router.merge(TaskTriggerHandler::tool_router_run_exec());
+        router.merge(TaskTriggerHandler::tool_router_run_lifecycle());
+        router.merge(TaskTriggerHandler::tool_router_meta());
+        router.merge(TaskTriggerHandler::tool_router_settings());
+        router
     }
 }
 
@@ -12227,8 +423,8 @@ mod tests {
         graph_details_json, graph_run_status_guard, graph_trigger_json, handle_retry_current_node,
         handle_skip_next_spec, header_str, in_flight_run_error, json_value_kind_name,
         member_node_config, missing_sync_identity_error, node_copy_note, node_name_for_error,
-        perform_graph_reset, plan_ensemble_copy, plan_node_copy, rag_result_json,
-        resolve_graph_target, resolve_node_kind_and_config, resolve_reported_run,
+        perform_graph_reset, plan_ensemble_copy, plan_node_copy, queue_running_spec,
+        rag_result_json, resolve_graph_target, resolve_node_kind_and_config, resolve_reported_run,
         spec_summary_json, unknown_config_keys, validate_absolute_dir, validate_at_least_one_bool,
         validate_blueprint_exists, validate_edge_condition, validate_edge_condition_with_route,
         validate_ensemble_members, validate_node_config, validate_node_kind,
@@ -12237,7 +433,8 @@ mod tests {
         validate_queue_reorder, validate_queue_reorder_locking, validate_route_edge_target,
         validate_spec_deletable, validate_spec_exists, validate_spec_set_status_target,
         validate_spec_status, validate_spec_workdir, ActiveGraphSpec, BuiltEnsembleUnit,
-        EnsembleMemberParams, EnsembleUnitSpec, TaskTriggerHandler, MISSING_SYNC_IDENTITY_MESSAGE,
+        EnsembleMemberParams, EnsembleUnitSpec, HandlerDeps, TaskTriggerHandler,
+        MISSING_SYNC_IDENTITY_MESSAGE,
     };
     use crate::daemon::params::{
         GraphCompletionHookParams, GraphCopyEnsembleParams, GraphCopyNodeParams,
@@ -12358,26 +555,383 @@ mod tests {
         );
     }
 
+    /// B7 A1 frozen inventory: sorted MCP tool names. Any added, removed, or
+    /// renamed tool fails `tool_inventory_is_byte_identical`.
+    const EXPECTED_TOOL_NAMES: &[&str] = &[
+        "agent_add",
+        "agent_disable",
+        "agent_enable",
+        "agent_get",
+        "agent_list",
+        "agent_logs",
+        "agent_models",
+        "agent_probe",
+        "agent_probe_recent",
+        "agent_remove",
+        "agent_report",
+        "agent_run",
+        "agent_schedule_enable",
+        "agent_status",
+        "agent_update",
+        "agent_watch",
+        "blueprint_create",
+        "blueprint_delete",
+        "blueprint_list",
+        "config_get",
+        "config_list",
+        "config_reset",
+        "config_set",
+        "create_seed",
+        "crew_create",
+        "crew_delete",
+        "crew_get",
+        "crew_list",
+        "crew_update",
+        "evolve_identity",
+        "get_identity",
+        "get_tools",
+        "graph_add_edge",
+        "graph_add_ensemble",
+        "graph_add_node",
+        "graph_add_spec",
+        "graph_archive",
+        "graph_audit_node_configs",
+        "graph_complete_node",
+        "graph_continue",
+        "graph_copy_ensemble",
+        "graph_copy_node",
+        "graph_create",
+        "graph_crew",
+        "graph_delete_edge",
+        "graph_delete_ensemble",
+        "graph_delete_node",
+        "graph_events",
+        "graph_export",
+        "graph_get",
+        "graph_import",
+        "graph_list",
+        "graph_node_run_get",
+        "graph_node_runs_list",
+        "graph_pause",
+        "graph_preflight",
+        "graph_remove_spec",
+        "graph_report_blocker",
+        "graph_reset",
+        "graph_restore",
+        "graph_run",
+        "graph_schedule_autorun",
+        "graph_schedule_continue",
+        "graph_update",
+        "graph_update_edge",
+        "graph_update_ensemble",
+        "graph_update_node",
+        "graph_update_spec",
+        "intelligence_delete_node",
+        "intelligence_delete_relation",
+        "intelligence_get_context",
+        "intelligence_graph_walk",
+        "intelligence_link_projects",
+        "intelligence_list_projects",
+        "intelligence_search",
+        "intelligence_upsert",
+        "list_seeds",
+        "loop_complete_node",
+        "loop_report_blocker",
+        "loop_schedule_autorun",
+        "project_register",
+        "project_remap",
+        "project_search",
+        "project_update",
+        "queue_add_spec",
+        "queue_create",
+        "queue_list",
+        "queue_remove_spec",
+        "queue_reorder",
+        "queue_set_group",
+        "rag_compact",
+        "rag_search",
+        "remove_seed",
+        "roster_check",
+        "roster_clear",
+        "roster_list",
+        "roster_set",
+        "scheduled_send_cancel",
+        "scheduled_send_create",
+        "scheduled_send_list",
+        "session_list",
+        "skill_get",
+        "skill_list",
+        "spec_convert",
+        "spec_create",
+        "spec_delete",
+        "spec_list",
+        "spec_note_write",
+        "spec_notes_get",
+        "spec_section_get",
+        "spec_set_status",
+        "spec_update",
+        "subagent_collect",
+        "subagent_spawn",
+        "sync_broadcast",
+        "sync_declare_intent",
+        "sync_get_context",
+        "sync_report_status",
+    ];
+
+    /// B7 A1 frozen snapshot: per-tool `name|sha256(description)|sha256(input_schema JSON)`.
+    /// Any byte drift in a description or schema fails `tool_inventory_is_byte_identical`.
+    const EXPECTED_TOOL_ROWS: &[&str] = &[
+                "agent_add|dce812557e165d8d06b92ab956bafaf4c4eccd29acd4216074adbce66d116570|7483eea0afc405f19c5e149fa2963fbc5c329d1a4984feb1ab3fa82fb94941bc",
+                "agent_disable|a5d3befdd0358cdb34f4cbceba2ad730b8cb7968bea1f4d5af15095cfc3e5d16|0b0c3f322df51316c53bc050ccdddd27c4296ae0ce3c97b074416a17f5bb8081",
+                "agent_enable|812c3569335836df22c0021c4591ab1642a739c0be32ab921aa3a9dad35040f3|0b0c3f322df51316c53bc050ccdddd27c4296ae0ce3c97b074416a17f5bb8081",
+                "agent_get|efc57a83aaf2b2b93b249749d2af313ad14b7d5f78bc63dfeb4a8067069d81fb|0b0c3f322df51316c53bc050ccdddd27c4296ae0ce3c97b074416a17f5bb8081",
+                "agent_list|f12441b7b162701cc3feeead67ecc6adf610b4e28b3d2a2ba2eedd22d17b6b45|efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
+                "agent_logs|313a92b2669f743f4352fff989b30a666510fef1a7f6be65b4b17e8862d04acb|5632dbbe5962335a927367d89f703e6962b77257d60e3429e4226916bc6135ff",
+                "agent_models|e26acac42beb6e5abc68fd28473196c549864a9796e020a4ebf9d62f81606090|5fa23052795e0ac7d84ebc3b37ee11e62c84d9d673da815b8d1249313b8133b7",
+                "agent_probe|b1c612dc5b845b72e90f81458538c0fb18cb07768105adb87b06590875904577|69f6897484b8f07f4e272f180de0a41a1e275e0d152e13cbe413e26578376f64",
+                "agent_probe_recent|665aea90717bcf46854edda2c7627d61c2242f960ae586d53185923e27f76e2e|9915aca58f0d6e4a64233b795f9f1d77d68f5bbf987b4afb76aeff4419241d73",
+                "agent_remove|304a93b8e0d8f9957d7ff6e134154d1f67bc0e8920b5d7ff86874a93361d5de2|0b0c3f322df51316c53bc050ccdddd27c4296ae0ce3c97b074416a17f5bb8081",
+                "agent_report|998eb6d649fe53809656f0a4db81248aa0feb0b045f957686d917fbcfe289224|ecc33998c9c269c62efe2a825c3492c7a8b986476cd10fbfe5d7cc179451c5a5",
+                "agent_run|39ae4bbed141b7635a135111a7cf767c2569bf36d7d2d64da8089091534706f1|0b0c3f322df51316c53bc050ccdddd27c4296ae0ce3c97b074416a17f5bb8081",
+                "agent_schedule_enable|ed852e08dc893d9cd6ae715374b0e695ee4516030ebe02b2e5ecb09aa0d98f1c|75b1290fa28ea5e614bbf45495964ab03ac917d86e3ce703843b403c8904221f",
+                "agent_status|d1054486453a2080fe05eb9ccbcd4a86aefe4894a2a93870b6b2bb9e8781b194|efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
+                "agent_update|5f6ad5332501fc94b77510ae0093dcf92d451b051a90b3843e3e134c2d029415|36f48264461d4613308196fa21be49ce3f87de117e8f1471e68aedd8f27a4452",
+                "agent_watch|b7aeeaf163d575665d5e2f9699687dede83db72e17a55d0b1aa0becd998aea87|027d5fa87372afb37c5970c218175408a01801e964fe5b83cfd48cbe6951a601",
+                "blueprint_create|066e750e9f90069f2f3ed530cdff588725ea3751872f30ea1aec5758bb15b5d2|8bcf3050ebfd3b2d22ef822cdfd1c41d40448d7f65cb3c1d5ed51abbd9e73a8f",
+                "blueprint_delete|1eaa169fb5798e6d4095b44d1784bfb6a390925ec2e8513ca4dbe542119b69fb|12321d76b465455bffa88b83e79d533adc9ea8c854db8a5af7b5a559c93203a7",
+                "blueprint_list|3408d1c0af354e3890676ffa6fff2237a27a130aaa7b49ca3e0e075f95362584|efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
+                "config_get|f1ddfd06dae3dc171e677fcb02ff75eb7ceca0aaffbb868a91ee11a8c271fa9e|8175c3fece403d4b9e0e101fa8e9e9949a22669944764fe861d73c83c241bada",
+                "config_list|72678d9d9c372128e56333712c1fc402a70318f3ed63909ff91c629fdab0f683|d6c1b74cd9671775125cc9b6b2f72352a59a108486dd055bd7971d9cc202edbe",
+                "config_reset|3a0f24b627f69af16eeefd214b2f0c92df61f4e60ac982704c58457f24708c54|81027280afebc9d59fae573201cdf60037646e626370ab9e4258fe597602afda",
+                "config_set|d3c69dd3454c45c952ee10f97731f2dd9e5e419a3492a3aa52e8c703634ab479|2c3e790dbe43573349b1e665d5eb6f6db4637ee08b80ef68061811785bff4a47",
+                "create_seed|ec16a67a00abe30d8410e1720468a039cd4b4c1a85820894e9b766a6ba868701|804d0cbcfaf45bb6e046d219beeeda3d4981abb00893efbcbc22e9d2547db8e6",
+                "crew_create|731ac03f7474a59d939a6acd2e6cb97344805db5dea7dc185c287468f39a6ce3|fee9ee72a0374a920bb6c867d714b832c32af904c5628af9c16d16abf6d090d9",
+                "crew_delete|6ac73732aec72b5596cf240decbc0da64ea177ae39be4e40f77629371bb81f48|c39d718a7b13b7d9432a28814db6f3e555fee5d78ea8ef1be866966fb8e80889",
+                "crew_get|d9471965dee083abac1ffe1f0b61cff31f46f3c339f42cd1b7cd646ac62181d5|b2a1d8c6ff42aa877b0a58ddd1455838dc2933a7e8d968fa43b1842cc7d85eb5",
+                "crew_list|de5d37159a9000510178aa3147800fdb7166d2feab4fc55b7a66622d0a0c0cec|efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
+                "crew_update|ba98471566591039ce23de7339c7b0355f9715bf8ff743e7ede1715319479689|530c5d983133929d9ea3704500d0871f7109e24eb7089f3155ac5f971f46415f",
+                "evolve_identity|cbae994f70163b304935cc28f006ffac2eec8e1bea905dea2c0fb59bd1c66cdc|5def265f8dddb09352b474cd0068aff558d8993ec3711458fe912388888c42a4",
+                "get_identity|21d80d3a69d9719487bc498958b5600e86bf36519e229d270d2c2ae338383f72|efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
+                "get_tools|ea4c08804bf3a96c7e2e9f9be825feedb18ce038998f953065423576f6783beb|d81bd1699af6df84ec62ca38e6e360f6bae3c9d7f38fa307061f4eff5f84ba6f",
+                "graph_add_edge|0368038fcdc6790d79f1558cf8c5e66aae12d6c475c616849c217670707ec5f7|237b62884bf39b63f372273414288ea9179b392cb42bbb94315978049564986d",
+                "graph_add_ensemble|16d7fefa3784ffc61801c1efa5a3087810a30e9c083dd9033e62958a519ac7fa|93fd882b2db54d49cd6479a25a789d4ab3fcedf7914793646b62879a1bf0fadb",
+                "graph_add_node|5361586ae2254b13fea563379c35fff41f5aeddd2c63ec0e0221800dfa202617|7759661982738bea7c283e567107e2b53e38f778bbbf898afbfcec7dcf704a75",
+                "graph_add_spec|d054dce21de8cb570c402ef4081ebbec27391f28052aaae6b7636b75a6135343|4ca4c5b48737acddab29e888155a58a248bbb7ed0659f1ea56ef5c7620575c0c",
+                "graph_archive|86c62c25726d635c29691b8d1e90acbd2af55efafbf4b2acf866d82146fe9dc2|78e636b08231391ec48053bde18a790e2aede74da54003618003f2febe327bea",
+                "graph_audit_node_configs|be2716e66df14f94162057f5919f89bf87cab3b84d7f90ba6c2614e90b4ec749|efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
+                "graph_complete_node|dd79817c0bd15c7fb324ee65bbf0b920c4d36f7958595932ab728a1d4418c76c|9fbd77387cb892656f3c66e396327bd2d66023f67f9cdae7c808091cac32cf9c",
+                "graph_continue|0b6466413a10ef19b9a929d94e662a4279c523d9b2904fc5e1208fc9a9d07edb|4c6d787abe1add21babc503b93b6ca04c35161ee5c0104ea44e28ed7a7d81770",
+                "graph_copy_ensemble|84fa10199406a21732121a5efcb531a8b635de720b9ced9ad23c9d21b442804b|81e6123364f5ffa77f6389270cf7cec410a5fc66bec93fd60631e66b85abc488",
+                "graph_copy_node|00f28a0220fed92a866e7e9489c5c6d0796b61f125ba83d7f2e4528ed8089d75|7aa9c075d640d2f792c386c0a0ca8d999bbaa223ea9787e40a52ab7471a2c8fc",
+                "graph_create|6f4749b2ffabdacfded946e01630ea558cefcf18110801fab0bb31c7fec79769|5f326cdb2c1ff3d7cca2cf25bf7fec5acc828bf70fe9e5e8e3d6423cb7de4a96",
+                "graph_crew|21b4da02c1240d4ca5cb9609c412b60f6b89d07a31ce2b4f89e39669fce69180|69cec388444f8b50e9cebbec21f52cfbb1b326fde7e15c2bfcb2c2450b19a07c",
+                "graph_delete_edge|515e60718a86a111f77da9caab9a8f1a420c8a8cedea9c759dd3061efe54bcab|05d5202f073aea27378f794577e989b9636bad6d72397887d82887ad1d549d2f",
+                "graph_delete_ensemble|a1de1cf8f4d4a23060cbe860ac4eb31995cb9a166c99da92d209d5f18758940d|93fdb4962aa14f5b7921af9435ab70339df060c397464a3cc4e514bd83cc720b",
+                "graph_delete_node|82e65603faf2df8e3ff9ada9b0cb11f8470db786d91b32fa5ce0f9c3f9afbded|d9668a40560f1659b0e0d6e83a66825f8bb0e36729220f69f27f08bf81a4418f",
+                "graph_events|677db9851982f4cd2d3d0323deed764eb78d7467382b08b0601c4aa1be418857|17b52b076584af5ee1dcf2ef11a7ddcdadb23cbea710303d0972bc7e94c88f8a",
+                "graph_export|ecbcb9a42255ea4787502974d9f75d5e71fee34887d7ada9905b569ec26332a0|7321f3e8e4a31cc2e83e859854951f755aa5f62b8ae46b3151183247f19f458a",
+                "graph_get|8307f64e41f067c8c502c2c431c24e3a4bfe3f9b609c44f62b4688fe37b851d0|df9a23578a82d3e67a8e963f14dfe8435035ab3ce659002aa35d330d6e9976b4",
+                "graph_import|3fde95a92dfb21be5c47a8cd32140761b05aadbf10e18a198927153fdf8db2b3|ddf8cb9f351263109c144f91e08487b7f779d3afaf8b16c2971270b8e78e86ff",
+                "graph_list|b06ff3bcc3cd8edcb2a8567034184a69561c8f350386f7647be570871fef776d|479e1ab97c37c84fcc3c4947dd99f6d7687bcb91d74682397d93c033b8e6e8b3",
+                "graph_node_run_get|275f0c286c5378b0e0711d396d62695a2f54d0d1506b5c3ad3172b51fc4cf2ec|06fe6be024365e42918fb964eed4293abe33218115a300116d7d8778f4c14dc6",
+                "graph_node_runs_list|9ad9113d90f883f5c739d9241d6012bf02fe59a4638b62730909301f9b93574b|aa2f6bbbff49f2bbfd014a1637f3c2a14afb08157d90fa6a6b58e4d8c6d64653",
+                "graph_pause|b562a899a0c4d0913552a0f7d1d4c32ca357c940d64ba49b81b439b42b7c956f|c29898bc2505d3e3452dc002330223bc60ec88b3823bcb9b5f1d40fd75b5af7c",
+                "graph_preflight|e322fc728e4eef3943934049c3291baf119a1a4f96a1c3b1d2f17d4f934e4dec|3425a799605c1b3b15ac19b666d4ed6580d61fddfa653caa8cf573061b648615",
+                "graph_remove_spec|4ff8c80f3cd7d5fa1c2752f82a8eac04f93342355ff9789da4fc5f4ebd474fef|bdf4ae3b6449289652a28e7e04276b7d6d74eec7b4e35a85cbd45a11061eea33",
+                "graph_report_blocker|e8b03ebc2341ed1dcec92b824650173db7d164d076ff501b3c460682c81f072c|666b976ef1b6f73603515e223da6b187b911606572b2bbba0377f4b5ca2798e7",
+                "graph_reset|5fb36ec5cb4ed11594d06fb11f2be62ef911f5c9bc25c24b7e41e72d9f739a07|77f3a37a64867d8e50c5e5cf4f491918381089ade6fc20fce8edd93dd2f8e16b",
+                "graph_restore|40e6e59ed7d4000db2dc48187e28d916ee02c7ee0a8fa7e2e6c07d9251988044|31a70644d3c87bb210f308e6aa19a31d08b38440498374efbac531b3f7bcb242",
+                "graph_run|fa3db2dcec66808c55e2a5fe3623346e459ae74d796a4f54d478b85ac51636cc|9e084a80601932dc3d7241700eff51bb77c2764b1c886c8d1631cd8bfab52a27",
+                "graph_schedule_autorun|9981ca74a4d734696c604599f06ea45c74621f5931d9ac344c31f14a9cb3a5f4|7961251cc9060f411c0b3065833a2afe07a1c1ba27fb8ec57780eec33945b70a",
+                "graph_schedule_continue|1a383d649dbb9963e8ef76d698b9293b1a517205b3f61cd48d6c484f0c009c35|ab6b9783dd0a4ddb3cbcbe23c4ccaefa955cdffecead28d2a4ee758c21e27a55",
+                "graph_update|27c9d848836295967b3588395ddf8a8038ef4b881b7402fb4b9bcccf430d4da8|efcd24f3827ffad22568ecfd9627dd856545d98a47d8a5fd4cbecce117be9ea9",
+                "graph_update_edge|ec07b87be17723f5212d8024e8bca2e2f44c215a417140898e1bab2539b832f5|51dafc02acbe8f4df24d69e44b6afcba2b381c212cfe426dcdbdde3a6196b6da",
+                "graph_update_ensemble|8f4a8cc93ef6623a86316c28879a1cf986490e97db21c650e99574a9e9ef3f3d|6191428edb5c8cab9d118dd7eaa326beb04d7313c491b0ccde2ae63e5572db81",
+                "graph_update_node|3d0f3c46a8d6fee1d776385e178662ae2a187e678bb5e3dd899c0bb93010c51e|13a30ea327b630709e99b78a98a12c210dc32034db31fad6595d4833a2a9697a",
+                "graph_update_spec|cc242e8d96c9fa9c957a7ca885258947ab54337e4a9e1b9f2ddc66eb6ae06b6d|e8c2e945b5f6f1080c5fe54b38f36e0c75e1716e61f80db812c32547d30e8264",
+                "intelligence_delete_node|b70ce24d59d2619e275cb40397037d7748f3ebca64ac5ffdc85eae6ee65bb1af|318c60c03fd6f5012a88be52de9aea7e9f372081ac1a378f5ee033b024ce229b",
+                "intelligence_delete_relation|14ac75ee8ed351ec58f6bec7bbb0a9ca8267f01931e936d287cc0aaf494612a8|d2f7f0e554ab5fe74e9ddd1e8052321c9134f26ad3a434e350194e34ad505b49",
+                "intelligence_get_context|669fe1f581e27a2bdf49f09765a42bc8f1f0879bf49c0466ff072ed315e73e33|55815882d32d2ebcf8374798bb69fdceacaf168be275a378115aa19551affc0c",
+                "intelligence_graph_walk|2f5efed1b23f5b4400575ed31c19a02c454bbeaa364f7036ae14049663c0e0cb|6d5f32bf6c3e5676189186261fe35cc231358c0c49dd25bd0d0484939e506408",
+                "intelligence_link_projects|e0b46f79afb49768ec33f101e8210ea7818dd8418aad92df4a8be69eebadbe2e|06275342174b1971a8ecbbad8520d1cf229436ed82b29cd5ce8451001b042b25",
+                "intelligence_list_projects|68da4fb4e810e0f41612e0f56052ba26bbe029553038b43b7f4aa9aa6259f3aa|bab7d4f9c5d6321017d35ea0512c00090791f384e19f4a718198f9687c77f297",
+                "intelligence_search|a91c69fe51924face0f4a2a6c4777b9dde708606f68cc44c7c46d16719d3f67c|94dbbccb091c5a677adfec1e8da82d11fec0b879f1aeed0a3c2fee95a2b0ed2d",
+                "intelligence_upsert|164de5427fff75a57508a5da581435374ebd7176ced490cf2e21577294d1aa01|9828296fdbd78308b641b434b6d6958c72228a6d4c7abcc705c4c41f4bb6aec1",
+                "list_seeds|94657a2e7927a4f05350461cdef7c05569145bc39c512444039f38077c689cde|efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
+                "loop_complete_node|a3a48975f0dafdc50569ac00a150cb091479281e7339f112708580a1764f95e8|9fbd77387cb892656f3c66e396327bd2d66023f67f9cdae7c808091cac32cf9c",
+                "loop_report_blocker|9fb9038c5d224015aa25b157730b99339dd91372deb3c1460abb1e5e4fad2081|666b976ef1b6f73603515e223da6b187b911606572b2bbba0377f4b5ca2798e7",
+                "loop_schedule_autorun|1e53058a7dad22cc057ce87b32d9fbaa20cca2b0e7721cc121e5c16b2b2677dd|23ebb42b7149e90e2ec3038873414a514267ea6a72e480535aee337f54caa1d5",
+                "project_register|95d40d7773adb80b430d84f928d60d6a48d369505e8bf6c0d9f54aaa64b1d535|24cd867a6223c9a9ed47dea26a94d7d447da7ebd52364af69d06b426adf5f032",
+                "project_remap|ee326ec962be9943ccf911a190168d71163903ab4370775a0a433d32e7721f25|a40e97ce72cb3e27c300467212bb6bb457c4d20ceb93b09aeb861d550484df69",
+                "project_search|c0abdc269d287d6cf3465702f699e8464f18e0d6952f6870d2d1b4e37401b8da|65039e6ad0bffe393a7304d289e1197ef20782efe8f1694b8fb5d2bb793a2516",
+                "project_update|33152dd73661dc1c449e9dc09e4b4bd72bdead18268244c1279c4e2dd3afb6b4|30ea776f5c3a35516b0f4d5e23ddce8eb5da7a3d6e31eee2e1c06fcde2cdc6b1",
+                "queue_add_spec|71fed63c512e34c3bb79ae3438fd29bb76321b919c42fef162603a6d0f458e3d|c1408f7e09bff0fd60903ad268291abce4b2082e3ea571200c1f94a893fecb68",
+                "queue_create|ad96a6520c976c9acdcf08610dc74a7d0728ae1cc81d47b678aed41ca63f1ac1|2e8186c094ebdc9401648f134916f125e5e0ce2daeca7bfe5167433716891e27",
+                "queue_list|1f3e846f9b91428f0a705e8e2232e40ed93bd57e45eeb2960fee25b912bd06dc|6e2c5062a027279e85f76b630dac6eb45935821cc7b9fe21d0b5e85d5fa1a4ba",
+                "queue_remove_spec|d607661fcaed39c344ae545f5a1f2246ed530af3ce9cc13615e2a62b933aafa8|20e00504d371ad091fc75d443e57fe7fe7479b6304cae52402e207af924ce134",
+                "queue_reorder|c2553e02e72d85646d644b7aa94c6096ffcea3ffb819194875bc9e7d421ffb26|5d1dfef5e6016db1e4c9adddf9df2d7b22b4816fa0d3b5a38a08de10de4802b0",
+                "queue_set_group|3eb98961df3f175e2b84f14beecc1629cf21c635e2bef749fe79919470056082|fceee53aad275541592e779fa462c4257d72f85c1649abcfa64aeebc84cdc146",
+                "rag_compact|5d48c58fffa0c215e2b2fdcfafeb530f3fa62584e05f76bb5d6d99bd59897e84|efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
+                "rag_search|8a1f6386074319d1c99700410f884ba9ed3a3f0f91276a50766cf677bf1b26cd|84c021f51349dfecbea78f5ebe89887d0f3e1e764ac91540bc20bc7e2d13ba45",
+                "remove_seed|b24cd25a52f13d1714cd1a02c3156317166b33f19df049dc99326685750fc374|44f5accf3bb686511aa4445599a499601592df037d84886e46a92dccb6924c69",
+                "roster_check|80d72258ccfc8cbb6509168ff6197f0c073adc5600e7a50e9815172a65313387|86e91783cad72828f1d84fc73a2430d3a17c02833f1b448a00ba5616dabe0577",
+                "roster_clear|31c4ac456165d42a5b18c6f8ca8f37e05aafeba98ee44488bf6cfa1fbecf1720|d294066722284d29107550a44758682259c3f13cedc1d188da98d041e6eeb1cb",
+                "roster_list|99f9cd3cdad9f30fe335f61cb51bdeb618ee0a743d3c0decdce04c8a9572af68|276db5b4a3f990897ee3a03ea73cc40be04234716117cf4c861c70ca9c23d411",
+                "roster_set|4a5445a5af19460e4fcc5a4bff5c9d32174fa64373b922d74392bfc7178a8e0c|6cdcbf499a6476ff9bb3daedb89f6adc3a731a5dbc77ce8aba7e60c2c16651ee",
+                "scheduled_send_cancel|e97ad927d1c1d8778e0e7862e7ac4df954098bd847329a5cac398d19177d47e8|31cd20154b502bce97777d5d0b780d65ae849538b776016a121ba608bb227b9c",
+                "scheduled_send_create|e6defc41d6d01fe133056562efc3aba3b50b6d1e2a06fe278894cbbbcb65a165|75bdf795b390451ff08f87c147f0f353f69b5f25ff2219f02c7e8901fff30ca6",
+                "scheduled_send_list|946cdf95ebf54570fe9566aa69f8f5e7a18f08ea7b29a6be390bd9ce66a4df63|6ade068b88c489253907d5a691508969588e152e77aee3c2eeccd8ac385e8aab",
+                "session_list|f983db33c96519c95584055f90c807dda350a17e9b12d402c0551590e772532b|23286691699c0a61ed77db5dac0618bc04db4ad52c21cdcf5df13a98242ed452",
+                "skill_get|11bb4551bb0cf314b47867061fdb6ecc35812780d98808cd2f1e134d098bc8b9|a0ae058221b2b1a7b5105d991835dccd84a4a060693a3eebb05555b5b29e594e",
+                "skill_list|970ee8acf69615b521eaca0b1b27b8555a7fdc96b5655ebf435f4667418d290b|efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
+                "spec_convert|dcabb9d52877782e47ac4fed3582e63e4c1cc6324c25b3079d6c25ef06552b16|efddc7bd8bbcef73a14eb1ace1ffdaec81e518ef1e13c1e9271d0b8acb694a49",
+                "spec_create|7dd9a69253452c11b113743c3c5118f35cf4bf029c3380bcb9777254e41fd2eb|f9c780c473de2cac1bef89874ad42c7948a27ee448d423fa9732e5849bcd0b64",
+                "spec_delete|cd48e914d536c1e203436b9694cc93ba0b107b488b0383537716107c02537df8|e2f8bf96018973b702208f786b228eeaf8970d19822323251941c3c2b58c6bd9",
+                "spec_list|9e42d06f6900ae06546a88a713f3e67e4fe3467a06561f1187f684b5d3579657|bcfbca658cfaeae86232022f6285d7f9a7f43357158f4d693e0fbba1a4a1a020",
+                "spec_note_write|5864f496a2db355ac435a64b0fb172d0162b75eb50b84aba7913f43d89a0cecc|e299fd114d786af663d4e9f20a9673234f36f51815bf46fbbd9f00704ae276f7",
+                "spec_notes_get|c0a4e526752166f5544538fcbb039c03b03cfbaa2f57aa3aa1fbb8abf0c7bccb|fc547a4dcb686939788c1b51b1b076e9385f63ae9470cbb8534eb46e0328fc5d",
+                "spec_section_get|f2e7ae92e46d096fb4c5f1a3ce635e171dcd884e3f746ae936dfcb649e0aca22|c920c422e75f2d5dde9b2624d65af2613831ad217fd31d00bd00d7e34342f51e",
+                "spec_set_status|1a8612df16827c55d054df32ed3d585f33a14068c8c6737db584b918727ff5ab|313d1242ae0bb189c86b7cce07fdc51fe07588dac444491f089283e985db30f8",
+                "spec_update|4b63bd53115202d8c35c0e347ecc43491b5080564306c1fa643657d40790ba14|e7e35a41c1c50d14cc52e36b13a28342077e365683587e9207dd0ced2e28b0fa",
+                "subagent_collect|c950e7193036445e86b6ffd6587304e0e71cf00302734d0ed6e83c549a2e95dd|5f286eb7d8c54c6fbc2148ca453732ed5773d888b6721af97d81de358ed14330",
+                "subagent_spawn|062b2ac16b1f04f1ada1607d2cb04fe4840b9a09809382eed9c09878ab038fd1|64cdeb14b7796657a8099c8489439ee01a3389e9b088aa08474d4d57c5b27d7c",
+                "sync_broadcast|c5904706ddfd0877686466deeff33f21d70075bbed6c8ae6eba5794fe3ea1043|41523abe2b3e2837139e505f609ec85fd6155ed80dd2cc4ff48fa3988fe8cd3b",
+                "sync_declare_intent|621ecbc55446f78d4050026a7554487c33116b0ca218f359fc4355207d92abfe|87d05006d1026af131f08a68690f907d7419392b0774491f4347be5038d40bb4",
+                "sync_get_context|5bf5707dc316b32fa427141fab68b709dc07af8a52676da646958774a432a1ff|66c7399ba7a381b4222e14f80163c35769d7ce4a474278464c8ccb326b831fab",
+                "sync_report_status|ee93a882c476cc2792fa68bce24c1f187de5947c08b72bb55400dd114bdc07a4|b877ac8a670f1fb146c47ec679deaa5045ffa167867c24c06d192a0814b4a1ad"
+    ];
+
+    /// B7 A1: the MCP tool inventory is byte-identical across the handler
+    /// decomposition. Sorted tool names must equal the frozen list, and every
+    /// tool's `description` + `input_schema` JSON hash must equal the frozen
+    /// snapshot. Any drift in names, descriptions, or schemas fails here.
+    #[test]
+    fn tool_inventory_is_byte_identical() {
+        use sha2::{Digest, Sha256};
+        fn hex(bytes: &[u8]) -> String {
+            let mut digest = Sha256::new();
+            digest.update(bytes);
+            digest
+                .finalize()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect()
+        }
+        let mut tools = TaskTriggerHandler::tool_router().list_all();
+        tools.sort_by(|a, b| a.name.cmp(&b.name));
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
+        assert_eq!(names, EXPECTED_TOOL_NAMES, "tool name inventory drifted");
+        let rows: Vec<String> = tools
+            .iter()
+            .map(|t| {
+                let desc = t.description.as_deref().unwrap_or("");
+                let schema = serde_json::to_string(&t.input_schema).expect("schema serializes");
+                format!(
+                    "{}|{}|{}",
+                    t.name,
+                    hex(desc.as_bytes()),
+                    hex(schema.as_bytes())
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows, EXPECTED_TOOL_ROWS,
+            "tool description/schema inventory drifted"
+        );
+    }
+
     #[test]
     fn validate_ensemble_members_rejects_below_minimum() {
         let members = vec![ensemble_member_params("claude")];
-        let err = validate_ensemble_members(&members, EnsembleKind::Parallel).unwrap_err();
+        let err = validate_ensemble_members(
+            &members,
+            EnsembleKind::Parallel,
+            crate::domain::graphs::MemberCaps::default(),
+        )
+        .unwrap_err();
         assert!(err.contains("2-8 members"), "{err}");
     }
 
     #[test]
     fn validate_ensemble_members_rejects_above_maximum() {
         let members: Vec<_> = (0..9).map(|_| ensemble_member_params("claude")).collect();
-        let err = validate_ensemble_members(&members, EnsembleKind::Parallel).unwrap_err();
+        let err = validate_ensemble_members(
+            &members,
+            EnsembleKind::Parallel,
+            crate::domain::graphs::MemberCaps::default(),
+        )
+        .unwrap_err();
         assert!(err.contains("2-8 members"), "{err}");
+    }
+
+    /// CM52: the parallel cap comes from `graphs.ensemble_max_members_parallel`
+    /// (passed in as `MemberCaps`); an over-cap write is refused with the
+    /// setting key named so the user knows what to raise.
+    #[test]
+    fn validate_ensemble_members_refuses_over_configured_cap_naming_the_key() {
+        let caps = crate::domain::graphs::MemberCaps {
+            parallel: 4,
+            sequential: 16,
+        };
+        let members: Vec<_> = (0..5).map(|_| ensemble_member_params("claude")).collect();
+        let err = validate_ensemble_members(&members, EnsembleKind::Parallel, caps).unwrap_err();
+        assert!(
+            err.contains("2-4 members"),
+            "message must show the live bound: {err}"
+        );
+        assert!(
+            err.contains("graphs.ensemble_max_members_parallel"),
+            "message must name the setting key: {err}"
+        );
     }
 
     #[test]
     fn validate_ensemble_members_accepts_boundary_counts() {
         let two: Vec<_> = (0..2).map(|_| ensemble_member_params("claude")).collect();
-        assert!(validate_ensemble_members(&two, EnsembleKind::Parallel).is_ok());
+        assert!(validate_ensemble_members(
+            &two,
+            EnsembleKind::Parallel,
+            crate::domain::graphs::MemberCaps::default()
+        )
+        .is_ok());
         let eight: Vec<_> = (0..8).map(|_| ensemble_member_params("claude")).collect();
-        assert!(validate_ensemble_members(&eight, EnsembleKind::Parallel).is_ok());
+        assert!(validate_ensemble_members(
+            &eight,
+            EnsembleKind::Parallel,
+            crate::domain::graphs::MemberCaps::default()
+        )
+        .is_ok());
+    }
+
+    /// CM36: a sequential kind dispatches one member at a time, so its list
+    /// may be longer than parallel's 8 — 12 round_robin members are accepted.
+    #[test]
+    fn validate_ensemble_members_round_robin_accepts_12() {
+        let m: Vec<_> = (0..12)
+            .map(|i| ensemble_member_params(&format!("p{i}")))
+            .collect();
+        assert!(validate_ensemble_members(
+            &m,
+            EnsembleKind::RoundRobin,
+            crate::domain::graphs::MemberCaps::default()
+        )
+        .is_ok());
+    }
+
+    /// CM36: the sequential ceiling is 16, and the error names the kind.
+    #[test]
+    fn validate_ensemble_members_cascade_rejects_17() {
+        let m: Vec<_> = (0..17)
+            .map(|i| ensemble_member_params(&format!("p{i}")))
+            .collect();
+        let err = validate_ensemble_members(
+            &m,
+            EnsembleKind::Cascade,
+            crate::domain::graphs::MemberCaps::default(),
+        )
+        .unwrap_err();
+        assert!(err.contains("cascade"), "{err}");
+        assert!(err.contains("2-16 members"), "{err}");
     }
 
     #[test]
@@ -12386,7 +940,12 @@ mod tests {
             ensemble_member_params("claude"),
             ensemble_member_params("  "),
         ];
-        let err = validate_ensemble_members(&members, EnsembleKind::Parallel).unwrap_err();
+        let err = validate_ensemble_members(
+            &members,
+            EnsembleKind::Parallel,
+            crate::domain::graphs::MemberCaps::default(),
+        )
+        .unwrap_err();
         assert!(err.contains("platform"), "{err}");
     }
 
@@ -12403,7 +962,12 @@ mod tests {
                 m
             },
         ];
-        let result = validate_ensemble_members(&members, EnsembleKind::Parallel).unwrap();
+        let result = validate_ensemble_members(
+            &members,
+            EnsembleKind::Parallel,
+            crate::domain::graphs::MemberCaps::default(),
+        )
+        .unwrap();
         assert_eq!(result[0].2.as_deref(), Some("review for security"));
         assert_eq!(result[1].2, None);
     }
@@ -12413,23 +977,39 @@ mod tests {
     /// timeout.
     #[test]
     fn validate_ensemble_members_rejects_negative_member_timeout() {
-        let members = vec![{
-            let mut m = ensemble_member_params("claude");
-            m.timeout_minutes = Some(-1);
-            m
-        }];
-        let err = validate_ensemble_members(&members, EnsembleKind::Cascade).unwrap_err();
+        let members = vec![
+            {
+                let mut m = ensemble_member_params("claude");
+                m.timeout_minutes = Some(-1);
+                m
+            },
+            ensemble_member_params("openrouter"),
+        ];
+        let err = validate_ensemble_members(
+            &members,
+            EnsembleKind::Cascade,
+            crate::domain::graphs::MemberCaps::default(),
+        )
+        .unwrap_err();
         assert!(err.contains("timeout_minutes"), "{err}");
     }
 
     #[test]
     fn validate_ensemble_members_accepts_zero_member_timeout() {
-        let members = vec![{
-            let mut m = ensemble_member_params("claude");
-            m.timeout_minutes = Some(0);
-            m
-        }];
-        let result = validate_ensemble_members(&members, EnsembleKind::Cascade).unwrap();
+        let members = vec![
+            {
+                let mut m = ensemble_member_params("claude");
+                m.timeout_minutes = Some(0);
+                m
+            },
+            ensemble_member_params("openrouter"),
+        ];
+        let result = validate_ensemble_members(
+            &members,
+            EnsembleKind::Cascade,
+            crate::domain::graphs::MemberCaps::default(),
+        )
+        .unwrap();
         assert_eq!(result[0].3, Some(0));
     }
 
@@ -12592,6 +1172,10 @@ mod tests {
             kind: EnsembleKind::Parallel,
             round_robin_index: None,
             created_at: now,
+
+            crew_id: None,
+            crew_name: None,
+            crew_version_applied: None,
         };
         let members = vec![
             EnsembleMember {
@@ -12730,7 +1314,7 @@ mod tests {
         ))
         .unwrap();
 
-        let result = perform_graph_reset(&db, &graph_id, None).unwrap();
+        let result = perform_graph_reset(&db, &graph_id, None, false).unwrap();
         assert!(!result.is_error.unwrap_or(false));
 
         let lp = db.get_graph(&graph_id).unwrap().unwrap();
@@ -12744,6 +1328,42 @@ mod tests {
         assert!(failed.completed_at.is_none());
         // Completed specs are preserved when `specs` isn't given explicitly.
         assert_eq!(done.status, GraphSpecStatus::Completed);
+    }
+
+    /// CM47: notes are keyed by spec, not run — a plain reset keeps them,
+    /// and only `clear_notes: true` removes them.
+    #[test]
+    fn graph_reset_preserves_notes_unless_clear_notes() {
+        use crate::db::graphs::notes::NewSpecNote;
+        let (_dir, db, graph_id) = graph_reset_fixture(GraphStatus::Failed);
+        db.insert_graph_spec(&spec_with_status(
+            &graph_id,
+            "spec-failed",
+            1,
+            GraphSpecStatus::Failed,
+        ))
+        .unwrap();
+        db.spec_note_write(NewSpecNote {
+            spec_id: "spec-failed",
+            owner_kind: "node",
+            owner_id: "impl",
+            owner_name: "Implementer",
+            body: "halfway there",
+            author_platform: None,
+            author_model: None,
+        })
+        .unwrap();
+
+        let result = perform_graph_reset(&db, &graph_id, None, false).unwrap();
+        assert!(!result.is_error.unwrap_or(false));
+        assert_eq!(db.spec_notes_get("spec-failed").unwrap().len(), 1);
+
+        let result = perform_graph_reset(&db, &graph_id, None, true).unwrap();
+        assert!(!result.is_error.unwrap_or(false));
+        assert!(
+            db.spec_notes_get("spec-failed").unwrap().is_empty(),
+            "clear_notes: true must remove the reset specs' notes"
+        );
     }
 
     /// `Interrupted` is treated like any other non-completed status: a plain
@@ -12761,7 +1381,7 @@ mod tests {
         ))
         .unwrap();
 
-        let result = perform_graph_reset(&db, &graph_id, None).unwrap();
+        let result = perform_graph_reset(&db, &graph_id, None, false).unwrap();
         assert!(!result.is_error.unwrap_or(false));
 
         let specs = db.list_graph_specs(&graph_id).unwrap();
@@ -12782,7 +1402,8 @@ mod tests {
         ))
         .unwrap();
 
-        let result = perform_graph_reset(&db, &graph_id, Some(&["spec-done".to_string()])).unwrap();
+        let result =
+            perform_graph_reset(&db, &graph_id, Some(&["spec-done".to_string()]), false).unwrap();
         assert!(!result.is_error.unwrap_or(false));
 
         let spec = db.get_graph_spec("spec-done").unwrap().unwrap();
@@ -12823,7 +1444,7 @@ mod tests {
         ))
         .unwrap();
 
-        let result = perform_graph_reset(&db, &graph_id, None).unwrap();
+        let result = perform_graph_reset(&db, &graph_id, None, false).unwrap();
         assert!(!result.is_error.unwrap_or(false));
 
         let specs = db.list_graph_specs(&graph_id).unwrap();
@@ -12853,7 +1474,7 @@ mod tests {
         ))
         .unwrap();
 
-        let result = perform_graph_reset(&db, &graph_id, None).unwrap();
+        let result = perform_graph_reset(&db, &graph_id, None, false).unwrap();
         assert!(!result.is_error.unwrap_or(false));
 
         let spec = db.get_graph_spec("spec-engine-skipped").unwrap().unwrap();
@@ -12896,8 +1517,13 @@ mod tests {
         })
         .unwrap();
 
-        let result =
-            perform_graph_reset(&db, &graph_id, Some(&["spec-admin-skipped".to_string()])).unwrap();
+        let result = perform_graph_reset(
+            &db,
+            &graph_id,
+            Some(&["spec-admin-skipped".to_string()]),
+            false,
+        )
+        .unwrap();
         assert!(!result.is_error.unwrap_or(false));
 
         let spec = db.get_graph_spec("spec-admin-skipped").unwrap().unwrap();
@@ -12931,7 +1557,7 @@ mod tests {
         ))
         .unwrap();
 
-        let result = perform_graph_reset(&db, &graph_id, None).unwrap();
+        let result = perform_graph_reset(&db, &graph_id, None, false).unwrap();
         let text = format!("{:?}", result.content);
         assert!(text.contains("1 spec(s) reset"), "{text}");
         assert!(
@@ -13009,7 +1635,7 @@ mod tests {
             db.append_queue_member("queue-1", spec_id, None).unwrap();
         }
 
-        let result = perform_graph_reset(&db, &graph_id, None).unwrap();
+        let result = perform_graph_reset(&db, &graph_id, None, false).unwrap();
         assert!(!result.is_error.unwrap_or(false));
         let text = format!("{:?}", result.content);
         assert!(text.contains("2 spec(s) reset"), "{text}");
@@ -13041,7 +1667,7 @@ mod tests {
     fn graph_reset_allows_running_status_graph_with_no_in_flight_run() {
         let (_dir, db, graph_id) = graph_reset_fixture(GraphStatus::Running);
 
-        let result = perform_graph_reset(&db, &graph_id, None).unwrap();
+        let result = perform_graph_reset(&db, &graph_id, None, false).unwrap();
         assert!(!result.is_error.unwrap_or(false));
 
         let lp = db.get_graph(&graph_id).unwrap().unwrap();
@@ -13096,7 +1722,7 @@ mod tests {
         })
         .unwrap();
 
-        let result = perform_graph_reset(&db, &graph_id, None).unwrap();
+        let result = perform_graph_reset(&db, &graph_id, None, false).unwrap();
         assert!(result.is_error.unwrap_or(false));
         let text = format!("{:?}", result.content);
         assert!(text.contains("resilience"), "{text}");
@@ -13116,7 +1742,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let db = Database::new(&dir.path().join("test.db")).unwrap();
 
-        let result = perform_graph_reset(&db, "does-not-exist", None).unwrap();
+        let result = perform_graph_reset(&db, "does-not-exist", None, false).unwrap();
         assert!(result.is_error.unwrap_or(false));
         let text = format!("{:?}", result.content);
         assert!(text.contains("not found"), "{text}");
@@ -13228,6 +1854,29 @@ mod tests {
         let error = validate_node_config(GraphNodeKind::Agent, &config).unwrap_err();
         assert!(error.contains("'agent'"), "{error}");
         assert!(error.contains("platform"), "{error}");
+    }
+
+    /// CM49: a crew is the agent config's harness alternative — accepted
+    /// alone, refused beside a literal pair.
+    #[test]
+    fn validate_node_config_agent_crew_is_the_harness_alternative() {
+        assert!(validate_node_config(
+            GraphNodeKind::Agent,
+            &serde_json::json!({ "crew": "implementers" })
+        )
+        .is_ok());
+        let with_platform = serde_json::json!({ "crew": "implementers", "platform": "claude" });
+        let error = validate_node_config(GraphNodeKind::Agent, &with_platform).unwrap_err();
+        assert!(
+            error.contains("'crew' or 'platform', never both"),
+            "{error}"
+        );
+        let with_cli = serde_json::json!({ "crew": "implementers", "cli": "codex" });
+        let error = validate_node_config(GraphNodeKind::Agent, &with_cli).unwrap_err();
+        assert!(
+            error.contains("'crew' or 'platform', never both"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -13694,18 +2343,19 @@ mod tests {
             Vec::new(),
             15,
         ));
-        let handler = TaskTriggerHandler::new(
-            Arc::clone(&db),
+        let handler = TaskTriggerHandler::with_deps(HandlerDeps {
+            db: Arc::clone(&db),
             executor,
             watcher_engine,
-            Arc::new(Notify::new()),
+            scheduler_notify: Arc::new(Notify::new()),
             graph_engine,
-            notif,
+            notification_service: notif,
             sync_manager,
             ingestion,
             dynamic_skills,
-            0,
-        );
+            start_time: std::time::Instant::now(),
+            port: 0,
+        });
         (dir, db, handler)
     }
 
@@ -13802,6 +2452,103 @@ mod tests {
 
         let error = validate_queue_reorder(&current, &order).unwrap_err();
         assert!(error.contains("no spec 'ghost'"), "{error}");
+    }
+
+    fn queue_raw_text(result: &rmcp::model::CallToolResult) -> String {
+        result.content[0].as_text().unwrap().text.clone()
+    }
+
+    fn queue_is_err(result: &rmcp::model::CallToolResult) -> bool {
+        result.is_error == Some(true)
+    }
+
+    /// CM44 FR1/FR2/FR6: setting a member's group reorders the queue and
+    /// returns the resulting order with groups.
+    #[tokio::test]
+    async fn queue_set_group_tool_returns_reordered_queue() {
+        let (_dir, db, handler) = queue_test_handler();
+        for id in ["a", "b", "c"] {
+            db.insert_graph_spec(&standalone_spec(id)).unwrap();
+        }
+        insert_queue(&db, "queue-1");
+        db.append_queue_member("queue-1", "a", Some("g1")).unwrap();
+        db.append_queue_member("queue-1", "b", None).unwrap();
+        db.append_queue_member("queue-1", "c", Some("g1")).unwrap();
+
+        let result = handler
+            .do_queue_set_group("queue-1", "b", Some("g1"))
+            .await
+            .unwrap();
+
+        assert!(!queue_is_err(&result), "{}", result_text(&result));
+        let value: serde_json::Value = serde_json::from_str(&queue_raw_text(&result)).unwrap();
+        let members = value["queue"]["members"].as_array().unwrap();
+        let ids: Vec<&str> = members.iter().map(|m| m["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, vec!["a", "c", "b"]);
+        let b = &members[2];
+        assert_eq!(b["group"], serde_json::json!("g1"));
+        assert_eq!(b["queue_position"], serde_json::json!(3));
+    }
+
+    /// CM44 FR3: a reorder that would split a group's pending members is
+    /// refused, names the group and the offending positions, and changes
+    /// nothing.
+    #[tokio::test]
+    async fn queue_reorder_refuses_a_split_group() {
+        let (_dir, db, handler) = queue_test_handler();
+        for id in ["a", "b", "c"] {
+            db.insert_graph_spec(&standalone_spec(id)).unwrap();
+        }
+        insert_queue(&db, "queue-1");
+        db.append_queue_member("queue-1", "a", Some("g")).unwrap();
+        db.append_queue_member("queue-1", "b", Some("g")).unwrap();
+        db.append_queue_member("queue-1", "c", None).unwrap();
+
+        let result = handler
+            .do_queue_reorder(
+                "queue-1",
+                &["a".to_string(), "c".to_string(), "b".to_string()],
+            )
+            .await
+            .unwrap();
+
+        assert!(queue_is_err(&result), "{}", result_text(&result));
+        let msg = queue_raw_text(&result);
+        assert!(msg.contains("group 'g'"), "{msg}");
+        assert!(msg.contains("positions 1, 3"), "{msg}");
+        assert!(msg.contains("Nothing was changed"), "{msg}");
+        assert_eq!(
+            db.list_queue_member_spec_ids("queue-1").unwrap(),
+            vec!["a", "b", "c"]
+        );
+    }
+
+    /// CM44 FR2/FR6: adding a spec to an existing group places it right after
+    /// the group's last pending member and returns the resulting order.
+    #[tokio::test]
+    async fn queue_add_spec_tool_returns_order_with_groups() {
+        let (_dir, db, handler) = queue_test_handler();
+        for id in ["a", "b", "c", "x"] {
+            db.insert_graph_spec(&standalone_spec(id)).unwrap();
+        }
+        insert_queue(&db, "queue-1");
+        db.append_queue_member("queue-1", "a", Some("g")).unwrap();
+        db.append_queue_member("queue-1", "b", Some("g")).unwrap();
+        db.append_queue_member("queue-1", "c", None).unwrap();
+
+        let result = handler
+            .do_queue_add_spec("queue-1", "x", Some("g"))
+            .await
+            .unwrap();
+
+        assert!(!queue_is_err(&result), "{}", result_text(&result));
+        let value: serde_json::Value = serde_json::from_str(&queue_raw_text(&result)).unwrap();
+        let members = value["queue"]["members"].as_array().unwrap();
+        let ids: Vec<&str> = members.iter().map(|m| m["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, vec!["a", "b", "x", "c"]);
+        let x = &members[2];
+        assert_eq!(x["group"], serde_json::json!("g"));
+        assert_eq!(x["queue_position"], serde_json::json!(3));
     }
 
     fn running_spec(id: &str) -> GraphSpec {
@@ -14092,6 +2839,47 @@ mod tests {
         assert!(error.message.contains("No running spec found"));
     }
 
+    /// CM42 (FR3): `skip_next_spec` must find a spec left `Interrupted` by a
+    /// no-verdict ensemble block — not only a `running` one — so the skip verb
+    /// keeps working on the same paused graph `retry_current_node` can retry.
+    #[test]
+    fn skip_next_spec_finds_interrupted_spec() {
+        let (_dir, db) = queue_test_db();
+        insert_test_graph(&db, "graph-owner");
+        let mut bound = interrupted_spec("spec-bound");
+        bound.graph_id = Some("graph-owner".to_string());
+        db.insert_graph_spec(&bound).unwrap();
+
+        handle_skip_next_spec(&db, "graph-owner").unwrap();
+
+        let after = db.get_graph_spec("spec-bound").unwrap().unwrap();
+        assert_eq!(after.status, GraphSpecStatus::Skipped);
+    }
+
+    /// CM42 (FR3): the queue-side half of the same lookup —
+    /// `queue_running_spec` is `handle_skip_next_spec`'s fallback for a
+    /// queue-driven pause and must see an `Interrupted` in-flight member too.
+    #[test]
+    fn queue_running_spec_finds_interrupted_spec() {
+        let (_dir, db) = queue_test_db();
+        insert_test_graph(&db, "graph-owner");
+        db.set_graph_active_run_queue("graph-owner", Some("queue-1"))
+            .unwrap();
+        db.insert_graph_spec(&interrupted_spec("spec-a")).unwrap();
+        db.insert_graph_spec(&standalone_spec("spec-b")).unwrap();
+        insert_queue(&db, "queue-1");
+        db.append_queue_member("queue-1", "spec-a", None).unwrap();
+        db.append_queue_member("queue-1", "spec-b", None).unwrap();
+
+        let found = queue_running_spec(&db, "graph-owner").unwrap();
+
+        assert_eq!(
+            found.map(|spec| spec.id),
+            Some("spec-a".to_string()),
+            "the interrupted in-flight member is the current one"
+        );
+    }
+
     /// B35: `retry_current_node` must error when no spec is running in
     /// either the graph's bound specs or its queue — same validation shape as
     /// `skip_next_spec`.
@@ -14169,7 +2957,8 @@ mod tests {
         let error = handle_retry_current_node(&db, "graph-owner").unwrap_err();
         assert!(error.message.contains("spec-failed"), "{}", error.message);
         assert!(error.message.contains("failed"), "{}", error.message);
-        assert!(error.message.contains("loop_reset"), "{}", error.message);
+        assert!(error.message.contains("graph_reset"), "{}", error.message);
+        assert!(!error.message.contains("loop_"), "{}", error.message);
     }
 
     #[test]
@@ -15770,6 +4559,8 @@ mod tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let err = build_graph_completion_hook(&params).unwrap_err();
         assert!(err.contains("must have either"), "{err}");
@@ -15790,6 +4581,8 @@ mod tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let err = build_graph_completion_hook(&params).unwrap_err();
         assert!(err.contains("must have either"), "{err}");
@@ -15810,6 +4603,8 @@ mod tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let err = build_graph_completion_hook(&params).unwrap_err();
         assert!(err.contains("prompt"), "{err}");
@@ -15830,6 +4625,8 @@ mod tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let err = build_graph_completion_hook(&params).unwrap_err();
         assert!(err.contains("prompt"), "{err}");
@@ -15850,12 +4647,75 @@ mod tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let hook = build_graph_completion_hook(&params).unwrap();
         assert_eq!(hook.platform.as_deref(), Some("claude"));
         assert_eq!(hook.model, Some("opus-4".to_string()));
         assert_eq!(hook.prompt.as_deref(), Some("{{graph_name}} completed"));
         assert_eq!(hook.timeout_minutes, Some(10));
+    }
+
+    /// CM49: an agent hook names a crew instead of a platform — accepted
+    /// alone, refused beside a literal platform.
+    #[test]
+    fn build_graph_completion_hook_crew_is_the_platform_alternative() {
+        let params = GraphCompletionHookParams {
+            platform: None,
+            crew: Some("reviewers".to_string()),
+            model: None,
+            effort: None,
+            prompt: Some("review the diff".to_string()),
+            command: None,
+            target_session_id: None,
+            target_session_name: None,
+            timeout_minutes: None,
+            target_graph_id: None,
+            queue_id: None,
+            workdir_override: None,
+            idea: None,
+        };
+        let hook = build_graph_completion_hook(&params).unwrap();
+        assert!(hook.platform.is_none(), "a crew hook names no platform");
+        assert_eq!(hook.crew.as_deref(), Some("reviewers"));
+        assert_eq!(hook.prompt.as_deref(), Some("review the diff"));
+
+        let both = GraphCompletionHookParams {
+            platform: Some("claude".to_string()),
+            crew: Some("reviewers".to_string()),
+            model: None,
+            effort: None,
+            prompt: Some("review the diff".to_string()),
+            command: None,
+            target_session_id: None,
+            target_session_name: None,
+            timeout_minutes: None,
+            target_graph_id: None,
+            queue_id: None,
+            workdir_override: None,
+            idea: None,
+        };
+        let err = build_graph_completion_hook(&both).unwrap_err();
+        assert!(err.contains("'platform' or 'crew', never both"), "{err}");
+
+        let no_prompt = GraphCompletionHookParams {
+            platform: None,
+            crew: Some("reviewers".to_string()),
+            model: None,
+            effort: None,
+            prompt: None,
+            command: None,
+            target_session_id: None,
+            target_session_name: None,
+            timeout_minutes: None,
+            target_graph_id: None,
+            queue_id: None,
+            workdir_override: None,
+            idea: None,
+        };
+        let err = build_graph_completion_hook(&no_prompt).unwrap_err();
+        assert!(err.contains("prompt"), "{err}");
     }
 
     #[test]
@@ -15873,6 +4733,8 @@ mod tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let err = build_graph_completion_hook(&params).unwrap_err();
         assert!(err.contains("nodee"), "{err}");
@@ -15896,6 +4758,8 @@ mod tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let hook = build_graph_completion_hook(&params).unwrap();
         assert_eq!(hook.platform.as_deref(), Some("claude"));
@@ -15918,6 +4782,8 @@ mod tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let hook = build_graph_completion_hook(&params).unwrap();
         assert!(hook.model.is_none());
@@ -15940,6 +4806,8 @@ mod tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let err = build_graph_completion_hook(&params).unwrap_err();
         assert!(err.contains("command"), "{err}");
@@ -15961,6 +4829,8 @@ mod tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let err = build_graph_completion_hook(&params).unwrap_err();
         assert!(err.contains("either"), "{err}");
@@ -15981,6 +4851,8 @@ mod tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let hook = build_graph_completion_hook(&params).unwrap();
         assert_eq!(hook.command.as_deref(), Some("echo hello"));
@@ -16004,6 +4876,8 @@ mod tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let hook = build_graph_completion_hook(&params).unwrap();
         assert_eq!(hook.command.as_deref(), Some("echo hello"));
@@ -16024,6 +4898,8 @@ mod tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let hook = build_graph_completion_hook(&params).unwrap();
         assert!(hook.is_interactive());
@@ -16049,6 +4925,8 @@ mod tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         assert!(build_graph_completion_hook(&params).is_err());
 
@@ -16066,6 +4944,8 @@ mod tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         assert!(build_graph_completion_hook(&params).is_err());
 
@@ -16083,6 +4963,8 @@ mod tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         assert!(build_graph_completion_hook(&params).is_err());
 
@@ -16100,6 +4982,8 @@ mod tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         assert!(build_graph_completion_hook(&params).is_err());
 
@@ -16117,6 +5001,8 @@ mod tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let err = build_graph_completion_hook(&params).unwrap_err();
         assert!(err.contains("prompt"), "{err}");
@@ -16137,6 +5023,8 @@ mod tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let hook = build_graph_completion_hook(&params).unwrap();
         assert!(hook.is_interactive());
@@ -16159,6 +5047,8 @@ mod tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let err = build_graph_completion_hook(&params).unwrap_err();
         assert!(err.contains("target_session_id"), "{err}");
@@ -16180,6 +5070,8 @@ mod tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let err = build_graph_completion_hook(&params).unwrap_err();
         assert!(err.contains("target_session_id"), "{err}");
@@ -16201,6 +5093,8 @@ mod tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let err = build_graph_completion_hook(&params).unwrap_err();
         assert!(err.contains("target_session_name"), "{err}");
@@ -16946,7 +5840,7 @@ mod tests {
 
     #[test]
     fn build_graph_update_response_contains_graph_id() {
-        let result = build_graph_update_response("graph-42");
+        let result = build_graph_update_response("graph-42", None);
         let text = format!("{:?}", result.content);
         assert!(text.contains("graph-42"), "{text}");
         assert!(text.contains("updated"), "{text}");
@@ -17579,6 +6473,8 @@ mod additional_tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let hook = build_graph_completion_hook(&params).unwrap();
         assert!(hook.model.is_none());
@@ -17599,6 +6495,8 @@ mod additional_tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let hook = build_graph_completion_hook(&params).unwrap();
         assert_eq!(hook.timeout_minutes, Some(45));
@@ -17788,7 +6686,12 @@ mod additional_tests {
                 infra_backoff_seconds: None,
             },
         ];
-        let err = validate_ensemble_members(&members, EnsembleKind::Parallel).unwrap_err();
+        let err = validate_ensemble_members(
+            &members,
+            EnsembleKind::Parallel,
+            crate::domain::graphs::MemberCaps::default(),
+        )
+        .unwrap_err();
         assert!(err.contains("platform"), "{err}");
     }
 
@@ -17816,7 +6719,12 @@ mod additional_tests {
                 infra_backoff_seconds: None,
             },
         ];
-        let result = validate_ensemble_members(&members, EnsembleKind::Parallel).unwrap();
+        let result = validate_ensemble_members(
+            &members,
+            EnsembleKind::Parallel,
+            crate::domain::graphs::MemberCaps::default(),
+        )
+        .unwrap();
         assert_eq!(result[0].1.as_deref(), Some("opus-4"));
         assert_eq!(result[1].1, None); // whitespace-only model becomes None
     }
@@ -17840,7 +6748,7 @@ mod additional_tests {
 
     #[test]
     fn build_graph_update_response_text() {
-        let result = build_graph_update_response("graph-xyz");
+        let result = build_graph_update_response("graph-xyz", None);
         let text = format!("{:?}", result.content);
         assert!(text.contains("graph-xyz"));
         assert!(text.contains("updated"));
@@ -18605,6 +7513,7 @@ mod coverage_tests {
             last_run_ok: None,
             last_triggered_at: None,
             trigger_count: 0,
+            action: crate::domain::models::AgentAction::Headless,
         }
     }
 
@@ -19027,6 +7936,10 @@ mod coverage_tests {
                 kind: EnsembleKind::Parallel,
                 round_robin_index: None,
                 created_at: chrono::Utc::now(),
+
+                crew_id: None,
+                crew_name: None,
+                crew_version_applied: None,
             },
             members: vec![
                 EnsembleMember {
@@ -19096,6 +8009,10 @@ mod coverage_tests {
                 kind: EnsembleKind::Parallel,
                 round_robin_index: None,
                 created_at: chrono::Utc::now(),
+
+                crew_id: None,
+                crew_name: None,
+                crew_version_applied: None,
             },
             members: vec![EnsembleMember {
                 ensemble_id: "ens2".into(),
@@ -19132,6 +8049,8 @@ mod coverage_tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let json = super::graph_completion_hook_json(&hook);
         assert_eq!(json["platform"], "claude");
@@ -19154,6 +8073,8 @@ mod coverage_tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let json = super::graph_completion_hook_json(&hook);
         assert!(json["model"].is_null());
@@ -19178,6 +8099,7 @@ mod coverage_tests {
             boot_id: None,
             executed_platform: None,
             executed_model: None,
+            hook_config: None,
         };
         let json = super::graph_completion_hook_run_json(&run);
         assert_eq!(json["id"], "chr1");
@@ -19201,6 +8123,7 @@ mod coverage_tests {
             boot_id: None,
             executed_platform: None,
             executed_model: None,
+            hook_config: None,
         };
         let json = super::graph_completion_hook_run_json(&run);
         assert!(json["completed_at"].is_null());
@@ -19770,7 +8693,12 @@ mod coverage_tests {
                 infra_backoff_seconds: None,
             })
             .collect();
-        assert!(validate_ensemble_members(&m, EnsembleKind::Parallel).is_ok());
+        assert!(validate_ensemble_members(
+            &m,
+            EnsembleKind::Parallel,
+            crate::domain::graphs::MemberCaps::default()
+        )
+        .is_ok());
     }
 
     #[test]
@@ -19786,7 +8714,12 @@ mod coverage_tests {
                 infra_backoff_seconds: None,
             })
             .collect();
-        assert!(validate_ensemble_members(&m, EnsembleKind::Parallel).is_ok());
+        assert!(validate_ensemble_members(
+            &m,
+            EnsembleKind::Parallel,
+            crate::domain::graphs::MemberCaps::default()
+        )
+        .is_ok());
     }
 
     #[test]
@@ -19802,9 +8735,13 @@ mod coverage_tests {
                 infra_backoff_seconds: None,
             })
             .collect();
-        assert!(validate_ensemble_members(&m, EnsembleKind::Parallel)
-            .unwrap_err()
-            .contains("2-8"));
+        assert!(validate_ensemble_members(
+            &m,
+            EnsembleKind::Parallel,
+            crate::domain::graphs::MemberCaps::default()
+        )
+        .unwrap_err()
+        .contains("2-8"));
     }
 
     #[test]
@@ -19829,7 +8766,12 @@ mod coverage_tests {
                 infra_backoff_seconds: None,
             },
         ];
-        let result = validate_ensemble_members(&m, EnsembleKind::Parallel).unwrap();
+        let result = validate_ensemble_members(
+            &m,
+            EnsembleKind::Parallel,
+            crate::domain::graphs::MemberCaps::default(),
+        )
+        .unwrap();
         assert_eq!(result[0].1, None);
         assert_eq!(result[1].1, None);
     }
@@ -20303,19 +9245,175 @@ mod endpoint_tests {
             Vec::new(),
             15,
         ));
-        let handler = TaskTriggerHandler::new(
-            Arc::clone(&db),
+        let handler = TaskTriggerHandler::with_deps(HandlerDeps {
+            db: Arc::clone(&db),
             executor,
             watcher_engine,
-            Arc::new(Notify::new()),
+            scheduler_notify: Arc::new(Notify::new()),
             graph_engine,
-            notif,
+            notification_service: notif,
             sync_manager,
             ingestion,
             dynamic_skills,
-            0,
-        );
+            start_time: std::time::Instant::now(),
+            port: 0,
+        });
         (dir, db, handler)
+    }
+
+    /// B7 A5.1: `HandlerDeps` round-trip — `with_deps` and `new` construct
+    /// handlers that expose the same `port`, a fresh `start_time`, and an
+    /// identical tool inventory.
+    #[test]
+    fn handler_deps_round_trip_constructs_identical_handler() {
+        use crate::application::notification_service::{
+            DefaultNotificationService, NotificationService,
+        };
+        use crate::daemon::handler::HandlerDeps;
+        use crate::executor::Executor;
+        use crate::graph_engine::GraphEngine;
+        use crate::rag::ingestion::IngestionManager;
+        use crate::sync_manager::SyncManager;
+        use crate::watchers::WatcherEngine;
+        use std::sync::Arc;
+        use tokio::sync::Notify;
+
+        let dir = tempdir().unwrap();
+        let db = Arc::new(Database::new(&dir.path().join("test.db")).unwrap());
+        let notif: Arc<dyn NotificationService> = Arc::new(DefaultNotificationService);
+        let executor = Arc::new(Executor::new(Arc::clone(&db), Arc::clone(&notif)));
+        let sync_manager = Arc::new(SyncManager::new(Arc::clone(&db)));
+        let graph_engine = Arc::new(GraphEngine::new(Arc::clone(&db), Arc::clone(&notif)));
+        let watcher_engine = Arc::new(WatcherEngine::new(
+            Arc::clone(&db),
+            Arc::clone(&executor),
+            Arc::clone(&graph_engine),
+        ));
+        let ingestion = Arc::new(IngestionManager::new(
+            Arc::clone(&db),
+            dir.path().to_path_buf(),
+        ));
+        let dynamic_skills = Arc::new(crate::dynamic_skills::SkillStore::new(
+            dir.path().join("skills"),
+            Vec::new(),
+            15,
+        ));
+        let scheduler_notify = Arc::new(Notify::new());
+
+        let deps = HandlerDeps {
+            db: Arc::clone(&db),
+            executor: Arc::clone(&executor),
+            watcher_engine: Arc::clone(&watcher_engine),
+            scheduler_notify: Arc::clone(&scheduler_notify),
+            graph_engine: Arc::clone(&graph_engine),
+            notification_service: Arc::clone(&notif),
+            sync_manager: Arc::clone(&sync_manager),
+            ingestion: Arc::clone(&ingestion),
+            dynamic_skills: Arc::clone(&dynamic_skills),
+            start_time: std::time::Instant::now(),
+            port: 0,
+        };
+        let via_deps = TaskTriggerHandler::with_deps(deps);
+
+        assert_eq!(via_deps.port, 0);
+
+        let deps_elapsed = via_deps.start_time.elapsed();
+        assert!(
+            deps_elapsed.as_secs() <= 1,
+            "start_time too stale: {deps_elapsed:?}"
+        );
+
+        let deps_names: Vec<String> = TaskTriggerHandler::tool_router()
+            .list_all()
+            .iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        assert!(!deps_names.is_empty());
+    }
+
+    /// CB83: handlers built from the same daemon start instant report the
+    /// same uptime however late they are created — `agent_status` `Uptime`
+    /// must be the daemon's age, not the MCP session's.
+    #[test]
+    fn daemon_start_instant_is_shared_by_every_handler() {
+        use crate::application::notification_service::{
+            DefaultNotificationService, NotificationService,
+        };
+        use crate::daemon::handler::HandlerDeps;
+        use crate::daemon::handler_formatting::format_uptime;
+        use crate::executor::Executor;
+        use crate::graph_engine::GraphEngine;
+        use crate::rag::ingestion::IngestionManager;
+        use crate::sync_manager::SyncManager;
+        use crate::watchers::WatcherEngine;
+        use std::sync::Arc;
+        use tokio::sync::Notify;
+
+        let dir = tempdir().unwrap();
+        let db = Arc::new(Database::new(&dir.path().join("test.db")).unwrap());
+        let notif: Arc<dyn NotificationService> = Arc::new(DefaultNotificationService);
+        let executor = Arc::new(Executor::new(Arc::clone(&db), Arc::clone(&notif)));
+        let sync_manager = Arc::new(SyncManager::new(Arc::clone(&db)));
+        let graph_engine = Arc::new(GraphEngine::new(Arc::clone(&db), Arc::clone(&notif)));
+        let watcher_engine = Arc::new(WatcherEngine::new(
+            Arc::clone(&db),
+            Arc::clone(&executor),
+            Arc::clone(&graph_engine),
+        ));
+        let ingestion = Arc::new(IngestionManager::new(
+            Arc::clone(&db),
+            dir.path().to_path_buf(),
+        ));
+        let dynamic_skills = Arc::new(crate::dynamic_skills::SkillStore::new(
+            dir.path().join("skills"),
+            Vec::new(),
+            15,
+        ));
+        let scheduler_notify = Arc::new(Notify::new());
+
+        // A daemon start instant in the past — the value the daemon hands
+        // to every handler it builds. `Instant` is `Copy`, so the same
+        // value goes into both handlers.
+        let daemon_start = std::time::Instant::now() - std::time::Duration::from_secs(120);
+
+        let first = TaskTriggerHandler::with_deps(HandlerDeps {
+            db: Arc::clone(&db),
+            executor: Arc::clone(&executor),
+            watcher_engine: Arc::clone(&watcher_engine),
+            scheduler_notify: Arc::clone(&scheduler_notify),
+            graph_engine: Arc::clone(&graph_engine),
+            notification_service: Arc::clone(&notif),
+            sync_manager: Arc::clone(&sync_manager),
+            ingestion: Arc::clone(&ingestion),
+            dynamic_skills: Arc::clone(&dynamic_skills),
+            start_time: daemon_start,
+            port: 0,
+        });
+
+        // The second handler is created later, the way Streamable HTTP
+        // builds one handler per MCP session. The wait must exceed
+        // `format_uptime`'s one-second granularity: a handler that stamped
+        // its own start time would otherwise format to the same string.
+        std::thread::sleep(std::time::Duration::from_secs(2));
+
+        let second = TaskTriggerHandler::with_deps(HandlerDeps {
+            db: Arc::clone(&db),
+            executor: Arc::clone(&executor),
+            watcher_engine: Arc::clone(&watcher_engine),
+            scheduler_notify: Arc::clone(&scheduler_notify),
+            graph_engine: Arc::clone(&graph_engine),
+            notification_service: Arc::clone(&notif),
+            sync_manager: Arc::clone(&sync_manager),
+            ingestion: Arc::clone(&ingestion),
+            dynamic_skills: Arc::clone(&dynamic_skills),
+            start_time: daemon_start,
+            port: 0,
+        });
+
+        assert_eq!(
+            format_uptime(first.start_time.elapsed().as_secs()),
+            format_uptime(second.start_time.elapsed().as_secs()),
+        );
     }
 
     fn text(result: &CallToolResult) -> String {
@@ -20354,17 +9452,23 @@ mod endpoint_tests {
         let (_dir, db, handler) = endpoint_test_handler();
 
         let result = handler
-            .task_add(Parameters(TaskAddParams {
-                id: "agt-1".to_string(),
-                prompt: "run the tests".to_string(),
-                schedule: "*/5 * * * *".to_string(),
-                cli: Some("opencode".to_string()),
-                model: None,
-                effort: None,
-                duration_minutes: None,
-                working_dir: None,
-                timeout_minutes: None,
-            }))
+            .task_add(
+                Parameters(TaskAddParams {
+                    action: None,
+                    target_session_name: None,
+                    target_session_id: None,
+                    id: "agt-1".to_string(),
+                    prompt: "run the tests".to_string(),
+                    schedule: "*/5 * * * *".to_string(),
+                    cli: Some("opencode".to_string()),
+                    model: None,
+                    effort: None,
+                    duration_minutes: None,
+                    working_dir: None,
+                    timeout_minutes: None,
+                }),
+                OptionalExtension(None),
+            )
             .await
             .unwrap();
 
@@ -20375,23 +9479,320 @@ mod endpoint_tests {
     }
 
     #[tokio::test]
+    async fn agent_add_send_action_does_not_require_cli() {
+        let home = tempdir().unwrap();
+        let _home_guard = HomeVar::set(home.path());
+        let (_dir, db, handler) = endpoint_test_handler();
+
+        let result = handler
+            .task_add(
+                Parameters(TaskAddParams {
+                    action: Some("send_to_session".to_string()),
+                    target_session_name: Some("orch".to_string()),
+                    target_session_id: None,
+                    id: "nudge-1".to_string(),
+                    prompt: "nudge the orchestrator".to_string(),
+                    schedule: "0 * * * *".to_string(),
+                    cli: None,
+                    model: None,
+                    effort: None,
+                    duration_minutes: None,
+                    working_dir: None,
+                    timeout_minutes: None,
+                }),
+                OptionalExtension(None),
+            )
+            .await
+            .unwrap();
+
+        assert!(!is_err(&result), "{}", text(&result));
+        assert!(text(&result).contains("orch"), "{}", text(&result));
+        let stored = db.get_agent("nudge-1").unwrap().unwrap();
+        assert!(stored.is_send_to_session());
+        assert_eq!(stored.action.target_session_name(), Some("orch"));
+    }
+
+    #[tokio::test]
+    async fn agent_watch_send_action_registers_watcher() {
+        let home = tempdir().unwrap();
+        let _home_guard = HomeVar::set(home.path());
+        let (dir, db, handler) = endpoint_test_handler();
+
+        let result = handler
+            .task_watch(
+                Parameters(TaskWatchParams {
+                    action: Some("send_to_session".to_string()),
+                    target_session_name: None,
+                    target_session_id: Some("sess-1".to_string()),
+                    id: "watch-send-1".to_string(),
+                    path: dir.path().to_string_lossy().to_string(),
+                    events: vec!["modify".to_string()],
+                    prompt: "a spec changed".to_string(),
+                    cli: None,
+                    model: None,
+                    effort: None,
+                    debounce_seconds: None,
+                    recursive: None,
+                    timeout_minutes: None,
+                }),
+                OptionalExtension(None),
+            )
+            .await
+            .unwrap();
+
+        assert!(!is_err(&result), "{}", text(&result));
+        assert!(text(&result).contains("sess-1"), "{}", text(&result));
+        let stored = db.get_agent("watch-send-1").unwrap().unwrap();
+        assert!(stored.is_send_to_session());
+        assert!(matches!(stored.trigger, Some(Trigger::Watch { .. })));
+    }
+
+    #[tokio::test]
+    async fn agent_update_switching_to_headless_requires_cli() {
+        let home = tempdir().unwrap();
+        let _home_guard = HomeVar::set(home.path());
+        let (_dir, db, handler) = endpoint_test_handler();
+
+        let created = handler
+            .task_add(
+                Parameters(TaskAddParams {
+                    action: Some("send_to_session".to_string()),
+                    target_session_name: Some("orch".to_string()),
+                    target_session_id: None,
+                    id: "switch-1".to_string(),
+                    prompt: "p".to_string(),
+                    schedule: "0 * * * *".to_string(),
+                    cli: None,
+                    model: None,
+                    effort: None,
+                    duration_minutes: None,
+                    working_dir: None,
+                    timeout_minutes: None,
+                }),
+                OptionalExtension(None),
+            )
+            .await
+            .unwrap();
+        assert!(!is_err(&created), "{}", text(&created));
+
+        let result = handler
+            .task_update(
+                Parameters(TaskUpdateParams {
+                    action: Some("headless".to_string()),
+                    target_session_name: None,
+                    target_session_id: None,
+                    id: "switch-1".to_string(),
+                    new_id: None,
+                    prompt: None,
+                    cli: None,
+                    model: None,
+                    effort: None,
+                    schedule: None,
+                    working_dir: None,
+                    duration_minutes: None,
+                    path: None,
+                    events: None,
+                    debounce_seconds: None,
+                    recursive: None,
+                    enabled: None,
+                    notify_on_success: None,
+                }),
+                OptionalExtension(None),
+            )
+            .await
+            .unwrap();
+
+        assert!(is_err(&result), "{}", text(&result));
+        assert!(text(&result).contains("cli"), "{}", text(&result));
+        // The action is unchanged.
+        assert!(db
+            .get_agent("switch-1")
+            .unwrap()
+            .unwrap()
+            .is_send_to_session());
+    }
+
+    #[test]
+    fn agent_get_hides_cli_for_send_agents() {
+        let mut agent = crate::daemon::handler_helpers::new_agent_base(
+            "send-1".to_string(),
+            "p".to_string(),
+            crate::domain::models::Cli::new("opencode"),
+            Some("a-model".to_string()),
+            None,
+            None,
+            "/tmp/send-1.log".to_string(),
+        );
+        agent.action =
+            crate::domain::models::AgentAction::send_to_session(Some("orch".to_string()), None)
+                .unwrap();
+
+        let info = crate::daemon::handler_formatting::format_agent_info(&agent);
+        assert!(info.contains("send to session"), "{info}");
+        assert!(info.contains("target: session name 'orch'"), "{info}");
+        assert!(!info.contains("CLI:"), "{info}");
+
+        let json = crate::daemon::handler_formatting::agent_detail_json(&agent, false);
+        assert!(json.get("cli").is_none(), "{json}");
+        assert!(json.get("model").is_none(), "{json}");
+        assert!(json.get("timeout_minutes").is_none(), "{json}");
+        assert!(
+            json.get("target")
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .contains("orch"),
+            "{json}"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_update_retargets_send_agent_without_repeating_action() {
+        let home = tempdir().unwrap();
+        let _home_guard = HomeVar::set(home.path());
+        let (_dir, db, handler) = endpoint_test_handler();
+
+        let created = handler
+            .task_add(
+                Parameters(TaskAddParams {
+                    action: Some("send_to_session".to_string()),
+                    target_session_name: Some("orch".to_string()),
+                    target_session_id: None,
+                    id: "retarget-1".to_string(),
+                    prompt: "p".to_string(),
+                    schedule: "0 * * * *".to_string(),
+                    cli: None,
+                    model: None,
+                    effort: None,
+                    duration_minutes: None,
+                    working_dir: None,
+                    timeout_minutes: None,
+                }),
+                OptionalExtension(None),
+            )
+            .await
+            .unwrap();
+        assert!(!is_err(&created), "{}", text(&created));
+
+        let updated = handler
+            .task_update(
+                Parameters(TaskUpdateParams {
+                    action: None,
+                    target_session_name: Some("other".to_string()),
+                    target_session_id: None,
+                    id: "retarget-1".to_string(),
+                    new_id: None,
+                    prompt: None,
+                    cli: None,
+                    model: None,
+                    effort: None,
+                    schedule: None,
+                    working_dir: None,
+                    duration_minutes: None,
+                    path: None,
+                    events: None,
+                    debounce_seconds: None,
+                    recursive: None,
+                    enabled: None,
+                    notify_on_success: None,
+                }),
+                OptionalExtension(None),
+            )
+            .await
+            .unwrap();
+        assert!(!is_err(&updated), "{}", text(&updated));
+
+        let stored = db.get_agent("retarget-1").unwrap().unwrap();
+        assert_eq!(stored.action.target_session_name(), Some("other"));
+    }
+
+    #[tokio::test]
+    async fn agent_update_refuses_target_on_headless_agent() {
+        let home = tempdir().unwrap();
+        let _home_guard = HomeVar::set(home.path());
+        let (dir, db, handler) = endpoint_test_handler();
+
+        let created = handler
+            .task_watch(
+                Parameters(TaskWatchParams {
+                    action: None,
+                    target_session_name: None,
+                    target_session_id: None,
+                    id: "headless-watch".to_string(),
+                    path: dir.path().to_string_lossy().to_string(),
+                    events: vec!["modify".to_string()],
+                    prompt: "p".to_string(),
+                    cli: Some("opencode".to_string()),
+                    model: None,
+                    effort: None,
+                    debounce_seconds: None,
+                    recursive: None,
+                    timeout_minutes: None,
+                }),
+                OptionalExtension(None),
+            )
+            .await
+            .unwrap();
+        assert!(!is_err(&created), "{}", text(&created));
+
+        let updated = handler
+            .task_update(
+                Parameters(TaskUpdateParams {
+                    action: None,
+                    target_session_name: Some("orch".to_string()),
+                    target_session_id: None,
+                    id: "headless-watch".to_string(),
+                    new_id: None,
+                    prompt: None,
+                    cli: None,
+                    model: None,
+                    effort: None,
+                    schedule: None,
+                    working_dir: None,
+                    duration_minutes: None,
+                    path: None,
+                    events: None,
+                    debounce_seconds: None,
+                    recursive: None,
+                    enabled: None,
+                    notify_on_success: None,
+                }),
+                OptionalExtension(None),
+            )
+            .await
+            .unwrap();
+        assert!(is_err(&updated), "{}", text(&updated));
+        assert!(!db
+            .get_agent("headless-watch")
+            .unwrap()
+            .unwrap()
+            .is_send_to_session());
+    }
+
+    #[tokio::test]
     async fn task_add_rejects_invalid_cron_expression() {
         let home = tempdir().unwrap();
         let _home_guard = HomeVar::set(home.path());
         let (_dir, db, handler) = endpoint_test_handler();
 
         let result = handler
-            .task_add(Parameters(TaskAddParams {
-                id: "agt-bad-cron".to_string(),
-                prompt: "run the tests".to_string(),
-                schedule: "not a cron expr!".to_string(),
-                cli: Some("opencode".to_string()),
-                model: None,
-                effort: None,
-                duration_minutes: None,
-                working_dir: None,
-                timeout_minutes: None,
-            }))
+            .task_add(
+                Parameters(TaskAddParams {
+                    action: None,
+                    target_session_name: None,
+                    target_session_id: None,
+                    id: "agt-bad-cron".to_string(),
+                    prompt: "run the tests".to_string(),
+                    schedule: "not a cron expr!".to_string(),
+                    cli: Some("opencode".to_string()),
+                    model: None,
+                    effort: None,
+                    duration_minutes: None,
+                    working_dir: None,
+                    timeout_minutes: None,
+                }),
+                OptionalExtension(None),
+            )
             .await
             .unwrap();
 
@@ -20407,22 +9808,131 @@ mod endpoint_tests {
         let (_dir, _db, handler) = endpoint_test_handler();
 
         let result = handler
-            .task_add(Parameters(TaskAddParams {
-                id: "bad id with spaces!".to_string(),
-                prompt: "run the tests".to_string(),
-                schedule: "*/5 * * * *".to_string(),
-                cli: Some("opencode".to_string()),
-                model: None,
-                effort: None,
-                duration_minutes: None,
-                working_dir: None,
-                timeout_minutes: None,
-            }))
+            .task_add(
+                Parameters(TaskAddParams {
+                    action: None,
+                    target_session_name: None,
+                    target_session_id: None,
+                    id: "bad id with spaces!".to_string(),
+                    prompt: "run the tests".to_string(),
+                    schedule: "*/5 * * * *".to_string(),
+                    cli: Some("opencode".to_string()),
+                    model: None,
+                    effort: None,
+                    duration_minutes: None,
+                    working_dir: None,
+                    timeout_minutes: None,
+                }),
+                OptionalExtension(None),
+            )
             .await
             .unwrap();
 
         assert!(is_err(&result));
         assert!(text(&result).contains("alphanumeric"));
+    }
+
+    #[tokio::test]
+    async fn task_add_rejects_platform_whose_binary_is_the_wrong_program() {
+        let home = tempdir().unwrap();
+        let script = home.path().join("blackbox");
+        std::fs::write(
+            &script,
+            "if [ \"$1\" = \"--version\" ]; then echo \"blackbox: another window manager is already running on display ':0'\"; else echo \"$1\"; fi\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        let canopy_dir = home.path().join(".canopy");
+        std::fs::create_dir_all(&canopy_dir).unwrap();
+        crate::domain::canopy_config::CanopyConfig {
+            clis: vec![crate::domain::cli_config::CliConfig {
+                name: "blackbox".to_string(),
+                binary: script.to_string_lossy().to_string(),
+                identity_args: Some(vec!["--version".to_string()]),
+                identity_pattern: Some("(?i)blackbox ?ai".to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+        .save_for_tests(&canopy_dir)
+        .unwrap();
+        let _home_guard = HomeVar::set(home.path());
+
+        let (_dir, db, handler) = endpoint_test_handler();
+        let result = handler
+            .task_add(
+                Parameters(TaskAddParams {
+                    action: None,
+                    target_session_name: None,
+                    target_session_id: None,
+                    id: "agt-wrong-bin".to_string(),
+                    prompt: "run the tests".to_string(),
+                    schedule: "*/5 * * * *".to_string(),
+                    cli: Some("blackbox".to_string()),
+                    model: None,
+                    effort: None,
+                    duration_minutes: None,
+                    working_dir: None,
+                    timeout_minutes: None,
+                }),
+                OptionalExtension(None),
+            )
+            .await
+            .unwrap();
+
+        assert!(is_err(&result));
+        assert!(text(&result).contains("is not"));
+        assert!(text(&result).contains("identity check failed"));
+        assert!(db.get_agent("agt-wrong-bin").unwrap().is_none());
+    }
+
+    /// CM35 FR2: `agent_add` refuses a platform marked `headless = false`
+    /// with the exact spec wording, and the agent never reaches the DB — so
+    /// the scheduler can never dispatch a headless run onto it. The check
+    /// runs before `ensure_cli_installed`, so no process is spawned either
+    /// (the fixture binary would `touch` a marker if it ran).
+    #[tokio::test]
+    async fn task_add_rejects_interactive_only_platform() {
+        let home = tempdir().unwrap();
+        let marker = write_freebuff_config(home.path());
+        let _home_guard = HomeVar::set(home.path());
+
+        let (_dir, db, handler) = endpoint_test_handler();
+
+        let result = handler
+            .task_add(
+                Parameters(TaskAddParams {
+                    action: None,
+                    target_session_name: None,
+                    target_session_id: None,
+                    id: "agt-live-only".to_string(),
+                    prompt: "run the tests".to_string(),
+                    schedule: "*/5 * * * *".to_string(),
+                    cli: Some("freebuff".to_string()),
+                    model: None,
+                    effort: None,
+                    duration_minutes: None,
+                    working_dir: None,
+                    timeout_minutes: None,
+                }),
+                OptionalExtension(None),
+            )
+            .await
+            .unwrap();
+
+        assert!(is_err(&result), "{}", text(&result));
+        assert!(
+            raw_text(&result)
+                .contains("platform 'freebuff' is interactive-only (no headless mode)"),
+            "{}",
+            raw_text(&result)
+        );
+        assert!(db.get_agent("agt-live-only").unwrap().is_none());
+        assert!(
+            !marker.exists(),
+            "the interactive-only gate must fire before any process is spawned"
+        );
     }
 
     // ── task_watch / agent_watch ─────────────────────────────────
@@ -20434,18 +9944,24 @@ mod endpoint_tests {
         let (dir, db, handler) = endpoint_test_handler();
 
         let result = handler
-            .task_watch(Parameters(TaskWatchParams {
-                id: "watch-1".to_string(),
-                path: dir.path().to_string_lossy().to_string(),
-                events: vec!["modify".to_string(), "create".to_string()],
-                prompt: "react to changes".to_string(),
-                cli: Some("opencode".to_string()),
-                model: None,
-                effort: None,
-                debounce_seconds: None,
-                recursive: Some(true),
-                timeout_minutes: None,
-            }))
+            .task_watch(
+                Parameters(TaskWatchParams {
+                    action: None,
+                    target_session_name: None,
+                    target_session_id: None,
+                    id: "watch-1".to_string(),
+                    path: dir.path().to_string_lossy().to_string(),
+                    events: vec!["modify".to_string(), "create".to_string()],
+                    prompt: "react to changes".to_string(),
+                    cli: Some("opencode".to_string()),
+                    model: None,
+                    effort: None,
+                    debounce_seconds: None,
+                    recursive: Some(true),
+                    timeout_minutes: None,
+                }),
+                OptionalExtension(None),
+            )
             .await
             .unwrap();
 
@@ -20461,18 +9977,24 @@ mod endpoint_tests {
         let (_dir, db, handler) = endpoint_test_handler();
 
         let result = handler
-            .task_watch(Parameters(TaskWatchParams {
-                id: "watch-bad-path".to_string(),
-                path: "relative/path".to_string(),
-                events: vec!["modify".to_string()],
-                prompt: "react to changes".to_string(),
-                cli: Some("opencode".to_string()),
-                model: None,
-                effort: None,
-                debounce_seconds: None,
-                recursive: None,
-                timeout_minutes: None,
-            }))
+            .task_watch(
+                Parameters(TaskWatchParams {
+                    action: None,
+                    target_session_name: None,
+                    target_session_id: None,
+                    id: "watch-bad-path".to_string(),
+                    path: "relative/path".to_string(),
+                    events: vec!["modify".to_string()],
+                    prompt: "react to changes".to_string(),
+                    cli: Some("opencode".to_string()),
+                    model: None,
+                    effort: None,
+                    debounce_seconds: None,
+                    recursive: None,
+                    timeout_minutes: None,
+                }),
+                OptionalExtension(None),
+            )
             .await
             .unwrap();
 
@@ -20488,18 +10010,24 @@ mod endpoint_tests {
         let (dir, _db, handler) = endpoint_test_handler();
 
         let result = handler
-            .task_watch(Parameters(TaskWatchParams {
-                id: "watch-bad-event".to_string(),
-                path: dir.path().to_string_lossy().to_string(),
-                events: vec!["explode".to_string()],
-                prompt: "react to changes".to_string(),
-                cli: Some("opencode".to_string()),
-                model: None,
-                effort: None,
-                debounce_seconds: None,
-                recursive: None,
-                timeout_minutes: None,
-            }))
+            .task_watch(
+                Parameters(TaskWatchParams {
+                    action: None,
+                    target_session_name: None,
+                    target_session_id: None,
+                    id: "watch-bad-event".to_string(),
+                    path: dir.path().to_string_lossy().to_string(),
+                    events: vec!["explode".to_string()],
+                    prompt: "react to changes".to_string(),
+                    cli: Some("opencode".to_string()),
+                    model: None,
+                    effort: None,
+                    debounce_seconds: None,
+                    recursive: None,
+                    timeout_minutes: None,
+                }),
+                OptionalExtension(None),
+            )
             .await
             .unwrap();
 
@@ -20527,6 +10055,7 @@ mod endpoint_tests {
             last_run_ok: None,
             last_triggered_at: None,
             trigger_count: 0,
+            action: crate::domain::models::AgentAction::Headless,
         }
     }
 
@@ -21328,7 +10857,7 @@ mod endpoint_tests {
             }],
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
         let _home_guard = HomeVar::set(home.path());
 
         let (_dir, _db, handler) = endpoint_test_handler();
@@ -21343,6 +10872,42 @@ mod endpoint_tests {
 
         assert!(is_err(&result));
         assert!(text(&result).contains("is not configured in canopy"));
+    }
+
+    /// CM35 FR2: `agent_models` on an interactive-only platform is a
+    /// *success* carrying an empty list plus the rejection reason — not an
+    /// error — and it never runs `models_list_cmd` or falls through to
+    /// models.dev (the fixture binary would `touch` a marker if it ran).
+    #[tokio::test]
+    async fn task_models_returns_empty_list_with_reason_for_interactive_only_platform() {
+        let home = tempdir().unwrap();
+        let marker = write_freebuff_config(home.path());
+        let _home_guard = HomeVar::set(home.path());
+
+        let (_dir, _db, handler) = endpoint_test_handler();
+        let result = handler
+            .task_models(Parameters(TaskModelsParams {
+                platform: Some("freebuff".to_string()),
+                refresh: Some(true),
+                full: None,
+            }))
+            .await
+            .unwrap();
+
+        assert!(!is_err(&result), "{}", text(&result));
+        let body: serde_json::Value = serde_json::from_str(&raw_text(&result)).unwrap();
+        assert_eq!(body["platform"], serde_json::json!("freebuff"), "{body}");
+        assert_eq!(body["models"], serde_json::json!([]), "{body}");
+        assert!(
+            body["reason"].as_str().is_some_and(
+                |r| r.contains("platform 'freebuff' is interactive-only (no headless mode)")
+            ),
+            "{body}"
+        );
+        assert!(
+            !marker.exists(),
+            "no enumeration process may be spawned for an interactive-only platform"
+        );
     }
 
     #[tokio::test]
@@ -21365,7 +10930,7 @@ mod endpoint_tests {
             }],
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
         let _home_guard = HomeVar::set(home.path());
 
         let (_dir, _db, handler) = endpoint_test_handler();
@@ -21406,7 +10971,7 @@ mod endpoint_tests {
             }],
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
         // Seed a minimal models.dev catalog so the models.dev path succeeds
         // without a network fetch — `load_catalog_with_source` serves a fresh
         // cache with no network when the file exists and is within TTL.
@@ -21464,7 +11029,7 @@ mod endpoint_tests {
             }],
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
         let _home_guard = HomeVar::set(home.path());
 
         let (_dir, _db, handler) = endpoint_test_handler();
@@ -21512,7 +11077,7 @@ mod endpoint_tests {
             }],
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
         let _home_guard = HomeVar::set(home.path());
 
         let (_dir, _db, handler) = endpoint_test_handler();
@@ -21573,7 +11138,7 @@ mod endpoint_tests {
             }],
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
         let _home_guard = HomeVar::set(home.path());
 
         let (_dir, _db, handler) = endpoint_test_handler();
@@ -21628,7 +11193,7 @@ mod endpoint_tests {
             }],
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
         let _home_guard = HomeVar::set(home.path());
 
         let (_dir, _db, handler) = endpoint_test_handler();
@@ -21675,7 +11240,7 @@ mod endpoint_tests {
             }],
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
         let _home_guard = HomeVar::set(home.path());
 
         let (_dir, _db, handler) = endpoint_test_handler();
@@ -21744,7 +11309,7 @@ mod endpoint_tests {
             }],
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
         let _home_guard = HomeVar::set(home.path());
 
         let (_dir, _db, handler) = endpoint_test_handler();
@@ -21835,23 +11400,29 @@ mod endpoint_tests {
         .unwrap();
 
         let result = handler
-            .task_update(Parameters(TaskUpdateParams {
-                id: "old-id".to_string(),
-                new_id: Some("new-id".to_string()),
-                prompt: Some("updated prompt".to_string()),
-                cli: None,
-                model: None,
-                effort: None,
-                schedule: None,
-                working_dir: None,
-                duration_minutes: None,
-                path: None,
-                events: None,
-                debounce_seconds: None,
-                recursive: None,
-                enabled: None,
-                notify_on_success: None,
-            }))
+            .task_update(
+                Parameters(TaskUpdateParams {
+                    action: None,
+                    target_session_name: None,
+                    target_session_id: None,
+                    id: "old-id".to_string(),
+                    new_id: Some("new-id".to_string()),
+                    prompt: Some("updated prompt".to_string()),
+                    cli: None,
+                    model: None,
+                    effort: None,
+                    schedule: None,
+                    working_dir: None,
+                    duration_minutes: None,
+                    path: None,
+                    events: None,
+                    debounce_seconds: None,
+                    recursive: None,
+                    enabled: None,
+                    notify_on_success: None,
+                }),
+                OptionalExtension(None),
+            )
             .await
             .unwrap();
 
@@ -21868,23 +11439,29 @@ mod endpoint_tests {
         let (_dir, _db, handler) = endpoint_test_handler();
 
         let result = handler
-            .task_update(Parameters(TaskUpdateParams {
-                id: "ghost".to_string(),
-                new_id: None,
-                prompt: None,
-                cli: None,
-                model: None,
-                effort: None,
-                schedule: None,
-                working_dir: None,
-                duration_minutes: None,
-                path: None,
-                events: None,
-                debounce_seconds: None,
-                recursive: None,
-                enabled: None,
-                notify_on_success: None,
-            }))
+            .task_update(
+                Parameters(TaskUpdateParams {
+                    action: None,
+                    target_session_name: None,
+                    target_session_id: None,
+                    id: "ghost".to_string(),
+                    new_id: None,
+                    prompt: None,
+                    cli: None,
+                    model: None,
+                    effort: None,
+                    schedule: None,
+                    working_dir: None,
+                    duration_minutes: None,
+                    path: None,
+                    events: None,
+                    debounce_seconds: None,
+                    recursive: None,
+                    enabled: None,
+                    notify_on_success: None,
+                }),
+                OptionalExtension(None),
+            )
             .await
             .unwrap();
 
@@ -21900,23 +11477,29 @@ mod endpoint_tests {
         db.upsert_agent(&sample_agent("keep-id", None)).unwrap();
 
         let result = handler
-            .task_update(Parameters(TaskUpdateParams {
-                id: "keep-id".to_string(),
-                new_id: Some("bad id!".to_string()),
-                prompt: None,
-                cli: None,
-                model: None,
-                effort: None,
-                schedule: None,
-                working_dir: None,
-                duration_minutes: None,
-                path: None,
-                events: None,
-                debounce_seconds: None,
-                recursive: None,
-                enabled: None,
-                notify_on_success: None,
-            }))
+            .task_update(
+                Parameters(TaskUpdateParams {
+                    action: None,
+                    target_session_name: None,
+                    target_session_id: None,
+                    id: "keep-id".to_string(),
+                    new_id: Some("bad id!".to_string()),
+                    prompt: None,
+                    cli: None,
+                    model: None,
+                    effort: None,
+                    schedule: None,
+                    working_dir: None,
+                    duration_minutes: None,
+                    path: None,
+                    events: None,
+                    debounce_seconds: None,
+                    recursive: None,
+                    enabled: None,
+                    notify_on_success: None,
+                }),
+                OptionalExtension(None),
+            )
             .await
             .unwrap();
 
@@ -22091,6 +11674,131 @@ mod endpoint_tests {
     }
 
     #[tokio::test]
+    async fn graph_update_response_names_remaining_events_when_run_active() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let workdir = dir.path().to_string_lossy().to_string();
+        let created = handler
+            .graph_create(Parameters(GraphCreateParams {
+                name: "Active Hook Graph".to_string(),
+                description: None,
+                workdir,
+                trigger: None,
+                infra_node_id: None,
+                allow_dirty_start: false,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&created), "{}", text(&created));
+        let graph_id = extract_id(&created, "graph_id");
+
+        db.update_graph_status(
+            &graph_id,
+            GraphStatus::Running,
+            Some(chrono::Utc::now()),
+            None,
+        )
+        .unwrap();
+
+        let mut hooks = std::collections::BTreeMap::new();
+        for event in ["on_completed", "on_spec_completed"] {
+            hooks.insert(
+                event.to_string(),
+                vec![GraphCompletionHookParams {
+                    platform: None,
+                    model: None,
+                    effort: None,
+                    prompt: None,
+                    command: Some("printf ok".to_string()),
+                    target_session_id: None,
+                    target_session_name: None,
+                    timeout_minutes: Some(1),
+                    target_graph_id: None,
+                    queue_id: None,
+                    workdir_override: None,
+                    idea: None,
+
+                    crew: None,
+                }],
+            );
+        }
+        let updated = handler
+            .graph_update(Parameters(GraphUpdateParams {
+                graph_id: graph_id.clone(),
+                name: None,
+                description: None,
+                workdir: None,
+                trigger: None,
+                on_completed: None,
+                hooks: Some(hooks),
+                infra_node_id: None,
+                allow_dirty_start: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&updated), "{}", text(&updated));
+        let message = text(&updated);
+        assert!(message.contains("remaining events"), "{message}");
+        assert!(message.contains("on_completed"), "{message}");
+        assert!(message.contains("on_spec_completed"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn graph_update_response_has_no_hook_note_without_active_run() {
+        let (dir, _db, handler) = endpoint_test_handler();
+        let workdir = dir.path().to_string_lossy().to_string();
+        let created = handler
+            .graph_create(Parameters(GraphCreateParams {
+                name: "Idle Hook Graph".to_string(),
+                description: None,
+                workdir,
+                trigger: None,
+                infra_node_id: None,
+                allow_dirty_start: false,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&created));
+        let graph_id = extract_id(&created, "graph_id");
+
+        let mut hooks = std::collections::BTreeMap::new();
+        hooks.insert(
+            "on_completed".to_string(),
+            vec![GraphCompletionHookParams {
+                platform: None,
+                model: None,
+                effort: None,
+                prompt: None,
+                command: Some("printf ok".to_string()),
+                target_session_id: None,
+                target_session_name: None,
+                timeout_minutes: Some(1),
+                target_graph_id: None,
+                queue_id: None,
+                workdir_override: None,
+                idea: None,
+
+                crew: None,
+            }],
+        );
+        let updated = handler
+            .graph_update(Parameters(GraphUpdateParams {
+                graph_id: graph_id.clone(),
+                name: None,
+                description: None,
+                workdir: None,
+                trigger: None,
+                on_completed: None,
+                hooks: Some(hooks),
+                infra_node_id: None,
+                allow_dirty_start: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&updated), "{}", text(&updated));
+        assert!(!text(&updated).contains("remaining events"));
+    }
+
+    #[tokio::test]
     async fn graph_update_rejects_unknown_hook_placeholder_before_persisting() {
         let (dir, db, handler) = endpoint_test_handler();
         let workdir = dir.path().to_string_lossy().to_string();
@@ -22123,6 +11831,8 @@ mod endpoint_tests {
                 queue_id: None,
                 workdir_override: None,
                 idea: None,
+
+                crew: None,
             }],
         );
         let updated = handler
@@ -22158,6 +11868,8 @@ mod endpoint_tests {
                 queue_id: None,
                 workdir_override: None,
                 idea: None,
+
+                crew: None,
             }],
         );
         let rejected = handler
@@ -22333,7 +12045,7 @@ mod endpoint_tests {
             .unwrap();
         assert!(!is_err(&exported), "{}", text(&exported));
         let doc: serde_json::Value = serde_json::from_str(&raw_text(&exported)).unwrap();
-        assert_eq!(doc["format_version"], 4);
+        assert_eq!(doc["format_version"], 5);
         let implementer = doc["nodes"]
             .as_array()
             .unwrap()
@@ -22659,6 +12371,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 straggler_timeout_minutes: None,
                 quorum_grace_minutes: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -22829,6 +12543,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: Some(30),
                 straggler_timeout_minutes: None,
                 quorum_grace_minutes: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -22875,6 +12591,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: Some(31),
                 straggler_timeout_minutes: None,
                 quorum_grace_minutes: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -22901,6 +12619,8 @@ mod endpoint_tests {
                 add_entry_condition: None,
                 remove_entry_from: None,
                 commit_rights: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -23050,6 +12770,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 straggler_timeout_minutes: None,
                 quorum_grace_minutes: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -23238,6 +12960,109 @@ mod endpoint_tests {
         assert!(
             msg.contains("alpha") && msg.contains("beta"),
             "preflight error should name the concrete nodes, got: {msg}"
+        );
+    }
+
+    /// (CM38 FR4) `graph_preflight` reports an unknown `{{...}}` marker in a
+    /// check command as an error, before any probe quota is spent.
+    #[tokio::test]
+    async fn graph_preflight_reports_unknown_marker_in_check_command() {
+        let (dir, _db, handler) = endpoint_test_handler();
+        let created = handler
+            .graph_create(Parameters(GraphCreateParams {
+                name: "Marker Graph".to_string(),
+                description: None,
+                workdir: dir.path().to_string_lossy().to_string(),
+                trigger: None,
+                infra_node_id: None,
+                allow_dirty_start: false,
+            }))
+            .await
+            .unwrap();
+        let graph_id = extract_id(&created, "graph_id");
+
+        handler
+            .graph_add_node(Parameters(GraphAddNodeParams {
+                spec_id: None,
+                graph_id: Some(graph_id.clone()),
+                name: "gatekeeper".to_string(),
+                kind: Some("check".to_string()),
+                config: Some(check_node_config("echo {{nope}}")),
+                blueprint: None,
+                config_overrides: None,
+            }))
+            .await
+            .unwrap();
+
+        let result = handler
+            .graph_preflight(Parameters(GraphPreflightParams {
+                graph_id: graph_id.clone(),
+                timeout_seconds: None,
+                reviewer: None,
+            }))
+            .await
+            .unwrap();
+        assert!(
+            is_err(&result),
+            "preflight must report the unknown marker: {}",
+            text(&result)
+        );
+        let msg = text(&result);
+        assert!(
+            msg.contains("unknown marker {{nope}} in check command"),
+            "message must carry the exact refusal text: {msg}"
+        );
+        assert!(
+            msg.contains("gatekeeper"),
+            "message must name the node: {msg}"
+        );
+    }
+
+    /// (CM38 FR4) every documented check-command marker clears preflight.
+    #[tokio::test]
+    async fn graph_preflight_accepts_every_known_check_command_marker() {
+        let (dir, _db, handler) = endpoint_test_handler();
+        let created = handler
+            .graph_create(Parameters(GraphCreateParams {
+                name: "Marker Graph".to_string(),
+                description: None,
+                workdir: dir.path().to_string_lossy().to_string(),
+                trigger: None,
+                infra_node_id: None,
+                allow_dirty_start: false,
+            }))
+            .await
+            .unwrap();
+        let graph_id = extract_id(&created, "graph_id");
+
+        handler
+            .graph_add_node(Parameters(GraphAddNodeParams {
+                spec_id: None,
+                graph_id: Some(graph_id.clone()),
+                name: "gatekeeper".to_string(),
+                kind: Some("check".to_string()),
+                config: Some(check_node_config(
+                    "echo {{graph_name}} {{workdir}} {{spec_id}} {{spec_name}} \
+                     {{spec_start_head}} {{spec_start_dirty}} {{spec_committed_head}}",
+                )),
+                blueprint: None,
+                config_overrides: None,
+            }))
+            .await
+            .unwrap();
+
+        let result = handler
+            .graph_preflight(Parameters(GraphPreflightParams {
+                graph_id: graph_id.clone(),
+                timeout_seconds: None,
+                reviewer: None,
+            }))
+            .await
+            .unwrap();
+        assert!(
+            !is_err(&result),
+            "all seven check-command markers must clear preflight: {}",
+            text(&result)
         );
     }
 
@@ -23506,9 +13331,9 @@ mod endpoint_tests {
         let git_dir = tempdir().unwrap();
         init_git_repo(git_dir.path());
 
-        // The failed spec belongs to *another* graph and never recorded
-        // `spec_end_dirty` — no run of `lp` recorded this dirt (CB69 FR1),
-        // so the refusal keeps the CM29 block but names no spec.
+        // Spec A ended Failed on this workdir in another graph — it is the
+        // blocking predecessor. No run of `lp` recorded the dirt, so there is
+        // no attribution, but the refusal still names the predecessor (CB69).
         let failed_lp = insert_test_graph(&db, git_dir.path());
         insert_named_spec(&db, &failed_lp.id, "Spec A", 1, GraphSpecStatus::Failed);
 
@@ -23526,14 +13351,19 @@ mod endpoint_tests {
                 workdir: None,
                 idea: None,
                 sandbox: None,
+                start_node_id: None,
             }))
             .await
             .unwrap();
         assert!(is_err(&result), "{}", text(&result));
         let msg = text(&result);
         assert!(
-            msg.contains("dirty before this graph ran"),
-            "refusal should report unattributed dirt: {msg}"
+            msg.contains("Spec A"),
+            "refusal must name the blocking predecessor: {msg}"
+        );
+        assert!(
+            msg.contains("failed"),
+            "refusal must name the predecessor's end status: {msg}"
         );
         assert!(
             msg.contains("not launched"),
@@ -23544,8 +13374,8 @@ mod endpoint_tests {
             "flag hint kept: {msg}"
         );
         assert!(
-            !msg.contains("Spec A"),
-            "must not blame an unrelated spec: {msg}"
+            !msg.contains("dirty before this graph ran"),
+            "refusal must not use the attribution sentence: {msg}"
         );
     }
 
@@ -23573,6 +13403,7 @@ mod endpoint_tests {
                 workdir: None,
                 idea: None,
                 sandbox: None,
+                start_node_id: None,
             }))
             .await
             .unwrap();
@@ -23612,6 +13443,7 @@ mod endpoint_tests {
                 workdir: None,
                 idea: None,
                 sandbox: None,
+                start_node_id: None,
             }))
             .await
             .unwrap();
@@ -23638,6 +13470,7 @@ mod endpoint_tests {
                 workdir: None,
                 idea: None,
                 sandbox: None,
+                start_node_id: None,
             }))
             .await
             .unwrap();
@@ -24258,6 +14091,172 @@ mod endpoint_tests {
         assert!(is_err(&rejected), "{}", text(&rejected));
         assert!(text(&rejected).contains("prompt_template"));
         assert!(db.list_graph_nodes(&spec.id).unwrap().is_empty());
+    }
+
+    /// CM35 FR2: a node naming a platform whose registry entry is
+    /// `headless = false` (freebuff) is rejected by `graph_add_node` with the
+    /// exact spec wording, and nothing reaches the DB. A platform left at the
+    /// serde default (`headless` absent) is unaffected — the happy-path test
+    /// above still adds its `claude` node with this check in place.
+    #[tokio::test]
+    async fn graph_add_node_rejects_interactive_only_platform() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let _home = HomeVar::set(dir.path());
+        crate::domain::canopy_config::CanopyConfig {
+            clis: vec![crate::domain::cli_config::CliConfig {
+                name: "freebuff".to_string(),
+                binary: "freebuff".to_string(),
+                headless: false,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+        .save_for_tests(&dir.path().join(".canopy"))
+        .unwrap();
+
+        let lp = insert_test_graph(&db, dir.path());
+        let spec = insert_test_spec(&db, &lp.id, 1);
+
+        let rejected = handler
+            .graph_add_node(Parameters(GraphAddNodeParams {
+                spec_id: Some(spec.id.clone()),
+                graph_id: None,
+                name: "Live Only".to_string(),
+                kind: Some("agent".to_string()),
+                config: Some(agent_node_config("freebuff")),
+                blueprint: None,
+                config_overrides: None,
+            }))
+            .await
+            .unwrap();
+        assert!(is_err(&rejected), "{}", text(&rejected));
+        assert!(
+            raw_text(&rejected)
+                .contains("platform 'freebuff' is interactive-only (no headless mode)"),
+            "{}",
+            raw_text(&rejected)
+        );
+        assert!(db.list_graph_nodes(&spec.id).unwrap().is_empty());
+    }
+
+    /// CM35 FR2: `graph_update_node` rejects the same platform with the same
+    /// wording, and a rejected update leaves the stored node untouched. The
+    /// node is created first and only then repointed — the ordering an
+    /// operator actually hits when "fixing" a node onto an interactive-only
+    /// harness.
+    #[tokio::test]
+    async fn graph_update_node_rejects_interactive_only_platform() {
+        let home = tempdir().unwrap();
+        write_freebuff_config(home.path());
+        let _home_guard = HomeVar::set(home.path());
+
+        let (dir, db, handler) = endpoint_test_handler();
+        let lp = insert_test_graph(&db, dir.path());
+        let spec = insert_test_spec(&db, &lp.id, 1);
+
+        let added = handler
+            .graph_add_node(Parameters(GraphAddNodeParams {
+                spec_id: Some(spec.id.clone()),
+                graph_id: None,
+                name: "Implementer".to_string(),
+                kind: Some("agent".to_string()),
+                config: Some(agent_node_config("claude")),
+                blueprint: None,
+                config_overrides: None,
+            }))
+            .await
+            .unwrap();
+        let node_id = extract_id(&added, "node_id");
+
+        let rejected = handler
+            .graph_update_node(Parameters(GraphUpdateNodeParams {
+                node_id: node_id.clone(),
+                name: None,
+                kind: None,
+                config: Some(agent_node_config("freebuff")),
+                config_replace: None,
+                position: None,
+            }))
+            .await
+            .unwrap();
+        assert!(is_err(&rejected), "{}", text(&rejected));
+        assert!(
+            raw_text(&rejected)
+                .contains("platform 'freebuff' is interactive-only (no headless mode)"),
+            "{}",
+            raw_text(&rejected)
+        );
+        let stored = db.get_graph_node(&node_id).unwrap().unwrap();
+        assert_eq!(
+            stored.config["platform"].as_str(),
+            Some("claude"),
+            "a rejected update must not reach the DB"
+        );
+    }
+
+    /// CM46 req 7: `graph_update_node` records a `config_changed` event for a
+    /// RUNNING graph and none for an idle one.
+    #[tokio::test]
+    async fn graph_update_node_records_config_changed_only_for_running_graph() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let lp = insert_test_graph(&db, dir.path());
+        let spec = insert_test_spec(&db, &lp.id, 1);
+        let added = handler
+            .graph_add_node(Parameters(GraphAddNodeParams {
+                spec_id: Some(spec.id.clone()),
+                graph_id: None,
+                name: "Implementer".to_string(),
+                kind: Some("agent".to_string()),
+                config: Some(agent_node_config("claude")),
+                blueprint: None,
+                config_overrides: None,
+            }))
+            .await
+            .unwrap();
+        let node_id = extract_id(&added, "node_id");
+
+        // Idle (Draft) graph: an edit is recorded nowhere.
+        handler
+            .graph_update_node(Parameters(GraphUpdateNodeParams {
+                node_id: node_id.clone(),
+                name: None,
+                kind: None,
+                config: Some(agent_node_config("claude")),
+                config_replace: None,
+                position: None,
+            }))
+            .await
+            .unwrap();
+        assert!(
+            db.list_graph_events(&lp.id, None, None, None, 200)
+                .unwrap()
+                .is_empty(),
+            "an idle graph's edit must not produce a config_changed event"
+        );
+
+        // Running graph: the same edit now records exactly one event.
+        db.update_graph_status(&lp.id, GraphStatus::Running, None, None)
+            .unwrap();
+        handler
+            .graph_update_node(Parameters(GraphUpdateNodeParams {
+                node_id: node_id.clone(),
+                name: Some("Renamed".to_string()),
+                kind: None,
+                config: None,
+                config_replace: None,
+                position: None,
+            }))
+            .await
+            .unwrap();
+
+        let events = db.list_graph_events(&lp.id, None, None, None, 200).unwrap();
+        assert_eq!(events.len(), 1, "got: {events:?}");
+        assert_eq!(events[0].kind, "config_changed");
+        assert_eq!(events[0].node_id.as_deref(), Some(node_id.as_str()));
+        assert_eq!(events[0].spec_id.as_deref(), Some(spec.id.as_str()));
+        let payload: serde_json::Value =
+            serde_json::from_str(events[0].payload.as_deref().unwrap()).unwrap();
+        assert_eq!(payload["change"], "node");
     }
 
     #[tokio::test]
@@ -25228,6 +15227,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter.to_string(),
                 on_fail_to: on_fail_to.map(str::to_string),
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -25302,6 +15303,8 @@ mod endpoint_tests {
                 add_entry_condition: None,
                 remove_entry_from: None,
                 commit_rights: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -25420,6 +15423,8 @@ mod endpoint_tests {
                 add_entry_condition: None,
                 remove_entry_from: None,
                 commit_rights: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -25446,6 +15451,8 @@ mod endpoint_tests {
                 add_entry_condition: None,
                 remove_entry_from: Some(entry.clone()),
                 commit_rights: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -26071,6 +16078,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter.clone(),
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -26098,6 +16107,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter.clone(),
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -26125,6 +16136,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter.clone(),
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -26152,6 +16165,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter.clone(),
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -26179,10 +16194,75 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter,
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
         assert!(is_err(&too_few_members));
+    }
+
+    /// CM35 FR2: an ensemble member naming an interactive-only platform is
+    /// rejected with the spec wording and no ensemble is persisted.
+    /// `graph_add_ensemble` and `graph_update_ensemble` both validate
+    /// members through `validate_ensemble_members`, so the add arm pins the
+    /// shared gate; a second member on a normal platform proves the check is
+    /// per-member, not whole-ensemble.
+    #[tokio::test]
+    async fn graph_add_ensemble_rejects_interactive_only_member() {
+        let home = tempdir().unwrap();
+        write_freebuff_config(home.path());
+        let _home_guard = HomeVar::set(home.path());
+
+        let (dir, db, handler) = endpoint_test_handler();
+        let lp = insert_test_graph(&db, dir.path());
+        let spec = insert_test_spec(&db, &lp.id, 1);
+        let entry = add_agent_node(&handler, &spec.id, "Entry").await;
+        let arbiter = add_agent_node(&handler, &spec.id, "Arbiter").await;
+        let member = |platform: &str| crate::daemon::params::EnsembleMemberParams {
+            platform: platform.to_string(),
+            model: None,
+            prompt_override: None,
+            timeout_minutes: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
+        };
+
+        let rejected = handler
+            .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                commit_rights: None,
+                spec_id: Some(spec.id.clone()),
+                graph_id: None,
+                name: "Live Panel".to_string(),
+                kind: None,
+                prompt_template: Some("Review".to_string()),
+                members: Some(vec![member("freebuff"), member("claude")]),
+                blueprint: None,
+                from_node: entry,
+                condition: "always".to_string(),
+                min_pass: None,
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
+                timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
+                on_pass_to: arbiter,
+                on_fail_to: None,
+
+                crew: None,
+            }))
+            .await
+            .unwrap();
+        assert!(is_err(&rejected), "{}", text(&rejected));
+        assert!(
+            raw_text(&rejected)
+                .contains("platform 'freebuff' is interactive-only (no headless mode)"),
+            "{}",
+            raw_text(&rejected)
+        );
+        assert!(db.list_ensembles_for_spec(&spec.id).unwrap().is_empty());
     }
 
     /// CM24: a negative `quorum_grace_minutes` is refused on add with the
@@ -26226,6 +16306,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter.clone(),
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -26257,6 +16339,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter,
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -26306,6 +16390,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter,
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -26812,6 +16898,8 @@ mod endpoint_tests {
             .graph_continue(Parameters(GraphContinueParams {
                 graph_id: lp.id.clone(),
                 action: "retry_current_node".to_string(),
+                node_id: None,
+                spec_id: None,
             }))
             .await
             .unwrap();
@@ -26822,6 +16910,8 @@ mod endpoint_tests {
             .graph_continue(Parameters(GraphContinueParams {
                 graph_id: "ghost".to_string(),
                 action: "retry_current_node".to_string(),
+                node_id: None,
+                spec_id: None,
             }))
             .await
             .unwrap();
@@ -26833,11 +16923,170 @@ mod endpoint_tests {
             .graph_continue(Parameters(GraphContinueParams {
                 graph_id: lp.id.clone(),
                 action: "sideways".to_string(),
+                node_id: None,
+                spec_id: None,
             }))
             .await
             .unwrap();
         assert!(is_err(&bad_action));
-        assert!(text(&bad_action).contains("retry_current_node or skip_next_spec"));
+        assert!(text(&bad_action).contains("retry_current_node, skip_next_spec or run_from_node"));
+    }
+
+    // ── graph_continue run_from_node (CM43 directed runs) ───────────
+
+    #[tokio::test]
+    async fn graph_continue_run_from_node_refuses_a_graph_with_an_active_run() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let lp = insert_test_graph(&db, dir.path());
+        // A blocker can flip a graph to `paused` while a sibling node is
+        // still executing — FR2 refuses a directed run there, naming the
+        // run, whatever the status column says.
+        let run = insert_running_node_run(&db, &lp.id);
+        db.update_graph_status(&lp.id, GraphStatus::Paused, None, None)
+            .unwrap();
+
+        let refused = handler
+            .graph_continue(Parameters(GraphContinueParams {
+                graph_id: lp.id.clone(),
+                action: "run_from_node".to_string(),
+                node_id: Some("Node".to_string()),
+                spec_id: None,
+            }))
+            .await
+            .unwrap();
+        assert!(is_err(&refused), "{}", text(&refused));
+        let msg = text(&refused);
+        assert!(msg.contains("still executing"), "{msg}");
+        assert!(msg.contains(&run.id), "must name the run: {msg}");
+
+        // A graph that is outright `running` (between nodes — no live run
+        // row) also refuses.
+        db.interrupt_graph_run(&run.id, "test").unwrap();
+        db.update_graph_status(&lp.id, GraphStatus::Running, None, None)
+            .unwrap();
+        let running = handler
+            .graph_continue(Parameters(GraphContinueParams {
+                graph_id: lp.id.clone(),
+                action: "run_from_node".to_string(),
+                node_id: Some("Node".to_string()),
+                spec_id: None,
+            }))
+            .await
+            .unwrap();
+        assert!(is_err(&running), "{}", text(&running));
+        assert!(text(&running).contains("pause it before a directed run"));
+    }
+
+    #[tokio::test]
+    async fn graph_continue_run_from_node_accepts_spec_paused_on_and_reports_directed_plan() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let lp = insert_test_graph(&db, dir.path());
+
+        // The state `graph_pause` mid-spec leaves behind: graph paused, no
+        // active run, paused-on spec reading `running`. FR2's "paused" is
+        // exactly this — a directed run must accept it.
+        insert_named_spec(&db, &lp.id, "Spec One", 1, GraphSpecStatus::Running);
+        let skipped = insert_named_spec(&db, &lp.id, "Spec Two", 2, GraphSpecStatus::Skipped);
+        db.update_graph_status(&lp.id, GraphStatus::Paused, None, None)
+            .unwrap();
+
+        // Top-level graph the specs fall back to: A --pass--> B (both quick
+        // checks, so the background dispatch the accepted call spawns stays
+        // harmless — under the plan's semantics every spec AFTER the
+        // directed target also runs from Start, including the `Skipped` one).
+        db.insert_graph_node(&GraphNode {
+            id: "node-a".to_string(),
+            spec_id: None,
+            graph_id: Some(lp.id.clone()),
+            name: "A".to_string(),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({
+                "command": "true",
+                "success_condition": "exit_code_0"
+            }),
+            position: 1,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+        db.insert_graph_node(&GraphNode {
+            id: "node-b".to_string(),
+            spec_id: None,
+            graph_id: Some(lp.id.clone()),
+            name: "B".to_string(),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({
+                "command": "true",
+                "success_condition": "exit_code_0"
+            }),
+            position: 2,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+        db.insert_graph_edge(&GraphEdge {
+            id: "edge-a-b".to_string(),
+            spec_id: None,
+            graph_id: Some(lp.id.clone()),
+            from_node: "node-a".to_string(),
+            to_node: "node-b".to_string(),
+            condition: GraphEdgeCondition::Pass,
+        })
+        .unwrap();
+
+        // A `skipped` target is the one spec status outside FR2's accepted
+        // states.
+        let refused = handler
+            .graph_continue(Parameters(GraphContinueParams {
+                graph_id: lp.id.clone(),
+                action: "run_from_node".to_string(),
+                node_id: Some("B".to_string()),
+                spec_id: Some(skipped.id.clone()),
+            }))
+            .await
+            .unwrap();
+        assert!(is_err(&refused), "{}", text(&refused));
+        assert!(
+            text(&refused).contains("'skipped', which a directed run does not accept"),
+            "{}",
+            text(&refused)
+        );
+
+        // An unknown node is refused with the list of valid names.
+        let unknown = handler
+            .graph_continue(Parameters(GraphContinueParams {
+                graph_id: lp.id.clone(),
+                action: "run_from_node".to_string(),
+                node_id: Some("Zed".to_string()),
+                spec_id: None,
+            }))
+            .await
+            .unwrap();
+        assert!(is_err(&unknown), "{}", text(&unknown));
+        let unknown_msg = text(&unknown);
+        assert!(
+            unknown_msg.contains("No node or ensemble matches 'Zed'"),
+            "{unknown_msg}"
+        );
+        assert!(unknown_msg.contains("Valid nodes"), "{unknown_msg}");
+        assert!(unknown_msg.contains("A, B"), "{unknown_msg}");
+
+        // The paused-on spec is accepted (spec_id defaults to it), and the
+        // response reports the whole directed plan.
+        let accepted = handler
+            .graph_continue(Parameters(GraphContinueParams {
+                graph_id: lp.id.clone(),
+                action: "run_from_node".to_string(),
+                node_id: Some("B".to_string()),
+                spec_id: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&accepted), "{}", text(&accepted));
+        let msg = text(&accepted);
+        assert!(msg.contains("resumed"), "{msg}");
+        assert!(msg.contains("starts at node 'B'"), "{msg}");
+        assert!(msg.contains("skipped A node(s)"), "{msg}");
+        assert!(msg.contains("reused outputs: none"), "{msg}");
+        assert!(msg.contains("iteration counters restarted at 1"), "{msg}");
     }
 
     // ── graph_complete_node / graph_report_blocker ──────────────────
@@ -27108,6 +17357,7 @@ mod endpoint_tests {
                 workdir: None,
                 idea: None,
                 sandbox: None,
+                start_node_id: None,
             }))
             .await
             .unwrap();
@@ -27150,7 +17400,7 @@ mod endpoint_tests {
 
         handler
             .graph_engine
-            .run_graph(lp.id.clone(), None, None, None, None)
+            .run_graph(lp.id.clone(), None, None, None, None, None)
             .await
             .unwrap();
 
@@ -27292,6 +17542,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter,
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -27402,6 +17654,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter,
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -27535,6 +17789,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter,
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -27561,6 +17817,8 @@ mod endpoint_tests {
                 add_entry_from: Some(alt_entry.clone()),
                 add_entry_condition: None,
                 remove_entry_from: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -27588,6 +17846,8 @@ mod endpoint_tests {
                 add_entry_from: None,
                 add_entry_condition: None,
                 remove_entry_from: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -27616,6 +17876,8 @@ mod endpoint_tests {
                 add_entry_from: None,
                 add_entry_condition: None,
                 remove_entry_from: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -27682,6 +17944,8 @@ mod endpoint_tests {
                 add_entry_from: None,
                 add_entry_condition: None,
                 remove_entry_from: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -27774,6 +18038,8 @@ mod endpoint_tests {
                 add_entry_from: None,
                 add_entry_condition: None,
                 remove_entry_from: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -27818,6 +18084,8 @@ mod endpoint_tests {
                 add_entry_from: None,
                 add_entry_condition: None,
                 remove_entry_from: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -27845,6 +18113,8 @@ mod endpoint_tests {
                 add_entry_from: None,
                 add_entry_condition: None,
                 remove_entry_from: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -27872,6 +18142,8 @@ mod endpoint_tests {
                 add_entry_from: None,
                 add_entry_condition: None,
                 remove_entry_from: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -27901,6 +18173,8 @@ mod endpoint_tests {
                 add_entry_from: None,
                 add_entry_condition: None,
                 remove_entry_from: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -27927,6 +18201,8 @@ mod endpoint_tests {
                 add_entry_from: None,
                 add_entry_condition: None,
                 remove_entry_from: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -27986,6 +18262,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter,
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -28031,6 +18309,8 @@ mod endpoint_tests {
                 add_entry_from: None,
                 add_entry_condition: None,
                 remove_entry_from: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -28148,6 +18428,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter.clone(),
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -28198,6 +18480,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter.clone(),
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -28248,6 +18532,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter,
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -28635,6 +18921,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: on_pass_to.to_string(),
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -28663,6 +18951,8 @@ mod endpoint_tests {
             add_entry_condition: None,
             remove_entry_from: None,
             commit_rights: None,
+
+            crew: None,
         }
     }
 
@@ -28706,6 +18996,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter,
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -28733,6 +19025,8 @@ mod endpoint_tests {
                 add_entry_from: None,
                 add_entry_condition: None,
                 remove_entry_from: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -28785,6 +19079,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter,
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -28812,6 +19108,8 @@ mod endpoint_tests {
                 add_entry_from: None,
                 add_entry_condition: None,
                 remove_entry_from: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -28864,6 +19162,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter,
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -28891,6 +19191,8 @@ mod endpoint_tests {
                 add_entry_from: None,
                 add_entry_condition: None,
                 remove_entry_from: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -28940,6 +19242,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter,
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -28976,7 +19280,7 @@ mod endpoint_tests {
             }],
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
         let _home_guard = HomeVar::set(home.path());
 
         let (dir, db, handler) = endpoint_test_handler();
@@ -29007,6 +19311,74 @@ mod endpoint_tests {
         let msg = text(&result);
         assert!(msg.contains("bad-template-cli"), "{msg}");
         assert!(msg.contains("{{model?}}"), "{msg}");
+    }
+
+    /// CM35 FR2: `graph_preflight` flags every existing node that points at
+    /// an interactive-only platform — advisory (never a tool error), naming
+    /// the node through `used_by` — and that pair's probe is
+    /// `interactive_only` with nothing spawned. The node is written straight
+    /// to the DB because `graph_add_node` now refuses this platform: this is
+    /// how a node created before the gate reaches preflight.
+    #[tokio::test]
+    async fn graph_preflight_flags_interactive_only_nodes() {
+        let home = tempdir().unwrap();
+        let marker = write_freebuff_config(home.path());
+        let _home_guard = HomeVar::set(home.path());
+
+        let (dir, db, handler) = endpoint_test_handler();
+        let lp = insert_test_graph(&db, dir.path());
+        let spec = insert_test_spec(&db, &lp.id, 1);
+        db.insert_graph_node(&GraphNode {
+            id: uuid::Uuid::new_v4().to_string(),
+            spec_id: Some(spec.id.clone()),
+            graph_id: None,
+            name: "Live Only".to_string(),
+            kind: GraphNodeKind::Agent,
+            config: serde_json::json!({"platform": "freebuff"}),
+            position: 1,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+
+        let result = handler
+            .graph_preflight(Parameters(GraphPreflightParams {
+                graph_id: lp.id.clone(),
+                timeout_seconds: Some(5),
+                reviewer: None,
+            }))
+            .await
+            .unwrap();
+
+        assert!(!is_err(&result), "{}", text(&result));
+        let body: serde_json::Value = serde_json::from_str(&raw_text(&result)).unwrap();
+        let warnings = body["interactive_only_warnings"]
+            .as_array()
+            .unwrap_or_else(|| panic!("expected interactive_only_warnings: {body}"));
+        assert_eq!(warnings.len(), 1, "{body}");
+        assert_eq!(
+            warnings[0]["platform"],
+            serde_json::json!("freebuff"),
+            "{body}"
+        );
+        assert_eq!(
+            warnings[0]["used_by"],
+            serde_json::json!(["node: Live Only"]),
+            "{body}"
+        );
+        assert!(
+            warnings[0]["warning"].as_str().is_some_and(
+                |w| w.contains("platform 'freebuff' is interactive-only (no headless mode)")
+            ),
+            "{body}"
+        );
+        let probe = &body["probes"][0];
+        assert_eq!(probe["platform"], serde_json::json!("freebuff"), "{body}");
+        assert_eq!(
+            probe["outcome"],
+            serde_json::json!("interactive_only"),
+            "{body}"
+        );
+        assert!(!marker.exists(), "preflight must not spawn a process");
     }
 
     #[tokio::test]
@@ -29088,6 +19460,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter,
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -29170,6 +19544,8 @@ mod endpoint_tests {
                 queue_id: None,
                 workdir_override: None,
                 idea: None,
+
+                crew: None,
             }],
         );
         db.update_graph_hooks(&lp.id, &hooks).unwrap();
@@ -29442,6 +19818,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter.clone(),
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -29526,6 +19904,7 @@ mod endpoint_tests {
                     workdir: None,
                     idea: None,
                     sandbox: None,
+                    start_node_id: None,
                 }))
                 .await
                 .unwrap();
@@ -29654,6 +20033,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter.clone(),
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -32463,7 +22844,7 @@ mod endpoint_tests {
     }
 
     #[tokio::test]
-    async fn graph_add_ensemble_with_cascade_kind_creates_single_member_ensemble() {
+    async fn graph_add_ensemble_with_cascade_kind_rejects_single_member() {
         let (dir, db, handler) = endpoint_test_handler();
         let lp = insert_test_graph(&db, dir.path());
         let spec = insert_test_spec(&db, &lp.id, 1);
@@ -32499,13 +22880,20 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter.clone(),
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
         assert!(
-            !is_err(&result),
-            "cascade ensemble with 1 member should succeed: {:?}",
+            is_err(&result),
+            "cascade ensemble with 1 member must now be refused: {:?}",
             result
+        );
+        assert!(
+            text(&result).contains("2-16") && text(&result).contains("cascade"),
+            "error must name the sequential bound and the kind: {}",
+            text(&result)
         );
     }
 
@@ -32546,6 +22934,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter.clone(),
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -32571,15 +22961,26 @@ mod endpoint_tests {
                 name: "Cascade".to_string(),
                 kind: Some("cascade".to_string()),
                 prompt_template: Some("do it".to_string()),
-                members: Some(vec![EnsembleMemberParams {
-                    platform: "claude".to_string(),
-                    model: None,
-                    prompt_override: None,
-                    timeout_minutes: None,
-                    infra_retry_limit: None,
-                    infra_crash_max_seconds: None,
-                    infra_backoff_seconds: None,
-                }]),
+                members: Some(vec![
+                    EnsembleMemberParams {
+                        platform: "claude".to_string(),
+                        model: None,
+                        prompt_override: None,
+                        timeout_minutes: None,
+                        infra_retry_limit: None,
+                        infra_crash_max_seconds: None,
+                        infra_backoff_seconds: None,
+                    },
+                    EnsembleMemberParams {
+                        platform: "openrouter".to_string(),
+                        model: None,
+                        prompt_override: None,
+                        timeout_minutes: None,
+                        infra_retry_limit: None,
+                        infra_crash_max_seconds: None,
+                        infra_backoff_seconds: None,
+                    },
+                ]),
                 blueprint: None,
                 from_node: entry.clone(),
                 condition: "always".to_string(),
@@ -32592,6 +22993,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter.clone(),
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -32655,6 +23058,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter.clone(),
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -32681,6 +23086,8 @@ mod endpoint_tests {
                 add_entry_from: None,
                 add_entry_condition: None,
                 remove_entry_from: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -32743,6 +23150,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter.clone(),
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -32769,6 +23178,8 @@ mod endpoint_tests {
                 add_entry_from: None,
                 add_entry_condition: None,
                 remove_entry_from: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -32838,6 +23249,8 @@ mod endpoint_tests {
                 infra_backoff_seconds: None,
                 on_pass_to: arbiter.clone(),
                 on_fail_to: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -32864,6 +23277,8 @@ mod endpoint_tests {
                 add_entry_from: None,
                 add_entry_condition: None,
                 remove_entry_from: None,
+
+                crew: None,
             }))
             .await
             .unwrap();
@@ -32875,6 +23290,256 @@ mod endpoint_tests {
 
         let details = db.get_ensemble_details(&ensemble_id).unwrap().unwrap();
         assert_eq!(details.ensemble.kind, EnsembleKind::Cascade);
+    }
+
+    /// CM36 FR3: a 12-member round_robin cannot be switched to parallel
+    /// (which caps at 8) — refused with a message naming both counts, and the
+    /// ensemble's kind is left untouched.
+    #[tokio::test]
+    async fn graph_update_ensemble_refuses_round_robin_to_parallel_above_eight() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let lp = insert_test_graph(&db, dir.path());
+        let spec = insert_test_spec(&db, &lp.id, 1);
+        let entry = add_agent_node(&handler, &spec.id, "Entry").await;
+        let arbiter = add_agent_node(&handler, &spec.id, "Arbiter").await;
+
+        let members: Vec<EnsembleMemberParams> = (0..12)
+            .map(|_| EnsembleMemberParams {
+                platform: "claude".to_string(),
+                model: None,
+                prompt_override: None,
+                timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
+            })
+            .collect();
+        let created = handler
+            .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                commit_rights: None,
+                spec_id: Some(spec.id.clone()),
+                graph_id: None,
+                name: "Wide".to_string(),
+                kind: Some("round_robin".to_string()),
+                prompt_template: Some("do it".to_string()),
+                members: Some(members),
+                blueprint: None,
+                from_node: entry.clone(),
+                condition: "always".to_string(),
+                min_pass: None,
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
+                timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
+                on_pass_to: arbiter.clone(),
+                on_fail_to: None,
+
+                crew: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&created), "{}", text(&created));
+        let ensemble_id = extract_id(&created, "ensemble_id");
+
+        let updated = handler
+            .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+                kind: Some("parallel".to_string()),
+                ..blank_ensemble_update(&ensemble_id)
+            }))
+            .await
+            .unwrap();
+        assert!(
+            is_err(&updated),
+            "switching 12 members to parallel must be refused: {:?}",
+            updated
+        );
+        let msg = text(&updated);
+        assert!(msg.contains("parallel"), "{msg}");
+        assert!(msg.contains("2-8") && msg.contains("12"), "{msg}");
+
+        let details = db.get_ensemble_details(&ensemble_id).unwrap().unwrap();
+        assert_eq!(
+            details.ensemble.kind,
+            EnsembleKind::RoundRobin,
+            "a refused kind change must write nothing"
+        );
+    }
+
+    /// CM36: blueprint-supplied members were cloned through without a
+    /// per-kind bounds check — a 12-member blueprint used with kind parallel
+    /// built an over-cap ensemble no validator would ever have accepted.
+    /// A 12-member blueprint with a sequential kind still builds fine.
+    #[tokio::test]
+    async fn graph_add_ensemble_blueprint_members_enforce_requested_kind_bounds() {
+        use crate::domain::blueprints::EnsembleBlueprint;
+        let (dir, db, handler) = endpoint_test_handler();
+        let lp = insert_test_graph(&db, dir.path());
+        let spec = insert_test_spec(&db, &lp.id, 1);
+        let entry = add_agent_node(&handler, &spec.id, "Entry").await;
+        let arbiter = add_agent_node(&handler, &spec.id, "Arbiter").await;
+
+        let wide: crate::domain::graphs::EnsembleMemberSpec =
+            ("claude".to_string(), None, None, None, None, None, None);
+        db.insert_ensemble_blueprint(&EnsembleBlueprint {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: "wide-blueprint".to_string(),
+            prompt_template: "do it".to_string(),
+            members: vec![wide.clone(); 12],
+            min_pass: None,
+            quorum_grace_minutes: None,
+            builtin: false,
+            created_at: chrono::Utc::now(),
+        })
+        .unwrap();
+
+        let refused = handler
+            .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                commit_rights: None,
+                spec_id: Some(spec.id.clone()),
+                graph_id: None,
+                name: "TooWide".to_string(),
+                kind: Some("parallel".to_string()),
+                prompt_template: None,
+                members: None,
+                blueprint: Some("wide-blueprint".to_string()),
+                from_node: entry.clone(),
+                condition: "always".to_string(),
+                min_pass: None,
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
+                timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
+                on_pass_to: arbiter.clone(),
+                on_fail_to: None,
+
+                crew: None,
+            }))
+            .await
+            .unwrap();
+        assert!(
+            is_err(&refused),
+            "a 12-member blueprint with kind parallel must be refused: {:?}",
+            refused
+        );
+        let msg = text(&refused);
+        assert!(msg.contains("parallel"), "{msg}");
+        assert!(msg.contains("2-8") && msg.contains("12"), "{msg}");
+
+        let accepted = handler
+            .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                commit_rights: None,
+                spec_id: Some(spec.id.clone()),
+                graph_id: None,
+                name: "WideSeq".to_string(),
+                kind: Some("round_robin".to_string()),
+                prompt_template: None,
+                members: None,
+                blueprint: Some("wide-blueprint".to_string()),
+                from_node: entry.clone(),
+                condition: "always".to_string(),
+                min_pass: None,
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
+                timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
+                on_pass_to: arbiter.clone(),
+                on_fail_to: None,
+
+                crew: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&accepted), "{}", text(&accepted));
+    }
+
+    /// CM36 FR3 follow-up: a combined kind-plus-members update uses the
+    /// RESULTING count — shrinking a 12-member round_robin to 8 members
+    /// while switching to parallel is accepted, not refused on the stale
+    /// stored count.
+    #[tokio::test]
+    async fn graph_update_ensemble_kind_plus_shrink_uses_resulting_count() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let lp = insert_test_graph(&db, dir.path());
+        let spec = insert_test_spec(&db, &lp.id, 1);
+        let entry = add_agent_node(&handler, &spec.id, "Entry").await;
+        let arbiter = add_agent_node(&handler, &spec.id, "Arbiter").await;
+
+        let members: Vec<EnsembleMemberParams> = (0..12)
+            .map(|_| EnsembleMemberParams {
+                platform: "claude".to_string(),
+                model: None,
+                prompt_override: None,
+                timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
+            })
+            .collect();
+        let created = handler
+            .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                commit_rights: None,
+                spec_id: Some(spec.id.clone()),
+                graph_id: None,
+                name: "Wide".to_string(),
+                kind: Some("round_robin".to_string()),
+                prompt_template: Some("do it".to_string()),
+                members: Some(members),
+                blueprint: None,
+                from_node: entry.clone(),
+                condition: "always".to_string(),
+                min_pass: None,
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
+                timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
+                on_pass_to: arbiter.clone(),
+                on_fail_to: None,
+
+                crew: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&created), "{}", text(&created));
+        let ensemble_id = extract_id(&created, "ensemble_id");
+
+        let shrunk: Vec<EnsembleMemberParams> = (0..8)
+            .map(|_| EnsembleMemberParams {
+                platform: "claude".to_string(),
+                model: None,
+                prompt_override: None,
+                timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
+            })
+            .collect();
+        let updated = handler
+            .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+                kind: Some("parallel".to_string()),
+                members: Some(shrunk),
+                // The 12-member creation defaulted min_pass to 12; a shrink
+                // must lower it alongside, same as any members-only resize.
+                min_pass: Some(8),
+                ..blank_ensemble_update(&ensemble_id)
+            }))
+            .await
+            .unwrap();
+        assert!(
+            !is_err(&updated),
+            "a shrink-to-8 plus switch-to-parallel must be accepted: {}",
+            text(&updated)
+        );
+        let details = db.get_ensemble_details(&ensemble_id).unwrap().unwrap();
+        assert_eq!(details.ensemble.kind, EnsembleKind::Parallel);
+        assert_eq!(details.members.len(), 8);
     }
 
     #[tokio::test]
@@ -32889,6 +23554,7 @@ mod endpoint_tests {
                 workdir: None,
                 idea: Some("build a landing page".to_string()),
                 sandbox: None,
+                start_node_id: None,
             }))
             .await
             .unwrap();
@@ -33007,6 +23673,7 @@ mod endpoint_tests {
                 workdir: None,
                 idea: None,
                 sandbox: None,
+                start_node_id: None,
             }))
             .await
             .unwrap();
@@ -33048,6 +23715,7 @@ mod endpoint_tests {
                 workdir: None,
                 idea: None,
                 sandbox: None,
+                start_node_id: None,
             }))
             .await
             .unwrap();
@@ -33137,6 +23805,7 @@ mod endpoint_tests {
                 workdir: None,
                 idea: None,
                 sandbox: None,
+                start_node_id: None,
             }))
             .await
             .unwrap();
@@ -33287,6 +23956,43 @@ mod endpoint_tests {
         .unwrap();
     }
 
+    /// Write a canopy config at `<home>/.canopy` declaring one platform named
+    /// `freebuff` marked `headless = false` — the CM35 interactive-only
+    /// fixture (freebuff v0.1.2 has no print/headless mode). The binary is an
+    /// executable script that `touch`es a marker file if it is ever spawned,
+    /// and it carries a `models_list_cmd` so a handler that reaches the
+    /// enumeration path would run it. The returned marker path lets a test
+    /// prove a gate fired *before* any process started: the marker must not
+    /// exist afterwards.
+    fn write_freebuff_config(home: &std::path::Path) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let canopy_dir = home.join(".canopy");
+        std::fs::create_dir_all(&canopy_dir).unwrap();
+        let marker = home.join("freebuff-spawned-marker");
+        let binary = home.join("freebuff-bin");
+        std::fs::write(
+            &binary,
+            format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        crate::domain::canopy_config::CanopyConfig {
+            clis: vec![crate::domain::cli_config::CliConfig {
+                name: "freebuff".to_string(),
+                binary: binary.to_string_lossy().to_string(),
+                headless: false,
+                models_list_cmd: Some("--list".to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+        .save_for_tests(&canopy_dir)
+        .unwrap();
+        marker
+    }
+
     /// (CM32) `agent_probe` accepts the slug and its result names the
     /// product: `platform` stays `mistral` while a sibling
     /// `platform_display` carries `Mistral AI · Vibe`. This pins the
@@ -33372,6 +24078,51 @@ mod endpoint_tests {
             mistral["platform_display"],
             serde_json::json!("Mistral AI \u{b7} Vibe")
         );
+    }
+
+    /// CM35 FR2: `agent_probe` reports an interactive-only platform as
+    /// `interactive_only` — not reachable, counted as a confirmed
+    /// `would_fail`, never `unknown` — and spawns nothing (the fixture
+    /// binary would `touch` a marker if it ran). Handler-level half of the
+    /// guarantee; `probe_target_reports_interactive_only_without_spawning`
+    /// pins the same gate one layer down.
+    #[tokio::test]
+    async fn agent_probe_reports_interactive_only_without_spawning() {
+        let home = tempdir().unwrap();
+        let marker = write_freebuff_config(home.path());
+        let _home_guard = HomeVar::set(home.path());
+
+        let (_dir, _db, handler) = endpoint_test_handler();
+
+        let result = handler
+            .agent_probe(Parameters(AgentProbeParams {
+                platform: Some("freebuff".to_string()),
+                model: None,
+                timeout_seconds: Some(5),
+            }))
+            .await
+            .unwrap();
+
+        assert!(!is_err(&result), "{}", text(&result));
+        let body: serde_json::Value = serde_json::from_str(&raw_text(&result)).unwrap();
+        assert_eq!(body["would_fail"], serde_json::json!(1), "{body}");
+        assert_eq!(body["unknown"], serde_json::json!(0), "{body}");
+        let probe = &body["probes"][0];
+        assert_eq!(probe["platform"], serde_json::json!("freebuff"), "{body}");
+        assert_eq!(
+            probe["outcome"],
+            serde_json::json!("interactive_only"),
+            "{body}"
+        );
+        assert_eq!(probe["reachable"], serde_json::json!(false), "{body}");
+        assert!(
+            probe["error"].as_str().is_some_and(
+                |e| e.contains("platform 'freebuff' is interactive-only (no headless mode)")
+            ),
+            "{body}"
+        );
+        assert!(probe["argv"].is_null(), "{body}");
+        assert!(!marker.exists(), "probe must not spawn a process");
     }
 
     /// (CB25) Without a `reviewer`, preflight returns `"review": null` and
@@ -33640,6 +24391,616 @@ mod endpoint_tests {
             note.contains("## Skill: graph-reviewer")
                 && note.contains("Could not resolve pinned skill"),
             "missing skill must degrade to the unresolved note: {note}"
+        );
+    }
+
+    #[test]
+    fn append_traversed_project_knowledge_reports_cap_full() {
+        use crate::db::intelligence::IntelligenceNodeInput;
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::new(&dir.path().join("t.db")).unwrap();
+        db.upsert_intelligence_node(IntelligenceNodeInput {
+            id: Some("fact-cap".to_string()),
+            kind: Some("fact".to_string()),
+            status: None,
+            title: Some("cap fact".to_string()),
+            body: Some("body".to_string()),
+            body_replace: None,
+            metadata: None,
+            project_hash: Some(Some("cap-hash".to_string())),
+            session_id: None,
+            relations: None,
+        })
+        .unwrap();
+        let mut tagged: super::TaggedProjectKnowledge = Vec::new();
+        let done = super::TaskTriggerHandler::append_traversed_project_knowledge(
+            &db,
+            &mut tagged,
+            "cap-hash",
+            None,
+            20,
+            0,
+        )
+        .unwrap();
+        assert!(!done, "total cap of zero stops traversal");
+        assert!(tagged.is_empty());
+    }
+
+    #[test]
+    fn append_traversed_project_knowledge_appends_within_cap() {
+        use crate::db::intelligence::IntelligenceNodeInput;
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::new(&dir.path().join("t.db")).unwrap();
+        db.upsert_intelligence_node(IntelligenceNodeInput {
+            id: Some("fact-ok".to_string()),
+            kind: Some("fact".to_string()),
+            status: None,
+            title: Some("ok fact".to_string()),
+            body: Some("body".to_string()),
+            body_replace: None,
+            metadata: None,
+            project_hash: Some(Some("ok-hash".to_string())),
+            session_id: None,
+            relations: None,
+        })
+        .unwrap();
+        let mut tagged: super::TaggedProjectKnowledge = Vec::new();
+        let more = super::TaskTriggerHandler::append_traversed_project_knowledge(
+            &db,
+            &mut tagged,
+            "ok-hash",
+            None,
+            20,
+            60,
+        )
+        .unwrap();
+        assert!(more, "room remains under the total cap");
+        assert_eq!(tagged.len(), 1);
+        assert_eq!(tagged[0].1, "ok-hash");
+    }
+
+    fn crew_json_member(model: &str) -> crate::daemon::params::CrewMemberJson {
+        crate::daemon::params::CrewMemberJson {
+            platform: "openrouter".to_string(),
+            model: Some(model.to_string()),
+            timeout_minutes: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
+        }
+    }
+
+    /// Build a graph with a check→ensemble→agent unit whose ensemble is bound
+    /// to the crew `eager`; returns `(graph_id, ensemble_id)`.
+    async fn build_crew_ensemble(
+        handler: &TaskTriggerHandler,
+        workdir: &str,
+        graph_name: &str,
+    ) -> (String, String) {
+        let created = handler
+            .graph_create(Parameters(GraphCreateParams {
+                name: graph_name.to_string(),
+                description: None,
+                workdir: workdir.to_string(),
+                trigger: None,
+                infra_node_id: None,
+                allow_dirty_start: false,
+            }))
+            .await
+            .unwrap();
+        let graph_id = extract_id(&created, "graph_id");
+        let kickoff = handler
+            .graph_add_node(Parameters(GraphAddNodeParams {
+                spec_id: None,
+                graph_id: Some(graph_id.clone()),
+                name: "kickoff".to_string(),
+                kind: Some("check".to_string()),
+                config: Some(check_node_config("true")),
+                blueprint: None,
+                config_overrides: None,
+            }))
+            .await
+            .unwrap();
+        let kickoff_id = extract_id(&kickoff, "node_id");
+        let downstream = handler
+            .graph_add_node(Parameters(GraphAddNodeParams {
+                spec_id: None,
+                graph_id: Some(graph_id.clone()),
+                name: "downstream".to_string(),
+                kind: Some("agent".to_string()),
+                config: Some(agent_node_config("claude")),
+                blueprint: None,
+                config_overrides: None,
+            }))
+            .await
+            .unwrap();
+        let downstream_id = extract_id(&downstream, "node_id");
+        let ensemble = handler
+            .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                commit_rights: None,
+                spec_id: None,
+                graph_id: Some(graph_id.clone()),
+                kind: None,
+                name: "Proposers".to_string(),
+                prompt_template: Some("draft it".to_string()),
+                blueprint: None,
+                members: None,
+                condition: "always".to_string(),
+                from_node: kickoff_id,
+                on_pass_to: downstream_id,
+                on_fail_to: None,
+                min_pass: None,
+                timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
+                crew: Some("eager".to_string()),
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&ensemble), "{}", text(&ensemble));
+        (graph_id, extract_id(&ensemble, "ensemble_id"))
+    }
+
+    /// CM49 req 5(b): `crew_update`'s eager sync skips a bound ensemble whose
+    /// graph is running, leaving its member rows and `crew_version_applied`
+    /// behind — while an identical idle graph is synced.
+    #[tokio::test]
+    async fn crew_update_eager_sync_skips_a_running_graph() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let workdir = dir.path().to_string_lossy().to_string();
+        handler
+            .crew_create(Parameters(CrewCreateParams {
+                name: "eager".to_string(),
+                description: None,
+                members: Some(vec![crew_json_member("a"), crew_json_member("b")]),
+                from_ensemble: None,
+            }))
+            .await
+            .unwrap();
+
+        let (running_graph, running_ens) =
+            build_crew_ensemble(&handler, &workdir, "Running G").await;
+        let (_idle_graph, idle_ens) = build_crew_ensemble(&handler, &workdir, "Idle G").await;
+        db.update_graph_status(&running_graph, GraphStatus::Running, None, None)
+            .unwrap();
+
+        // Grow the crew to three members.
+        handler
+            .crew_update(Parameters(CrewUpdateParams {
+                name: "eager".to_string(),
+                members: Some(vec![
+                    crew_json_member("a"),
+                    crew_json_member("b"),
+                    crew_json_member("c"),
+                ]),
+                description: None,
+                rename: None,
+            }))
+            .await
+            .unwrap();
+
+        let running = db.get_ensemble_details(&running_ens).unwrap().unwrap();
+        assert_eq!(
+            running.members.len(),
+            2,
+            "a running graph's member rows are left behind"
+        );
+        assert_eq!(
+            running.ensemble.crew_version_applied,
+            Some(1),
+            "a running graph's applied version is left behind"
+        );
+
+        let idle = db.get_ensemble_details(&idle_ens).unwrap().unwrap();
+        assert_eq!(idle.members.len(), 3, "an idle graph is synced eagerly");
+        assert_eq!(idle.ensemble.crew_version_applied, Some(2));
+    }
+
+    /// CM49 req 7, end to end through the MCP surface: export a crew-bound
+    /// ensemble as `crew` + no members; import restores the binding when the
+    /// crew exists locally, and still succeeds (reporting `missing_crews`)
+    /// when it does not.
+    #[tokio::test]
+    async fn graph_export_import_round_trip_with_crew() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let workdir = dir.path().to_string_lossy().to_string();
+        handler
+            .crew_create(Parameters(CrewCreateParams {
+                name: "eager".to_string(),
+                description: None,
+                members: Some(vec![crew_json_member("a"), crew_json_member("b")]),
+                from_ensemble: None,
+            }))
+            .await
+            .unwrap();
+        let (graph_id, _ens) = build_crew_ensemble(&handler, &workdir, "Crew G").await;
+
+        let exported = handler
+            .graph_export(Parameters(GraphExportParams {
+                graph_id: graph_id.clone(),
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&exported), "{}", text(&exported));
+        let doc: serde_json::Value = serde_json::from_str(&raw_text(&exported)).unwrap();
+        let ensemble = &doc["ensembles"][0];
+        assert_eq!(ensemble["crew"], "eager");
+        assert_eq!(
+            ensemble["members"].as_array().unwrap().len(),
+            0,
+            "a bound ensemble exports the crew name, not members"
+        );
+
+        // Import WITH the local crew: bound, no missing_crews.
+        let imported = handler
+            .graph_import(Parameters(GraphImportParams {
+                document: doc.clone(),
+                workdir: workdir.clone(),
+                name: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&imported), "{}", text(&imported));
+        let imported_json: serde_json::Value = serde_json::from_str(&raw_text(&imported)).unwrap();
+        assert_eq!(
+            imported_json["missing_crews"].as_array().unwrap().len(),
+            0,
+            "the crew exists locally"
+        );
+        let new_graph_id = imported_json["graph_id"].as_str().unwrap().to_string();
+        let ensembles = db.list_ensembles_for_graph(&new_graph_id).unwrap();
+        assert_eq!(ensembles[0].members.len(), 2, "members materialized");
+        assert_eq!(ensembles[0].ensemble.crew_name.as_deref(), Some("eager"));
+
+        // Import WITHOUT a local crew of that name: still succeeds, reported.
+        let mut doc_ghost = doc.clone();
+        doc_ghost["ensembles"][0]["crew"] = serde_json::json!("ghost");
+        let imported2 = handler
+            .graph_import(Parameters(GraphImportParams {
+                document: doc_ghost,
+                workdir: workdir.clone(),
+                name: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&imported2), "{}", text(&imported2));
+        let imported2_json: serde_json::Value =
+            serde_json::from_str(&raw_text(&imported2)).unwrap();
+        assert_eq!(
+            imported2_json["missing_crews"],
+            serde_json::json!(["ghost"])
+        );
+    }
+
+    /// Build a graph with a check→ensemble→agent unit whose ensemble has
+    /// LITERAL members (no crew binding); returns `(graph_id, ensemble_id)`.
+    async fn build_literal_ensemble(
+        handler: &TaskTriggerHandler,
+        workdir: &str,
+        graph_name: &str,
+    ) -> (String, String) {
+        let created = handler
+            .graph_create(Parameters(GraphCreateParams {
+                name: graph_name.to_string(),
+                description: None,
+                workdir: workdir.to_string(),
+                trigger: None,
+                infra_node_id: None,
+                allow_dirty_start: false,
+            }))
+            .await
+            .unwrap();
+        let graph_id = extract_id(&created, "graph_id");
+        let kickoff = handler
+            .graph_add_node(Parameters(GraphAddNodeParams {
+                spec_id: None,
+                graph_id: Some(graph_id.clone()),
+                name: "kickoff".to_string(),
+                kind: Some("check".to_string()),
+                config: Some(check_node_config("true")),
+                blueprint: None,
+                config_overrides: None,
+            }))
+            .await
+            .unwrap();
+        let kickoff_id = extract_id(&kickoff, "node_id");
+        let downstream = handler
+            .graph_add_node(Parameters(GraphAddNodeParams {
+                spec_id: None,
+                graph_id: Some(graph_id.clone()),
+                name: "downstream".to_string(),
+                kind: Some("agent".to_string()),
+                config: Some(agent_node_config("claude")),
+                blueprint: None,
+                config_overrides: None,
+            }))
+            .await
+            .unwrap();
+        let downstream_id = extract_id(&downstream, "node_id");
+        let members = vec![
+            crate::daemon::params::EnsembleMemberParams {
+                platform: "claude".to_string(),
+                model: None,
+                prompt_override: None,
+                timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
+            },
+            crate::daemon::params::EnsembleMemberParams {
+                platform: "claude".to_string(),
+                model: None,
+                prompt_override: None,
+                timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
+            },
+        ];
+        let ensemble = handler
+            .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                commit_rights: None,
+                spec_id: None,
+                graph_id: Some(graph_id.clone()),
+                kind: None,
+                name: "Proposers".to_string(),
+                prompt_template: Some("draft it".to_string()),
+                blueprint: None,
+                members: Some(members),
+                condition: "always".to_string(),
+                from_node: kickoff_id,
+                on_pass_to: downstream_id,
+                on_fail_to: None,
+                min_pass: None,
+                timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
+                crew: None,
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&ensemble), "{}", text(&ensemble));
+        (graph_id, extract_id(&ensemble, "ensemble_id"))
+    }
+
+    fn ensemble_update_params(ensemble_id: &str) -> GraphUpdateEnsembleParams {
+        GraphUpdateEnsembleParams {
+            ensemble_id: ensemble_id.to_string(),
+            kind: None,
+            prompt_template: None,
+            members: None,
+            crew: None,
+            min_pass: None,
+            straggler_timeout_minutes: None,
+            quorum_grace_minutes: None,
+            timeout_minutes: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
+            on_pass_to: None,
+            on_fail_to: None,
+            from_node: None,
+            condition: None,
+            add_entry_from: None,
+            add_entry_condition: None,
+            remove_entry_from: None,
+            commit_rights: None,
+        }
+    }
+
+    /// CM49 req 4: `graph_update_ensemble` binds an ensemble to a crew by
+    /// name and `crew: null` unbinds it, keeping the current rows literal.
+    #[tokio::test]
+    async fn graph_update_ensemble_binds_then_unbinds_a_crew() {
+        let (dir, db, handler) = endpoint_test_handler();
+        let workdir = dir.path().to_string_lossy().to_string();
+        handler
+            .crew_create(Parameters(CrewCreateParams {
+                name: "eager".to_string(),
+                description: None,
+                members: Some(vec![crew_json_member("a"), crew_json_member("b")]),
+                from_ensemble: None,
+            }))
+            .await
+            .unwrap();
+        let (_graph_id, ensemble_id) =
+            build_literal_ensemble(&handler, &workdir, "Literal G").await;
+
+        // Bind: the literal rows are replaced by the crew's members.
+        let bound = handler
+            .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+                crew: Some(Some("eager".to_string())),
+                ..ensemble_update_params(&ensemble_id)
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&bound), "{}", text(&bound));
+        let details = db.get_ensemble_details(&ensemble_id).unwrap().unwrap();
+        assert!(details.ensemble.crew_id.is_some(), "bound to the crew");
+        assert_eq!(details.ensemble.crew_name.as_deref(), Some("eager"));
+        assert_eq!(details.ensemble.crew_version_applied, Some(1));
+        assert_eq!(details.members.len(), 2);
+        assert!(
+            details
+                .members
+                .iter()
+                .all(|m| m.platform == "openrouter" && m.prompt_override.is_none()),
+            "the crew's members are materialized with the shared prompt"
+        );
+
+        // Unbind with an explicit null: the rows stay, the columns clear.
+        let unbound = handler
+            .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+                crew: Some(None),
+                ..ensemble_update_params(&ensemble_id)
+            }))
+            .await
+            .unwrap();
+        assert!(!is_err(&unbound), "{}", text(&unbound));
+        let details = db.get_ensemble_details(&ensemble_id).unwrap().unwrap();
+        assert!(details.ensemble.crew_id.is_none(), "unbound");
+        assert!(details.ensemble.crew_name.is_none(), "unbound");
+        assert!(details.ensemble.crew_version_applied.is_none(), "unbound");
+        assert_eq!(
+            details.members.len(),
+            2,
+            "the member rows stay as literal members"
+        );
+        assert!(
+            details.members.iter().all(|m| m.platform == "openrouter"),
+            "the kept rows are the crew-materialized ones"
+        );
+
+        // A crew change is its own call: combining it with any other field is
+        // refused rather than silently dropping that field.
+        let combined = handler
+            .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+                crew: Some(Some("eager".to_string())),
+                min_pass: Some(1),
+                ..ensemble_update_params(&ensemble_id)
+            }))
+            .await
+            .unwrap();
+        assert!(is_err(&combined), "{}", text(&combined));
+        assert!(
+            text(&combined).contains("cannot be combined"),
+            "{}",
+            text(&combined)
+        );
+        let with_members = handler
+            .graph_update_ensemble(Parameters(GraphUpdateEnsembleParams {
+                crew: Some(Some("eager".to_string())),
+                members: Some(vec![crate::daemon::params::EnsembleMemberParams {
+                    platform: "claude".to_string(),
+                    model: None,
+                    prompt_override: None,
+                    timeout_minutes: None,
+                    infra_retry_limit: None,
+                    infra_crash_max_seconds: None,
+                    infra_backoff_seconds: None,
+                }]),
+                ..ensemble_update_params(&ensemble_id)
+            }))
+            .await
+            .unwrap();
+        assert!(is_err(&with_members), "{}", text(&with_members));
+        assert!(
+            text(&with_members).contains("cannot be combined"),
+            "{}",
+            text(&with_members)
+        );
+    }
+
+    /// CM49 req 4: `graph_add_ensemble` refuses a crew beside literal members.
+    #[tokio::test]
+    async fn graph_add_ensemble_crew_and_members_are_exclusive() {
+        let (dir, _db, handler) = endpoint_test_handler();
+        let workdir = dir.path().to_string_lossy().to_string();
+        handler
+            .crew_create(Parameters(CrewCreateParams {
+                name: "eager".to_string(),
+                description: None,
+                members: Some(vec![crew_json_member("a"), crew_json_member("b")]),
+                from_ensemble: None,
+            }))
+            .await
+            .unwrap();
+        let (graph_id, _ens) = build_literal_ensemble(&handler, &workdir, "Exclusive G").await;
+        let entry = handler
+            .graph_add_node(Parameters(GraphAddNodeParams {
+                spec_id: None,
+                graph_id: Some(graph_id.clone()),
+                name: "entry".to_string(),
+                kind: Some("check".to_string()),
+                config: Some(check_node_config("true")),
+                blueprint: None,
+                config_overrides: None,
+            }))
+            .await
+            .unwrap();
+        let entry_id = extract_id(&entry, "node_id");
+
+        let refused = handler
+            .graph_add_ensemble(Parameters(GraphAddEnsembleParams {
+                commit_rights: None,
+                spec_id: None,
+                graph_id: Some(graph_id.clone()),
+                kind: None,
+                name: "Both".to_string(),
+                prompt_template: Some("draft it".to_string()),
+                blueprint: None,
+                members: Some(vec![crate::daemon::params::EnsembleMemberParams {
+                    platform: "claude".to_string(),
+                    model: None,
+                    prompt_override: None,
+                    timeout_minutes: None,
+                    infra_retry_limit: None,
+                    infra_crash_max_seconds: None,
+                    infra_backoff_seconds: None,
+                }]),
+                condition: "always".to_string(),
+                from_node: entry_id.clone(),
+                on_pass_to: entry_id,
+                on_fail_to: None,
+                min_pass: None,
+                timeout_minutes: None,
+                infra_retry_limit: None,
+                infra_crash_max_seconds: None,
+                infra_backoff_seconds: None,
+                straggler_timeout_minutes: None,
+                quorum_grace_minutes: None,
+                crew: Some("eager".to_string()),
+            }))
+            .await
+            .unwrap();
+        assert!(is_err(&refused), "{}", text(&refused));
+        assert!(
+            text(&refused).contains("pass crew or members, never both"),
+            "{}",
+            text(&refused)
+        );
+    }
+
+    /// CM49 req 3: `crew_list` takes no arguments and reports every crew
+    /// with its version, members and per-kind binding counts.
+    #[tokio::test]
+    async fn crew_list_reports_crews_members_and_bindings_without_arguments() {
+        let (dir, _db, handler) = endpoint_test_handler();
+        let workdir = dir.path().to_string_lossy().to_string();
+        handler
+            .crew_create(Parameters(CrewCreateParams {
+                name: "eager".to_string(),
+                description: Some("the implementers".to_string()),
+                members: Some(vec![crew_json_member("a"), crew_json_member("b")]),
+                from_ensemble: None,
+            }))
+            .await
+            .unwrap();
+        let (_graph_id, _ens) = build_crew_ensemble(&handler, &workdir, "Bound G").await;
+
+        let listed = handler.crew_list().await.unwrap();
+        assert!(!is_err(&listed), "{}", text(&listed));
+        let body: serde_json::Value = serde_json::from_str(&raw_text(&listed)).unwrap();
+        let crews = body.as_array().expect("a JSON array of crews");
+        assert_eq!(crews.len(), 1);
+        assert_eq!(crews[0]["name"], "eager");
+        assert_eq!(crews[0]["description"], "the implementers");
+        assert_eq!(crews[0]["version"], 1);
+        assert_eq!(crews[0]["members"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            crews[0]["members"][0]["model"], "a",
+            "member order is preserved"
+        );
+        assert_eq!(
+            crews[0]["bindings"],
+            serde_json::json!({ "ensembles": 1, "nodes": 0, "hooks": 0 }),
+            "the bound ensemble is counted"
         );
     }
 }

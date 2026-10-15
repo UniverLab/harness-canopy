@@ -5,26 +5,33 @@
 //! [`draw_graph_live_view`], which assembles plain values before handing off
 //! to [`render_graph_live_view`].
 
-use std::collections::HashMap;
-
-use chrono::{DateTime, Local, Utc};
-use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Wrap};
+use chrono::{DateTime, Utc};
+use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::Style;
+use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use super::super::theme::Theme;
-use super::compact_cwd;
-use crate::domain::graphs::{
-    GraphEdgeCondition, GraphNode, GraphNodeKind, GraphRunStatus, GraphSpecStatus, GraphStatus,
-};
-use crate::tui::app::graph_live_state::{
-    EnsembleLiveInfo, GraphLiveState, NodeRunInfo, SpecQueueEntry,
-};
+use crate::tui::app::graph_live_state::{GraphLiveState, NodeRunInfo};
 use crate::tui::app::types::App;
-use crate::tui::ui::sidebar::draw_scroll_indicators;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+mod lines;
+mod render;
+
+use render::render_graph_live_view;
+
+#[cfg(test)]
+use crate::domain::graphs::{GraphEdgeCondition, GraphRunStatus};
+#[cfg(test)]
+use crate::tui::app::graph_live_state::{EnsembleLiveInfo, SpecQueueEntry};
+#[cfg(test)]
+use lines::{ensemble_box_lines, graph_lines, node_box_lines};
+#[cfg(test)]
+use ratatui::style::Color;
+#[cfg(test)]
+use render::{spec_strip_layout, SPEC_CHIP_WIDTH};
+#[cfg(test)]
+use std::collections::HashMap;
 
 pub(crate) fn draw_graph_live_view(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     if area.width == 0 || area.height == 0 {
@@ -49,9 +56,17 @@ pub(crate) fn draw_graph_live_view(frame: &mut Frame, area: Rect, app: &mut App,
     let selected_spec_id = app.graph_spec_strip_selected.clone();
     let spec_scroll = app.graph_spec_strip_scroll;
 
+    // CT28: split the area when the tail pane is open — graph on the left
+    // (≥140 cols) or top (<140), pane taking the rest.
+    let (graph_area, pane_area) = if app.node_tail_dialog_active() {
+        tail_pane_split(area)
+    } else {
+        (area, Rect::default())
+    };
+
     let result = render_graph_live_view(
         frame,
-        area,
+        graph_area,
         &LiveViewContext {
             state,
             follow: app.graph_live_follow,
@@ -61,6 +76,7 @@ pub(crate) fn draw_graph_live_view(frame: &mut Frame, area: Rect, app: &mut App,
             blocked,
             now: Utc::now(),
             theme,
+            time_format: &app.tui_settings.time_format,
             selected_spec_id: selected_spec_id.as_deref(),
             spec_scroll,
             scroll: app.graph_live_view_scroll,
@@ -73,10 +89,24 @@ pub(crate) fn draw_graph_live_view(frame: &mut Frame, area: Rect, app: &mut App,
     app.graph_live_view_scroll = result.clamped_scroll;
     app.graph_live_follow_anchor = result.follow_anchor;
 
-    // CT3: live-tail overlay renders last so it sits above the graph and
-    // detail content. Viewer only — no input state is touched here.
+    // CT28: live-tail pane renders beside the graph. Read-only viewer.
     if let Some(dialog) = app.node_tail_dialog.as_ref() {
-        super::super::dialogs::draw_node_tail_dialog(frame, area, dialog, theme, Utc::now());
+        super::super::dialogs::draw_node_tail_pane(frame, pane_area, dialog, theme, Utc::now());
+    }
+    app.node_tail_pane_body_height = pane_area.height.saturating_sub(2) as usize;
+}
+
+/// CT28: split `area` into (graph, pane). Width ≥ 140 → horizontal (50/50);
+/// otherwise vertical (graph 40%, ≥ 8 rows, pane below).
+fn tail_pane_split(area: Rect) -> (Rect, Rect) {
+    if area.width >= 140 {
+        let cols = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(area);
+        (cols[0], cols[1])
+    } else {
+        let graph_h = ((area.height * 40) / 100).max(8).min(area.height);
+        let rows = Layout::vertical([Constraint::Length(graph_h), Constraint::Min(0)]).split(area);
+        (rows[0], rows[1])
     }
 }
 
@@ -98,6 +128,8 @@ struct LiveViewContext<'a> {
     blocked: bool,
     now: DateTime<Utc>,
     theme: &'a Theme,
+    /// CM52: chrono format for the time-only labels (`tui.time_format`).
+    time_format: &'a str,
     /// Spec id manually selected in the marker strip, if any — independent
     /// of `highlighted_node_id`/`follow`, which are the *graph's* own
     /// follow/manual state.
@@ -119,1060 +151,6 @@ struct LiveViewRenderResult {
     /// current node id (adopted whether or not we re-centred this frame); in
     /// manual it is carried through unchanged.
     follow_anchor: Option<String>,
-}
-
-fn render_graph_live_view(
-    frame: &mut Frame,
-    area: Rect,
-    ctx: &LiveViewContext,
-) -> LiveViewRenderResult {
-    let state = ctx.state;
-    let mut lines = header_lines(state, ctx.blocked, ctx.theme);
-    lines.push(Line::from(""));
-
-    let chip_row = area.y + lines.len() as u16;
-    let strip = spec_strip_layout(
-        state,
-        ctx.selected_spec_id,
-        ctx.spec_scroll,
-        area.width,
-        area.height,
-        ctx.theme,
-    );
-    lines.extend(strip.lines);
-
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "Graph",
-        Style::default().fg(ctx.theme.dim_text),
-    )));
-    let graph_start_line = lines.len() as u16;
-    let graph_result = if state.effective_nodes.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "  (no nodes yet)",
-            Style::default().fg(ctx.theme.dim_text),
-        )));
-        None
-    } else {
-        let result = graph_lines(
-            state,
-            ctx.highlighted_node_id,
-            ctx.follow,
-            area.width,
-            ctx.theme,
-        );
-        let offset = result.highlighted_offset;
-        lines.extend(result.lines);
-        Some(offset)
-    };
-    lines.push(Line::from(""));
-    lines.extend(footer_lines(
-        state,
-        ctx.highlighted_node_id,
-        ctx.node_info,
-        ctx.follow,
-        ctx.now,
-        ctx.theme,
-    ));
-
-    let total_lines = lines.len() as u16;
-    let max_scroll = total_lines.saturating_sub(area.height);
-    let clamped_from_input = ctx.scroll.min(max_scroll);
-
-    // CT8: who owns the scroll.
-    //
-    // Auto-follow: re-derive the scroll from the highlighted node ONLY on the
-    // frame where the current node's identity changed since the last
-    // re-centre (`ctx.follow_anchor`). While `follow` is true,
-    // `highlighted_node_id` == the engine's current node id, so this fires on
-    // a real node-to-node transition and on nothing else — not a status
-    // change, not elapsed time, not the user scrolling. Every other redraw
-    // keeps `clamped_from_input`, the user's own scroll, so the whole graph
-    // of a running graph can be read.
-    //
-    // Manual navigation: the scroll always chases the selection with the same
-    // margin `ensure_visible` uses, so the highlight can never leave the panel.
-    let (scroll, next_follow_anchor) = if ctx.follow {
-        let node_changed = ctx.highlighted_node_id != ctx.follow_anchor;
-        let scroll = if node_changed {
-            match graph_result.flatten() {
-                Some(offset) => ensure_visible(
-                    graph_start_line + offset,
-                    3,
-                    clamped_from_input,
-                    area.height,
-                ),
-                None => clamped_from_input,
-            }
-        } else {
-            clamped_from_input
-        };
-        (scroll, ctx.highlighted_node_id.map(str::to_string))
-    } else {
-        let scroll = match graph_result.flatten() {
-            Some(offset) => ensure_visible(
-                graph_start_line + offset,
-                3,
-                clamped_from_input,
-                area.height,
-            ),
-            None => clamped_from_input,
-        };
-        (scroll, ctx.follow_anchor.map(str::to_string))
-    };
-    let clamped_scroll = scroll.min(max_scroll);
-
-    frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .scroll((clamped_scroll, 0)),
-        area,
-    );
-
-    let has_up = clamped_scroll > 0;
-    let has_down = total_lines > area.height && clamped_scroll < max_scroll;
-    if has_up || has_down {
-        draw_scroll_indicators(frame, area, has_up, has_down, ctx.theme);
-    }
-
-    LiveViewRenderResult {
-        click_map: strip
-            .click_map
-            .into_iter()
-            .map(|(spec_id, row_offset, col_start, col_end)| {
-                (
-                    spec_id,
-                    chip_row + row_offset,
-                    area.x + col_start,
-                    area.x + col_end,
-                )
-            })
-            .collect(),
-        capacity: strip.capacity,
-        total_lines,
-        clamped_scroll,
-        follow_anchor: next_follow_anchor,
-    }
-}
-
-fn ensure_visible(start: u16, span: u16, scroll: u16, height: u16) -> u16 {
-    let end = start.saturating_add(span);
-    let view_end = scroll.saturating_add(height);
-    if height == 0 {
-        return scroll;
-    }
-    if start < scroll {
-        start
-    } else if end > view_end {
-        end.saturating_sub(height)
-    } else {
-        scroll
-    }
-}
-
-fn status_icon_and_label(
-    state: &GraphLiveState,
-    blocked: bool,
-    theme: &Theme,
-) -> (&'static str, String, Color) {
-    if let Some(at) = state.autorun_at {
-        let local = at.with_timezone(&Local);
-        return (
-            "⏰",
-            format!("autorun {}", local.format("%H:%M")),
-            Color::Cyan,
-        );
-    }
-    if blocked {
-        return ("⛔", "blocked".to_string(), theme.status_fail);
-    }
-    match state.graph_status {
-        GraphStatus::Running => ("▶", "running".to_string(), theme.status_running),
-        GraphStatus::Pausing => ("⏸", "pausing".to_string(), Color::Yellow),
-        GraphStatus::Paused => ("⏸", "paused".to_string(), Color::Yellow),
-        GraphStatus::Completed => ("✓", "completed".to_string(), theme.status_ok),
-        GraphStatus::Failed => ("✗", "failed".to_string(), theme.status_fail),
-        GraphStatus::Draft => ("·", "draft".to_string(), theme.dim_text),
-    }
-}
-
-fn header_lines(state: &GraphLiveState, blocked: bool, theme: &Theme) -> Vec<Line<'static>> {
-    let (icon, label, color) = status_icon_and_label(state, blocked, theme);
-    vec![
-        Line::from(vec![
-            Span::styled(icon, Style::default().fg(color)),
-            Span::raw(" "),
-            Span::styled(
-                state.graph_name.clone(),
-                Style::default()
-                    .fg(theme.header_color)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  "),
-            Span::styled(label, Style::default().fg(color)),
-            Span::raw("   "),
-            Span::styled(
-                format!("{}/{} specs", state.done_count, state.total_count),
-                Style::default().fg(theme.dim_text),
-            ),
-        ]),
-        Line::from(Span::styled(
-            format!("Workdir: {}", compact_cwd(&state.workdir)),
-            Style::default().fg(theme.dim_text),
-        )),
-    ]
-}
-
-/// Chip glyph for a queue entry: the current spec always shows `▶`
-/// regardless of its underlying status (running or the next pending one —
-/// see `assemble_graph_live_state`'s `current_spec_id` rule); otherwise the
-/// glyph reflects the terminal status directly, since that's exactly the
-/// case a user goes looking for (which spec failed vs. was skipped).
-fn spec_chip(
-    entry: &SpecQueueEntry,
-    current_spec_id: Option<&str>,
-    theme: &Theme,
-) -> (&'static str, Color) {
-    if Some(entry.spec_id.as_str()) == current_spec_id {
-        return ("▶", theme.status_running);
-    }
-    match entry.status {
-        GraphSpecStatus::Pending => ("○", theme.dim_text),
-        GraphSpecStatus::Running => ("▶", theme.status_running),
-        GraphSpecStatus::Completed => ("✓", theme.status_ok),
-        GraphSpecStatus::Failed => ("✗", theme.status_fail),
-        GraphSpecStatus::Skipped => ("⊘", theme.status_disabled),
-        GraphSpecStatus::Interrupted => ("⚑", theme.status_interrupted),
-    }
-}
-
-/// A marker chip's fixed on-screen footprint: a 3-column core (bracketed
-/// when selected, plain otherwise) plus a 1-column gap, so the strip's
-/// column arithmetic never has to special-case which chip is selected.
-const SPEC_CHIP_WIDTH: u16 = 4;
-
-/// Columns reserved for the "(a-b of N)" suffix when the strip has to
-/// truncate — wide enough for three-digit spec counts on either side.
-const SPEC_STRIP_RANGE_SUFFIX_WIDTH: u16 = 14;
-
-/// The marker strip's rendered lines, its click map (spec id + row offset +
-/// column span, relative to the strip's own origin — the caller translates
-/// to absolute screen coordinates), and how many chips fit in the given
-/// width.
-struct SpecStripLayout {
-    lines: Vec<Line<'static>>,
-    click_map: Vec<(String, u16, u16, u16)>,
-    capacity: usize,
-    #[allow(dead_code)]
-    chip_line_count: usize,
-}
-
-/// Lay out the spec marker strip: status chips wrapped across multiple lines
-/// to fill available height; compressed to a scrollable window with a
-/// "(a-b of N)" indicator only when even multi-line wrapping cannot fit all
-/// specs — followed by the selected spec's detail, falling back to the
-/// running/next-pending spec when nothing is manually selected.
-fn spec_strip_layout(
-    state: &GraphLiveState,
-    selected_spec_id: Option<&str>,
-    scroll: usize,
-    area_width: u16,
-    area_height: u16,
-    theme: &Theme,
-) -> SpecStripLayout {
-    if state.spec_queue.is_empty() {
-        return SpecStripLayout {
-            lines: vec![Line::from(Span::styled(
-                "Queue: (empty)",
-                Style::default().fg(theme.dim_text),
-            ))],
-            click_map: Vec::new(),
-            capacity: 0,
-            chip_line_count: 1,
-        };
-    }
-
-    let total = state.spec_queue.len();
-    let chips_per_line = (area_width / SPEC_CHIP_WIDTH).max(1) as usize;
-    let lines_needed = total.div_ceil(chips_per_line);
-    const RESERVED_NON_CHIP_LINES: u16 = 8;
-    let max_chip_lines = area_height.saturating_sub(RESERVED_NON_CHIP_LINES).max(1) as usize;
-    let chip_lines = lines_needed.min(max_chip_lines);
-    let truncated = total > chip_lines * chips_per_line;
-    let capacity = if truncated {
-        // Round up: reserving 3 whole chips (12 cols) for a 14-col suffix
-        // leaves the "(a-b of N)" text spilling past the line and soft-wrapping
-        // onto an extra visual row. Reserve the ceiling so it fits.
-        let last_line_reserved = SPEC_STRIP_RANGE_SUFFIX_WIDTH
-            .div_ceil(SPEC_CHIP_WIDTH)
-            .max(1) as usize;
-        chip_lines.saturating_sub(1) * chips_per_line
-            + chips_per_line.saturating_sub(last_line_reserved)
-    } else {
-        chip_lines * chips_per_line
-    };
-    let capacity = capacity.max(1);
-    let start = scroll.min(total.saturating_sub(capacity));
-    let end = (start + capacity).min(total);
-
-    let mut chip_lines_vec: Vec<Line<'static>> = Vec::new();
-    let mut click_map: Vec<(String, u16, u16, u16)> = Vec::new();
-    let mut current_spans: Vec<Span<'static>> = Vec::new();
-    let mut col: u16 = 0;
-    let mut row_offset: u16 = 0;
-
-    for entry in &state.spec_queue[start..end] {
-        if col > 0 && col + SPEC_CHIP_WIDTH > area_width {
-            chip_lines_vec.push(Line::from(std::mem::take(&mut current_spans)));
-            row_offset += 1;
-            col = 0;
-        }
-        let (icon, color) = spec_chip(entry, state.current_spec_id.as_deref(), theme);
-        let selected = Some(entry.spec_id.as_str()) == selected_spec_id;
-        let core = if selected {
-            format!("[{icon}]")
-        } else {
-            format!(" {icon} ")
-        };
-        let style = if selected {
-            Style::default().fg(color).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(color)
-        };
-        let core_width = core.chars().count() as u16;
-        click_map.push((entry.spec_id.clone(), row_offset, col, col + core_width));
-        current_spans.push(Span::styled(core, style));
-        current_spans.push(Span::raw(" "));
-        col += SPEC_CHIP_WIDTH;
-    }
-    if truncated {
-        current_spans.push(Span::styled(
-            format!(" ({}-{} of {})", start + 1, end, total),
-            Style::default().fg(theme.dim_text),
-        ));
-    }
-    if !current_spans.is_empty() || chip_lines_vec.is_empty() {
-        chip_lines_vec.push(Line::from(current_spans));
-    }
-
-    let chip_line_count = chip_lines_vec.len();
-    let mut lines = chip_lines_vec;
-    lines.extend(spec_detail_lines(state, selected_spec_id, theme));
-
-    SpecStripLayout {
-        lines,
-        click_map,
-        capacity,
-        chip_line_count,
-    }
-}
-
-/// Name, status, and (for a failed/skipped spec) the recorded reason for
-/// whichever spec the marker strip is showing: the manual selection if
-/// there is one, else the running/next-pending spec — the same fallback
-/// the strip's detail line always showed before selection existed.
-fn spec_detail_lines(
-    state: &GraphLiveState,
-    selected_spec_id: Option<&str>,
-    theme: &Theme,
-) -> Vec<Line<'static>> {
-    let entry = selected_spec_id
-        .and_then(|id| state.spec_queue.iter().find(|e| e.spec_id == id))
-        .or_else(|| {
-            state
-                .spec_queue
-                .iter()
-                .find(|e| Some(e.spec_id.as_str()) == state.current_spec_id.as_deref())
-        });
-    let Some(entry) = entry else {
-        return Vec::new();
-    };
-
-    let (_, color) = spec_chip(entry, state.current_spec_id.as_deref(), theme);
-    let mut lines = vec![Line::from(vec![
-        Span::styled(
-            entry.spec_name.clone(),
-            Style::default()
-                .fg(theme.text_primary)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("  "),
-        Span::styled(
-            format!("[{}]", spec_status_label(entry.status)),
-            Style::default().fg(color),
-        ),
-    ])];
-    if let Some(reason) = entry.failure_reason.as_deref() {
-        lines.push(Line::from(Span::styled(
-            format!("  {reason}"),
-            Style::default().fg(theme.dim_text),
-        )));
-    }
-    lines
-}
-
-fn spec_status_label(status: GraphSpecStatus) -> &'static str {
-    match status {
-        GraphSpecStatus::Pending => "pending",
-        GraphSpecStatus::Running => "running",
-        GraphSpecStatus::Completed => "completed",
-        GraphSpecStatus::Failed => "failed",
-        GraphSpecStatus::Skipped => "skipped",
-        GraphSpecStatus::Interrupted => "interrupted",
-    }
-}
-
-/// Border/text style and marker glyph for a node box — bold accent with a
-/// solid marker while auto-following (the "pulsing current node" cue),
-/// plain accent with a `›` marker for a manually-picked node, dim/plain
-/// otherwise.
-fn node_style(is_highlighted: bool, follow: bool, theme: &Theme) -> (Style, Style, &'static str) {
-    if is_highlighted && follow {
-        (
-            Style::default()
-                .fg(theme.header_color)
-                .add_modifier(Modifier::BOLD),
-            Style::default()
-                .fg(theme.header_color)
-                .add_modifier(Modifier::BOLD),
-            "●",
-        )
-    } else if is_highlighted {
-        (
-            Style::default().fg(theme.header_color),
-            Style::default()
-                .fg(theme.header_color)
-                .add_modifier(Modifier::BOLD),
-            "›",
-        )
-    } else {
-        (
-            Style::default().fg(theme.border_color),
-            Style::default().fg(theme.text_primary),
-            " ",
-        )
-    }
-}
-
-fn depth_prefix(depth: usize) -> String {
-    "   ".repeat(depth.min(3))
-}
-
-fn edge_condition_priority(condition: &GraphEdgeCondition) -> (u8, Option<String>) {
-    match condition {
-        GraphEdgeCondition::Pass => (0, None),
-        GraphEdgeCondition::Fail => (1, None),
-        GraphEdgeCondition::Always => (2, None),
-        GraphEdgeCondition::Route(label) => (3, Some(label.clone())),
-        GraphEdgeCondition::Error => (4, None),
-    }
-}
-
-/// Truncates `content` to at most `max_width` display columns (per
-/// `unicode-width`), appending `…` when it doesn't fit. Unlike
-/// `truncate_str`, this measures render columns rather than
-/// `chars().count()`, so a wide character (CJK, emoji) is never counted as
-/// one column when it occupies two — the miscount that let a wide label
-/// desync a box border.
-fn truncate_str_width(s: &str, max_width: usize) -> String {
-    if UnicodeWidthStr::width(s) <= max_width {
-        return s.to_string();
-    }
-    if max_width == 0 {
-        return String::new();
-    }
-    let budget = max_width - 1; // reserve 1 column for the ellipsis
-    let mut out = String::new();
-    let mut width = 0usize;
-    for ch in s.chars() {
-        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if width + cw > budget {
-            break;
-        }
-        out.push(ch);
-        width += cw;
-    }
-    out.push('…');
-    out
-}
-
-/// Fits `content` into a box row that already has `leading` display columns
-/// of fixed prefix before it (a marker+space, or a two-space indent):
-/// truncates `content` by display width to leave room for one mandatory
-/// blank column before the closing border, then right-pads with spaces and
-/// appends that blank column. The result's display width is always
-/// `inner - leading`, so `leading + width(fit_row(...)) == inner` for every
-/// row built this way — this is what keeps member rows exactly as wide as
-/// the title and border rows (previously short by 2 columns because the
-/// padding math didn't add up to `inner`).
-fn fit_row(content: &str, inner: usize, leading: usize) -> String {
-    let budget = inner.saturating_sub(leading + 1);
-    let truncated = truncate_str_width(content, budget);
-    let pad = budget.saturating_sub(UnicodeWidthStr::width(truncated.as_str()));
-    format!("{truncated}{} ", " ".repeat(pad))
-}
-
-fn node_box_lines(
-    node: &GraphNode,
-    is_highlighted: bool,
-    follow: bool,
-    inner: usize,
-    theme: &Theme,
-    depth: usize,
-) -> Vec<Line<'static>> {
-    let prefix = depth_prefix(depth);
-    let (border_style, text_style, marker) = node_style(is_highlighted, follow, theme);
-    let kind_tag = format!("[{}]", node.kind.display_str());
-    let kind_tag_width = UnicodeWidthStr::width(kind_tag.as_str());
-    let kind_tag_style = if node.kind == GraphNodeKind::Router {
-        Style::default()
-            .fg(theme.kind_router)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        text_style
-    };
-    // Budget reserves: marker+space (2, "leading"), kind_tag_width, and one
-    // mandatory trailing blank column before the border.
-    let name_budget = inner.saturating_sub(2 + kind_tag_width + 1);
-    let name_display = truncate_str_width(&node.name, name_budget);
-    let pad = name_budget.saturating_sub(UnicodeWidthStr::width(name_display.as_str()));
-
-    vec![
-        Line::from(Span::styled(
-            format!("{prefix}┌{}┐", "─".repeat(inner)),
-            border_style,
-        )),
-        Line::from(vec![
-            Span::styled(
-                format!("{prefix}│{marker} {name_display}{}", " ".repeat(pad)),
-                text_style,
-            ),
-            Span::styled(kind_tag, kind_tag_style),
-            Span::styled(" │", text_style),
-        ]),
-        Line::from(Span::styled(
-            format!("{prefix}└{}┘", "─".repeat(inner)),
-            border_style,
-        )),
-    ]
-}
-
-/// Collapsed box for an ensemble (F1) — folds its N member nodes plus the
-/// join into ONE box ("name [N models]") with a live status tag per member,
-/// instead of drawing N+1 separate boxes and a fan-out of near-identical
-/// edges. Expand-on-inspect isn't a separate view: the member/join ids are
-/// still real entries in `state.effective_nodes`, so navigating directly to
-/// one (e.g. via a future picker) still resolves correctly — this box is
-/// purely a collapsed *rendering*, not a different graph.
-fn ensemble_box_lines(
-    ensemble: &EnsembleLiveInfo,
-    is_highlighted: bool,
-    follow: bool,
-    inner: usize,
-    theme: &Theme,
-    depth: usize,
-) -> Vec<Line<'static>> {
-    let prefix = depth_prefix(depth);
-    let (border_style, text_style, marker) = node_style(is_highlighted, follow, theme);
-    let title = format!("{} [{} models]", ensemble.name, ensemble.members.len());
-
-    let mut lines = vec![
-        Line::from(Span::styled(
-            format!("{prefix}┌{}┐", "─".repeat(inner)),
-            border_style,
-        )),
-        Line::from(Span::styled(
-            format!("{prefix}│{marker} {}│", fit_row(&title, inner, 2)),
-            text_style,
-        )),
-    ];
-    for member in &ensemble.members {
-        let (tag, color) = ensemble_member_status_tag(member.status, theme);
-        let label = format!("{} {tag}", member.label);
-        lines.push(Line::from(Span::styled(
-            format!("{prefix}│  {}│", fit_row(&label, inner, 2)),
-            Style::default().fg(color),
-        )));
-    }
-    lines.push(Line::from(Span::styled(
-        format!("{prefix}└{}┘", "─".repeat(inner)),
-        border_style,
-    )));
-    lines
-}
-
-fn ensemble_member_status_tag(
-    status: Option<GraphRunStatus>,
-    theme: &Theme,
-) -> (&'static str, Color) {
-    match status {
-        Some(GraphRunStatus::Pass) => ("[pass]", theme.status_ok),
-        Some(GraphRunStatus::Fail) => ("[fail]", theme.status_fail),
-        Some(GraphRunStatus::Interrupted) => ("[interrupted]", theme.status_fail),
-        Some(GraphRunStatus::Error) => ("[error]", theme.status_interrupted),
-        Some(GraphRunStatus::Running) => ("[running]", theme.status_running),
-        None => ("[pending]", theme.dim_text),
-    }
-}
-
-/// Node boxes in DFS tree order starting from the entry node (the node
-/// with no incoming edges, or position 0 if every node has one). Each node's
-/// children appear immediately after its edge lines, indented one level
-/// deeper. Cycles render as a back-reference line with `↩` instead of a
-/// second box. An ensemble (F1) renders as one collapsed box at the depth
-/// of its first member; other members and the join are skipped.
-struct GraphLinesResult<'a> {
-    lines: Vec<Line<'a>>,
-    highlighted_offset: Option<u16>,
-}
-
-fn graph_lines(
-    state: &GraphLiveState,
-    highlighted_node_id: Option<&str>,
-    follow: bool,
-    area_width: u16,
-    theme: &Theme,
-) -> GraphLinesResult<'static> {
-    let box_width = (area_width as usize).saturating_sub(4).clamp(22, 48);
-    let inner = box_width.saturating_sub(2);
-
-    let join_node_ids: std::collections::HashSet<&str> = state
-        .ensembles
-        .iter()
-        .map(|e| e.join_node_id.as_str())
-        .collect();
-    let ensemble_by_member: HashMap<&str, &EnsembleLiveInfo> = state
-        .ensembles
-        .iter()
-        .flat_map(|e| e.members.iter().map(move |m| (m.node_id.as_str(), e)))
-        .collect();
-    let ensemble_by_join: HashMap<&str, &EnsembleLiveInfo> = state
-        .ensembles
-        .iter()
-        .map(|e| (e.join_node_id.as_str(), e))
-        .collect();
-
-    // --- Collapsed node map (key -> renderable) ---
-    enum Collapsed<'a> {
-        Node(&'a GraphNode),
-        Ensemble(&'a EnsembleLiveInfo),
-    }
-    // Position for ordering fallback entry selection.
-    let mut collapsed_nodes: HashMap<String, Collapsed> = HashMap::new();
-    let mut collapsed_pos: HashMap<String, i64> = HashMap::new();
-    let mut seen_ens: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    for node in &state.effective_nodes {
-        if join_node_ids.contains(node.id.as_str()) {
-            continue;
-        }
-        if let Some(ens) = ensemble_by_member.get(node.id.as_str()) {
-            if seen_ens.insert(ens.ensemble_id.as_str()) {
-                // position is the first member's position
-                collapsed_nodes.insert(ens.ensemble_id.clone(), Collapsed::Ensemble(ens));
-                collapsed_pos.insert(ens.ensemble_id.clone(), node.position);
-            }
-        } else {
-            collapsed_nodes.insert(node.id.clone(), Collapsed::Node(node));
-            collapsed_pos.insert(node.id.clone(), node.position);
-        }
-    }
-    if collapsed_nodes.is_empty() {
-        return GraphLinesResult {
-            lines: Vec::new(),
-            highlighted_offset: None,
-        };
-    }
-
-    // --- Collapsed edges (deduped, sorted later per DFS) ---
-    let mut collapsed_edges: HashMap<String, Vec<(String, GraphEdgeCondition)>> = HashMap::new();
-    for edge in &state.effective_edges {
-        let from_raw = edge.from_node.as_str();
-        let to_raw = edge.to_node.as_str();
-        // internal ensemble member -> join edge
-        if let Some(ens) = ensemble_by_member.get(from_raw) {
-            if ens.join_node_id.as_str() == to_raw {
-                continue;
-            }
-        }
-        let from_key = if let Some(ens) = ensemble_by_join.get(from_raw) {
-            Some(ens.ensemble_id.clone())
-        } else if let Some(ens) = ensemble_by_member.get(from_raw) {
-            Some(ens.ensemble_id.clone())
-        } else if collapsed_nodes.contains_key(from_raw) {
-            Some(from_raw.to_string())
-        } else {
-            None
-        };
-        let to_key = if let Some(ens) = ensemble_by_join.get(to_raw) {
-            Some(ens.ensemble_id.clone())
-        } else if let Some(ens) = ensemble_by_member.get(to_raw) {
-            Some(ens.ensemble_id.clone())
-        } else if collapsed_nodes.contains_key(to_raw) {
-            Some(to_raw.to_string())
-        } else {
-            None
-        };
-        if let (Some(fk), Some(tk)) = (from_key, to_key) {
-            if fk == tk {
-                // self-graph: keep as edge but DFS will treat it as back-ref
-            }
-            let entry = collapsed_edges.entry(fk).or_default();
-            if !entry
-                .iter()
-                .any(|(ek, ec)| ek == &tk && ec == &edge.condition)
-            {
-                entry.push((tk, edge.condition.clone()));
-            }
-        }
-    }
-    // Sort each adjacency by pass > fail > always > route(alpha) > error
-    for edges in collapsed_edges.values_mut() {
-        edges.sort_by(|a, b| {
-            let (pa, la) = edge_condition_priority(&a.1);
-            let (pb, lb) = edge_condition_priority(&b.1);
-            pa.cmp(&pb).then_with(|| la.cmp(&lb))
-        });
-    }
-
-    // --- Find entry (node with no incoming collapsed edge) ---
-    let mut incoming: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    for tos in collapsed_edges.values() {
-        for (tk, _) in tos {
-            incoming.insert(tk.as_str());
-        }
-    }
-    let entry_key = collapsed_nodes
-        .keys()
-        .find(|k| !incoming.contains(k.as_str()))
-        .cloned()
-        .or_else(|| {
-            // fallback to smallest position
-            collapsed_nodes
-                .keys()
-                .min_by_key(|k| collapsed_pos.get(k.as_str()).copied().unwrap_or(i64::MAX))
-                .cloned()
-        })
-        .unwrap();
-
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    let mut highlighted_offset: Option<u16> = None;
-    let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-    #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::needless_pass_by_value)]
-    fn dfs_visit(
-        key: &str,
-        depth: usize,
-        collapsed_nodes: &HashMap<String, Collapsed>,
-        collapsed_edges: &HashMap<String, Vec<(String, GraphEdgeCondition)>>,
-        state: &GraphLiveState,
-        follow: bool,
-        inner: usize,
-        theme: &Theme,
-        lines: &mut Vec<Line<'static>>,
-        highlighted_offset: &mut Option<u16>,
-        visited: &mut std::collections::HashSet<String>,
-        highlighted_node_id: Option<&str>,
-    ) {
-        if visited.contains(key) {
-            return;
-        }
-        visited.insert(key.to_string());
-        let depth_clamped = depth.min(3);
-        let is_hl = if let Some(Collapsed::Ensemble(ens)) = collapsed_nodes.get(key) {
-            ens.members
-                .iter()
-                .any(|m| Some(m.node_id.as_str()) == highlighted_node_id)
-                || highlighted_node_id == Some(ens.join_node_id.as_str())
-        } else {
-            highlighted_node_id == Some(key)
-        };
-        if is_hl && highlighted_offset.is_none() {
-            *highlighted_offset = Some(lines.len() as u16);
-        }
-        match collapsed_nodes.get(key) {
-            Some(Collapsed::Node(node)) => {
-                lines.extend(node_box_lines(
-                    node,
-                    is_hl,
-                    follow,
-                    inner,
-                    theme,
-                    depth_clamped,
-                ));
-            }
-            Some(Collapsed::Ensemble(ens)) => {
-                lines.extend(ensemble_box_lines(
-                    ens,
-                    is_hl,
-                    follow,
-                    inner,
-                    theme,
-                    depth_clamped,
-                ));
-            }
-            None => return,
-        }
-        if let Some(edges) = collapsed_edges.get(key) {
-            let prefix = depth_prefix(depth_clamped);
-            // Determine taken route for router nodes (only regular nodes)
-            let taken_route = if let Some(Collapsed::Node(node)) = collapsed_nodes.get(key) {
-                state
-                    .router_taken_routes
-                    .get(node.id.as_str())
-                    .map(String::as_str)
-            } else {
-                None
-            };
-            for (i, (to_key, cond)) in edges.iter().enumerate() {
-                let branch = if i == edges.len() - 1 { "└" } else { "├" };
-                let is_back = visited.contains(to_key.as_str());
-                let target_label = match collapsed_nodes.get(to_key.as_str()) {
-                    Some(Collapsed::Ensemble(ens)) => {
-                        format!("{} [{} models]", ens.name, ens.members.len())
-                    }
-                    Some(Collapsed::Node(n)) => n.name.clone(),
-                    None => to_key.clone(),
-                };
-                let suffix = if is_back { "  ↩" } else { "" };
-                match cond.route_label() {
-                    Some(route) => {
-                        let taken = taken_route == Some(route);
-                        let (marker, style) = if taken {
-                            (
-                                "✓",
-                                Style::default()
-                                    .fg(theme.status_ok)
-                                    .add_modifier(Modifier::BOLD),
-                            )
-                        } else {
-                            (" ", Style::default().fg(theme.dim_text))
-                        };
-                        lines.push(Line::from(Span::styled(
-                            format!(
-                                "{prefix}   {branch}─{marker} {route} → {target_label}{suffix}"
-                            ),
-                            style,
-                        )));
-                    }
-                    None => {
-                        let label = format!("{target_label}{suffix}");
-                        lines.push(Line::from(Span::styled(
-                            format!("{prefix}   {}─ {} → {}", branch, cond.as_str(), label),
-                            Style::default().fg(theme.dim_text),
-                        )));
-                    }
-                }
-            }
-            lines.push(Line::from(""));
-            // Recurse into unvisited children in priority order
-            for (to_key, _) in edges {
-                if !visited.contains(to_key.as_str()) {
-                    dfs_visit(
-                        to_key,
-                        depth + 1,
-                        collapsed_nodes,
-                        collapsed_edges,
-                        state,
-                        follow,
-                        inner,
-                        theme,
-                        lines,
-                        highlighted_offset,
-                        visited,
-                        highlighted_node_id,
-                    );
-                }
-            }
-        } else {
-            // leaf node still needs spacing before next sibling at same depth
-            // Only add blank if not last overall? DFS already pushes blanks per node with edges;
-            // for leaves, add a blank line to separate siblings visually unless at end.
-            // We'll add a blank line for consistency with old rendering.
-            lines.push(Line::from(""));
-        }
-    }
-
-    // Start DFS from entry
-    dfs_visit(
-        &entry_key,
-        0,
-        &collapsed_nodes,
-        &collapsed_edges,
-        state,
-        follow,
-        inner,
-        theme,
-        &mut lines,
-        &mut highlighted_offset,
-        &mut visited,
-        highlighted_node_id,
-    );
-    // Visit any disconnected components not reached from entry
-    let mut remaining: Vec<String> = collapsed_nodes
-        .keys()
-        .filter(|k| !visited.contains(k.as_str()))
-        .cloned()
-        .collect();
-    remaining.sort_by_key(|k| collapsed_pos.get(k.as_str()).copied().unwrap_or(i64::MAX));
-    for rk in &remaining {
-        dfs_visit(
-            rk,
-            0,
-            &collapsed_nodes,
-            &collapsed_edges,
-            state,
-            follow,
-            inner,
-            theme,
-            &mut lines,
-            &mut highlighted_offset,
-            &mut visited,
-            highlighted_node_id,
-        );
-    }
-    // Trim trailing blank lines
-    while lines.last().is_some_and(|l| l.width() == 0) {
-        lines.pop();
-    }
-    GraphLinesResult {
-        lines,
-        highlighted_offset,
-    }
-}
-
-fn format_elapsed(started_at: DateTime<Utc>, now: DateTime<Utc>) -> String {
-    let secs = (now - started_at).num_seconds().max(0);
-    if secs < 60 {
-        format!("{secs}s")
-    } else if secs < 3600 {
-        format!("{}m{:02}s", secs / 60, secs % 60)
-    } else {
-        format!("{}h{:02}m", secs / 3600, (secs % 3600) / 60)
-    }
-}
-
-fn run_status_span(status: Option<GraphRunStatus>, theme: &Theme) -> Span<'static> {
-    match status {
-        Some(GraphRunStatus::Running) => {
-            Span::styled("running", Style::default().fg(theme.status_running))
-        }
-        Some(GraphRunStatus::Pass) => Span::styled("pass", Style::default().fg(theme.status_ok)),
-        Some(GraphRunStatus::Fail) => Span::styled("fail", Style::default().fg(theme.status_fail)),
-        Some(GraphRunStatus::Error) => Span::styled(
-            "error (no verdict)",
-            Style::default().fg(theme.status_interrupted),
-        ),
-        Some(GraphRunStatus::Interrupted) => {
-            Span::styled("interrupted", Style::default().fg(theme.status_fail))
-        }
-        None => Span::styled("(no runs yet)", Style::default().fg(theme.dim_text)),
-    }
-}
-
-fn footer_lines(
-    state: &GraphLiveState,
-    highlighted_node_id: Option<&str>,
-    node_info: &NodeRunInfo,
-    follow: bool,
-    now: DateTime<Utc>,
-    theme: &Theme,
-) -> Vec<Line<'static>> {
-    let Some(node_id) = highlighted_node_id else {
-        return vec![Line::from(Span::styled(
-            "(no node selected)",
-            Style::default().fg(theme.dim_text),
-        ))];
-    };
-    let Some(node) = state.effective_nodes.iter().find(|n| n.id == node_id) else {
-        return vec![Line::from(Span::styled(
-            "(node not found)",
-            Style::default().fg(theme.dim_text),
-        ))];
-    };
-
-    let mode_label = if follow { "auto-follow" } else { "manual" };
-    let mut lines = vec![Line::from(vec![
-        Span::styled(
-            node.name.clone(),
-            Style::default()
-                .fg(theme.header_color)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("  "),
-        Span::styled(
-            format!("[{}]", node.kind.display_str()),
-            Style::default().fg(theme.dim_text),
-        ),
-        Span::raw("  "),
-        Span::styled(
-            format!("({mode_label})"),
-            Style::default().fg(theme.dim_text),
-        ),
-    ])];
-
-    let mut meta = vec![run_status_span(node_info.status, theme)];
-    if let Some(started_at) = node_info.started_at {
-        meta.push(Span::raw("  "));
-        meta.push(Span::styled(
-            format!("elapsed {}", format_elapsed(started_at, now)),
-            Style::default().fg(theme.dim_text),
-        ));
-    }
-    if let Some(iteration) = node_info.iteration {
-        meta.push(Span::raw("  "));
-        meta.push(Span::styled(
-            format!("iter {iteration}"),
-            Style::default().fg(theme.dim_text),
-        ));
-    }
-    if let Some(route) = node_info.chosen_route.as_deref() {
-        meta.push(Span::raw("  "));
-        meta.push(Span::styled(
-            format!("route → {route}"),
-            Style::default()
-                .fg(theme.status_ok)
-                .add_modifier(Modifier::BOLD),
-        ));
-    }
-    // CM24: when the highlighted node is ensemble-owned (a member or the
-    // join), show the join's straggler/grace config side by side — the only
-    // place the TUI surfaces ensemble quorum tuning.
-    if let Some(ensemble) = state.ensembles.iter().find(|ensemble| {
-        ensemble.join_node_id == node_id || ensemble.members.iter().any(|m| m.node_id == node_id)
-    }) {
-        if let Some(straggler) = ensemble.straggler_timeout_minutes {
-            meta.push(Span::raw("  "));
-            meta.push(Span::styled(
-                format!("straggler {straggler}m"),
-                Style::default().fg(theme.dim_text),
-            ));
-        }
-        if let Some(grace) = ensemble.quorum_grace_minutes {
-            meta.push(Span::raw("  "));
-            meta.push(Span::styled(
-                if grace == 0 {
-                    "grace immediate".to_string()
-                } else {
-                    format!("grace {grace}m")
-                },
-                Style::default().fg(theme.dim_text),
-            ));
-        }
-    }
-    lines.push(Line::from(meta));
-
-    if let Some(tail) = node_info.output_tail.as_deref() {
-        lines.push(Line::from(""));
-        for line in tail.lines() {
-            lines.push(Line::from(Span::styled(
-                line.to_string(),
-                Style::default().fg(theme.text_primary),
-            )));
-        }
-    }
-
-    lines
 }
 
 #[cfg(test)]
@@ -1301,7 +279,6 @@ mod tests {
             current_node_status: Some(GraphRunStatus::Running),
             current_node_started_at: Some(Utc::now() - chrono::Duration::seconds(75)),
             current_node_iteration: Some(2),
-            current_node_output_tail: Some("implementing the graph render...".to_string()),
         }
     }
 
@@ -1312,7 +289,6 @@ mod tests {
             status: state.current_node_status,
             started_at: state.current_node_started_at,
             iteration: state.current_node_iteration,
-            output_tail: state.current_node_output_tail.clone(),
             chosen_route: None,
         };
 
@@ -1329,6 +305,7 @@ mod tests {
                     blocked: false,
                     now: Utc::now(),
                     theme: &Theme::classic(),
+                    time_format: "%H:%M",
                     selected_spec_id: None,
                     spec_scroll: 0,
                     scroll: 0,
@@ -1361,7 +338,6 @@ mod tests {
         // Footer.
         assert!(text.contains("iter 2"), "{text}");
         assert!(text.contains("elapsed"), "{text}");
-        assert!(text.contains("implementing the graph render"), "{text}");
     }
 
     #[test]
@@ -1372,7 +348,6 @@ mod tests {
             status: Some(GraphRunStatus::Pass),
             started_at: Some(Utc::now() - chrono::Duration::seconds(10)),
             iteration: Some(1),
-            output_tail: Some("reviewed and committed".to_string()),
             chosen_route: None,
         };
         let text = render_to_text(80, 40, |frame, area| {
@@ -1388,6 +363,7 @@ mod tests {
                     blocked: false,
                     now: Utc::now(),
                     theme: &Theme::classic(),
+                    time_format: "%H:%M",
                     selected_spec_id: None,
                     spec_scroll: 0,
                     scroll: 0,
@@ -1396,7 +372,6 @@ mod tests {
         });
 
         assert!(text.contains("manual"), "{text}");
-        assert!(text.contains("reviewed and committed"), "{text}");
         // Manual pick uses the `›` marker, not the follow `●`.
         assert!(text.contains('›'), "expected manual marker in:\n{text}");
     }
@@ -1430,6 +405,7 @@ mod tests {
                     blocked: false,
                     now: Utc::now(),
                     theme: &Theme::classic(),
+                    time_format: "%H:%M",
                     selected_spec_id: Some("s3"),
                     spec_scroll: 0,
                     scroll: 0,
@@ -1485,6 +461,7 @@ mod tests {
                     blocked: false,
                     now: Utc::now(),
                     theme: &Theme::classic(),
+                    time_format: "%H:%M",
                     selected_spec_id: None,
                     spec_scroll: 0,
                     scroll: 0,
@@ -1562,6 +539,7 @@ mod tests {
                     blocked: false,
                     now: Utc::now(),
                     theme: &Theme::classic(),
+                    time_format: "%H:%M",
                     selected_spec_id: None,
                     spec_scroll: 0,
                     scroll: 0,
@@ -1616,6 +594,7 @@ mod tests {
                     blocked: false,
                     now: Utc::now(),
                     theme: &Theme::classic(),
+                    time_format: "%H:%M",
                     selected_spec_id: None,
                     spec_scroll: 0,
                     scroll: 0,
@@ -1661,6 +640,7 @@ mod tests {
                     blocked: false,
                     now: Utc::now(),
                     theme: &Theme::classic(),
+                    time_format: "%H:%M",
                     selected_spec_id: None,
                     spec_scroll: 0,
                     scroll: 0,
@@ -1692,6 +672,7 @@ mod tests {
                         blocked: false,
                         now: Utc::now(),
                         theme: &Theme::classic(),
+                        time_format: "%H:%M",
                         selected_spec_id: None,
                         spec_scroll: 0,
                         scroll: 0,
@@ -1757,6 +738,7 @@ mod tests {
             blocked: false,
             now: Utc::now(),
             theme: &Theme::classic(),
+            time_format: "%H:%M",
             selected_spec_id: None,
             spec_scroll: 0,
             scroll: 0,
@@ -1781,7 +763,6 @@ mod tests {
             status: state.current_node_status,
             started_at: state.current_node_started_at,
             iteration: state.current_node_iteration,
-            output_tail: state.current_node_output_tail.clone(),
             chosen_route: None,
         };
 
@@ -1798,6 +779,7 @@ mod tests {
                     blocked: false,
                     now: Utc::now(),
                     theme: &Theme::classic(),
+                    time_format: "%H:%M",
                     selected_spec_id: None,
                     spec_scroll: 0,
                     scroll: 0,
@@ -1940,6 +922,7 @@ mod tests {
                     blocked: false,
                     now: Utc::now(),
                     theme: &Theme::classic(),
+                    time_format: "%H:%M",
                     selected_spec_id: None,
                     spec_scroll: 0,
                     scroll: 0,
@@ -2197,6 +1180,7 @@ mod tests {
                     blocked: false,
                     now: Utc::now(),
                     theme: &Theme::classic(),
+                    time_format: "%H:%M",
                     selected_spec_id: None,
                     spec_scroll: 0,
                     scroll: 0,
@@ -2371,6 +1355,7 @@ mod tests {
                     blocked: false,
                     now: Utc::now(),
                     theme: &Theme::classic(),
+                    time_format: "%H:%M",
                     selected_spec_id: None,
                     spec_scroll: 0,
                     scroll: 0,
@@ -2400,6 +1385,7 @@ mod tests {
                     blocked: false,
                     now: Utc::now(),
                     theme: &Theme::classic(),
+                    time_format: "%H:%M",
                     selected_spec_id: None,
                     spec_scroll: 0,
                     scroll: 10,
@@ -2433,6 +1419,7 @@ mod tests {
                     blocked: false,
                     now: Utc::now(),
                     theme: &Theme::classic(),
+                    time_format: "%H:%M",
                     selected_spec_id: None,
                     spec_scroll: 0,
                     scroll: 0,
@@ -2467,6 +1454,7 @@ mod tests {
                         blocked: false,
                         now: Utc::now(),
                         theme: &Theme::classic(),
+                        time_format: "%H:%M",
                         selected_spec_id: None,
                         spec_scroll: 0,
                         scroll: 1000,
@@ -2509,6 +1497,7 @@ mod tests {
                     blocked: false,
                     now: Utc::now(),
                     theme: &Theme::classic(),
+                    time_format: "%H:%M",
                     selected_spec_id: None,
                     spec_scroll: 0,
                     scroll: 0,
@@ -2590,6 +1579,7 @@ mod tests {
                     blocked: false,
                     now: Utc::now(),
                     theme: &Theme::classic(),
+                    time_format: "%H:%M",
                     selected_spec_id: None,
                     spec_scroll: 0,
                     scroll: 0,
@@ -2676,6 +1666,7 @@ mod tests {
                     blocked: false,
                     now: Utc::now(),
                     theme: &Theme::classic(),
+                    time_format: "%H:%M",
                     selected_spec_id: None,
                     spec_scroll: 0,
                     scroll: 0,
@@ -2760,6 +1751,7 @@ mod tests {
                     blocked: false,
                     now: Utc::now(),
                     theme: &Theme::classic(),
+                    time_format: "%H:%M",
                     selected_spec_id: None,
                     spec_scroll: 0,
                     scroll: 0,
@@ -2947,6 +1939,7 @@ mod tests {
                         blocked: false,
                         now: Utc::now(),
                         theme: &Theme::classic(),
+                        time_format: "%H:%M",
                         selected_spec_id: None,
                         spec_scroll: 0,
                         scroll: 0,
@@ -2978,6 +1971,7 @@ mod tests {
                         blocked: false,
                         now: Utc::now(),
                         theme: &Theme::classic(),
+                        time_format: "%H:%M",
                         selected_spec_id: None,
                         spec_scroll: 0,
                         scroll: 10,
@@ -3018,6 +2012,7 @@ mod tests {
                     blocked: false,
                     now: Utc::now(),
                     theme: &Theme::classic(),
+                    time_format: "%H:%M",
                     selected_spec_id: None,
                     spec_scroll: 0,
                     scroll: 0,
@@ -3031,6 +2026,169 @@ mod tests {
     }
     // Breaks if: auto-follow stops re-centring on node change (e.g. the
     // node-change branch always returns `clamped_from_input`).
+
+    #[test]
+    fn ct27_auto_follow_centres_a_tall_ensemble_box_in_the_panel() {
+        // The 2026-10-08 regression, replayed: on the transition
+        // "Lock repo + clear scratch" -> "Designer [8 models]" the panel
+        // scrolled just far enough to park the box's first three lines on the
+        // last visible rows, leaving the remaining six members below the
+        // bottom edge. Auto-follow must bring the whole box into view.
+        let mut state = running_state();
+        state.effective_nodes = vec![
+            GraphNode {
+                id: "kickoff".to_string(),
+                spec_id: Some("spec-1".to_string()),
+                graph_id: None,
+                name: "Lock repo + clear scratch".to_string(),
+                kind: GraphNodeKind::Agent,
+                config: json!({}),
+                position: 0,
+                created_at: Utc::now(),
+            },
+            GraphNode {
+                id: "join1".to_string(),
+                spec_id: Some("spec-1".to_string()),
+                graph_id: None,
+                name: "Designer (quorum)".to_string(),
+                kind: GraphNodeKind::Join,
+                config: json!({}),
+                position: 9,
+                created_at: Utc::now(),
+            },
+            GraphNode {
+                id: "arbiter".to_string(),
+                spec_id: Some("spec-1".to_string()),
+                graph_id: None,
+                name: "Arbiter".to_string(),
+                kind: GraphNodeKind::Agent,
+                config: json!({}),
+                position: 10,
+                created_at: Utc::now(),
+            },
+        ]
+        .into_iter()
+        .chain((0..8).map(|i| GraphNode {
+            id: format!("m{i}"),
+            spec_id: Some("spec-1".to_string()),
+            graph_id: None,
+            name: format!("Designer [{i}]"),
+            kind: GraphNodeKind::Agent,
+            config: json!({}),
+            position: i + 1,
+            created_at: Utc::now(),
+        }))
+        .collect();
+        let mut edges: Vec<GraphEdge> = (0..8)
+            .flat_map(|i| {
+                [
+                    (
+                        "kickoff".to_string(),
+                        format!("m{i}"),
+                        GraphEdgeCondition::Always,
+                    ),
+                    (
+                        format!("m{i}"),
+                        "join1".to_string(),
+                        GraphEdgeCondition::Always,
+                    ),
+                ]
+            })
+            .enumerate()
+            .map(|(i, (from, to, condition))| GraphEdge {
+                id: format!("ee{i}"),
+                spec_id: Some("spec-1".to_string()),
+                graph_id: None,
+                from_node: from,
+                to_node: to,
+                condition,
+            })
+            .collect();
+        edges.push(GraphEdge {
+            id: "ee16".to_string(),
+            spec_id: Some("spec-1".to_string()),
+            graph_id: None,
+            from_node: "join1".to_string(),
+            to_node: "arbiter".to_string(),
+            condition: GraphEdgeCondition::Pass,
+        });
+        state.effective_edges = edges;
+        state.ensembles = vec![ensemble_fixture_with_labels(&[
+            "openrouter/deepseek",
+            "openrouter/qwen",
+            "openrouter/llama",
+            "openrouter/mistral",
+            "openrouter/gemma",
+            "openrouter/phi",
+            "openrouter/yi",
+            "openrouter/grok",
+        ])];
+        state.current_node_id = Some("m0".to_string());
+
+        let text = render_to_text(80, 20, |frame, area| {
+            render_graph_live_view(
+                frame,
+                area,
+                &LiveViewContext {
+                    state: &state,
+                    follow: true,
+                    // The engine just moved off the previous node, so this
+                    // frame is a node change and must re-centre.
+                    follow_anchor: Some("kickoff"),
+                    highlighted_node_id: Some("m0"),
+                    node_info: &NodeRunInfo::default(),
+                    blocked: false,
+                    now: Utc::now(),
+                    theme: &Theme::classic(),
+                    time_format: "%H:%M",
+                    selected_spec_id: None,
+                    spec_scroll: 0,
+                    scroll: 0,
+                },
+            );
+        });
+
+        // The collapsed box is titled with its member count...
+        assert!(
+            text.contains("Implementer [8 models]"),
+            "ensemble box title missing in:\n{text}"
+        );
+        // ...and EVERY member row is on screen, not only the first three.
+        for label in [
+            "openrouter/deepseek",
+            "openrouter/qwen",
+            "openrouter/llama",
+            "openrouter/mistral",
+            "openrouter/gemma",
+            "openrouter/phi",
+            "openrouter/yi",
+            "openrouter/grok",
+        ] {
+            assert!(
+                text.contains(label),
+                "member {label} of the followed ensemble is below the bottom edge:\n{text}"
+            );
+        }
+        // The box is complete on screen: its closing border renders directly
+        // under the last member row, and the node that follows it is visible
+        // below that border.
+        let rows: Vec<&str> = text.lines().collect();
+        let last_member_row = rows
+            .iter()
+            .position(|row| row.contains("openrouter/grok"))
+            .expect("last member row must be on screen");
+        assert!(
+            rows[last_member_row + 1].contains('└'),
+            "ensemble box bottom border must sit under the last member row:\n{text}"
+        );
+        assert!(
+            text.contains("Arbiter"),
+            "the node after the followed ensemble must be visible below it:\n{text}"
+        );
+    }
+    // Breaks if: auto-follow returns to the span-3 `ensure_visible` (only the
+    // title and the first two member rows would be on the last visible
+    // lines), or if `highlighted_span` stops measuring the ensemble box.
 
     #[test]
     fn ct8_auto_follow_ignores_status_or_elapsed_change_for_same_node() {
@@ -3063,6 +2221,7 @@ mod tests {
                         blocked: false,
                         now: Utc::now(),
                         theme: &Theme::classic(),
+                        time_format: "%H:%M",
                         selected_spec_id: None,
                         spec_scroll: 0,
                         scroll: 0,
@@ -3094,6 +2253,7 @@ mod tests {
                         blocked: false,
                         now: Utc::now(),
                         theme: &Theme::classic(),
+                        time_format: "%H:%M",
                         selected_spec_id: None,
                         spec_scroll: 0,
                         scroll: 12,
@@ -3132,6 +2292,7 @@ mod tests {
                     blocked: false,
                     now: Utc::now(),
                     theme: &Theme::classic(),
+                    time_format: "%H:%M",
                     selected_spec_id: None,
                     spec_scroll: 0,
                     scroll: 0,
@@ -3168,6 +2329,7 @@ mod tests {
                     blocked: false,
                     now: Utc::now(),
                     theme: &Theme::classic(),
+                    time_format: "%H:%M",
                     selected_spec_id: None,
                     spec_scroll: 0,
                     scroll: 250,
@@ -3199,6 +2361,7 @@ mod tests {
                     blocked: false,
                     now: Utc::now(),
                     theme: &Theme::classic(),
+                    time_format: "%H:%M",
                     selected_spec_id: None,
                     spec_scroll: 0,
                     scroll: 0,
@@ -3223,6 +2386,7 @@ mod tests {
                     blocked: false,
                     now: Utc::now(),
                     theme: &Theme::classic(),
+                    time_format: "%H:%M",
                     selected_spec_id: None,
                     spec_scroll: 0,
                     scroll: 0,
@@ -3236,4 +2400,41 @@ mod tests {
     }
     // Breaks if: the strip is re-added to the live view instead of
     // the border title.
+}
+
+#[cfg(test)]
+mod tail_pane_split_tests {
+    use super::tail_pane_split;
+    use ratatui::layout::Rect;
+
+    #[test]
+    fn split_horizontal_at_160x40() {
+        let area = Rect::new(0, 0, 160, 40);
+        let (graph, pane) = tail_pane_split(area);
+        assert_eq!(graph.width, 80);
+        assert_eq!(pane.width, 80);
+        assert_eq!(graph.height, 40);
+        assert_eq!(pane.height, 40);
+        assert_eq!(graph.x, 0);
+        assert_eq!(pane.x, 80);
+    }
+
+    #[test]
+    fn split_vertical_at_100x40() {
+        let area = Rect::new(0, 0, 100, 40);
+        let (graph, pane) = tail_pane_split(area);
+        assert_eq!(graph.height, 16); // 40 * 40% = 16
+        assert_eq!(graph.y, 0);
+        assert_eq!(pane.y, 16);
+        assert_eq!(graph.width, 100);
+        assert_eq!(pane.width, 100);
+    }
+
+    #[test]
+    fn split_vertical_minimum_8_rows() {
+        let area = Rect::new(0, 0, 80, 10);
+        let (graph, _) = tail_pane_split(area);
+        // 10 * 40% = 4, clamped to min 8
+        assert_eq!(graph.height, 8);
+    }
 }

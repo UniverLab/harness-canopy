@@ -85,12 +85,11 @@ fn enrich(row: &SandboxRun) -> SandboxInfo {
     }
 }
 
-/// Directories under canopy's worktrees root with no `sandbox_runs` row:
+/// Directories under a worktrees root with no `sandbox_runs` row:
 /// anonymous leftovers from before runs were recorded. Listed so they stay
 /// findable — never touched here.
-fn untracked_sandbox_dirs(known_ids: &HashSet<String>) -> Vec<PathBuf> {
-    let base = sandbox::worktrees_base_dir();
-    let Ok(entries) = std::fs::read_dir(&base) else {
+fn untracked_sandbox_dirs_in(known_ids: &HashSet<String>, base: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(base) else {
         return Vec::new();
     };
     let mut out = Vec::new();
@@ -126,14 +125,20 @@ fn untracked_sandbox_dirs(known_ids: &HashSet<String>) -> Vec<PathBuf> {
     out
 }
 
+fn untracked_sandbox_dirs(known_ids: &HashSet<String>) -> Vec<PathBuf> {
+    untracked_sandbox_dirs_in(known_ids, &sandbox::worktrees_base_dir())
+}
+
 /// Shared by `sandbox list` and `canopy clean`: the untracked-directory
 /// scan is one function so both commands agree on what "untracked" means.
-pub(crate) fn scan_untracked_sandbox_dirs(db: &Database) -> Vec<PathBuf> {
+/// The `_in` form takes the worktrees root explicitly so `canopy clean`
+/// derives it from its injected `data_dir` instead of the real home.
+pub(crate) fn scan_untracked_sandbox_dirs_in(db: &Database, base: &Path) -> Vec<PathBuf> {
     let known: HashSet<String> = db
         .list_all_sandbox_runs()
         .map(|rows| rows.into_iter().map(|r| r.id).collect())
         .unwrap_or_default();
-    untracked_sandbox_dirs(&known)
+    untracked_sandbox_dirs_in(&known, base)
 }
 
 fn untracked_info(path: &Path) -> SandboxInfo {

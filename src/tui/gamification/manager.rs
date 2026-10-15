@@ -83,8 +83,14 @@ impl MissionManager {
         whimsg: &mut Whimsg,
     ) -> Result<Vec<String>> {
         let mut pending = Vec::new();
-        let mut newly_unlocked = Vec::new();
+        Self::collect_event_missions(events, &mut pending);
+        Self::collect_snapshot_missions(snapshot, &mut pending);
+        Self::collect_agent_missions(snapshot, &mut pending);
+        self.unlock_pending(pending, whimsg)
+    }
 
+    /// Map discrete events to the mission each one awards.
+    fn collect_event_missions(events: &[MissionEvent], pending: &mut Vec<MissionId>) {
         for event in events {
             match event {
                 MissionEvent::FireflyCaught => pending.push(MissionId::FireflyCatcher),
@@ -98,127 +104,130 @@ impl MissionManager {
                 }
             }
         }
+    }
 
+    /// Threshold missions derived from the accumulated snapshot counters.
+    fn collect_snapshot_missions(snapshot: &MissionSnapshot, pending: &mut Vec<MissionId>) {
         Self::push_if(
             snapshot.canopy_uptime_secs >= 86_400,
             MissionId::CanopyExplorer,
-            &mut pending,
+            pending,
         );
         Self::push_if(
             snapshot.interactive_sessions >= 5,
             MissionId::Multitasker,
-            &mut pending,
+            pending,
         );
         Self::push_if(
             snapshot.registered_harness_count > 0
                 && snapshot.harnesses_used_count >= snapshot.registered_harness_count,
             MissionId::HarnessMaster,
-            &mut pending,
+            pending,
         );
         Self::push_if(
             snapshot.intelligence_nodes >= 100,
             MissionId::DataArchitect,
-            &mut pending,
+            pending,
         );
         Self::push_if(
             snapshot.cross_project_links >= 1,
             MissionId::WorldConnector,
-            &mut pending,
+            pending,
         );
         Self::push_if(
             snapshot.indexed_files >= 100,
             MissionId::UniversalLibrarian,
-            &mut pending,
+            pending,
         );
         Self::push_if(
             snapshot.rag_chunks >= 1_000,
             MissionId::SiliconBrain,
-            &mut pending,
+            pending,
         );
         Self::push_if(
             snapshot.project_count >= 10,
             MissionId::DataHoarder,
-            &mut pending,
+            pending,
         );
         Self::push_if(
             snapshot.distinct_project_languages >= 3,
             MissionId::ProjectPolyglot,
-            &mut pending,
+            pending,
         );
         Self::push_if(
             snapshot.gardener_edits >= 5,
             MissionId::TheGardener,
-            &mut pending,
+            pending,
         );
         Self::push_if(
             snapshot.graph_node_count_max >= 5,
             MissionId::AutomationEngineer,
-            &mut pending,
+            pending,
         );
         Self::push_if(
             snapshot.completed_graph_runs >= 10,
             MissionId::PipelinePilot,
-            &mut pending,
+            pending,
         );
         Self::push_if(
             snapshot.has_parallel_graph,
             MissionId::ParallelVision,
-            &mut pending,
+            pending,
         );
         Self::push_if(
             snapshot.total_graph_node_runs >= 100,
             MissionId::GraphSurvivor,
-            &mut pending,
+            pending,
         );
-        Self::push_if(
-            snapshot.seed_count >= 1,
-            MissionId::FirstBloom,
-            &mut pending,
-        );
-        Self::push_if(
-            snapshot.seed_count >= 5,
-            MissionId::TheOrchard,
-            &mut pending,
-        );
+        Self::push_if(snapshot.seed_count >= 1, MissionId::FirstBloom, pending);
+        Self::push_if(snapshot.seed_count >= 5, MissionId::TheOrchard, pending);
         Self::push_if(
             snapshot.max_seed_session_bindings >= 50,
             MissionId::DeepRoots,
-            &mut pending,
+            pending,
         );
+    }
 
-        if snapshot.agent_running {
-            Self::push_if(
-                snapshot.cpu_usage >= 95.0,
-                MissionId::FullThrottle,
-                &mut pending,
-            );
-            if let Some(temp) = snapshot.cpu_temperature_c {
-                Self::push_if(temp >= 85.0, MissionId::NuclearWinter, &mut pending);
-            }
-            if let (Some(used), Some(total)) = (snapshot.gpu_vram_used, snapshot.gpu_vram_total) {
-                if total > 0 && used as f64 / total as f64 >= 0.9 {
-                    pending.push(MissionId::VramSqueezer);
-                }
-            }
-            Self::push_if(
-                snapshot.swap_used_bytes > 1_000_000_000,
-                MissionId::SwapSurvivor,
-                &mut pending,
-            );
-            if let (Some(current), Some(max)) =
-                (snapshot.cpu_frequency_mhz, snapshot.max_cpu_frequency_seen)
-            {
-                if current >= max && max > 0 {
-                    pending.push(MissionId::Overclocker);
-                }
-            }
-            Self::push_if(
-                snapshot.process_count > 500,
-                MissionId::ProcessLord,
-                &mut pending,
-            );
+    /// Missions that only count while an agent is actually running.
+    fn collect_agent_missions(snapshot: &MissionSnapshot, pending: &mut Vec<MissionId>) {
+        if !snapshot.agent_running {
+            return;
         }
+        Self::push_if(snapshot.cpu_usage >= 95.0, MissionId::FullThrottle, pending);
+        if let Some(temp) = snapshot.cpu_temperature_c {
+            Self::push_if(temp >= 85.0, MissionId::NuclearWinter, pending);
+        }
+        if let (Some(used), Some(total)) = (snapshot.gpu_vram_used, snapshot.gpu_vram_total) {
+            if total > 0 && used as f64 / total as f64 >= 0.9 {
+                pending.push(MissionId::VramSqueezer);
+            }
+        }
+        Self::push_if(
+            snapshot.swap_used_bytes > 1_000_000_000,
+            MissionId::SwapSurvivor,
+            pending,
+        );
+        if let (Some(current), Some(max)) =
+            (snapshot.cpu_frequency_mhz, snapshot.max_cpu_frequency_seen)
+        {
+            if current >= max && max > 0 {
+                pending.push(MissionId::Overclocker);
+            }
+        }
+        Self::push_if(
+            snapshot.process_count > 500,
+            MissionId::ProcessLord,
+            pending,
+        );
+    }
 
+    /// Unlock every awarded mission, notifying and reporting the new titles.
+    fn unlock_pending(
+        &mut self,
+        pending: Vec<MissionId>,
+        whimsg: &mut Whimsg,
+    ) -> Result<Vec<String>> {
+        let mut newly_unlocked = Vec::new();
         for id in pending {
             if self.store.unlock(id)? {
                 let title = mission_def(id).title;
@@ -226,7 +235,6 @@ impl MissionManager {
                 newly_unlocked.push(title.to_string());
             }
         }
-
         Ok(newly_unlocked)
     }
 

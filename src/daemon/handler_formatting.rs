@@ -1,10 +1,16 @@
 use chrono::Utc;
+use rmcp::model::{CallToolResult, Content};
 use rmcp::ErrorData as McpError;
 
 use crate::application::ports::{AgentRepository, RunRepository};
-use crate::daemon::helpers::{data_dir, filter_log_line};
+use crate::daemon::helpers::{data_dir, filter_log_line, success_result};
+use crate::db::session::InteractiveSession;
 use crate::db::Database;
+use crate::db::{connection::is_busy_error, DB_BUSY_TIMEOUT};
 use crate::domain::models::{Agent, RunLog, Trigger};
+
+mod send_action;
+pub(crate) use send_action::{append_send_session_section, describe_action};
 
 pub(crate) fn format_uptime(secs: u64) -> String {
     if secs > 3600 {
@@ -42,9 +48,21 @@ pub(crate) fn format_agent_info(a: &Agent) -> String {
         None => "manual".to_string(),
     };
 
+    // A send_to_session agent has no CLI/model/effort/timeout; show its
+    // action and target instead of a CLI line.
+    let delivery_line = if a.is_send_to_session() {
+        let description = describe_action(a);
+        match description.target {
+            Some(target) => format!(" Action: {}\n {}\n", description.label, target),
+            None => format!(" Action: {}\n", description.label),
+        }
+    } else {
+        format!(" CLI: {}\n", a.cli)
+    };
+
     let mut info = format!(
-        "- **{}** [{}] ({})\n Trigger: {} `{}`\n CLI: {}\n Prompt: {}\n",
-        a.id, status, trigger_label, trigger_label, trigger_detail, a.cli, prompt_preview
+        "- **{}** [{}] ({})\n Trigger: {} `{}`\n{} Prompt: {}\n",
+        a.id, status, trigger_label, trigger_label, trigger_detail, delivery_line, prompt_preview
     );
 
     if let Some(last) = a.last_run_at {
@@ -83,7 +101,7 @@ pub(crate) fn format_agent_info(a: &Agent) -> String {
 /// it in. `trigger_type`/`trigger_config` are null for a manual (trigger-less)
 /// agent — they mirror the stored columns, not the "manual" display label.
 pub(crate) fn agent_detail_json(a: &Agent, notify_on_success: bool) -> serde_json::Value {
-    serde_json::json!({
+    let mut value = serde_json::json!({
         "id": &a.id,
         "trigger_type": a.trigger.as_ref().map(|t| t.type_str()),
         "trigger_config": &a.trigger,
@@ -103,7 +121,21 @@ pub(crate) fn agent_detail_json(a: &Agent, notify_on_success: bool) -> serde_jso
         "last_triggered_at": a.last_triggered_at.as_ref().map(|t| t.to_rfc3339()),
         "trigger_count": a.trigger_count,
         "prompt": &a.prompt,
-    })
+    });
+    if a.is_send_to_session() {
+        let description = describe_action(a);
+        if let Some(obj) = value.as_object_mut() {
+            obj.remove("cli");
+            obj.remove("model");
+            obj.remove("effort");
+            obj.remove("timeout_minutes");
+            obj.insert("action".to_string(), serde_json::json!(description.label));
+            if let Some(target) = description.target {
+                obj.insert("target".to_string(), serde_json::json!(target));
+            }
+        }
+    }
+    value
 }
 
 pub(crate) fn resolve_log_path(db: &Database, id: &str) -> Result<String, McpError> {
@@ -212,6 +244,29 @@ pub(crate) fn make_log_path(id: &str) -> Result<String, McpError> {
 
 pub(crate) fn internal_error(error: impl std::fmt::Display) -> McpError {
     McpError::internal_error(error.to_string(), None)
+}
+
+/// Map a failed write to the MCP error the caller sees. A `SQLITE_BUSY` that
+/// outlived the busy timeout is transient — nothing was committed — so the
+/// message names `operation` and says to retry, logged once at warn (FR2).
+/// Every other error keeps the generic internal-error shape, byte for byte.
+pub(crate) fn write_error(operation: &str, error: &anyhow::Error) -> McpError {
+    internal_error(write_error_message(operation, error))
+}
+
+/// The busy message `write_error` wraps — also usable by the tool-level
+/// `error_result` channel, which carries a `String`, not an `McpError`.
+pub(crate) fn write_error_message(operation: &str, error: &anyhow::Error) -> String {
+    if is_busy_error(error) {
+        let message = format!(
+            "{operation}: database busy after {} s — nothing was written, retry",
+            DB_BUSY_TIMEOUT.as_secs()
+        );
+        tracing::warn!("{message}");
+        message
+    } else {
+        error.to_string()
+    }
 }
 
 pub(crate) fn format_temporal_agents(agents: &[Agent]) -> String {
@@ -458,6 +513,103 @@ fn format_models_for_providers(
     (sections.join("\n"), truncation)
 }
 
+pub(crate) fn build_graph_update_response(
+    graph_id: &str,
+    active_run_note: Option<&str>,
+) -> CallToolResult {
+    match active_run_note {
+        Some(note) => success_result(&format!("Graph '{graph_id}' updated. {note}")),
+        None => success_result(&format!("Graph '{graph_id}' updated.")),
+    }
+}
+
+pub(crate) fn build_spec_update_response(spec_id: &str) -> CallToolResult {
+    success_result(&format!("Graph spec '{spec_id}' updated."))
+}
+
+pub(crate) fn build_node_update_response_with_changes(
+    node_id: &str,
+    changed_keys: &[String],
+) -> CallToolResult {
+    if changed_keys.is_empty() {
+        return success_result(&format!(
+            "Graph node '{node_id}' updated (no config changes)."
+        ));
+    }
+    let mut map = serde_json::Map::new();
+    map.insert("node_id".to_string(), serde_json::json!(node_id));
+    map.insert(
+        "changed_config_keys".to_string(),
+        serde_json::json!(changed_keys),
+    );
+    CallToolResult::success(vec![Content::text(
+        serde_json::to_string_pretty(&serde_json::Value::Object(map)).unwrap_or_default(),
+    )])
+}
+
+pub(crate) fn build_id_result(id: &str, key: &str) -> CallToolResult {
+    let mut map = serde_json::Map::new();
+    map.insert(key.to_string(), serde_json::json!(id));
+    CallToolResult::success(vec![Content::text(
+        serde_json::to_string_pretty(&serde_json::Value::Object(map)).unwrap_or_default(),
+    )])
+}
+
+/// Return an arbitrary JSON value as a tool result — used by the copy tools
+/// (`graph_copy_node`/`graph_copy_ensemble`) whose response carries an explicit
+/// old→new id mapping and a wiring report, not just a single id.
+pub(crate) fn build_json_result(value: &serde_json::Value) -> CallToolResult {
+    CallToolResult::success(vec![Content::text(
+        serde_json::to_string_pretty(value).unwrap_or_default(),
+    )])
+}
+
+/// Format a `SystemTime` as an RFC 3339 / ISO 8601 UTC timestamp for the
+/// `agent_models` cache metadata.
+pub(crate) fn format_system_time(time: std::time::SystemTime) -> String {
+    chrono::DateTime::<chrono::Utc>::from(time).to_rfc3339()
+}
+
+/// Render a `Duration` as a short human-readable age/TTL (`45s`, `12m`,
+/// `2h15m`, `3d4h`) for the `agent_models` footer — coarse on purpose, since
+/// the footer only needs to convey rough freshness, not precise timing.
+pub(crate) fn format_duration_short(d: std::time::Duration) -> String {
+    let secs = d.as_secs();
+    if secs < 60 {
+        return format!("{secs}s");
+    }
+    let mins = secs / 60;
+    if mins < 60 {
+        return format!("{mins}m");
+    }
+    let hours = mins / 60;
+    let rem_mins = mins % 60;
+    if hours < 24 {
+        return if rem_mins == 0 {
+            format!("{hours}h")
+        } else {
+            format!("{hours}h{rem_mins}m")
+        };
+    }
+    let days = hours / 24;
+    let rem_hours = hours % 24;
+    if rem_hours == 0 {
+        format!("{days}d")
+    } else {
+        format!("{days}d{rem_hours}h")
+    }
+}
+
+pub(crate) fn append_temporal_agents_section(status: &mut String, agents: &[Agent]) {
+    let temporal = format_temporal_agents(agents);
+    if temporal.is_empty() {
+        return;
+    }
+
+    status.push_str("\n\nTemporal agents:\n");
+    status.push_str(&temporal);
+}
+
 #[cfg(test)]
 mod formatting_unit_tests {
     use super::*;
@@ -483,6 +635,7 @@ mod formatting_unit_tests {
             last_run_ok: None,
             last_triggered_at: None,
             trigger_count: 0,
+            action: crate::domain::models::AgentAction::Headless,
         }
     }
 
@@ -1071,6 +1224,44 @@ mod formatting_unit_tests {
         let result = format_log_output(path, "test-agent", None, 100);
         assert!(result.is_err());
     }
+
+    fn busy_anyhow() -> anyhow::Error {
+        anyhow::Error::new(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: rusqlite::ErrorCode::DatabaseBusy,
+                extended_code: 5,
+            },
+            None,
+        ))
+    }
+
+    #[test]
+    fn write_error_busy_names_operation_and_says_retry() {
+        let mcp = write_error("graph_import", &busy_anyhow());
+        assert_eq!(mcp.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
+        assert_eq!(
+            mcp.message.to_string(),
+            "graph_import: database busy after 5 s — nothing was written, retry"
+        );
+    }
+
+    #[test]
+    fn write_error_non_busy_passes_through_unchanged() {
+        let mcp = write_error("graph_import", &anyhow::anyhow!("disk full"));
+        assert_eq!(mcp.message.to_string(), "disk full");
+    }
+
+    #[test]
+    fn write_error_message_busy_and_plain() {
+        assert_eq!(
+            write_error_message("graph_import", &busy_anyhow()),
+            "graph_import: database busy after 5 s — nothing was written, retry"
+        );
+        assert_eq!(
+            write_error_message("graph_import", &anyhow::anyhow!("disk full")),
+            "disk full"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1220,5 +1411,54 @@ mod model_listing_tests {
             out1, out2,
             "two consecutive calls must produce identical output"
         );
+    }
+}
+
+/// Format one interactive session as a single summary line for `session_list`.
+pub(crate) fn format_session_info(session: &InteractiveSession) -> String {
+    let attached = if session_is_attached(session) {
+        "yes"
+    } else {
+        "no"
+    };
+    let hook_target = if session.status == "active" {
+        "yes".to_string()
+    } else {
+        format!(
+            "no (status: {} — an interactive hook rejects this id until the session is live again)",
+            session.status
+        )
+    };
+    format!(
+        "- id: {} | name: {} | platform: {} | workdir: {} | attached: {} | hook_target: {}",
+        session.id, session.name, session.cli, session.working_dir, attached, hook_target
+    )
+}
+
+/// Whether an interactive session is attached to a live CLI process on this
+/// host right now (CM16). `true` only when provable: the row was recorded on
+/// the current boot AND its PID is still alive. A different boot id, a NULL
+/// boot id, or a missing/dead PID all read as `false` — the session may
+/// still be a valid hook target (an enqueued send is delivered when a TUI
+/// next attaches), it just is not attached at this moment. Side-effect-free:
+/// no PTY touched, no session woken.
+pub(crate) fn session_is_attached(session: &InteractiveSession) -> bool {
+    match (
+        session.boot_id.as_deref(),
+        crate::system::boot_id().as_deref(),
+    ) {
+        (Some(stored), Some(current)) if stored == current => session
+            .pid
+            .map(crate::system::process_is_alive)
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+pub(crate) fn transport_details(port: u16) -> (&'static str, String) {
+    if port > 0 {
+        ("Streamable HTTP", port.to_string())
+    } else {
+        ("stdio", "N/A".to_owned())
     }
 }

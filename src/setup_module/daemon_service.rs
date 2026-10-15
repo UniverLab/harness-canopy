@@ -127,11 +127,20 @@ pub fn run_setup_silent() -> Result<()> {
     let canopy_dir = home.join(".canopy");
     std::fs::create_dir_all(&canopy_dir)?;
 
-    // Save unified config
+    // Save unified config (CM51: through the one writer).
     let mut config = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir);
     config.mark_configured();
     config.clis = cli_registry.available_clis;
-    config.save(&canopy_dir)?;
+    crate::domain::settings::writer::write_keys(
+        &canopy_dir,
+        &[(
+            "configured_at",
+            Some(toml_edit::Value::from(
+                config.configured_at.clone().unwrap_or_default(),
+            )),
+        )],
+    )?;
+    crate::domain::settings::writer::write_clis(&canopy_dir, &config.clis)?;
 
     Ok(())
 }

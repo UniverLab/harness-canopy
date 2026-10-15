@@ -51,7 +51,6 @@ impl RegistryBaseline {
 
     /// The baselined view of a single platform by name, if the last refresh
     /// knew about it.
-    #[allow(dead_code)]
     pub fn get_platform(&self, name: &str) -> Option<&Platform> {
         self.platforms.iter().find(|p| p.name == name)
     }

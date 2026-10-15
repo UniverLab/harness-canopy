@@ -1,11 +1,14 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+use super::types::App;
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 use crate::db::Database;
 use crate::domain::graphs::{
-    GraphEdge, GraphNode, GraphNodeKind, GraphRunStatus, GraphSpecStatus, GraphStatus,
+    GraphEdge, GraphEdgeCondition, GraphNode, GraphNodeKind, GraphRunStatus, GraphSpecStatus,
+    GraphStatus,
 };
 
 /// A snapshot of the currently-selected graph's runtime state, assembled
@@ -58,8 +61,6 @@ pub(crate) struct GraphLiveState {
     pub current_node_started_at: Option<DateTime<Utc>>,
     /// Iteration counter for the current node's latest run.
     pub current_node_iteration: Option<i64>,
-    /// Bounded output tail (last ~15 lines) from the current node's latest run.
-    pub current_node_output_tail: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -100,8 +101,6 @@ pub(crate) struct EnsembleMemberLiveInfo {
     pub label: String,
     pub status: Option<GraphRunStatus>,
 }
-
-const OUTPUT_TAIL_LINES: usize = 15;
 
 /// Assemble a [`GraphLiveState`] for the given graph. Returns `None` when
 /// `details` is `None` (no graph selected / mid-migration).
@@ -187,7 +186,6 @@ pub(crate) fn assemble_graph_live_state(
         current_node_status: current_node_info.status,
         current_node_started_at: current_node_info.started_at,
         current_node_iteration: current_node_info.iteration,
-        current_node_output_tail: current_node_info.output_tail,
     })
 }
 
@@ -278,7 +276,6 @@ pub(crate) struct NodeRunInfo {
     pub status: Option<GraphRunStatus>,
     pub started_at: Option<DateTime<Utc>>,
     pub iteration: Option<i64>,
-    pub output_tail: Option<String>,
     /// The route label a router node's run selected, if this run is a
     /// router's (see `graph_engine::execute_router_node`'s `"route"` output
     /// field). `None` for every other node kind.
@@ -291,7 +288,6 @@ impl NodeRunInfo {
             status: Some(run.status),
             started_at: Some(run.started_at),
             iteration: Some(run.iteration),
-            output_tail: extract_output_tail(&run.output),
             chosen_route: extract_chosen_route(&run.output),
         }
     }
@@ -362,10 +358,11 @@ fn build_spec_queue(db: &Database, lp: &crate::domain::graphs::Graph) -> Vec<Spe
 
 /// Reason a spec ended up `Failed`/`Skipped`, for the marker strip's detail
 /// view: the admin-recorded reason (`completed_via_reason`, set only for
-/// administrative transitions) if present, else the output tail of its last
-/// run — the best available proxy for an engine-driven failure, which
-/// doesn't persist a reason on the spec row itself. `None` for every other
-/// status, and when neither source has anything.
+/// administrative transitions) if present, else the last run's self-reported
+/// `summary`/`error`/`blocker` — the best available proxy for an
+/// engine-driven failure, which doesn't persist a reason on the spec row
+/// itself. `None` for every other status, and when neither source has
+/// anything.
 fn spec_failure_reason(db: &Database, spec: &crate::domain::graphs::GraphSpec) -> Option<String> {
     if !matches!(
         spec.status,
@@ -376,11 +373,22 @@ fn spec_failure_reason(db: &Database, spec: &crate::domain::graphs::GraphSpec) -
     if let Some(reason) = spec.completed_via_reason.clone() {
         return Some(reason);
     }
+    // CT28: the live footer tail is gone; fall back to the run's own
+    // `summary` field (self-reported by the engine) as the best proxy for a
+    // failure reason, then the raw error text.
     db.list_graph_runs_for_spec(&spec.id)
         .unwrap_or_default()
         .iter()
         .rev()
-        .find_map(|run| extract_output_tail(&run.output))
+        .find_map(|run| {
+            run.output.as_ref().and_then(|o| {
+                o.get("summary")
+                    .or_else(|| o.get("error"))
+                    .or_else(|| o.get("blocker"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+        })
 }
 
 /// Resolve the effective graph: spec's own graph if it has nodes, else the
@@ -436,51 +444,212 @@ fn resolve_current_node(
     (None, NodeRunInfo::default())
 }
 
-/// Extract a bounded text tail (~15 lines) from a JSON output value.
-fn extract_output_tail(output: &Option<Value>) -> Option<String> {
-    let value = output.as_ref()?;
-    let text = json_to_text(value);
-    if text.is_empty() {
-        return None;
+impl App {
+    pub(super) fn edge_priority(
+        condition: &crate::domain::graphs::GraphEdgeCondition,
+    ) -> (u8, Option<String>) {
+        match condition {
+            crate::domain::graphs::GraphEdgeCondition::Pass => (0, None),
+            crate::domain::graphs::GraphEdgeCondition::Fail => (1, None),
+            crate::domain::graphs::GraphEdgeCondition::Always => (2, None),
+            crate::domain::graphs::GraphEdgeCondition::Route(label) => (3, Some(label.clone())),
+            crate::domain::graphs::GraphEdgeCondition::Error => (4, None),
+        }
     }
-    let tail = tail_lines(&text, OUTPUT_TAIL_LINES);
-    if tail.is_empty() {
+
+    /// Collapse join nodes and ensemble members into one key per ensemble
+    /// (`true` = ensemble), carrying each key's node position. Mirrors what
+    /// the graph view draws.
+    pub(super) fn collapse_nodes(state: &GraphLiveState) -> HashMap<String, (bool, i64)> {
+        let join_ids: HashSet<&str> = state
+            .ensembles
+            .iter()
+            .map(|e| e.join_node_id.as_str())
+            .collect();
+        let ensemble_by_member: HashMap<&str, &EnsembleLiveInfo> = state
+            .ensembles
+            .iter()
+            .flat_map(|e| e.members.iter().map(move |m| (m.node_id.as_str(), e)))
+            .collect();
+        let mut nodes: HashMap<String, (bool, i64)> = HashMap::new(); // true=ensemble
+        let mut seen_ens: HashSet<String> = HashSet::new();
+        for node in &state.effective_nodes {
+            if join_ids.contains(node.id.as_str()) {
+                continue;
+            }
+            let Some(ens) = ensemble_by_member.get(node.id.as_str()) else {
+                nodes.insert(node.id.clone(), (false, node.position));
+                continue;
+            };
+            if !seen_ens.insert(ens.ensemble_id.clone()) {
+                continue;
+            }
+            nodes.insert(ens.ensemble_id.clone(), (true, node.position));
+        }
+        nodes
+    }
+
+    /// member-id -> ensemble-id for every member of any ensemble that has a
+    /// member in the effective graph (matching `collapse_nodes`'s scope).
+    pub(super) fn member_to_ensemble(state: &GraphLiveState) -> HashMap<String, String> {
+        let ensemble_by_member: HashMap<&str, &EnsembleLiveInfo> = state
+            .ensembles
+            .iter()
+            .flat_map(|e| e.members.iter().map(move |m| (m.node_id.as_str(), e)))
+            .collect();
+        let mut member_to_ensemble: HashMap<String, String> = HashMap::new();
+        let mut seen_ens: HashSet<String> = HashSet::new();
+        for node in &state.effective_nodes {
+            let Some(ens) = ensemble_by_member.get(node.id.as_str()) else {
+                continue;
+            };
+            if !seen_ens.insert(ens.ensemble_id.clone()) {
+                continue;
+            }
+            member_to_ensemble.extend(
+                ens.members
+                    .iter()
+                    .map(|m| (m.node_id.clone(), ens.ensemble_id.clone())),
+            );
+        }
+        member_to_ensemble
+    }
+
+    /// Resolve one raw node id to its collapsed key: the ensemble it is the
+    /// join of, else its ensemble (as a member), else itself when collapsed.
+    pub(super) fn dfs_endpoint(
+        raw: &str,
+        by_join: &HashMap<&str, &EnsembleLiveInfo>,
+        member_to_ensemble: &HashMap<String, String>,
+        collapsed: &HashMap<String, (bool, i64)>,
+    ) -> Option<String> {
+        if let Some(ens) = by_join.get(raw) {
+            return Some(ens.ensemble_id.clone());
+        }
+        if let Some(ek) = member_to_ensemble.get(raw) {
+            return Some(ek.clone());
+        }
+        if collapsed.contains_key(raw) {
+            return Some(raw.to_string());
+        }
         None
-    } else {
-        Some(tail)
     }
-}
 
-/// Convert a JSON value to a human-readable text string.
-fn json_to_text(value: &Value) -> String {
-    match value {
-        Value::String(s) => s.clone(),
-        Value::Object(map) => {
-            // If there's a "blocker" field, show it prominently.
-            if let Some(blocker) = map.get("blocker").and_then(|v| v.as_str()) {
-                return format!("Blocker: {blocker}");
+    /// Build the collapsed-edge adjacency with member->join edges removed and
+    /// duplicates dropped, sorting each node's outgoing edges by priority.
+    pub(super) fn dfs_collapsed_edges(
+        state: &GraphLiveState,
+        collapsed: &HashMap<String, (bool, i64)>,
+        by_join: &HashMap<&str, &EnsembleLiveInfo>,
+        member_to_ensemble: &HashMap<String, String>,
+    ) -> HashMap<String, Vec<(String, GraphEdgeCondition)>> {
+        let by_member: HashMap<&str, &EnsembleLiveInfo> = state
+            .ensembles
+            .iter()
+            .flat_map(|e| e.members.iter().map(move |m| (m.node_id.as_str(), e)))
+            .collect();
+        let mut collapsed_edges: HashMap<String, Vec<(String, GraphEdgeCondition)>> =
+            HashMap::new();
+        for edge in &state.effective_edges {
+            let from_raw = edge.from_node.as_str();
+            let to_raw = edge.to_node.as_str();
+            if by_member
+                .get(from_raw)
+                .is_some_and(|e| e.join_node_id.as_str() == to_raw)
+            {
+                continue;
             }
-            // If there's a "summary" field, use it.
-            if let Some(summary) = map.get("summary").and_then(|v| v.as_str()) {
-                return summary.to_string();
+            let from_key = Self::dfs_endpoint(from_raw, by_join, member_to_ensemble, collapsed);
+            let to_key = Self::dfs_endpoint(to_raw, by_join, member_to_ensemble, collapsed);
+            let (Some(fk), Some(tk)) = (from_key, to_key) else {
+                continue;
+            };
+            let entry = collapsed_edges.entry(fk).or_default();
+            if !entry
+                .iter()
+                .any(|(ek, ec)| ek == &tk && ec == &edge.condition)
+            {
+                entry.push((tk, edge.condition.clone()));
             }
-            // Otherwise, pretty-print the object.
-            serde_json::to_string_pretty(value).unwrap_or_default()
         }
-        Value::Array(arr) => {
-            let strs: Vec<String> = arr.iter().map(json_to_text).collect();
-            strs.join("\n")
+        for edges in collapsed_edges.values_mut() {
+            edges.sort_by(|a, b| {
+                let (pa, la) = Self::edge_priority(&a.1);
+                let (pb, lb) = Self::edge_priority(&b.1);
+                pa.cmp(&pb).then_with(|| la.cmp(&lb))
+            });
         }
-        Value::Null => String::new(),
-        other => other.to_string(),
+        collapsed_edges
     }
-}
 
-/// Return the last `n` lines of `content`.
-fn tail_lines(content: &str, n: usize) -> String {
-    let lines: Vec<&str> = content.lines().collect();
-    let start = lines.len().saturating_sub(n);
-    lines[start..].join("\n")
+    /// The DFS entry key: the collapsed key with no incoming edge, else the
+    /// one at the lowest node position. The `unwrap` panics only on an empty
+    /// `collapsed`, which the caller guards.
+    pub(super) fn dfs_entry_key(
+        collapsed: &HashMap<String, (bool, i64)>,
+        collapsed_pos: &HashMap<String, i64>,
+        adjacency: &HashMap<String, Vec<(String, GraphEdgeCondition)>>,
+    ) -> String {
+        let mut incoming: HashSet<String> = HashSet::new();
+        for tos in adjacency.values() {
+            for (tk, _) in tos {
+                incoming.insert(tk.clone());
+            }
+        }
+        collapsed
+            .keys()
+            .find(|k| !incoming.contains(*k))
+            .cloned()
+            .or_else(|| {
+                collapsed
+                    .keys()
+                    .min_by_key(|k| collapsed_pos.get(*k).copied().unwrap_or(i64::MAX))
+                    .cloned()
+            })
+            .unwrap()
+    }
+
+    /// Depth-first walk of the collapsed adjacency, appending each key once to
+    /// `order`.
+    pub(super) fn dfs_rec(
+        key: &str,
+        adjacency: &HashMap<String, Vec<(String, GraphEdgeCondition)>>,
+        visited: &mut HashSet<String>,
+        order: &mut Vec<String>,
+    ) {
+        if visited.contains(key) {
+            return;
+        }
+        visited.insert(key.to_string());
+        order.push(key.to_string());
+        let Some(edges) = adjacency.get(key) else {
+            return;
+        };
+        for (tk, _) in edges {
+            if !visited.contains(tk.as_str()) {
+                Self::dfs_rec(tk, adjacency, visited, order);
+            }
+        }
+    }
+
+    /// Map collapsed keys back to concrete node ids for selection. For
+    /// ensembles, use the first member's node id (renderer highlights on any
+    /// member).
+    pub(super) fn dfs_concrete_ids(order: Vec<String>, state: &GraphLiveState) -> Vec<String> {
+        let mut ensemble_first_member: HashMap<String, String> = HashMap::new();
+        for ens in &state.ensembles {
+            if let Some(first) = ens.members.first() {
+                ensemble_first_member.insert(ens.ensemble_id.clone(), first.node_id.clone());
+            }
+        }
+        order
+            .into_iter()
+            .map(|ck| match ensemble_first_member.get(&ck) {
+                Some(mid) => mid.clone(),
+                None => ck,
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -884,9 +1053,6 @@ mod tests {
 
         assert_eq!(state.current_node_id.as_deref(), Some("n2"));
         assert_eq!(state.current_node_status, Some(GraphRunStatus::Pass));
-        // Regression: a completed (non-running) current node must still
-        // surface its output tail, not just status/timing.
-        assert_eq!(state.current_node_output_tail.as_deref(), Some("done"));
     }
 
     #[test]
@@ -929,41 +1095,9 @@ mod tests {
         // Requesting n1 explicitly (not the current node) still works.
         let n1_info = resolve_node_run_info(&db, "s1", "n1");
         assert_eq!(n1_info.status, Some(GraphRunStatus::Pass));
-        assert_eq!(n1_info.output_tail.as_deref(), Some("n1 finished"));
 
         let n2_info = resolve_node_run_info(&db, "s1", "n2");
         assert_eq!(n2_info.status, Some(GraphRunStatus::Running));
-    }
-
-    #[test]
-    fn output_tail_bounded_to_15_lines() {
-        let many_lines: String = (0..50)
-            .map(|i| format!("line {i}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let output = json!(many_lines);
-
-        let tail = extract_output_tail(&Some(output)).unwrap();
-        let line_count = tail.lines().count();
-        assert!(line_count <= OUTPUT_TAIL_LINES);
-        // Should contain the last 15 lines.
-        assert!(tail.contains("line 49"));
-        assert!(tail.contains("line 35"));
-        assert!(!tail.contains("line 34"));
-    }
-
-    #[test]
-    fn output_tail_handles_json_object_with_blocker() {
-        let output = json!({"blocker": "waiting for human review"});
-        let tail = extract_output_tail(&Some(output)).unwrap();
-        assert!(tail.contains("Blocker: waiting for human review"));
-    }
-
-    #[test]
-    fn output_tail_handles_empty_output() {
-        assert!(extract_output_tail(&None).is_none());
-        assert!(extract_output_tail(&Some(Value::Null)).is_none());
-        assert!(extract_output_tail(&Some(json!(""))).is_none());
     }
 
     #[test]
@@ -1114,6 +1248,10 @@ mod tests {
             kind: crate::domain::graphs::EnsembleKind::Parallel,
             round_robin_index: None,
             created_at: Utc::now(),
+
+            crew_id: None,
+            crew_name: None,
+            crew_version_applied: None,
         };
         let members: Vec<EnsembleMember> = member_nodes
             .iter()
@@ -1135,154 +1273,6 @@ mod tests {
             .unwrap();
     }
 
-    // ── json_to_text ─────────────────────────────────────────────
-
-    #[test]
-    fn json_to_text_string_passthrough() {
-        assert_eq!(json_to_text(&json!("hello world")), "hello world");
-    }
-
-    #[test]
-    fn json_to_text_null_returns_empty() {
-        assert_eq!(json_to_text(&Value::Null), "");
-    }
-
-    #[test]
-    fn json_to_text_number_returns_to_string() {
-        assert_eq!(json_to_text(&json!(42)), "42");
-        assert_eq!(json_to_text(&json!(2.72)), "2.72");
-    }
-
-    #[test]
-    fn json_to_text_object_with_blocker() {
-        let val = json!({"blocker": "needs human review", "extra": "ignored"});
-        assert_eq!(json_to_text(&val), "Blocker: needs human review");
-    }
-
-    #[test]
-    fn json_to_text_object_with_summary() {
-        let val = json!({"summary": "task completed successfully"});
-        assert_eq!(json_to_text(&val), "task completed successfully");
-    }
-
-    #[test]
-    fn json_to_text_object_blocker_takes_precedence_over_summary() {
-        let val = json!({"blocker": "stuck", "summary": "partial"});
-        assert_eq!(json_to_text(&val), "Blocker: stuck");
-    }
-
-    #[test]
-    fn json_to_text_object_fallback_to_pretty_print() {
-        let val = json!({"key": "value", "count": 3});
-        let result = json_to_text(&val);
-        assert!(result.contains("\"key\""));
-        assert!(result.contains("\"value\""));
-    }
-
-    #[test]
-    fn json_to_text_array_joins_with_newlines() {
-        let val = json!(["line1", "line2", "line3"]);
-        assert_eq!(json_to_text(&val), "line1\nline2\nline3");
-    }
-
-    #[test]
-    fn json_to_text_nested_array() {
-        let val = json!([["a", "b"], ["c"]]);
-        assert_eq!(json_to_text(&val), "a\nb\nc");
-    }
-
-    #[test]
-    fn json_to_text_empty_array() {
-        let val = json!([]);
-        assert_eq!(json_to_text(&val), "");
-    }
-
-    #[test]
-    fn json_to_text_empty_object_pretty_prints() {
-        let val = json!({});
-        assert_eq!(json_to_text(&val), "{}");
-    }
-
-    // ── tail_lines ──────────────────────────────────────────────
-
-    #[test]
-    fn tail_lines_empty_string() {
-        assert_eq!(tail_lines("", 10), "");
-    }
-
-    #[test]
-    fn tail_lines_fewer_than_n() {
-        assert_eq!(tail_lines("a\nb\nc", 10), "a\nb\nc");
-    }
-
-    #[test]
-    fn tail_lines_exactly_n() {
-        assert_eq!(tail_lines("a\nb\nc", 3), "a\nb\nc");
-    }
-
-    #[test]
-    fn tail_lines_more_than_n() {
-        assert_eq!(tail_lines("a\nb\nc\nd\ne", 3), "c\nd\ne");
-    }
-
-    #[test]
-    fn tail_lines_single_line() {
-        assert_eq!(tail_lines("only one", 5), "only one");
-    }
-
-    #[test]
-    fn tail_lines_zero_n_returns_empty() {
-        assert_eq!(tail_lines("a\nb", 0), "");
-    }
-
-    #[test]
-    fn tail_lines_preserves_empty_lines() {
-        let input = "a\n\nb\n\nc";
-        let result = tail_lines(input, 10);
-        assert_eq!(result, "a\n\nb\n\nc");
-    }
-
-    // ── extract_output_tail ─────────────────────────────────────
-
-    #[test]
-    fn extract_output_tail_none_input() {
-        assert!(extract_output_tail(&None).is_none());
-    }
-
-    #[test]
-    fn extract_output_tail_empty_string() {
-        assert!(extract_output_tail(&Some(json!(""))).is_none());
-    }
-
-    #[test]
-    fn extract_output_tail_whitespace_only() {
-        // Whitespace-only string still produces a result (it's not empty)
-        let result = extract_output_tail(&Some(json!("   \n  \n  ")));
-        assert!(result.is_some());
-    }
-
-    #[test]
-    fn extract_output_tail_array_value() {
-        let val = json!(["line1", "line2"]);
-        let tail = extract_output_tail(&Some(val)).unwrap();
-        assert!(tail.contains("line1"));
-        assert!(tail.contains("line2"));
-    }
-
-    #[test]
-    fn extract_output_tail_numeric_value() {
-        let val = json!(42);
-        let tail = extract_output_tail(&Some(val)).unwrap();
-        assert_eq!(tail, "42");
-    }
-
-    #[test]
-    fn extract_output_tail_object_without_blocker_or_summary() {
-        let val = json!({"raw": "data"});
-        let tail = extract_output_tail(&Some(val)).unwrap();
-        assert!(tail.contains("raw"));
-    }
-
     // ── NodeRunInfo::from_run and default ────────────────────────
 
     #[test]
@@ -1291,7 +1281,6 @@ mod tests {
         assert!(info.status.is_none());
         assert!(info.started_at.is_none());
         assert!(info.iteration.is_none());
-        assert!(info.output_tail.is_none());
     }
 
     #[test]
@@ -1308,7 +1297,6 @@ mod tests {
         assert_eq!(info.status, Some(GraphRunStatus::Pass));
         assert!(info.started_at.is_some());
         assert_eq!(info.iteration, Some(3));
-        assert_eq!(info.output_tail.as_deref(), Some("all good"));
     }
 
     #[test]
@@ -1316,7 +1304,6 @@ mod tests {
         let run = make_run("lp1", "s1", "n1", GraphRunStatus::Running, 1, None);
         let info = NodeRunInfo::from_run(&run);
         assert_eq!(info.status, Some(GraphRunStatus::Running));
-        assert!(info.output_tail.is_none());
     }
 
     // ── resolve_node_run_info edge cases ─────────────────────────
@@ -1350,7 +1337,6 @@ mod tests {
 
         let info = resolve_node_run_info(&db, "s1", "n1");
         assert_eq!(info.status, Some(GraphRunStatus::Pass));
-        assert_eq!(info.output_tail.as_deref(), Some("completed"));
     }
 
     #[test]

@@ -1,15 +1,22 @@
 use crate::setup_module::daemon_service::{
     install_service_if_needed, start_daemon_if_needed, stop_daemon,
 };
-use crate::setup_module::dir_browser::browse_directories_multiselect_with_preselected;
 use crate::setup_module::models::{is_platform_available, Platform};
 use crate::setup_module::platform_adapter::clear_wizard_screen;
 use crate::setup_module::registry_fetch::{fetch_registry, print_banner};
 use crate::setup_module::sync_and_skills::{run_essential_skills_step, run_sync_step};
 use crate::setup_module::PlatformWithCli;
 use anyhow::{Context, Result};
-use inquire::{Confirm, CustomType, MultiSelect, Select};
+use inquire::{MultiSelect, Select};
 use std::io::{self, Write};
+
+mod rag;
+
+#[cfg(test)]
+use rag::{
+    disabled_rag, local_embeddings_model_choices, local_model_label, rag_browser_starting_dir,
+};
+use rag::{rag_keep_current_configuration, resolve_kept_rag_configuration, run_rag_setup};
 
 /// Human label for a registry platform in wizard output: the product
 /// display string with the slug in parentheses when it differs, so the
@@ -36,89 +43,24 @@ pub fn run_setup(force_skills: bool) -> Result<()> {
     let existing_config = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir);
 
     // ── Step 1: Fetch registry ──────────────────────────────────
-    clear_wizard_screen()?;
-    print_banner();
-    print!("  Fetching platform registry... ");
-    io::stdout().flush()?;
-    let mut registry = fetch_registry()?;
-
-    // Legacy v5 compat: no longer needed with v6
-    let _ = &mut registry;
-    println!("\x1b[32m✓\x1b[0m");
+    let registry = fetch_registry_step()?;
 
     let detected: Vec<&Platform> = registry
         .platforms
         .iter()
         .filter(|p| is_platform_available(p))
         .collect();
-
-    let detected_names: Vec<String> = detected
-        .iter()
-        .copied()
-        .map(format_platform_label)
-        .collect();
-    wiz.add(format!(
-        "\x1b[32m✓\x1b[0m Fetched registry — {} detected: {}",
-        detected.len(),
-        if detected_names.is_empty() {
-            "(none)".to_string()
-        } else {
-            detected_names.join(", ")
-        }
-    ));
+    record_registry_detection(&mut wiz, &detected);
 
     // ── Step 2: Select platforms ─────────────────────────────────
     wiz.render()?;
     if detected.is_empty() {
-        println!();
-        println!("  \x1b[33mNo supported platform CLI detected on PATH.\x1b[0m");
-        println!();
-        println!("  This means no platform is installed at all — not that an");
-        println!("  installed one is failing to respond. If a platform IS installed");
-        println!("  but setup still can't see it, its binary isn't on PATH; to check");
-        println!("  whether an installed platform actually answers, run");
-        println!("  \x1b[1mcanopy doctor\x1b[0m or use \x1b[1magent_probe\x1b[0m.");
-        println!();
-        println!("  \"CLI\" here means the platform's command-line tool — the binary");
-        println!("  canopy runs to drive it. canopy needs at least one platform's");
-        println!("  CLI installed and authenticated before setup can configure");
-        println!("  anything.");
-        println!();
-        println!("  Supported platforms and the CLI binary canopy will invoke:");
-        println!();
-        for p in &registry.platforms {
-            let binary = p
-                .cli
-                .as_ref()
-                .and_then(|v| v.get("binary").and_then(|b| b.as_str()))
-                .unwrap_or("(unknown)");
-            println!(
-                "    \x1b[90m{:<28}\x1b[0m  binary: \x1b[1m{}\x1b[0m",
-                format_platform_label(p),
-                binary
-            );
-        }
-        println!();
-        println!("  Install one of the above, make sure it's on your PATH, then");
-        println!("  run \x1b[1mcanopy setup\x1b[0m again.");
-        println!();
+        explain_no_platforms_detected(&registry);
         return Ok(());
     }
 
     let selected = select_platforms(&detected)?;
-    let selected_names: Vec<String> = selected
-        .iter()
-        .copied()
-        .map(format_platform_label)
-        .collect();
-    wiz.add(format!(
-        "\x1b[32m✓\x1b[0m Platforms: {}",
-        if selected_names.is_empty() {
-            "(none)".to_string()
-        } else {
-            selected_names.join(", ")
-        }
-    ));
+    record_platform_selection(&mut wiz, &selected);
 
     // ── Step 2.2: Temperature unit preference ────────────────────
     wiz.render()?;
@@ -143,53 +85,193 @@ pub fn run_setup(force_skills: bool) -> Result<()> {
     ));
 
     // ── Step 2.3: RAG configuration ──────────────────────────────
+    let (embeddings_model, similarity_threshold, rag_personal_dirs, rag_max_file_mb) =
+        record_rag_step(&mut wiz, &existing_config, &canopy_dir)?;
+
+    // ── Step 3: Install MCP servers + show matrix ───────────────
+    record_sync_step(&mut wiz, &home, &selected, &registry)?;
+
+    // ── Step 4: Save CLI configuration ──────────────────────────
+    let (platforms_with_cli, cli_registry) =
+        prepare_cli_registry_dirs(&selected, &canopy_dir, &rag_personal_dirs)?;
+
+    // ── Step 5: Essential Skills ─────────────────────────────────
+    record_skills_step(&mut wiz, &home, &selected, force_skills)?;
+
+    // ── Step 6: Daemon + service ────────────────────────────────
+    record_daemon_service_steps(&mut wiz)?;
+
+    // ── Save unified config ──────────────────────────────────────
+    record_config_and_summary(
+        &mut wiz,
+        &canopy_dir,
+        temperature_unit,
+        theme,
+        (
+            embeddings_model,
+            similarity_threshold,
+            rag_personal_dirs,
+            rag_max_file_mb,
+        ),
+        &platforms_with_cli,
+        &cli_registry,
+    )?;
+
+    Ok(())
+}
+
+/// Clear the screen, print the banner, and fetch the platform registry —
+/// the setup wizard's step 1. The detection pass itself stays in
+/// `run_setup` so each platform is probed exactly once.
+fn fetch_registry_step() -> Result<crate::setup_module::models::RegistryRaw> {
+    clear_wizard_screen()?;
+    print_banner();
+    print!("  Fetching platform registry... ");
+    io::stdout().flush()?;
+    let mut registry = fetch_registry()?;
+
+    // Legacy v5 compat: no longer needed with v6
+    let _ = &mut registry;
+    println!("\x1b[32m✓\x1b[0m");
+
+    Ok(registry)
+}
+
+/// Record the fetched-registry step summary on the wizard.
+fn record_registry_detection(wiz: &mut WizardState, detected: &[&Platform]) {
+    let detected_names: Vec<String> = detected
+        .iter()
+        .copied()
+        .map(format_platform_label)
+        .collect();
+    wiz.add(format!(
+        "\x1b[32m✓\x1b[0m Fetched registry — {} detected: {}",
+        detected.len(),
+        if detected_names.is_empty() {
+            "(none)".to_string()
+        } else {
+            detected_names.join(", ")
+        }
+    ));
+}
+
+/// Print the wizard's "no supported platform CLI detected" explanation
+/// (including the registry's supported-platform table) instead of failing.
+fn explain_no_platforms_detected(registry: &crate::setup_module::models::RegistryRaw) {
+    println!();
+    println!("  \x1b[33mNo supported platform CLI detected on PATH.\x1b[0m");
+    println!();
+    println!("  This means no platform is installed at all — not that an");
+    println!("  installed one is failing to respond. If a platform IS installed");
+    println!("  but setup still can't see it, its binary isn't on PATH; to check");
+    println!("  whether an installed platform actually answers, run");
+    println!("  \x1b[1mcanopy doctor\x1b[0m or use \x1b[1magent_probe\x1b[0m.");
+    println!();
+    println!("  \"CLI\" here means the platform's command-line tool — the binary");
+    println!("  canopy runs to drive it. canopy needs at least one platform's");
+    println!("  CLI installed and authenticated before setup can configure");
+    println!("  anything.");
+    println!();
+    println!("  Supported platforms and the CLI binary canopy will invoke:");
+    println!();
+    for p in &registry.platforms {
+        let binary = p
+            .cli
+            .as_ref()
+            .and_then(|v| v.get("binary").and_then(|b| b.as_str()))
+            .unwrap_or("(unknown)");
+        println!(
+            "    \x1b[90m{:<28}\x1b[0m  binary: \x1b[1m{}\x1b[0m",
+            format_platform_label(p),
+            binary
+        );
+    }
+    println!();
+    println!("  Install one of the above, make sure it's on your PATH, then");
+    println!("  run \x1b[1mcanopy setup\x1b[0m again.");
+    println!();
+}
+
+/// Record the platform-selection step summary on the wizard.
+fn record_platform_selection(wiz: &mut WizardState, selected: &[&Platform]) {
+    let selected_names: Vec<String> = selected
+        .iter()
+        .copied()
+        .map(format_platform_label)
+        .collect();
+    wiz.add(format!(
+        "\x1b[32m✓\x1b[0m Platforms: {}",
+        if selected_names.is_empty() {
+            "(none)".to_string()
+        } else {
+            selected_names.join(", ")
+        }
+    ));
+}
+
+/// Record the RAG configuration step: keep the existing setup (when there
+/// is one and the operator says so) or run the interactive RAG wizard;
+/// returns the four values the config-save step applies.
+fn record_rag_step(
+    wiz: &mut WizardState,
+    existing_config: &crate::domain::canopy_config::CanopyConfig,
+    canopy_dir: &std::path::Path,
+) -> Result<(String, f32, Vec<String>, u32)> {
     wiz.render()?;
     let rag_previously_configured = !existing_config.embeddings_model.is_empty();
 
-    let (embeddings_model, similarity_threshold, rag_personal_dirs, rag_max_file_mb) =
-        if rag_previously_configured && rag_keep_current_configuration(&existing_config)? {
-            let local_embeddings_available = crate::rag::embedding_client::provider_available(
-                crate::rag::embedding_client::EmbeddingProvider::Local,
-            );
-            let outcome =
-                resolve_kept_rag_configuration(&existing_config, local_embeddings_available);
-            match outcome.disabled_reason {
-                None => wiz.add(format!(
-                    "\x1b[32m✓\x1b[0m RAG: kept existing configuration ({})",
-                    outcome.embeddings_model
-                )),
-                Some(_) => {
-                    print_local_embeddings_unavailable();
-                    wiz.add(
-                        "\x1b[90m–\x1b[0m RAG: disabled (build lacks local-embeddings support)"
-                            .to_string(),
-                    );
-                }
+    if rag_previously_configured && rag_keep_current_configuration(existing_config)? {
+        let local_embeddings_available = crate::rag::embedding_client::provider_available(
+            crate::rag::embedding_client::EmbeddingProvider::Local,
+        );
+        let outcome = resolve_kept_rag_configuration(existing_config, local_embeddings_available);
+        match outcome.disabled_reason {
+            None => wiz.add(format!(
+                "\x1b[32m✓\x1b[0m RAG: kept existing configuration ({})",
+                outcome.embeddings_model
+            )),
+            Some(_) => {
+                print_local_embeddings_unavailable();
+                wiz.add(
+                    "\x1b[90m–\x1b[0m RAG: disabled (build lacks local-embeddings support)"
+                        .to_string(),
+                );
             }
-            (
-                outcome.embeddings_model,
-                outcome.similarity_threshold,
-                outcome.rag_personal_dirs,
-                outcome.rag_max_file_mb,
-            )
-        } else {
-            run_rag_setup(
-                &existing_config,
-                &canopy_dir,
-                rag_previously_configured,
-                &mut wiz,
-            )?
-        };
+        }
+        Ok((
+            outcome.embeddings_model,
+            outcome.similarity_threshold,
+            outcome.rag_personal_dirs,
+            outcome.rag_max_file_mb,
+        ))
+    } else {
+        run_rag_setup(existing_config, canopy_dir, rag_previously_configured, wiz)
+    }
+}
 
-    // ── Step 3: Install MCP servers + show matrix ───────────────
+/// Record the MCP sync step (only when platforms were selected).
+fn record_sync_step(
+    wiz: &mut WizardState,
+    home: &std::path::Path,
+    selected: &[&Platform],
+    registry: &crate::setup_module::models::RegistryRaw,
+) -> Result<()> {
     if !selected.is_empty() {
-        let sync_summary = run_sync_step(&mut wiz, &home, &selected, &registry.canonical_servers)?;
+        let sync_summary = run_sync_step(wiz, home, selected, &registry.canonical_servers)?;
         if let Some(s) = sync_summary {
             wiz.add(s);
         }
     }
+    Ok(())
+}
 
-    // ── Step 4: Save CLI configuration ──────────────────────────
+/// Build the CLI registry from the selected platforms and make sure the
+/// config and personal-RAG directories exist on disk.
+fn prepare_cli_registry_dirs(
+    selected: &[&Platform],
+    canopy_dir: &std::path::Path,
+    rag_personal_dirs: &[String],
+) -> Result<(Vec<PlatformWithCli>, crate::domain::cli_config::CliRegistry)> {
     let platforms_with_cli: Vec<PlatformWithCli> = selected
         .iter()
         .map(|p| p.to_platform_with_cli())
@@ -198,17 +280,30 @@ pub fn run_setup(force_skills: bool) -> Result<()> {
 
     let cli_registry =
         crate::domain::cli_config::CliRegistry::detect_available(&platforms_with_cli);
-    std::fs::create_dir_all(&canopy_dir)?;
-    for dir in &rag_personal_dirs {
+    std::fs::create_dir_all(canopy_dir)?;
+    for dir in rag_personal_dirs {
         std::fs::create_dir_all(dir)?;
     }
 
-    // ── Step 5: Essential Skills ─────────────────────────────────
-    wiz.render()?;
-    let skills_step = run_essential_skills_step(&home, &selected, force_skills);
-    wiz.add(skills_step);
+    Ok((platforms_with_cli, cli_registry))
+}
 
-    // ── Step 6: Daemon + service ────────────────────────────────
+/// Record the essential-skills step on the wizard.
+fn record_skills_step(
+    wiz: &mut WizardState,
+    home: &std::path::Path,
+    selected: &[&Platform],
+    force_skills: bool,
+) -> Result<()> {
+    wiz.render()?;
+    let skills_step = run_essential_skills_step(home, selected, force_skills);
+    wiz.add(skills_step);
+    Ok(())
+}
+
+/// Restart the daemon (always, so new MCP configs land) and install the
+/// service if needed, recording both outcomes on the wizard.
+fn record_daemon_service_steps(wiz: &mut WizardState) -> Result<()> {
     wiz.render()?;
 
     // Always restart daemon to pick up new MCP configs
@@ -226,25 +321,64 @@ pub fn run_setup(force_skills: bool) -> Result<()> {
         Err(_) => "\x1b[31m✗\x1b[0m Service: failed to install",
     };
     wiz.add(service_msg.to_string());
+    Ok(())
+}
 
-    // ── Save unified config ──────────────────────────────────────
-    let mut config = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir);
+/// Save the unified config with the wizard's choices and print the final
+/// setup summary.
+fn record_config_and_summary(
+    wiz: &mut WizardState,
+    canopy_dir: &std::path::Path,
+    temperature_unit: crate::domain::canopy_config::TemperatureUnit,
+    theme: String,
+    rag: (String, f32, Vec<String>, u32),
+    platforms_with_cli: &[PlatformWithCli],
+    cli_registry: &crate::domain::cli_config::CliRegistry,
+) -> Result<()> {
+    let mut config = crate::domain::canopy_config::CanopyConfig::load(canopy_dir);
     config.mark_configured();
-    let baseline = crate::domain::registry_baseline::RegistryBaseline::load(&canopy_dir);
+    let baseline = crate::domain::registry_baseline::RegistryBaseline::load(canopy_dir);
     let changed_fields = merge_cli_registry_into_config(
         &mut config,
-        &cli_registry,
-        &platforms_with_cli,
+        cli_registry,
+        platforms_with_cli,
         baseline.as_ref(),
     );
+    let (embeddings_model, similarity_threshold, rag_personal_dirs, rag_max_file_mb) = rag;
     config.temperature_unit = temperature_unit;
     config.theme = theme;
     config.embeddings_model = embeddings_model;
     config.similarity_threshold = similarity_threshold;
     config.rag_personal_dirs = rag_personal_dirs;
     config.rag_max_file_mb = rag_max_file_mb;
-    let config_step = match config.save(&canopy_dir) {
-        Ok(_) => format!(
+    // CM51: first install, no daemon running yet — the wizard writes through
+    // the same writer as everything else, so nothing else in config.toml is
+    // rewritten. The keys it asks for come from the registry's `wizard`
+    // flag, so "what setup asks for" is declared in one place (CM51 FR1).
+    let edits: Vec<(&str, Option<toml_edit::Value>)> = std::iter::once((
+        "configured_at",
+        Some(toml_edit::Value::from(
+            config.configured_at.clone().unwrap_or_default(),
+        )),
+    ))
+    .chain(
+        crate::domain::settings::REGISTRY
+            .iter()
+            .filter(|def| def.wizard)
+            .map(|def| {
+                (
+                    def.key,
+                    Some(crate::domain::settings::inspect::config_value(
+                        &config, def.key,
+                    )),
+                )
+            }),
+    )
+    .collect();
+    let saved = crate::domain::settings::writer::write_keys(canopy_dir, &edits)
+        .and_then(|()| crate::domain::settings::writer::write_clis(canopy_dir, &config.clis));
+    let config_step = match saved {
+        Ok(()) => format!(
             "\x1b[32m✓\x1b[0m Config: {} CLI(s) saved to config.toml",
             config.clis.len()
         ),
@@ -267,39 +401,6 @@ pub fn run_setup(force_skills: bool) -> Result<()> {
     Ok(())
 }
 
-/// Print the RAG configuration this installation already has and ask
-/// whether to keep it as-is. Called only when a model is already configured
-/// (CB59): re-asking every RAG field from scratch on every setup run was the
-/// bug — the cursor on the embeddings-provider question always started on
-/// "OpenAI" even for an install that had been running local-only for months.
-fn rag_keep_current_configuration(
-    existing_config: &crate::domain::canopy_config::CanopyConfig,
-) -> Result<bool> {
-    println!();
-    println!("  \x1b[1mPersonal knowledge indexing (RAG)\x1b[0m — currently configured:");
-    println!("    Model:       {}", existing_config.embeddings_model);
-    println!("    Threshold:   {}", existing_config.similarity_threshold);
-    println!(
-        "    Directories: {}",
-        if existing_config.rag_personal_dirs.is_empty() {
-            "(none)".to_string()
-        } else {
-            existing_config.rag_personal_dirs.join(", ")
-        }
-    );
-    println!(
-        "    Size limit:  {} MB per file",
-        existing_config.rag_max_file_mb
-    );
-    println!();
-
-    Confirm::new("Keep this configuration?")
-        .with_default(true)
-        .with_help_message("no: reconfigure model, directories, or size limit")
-        .prompt()
-        .map_err(|e| anyhow::anyhow!("RAG keep-configuration selection cancelled: {}", e))
-}
-
 /// Print the "this build can't do local embeddings" notice. Shared by the
 /// top-level keep-path capability gate in `run_setup` and `run_rag_setup`'s
 /// own check, so both onboarding paths — an installation that already has
@@ -314,195 +415,6 @@ fn print_local_embeddings_unavailable() {
     );
     println!("  \x1b[90mRAG will remain disabled.\x1b[0m");
     println!();
-}
-
-/// The RAG step's outcome once the user has been asked "keep it?" (i.e.
-/// `rag_previously_configured` is true) and answered yes. Pure — takes
-/// `local_embeddings_available` as a parameter instead of reading
-/// `cfg!(feature = "local-embeddings")` itself — so the CB59 fix (the
-/// capability check gates this branch's *return*, not just
-/// `run_rag_setup`'s own path) is testable without a terminal.
-struct KeptRagOutcome {
-    embeddings_model: String,
-    similarity_threshold: f32,
-    rag_personal_dirs: Vec<String>,
-    rag_max_file_mb: u32,
-    /// `Some(reason)` when this build cannot do local embeddings at all:
-    /// the "kept" answer is overridden and RAG ends up disabled instead.
-    disabled_reason: Option<&'static str>,
-}
-
-fn resolve_kept_rag_configuration(
-    existing_config: &crate::domain::canopy_config::CanopyConfig,
-    local_embeddings_available: bool,
-) -> KeptRagOutcome {
-    if local_embeddings_available {
-        KeptRagOutcome {
-            embeddings_model: existing_config.embeddings_model.clone(),
-            similarity_threshold: existing_config.similarity_threshold,
-            rag_personal_dirs: existing_config.rag_personal_dirs.clone(),
-            rag_max_file_mb: existing_config.rag_max_file_mb,
-            disabled_reason: None,
-        }
-    } else {
-        KeptRagOutcome {
-            embeddings_model: String::new(),
-            similarity_threshold: existing_config.similarity_threshold,
-            rag_personal_dirs: Vec::new(),
-            rag_max_file_mb: existing_config.rag_max_file_mb,
-            disabled_reason: Some(
-                crate::rag::embedding_client::LOCAL_EMBEDDINGS_UNAVAILABLE_REASON,
-            ),
-        }
-    }
-}
-
-/// Ask whether to enable RAG at all, then — if yes and this build can run
-/// local embeddings — which local model, which directories, and what
-/// per-file size limit. `default_enable` is `true` when called because an
-/// existing configuration is being revised (so declining to keep it still
-/// defaults to staying enabled) and `false` for a genuinely fresh install.
-/// No provider question: canopy's RAG is local-only (CB59) — see
-/// `functional_requirements` 1 in the CB59 spec for why the cloud-provider
-/// question was removed rather than merely reordered.
-#[cfg_attr(not(feature = "local-embeddings"), allow(unused_variables))]
-fn run_rag_setup(
-    existing_config: &crate::domain::canopy_config::CanopyConfig,
-    canopy_dir: &std::path::Path,
-    default_enable: bool,
-    wiz: &mut WizardState,
-) -> Result<(String, f32, Vec<String>, u32)> {
-    let use_rag = Confirm::new("Enable personal knowledge indexing (RAG)?")
-        .with_default(default_enable)
-        .with_help_message("Indexes your notes/docs so AI tools can search them")
-        .prompt()
-        .map_err(|e| anyhow::anyhow!("RAG selection cancelled: {}", e))?;
-
-    if !use_rag {
-        wiz.add("\x1b[90m–\x1b[0m RAG: disabled".to_string());
-        return Ok((
-            String::new(),
-            existing_config.similarity_threshold,
-            Vec::new(),
-            existing_config.rag_max_file_mb,
-        ));
-    }
-
-    if !crate::rag::embedding_client::provider_available(
-        crate::rag::embedding_client::EmbeddingProvider::Local,
-    ) {
-        print_local_embeddings_unavailable();
-        wiz.add(
-            "\x1b[90m–\x1b[0m RAG: disabled (build lacks local-embeddings support)".to_string(),
-        );
-        return Ok((
-            String::new(),
-            existing_config.similarity_threshold,
-            Vec::new(),
-            existing_config.rag_max_file_mb,
-        ));
-    }
-
-    wiz.render()?;
-    let embeddings_model = select_local_embeddings_model(&existing_config.embeddings_model)?;
-
-    // ── Model changed check ─────────────────────────────────────────
-    if !existing_config.embeddings_model.is_empty()
-        && embeddings_model != existing_config.embeddings_model
-    {
-        println!();
-        println!("  \x1b[33m⚠  Embeddings model changed.\x1b[0m");
-        println!("  \x1b[90mAll previously indexed documents will need to be re-indexed.\x1b[0m");
-        println!("  \x1b[90mThis is a heavy operation and may take a while.\x1b[0m");
-        println!();
-        let confirmed = Confirm::new("Continue with the new model?")
-            .with_default(false)
-            .with_help_message("enter: confirm")
-            .prompt()
-            .unwrap_or(false);
-        if !confirmed {
-            anyhow::bail!("Embeddings model change cancelled by user");
-        }
-    }
-
-    wiz.add(format!(
-        "\x1b[32m✓\x1b[0m Embeddings model: {}",
-        embeddings_model
-    ));
-
-    // ── Model acquisition ─────────────────────────────────────────────
-    // Setup never downloads the model itself — it only checks whether one's
-    // already cached; the daemon's background acquisition loop picks it up
-    // once it (re)starts below, so a multi-hundred-MB download never blocks
-    // this wizard.
-    wiz.render()?;
-    #[cfg(feature = "local-embeddings")]
-    let model_already_cached = {
-        let model_cache_dir = canopy_dir.join("models");
-        crate::rag::embedding_client::is_local_model_cached(&embeddings_model, &model_cache_dir)
-            .unwrap_or(false)
-    };
-    #[cfg(not(feature = "local-embeddings"))]
-    let model_already_cached = false;
-    if model_already_cached {
-        wiz.add(format!(
-            "\x1b[32m✓\x1b[0m Model ready: {embeddings_model} (already cached)"
-        ));
-    } else {
-        wiz.add(
-            "\x1b[33m⬇\x1b[0m Model will download in the background — indexing begins once it's ready"
-                .to_string(),
-        );
-    }
-
-    // Chunk-merge similarity threshold: internal tuning knob with no
-    // user-observable effect in its valid range, so it is not prompted.
-    let similarity_threshold = existing_config.similarity_threshold;
-
-    // ── RAG directories ─────────────────────────────────────────────
-    let prev_dirs = existing_config.rag_personal_dirs.clone();
-    let browser_start = if !prev_dirs.is_empty() {
-        prev_dirs
-            .first()
-            .and_then(|p| {
-                std::path::Path::new(p)
-                    .parent()
-                    .map(|pp| pp.to_string_lossy().to_string())
-            })
-            .filter(|pp| std::path::Path::new(pp).is_dir())
-            .unwrap_or_else(|| prev_dirs.first().unwrap().clone())
-    } else if !existing_config.rag_personal_root.is_empty() {
-        std::path::Path::new(&existing_config.rag_personal_root)
-            .parent()
-            .map(|pp| pp.to_string_lossy().to_string())
-            .filter(|pp| std::path::Path::new(pp).is_dir())
-            .unwrap_or(existing_config.rag_personal_root.clone())
-    } else {
-        String::new()
-    };
-    let rag_personal_dirs = pick_multiple_directories(
-        "Personal RAG directories (your own notes/docs — indexed for global retrieval):",
-        &browser_start,
-        &prev_dirs,
-    )?;
-    wiz.add(format!(
-        "\x1b[32m✓\x1b[0m Personal RAG dirs: {}",
-        rag_personal_dirs.join(", ")
-    ));
-
-    // ── Per-file indexing size limit ─────────────────────────────────
-    wiz.render()?;
-    let rag_max_file_mb = select_rag_max_file_mb(existing_config.rag_max_file_mb)?;
-    wiz.add(format!(
-        "\x1b[32m✓\x1b[0m Indexing size limit: {rag_max_file_mb} MB per file"
-    ));
-
-    Ok((
-        embeddings_model,
-        similarity_threshold,
-        rag_personal_dirs,
-        rag_max_file_mb,
-    ))
 }
 
 /// Merge the registry's detected CLIs into `config.clis` through the same
@@ -701,137 +613,6 @@ fn theme_choice_to_config_value(selected: &str) -> String {
     } else {
         "classic".to_string()
     }
-}
-
-/// Prompt for the per-file indexing size cap, in MB, with the currently
-/// configured value (or the 10 MB default on first run) preselected. Rejects
-/// out-of-range input inline via the same `validate_rag_max_file_mb` doctor
-/// and ingestion both defer to, so the wizard can't save a value neither of
-/// them would actually honor.
-fn select_rag_max_file_mb(current: u32) -> Result<u32> {
-    use inquire::validator::Validation;
-
-    CustomType::<u32>::new("Per-file indexing size limit (MB):")
-        .with_default(current)
-        .with_help_message(&format!(
-            "Files larger than this are skipped during indexing | ceiling: {} MB",
-            crate::domain::canopy_config::RAG_MAX_FILE_MB_CEILING
-        ))
-        .with_validator(|mb: &u32| {
-            Ok(
-                match crate::domain::canopy_config::validate_rag_max_file_mb(*mb) {
-                    Ok(()) => Validation::Valid,
-                    Err(reason) => Validation::Invalid(reason.into()),
-                },
-            )
-        })
-        .prompt()
-        .map_err(|e| anyhow::anyhow!("Indexing size limit selection cancelled: {}", e))
-}
-
-/// Human-readable label (name, dimensions, approximate download size) for a
-/// supported local model id. The set of ids offered is derived from
-/// `embedding_client::LOCAL_MODEL_IDS` — the same single source of truth
-/// `model_id_to_fastembed` maps from — instead of a second hand-maintained
-/// id list, so the wizard can no longer drift out of step with which models
-/// are actually supported. Only the descriptive text lives here; coverage
-/// against `LOCAL_MODEL_IDS` is asserted by
-/// `every_local_model_id_has_a_label` below.
-fn local_model_label(id: &str) -> &'static str {
-    match id {
-        "baai/bge-small-en-v1.5" => {
-            "BGE Small EN v1.5     (local · 384d · ~130 MB)  — fast, great for English"
-        }
-        "baai/bge-base-en-v1.5" => {
-            "BGE Base EN v1.5      (local · 768d · ~430 MB)  — balanced, English"
-        }
-        "baai/bge-large-en-v1.5" => {
-            "BGE Large EN v1.5     (local · 1024d · ~1.3 GB) — best quality, English"
-        }
-        "intfloat/multilingual-e5-small" => {
-            "Multilingual E5 Small (local · 384d · ~480 MB)  — fast, multilingual"
-        }
-        "intfloat/multilingual-e5-base" => {
-            "Multilingual E5 Base  (local · 768d · ~1.1 GB)  — balanced, multilingual"
-        }
-        "intfloat/multilingual-e5-large" => {
-            "Multilingual E5 Large (local · 1024d · ~2.2 GB) — best quality, multilingual"
-        }
-        // Unreached in practice — every id in LOCAL_MODEL_IDS is covered
-        // above, and every_local_model_id_has_a_label fails the build if a
-        // new one is added here without it.
-        _ => "(unlabeled model)",
-    }
-}
-
-/// The `(id, label)` pairs the embeddings-model prompt offers: every
-/// supported local model id paired with its label, nothing else. Split out
-/// so a fresh install's model list is testable without a terminal (CB59:
-/// it must never again include a remote/API-key option).
-fn local_embeddings_model_choices() -> Vec<(&'static str, &'static str)> {
-    crate::rag::embedding_client::LOCAL_MODEL_IDS
-        .iter()
-        .map(|id| (*id, local_model_label(id)))
-        .collect()
-}
-
-fn select_local_embeddings_model(current: &str) -> Result<String> {
-    let choices = local_embeddings_model_choices();
-    let options: Vec<&str> = choices.iter().map(|(_, label)| *label).collect();
-
-    let start = choices
-        .iter()
-        .position(|(id, _)| *id == current)
-        .unwrap_or(0);
-
-    let selected = Select::new("Embeddings model (local, no API key required):", options)
-        .with_starting_cursor(start)
-        .with_help_message(
-            "Downloaded once to ~/.canopy/models/ — no internet needed after that | ↑↓: navigate | enter: confirm",
-        )
-        .prompt()
-        .map_err(|e| anyhow::anyhow!("Embeddings model selection cancelled: {}", e))?;
-
-    choices
-        .iter()
-        .find(|(_, label)| *label == selected)
-        .map(|(id, _)| id.to_string())
-        .ok_or_else(|| anyhow::anyhow!("Unknown embeddings model selection"))
-}
-
-/// Interactively pick one or more directories for personal RAG indexing.
-fn pick_multiple_directories(
-    message: &str,
-    initial: &str,
-    existing: &[String],
-) -> Result<Vec<String>> {
-    println!("  {message}");
-    if !existing.is_empty() {
-        println!("  \x1b[90mCurrently configured:\x1b[0m");
-        for dir in existing {
-            println!("    \x1b[90m• {dir}\x1b[0m");
-        }
-    }
-    println!("  \x1b[90mUse Space to mark directories, navigate with ↑↓, → to enter folders, ← to go up, Enter to confirm.\x1b[0m");
-
-    let pre_selected: std::collections::HashSet<String> = existing.iter().cloned().collect();
-    let selected = browse_directories_multiselect_with_preselected(initial, pre_selected);
-
-    if selected.is_empty() {
-        anyhow::bail!("At least one RAG directory is required");
-    }
-
-    // Sort for consistency
-    let mut dirs = selected;
-    dirs.sort();
-
-    println!("\n  \x1b[32m✓\x1b[0m Selected directories:");
-    for dir in &dirs {
-        println!("    \x1b[90m• {dir}\x1b[0m");
-    }
-    println!();
-
-    Ok(dirs)
 }
 
 #[cfg(test)]
@@ -1170,6 +951,7 @@ mod tests {
             server_extras: std::collections::HashMap::new(),
             skills_dir: None,
             instruction_file: None,
+            instruction_precedence: vec![],
             provider: provider.map(str::to_string),
             tool_name: tool.map(str::to_string),
             cli: None,
@@ -1439,5 +1221,74 @@ mod tests {
             config.get_cli("manual-only").is_some(),
             "a CLI the registry doesn't know about at all must never be removed"
         );
+    }
+    // ── Coverage for helpers extracted during the quality refactor ────
+
+    #[test]
+    fn rag_browser_starting_dir_from_prev_dirs_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("notes").join("sub");
+        std::fs::create_dir_all(&nested).unwrap();
+        let config = crate::domain::canopy_config::CanopyConfig {
+            rag_personal_dirs: vec![nested.to_string_lossy().to_string()],
+            ..Default::default()
+        };
+
+        let start = rag_browser_starting_dir(&config);
+        assert_eq!(
+            start,
+            dir.path().join("notes").to_string_lossy().to_string()
+        );
+    }
+
+    #[test]
+    fn rag_browser_starting_dir_falls_back_to_first_prev_dir_when_parent_missing() {
+        let missing = "/canopy-quality-never-created-parent-9f3a/sub.md";
+        let config = crate::domain::canopy_config::CanopyConfig {
+            rag_personal_dirs: vec![missing.to_string()],
+            ..Default::default()
+        };
+
+        let start = rag_browser_starting_dir(&config);
+        assert_eq!(start, missing);
+    }
+
+    #[test]
+    fn rag_browser_starting_dir_from_rag_personal_root_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = crate::domain::canopy_config::CanopyConfig {
+            rag_personal_dirs: Vec::new(),
+            rag_personal_root: dir.path().join("kb").to_string_lossy().to_string(),
+            ..Default::default()
+        };
+
+        let start = rag_browser_starting_dir(&config);
+        assert_eq!(start, dir.path().to_string_lossy().to_string());
+    }
+
+    #[test]
+    fn rag_browser_starting_dir_empty_when_nothing_configured() {
+        let config = crate::domain::canopy_config::CanopyConfig {
+            rag_personal_dirs: Vec::new(),
+            rag_personal_root: String::new(),
+            ..Default::default()
+        };
+
+        assert_eq!(rag_browser_starting_dir(&config), "");
+    }
+
+    #[test]
+    fn disabled_rag_returns_threshold_and_size_limit() {
+        let config = crate::domain::canopy_config::CanopyConfig {
+            similarity_threshold: 0.42,
+            rag_max_file_mb: 77,
+            ..Default::default()
+        };
+
+        let (model, threshold, dirs, max_mb) = disabled_rag(&config).unwrap();
+        assert_eq!(model, "");
+        assert_eq!(threshold, 0.42);
+        assert!(dirs.is_empty());
+        assert_eq!(max_mb, 77);
     }
 }

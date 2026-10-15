@@ -166,6 +166,10 @@ mod ensemble_graph {
             kind: crate::domain::graphs::EnsembleKind::Parallel,
             round_robin_index: None,
             created_at: Utc::now(),
+
+            crew_id: None,
+            crew_name: None,
+            crew_version_applied: None,
         };
         let members = vec![
             EnsembleMember {
@@ -274,6 +278,10 @@ mod ensemble_graph {
             kind,
             round_robin_index: None,
             created_at: Utc::now(),
+
+            crew_id: None,
+            crew_name: None,
+            crew_version_applied: None,
         };
         let members = vec![EnsembleMember {
             ensemble_id: "ens1".to_string(),
@@ -349,6 +357,10 @@ mod ensemble_graph {
             kind: crate::domain::graphs::EnsembleKind::Cascade,
             round_robin_index: None,
             created_at: Utc::now(),
+
+            crew_id: None,
+            crew_name: None,
+            crew_version_applied: None,
         };
         let target_members = vec![EnsembleMember {
             ensemble_id: "ens2".to_string(),
@@ -405,6 +417,10 @@ mod ensemble_graph {
             kind: crate::domain::graphs::EnsembleKind::Parallel,
             round_robin_index: None,
             created_at: Utc::now(),
+
+            crew_id: None,
+            crew_name: None,
+            crew_version_applied: None,
         };
         let target_members = vec![
             EnsembleMember {

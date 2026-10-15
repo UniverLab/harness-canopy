@@ -360,7 +360,7 @@ pub fn render_template(template: &str, resolve: impl Fn(&str) -> Option<String>)
 /// deduplicated. Escaped `\{{name}}` pairs are literal prose, not binding
 /// sites, and are skipped. Names are trimmed for the dedup key, matching the
 /// historical behaviour of this helper.
-fn placeholder_names(content: &str) -> Vec<String> {
+pub(crate) fn placeholder_names(content: &str) -> Vec<String> {
     let mut names = Vec::new();
     scan_template(content, |piece| {
         if let TemplatePiece::Marker { inner } = piece {

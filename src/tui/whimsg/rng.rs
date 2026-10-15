@@ -77,9 +77,12 @@ mod tests {
     /// Rng from two different instants creates different seeds
     #[test]
     fn rng_from_different_instants_differs() {
-        let rng1 = Rng::from_instant(Instant::now());
+        // Deterministic: an instant guaranteed to be older than `now`, so the
+        // two seeds differ regardless of clock resolution — two back-to-back
+        // `Instant::now()` calls can land in the same tick and seed identically.
+        let older = Instant::now() - std::time::Duration::from_millis(5);
+        let rng1 = Rng::from_instant(older);
         let rng2 = Rng::from_instant(Instant::now());
-        // Very high probability they're different (not guaranteed but extremely likely)
         assert_ne!(rng1.0, rng2.0);
     }
 

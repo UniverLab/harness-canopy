@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+#![allow(unused_imports)]
 #![allow(clippy::doc_markdown)]
 
 mod setup_module {
@@ -88,6 +89,8 @@ mod setup_module {
             pub skills_dir: Option<String>,
             #[serde(default)]
             pub instruction_file: Option<String>,
+            #[serde(default)]
+            pub instruction_precedence: Vec<String>,
             #[serde(default)]
             pub cli: Option<serde_json::Value>,
         }

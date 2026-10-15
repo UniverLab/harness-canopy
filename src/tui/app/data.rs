@@ -1,6 +1,8 @@
 use anyhow::Result;
+use std::collections::HashSet;
 
 use crate::application::ports::{AgentRepository, RunRepository, StateRepository};
+use crate::db::scheduled_sends::ScheduledSend;
 
 use super::types::{AgentEntry, App};
 use super::utils::{is_local_port_open, is_process_running, relative_time, tail_lines};
@@ -88,32 +90,41 @@ impl App {
         // a fallback for a daemonless TUI (no daemon process detected), so it
         // still surfaces completions when nothing else would.
         if self.notifications_enabled && !self.daemon_running {
-            for finished_id in &prev_ids {
-                if !self.active_runs.contains_key(finished_id.as_str()) {
-                    if self.db.get_agent(finished_id).ok().flatten().is_none() {
-                        continue;
-                    }
-                    if let Some(run) = self
-                        .db
-                        .list_runs(finished_id, 1)
-                        .ok()
-                        .and_then(|mut runs| runs.drain(..).next())
-                    {
-                        let success =
-                            matches!(run.status, crate::domain::models::RunStatus::Success);
-                        self.notification_service.notify_task_completed(
-                            finished_id,
-                            success,
-                            run.exit_code,
-                        );
-                    }
-                }
-            }
+            self.notify_finished_runs(&prev_ids);
         }
         self.prev_active_run_ids = self.active_runs.keys().cloned().collect();
 
         self.recent_runs = self.db.list_all_recent_runs(50)?;
         Ok(())
+    }
+
+    fn notify_finished_runs(&mut self, prev_ids: &HashSet<String>) {
+        if !self.notifications_enabled || self.daemon_running {
+            return;
+        }
+        for finished_id in prev_ids {
+            self.notify_finished_run(finished_id);
+        }
+    }
+
+    fn notify_finished_run(&mut self, finished_id: &str) {
+        if self.active_runs.contains_key(finished_id) {
+            return;
+        }
+        if self.db.get_agent(finished_id).ok().flatten().is_none() {
+            return;
+        }
+        let Some(run) = self
+            .db
+            .list_runs(finished_id, 1)
+            .ok()
+            .and_then(|mut runs| runs.drain(..).next())
+        else {
+            return;
+        };
+        let success = matches!(run.status, crate::domain::models::RunStatus::Success);
+        self.notification_service
+            .notify_task_completed(finished_id, success, run.exit_code);
     }
 
     pub(super) fn refresh_log(&mut self) {
@@ -224,99 +235,126 @@ impl App {
                 &send.target_session_id,
                 &live_session_ids,
             ) {
-                // Find the target interactive agent by session ID.
-                let Some(agent) = self
-                    .interactive_agents
-                    .iter()
-                    .find(|a| a.id == send.target_session_id)
-                else {
-                    continue;
-                };
-                // Deliver the prompt using the same path as a manual send.
-                let spec = agent.cli.paste_submit_spec();
-                if let Err(e) = agent.submit_prompt_to_pty(&send.prompt, spec) {
-                    tracing::warn!("Scheduled send '{}' delivery failed: {e}", send.id);
-                    crate::domain::notification::send_notification(
-                        "Scheduled send failed",
-                        &format!("Could not deliver prompt: {e}"),
-                        crate::domain::notification::NotificationLevel::Error,
-                    );
-                } else {
-                    tracing::info!(
-                        "Scheduled send '{}' delivered to session '{}'",
-                        send.id,
-                        send.target_session_id
-                    );
-                    // A hook-originated message stays identifiable as such:
-                    // the delivered prompt is exactly the promptbuilder text,
-                    // and the graph/event that sent it is surfaced here rather
-                    // than being buried in that text.
-                    if let Some(provenance) = send.provenance.as_ref() {
-                        if provenance.kind == "hook" {
-                            crate::domain::notification::send_notification(
-                                "Hook message delivered",
-                                &format!(
-                                    "Graph '{}' sent a message to this session (event '{}').",
-                                    provenance.graph_id, provenance.event
-                                ),
-                                crate::domain::notification::NotificationLevel::Info,
-                            );
-                        }
-                    }
-                }
+                self.deliver_live_scheduled_send(send);
             } else {
-                // Target session doesn't exist — notify and preserve the prompt
-                // so it stays reachable via the project's last-prompt recall.
-                tracing::warn!(
-                    "Scheduled send '{}': target session '{}' not found; \
-                     prompt preserved for recall",
-                    send.id,
-                    send.target_session_id
-                );
-                if let Err(e) = self.db.insert_failed_scheduled_send(
-                    &send.id,
-                    &send.prompt,
-                    &send.target_session_id,
-                    send.workdir.as_deref(),
-                    now,
-                    send.provenance.as_ref(),
-                ) {
-                    tracing::warn!(
-                        "Failed to preserve failed scheduled send '{}': {e}",
-                        send.id
-                    );
-                }
-                // Also surface it as the project's last prompt so Ctrl+L in
-                // the prompt builder recovers it (U8). Only the flattened
-                // text is available here — the builder that composed it is
-                // long gone by the time this fires.
-                if let Some(workdir) = send.workdir.as_deref() {
-                    let id = format!("lp-{}", uuid::Uuid::new_v4());
-                    if let Err(e) =
-                        self.db
-                            .insert_last_prompt(&id, workdir, &send.prompt, None, now)
-                    {
-                        tracing::warn!(
-                            "Failed to record last prompt for failed send '{}': {e}",
-                            send.id
-                        );
-                    }
-                }
-                crate::domain::notification::send_notification(
-                    "Scheduled send: session not found",
-                    &format!(
-                        "Target session '{}' is no longer active. The prompt is preserved for recall.",
-                        send.target_session_id
-                    ),
-                    crate::domain::notification::NotificationLevel::Warning,
-                );
+                self.preserve_dead_scheduled_send(send, now);
             }
-
-            // Remove the scheduled send after delivery attempt (whether
-            // successful or not — the prompt is either delivered or preserved).
             if let Err(e) = self.db.delete_scheduled_send(&send.id) {
                 tracing::warn!("Failed to delete scheduled send '{}': {e}", send.id);
             }
+        }
+    }
+
+    fn deliver_live_scheduled_send(&self, send: &ScheduledSend) {
+        let Some(agent) = self
+            .interactive_agents
+            .iter()
+            .find(|a| a.id == send.target_session_id)
+        else {
+            return;
+        };
+        let spec = agent.cli.paste_submit_spec();
+        if let Err(e) = agent.submit_prompt_to_pty(&send.prompt, spec) {
+            tracing::warn!("Scheduled send '{}' delivery failed: {e}", send.id);
+            crate::domain::notification::send_notification(
+                "Scheduled send failed",
+                &format!("Could not deliver prompt: {e}"),
+                crate::domain::notification::NotificationLevel::Error,
+            );
+            return;
+        }
+        tracing::info!(
+            "Scheduled send '{}' delivered to session '{}'",
+            send.id,
+            send.target_session_id
+        );
+        Self::notify_hook_delivery(send);
+    }
+
+    fn notify_hook_delivery(send: &ScheduledSend) -> bool {
+        // bool only for testability; caller ignores
+        let Some(provenance) = send.provenance.as_ref() else {
+            return false;
+        };
+        match provenance.kind.as_str() {
+            "hook" => {
+                crate::domain::notification::send_notification(
+                    "Hook message delivered",
+                    &format!(
+                        "Graph '{}' sent a message to this session (event '{}').",
+                        provenance.graph_id, provenance.event
+                    ),
+                    crate::domain::notification::NotificationLevel::Info,
+                );
+                true
+            }
+            "agent_trigger" => {
+                crate::domain::notification::send_notification(
+                    "Agent message delivered",
+                    &format!(
+                        "Agent '{}' ({}) sent a message to this session.",
+                        provenance.agent_id.as_deref().unwrap_or(""),
+                        provenance.trigger.as_deref().unwrap_or("trigger")
+                    ),
+                    crate::domain::notification::NotificationLevel::Info,
+                );
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn preserve_dead_scheduled_send(
+        &mut self,
+        send: &ScheduledSend,
+        now: chrono::DateTime<chrono::Utc>,
+    ) {
+        tracing::warn!(
+            "Scheduled send '{}': target session '{}' not found; prompt preserved for recall",
+            send.id,
+            send.target_session_id
+        );
+        if let Err(e) = self.db.insert_failed_scheduled_send(
+            &send.id,
+            &send.prompt,
+            &send.target_session_id,
+            send.workdir.as_deref(),
+            now,
+            send.provenance.as_ref(),
+        ) {
+            tracing::warn!(
+                "Failed to preserve failed scheduled send '{}': {e}",
+                send.id
+            );
+        }
+        self.record_failed_send_recall(send, now);
+        crate::domain::notification::send_notification(
+            "Scheduled send: session not found",
+            &format!(
+                "Target session '{}' is no longer active. The prompt is preserved for recall.",
+                send.target_session_id
+            ),
+            crate::domain::notification::NotificationLevel::Warning,
+        );
+    }
+
+    fn record_failed_send_recall(
+        &mut self,
+        send: &ScheduledSend,
+        now: chrono::DateTime<chrono::Utc>,
+    ) {
+        let Some(workdir) = send.workdir.as_deref() else {
+            return;
+        };
+        let id = format!("lp-{}", uuid::Uuid::new_v4());
+        if let Err(e) = self
+            .db
+            .insert_last_prompt(&id, workdir, &send.prompt, None, now)
+        {
+            tracing::warn!(
+                "Failed to record last prompt for failed send '{}': {e}",
+                send.id
+            );
         }
     }
 }
@@ -324,6 +362,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::App;
+    use crate::application::ports::AgentRepository;
     use crate::db::Database;
     use std::sync::Arc;
     use tempfile::{tempdir, NamedTempFile};
@@ -512,5 +551,203 @@ mod tests {
             .get_last_prompt_for_workdir(workdir)
             .expect("query last prompt")
             .is_none());
+    }
+
+    /// deliver_live_scheduled_send delivers the prompt and deletes the
+    /// schedule without creating a failed-scheduled-send record.
+    #[test]
+    fn deliver_live_scheduled_send_deletes_without_failure_record() {
+        let (mut app, _dir) = test_app();
+        app.scheduled_sends_restored = true;
+
+        // Spawn a real interactive agent (cat as stand-in)
+        let mut agent = crate::tui::agent::InteractiveAgent::spawn_terminal(
+            "cat",
+            "/tmp",
+            80,
+            24,
+            Some("live-target"),
+            &[],
+            ratatui::style::Color::White,
+        )
+        .expect("spawn terminal");
+        let target_id = agent.id.clone();
+        agent.kill();
+        app.interactive_agents.push(agent);
+
+        let fire_at = chrono::Utc::now() - chrono::Duration::minutes(1);
+        app.db
+            .insert_scheduled_send(
+                "ss-live-1",
+                "deliver me",
+                &target_id,
+                None,
+                fire_at,
+                None,
+                None,
+            )
+            .expect("insert scheduled send");
+
+        app.deliver_due_scheduled_sends();
+
+        // Schedule should be deleted
+        assert!(app
+            .db
+            .list_due_scheduled_sends(chrono::Utc::now())
+            .expect("list due")
+            .is_empty());
+        // No failed record should exist
+        assert!(app
+            .db
+            .list_failed_scheduled_sends_for_workdir("/tmp")
+            .expect("list failed")
+            .is_empty());
+    }
+
+    /// notify_hook_delivery returns true for hook and agent-trigger provenance.
+    #[test]
+    fn notify_hook_delivery_is_true_for_hook_and_agent_trigger_provenance() {
+        use crate::db::scheduled_sends::{ScheduledSend, ScheduledSendProvenance};
+
+        let hook_prov = ScheduledSendProvenance::hook("graph-1", "on_failed");
+        let send_hook = ScheduledSend {
+            id: "ss-hook".into(),
+            prompt: "test".into(),
+            target_session_id: "sess".into(),
+            workdir: None,
+            fire_at: chrono::Utc::now(),
+            created_at: chrono::Utc::now(),
+            builder_state: None,
+            provenance: Some(hook_prov),
+        };
+        assert!(App::notify_hook_delivery(&send_hook));
+
+        // CM53: an agent-triggered send announces delivery the same way.
+        let agent_prov = ScheduledSendProvenance::agent_trigger("nudger", "cron");
+        let send_agent = ScheduledSend {
+            id: "ss-agent".into(),
+            prompt: "test".into(),
+            target_session_id: "sess".into(),
+            workdir: None,
+            fire_at: chrono::Utc::now(),
+            created_at: chrono::Utc::now(),
+            builder_state: None,
+            provenance: Some(agent_prov),
+        };
+        assert!(App::notify_hook_delivery(&send_agent));
+
+        let non_hook_prov = ScheduledSendProvenance {
+            kind: "other".into(),
+            graph_id: "graph-1".into(),
+            event: "on_failed".into(),
+            session_id: None,
+            agent_id: None,
+            trigger: None,
+            target_session_name: None,
+        };
+        let send_other = ScheduledSend {
+            id: "ss-other".into(),
+            prompt: "test".into(),
+            target_session_id: "sess".into(),
+            workdir: None,
+            fire_at: chrono::Utc::now(),
+            created_at: chrono::Utc::now(),
+            builder_state: None,
+            provenance: Some(non_hook_prov),
+        };
+        assert!(!App::notify_hook_delivery(&send_other));
+
+        let send_none = ScheduledSend {
+            id: "ss-none".into(),
+            prompt: "test".into(),
+            target_session_id: "sess".into(),
+            workdir: None,
+            fire_at: chrono::Utc::now(),
+            created_at: chrono::Utc::now(),
+            builder_state: None,
+            provenance: None,
+        };
+        assert!(!App::notify_hook_delivery(&send_none));
+    }
+
+    // ── notify_finished_run tests ───────────────────────────────────────
+    // Three early-return branches must be covered:
+    // 1. run still in active_runs (should not notify)
+    // 2. agent not found in DB (should not notify)
+    // 3. no runs found for agent (should not notify)
+
+    #[test]
+    fn notify_finished_run_skips_when_still_active() {
+        let (mut app, _dir) = test_app();
+        app.notifications_enabled = true;
+        app.daemon_running = false;
+
+        // Add to active_runs - should skip notification
+        app.active_runs.insert(
+            "agent1".to_string(),
+            crate::domain::models::RunLog {
+                id: "run1".into(),
+                background_agent_id: "agent1".into(),
+                status: crate::domain::models::RunStatus::InProgress,
+                trigger_type: crate::domain::models::TriggerType::Manual,
+                summary: None,
+                started_at: chrono::Utc::now(),
+                finished_at: None,
+                exit_code: None,
+                timeout_at: None,
+                executed_platform: None,
+                executed_model: None,
+            },
+        );
+
+        // This should not panic and should return early
+        app.notify_finished_run("agent1");
+    }
+
+    #[test]
+    fn notify_finished_run_skips_when_agent_not_found() {
+        let (mut app, _dir) = test_app();
+        app.notifications_enabled = true;
+        app.daemon_running = false;
+
+        // Agent "nonexistent" is not in the DB - should skip
+        app.notify_finished_run("nonexistent");
+    }
+
+    #[test]
+    fn notify_finished_run_skips_when_no_runs() {
+        let (mut app, _dir) = test_app();
+        app.notifications_enabled = true;
+        app.daemon_running = false;
+
+        // Create an agent in the DB but with no runs
+        use crate::domain::models::{Agent, Cli, Trigger};
+        use chrono::Utc;
+        let agent = Agent {
+            id: "agent-no-runs".into(),
+            prompt: "test".into(),
+            trigger: Some(Trigger::Cron {
+                schedule_expr: "0 9 * * *".into(),
+            }),
+            cli: Cli::new("claude"),
+            model: None,
+            effort: None,
+            working_dir: None,
+            enabled: true,
+            enable_at: None,
+            created_at: Utc::now(),
+            log_path: "/tmp/test.log".into(),
+            timeout_minutes: 15,
+            expires_at: None,
+            last_run_at: None,
+            last_run_ok: None,
+            last_triggered_at: None,
+            trigger_count: 0,
+            action: crate::domain::models::AgentAction::Headless,
+        };
+        app.db.upsert_agent(&agent).expect("insert agent");
+
+        // Should skip because no runs exist for this agent
+        app.notify_finished_run("agent-no-runs");
     }
 }

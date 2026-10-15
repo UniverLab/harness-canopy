@@ -1,5 +1,6 @@
 //! UI rendering — sidebar with agent cards, log panel, header, footer, and dialogs.
 
+pub(crate) mod brand;
 pub(crate) mod dialogs;
 mod footer;
 mod header;
@@ -20,14 +21,14 @@ use super::app::types::App;
 
 pub(crate) const ERROR_COLOR: Color = Color::Rgb(229, 57, 53);
 pub(crate) const BG_HOVER: Color = Color::Rgb(30, 30, 30);
-pub(crate) const INTERACTIVE_COLOR: Color = Color::Rgb(102, 187, 106);
+pub(crate) const INTERACTIVE_COLOR: Color = brand::rgb(brand::CANOPY_SCALE[3]);
 pub(crate) const STATUS_DISABLED: Color = Color::Rgb(120, 120, 120);
-pub(crate) const STATUS_RUNNING: Color = Color::Rgb(76, 175, 80);
+pub(crate) const STATUS_RUNNING: Color = brand::rgb(brand::ESSENCE);
 // Active-session pulse phases (B21): a working PTY breathes between a
-// muted gray-green and an illuminated green — never blank, so the
-// indicator reads as a heartbeat instead of the status bar flickering out.
-pub(crate) const STATUS_RUNNING_DIM: Color = Color::Rgb(74, 102, 77);
-pub(crate) const STATUS_RUNNING_BRIGHT: Color = Color::Rgb(129, 230, 133);
+// muted teal and an illuminated teal — never blank, so the indicator reads
+// as a heartbeat instead of the status bar flickering out.
+pub(crate) const STATUS_RUNNING_DIM: Color = brand::rgb(brand::CANOPY_SCALE[1]);
+pub(crate) const STATUS_RUNNING_BRIGHT: Color = brand::rgb(brand::CANOPY_SCALE[3]);
 pub(crate) const STATUS_OK: Color = Color::Rgb(66, 165, 245);
 pub(crate) const STATUS_FAIL: Color = Color::Rgb(229, 57, 53);
 pub(crate) const STATUS_WAIT_ON: Color = Color::Rgb(255, 255, 0);
@@ -73,134 +74,155 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     ])
     .areas(frame.area());
 
-    let body_area = if app.sidebar_visible {
-        let [sidebar, content] =
-            Layout::horizontal([Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(0)]).areas(body);
-        header::draw_header(frame, header_area, app, &theme);
-        sidebar::draw_sidebar(frame, sidebar, app, &theme);
-        if !theme.show_borders && MODERN_USES_SEPARATOR_COLUMN {
-            let separator = Rect::new(sidebar.x + sidebar.width, sidebar.y, 1, sidebar.height);
-            frame.render_widget(
-                ratatui::widgets::Paragraph::new("").style(Style::default().bg(theme.border_color)),
-                separator,
-            );
-        }
-        content
-    } else {
-        header::draw_header(frame, header_area, app, &theme);
-        body
-    };
+    let body_area = draw_body(frame, app, &theme, header_area, body);
+    let panel_area = draw_panel_and_sync(frame, app, &theme, body_area);
+    draw_split_or_log(frame, app, &theme, panel_area);
+    footer::draw_footer(frame, footer_area, app, &theme);
+    draw_ctrl_c_notice(frame, body, app, &theme);
+    draw_modal_dialogs(frame, app, &theme);
+    draw_picker_overlays(frame, app, &theme, panel_area);
+    draw_top_overlays(frame, app, &theme);
+}
 
-    // CT1 multi-face right panel: the visible face decides, and the face
-    // decides whether there is anything to show. The layout width rule is
-    // unchanged — only which content fills the panel moved.
+/// Draw the header and sidebar, returning the area left for the content face.
+fn draw_body(
+    frame: &mut Frame,
+    app: &mut App,
+    theme: &Theme,
+    header_area: Rect,
+    body: Rect,
+) -> Rect {
+    if !app.sidebar_visible {
+        header::draw_header(frame, header_area, app, theme);
+        return body;
+    }
+    let [sidebar, content] =
+        Layout::horizontal([Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(0)]).areas(body);
+    header::draw_header(frame, header_area, app, theme);
+    sidebar::draw_sidebar(frame, sidebar, app, theme);
+    if !theme.show_borders && MODERN_USES_SEPARATOR_COLUMN {
+        let separator = Rect::new(sidebar.x + sidebar.width, sidebar.y, 1, sidebar.height);
+        frame.render_widget(
+            ratatui::widgets::Paragraph::new("").style(Style::default().bg(theme.border_color)),
+            separator,
+        );
+    }
+    content
+}
+
+/// CT1 multi-face right panel: the visible face decides, and the face
+/// decides whether there is anything to show. The layout width rule is
+/// unchanged — only which content fills the panel moved. Returns the
+/// panel area.
+fn draw_panel_and_sync(frame: &mut Frame, app: &mut App, theme: &Theme, body_area: Rect) -> Rect {
     let panel_visible = app.panel_face_visible();
     let activity_width = app.activity_panel_layout_width(body_area.width, panel_visible);
-    let (panel_area, sync_area) = if panel_visible {
-        if activity_width > 0 {
-            let [panel, sync] = Layout::horizontal([
-                Constraint::Min(body_area.width.saturating_sub(activity_width)),
-                Constraint::Length(activity_width),
-            ])
-            .areas(body_area);
-            panel::draw_panel_face(frame, sync, app, &theme);
-            app.last_sync_area = Some(sync);
-            (panel, Some(sync))
-        } else {
-            app.last_sync_area = None;
-            (body_area, None)
-        }
-    } else {
+    if !panel_visible || activity_width == 0 {
         app.last_sync_area = None;
-        (body_area, None)
-    };
-
-    // Split view: render two panels side-by-side (or stacked) when a split is active
-    if let Some(ref split_id) = app.active_split_id.clone() {
-        if let Some(group) = app.split_groups.iter().find(|g| g.id == *split_id) {
-            let session_a = group.session_a.clone();
-            let session_b = group.session_b.clone();
-            let orientation = group.orientation;
-            let areas = match orientation {
-                crate::domain::models::SplitOrientation::Horizontal => {
-                    Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
-                        .areas(panel_area)
-                }
-                crate::domain::models::SplitOrientation::Vertical => {
-                    Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)])
-                        .areas(panel_area)
-                }
-            };
-            let [area_a, area_b]: [Rect; 2] = areas;
-            panel::draw_split_panel(
-                frame,
-                area_a,
-                app,
-                &session_a,
-                !app.split_right_focused,
-                &theme,
-            );
-            panel::draw_split_panel(
-                frame,
-                area_b,
-                app,
-                &session_b,
-                app.split_right_focused,
-                &theme,
-            );
-        } else {
-            // Group no longer exists — clear stale reference
-            app.active_split_id = None;
-            panel::draw_log_panel(frame, panel_area, app, &theme);
-        }
-    } else {
-        panel::draw_log_panel(frame, panel_area, app, &theme);
+        return body_area;
     }
+    let [panel, sync] = Layout::horizontal([
+        Constraint::Min(body_area.width.saturating_sub(activity_width)),
+        Constraint::Length(activity_width),
+    ])
+    .areas(body_area);
+    panel::draw_panel_face(frame, sync, app, theme);
+    app.last_sync_area = Some(sync);
+    panel
+}
 
-    footer::draw_footer(frame, footer_area, app, &theme);
+/// Split view: render two panels side-by-side (or stacked) when a split is active.
+fn draw_split_or_log(frame: &mut Frame, app: &mut App, theme: &Theme, panel_area: Rect) {
+    let Some(ref split_id) = app.active_split_id.clone() else {
+        panel::draw_log_panel(frame, panel_area, app, theme);
+        return;
+    };
+    let Some(group) = app.split_groups.iter().find(|g| g.id == *split_id) else {
+        // Group no longer exists — clear stale reference
+        app.active_split_id = None;
+        panel::draw_log_panel(frame, panel_area, app, theme);
+        return;
+    };
+    let session_a = group.session_a.clone();
+    let session_b = group.session_b.clone();
+    let areas = match group.orientation {
+        crate::domain::models::SplitOrientation::Horizontal => {
+            Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .areas(panel_area)
+        }
+        crate::domain::models::SplitOrientation::Vertical => {
+            Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .areas(panel_area)
+        }
+    };
+    let [area_a, area_b]: [Rect; 2] = areas;
+    panel::draw_split_panel(
+        frame,
+        area_a,
+        app,
+        &session_a,
+        !app.split_right_focused,
+        theme,
+    );
+    panel::draw_split_panel(
+        frame,
+        area_b,
+        app,
+        &session_b,
+        app.split_right_focused,
+        theme,
+    );
+}
 
+/// The exclusive confirm chain — only one confirmation can be on screen.
+fn draw_confirm_dialogs(frame: &mut Frame, app: &App, theme: &Theme) {
+    if app.quit_confirm {
+        dialogs::draw_quit_confirm(frame, theme);
+    } else if app.delete_project_confirm {
+        dialogs::draw_delete_project_confirm(frame, theme);
+    } else if app.archive_graph_confirm {
+        dialogs::draw_archive_graph_confirm(frame, theme);
+    } else if app.permanent_delete_graph_confirm {
+        dialogs::draw_permanent_delete_graph_confirm(frame, theme);
+    } else if app.graph_reset_confirm {
+        dialogs::draw_graph_reset_confirm(frame, app, theme);
+    }
+}
+
+/// Every modal dialog, in the order they stack.
+fn draw_modal_dialogs(frame: &mut Frame, app: &mut App, theme: &Theme) {
     if app.new_agent_dialog.is_some() {
-        dialogs::draw_new_agent_dialog(frame, app, &theme);
+        dialogs::draw_new_agent_dialog(frame, app, theme);
     }
 
     if app.launchpad_dialog.is_some() {
-        dialogs::draw_launchpad_dialog(frame, app, &theme);
+        dialogs::draw_launchpad_dialog(frame, app, theme);
     }
 
-    if app.quit_confirm {
-        dialogs::draw_quit_confirm(frame, &theme);
-    } else if app.delete_project_confirm {
-        dialogs::draw_delete_project_confirm(frame, &theme);
-    } else if app.archive_graph_confirm {
-        dialogs::draw_archive_graph_confirm(frame, &theme);
-    } else if app.permanent_delete_graph_confirm {
-        dialogs::draw_permanent_delete_graph_confirm(frame, &theme);
-    } else if app.graph_reset_confirm {
-        dialogs::draw_graph_reset_confirm(frame, app, &theme);
-    }
+    draw_confirm_dialogs(frame, app, theme);
 
     if app.graph_autorun_dialog.is_some() {
-        dialogs::draw_graph_autorun_dialog(frame, app, &theme);
+        dialogs::draw_graph_autorun_dialog(frame, app, theme);
     }
 
     if app.graph_action_message.is_some() {
-        dialogs::draw_graph_action_message(frame, app, &theme);
+        dialogs::draw_graph_action_message(frame, app, theme);
     }
 
-    if app.show_legend {
-        dialogs::draw_legend(frame, app, &theme);
+    if app.hub_open {
+        dialogs::draw_hub(frame, app, theme);
     }
 
     if app.context_transfer_modal.is_some() {
-        dialogs::draw_context_transfer_modal(frame, app, &theme);
+        dialogs::draw_context_transfer_modal(frame, app, theme);
     }
 
     if app.rag_transfer_modal.is_some() {
-        dialogs::draw_rag_transfer_modal(frame, app, &theme);
+        dialogs::draw_rag_transfer_modal(frame, app, theme);
     }
 
     if app.simple_prompt_dialog.is_some() {
-        let result = dialogs::draw_simple_prompt_dialog(frame, app, &theme);
+        let result = dialogs::draw_simple_prompt_dialog(frame, app, theme);
         if let Some((tab_origin, content_rect)) = result {
             app.prompt_tab_origin = Some(tab_origin);
             app.prompt_raw_content_rect = content_rect;
@@ -208,71 +230,114 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
 
     if app.graph_editor_dialog.is_some() {
-        dialogs::draw_graph_editor_dialog(frame, app, &theme);
+        dialogs::draw_graph_editor_dialog(frame, app, theme);
     }
 
     if app.graph_form_dialog.is_some() {
-        dialogs::draw_graph_form_dialog(frame, app, &theme);
+        dialogs::draw_graph_form_dialog(frame, app, theme);
     }
 
     if app.knowledge_dialog.is_some() {
-        dialogs::draw_knowledge_dialog(frame, app, &theme);
+        dialogs::draw_knowledge_dialog(frame, app, theme);
     }
 
     if app.split_picker_open {
-        dialogs::draw_split_picker(frame, app, &theme);
+        dialogs::draw_split_picker(frame, app, theme);
     }
+}
 
+/// The panel picker, the suggestion picker and the terminal search bar.
+fn draw_picker_overlays(frame: &mut Frame, app: &App, theme: &Theme, panel_area: Rect) {
     if app.panel_picker_open {
-        draw_panel_picker(frame, app, &theme);
+        draw_panel_picker(frame, app, theme);
     }
 
     if app.suggestion_picker.is_some() {
-        dialogs::draw_suggestion_picker(frame, app, panel_area, &theme);
+        dialogs::draw_suggestion_picker(frame, app, panel_area, theme);
     }
 
     // Terminal search bar overlay (Ctrl+F)
-    if let Some(search) = &app.terminal_search {
-        let w = panel_area.width.min(50);
-        let x = panel_area.x + panel_area.width.saturating_sub(w + 1);
-        let y = panel_area.y;
-        let area = Rect::new(x, y, w, 1);
-        let match_info = if search.match_rows.is_empty() {
-            if search.query.is_empty() {
-                String::new()
-            } else {
-                " (no matches)".to_string()
-            }
+    let Some(search) = &app.terminal_search else {
+        return;
+    };
+    let w = panel_area.width.min(50);
+    let x = panel_area.x + panel_area.width.saturating_sub(w + 1);
+    let y = panel_area.y;
+    let area = Rect::new(x, y, w, 1);
+    let match_info = if search.match_rows.is_empty() {
+        if search.query.is_empty() {
+            String::new()
         } else {
-            format!(" {}/{}", search.current_match + 1, search.match_rows.len())
-        };
-        let text = format!(" 🔍 {}{} ", search.query, match_info);
-        let style = ratatui::style::Style::default()
-            .fg(Color::Black)
-            .bg(Color::Rgb(255, 235, 59));
-        frame.render_widget(ratatui::widgets::Paragraph::new(text).style(style), area);
-    }
-
-    // Top-level overlays rendered last so they appear above all content
-    if app.show_copied {
-        let full = frame.area();
-        let msg = " \u{2592} COPIED \u{2592} "; // ▒ COPIED ▒
-        let w = msg.chars().count() as u16; // display width (char count, not bytes)
-        if full.width > w + 2 {
-            let x = full.x + full.width - w - 1;
-            let y = full.y + 1; // just below header
-            let area = ratatui::layout::Rect::new(x, y, w, 1);
-            let widget = ratatui::widgets::Paragraph::new(msg).style(
-                ratatui::style::Style::default()
-                    .fg(theme.header_color)
-                    .bg(Color::Black),
-            );
-            frame.render_widget(widget, area);
+            " (no matches)".to_string()
         }
+    } else {
+        format!(" {}/{}", search.current_match + 1, search.match_rows.len())
+    };
+    let text = format!(" 🔍 {}{} ", search.query, match_info);
+    let style = ratatui::style::Style::default()
+        .fg(Color::Black)
+        .bg(Color::Rgb(255, 235, 59));
+    frame.render_widget(ratatui::widgets::Paragraph::new(text).style(style), area);
+}
+
+/// The `▒ COPIED ▒` badge, drawn just below the header.
+fn draw_copied_badge(frame: &mut Frame, theme: &Theme) {
+    let full = frame.area();
+    let msg = " ▒ COPIED ▒ "; // ▒ COPIED ▒
+    let w = msg.chars().count() as u16; // display width (char count, not bytes)
+    if full.width > w + 2 {
+        let x = full.x + full.width - w - 1;
+        let y = full.y + 1; // just below header
+        let area = ratatui::layout::Rect::new(x, y, w, 1);
+        let widget = ratatui::widgets::Paragraph::new(msg).style(
+            ratatui::style::Style::default()
+                .fg(theme.header_color)
+                .bg(Color::Black),
+        );
+        frame.render_widget(widget, area);
+    }
+}
+
+/// CT26: the copy-reflex guard's one-line sentence, drawn on the pane's bottom
+/// row (directly above the key-hint footer) while its TTL holds. It names the
+/// key the user reflexively pressed, so it belongs in the same eye line as the
+/// hints — and it borrows the `▒ COPIED ▒` badge's styling so a transient TUI
+/// notice always looks the same.
+fn draw_ctrl_c_notice(frame: &mut Frame, body: Rect, app: &App, theme: &Theme) {
+    let Some(notice) = app.ctrl_c.notice() else {
+        return;
+    };
+    if body.height == 0 || body.width == 0 {
+        return;
+    }
+    let text = format!(" {notice} ");
+    let width = (text.chars().count() as u16).min(body.width);
+    let area = Rect::new(body.x, body.y + body.height - 1, width, 1);
+    frame.render_widget(
+        ratatui::widgets::Paragraph::new(text).style(
+            ratatui::style::Style::default()
+                .fg(Color::Black)
+                .bg(theme.header_color),
+        ),
+        area,
+    );
+}
+
+/// CM52: whether the atmosphere scene ticks and draws this frame. False when
+/// the user hid it for the session or `tui.atmosphere = false`.
+pub(crate) fn atmosphere_active(app: &App) -> bool {
+    !app.atmosphere_hidden && app.tui_settings.atmosphere
+}
+
+/// Top-level overlays rendered last so they appear above all content.
+fn draw_top_overlays(frame: &mut Frame, app: &mut App, theme: &Theme) {
+    if app.show_copied {
+        draw_copied_badge(frame, theme);
     }
 
-    // Atmosphere particles — absolute top layer, drawn last over everything
-    if !app.atmosphere_hidden {
+    // Atmosphere particles — absolute top layer, drawn last over everything.
+    // CM52: `tui.atmosphere = false` skips both the scene tick and the draw.
+    if atmosphere_active(app) {
         let area = frame.area();
         app.atmosphere.tick(area, &mut app.atmosphere_ctx);
         // Reset mouse deltas after the scene has consumed them
@@ -281,8 +346,6 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         let buf = frame.buffer_mut();
         super::atmosphere::render_atmosphere(&app.atmosphere, buf, area);
     }
-
-    let _ = sync_area;
 }
 
 // ── Shared helpers ──────────────────────────────────────────────
@@ -439,6 +502,44 @@ mod tests {
         assert_eq!(sidebar.x, 0);
         assert_eq!(content.x, SIDEBAR_WIDTH);
         assert_eq!(content.width, body.width - SIDEBAR_WIDTH);
+    }
+
+    /// CM52: `tui.brians_brain = false` stops the banner automaton.
+    #[test]
+    fn brians_brain_toggle_stops_the_banner_animation() {
+        let (mut app, _data_dir) = picker_test_app();
+        app.focus = crate::tui::app::types::Focus::Agent;
+        app.home_brain = Some(crate::tui::brians_brain::BriansBrain::new(6, 10));
+
+        app.tui_settings.brians_brain = false;
+        let before = app.home_brain.as_ref().expect("brain set").grid.clone();
+        app.tick_banner_animation();
+        assert_eq!(
+            app.home_brain.as_ref().expect("brain set").grid,
+            before,
+            "disabled must not advance the automaton"
+        );
+
+        app.tui_settings.brians_brain = true;
+        app.tick_banner_animation();
+        assert_ne!(
+            app.home_brain.as_ref().expect("brain set").grid,
+            before,
+            "enabled must advance the automaton"
+        );
+    }
+
+    /// CM52: `tui.atmosphere = false` disables the scene tick and draw.
+    #[test]
+    fn atmosphere_toggle_gates_the_scene() {
+        let (mut app, _data_dir) = picker_test_app();
+        app.atmosphere_hidden = false;
+        app.tui_settings.atmosphere = false;
+        assert!(!atmosphere_active(&app));
+        app.tui_settings.atmosphere = true;
+        assert!(atmosphere_active(&app));
+        app.atmosphere_hidden = true;
+        assert!(!atmosphere_active(&app));
     }
 
     #[test]
@@ -858,5 +959,49 @@ mod tests {
                 "picker must paint the shared dialog background {theme:?}"
             );
         }
+    }
+
+    /// CT26 (FR1/FR2): the notice is drawn on the row just above the footer,
+    /// and nothing is drawn when no notice is set.
+    #[test]
+    fn ctrl_c_notice_is_drawn_on_the_row_above_the_footer() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let (mut app, _data_dir) = picker_test_app();
+        let theme = Theme::classic();
+        app.ctrl_c.set_notice("already copied");
+
+        let backend = TestBackend::new(120, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                draw_ctrl_c_notice(frame, frame.area(), &app, &theme);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let mut row = String::new();
+        for x in 0..buffer.area.width {
+            row.push_str(buffer[(x, 9)].symbol());
+        }
+        assert!(row.contains("already copied"), "notice row: {row}");
+
+        app.ctrl_c.notice = None;
+        let backend = TestBackend::new(120, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                draw_ctrl_c_notice(frame, frame.area(), &app, &theme);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let mut row = String::new();
+        for x in 0..buffer.area.width {
+            row.push_str(buffer[(x, 9)].symbol());
+        }
+        assert!(
+            row.trim().is_empty(),
+            "no notice must draw nothing on that row: {row}"
+        );
     }
 }

@@ -7,14 +7,17 @@ use super::context_transfer::{
 use super::home_preview::handle_playground_key;
 use super::knowledge_dialog::{edit_knowledge_dialog, open_knowledge_dialog};
 use super::search_picker::handle_suggestion_picker_key;
-use super::terminal_warp::{
-    handle_terminal_direct_pty_key, handle_terminal_warp_key, record_terminal_command,
-};
-use crate::tui::agent::{key_to_bytes, InteractiveAgent};
+#[cfg(test)]
+use super::terminal_warp::handle_terminal_direct_pty_key;
+use crate::tui::agent::InteractiveAgent;
 use crate::tui::app::types::{AgentEntry, App, Focus, ProjectTab, SidebarLayer};
 
+mod input;
+
+use input::{forward_key_to_focused_agent, handle_target_input, reset_scroll_on_input};
+
 #[derive(Clone, Copy)]
-enum FocusedAgent {
+pub(super) enum FocusedAgent {
     Interactive(usize),
     Terminal(usize),
 }
@@ -186,7 +189,7 @@ fn handle_background_agent_key(app: &mut App, code: KeyCode, modifiers: KeyModif
         KeyCode::Down | KeyCode::Char('j') => app.scroll_log_down(),
         KeyCode::Up | KeyCode::Char('k') => app.scroll_log_up(),
         KeyCode::Char('q') => app.running = false,
-        KeyCode::F(1) => app.show_legend = !app.show_legend,
+        KeyCode::F(1) => app.toggle_hub(),
         KeyCode::Char('e') if !app.agents_rag_focused => app.open_edit_dialog(),
         _ => {}
     }
@@ -309,7 +312,7 @@ fn handle_focus_shortcuts(app: &mut App, code: KeyCode, modifiers: KeyModifiers)
         || handle_orphaned_session_key(app, code)
         || handle_preview_shortcut(app, code)
         || handle_termination_shortcut(app, code, modifiers)
-        || handle_legend_shortcut(app, code)
+        || handle_hub_shortcut(app, code)
         || handle_agent_cycle_shortcut(app, code, modifiers)
 }
 
@@ -438,12 +441,12 @@ fn handle_termination_shortcut(app: &mut App, code: KeyCode, modifiers: KeyModif
     true
 }
 
-fn handle_legend_shortcut(app: &mut App, code: KeyCode) -> bool {
+fn handle_hub_shortcut(app: &mut App, code: KeyCode) -> bool {
     if code != KeyCode::F(1) {
         return false;
     }
 
-    app.show_legend = !app.show_legend;
+    app.toggle_hub();
     true
 }
 
@@ -705,182 +708,6 @@ fn scroll_focused_agent(app: &mut App, target: FocusedAgent, scroll_up: bool, st
     true
 }
 
-fn reset_scroll_on_input(app: &mut App, target: FocusedAgent, code: KeyCode) {
-    if !matches!(
-        code,
-        KeyCode::Char(_) | KeyCode::Enter | KeyCode::Backspace | KeyCode::Tab
-    ) {
-        return;
-    }
-
-    let Some(agent) = focused_agent_mut(app, target) else {
-        return;
-    };
-    if agent.scroll_offset == 0 {
-        return;
-    }
-
-    agent.scroll_offset = 0;
-}
-
-fn handle_target_input(
-    app: &mut App,
-    target: FocusedAgent,
-    code: KeyCode,
-    modifiers: KeyModifiers,
-) -> Result<bool> {
-    match target {
-        FocusedAgent::Interactive(idx) => {
-            handle_interactive_input(app, idx, code, modifiers);
-            Ok(false)
-        }
-        FocusedAgent::Terminal(idx) => handle_terminal_input(app, idx, code, modifiers),
-    }
-}
-
-fn handle_interactive_input(app: &mut App, idx: usize, code: KeyCode, modifiers: KeyModifiers) {
-    let target = FocusedAgent::Interactive(idx);
-    if code == KeyCode::Enter {
-        record_interactive_prompt(app, idx);
-        clear_input_buffer(app, target);
-        return;
-    }
-
-    track_plain_input(app, target, code, modifiers);
-}
-
-fn record_interactive_prompt(app: &mut App, idx: usize) {
-    if app.interactive_agents[idx].is_sensitive_input_active() {
-        return;
-    }
-
-    let Some(captured) = trimmed_input_buffer(app, FocusedAgent::Interactive(idx)) else {
-        return;
-    };
-    if captured.is_empty() {
-        return;
-    }
-
-    app.interactive_agents[idx].record_prompt(&captured);
-}
-
-fn handle_terminal_input(
-    app: &mut App,
-    idx: usize,
-    code: KeyCode,
-    modifiers: KeyModifiers,
-) -> Result<bool> {
-    if code == KeyCode::Char('w') && modifiers.contains(KeyModifiers::CONTROL) {
-        toggle_terminal_warp_mode(app, idx);
-        return Ok(true);
-    }
-
-    if app.terminal_agents[idx].warp_mode {
-        return handle_terminal_warp_input(app, idx, code, modifiers);
-    }
-
-    track_terminal_input(app, idx, code, modifiers);
-    Ok(false)
-}
-
-fn toggle_terminal_warp_mode(app: &mut App, idx: usize) {
-    app.terminal_agents[idx].warp_mode = !app.terminal_agents[idx].warp_mode;
-    app.terminal_agents[idx].warp_passthrough = false;
-}
-
-fn handle_terminal_warp_input(
-    app: &mut App,
-    idx: usize,
-    code: KeyCode,
-    modifiers: KeyModifiers,
-) -> Result<bool> {
-    if app.terminal_agents[idx].should_bypass_warp_input() {
-        handle_terminal_direct_pty_key(app, idx, code, modifiers)?;
-        return Ok(true);
-    }
-
-    handle_terminal_warp_key(app, idx, code, modifiers)?;
-    Ok(true)
-}
-
-fn track_terminal_input(app: &mut App, idx: usize, code: KeyCode, modifiers: KeyModifiers) {
-    let target = FocusedAgent::Terminal(idx);
-    if code == KeyCode::Enter {
-        let captured = trimmed_input_buffer(app, target).unwrap_or_default();
-        record_terminal_command(app, idx, &captured);
-        clear_input_buffer(app, target);
-        return;
-    }
-    if code == KeyCode::Tab {
-        return;
-    }
-
-    track_plain_input(app, target, code, modifiers);
-}
-
-fn track_plain_input(app: &mut App, target: FocusedAgent, code: KeyCode, modifiers: KeyModifiers) {
-    let KeyCode::Char(ch) = code else {
-        if code == KeyCode::Backspace {
-            pop_input_buffer(app, target);
-        }
-        return;
-    };
-    if modifiers.contains(KeyModifiers::CONTROL) {
-        return;
-    }
-
-    let _ = with_input_buffer_mut(app, target, |input| input.push(ch));
-}
-
-fn trimmed_input_buffer(app: &App, target: FocusedAgent) -> Option<String> {
-    let agent = focused_agent(app, target)?;
-    let Ok(input) = agent.input_buffer.lock() else {
-        return None;
-    };
-
-    Some(input.trim().to_string())
-}
-
-fn with_input_buffer_mut<R>(
-    app: &mut App,
-    target: FocusedAgent,
-    f: impl FnOnce(&mut String) -> R,
-) -> Option<R> {
-    let agent = focused_agent_mut(app, target)?;
-    let Ok(mut input) = agent.input_buffer.lock() else {
-        return None;
-    };
-
-    Some(f(&mut input))
-}
-
-fn clear_input_buffer(app: &mut App, target: FocusedAgent) {
-    let _ = with_input_buffer_mut(app, target, String::clear);
-}
-
-fn pop_input_buffer(app: &mut App, target: FocusedAgent) {
-    let _ = with_input_buffer_mut(app, target, |input| {
-        input.pop();
-    });
-}
-
-fn forward_key_to_focused_agent(
-    app: &mut App,
-    target: FocusedAgent,
-    code: KeyCode,
-    modifiers: KeyModifiers,
-) {
-    let bytes = key_to_bytes(code, modifiers);
-    if bytes.is_empty() {
-        return;
-    }
-
-    let Some(agent) = focused_agent_mut(app, target) else {
-        return;
-    };
-    let _ = agent.write_to_pty(&bytes);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -919,6 +746,7 @@ mod tests {
             last_run_ok: None,
             last_triggered_at: None,
             trigger_count: 3,
+            action: crate::domain::models::AgentAction::Headless,
         }
     }
 
@@ -2077,6 +1905,156 @@ mod focus_shortcuts_keyboard_claim_tests {
             KeyCode::Down,
             KeyModifiers::SHIFT
         ));
+        app.interactive_agents[0].kill();
+    }
+
+    // ── CT26: the copy-reflex Ctrl+C guard ─────────────────────────────
+
+    /// An app whose single interactive session runs on `platform`, with the
+    /// platform's registry `ctrl_c_exits` flag reflected in
+    /// `App::ctrl_c_exits_clis` exactly the way `App::new` derives it.
+    fn app_with_platform(agent: InteractiveAgent, platform: &str, exits: bool) -> App {
+        let mut app = app_with_interactive_agent(agent);
+        app.interactive_agents[0].cli = crate::domain::models::Cli::new(platform);
+        if exits {
+            app.ctrl_c_exits_clis.insert(platform.to_string());
+        }
+        app
+    }
+
+    fn press_ctrl_c(app: &mut App) {
+        handle_agent_key(app, KeyCode::Char('c'), KeyModifiers::CONTROL).expect("ctrl+c");
+    }
+
+    #[test]
+    fn first_ctrl_c_on_an_exiting_platform_is_swallowed_with_a_confirm_hint() {
+        // FR1 (guideline a, first half): opencode exits on a single Ctrl+C, so
+        // the first one is NOT forwarded — the pane shows the confirm hint and
+        // the confirm window is armed.
+        let agent = spawn_cat_agent("opencode-guard");
+        let mut app = app_with_platform(agent, "opencode", true);
+        assert!(!app.ctrl_c.armed());
+
+        press_ctrl_c(&mut app);
+
+        assert!(app.ctrl_c.armed(), "the confirm window must be armed");
+        assert_eq!(
+            app.ctrl_c.notice(),
+            Some("Ctrl+C again within 1 s to send it to opencode"),
+            "the pane must say how to actually send it"
+        );
+        app.interactive_agents[0].kill();
+    }
+
+    #[test]
+    fn second_ctrl_c_within_one_second_is_forwarded() {
+        // FR1 (guideline a, second half): a second Ctrl+C inside the confirm
+        // window is forwarded, so a deliberate interrupt still works.
+        let agent = spawn_cat_agent("opencode-forward");
+        let mut app = app_with_platform(agent, "opencode", true);
+
+        press_ctrl_c(&mut app);
+        assert!(app.ctrl_c.armed());
+        press_ctrl_c(&mut app);
+
+        assert!(!app.ctrl_c.armed(), "the second Ctrl+C must be forwarded");
+        app.interactive_agents[0].kill();
+    }
+
+    #[test]
+    fn a_late_second_ctrl_c_re_arms_instead_of_forwarding() {
+        // FR1: "otherwise nothing is sent" — a second press that arrived after
+        // the window closed is swallowed like the first one.
+        let agent = spawn_cat_agent("opencode-late");
+        let mut app = app_with_platform(agent, "opencode", true);
+
+        press_ctrl_c(&mut app);
+        app.ctrl_c.armed_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(2));
+        press_ctrl_c(&mut app);
+
+        assert!(
+            app.ctrl_c.armed(),
+            "a late second press must re-arm, not forward"
+        );
+        app.interactive_agents[0].kill();
+    }
+
+    #[test]
+    fn ctrl_c_on_an_ordinary_platform_is_forwarded_as_today() {
+        // FR1 (guideline b): claude needs two Ctrl+C presses to exit, so one is
+        // forwarded exactly as before — no swallow, no hint, no window.
+        let agent = spawn_cat_agent("claude-forward");
+        let mut app = app_with_platform(agent, "claude", false);
+
+        press_ctrl_c(&mut app);
+
+        assert!(!app.ctrl_c.armed(), "an ordinary platform keeps forwarding");
+        assert_eq!(app.ctrl_c.notice(), None);
+        app.interactive_agents[0].kill();
+    }
+
+    #[test]
+    fn ctrl_c_within_three_seconds_of_a_copy_is_swallowed_as_already_copied() {
+        // FR2 (guideline c): the drag copy already put the selection on the
+        // clipboard, so the Ctrl+C that follows it is the reflex, not an
+        // interrupt — swallowed on every platform, showing `already copied`.
+        let agent = spawn_cat_agent("copy-reflex");
+        let mut app = app_with_platform(agent, "claude", false);
+        app.copied_at = std::time::Instant::now();
+
+        press_ctrl_c(&mut app);
+
+        assert!(!app.ctrl_c.armed());
+        assert_eq!(app.ctrl_c.notice(), Some("already copied"));
+        app.interactive_agents[0].kill();
+    }
+
+    #[test]
+    fn ctrl_c_after_the_copy_window_is_forwarded_again() {
+        // FR2's window is 3 s, not forever: a deliberate interrupt a moment
+        // later still reaches the session.
+        let agent = spawn_cat_agent("copy-window-passed");
+        let mut app = app_with_platform(agent, "claude", false);
+        app.copied_at = std::time::Instant::now() - std::time::Duration::from_secs(4);
+
+        press_ctrl_c(&mut app);
+
+        assert_eq!(app.ctrl_c.notice(), None);
+        assert!(!app.ctrl_c.armed());
+        app.interactive_agents[0].kill();
+    }
+
+    #[test]
+    fn ctrl_c_on_a_terminal_session_is_never_swallowed() {
+        // FR4 plus the guard's scope decision: a shell's Ctrl+C is not fatal
+        // and never closes the session, so it is left alone entirely — even
+        // right after a copy.
+        let agent = spawn_cat_terminal("term-ctrl-c");
+        let mut app = app_with_terminal_agent(agent);
+        app.copied_at = std::time::Instant::now();
+
+        press_ctrl_c(&mut app);
+
+        assert_eq!(app.ctrl_c.notice(), None);
+        assert!(!app.ctrl_c.armed());
+        app.terminal_agents[0].kill();
+    }
+
+    #[test]
+    fn ordinary_keys_still_reach_the_session_after_a_swallowed_ctrl_c() {
+        // FR4: the guard swallows exactly one key (Ctrl+C) on exactly one agent
+        // kind (interactive). A printable key right after a swallow still lands
+        // in the input buffer and reaches the PTY.
+        let agent = spawn_cat_agent("ordinary-keys");
+        let mut app = app_with_platform(agent, "opencode", true);
+
+        press_ctrl_c(&mut app);
+        handle_agent_key(&mut app, KeyCode::Char('x'), KeyModifiers::NONE).expect("key");
+
+        {
+            let buffer = app.interactive_agents[0].input_buffer.lock().expect("lock");
+            assert_eq!(buffer.as_str(), "x");
+        }
         app.interactive_agents[0].kill();
     }
 }

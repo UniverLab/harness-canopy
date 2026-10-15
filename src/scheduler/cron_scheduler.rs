@@ -16,66 +16,30 @@ use tokio_util::sync::CancellationToken;
 
 use crate::application::ports::{AgentRepository, RunRepository};
 use crate::db::Database;
-use crate::domain::activity;
-use crate::domain::graphs::{GraphResetOutcome, GraphStatus};
 use crate::executor::Executor;
 use crate::graph_engine::GraphEngine;
 
+use autorun::{launch_due_autorun, warn_blocked_operator_paused_autorun};
+use retry::run_with_retry;
+use schedule_math::{
+    agent_due_tick, due_fire_local, earliest_duration_before, fold_earliest, fold_earliest_instant,
+    to_7field_cron,
+};
+
+#[cfg(test)]
+use crate::domain::graphs::GraphStatus;
+#[cfg(test)]
+use retry::{run_outcome_is_failure, should_retry, wait_retry_delay};
+#[cfg(test)]
+use schedule_math::next_fire_utc;
+
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
-/// How a failed scheduled run is retried, independently of the cron slot.
-///
-/// A cron miss/failure (e.g. a CLI hitting its quota) used to wait for the
-/// next scheduled slot — hours away. With retry enabled, a failing run is
-/// re-attempted after `delay_minutes`, up to `max_retries` times, without
-/// disturbing the regular cron schedule.
-///
-/// Configurable via environment (read once at scheduler construction):
-/// - `CANOPY_RETRY_ENABLED`      (bool, default true)
-/// - `CANOPY_RETRY_DELAY_MINUTES` (u64,  default 60)
-/// - `CANOPY_RETRY_MAX`          (u32,  default 3)
-#[derive(Debug, Clone, Copy)]
-pub struct RetryPolicy {
-    pub enabled: bool,
-    pub delay_minutes: u64,
-    pub max_retries: u32,
-}
+pub use retry::RetryPolicy;
 
-impl Default for RetryPolicy {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            delay_minutes: 60,
-            max_retries: 3,
-        }
-    }
-}
-
-impl RetryPolicy {
-    /// Build from environment variables, falling back to defaults.
-    pub fn from_env() -> Self {
-        let d = Self::default();
-        Self {
-            enabled: std::env::var("CANOPY_RETRY_ENABLED")
-                .ok()
-                .and_then(|v| match v.trim().to_ascii_lowercase().as_str() {
-                    "1" | "true" | "yes" | "on" => Some(true),
-                    "0" | "false" | "no" | "off" => Some(false),
-                    _ => None,
-                })
-                .unwrap_or(d.enabled),
-            delay_minutes: std::env::var("CANOPY_RETRY_DELAY_MINUTES")
-                .ok()
-                .and_then(|v| v.trim().parse().ok())
-                .unwrap_or(d.delay_minutes),
-            max_retries: std::env::var("CANOPY_RETRY_MAX")
-                .ok()
-                .and_then(|v| v.trim().parse().ok())
-                .unwrap_or(d.max_retries),
-        }
-    }
-}
-
+mod autorun;
+mod retry;
+mod schedule_math;
 /// The internal cron scheduler that runs as a tokio background_agent.
 pub struct CronScheduler {
     db: Arc<Database>,
@@ -125,8 +89,16 @@ impl CronScheduler {
             graph_engine: None,
             last_fired: Arc::new(Mutex::new(std::collections::HashMap::new())),
             in_flight: Arc::new(Mutex::new(std::collections::HashSet::new())),
-            retry: RetryPolicy::from_env(),
+            retry: RetryPolicy::default(),
         }
+    }
+
+    /// CM51: take the retry policy from the loaded config's `[scheduler]`
+    /// table (which already carries any `CANOPY_RETRY_*` override) instead of
+    /// the registry defaults.
+    pub fn with_retry(mut self, retry: RetryPolicy) -> Self {
+        self.retry = retry;
+        self
     }
 
     /// Build a scheduler that also fires cron-triggered graphs via `graph_engine`.
@@ -233,80 +205,67 @@ impl CronScheduler {
             fold_earliest(&mut earliest, agent.schedule_expr(), now_local);
         }
 
-        // Cron-triggered graphs share the same sleep math as agents.
-        if self.graph_engine.is_some() {
-            if let Ok(graphs) = self.db.list_cron_graphs() {
-                for lp in &graphs {
-                    if !lp.is_fireable() {
-                        continue;
-                    }
-                    fold_earliest(&mut earliest, lp.schedule_expr(), now_local);
-                }
-            }
-        }
+        self.fold_fireable_graph_schedules(&mut earliest, now_local);
+        self.fold_pending_one_shot_wakeups(&mut earliest);
 
+        match earliest {
+            Some(t) => earliest_duration_before(now_utc, t),
+            None => FALLBACK,
+        }
+    }
+
+    /// Cron-triggered graphs share the same sleep math as agents.
+    fn fold_fireable_graph_schedules(
+        &self,
+        earliest: &mut Option<chrono::DateTime<Utc>>,
+        now_local: chrono::DateTime<Local>,
+    ) {
+        if self.graph_engine.is_none() {
+            return;
+        }
+        let Ok(graphs) = self.db.list_cron_graphs() else {
+            return;
+        };
+        for lp in &graphs {
+            if !lp.is_fireable() {
+                continue;
+            }
+            fold_earliest(earliest, lp.schedule_expr(), now_local);
+        }
+    }
+
+    /// Fold every pending one-shot schedule into `earliest`: agent
+    /// `enable_at`, then graph `autorun_at`, then graph `auto_continue_at` —
+    /// each gated on the graph engine exactly where its query sits.
+    fn fold_pending_one_shot_wakeups(&self, earliest: &mut Option<chrono::DateTime<Utc>>) {
         // One-shot `enable_at` schedules also need a wakeup, independent of
         // any cron expression on the agent.
         if let Ok(pending) = self.db.list_pending_enable_agents() {
-            for agent in &pending {
-                if let Some(enable_at) = agent.enable_at {
-                    let nearer = match earliest {
-                        Some(e) => enable_at < e,
-                        None => true,
-                    };
-                    if nearer {
-                        earliest = Some(enable_at);
-                    }
-                }
+            for agent in pending {
+                fold_earliest_instant(earliest, agent.enable_at);
             }
         }
 
         // One-shot `autorun_at` graph schedules need a wakeup too, independent
         // of any cron trigger on the graph.
-        if self.graph_engine.is_some() {
-            if let Ok(pending) = self.db.list_pending_autorun_graphs() {
-                for lp in &pending {
-                    if let Some(autorun_at) = lp.autorun_at {
-                        let nearer = match earliest {
-                            Some(e) => autorun_at < e,
-                            None => true,
-                        };
-                        if nearer {
-                            earliest = Some(autorun_at);
-                        }
-                    }
-                }
+        if self.graph_engine.is_none() {
+            return;
+        }
+        if let Ok(pending) = self.db.list_pending_autorun_graphs() {
+            for lp in pending {
+                fold_earliest_instant(earliest, lp.autorun_at);
             }
         }
 
         // One-shot `auto_continue_at` graph schedules (deferred resume of a
         // paused graph) need a wakeup too, same as `autorun_at` above.
-        if self.graph_engine.is_some() {
-            if let Ok(pending) = self.db.list_pending_auto_continue_graphs() {
-                for lp in &pending {
-                    if let Some(auto_continue_at) = lp.auto_continue_at {
-                        let nearer = match earliest {
-                            Some(e) => auto_continue_at < e,
-                            None => true,
-                        };
-                        if nearer {
-                            earliest = Some(auto_continue_at);
-                        }
-                    }
-                }
-            }
+        if self.graph_engine.is_none() {
+            return;
         }
-
-        match earliest {
-            Some(t) => {
-                let delta = t.signed_duration_since(now_utc);
-                if delta.num_milliseconds() <= 0 {
-                    std::time::Duration::ZERO
-                } else {
-                    std::time::Duration::from_millis(delta.num_milliseconds() as u64)
-                }
+        if let Ok(pending) = self.db.list_pending_auto_continue_graphs() {
+            for lp in pending {
+                fold_earliest_instant(earliest, lp.auto_continue_at);
             }
-            None => FALLBACK,
         }
     }
 
@@ -402,115 +361,11 @@ impl CronScheduler {
         let pending = self.db.list_pending_autorun_graphs()?;
         for lp in &pending {
             if !lp.is_autorun_due(now_utc) {
-                // C1: a due schedule on a graph the *operator* paused
-                // (`paused_by_reconciliation` is false) can never fire on its
-                // own — `is_fireable()` deliberately keeps excluding `Paused`
-                // for every caller but reconciliation's. That's correct, but
-                // it must not be a second silent expiry: surface it every
-                // tick it's still blocked, so an operator watching logs sees
-                // why the resume never happened instead of concluding canopy
-                // forgot.
-                if lp.status == GraphStatus::Paused
-                    && !lp.paused_by_reconciliation
-                    && lp.autorun_at.is_some_and(|at| now_utc >= at)
-                {
-                    tracing::warn!(
-                        "Graph '{}' autorun_at is due but the graph is paused (not by \
-                         reconciliation); it will not fire until resumed manually via \
-                         graph_continue or graph_run — the schedule remains pending.",
-                        lp.id
-                    );
-                }
+                warn_blocked_operator_paused_autorun(lp, now_utc);
                 continue;
             }
             self.db.clear_graph_autorun(&lp.id)?;
-
-            if lp.status == GraphStatus::Completed {
-                tracing::warn!(
-                    "Graph '{}' autorun fired but the graph is already completed; clearing the \
-                     schedule without re-running it (re-running a finished graph is a human \
-                     decision via graph_reset + graph_run)",
-                    lp.id
-                );
-                continue;
-            }
-
-            if lp.status == GraphStatus::Failed {
-                match self.db.reset_graph(&lp.id, None)? {
-                    GraphResetOutcome::Reset {
-                        spec_count,
-                        skipped_count,
-                    } => {
-                        tracing::info!(
-                            "Graph '{}' was failed; auto-reset by its schedule ({} spec(s) reset, {} skipped preserved) \
-                             and resuming",
-                            lp.id,
-                            spec_count,
-                            skipped_count
-                        );
-                    }
-                    other => {
-                        tracing::warn!(
-                            "Graph '{}' autorun could not auto-reset it ({:?}); skipping launch",
-                            lp.id,
-                            other
-                        );
-                        continue;
-                    }
-                }
-            }
-
-            tracing::info!("Graph '{}' reached its autorun_at time; launching", lp.id);
-            activity::publish(
-                &self.db,
-                &lp.workdir,
-                &lp.id,
-                &lp.name,
-                "Autorun fired; resuming.",
-            );
-
-            let next_spec_preview = graph_engine
-                .preview_next_spec_id(&lp.id, lp.active_run_queue_id.as_deref())
-                .unwrap_or(None);
-            match graph_engine
-                .dirty_start_check(
-                    &lp.id,
-                    &lp.workdir,
-                    next_spec_preview.as_deref(),
-                    lp.allow_dirty_start,
-                )
-                .await
-            {
-                Ok(Some(notice)) if notice.refuse => {
-                    tracing::warn!(
-                        "Graph '{}' autorun refused: {}. The schedule was one-shot and is \
-                         already cleared — relaunch manually via graph_run (or graph_continue) \
-                         once resolved.",
-                        lp.id,
-                        notice.message
-                    );
-                    continue;
-                }
-                Ok(Some(notice)) => {
-                    tracing::warn!(
-                        "Graph '{}' autorun launching with a warning: {}",
-                        lp.id,
-                        notice.message
-                    );
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    tracing::error!("Graph '{}' autorun dirty-start check failed: {}", lp.id, e);
-                }
-            }
-
-            // Resume with the graph's persisted run context (its queue, if any)
-            // rather than a fresh `start_background`, which would fall back
-            // to the graph's own bound specs — empty for a queue run, and
-            // exactly how a resumed queue run used to be mistaken for
-            // "nothing to do" and marked completed with members still
-            // pending.
-            Arc::clone(graph_engine).resume_background(lp.id.clone());
+            launch_due_autorun(graph_engine, &self.db, lp).await?;
         }
         Ok(())
     }
@@ -536,51 +391,69 @@ impl CronScheduler {
         let pending = self.db.list_pending_auto_continue_graphs()?;
         for lp in &pending {
             if !lp.is_auto_continue_due(now_utc) {
-                // Not firing this tick. If the time has passed but the graph
-                // left `Paused` some other way (manual `graph_continue`,
-                // failure) before the schedule fired, it's stale — clear it
-                // now rather than leaving it to linger forever waiting for
-                // `Paused` to recur (unlike `autorun_at`, which does wait,
-                // since its target statuses don't otherwise repeat).
-                if lp.is_auto_continue_time_reached(now_utc) {
-                    self.db.clear_graph_auto_continue(&lp.id)?;
-                    tracing::warn!(
-                        "Graph '{}' auto-continue fired but the graph is no longer paused ({}); \
-                         clearing the schedule without resuming it",
-                        lp.id,
-                        lp.status.as_str()
-                    );
-                }
+                self.clear_stale_auto_continue(lp, now_utc)?;
                 continue;
             }
             self.db.clear_graph_auto_continue(&lp.id)?;
-
-            let action = lp
-                .auto_continue_action
-                .as_deref()
-                .unwrap_or("retry_current_node");
-            let applied = match action {
-                "skip_next_spec" => crate::daemon::handler::handle_skip_next_spec(&self.db, &lp.id),
-                _ => crate::daemon::handler::handle_retry_current_node(&self.db, &lp.id),
-            };
-            if let Err(error) = applied {
-                tracing::warn!(
-                    "Graph '{}' auto-continue could not apply action '{}' ({}); skipping resume",
-                    lp.id,
-                    action,
-                    error.message
-                );
-                continue;
-            }
-
-            tracing::info!(
-                "Graph '{}' reached its auto_continue_at time; resuming with action '{}'",
-                lp.id,
-                action
-            );
-            Arc::clone(graph_engine).resume_background(lp.id.clone());
+            self.resume_graph_via_auto_continue(graph_engine, lp);
         }
         Ok(())
+    }
+
+    /// Not firing this tick: if the auto-continue time has passed but the
+    /// graph left `Paused` some other way (manual `graph_continue`, failure)
+    /// before the schedule fired, the schedule is stale — clear it now rather
+    /// than leaving it to linger forever waiting for `Paused` to recur
+    /// (unlike `autorun_at`, which does wait, since its target statuses
+    /// don't otherwise repeat).
+    fn clear_stale_auto_continue(
+        &self,
+        lp: &crate::domain::graphs::Graph,
+        now_utc: chrono::DateTime<Utc>,
+    ) -> anyhow::Result<()> {
+        if lp.is_auto_continue_time_reached(now_utc) {
+            self.db.clear_graph_auto_continue(&lp.id)?;
+            tracing::warn!(
+                "Graph '{}' auto-continue fired but the graph is no longer paused ({}); \
+                 clearing the schedule without resuming it",
+                lp.id,
+                lp.status.as_str()
+            );
+        }
+        Ok(())
+    }
+
+    /// Apply the graph's requested auto-continue action and — only if the
+    /// action succeeded — resume it in place with its persisted run context.
+    fn resume_graph_via_auto_continue(
+        &self,
+        graph_engine: &Arc<GraphEngine>,
+        lp: &crate::domain::graphs::Graph,
+    ) {
+        let action = lp
+            .auto_continue_action
+            .as_deref()
+            .unwrap_or("retry_current_node");
+        let applied = match action {
+            "skip_next_spec" => crate::daemon::handler::handle_skip_next_spec(&self.db, &lp.id),
+            _ => crate::daemon::handler::handle_retry_current_node(&self.db, &lp.id),
+        };
+        if let Err(error) = applied {
+            tracing::warn!(
+                "Graph '{}' auto-continue could not apply action '{}' ({}); skipping resume",
+                lp.id,
+                action,
+                error.message
+            );
+            return;
+        }
+
+        tracing::info!(
+            "Graph '{}' reached its auto_continue_at time; resuming with action '{}'",
+            lp.id,
+            action
+        );
+        Arc::clone(graph_engine).resume_background(lp.id.clone(), None);
     }
 
     /// Evaluate a single cron graph and launch it via the graph engine if due.
@@ -662,30 +535,9 @@ impl CronScheduler {
             return Ok(());
         }
 
-        let Some(schedule_expr) = agent.schedule_expr() else {
+        let Some(scheduled_tick) = agent_due_tick(agent, now_local) else {
             return Ok(());
         };
-
-        let cron_7field = to_7field_cron(schedule_expr);
-        let schedule = match Schedule::from_str(&cron_7field) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!(
-                    "Agent '{}' has invalid cron expression '{}': {}",
-                    agent.id,
-                    schedule_expr,
-                    e
-                );
-                return Ok(());
-            }
-        };
-
-        // 1-minute lookback so a scheduler hiccup doesn't skip a fire that
-        // was scheduled to happen just before "now" (in local time).
-        let Some(due_local) = due_fire_local(&schedule, now_local) else {
-            return Ok(());
-        };
-        let scheduled_tick = due_local.with_timezone(&Utc);
 
         // Tick idempotency: dedupe by the scheduled tick itself (in UTC, so
         // it lines up with the rest of the system — DB schema, `last_run_at`,
@@ -709,42 +561,50 @@ impl CronScheduler {
             last_fired.insert(agent.id.clone(), scheduled_tick);
         }
 
-        // Per-agent in-flight guard: if this agent is already running
-        // (spawned but not yet finalized), skip this fire. This is the
-        // single choke point at the scheduler level — all firing paths
-        // (scheduled tick, notify wake-up) go through it.
-        {
-            let mut in_flight = self.in_flight.lock().await;
-            if !in_flight.insert(agent.id.clone()) {
-                tracing::info!(
-                    "Agent '{}' is already running; skipping this fire",
-                    agent.id
-                );
-                // Record a Missed run so the skip is visible in execution
-                // history, distinguishing "skipped: already running" from
-                // "never fired".
-                let now = Utc::now();
-                let missed = crate::domain::models::RunLog {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    background_agent_id: agent.id.clone(),
-                    status: crate::domain::models::RunStatus::Missed,
-                    trigger_type: crate::domain::models::TriggerType::Scheduled,
-                    summary: Some(
-                        "Skipped: already running (scheduler in-flight guard)".to_string(),
-                    ),
-                    started_at: now,
-                    finished_at: Some(now),
-                    exit_code: None,
-                    timeout_at: None,
-                    // CB43: nothing executed on a skipped run — no pair.
-                    executed_platform: None,
-                    executed_model: None,
-                };
-                let _ = self.db.insert_run(&missed);
-                return Ok(());
-            }
+        if !self.claim_in_flight_slot(agent).await {
+            return Ok(());
         }
+        self.spawn_scheduled_agent_run(agent);
+        Ok(())
+    }
 
+    /// Per-agent in-flight guard: if this agent is already running
+    /// (spawned but not yet finalized), skip this fire. This is the
+    /// single choke point at the scheduler level — all firing paths
+    /// (scheduled tick, notify wake-up) go through it.
+    /// Returns `true` when the slot was newly claimed.
+    async fn claim_in_flight_slot(&self, agent: &crate::domain::models::Agent) -> bool {
+        let mut in_flight = self.in_flight.lock().await;
+        if !in_flight.insert(agent.id.clone()) {
+            tracing::info!(
+                "Agent '{}' is already running; skipping this fire",
+                agent.id
+            );
+            // Record a Missed run so the skip is visible in execution
+            // history, distinguishing "skipped: already running" from
+            // "never fired".
+            let now = Utc::now();
+            let missed = crate::domain::models::RunLog {
+                id: uuid::Uuid::new_v4().to_string(),
+                background_agent_id: agent.id.clone(),
+                status: crate::domain::models::RunStatus::Missed,
+                trigger_type: crate::domain::models::TriggerType::Scheduled,
+                summary: Some("Skipped: already running (scheduler in-flight guard)".to_string()),
+                started_at: now,
+                finished_at: Some(now),
+                exit_code: None,
+                timeout_at: None,
+                // CB43: nothing executed on a skipped run — no pair.
+                executed_platform: None,
+                executed_model: None,
+            };
+            let _ = self.db.insert_run(&missed);
+            return false;
+        }
+        true
+    }
+
+    fn spawn_scheduled_agent_run(&self, agent: &crate::domain::models::Agent) {
         let executor = Arc::clone(&self.executor);
         let agent = agent.clone();
         let retry = self.retry;
@@ -758,8 +618,6 @@ impl CronScheduler {
             // doesn't permanently block future fires.
             in_flight.lock().await.remove(&agent_id);
         });
-
-        Ok(())
     }
 
     /// Stop the scheduler.
@@ -767,161 +625,6 @@ impl CronScheduler {
         self.cancel.cancel();
     }
 }
-
-/// Whether a run outcome counts as a failure eligible for retry.
-///
-/// An `Err` (spawn/IO failure) and any non-zero exit code are failures.
-/// A clean exit (code 0) is a success. Callers treat lock-skips — which
-/// surface as an `Ok` with the process's own code — like any other run.
-fn run_outcome_is_failure(outcome: &anyhow::Result<i32>) -> bool {
-    !matches!(outcome, Ok(0))
-}
-
-/// Given a failed run, decide whether another attempt is warranted.
-/// `attempt` is the 0-based index of the attempt that just failed.
-fn should_retry(retry: &RetryPolicy, attempt: u32) -> bool {
-    retry.enabled && attempt < retry.max_retries
-}
-
-/// Run a scheduled agent, retrying on failure per [`RetryPolicy`].
-///
-/// The first attempt runs immediately (the cron slot fired). On failure,
-/// waits `delay_minutes` and re-runs, up to `max_retries` extra attempts.
-/// The wait is cancellation-aware, so a stopping daemon does not leave a
-/// pending retry sleeping.
-async fn run_with_retry(
-    executor: Arc<Executor>,
-    agent: crate::domain::models::Agent,
-    retry: RetryPolicy,
-    cancel: CancellationToken,
-) {
-    let mut attempt: u32 = 0;
-    loop {
-        let outcome = executor.execute_agent(&agent, false).await;
-        if !run_outcome_is_failure(&outcome) {
-            if let Ok(code) = outcome {
-                tracing::info!(
-                    "Scheduled agent '{}' completed (exit code: {})",
-                    agent.id,
-                    code
-                );
-            }
-            return;
-        }
-
-        match &outcome {
-            Ok(code) => tracing::warn!(
-                "Scheduled agent '{}' failed (exit code: {}), attempt {}",
-                agent.id,
-                code,
-                attempt + 1
-            ),
-            Err(e) => tracing::error!(
-                "Scheduled agent '{}' failed: {}, attempt {}",
-                agent.id,
-                e,
-                attempt + 1
-            ),
-        }
-
-        if !should_retry(&retry, attempt) {
-            if retry.enabled {
-                tracing::warn!(
-                    "Scheduled agent '{}' exhausted {} retries; waiting for next cron slot",
-                    agent.id,
-                    retry.max_retries
-                );
-            }
-            return;
-        }
-
-        attempt += 1;
-        tracing::info!(
-            "Scheduled agent '{}' will retry ({}/{}) in {} min",
-            agent.id,
-            attempt,
-            retry.max_retries,
-            retry.delay_minutes
-        );
-        let wait = Duration::from_secs(retry.delay_minutes.saturating_mul(60));
-        tokio::select! {
-            _ = tokio::time::sleep(wait) => {}
-            _ = cancel.cancelled() => {
-                tracing::info!("Retry for agent '{}' cancelled (daemon stopping)", agent.id);
-                return;
-            }
-        }
-    }
-}
-
-/// Compute the next fire instant (in UTC) for a cron schedule, evaluated
-/// against the user's local wall clock.
-///
-/// Cron expressions are authored in the user's local timezone (someone who
-/// types `0 9 * * *` expects 9 AM on their wall clock, not 9 AM UTC), so we
-/// feed the schedule iterator a `Local` reference and only convert the
-/// resulting instant to UTC for wall-clock-independent delta math. Returns
-/// `None` if the schedule has no future occurrence.
-fn next_fire_utc(
-    schedule: &Schedule,
-    now_local: chrono::DateTime<Local>,
-) -> Option<chrono::DateTime<Utc>> {
-    schedule
-        .after(&now_local)
-        .next()
-        .map(|next_local| next_local.with_timezone(&Utc))
-}
-
-/// Parse `schedule_expr` and, if it yields a nearer next fire than `earliest`,
-/// update `earliest`. A `None` expression or an unparseable one is skipped.
-/// Shared by agents and cron graphs so both walk fire times identically.
-fn fold_earliest(
-    earliest: &mut Option<chrono::DateTime<Utc>>,
-    schedule_expr: Option<&str>,
-    now_local: chrono::DateTime<Local>,
-) {
-    let Some(schedule_expr) = schedule_expr else {
-        return;
-    };
-    let Ok(schedule) = Schedule::from_str(&to_7field_cron(schedule_expr)) else {
-        return;
-    };
-    if let Some(next_utc) = next_fire_utc(&schedule, now_local) {
-        let nearer = match earliest {
-            Some(e) => next_utc < *e,
-            None => true,
-        };
-        if nearer {
-            *earliest = Some(next_utc);
-        }
-    }
-}
-
-/// Decide whether a cron schedule is due at `now_local`, using a 60-second
-/// lookback so a scheduler hiccup doesn't skip a fire scheduled just before
-/// "now". Returns the matched fire time (in local wall-clock time) when due,
-/// or `None` otherwise.
-///
-/// Like [`next_fire_utc`], the schedule is evaluated in the local frame so
-/// the cron fields mean local wall-clock times.
-fn due_fire_local(
-    schedule: &Schedule,
-    now_local: chrono::DateTime<Local>,
-) -> Option<chrono::DateTime<Local>> {
-    let window_start = now_local - chrono::Duration::seconds(60);
-    let candidate = schedule.after(&window_start).next()?;
-    (candidate <= now_local).then_some(candidate)
-}
-
-/// Convert a standard 5-field cron expression to the 7-field format
-/// expected by the `cron` crate: `sec min hour day month dow year`.
-///
-/// Input:  `*/5 * * * *`       (min hour day month dow)
-/// Output: `0 */5 * * * * *`   (sec min hour day month dow year)
-fn to_7field_cron(expr: &str) -> String {
-    format!("0 {} *", expr.trim())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -948,6 +651,7 @@ mod tests {
             last_run_ok: None,
             last_triggered_at: None,
             trigger_count: 0,
+            action: crate::domain::models::AgentAction::Headless,
         }
     }
 
@@ -1470,7 +1174,10 @@ mod tests {
 
         // The next boot's reconciliation pass — this is what must leave the
         // graph resumable, not the test hand-setting `paused_by_reconciliation`.
-        assert_eq!(db.reconcile_orphaned_graphs(data_dir.path()).unwrap(), 1);
+        assert_eq!(
+            db.reconcile_orphaned_graphs(data_dir.path()).unwrap().len(),
+            1
+        );
         let lp_after_reconcile = db.get_graph(&graph_id).unwrap().unwrap();
         assert_eq!(lp_after_reconcile.status, GraphStatus::Paused);
         assert!(
@@ -1644,7 +1351,7 @@ mod tests {
         // exceed the attempt limit of 1 this fixture set up.
 
         graph_engine
-            .run_graph(graph_id.clone(), None, None, None, None)
+            .run_graph(graph_id.clone(), None, None, None, None, None)
             .await
             .unwrap();
         let lp = db.get_graph(&graph_id).unwrap().unwrap();
@@ -2648,5 +2355,85 @@ mod tests {
             runs.len(),
             runs
         );
+    }
+
+    // ── Coverage for helpers extracted during the quality refactor ──────
+
+    #[test]
+    fn fold_earliest_instant_sets_first_seen() {
+        let mut earliest: Option<chrono::DateTime<Utc>> = None;
+        let first = chrono::DateTime::from_timestamp(1_000_000, 0).unwrap();
+        fold_earliest_instant(&mut earliest, Some(first));
+        assert_eq!(earliest, Some(first));
+    }
+
+    #[test]
+    fn fold_earliest_instant_keeps_nearer_existing() {
+        let earlier = chrono::DateTime::from_timestamp(1_000_000, 0).unwrap();
+        let later = chrono::DateTime::from_timestamp(2_000_000, 0).unwrap();
+        let mut earliest = Some(later);
+
+        fold_earliest_instant(&mut earliest, Some(earlier));
+        assert_eq!(earliest, Some(earlier));
+
+        // A farther instant must not replace the nearer one already folded in.
+        let much_later = chrono::DateTime::from_timestamp(3_000_000, 0).unwrap();
+        fold_earliest_instant(&mut earliest, Some(much_later));
+        assert_eq!(earliest, Some(earlier));
+    }
+
+    #[test]
+    fn fold_earliest_instant_ignores_none() {
+        let mut earliest: Option<chrono::DateTime<Utc>> = None;
+        fold_earliest_instant(&mut earliest, None);
+        assert!(earliest.is_none());
+
+        let known = chrono::DateTime::from_timestamp(1_000_000, 0).unwrap();
+        earliest = Some(known);
+        fold_earliest_instant(&mut earliest, None);
+        assert_eq!(earliest, Some(known));
+    }
+
+    #[tokio::test]
+    async fn wait_retry_delay_returns_true_after_zero_delay() {
+        let retry = RetryPolicy {
+            enabled: true,
+            delay_minutes: 0,
+            max_retries: 1,
+        };
+        let cancel = CancellationToken::new();
+        let agent = manual_agent("retry-wait-zero-delay", true);
+        assert!(wait_retry_delay(&retry, &cancel, &agent).await);
+    }
+
+    #[tokio::test]
+    async fn wait_retry_delay_returns_false_when_cancelled() {
+        let retry = RetryPolicy {
+            enabled: true,
+            delay_minutes: 5,
+            max_retries: 1,
+        };
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let agent = manual_agent("retry-wait-cancelled", true);
+        assert!(!wait_retry_delay(&retry, &cancel, &agent).await);
+    }
+
+    #[test]
+    fn agent_due_tick_invalid_cron_is_none() {
+        let mut agent = manual_agent("due-tick-invalid-cron", true);
+        agent.trigger = Some(Trigger::Cron {
+            schedule_expr: "not a cron expression".to_string(),
+        });
+        assert!(agent_due_tick(&agent, Local::now()).is_none());
+    }
+
+    #[test]
+    fn agent_due_tick_returns_tick_when_due() {
+        let mut agent = manual_agent("due-tick-minutely", true);
+        agent.trigger = Some(Trigger::Cron {
+            schedule_expr: "* * * * *".to_string(),
+        });
+        assert!(agent_due_tick(&agent, Local::now()).is_some());
     }
 }

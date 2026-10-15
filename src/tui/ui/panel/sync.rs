@@ -43,13 +43,23 @@ pub(crate) fn draw_panel_face(frame: &mut Frame, area: Rect, app: &mut App, them
         PanelFace::Activity => {
             app.last_activity_rect = Some(inner);
             if let Some(state) = app.activity_panel_state() {
-                draw_sync_section(frame, inner, &state, app.sync_scroll_offset, theme);
+                draw_sync_section(
+                    frame,
+                    inner,
+                    &state,
+                    app.sync_scroll_offset,
+                    &app.tui_settings.datetime_format,
+                    theme,
+                );
             } else {
                 draw_panel_placeholder(frame, inner, "no activity", theme);
             }
         }
         PanelFace::Knowledge => draw_knowledge_face(frame, inner, app, theme),
         PanelFace::Graph => draw_graph_face(frame, inner, app, theme),
+        // CT30: the Crews face is read-only (`&App` reborrow) and manages
+        // its own refresh through the tick, not through rendering.
+        PanelFace::Crews => super::crews::draw_crews_face(frame, inner, app, theme),
     }
 }
 
@@ -72,7 +82,14 @@ fn draw_knowledge_face(frame: &mut Frame, area: Rect, app: &mut App, theme: &The
         // Too short to split honestly: activity keeps the whole panel.
         app.last_activity_rect = Some(area);
         if let Some(state) = app.selected_activity_state() {
-            draw_sync_section(frame, area, &state, app.sync_scroll_offset, theme);
+            draw_sync_section(
+                frame,
+                area,
+                &state,
+                app.sync_scroll_offset,
+                &app.tui_settings.datetime_format,
+                theme,
+            );
         } else {
             draw_panel_placeholder(frame, area, "no activity", theme);
         }
@@ -88,7 +105,14 @@ fn draw_knowledge_face(frame: &mut Frame, area: Rect, app: &mut App, theme: &The
 
     app.last_activity_rect = Some(activity_area);
     if let Some(state) = app.selected_activity_state() {
-        draw_sync_section(frame, activity_area, &state, app.sync_scroll_offset, theme);
+        draw_sync_section(
+            frame,
+            activity_area,
+            &state,
+            app.sync_scroll_offset,
+            &app.tui_settings.datetime_format,
+            theme,
+        );
     } else {
         draw_panel_placeholder(frame, activity_area, "no activity", theme);
     }
@@ -340,6 +364,7 @@ fn draw_sync_section(
     area: Rect,
     state: &SyncPanelState,
     scroll_offset: u16,
+    datetime_format: &str,
     theme: &Theme,
 ) {
     let w = area.width as usize;
@@ -374,58 +399,7 @@ fn draw_sync_section(
         )),
     ];
 
-    if state.active_intents.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "  none",
-            Style::default().fg(theme.dim_text),
-        )));
-    } else {
-        for intent in &state.active_intents {
-            // Card header: agent · impact · status
-            lines.push(Line::from(vec![
-                Span::styled(
-                    "┌ ",
-                    Style::default().fg(intent_color(intent.impact, theme)),
-                ),
-                Span::styled(
-                    &intent.agent_name,
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!(" [{}]", intent.impact.as_str()),
-                    Style::default().fg(intent_color(intent.impact, theme)),
-                ),
-            ]));
-            // Mission text — wrap manually
-            for chunk in wrap_text(&intent.mission, w.saturating_sub(2)) {
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        "│ ",
-                        Style::default().fg(intent_color(intent.impact, theme)),
-                    ),
-                    Span::styled(chunk, Style::default().fg(Color::White)),
-                ]));
-            }
-            // Description — wrap
-            if !intent.description.is_empty() {
-                for chunk in wrap_text(&intent.description, w.saturating_sub(2)) {
-                    lines.push(Line::from(vec![
-                        Span::styled(
-                            "│ ",
-                            Style::default().fg(intent_color(intent.impact, theme)),
-                        ),
-                        Span::styled(chunk, Style::default().fg(theme.dim_text)),
-                    ]));
-                }
-            }
-            lines.push(Line::from(Span::styled(
-                "└─",
-                Style::default().fg(intent_color(intent.impact, theme)),
-            )));
-        }
-    }
+    push_sync_intent_lines(&mut lines, state, w, theme);
 
     lines.push(Line::raw(""));
     lines.push(Line::from(Span::styled(
@@ -435,6 +409,85 @@ fn draw_sync_section(
             .add_modifier(Modifier::BOLD),
     )));
 
+    push_sync_message_lines(&mut lines, state, w, theme, datetime_format);
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(Style::default())
+            .scroll((scroll_offset, 0)),
+        area,
+    );
+}
+
+/// Append one card per active intent, or a `none` placeholder when there are none.
+fn push_sync_intent_lines<'a>(
+    lines: &mut Vec<Line<'a>>,
+    state: &'a SyncPanelState,
+    w: usize,
+    theme: &Theme,
+) {
+    if state.active_intents.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  none",
+            Style::default().fg(theme.dim_text),
+        )));
+        return;
+    }
+    for intent in &state.active_intents {
+        // Card header: agent · impact · status
+        lines.push(Line::from(vec![
+            Span::styled(
+                "┌ ",
+                Style::default().fg(intent_color(intent.impact, theme)),
+            ),
+            Span::styled(
+                &intent.agent_name,
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" [{}]", intent.impact.as_str()),
+                Style::default().fg(intent_color(intent.impact, theme)),
+            ),
+        ]));
+        // Mission text — wrap manually
+        for chunk in wrap_text(&intent.mission, w.saturating_sub(2)) {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    "│ ",
+                    Style::default().fg(intent_color(intent.impact, theme)),
+                ),
+                Span::styled(chunk, Style::default().fg(Color::White)),
+            ]));
+        }
+        // Description — wrap
+        if !intent.description.is_empty() {
+            for chunk in wrap_text(&intent.description, w.saturating_sub(2)) {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        "│ ",
+                        Style::default().fg(intent_color(intent.impact, theme)),
+                    ),
+                    Span::styled(chunk, Style::default().fg(theme.dim_text)),
+                ]));
+            }
+        }
+        lines.push(Line::from(Span::styled(
+            "└─",
+            Style::default().fg(intent_color(intent.impact, theme)),
+        )));
+    }
+}
+
+/// Append one card per recent message, or a placeholder when both sections are empty.
+fn push_sync_message_lines<'a>(
+    lines: &mut Vec<Line<'a>>,
+    state: &'a SyncPanelState,
+    w: usize,
+    theme: &Theme,
+    datetime_format: &str,
+) {
     let recent_msgs = recent_messages_for_display(&state.recent_messages);
     if state.active_intents.is_empty() && recent_msgs.is_empty() {
         lines.push(Line::from(Span::styled(
@@ -462,7 +515,7 @@ fn draw_sync_section(
         lines.push(Line::from(vec![
             Span::styled("│ ", Style::default().fg(color)),
             Span::styled(
-                format_timestamp(message.created_at),
+                format_timestamp(message.created_at, datetime_format),
                 Style::default().fg(theme.dim_text),
             ),
         ]));
@@ -475,13 +528,6 @@ fn draw_sync_section(
         }
         lines.push(Line::from(Span::styled("└─", Style::default().fg(color))));
     }
-
-    frame.render_widget(
-        Paragraph::new(lines)
-            .style(Style::default())
-            .scroll((scroll_offset, 0)),
-        area,
-    );
 }
 
 /// Split `text` into chunks of at most `max_width` chars, breaking on whitespace.
@@ -541,9 +587,9 @@ fn kind_color(kind: MessageKind, theme: &Theme) -> Color {
     }
 }
 
-fn format_timestamp(timestamp: i64) -> String {
+fn format_timestamp(timestamp: i64, fmt: &str) -> String {
     match Local.timestamp_opt(timestamp, 0).single() {
-        Some(datetime) => datetime.format("%Y-%m-%d %H:%M").to_string(),
+        Some(datetime) => datetime.format(fmt).to_string(),
         None => timestamp.to_string(),
     }
 }
@@ -617,7 +663,17 @@ mod tests {
 
     #[test]
     fn format_timestamp_returns_non_empty_text() {
-        assert!(!format_timestamp(0).is_empty());
+        assert!(!format_timestamp(0, "%Y-%m-%d %H:%M").is_empty());
+    }
+
+    /// CM52: the message timestamp uses `tui.datetime_format`.
+    #[test]
+    fn format_timestamp_reads_the_setting() {
+        let default = format_timestamp(0, "%Y-%m-%d %H:%M");
+        let custom = format_timestamp(0, "%d/%m/%Y");
+        assert_ne!(default, custom);
+        assert!(custom.contains('/'));
+        assert!(!custom.contains(':'));
     }
 
     #[test]

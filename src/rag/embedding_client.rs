@@ -239,12 +239,15 @@ impl EmbeddingClient for GeminiEmbeddingClient {
     fn embed(&self, text: &str) -> Result<Vec<f32>> {
         let response = self
             .client
+            // The key travels in a header, not the query string: URLs end up
+            // in logs and in reqwest's error messages (CodeQL
+            // rust/cleartext-transmission).
             .post(format!(
-                "{}/v1beta/{}:embedContent?key={}",
+                "{}/v1beta/{}:embedContent",
                 self.base_url.trim_end_matches('/'),
-                self.endpoint_model(),
-                self.api_key
+                self.endpoint_model()
             ))
+            .header("x-goog-api-key", &self.api_key)
             .json(&GeminiEmbeddingRequest {
                 content: GeminiContent {
                     parts: vec![GeminiPart { text }],
@@ -669,7 +672,14 @@ mod tests {
         let request = server.join().unwrap();
 
         assert_eq!(embedding, vec![0.5, 0.25, 0.125, 0.0625]);
-        assert!(request.contains("POST /v1beta/models/custom-4d:embedContent?key=gem-key HTTP/1.1"));
+        assert!(request.contains("POST /v1beta/models/custom-4d:embedContent HTTP/1.1"));
+        assert!(request
+            .to_ascii_lowercase()
+            .contains("x-goog-api-key: gem-key"));
+        assert!(
+            !request.contains("key=gem-key"),
+            "the key must not travel in the URL"
+        );
         assert!(request.contains("\"outputDimensionality\":4"));
         assert!(request.contains("\"text\":\"hello gemini\""));
     }

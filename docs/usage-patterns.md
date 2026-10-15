@@ -27,6 +27,12 @@ a shape that exists only in a diagram deserve different levels of trust:
 | **Designed** | The engine supports it today; we have not run it. |
 | **Blocked** | Needs something the engine does not have yet, named below. |
 
+**Per-graph logging is built in.** You no longer need a `printf … >> file`
+command hook on `on_completed`/`on_failed` to keep a per-graph log — the
+engine records that history itself. Read it with `canopy graph log <graph-id>`
+(or the `graph_events` MCP tool). See the
+[Event log](graphs.md#event-log) section.
+
 ---
 
 ## 1. Gated implement — Proven
@@ -58,6 +64,13 @@ the run's status, not on its prose.
 **Auto-fixing commands must not bounce work.** Run `cargo fmt --all`, which
 rewrites, not `cargo fmt --check`, which fails. Only genuine breakage should
 route back to implement.
+
+**Hand plans through spec notes, not files.** A Designer node writes its
+plan with `spec_note_write(run_id, body)` instead of a temp file no later
+node can find, and the verify step reads
+`grep -q '^## Designer' "$CANOPY_SPEC_NOTES_FILE"` — every agent prompt
+already carries the notes, so nothing needs deleting and nothing goes stale.
+See [Spec notes](graphs.md#spec-notes).
 
 Use it for: essentially everything. Start here and add shape only when a
 specific failure justifies it.
@@ -122,8 +135,12 @@ window.
 
 ## 4. Draft ensemble — Proven
 
-An ensemble is 2–8 agent nodes that get the same prompt in parallel, plus a
-quorum that waits for all of them. The canonical use spends the expensive
+An ensemble is a set of agent nodes that get the same prompt, plus a quorum
+(parallel) or single dispatch (cascade/round_robin). A parallel ensemble takes
+2–8 members by default, since it runs every member concurrently; the
+sequential `cascade`/`round_robin` kinds take 2–16, because they dispatch one
+member at a time and a longer list only adds rotation/fallback depth. Both caps
+can be raised in settings (see [Tuning the engine](graphs.md#tuning-the-engine)). The canonical use spends the expensive
 model once, on a pre-digested problem.
 
 ```mermaid
@@ -191,12 +208,52 @@ you routed away from it.
 
 ---
 
-## 6. Free-tier cascade — Designed
+## 6. Free-tier cascade — Proven
 
 You have four CLIs with generous free tiers and small ceilings. Spend all of
-them in sequence before touching anything you pay for.
+them in sequence before touching anything you pay for. One ensemble node of
+`kind: cascade` does it in a single call:
 
-The naive version is a chain of fail edges, and it is a trap:
+```mermaid
+graph LR
+    subgraph ENS["ensemble: free-tier cascade"]
+        A["cursor"]
+        B["antigravity"]
+        C["codex"]
+        D["kiro"]
+    end
+    ENS --> F["paid fallback"]
+```
+
+`graph_add_ensemble` with `kind: "cascade"` creates the four members, orders them
+from cheapest to dearest, and wires a single exit — `on_pass_to` the next node once
+a member passes, `on_fail_to` (or dead end) if every member fails. The members are
+the same prompt on different harnesses; you choose the order, and the engine walks
+it.
+
+The cascade runs its members **one at a time**. A member that fails or infra-crashes
+falls through to the next member cold; the first member that passes exits the ensemble.
+A bounce — the review after the implementer rejects the work — resumes the member that
+last passed and only falls through to the next one if that resumed member fails again.
+A member with `infra_retry_limit: 0` falls through immediately on an infra crash instead
+of burning time on retries. See [Ensembles](graphs.md#ensembles) for the full semantics.
+
+The order above is the real free-to-paid walk for this project's own Committer: a
+cascade ensemble is what lands every commit here, which is why this pattern is Proven.
+
+### Routing on why a member failed
+
+The cascade falls through on *any* failure — a quota exhaustion, a network error, and
+a genuinely wrong implementation all look the same to the ensemble. That is correct
+when every member is equally capable and you are only spending ceilings in order. It is
+wrong when the right response to "wrong code" is to send the work back to a fixer, not
+down to a weaker harness.
+
+For that case you still need the router variant (below). Keep it short: a router is
+only justified when the *reason* for the failure changes where the work should go. If
+you are only spending free tiers in sequence, the plain cascade above is enough.
+
+### The naive version and why it is a trap
 
 ```mermaid
 graph LR
@@ -205,13 +262,11 @@ graph LR
     C -->|fail| D["implement (kiro)"]
 ```
 
-**`fail` conflates "my quota is gone" with "this code is wrong".** A spec
-with a genuine bug in it burns all four free tiers on the same wrong task,
-and you end the day with every ceiling spent and nothing done. The chain only
-makes sense if it routes on *why* the node failed.
-
-Which is a router — one node for the whole cascade instead of a triage node
-between every pair:
+`fail` conflates "my quota is gone" with "this code is wrong". A spec with a genuine
+bug burns all four free tiers on the same wrong task, and you end the day with every
+ceiling spent and nothing done. A chain of fail edges only makes sense if it routes on
+*why* the node failed — which is a router, one node for the whole cascade instead of a
+triage node between every pair:
 
 ```mermaid
 graph LR
@@ -224,20 +279,21 @@ graph LR
     RT -->|broken| STOP[fail the spec]
 ```
 
-Two more things worth knowing before you build this.
+This variant is **Designed** (the engine supports it; we have not run it). Build it only
+when you need the cascade to route on failure reason instead of falling through blindly.
 
-**Exhaustion does not look the same on every harness.** Some CLIs exit
-non-zero with a message naming the reset time; others simply stop responding
-and die on the node's timeout. A model reading the output generalizes across
-both; a regex matching one vendor's wording does not, and there is no version
-of that regex that survives a CLI update.
+### Two things worth knowing before you build either variant
 
-**The engine has no memory of a spent harness.** If spec 1 burns cursor and
-antigravity, spec 2 starts at cursor again and spends an iteration
-rediscovering that it is dead — and it does that for every remaining spec in
-the queue. Today the only lever is `graph_schedule_autorun`, which parks the
-*whole graph* until a reset. A per-harness "unavailable until" that the
-router could read does not exist yet.
+**Exhaustion does not look the same on every harness.** Some CLIs exit non-zero with a
+message naming the reset time; others simply stop responding and die on the node's
+timeout. A cascade member that times out falls through to the next member — which is
+usually what you want. A router reading the output generalizes across both.
+
+**The engine has no memory of a spent harness.** If spec 1 burns cursor and antigravity,
+spec 2 starts at cursor again and spends an iteration rediscovering that it is dead —
+and it does that for every remaining spec in the queue. Today the only lever is
+`graph_schedule_autorun`, which parks the *whole graph* until a reset. A per-harness
+"unavailable until" that a router could read does not exist yet.
 
 ---
 
@@ -345,6 +401,24 @@ it lands.
 
 ---
 
+## Resuming and redirecting a run
+
+Three levers, from least to most intrusive:
+
+- **Retry or skip the stuck node.** `graph_continue` with
+  `retry_current_node` re-runs the node the run stopped on; `skip_next_spec`
+  moves past the spec. Use these first.
+- **Start a spec at a node you choose.** When everything before a node is
+  already right, a directed run (`graph_continue run_from_node`, or
+  `canopy graph run <graph> --from <node>`) begins at that node and reuses the
+  recorded output of every earlier node. Use it after a crash, a rewired
+  ensemble or a hand fix, instead of paying for the earlier nodes again. The
+  run is refused, and names the missing node, when a prompt or check still
+  needs output that was never recorded for the spec.
+- **Keep a related run warm.** Put specs that share context in one queue
+  group. A grouped spec resumes the harness session its previous completed
+  sibling used, so the repo is not analysed again from cold.
+
 ## Choosing a shape
 
 | If the thing you fear is… | Use |
@@ -354,7 +428,7 @@ it lands.
 | A quota ending overnight | 3 — resilience branch |
 | Spending the good model on exploration | 4 — draft ensemble |
 | Spending the good model on trivia | 5 — router by complexity |
-| Paying at all before the free tiers are gone | 6 — free-tier cascade |
+| Paying at all before the free tiers are gone | 6 — cascade ensemble (free → paid) |
 | A whole dimension going unreviewed | 7 — specialist panel |
 | Work arriving while you sleep | 8 — event intake |
 | A fix that is right but fragile | 9 — adversarial pair |

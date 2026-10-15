@@ -24,6 +24,12 @@ pub const DEFAULT_CATALOG_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 /// authenticates with a new provider through that CLI — a stale native cache
 /// is far more likely to hide a model the user just unlocked than the
 /// models.dev catalog is to miss a same-day release.
+/// CM51: the settings registry now declares this default (its literal must
+/// equal this constant, asserted by
+/// `settings::tests::models_registry_defaults_equal_models_db_ttls`), so
+/// nothing in production reads it any more — it stays as the models layer's
+/// published value that the registry is checked against.
+#[allow(dead_code)]
 pub const DEFAULT_NATIVE_TTL: Duration = Duration::from_secs(60 * 60);
 
 const API_URL: &str = "https://models.dev/api.json";

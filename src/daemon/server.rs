@@ -1,10 +1,12 @@
 use anyhow::Result;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use rmcp::ServiceExt;
 
 use crate::application::notification_service::{DefaultNotificationService, NotificationService};
 use crate::application::ports::StateRepository;
+use crate::daemon::handler::HandlerDeps;
 use crate::daemon::health_routine::HealthRoutine;
 use crate::daemon::process::{
     acquire_daemon_lock, kill_port_occupant, remove_pid_file, write_pid_file,
@@ -19,10 +21,24 @@ use crate::scheduler::cron_scheduler::CronScheduler;
 use crate::sync_manager::SyncManager;
 use crate::watchers::WatcherEngine;
 
+mod personal_rag;
+
+use personal_rag::startup_personal_rag;
+
+#[cfg(test)]
+use personal_rag::{
+    migrate_personal_rag_chunking, migrate_personal_rag_model, prepare_personal_rag_roots,
+    queue_existing_personal_rag_files, reload_personal_rag_queue, RAG_CHUNKING_VERSION,
+};
+
 pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
     crate::domain::notification::register_aumid();
     crate::domain::notification::clear_stale_notifications();
     init_tracing();
+
+    // CB83: one instant per daemon process; every MCP session's handler
+    // inherits it so `agent_status` Uptime is the daemon's age.
+    let daemon_start = std::time::Instant::now();
 
     let port = crate::resolve_port(port_override);
     let data_dir = crate::ensure_data_dir()?;
@@ -38,15 +54,25 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
     ));
     let sync_manager = Arc::new(SyncManager::new(Arc::clone(&db)));
     let canopy_config = crate::domain::canopy_config::CanopyConfig::load(&data_dir);
+    // CM51 (D12): remember what the running daemon loaded, so `config_list`
+    // can report `pending_restart`, and watch the file so a hand edit takes
+    // effect without a restart (D4).
+    crate::domain::settings::set_running_snapshot(canopy_config.clone());
+    crate::daemon::config_watch::spawn(data_dir.clone(), Arc::clone(&db));
     let dynamic_skills = Arc::new(crate::dynamic_skills::SkillStore::from_config(
         &data_dir,
         &canopy_config.skills,
     ));
+    // CB82: the process-wide shutdown flag — set first in graceful shutdown,
+    // before any node process is SIGTERMed, so the engine finalizes in-flight
+    // runs as interrupted instead of routing their fail edges.
+    let shutdown_flag = Arc::new(AtomicBool::new(false));
     let graph_engine = Arc::new(
         GraphEngine::new(Arc::clone(&db), Arc::clone(&notification_service))
             .with_ensemble_concurrency_cap(canopy_config.ensemble_concurrency_cap)
             .with_spec_attempt_limit(canopy_config.spec_attempt_limit)
-            .with_dynamic_skills(Arc::clone(&dynamic_skills)),
+            .with_dynamic_skills(Arc::clone(&dynamic_skills))
+            .with_shutdown_flag(Arc::clone(&shutdown_flag)),
     );
     let watcher_engine = Arc::new(WatcherEngine::new(
         Arc::clone(&db),
@@ -57,29 +83,106 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
     let ingestion = Arc::new(IngestionManager::new(Arc::clone(&db), data_dir.clone()));
     let _ingestion_cancel = Arc::clone(&ingestion).start();
 
+    announce_daemon_start(port);
+    write_pid_file(&data_dir)?;
+    write_startup_state(&db, port)?;
+
+    reconcile_orphaned_graphs_on_startup(&db, &data_dir);
+    reconcile_stranded_queue_specs_on_startup(&db);
+    // CT28: drop live-output chunks whose run is finished — leftovers from a
+    // crash, since completion paths delete their own chunks.
+    if let Err(e) = db.delete_graph_run_output_for_non_running() {
+        tracing::error!("Failed to clean stale graph_run_output chunks: {}", e);
+    }
+    capture_interrupted_state(&graph_engine, &watcher_engine).await;
+
+    startup_personal_rag(Arc::clone(&ingestion), &data_dir).await;
+    // CB91: one maintenance pass at startup, after the reconciliations that
+    // `startup_personal_rag` runs; the periodic tick continues from `start()`.
+    ingestion.run_rag_maintenance().await;
+
+    let background = start_background_tasks(
+        &db,
+        &executor,
+        &graph_engine,
+        &notification_service,
+        &data_dir,
+        canopy_config.announcements_enabled,
+    );
+
+    let ct = tokio_util::sync::CancellationToken::new();
+    let router = build_mcp_router(
+        HandlerDeps {
+            db: Arc::clone(&db),
+            executor: Arc::clone(&executor),
+            watcher_engine: Arc::clone(&watcher_engine),
+            scheduler_notify: Arc::clone(&background.scheduler_notify),
+            graph_engine: Arc::clone(&graph_engine),
+            notification_service: Arc::clone(&notification_service),
+            sync_manager: Arc::clone(&sync_manager),
+            ingestion: Arc::clone(&ingestion),
+            dynamic_skills: Arc::clone(&dynamic_skills),
+            start_time: daemon_start,
+            port,
+        },
+        &ct,
+    );
+
+    bind_and_serve(router, port, ct).await?;
+
+    shutdown_http_server(background, watcher_engine, &db, &data_dir, &graph_engine).await;
+
+    Ok(())
+}
+
+/// The startup banner line: version and port, logged once the port and data
+/// directory are resolved.
+fn announce_daemon_start(port: u16) {
     tracing::info!(
         "canopy v{} starting on port {}",
         env!("CARGO_PKG_VERSION"),
         port
     );
+}
 
-    write_pid_file(&data_dir)?;
-
+/// The daemon's own record of being up: port, version and start time, in
+/// that order — every later `daemon status` / doctor probe reads these.
+fn write_startup_state(db: &Database, port: u16) -> Result<()> {
     db.set_state("port", &port.to_string())?;
     db.set_state("version", env!("CARGO_PKG_VERSION"))?;
     db.set_state("last_start", &chrono::Utc::now().to_rfc3339())?;
+    Ok(())
+}
 
-    match db.reconcile_orphaned_graphs(&data_dir) {
-        Ok(count) if count > 0 => {
+/// Startup reconciliation 1/2: graphs a previous daemon left `Running`.
+fn reconcile_orphaned_graphs_on_startup(db: &Database, data_dir: &std::path::Path) {
+    match db.reconcile_orphaned_graphs(data_dir) {
+        Ok(reconciled) if !reconciled.is_empty() => {
             tracing::warn!(
                 "Reconciled {} graph(s) left running by a previous daemon",
-                count
+                reconciled.len()
             );
+            // CB84: best-effort end the harness sessions behind every
+            // reconciled run — the previous daemon's harness service may
+            // still be ticking. Detached so startup isn't blocked.
+            for (lp, run) in reconciled {
+                let platform = run.executed_platform.clone().unwrap_or_default();
+                let workdir = lp.workdir.clone();
+                if !platform.is_empty() {
+                    tokio::spawn(async move {
+                        crate::graph_engine::end_harness_session(&platform, &run, &workdir).await;
+                    });
+                }
+            }
         }
         Ok(_) => {}
         Err(e) => tracing::error!("Failed to reconcile orphaned graphs: {}", e),
     }
+}
 
+/// Startup reconciliation 2/2: queue members a previous daemon left
+/// `Running` after their graph was reconciled.
+fn reconcile_stranded_queue_specs_on_startup(db: &Database) {
     match db.reconcile_stranded_queue_specs() {
         Ok(count) if count > 0 => {
             tracing::warn!(
@@ -90,7 +193,11 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
         Ok(_) => {}
         Err(e) => tracing::error!("Failed to reconcile stranded queue specs: {}", e),
     }
+}
 
+/// The two awaited startup reads, in order: capture the dirty-tree state of
+/// interrupted specs, then reload the watcher set from the database.
+async fn capture_interrupted_state(graph_engine: &GraphEngine, watcher_engine: &WatcherEngine) {
     if let Err(e) = graph_engine.capture_end_dirty_for_interrupted_specs().await {
         tracing::error!(
             "Failed to capture dirty-tree state for interrupted specs: {}",
@@ -101,55 +208,97 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
     if let Err(e) = watcher_engine.reload_from_db().await {
         tracing::error!("Failed to reload watchers: {}", e);
     }
+}
 
-    startup_personal_rag(Arc::clone(&ingestion), &data_dir).await;
+/// The daemon's background tasks plus the tokens that stop them, started in
+/// the order the daemon has always started them: cron scheduler, health
+/// routine, then (only when enabled) the announcements client.
+struct HttpBackgroundTasks {
+    scheduler_notify: Arc<tokio::sync::Notify>,
+    scheduler_cancel: tokio_util::sync::CancellationToken,
+    health_routine_cancel: tokio_util::sync::CancellationToken,
+    announcements_cancel: Option<tokio_util::sync::CancellationToken>,
+}
 
-    let cron_scheduler = Arc::new(CronScheduler::with_graphs(
-        Arc::clone(&db),
-        Arc::clone(&executor),
-        Arc::clone(&graph_engine),
-    ));
+fn start_background_tasks(
+    db: &Arc<Database>,
+    executor: &Arc<Executor>,
+    graph_engine: &Arc<GraphEngine>,
+    notification_service: &Arc<dyn NotificationService>,
+    data_dir: &std::path::Path,
+    announcements_enabled: bool,
+) -> HttpBackgroundTasks {
+    let cron_scheduler = Arc::new(
+        CronScheduler::with_graphs(
+            Arc::clone(db),
+            Arc::clone(executor),
+            Arc::clone(graph_engine),
+        )
+        .with_retry(crate::scheduler::cron_scheduler::RetryPolicy::from_config(
+            &crate::domain::canopy_config::CanopyConfig::load(data_dir).scheduler,
+        )),
+    );
     let scheduler_notify = cron_scheduler.notifier();
     let scheduler_cancel = Arc::clone(&cron_scheduler).start();
 
-    let health_routine = Arc::new(HealthRoutine::new(Arc::clone(&db), data_dir.clone()));
+    let health_routine = Arc::new(HealthRoutine::new(Arc::clone(db), data_dir.to_path_buf()));
     let health_routine_cancel = health_routine.start();
 
-    let announcements_cancel = if canopy_config.announcements_enabled {
+    let announcements_cancel = if announcements_enabled {
         let client = Arc::new(crate::daemon::announcements::AnnouncementsClient::new(
-            Arc::clone(&db),
-            Arc::clone(&notification_service),
+            Arc::clone(db),
+            Arc::clone(notification_service),
         ));
         Some(client.start())
     } else {
         None
     };
 
-    let handler_db = Arc::clone(&db);
-    let handler_executor = Arc::clone(&executor);
-    let handler_watcher_engine = Arc::clone(&watcher_engine);
-    let handler_scheduler_notify = Arc::clone(&scheduler_notify);
-    let handler_sync_manager = Arc::clone(&sync_manager);
-    let handler_graph_engine = Arc::clone(&graph_engine);
-    let handler_ingestion = Arc::clone(&ingestion);
-    let handler_dynamic_skills = Arc::clone(&dynamic_skills);
+    HttpBackgroundTasks {
+        scheduler_notify,
+        scheduler_cancel,
+        health_routine_cancel,
+        announcements_cancel,
+    }
+}
 
-    let ct = tokio_util::sync::CancellationToken::new();
+/// Everything the `/mcp` handler closure clones per session, plus the port
+/// it reports — the daemon-side owners stay alive in `run_http_server`.
+/// `HandlerDeps` (re-exported from handler) is the canonical bundle.
+/// Builds the `/mcp` router: the streamable-HTTP service (one
+/// `TaskTriggerHandler` per session), the session manager, and the server
+/// config wired to the shutdown cancellation token, layered with the
+/// error-status logger.
+fn build_mcp_router(deps: HandlerDeps, ct: &tokio_util::sync::CancellationToken) -> axum::Router {
+    let HandlerDeps {
+        db: handler_db,
+        executor: handler_executor,
+        watcher_engine: handler_watcher_engine,
+        scheduler_notify: handler_scheduler_notify,
+        graph_engine: handler_graph_engine,
+        notification_service,
+        sync_manager: handler_sync_manager,
+        ingestion: handler_ingestion,
+        dynamic_skills: handler_dynamic_skills,
+        start_time,
+        port,
+    } = deps;
 
     let service = rmcp::transport::streamable_http_server::StreamableHttpService::new(
         move || {
-            Ok(TaskTriggerHandler::new(
-                Arc::clone(&handler_db),
-                Arc::clone(&handler_executor),
-                Arc::clone(&handler_watcher_engine),
-                Arc::clone(&handler_scheduler_notify),
-                Arc::clone(&handler_graph_engine),
-                Arc::clone(&notification_service),
-                Arc::clone(&handler_sync_manager),
-                Arc::clone(&handler_ingestion),
-                Arc::clone(&handler_dynamic_skills),
+            Ok(TaskTriggerHandler::with_deps(HandlerDeps {
+                db: Arc::clone(&handler_db),
+                executor: Arc::clone(&handler_executor),
+                watcher_engine: Arc::clone(&handler_watcher_engine),
+                scheduler_notify: Arc::clone(&handler_scheduler_notify),
+                graph_engine: Arc::clone(&handler_graph_engine),
+                notification_service: Arc::clone(&notification_service),
+                sync_manager: Arc::clone(&handler_sync_manager),
+                ingestion: Arc::clone(&handler_ingestion),
+                dynamic_skills: Arc::clone(&handler_dynamic_skills),
+                start_time,
                 port,
-            ))
+            }))
         },
         {
             let mut mgr =
@@ -168,9 +317,18 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
         },
     );
 
-    let router = axum::Router::new()
+    axum::Router::new()
         .nest_service("/mcp", service)
-        .layer(axum::middleware::from_fn(log_mcp_error_responses));
+        .layer(axum::middleware::from_fn(log_mcp_error_responses))
+}
+
+/// Frees the port (a stale occupant from a previous daemon), binds, logs the
+/// listening address, and serves until the shutdown signal cancels `ct`.
+async fn bind_and_serve(
+    router: axum::Router,
+    port: u16,
+    ct: tokio_util::sync::CancellationToken,
+) -> Result<()> {
     let bind_addr = format!("127.0.0.1:{port}");
 
     kill_port_occupant(port);
@@ -190,18 +348,34 @@ pub(crate) async fn run_http_server(port_override: Option<u16>) -> Result<()> {
         })
         .await?;
 
-    scheduler_cancel.cancel();
-    health_routine_cancel.cancel();
-    if let Some(cancel) = announcements_cancel {
+    Ok(())
+}
+
+/// The shutdown sequence, in order: cancel the scheduler, the health
+/// routine and (when it was started) the announcements client; await
+/// watcher stop; terminate this daemon's node processes; remove the PID
+/// file; clear notifications; log stopped.
+async fn shutdown_http_server(
+    background: HttpBackgroundTasks,
+    watcher_engine: Arc<WatcherEngine>,
+    db: &Arc<Database>,
+    data_dir: &std::path::Path,
+    graph_engine: &Arc<GraphEngine>,
+) {
+    // CB82: FIRST — before the scheduler/health cancels and before
+    // `terminate_all_...` sends SIGTERM — so the engine finalizes in-flight
+    // runs as interrupted instead of routing the fail edge of a killed node.
+    graph_engine.mark_shutting_down();
+    background.scheduler_cancel.cancel();
+    background.health_routine_cancel.cancel();
+    if let Some(cancel) = background.announcements_cancel {
         cancel.cancel();
     }
     watcher_engine.stop_all().await;
-    terminate_all_running_node_processes_at_shutdown(&db).await;
-    remove_pid_file(&data_dir);
+    terminate_all_running_node_processes_at_shutdown(db).await;
+    remove_pid_file(data_dir);
     crate::domain::notification::clear_notifications_on_exit();
     tracing::info!("Daemon stopped");
-
-    Ok(())
 }
 
 /// rmcp's `/mcp` handler returns 404 "Session not found" (and other non-2xx
@@ -245,6 +419,11 @@ async fn log_mcp_error_responses(
 /// to fire, and a *sequential* terminate-and-wait per process would
 /// multiply the shutdown delay by the number of processes instead of
 /// bounding it by one grace period total.
+///
+/// CB82: the shutdown flag is already set before this runs, so rows still
+/// `Running` here are ones whose dispatch died without finalizing — they are
+/// marked `interrupted` (not `terminated`) so the same output-based check
+/// covers late completions from both the engine finalizer and this sweep.
 async fn terminate_all_running_node_processes_at_shutdown(db: &Database) {
     let Ok(runs) = db.list_all_running_graph_runs() else {
         return;
@@ -269,11 +448,34 @@ async fn terminate_all_running_node_processes_at_shutdown(db: &Database) {
         }
     }
 
+    // CB84: after the SIGKILL pass, best-effort end every run's harness
+    // session concurrently — the opencode v2 service-side session keeps
+    // ticking after the client process group is gone, so this is the only
+    // way to stop it. One detached task per run so they run in parallel (and
+    // in parallel with the DB finalization below), each with its own 30s
+    // timeout: total wall time stays inside the existing KILL_GRACE budget
+    // plus at most 30s.
+    for run in &runs {
+        let Some(platform) = run.executed_platform.clone() else {
+            continue;
+        };
+        let workdir = db
+            .get_graph(&run.graph_id)
+            .ok()
+            .flatten()
+            .map(|g| g.workdir)
+            .unwrap_or_default();
+        let run = run.clone();
+        tokio::spawn(async move {
+            crate::graph_engine::end_harness_session(&platform, &run, &workdir).await;
+        });
+    }
+
     for run in &runs {
         let _ = db.update_graph_run_result(
             &run.id,
             crate::domain::graphs::GraphRunStatus::Fail,
-            Some(&serde_json::json!({ "terminated": true, "reason": "daemon shutdown" })),
+            Some(&serde_json::json!({ "interrupted": true, "reason": "daemon shutdown" })),
             Some(chrono::Utc::now()),
         );
     }
@@ -287,31 +489,53 @@ pub(crate) async fn run_stdio_server() -> Result<()> {
     let db = Arc::new(Database::new_safe(&database_path(&data_dir), &data_dir)?);
     let startup = stdio_server_startup(Arc::clone(&db), &data_dir).await;
 
-    let handler = TaskTriggerHandler::new(
-        Arc::clone(&db),
-        Arc::clone(&startup.executor),
-        Arc::clone(&startup.watcher_engine),
-        startup.scheduler_notify,
-        Arc::clone(&startup.graph_engine),
-        Arc::clone(&startup.notification_service),
-        Arc::clone(&startup.sync_manager),
-        Arc::clone(&startup.ingestion),
-        Arc::clone(&startup.dynamic_skills),
-        0,
-    );
+    serve_stdio_transport(&db, &startup).await?;
+    stop_stdio_server(startup).await;
+
+    Ok(())
+}
+
+/// The MCP handler over the startup dependencies — port 0, because stdio
+/// has no port of its own to report.
+fn build_stdio_handler(db: &Arc<Database>, startup: &StdioServerStartup) -> TaskTriggerHandler {
+    TaskTriggerHandler::with_deps(HandlerDeps {
+        db: Arc::clone(db),
+        executor: Arc::clone(&startup.executor),
+        watcher_engine: Arc::clone(&startup.watcher_engine),
+        scheduler_notify: Arc::clone(&startup.scheduler_notify),
+        graph_engine: Arc::clone(&startup.graph_engine),
+        notification_service: Arc::clone(&startup.notification_service),
+        sync_manager: Arc::clone(&startup.sync_manager),
+        ingestion: Arc::clone(&startup.ingestion),
+        dynamic_skills: Arc::clone(&startup.dynamic_skills),
+        start_time: startup.start_time,
+        port: 0,
+    })
+}
+
+/// Serves JSON-RPC over the stdio transport until the client closes it:
+/// build the handler, serve, log the started line, then wait for the
+/// transport to end.
+async fn serve_stdio_transport(db: &Arc<Database>, startup: &StdioServerStartup) -> Result<()> {
+    let handler = build_stdio_handler(db, startup);
 
     let transport = rmcp::transport::stdio();
     let server = handler.serve(transport).await?;
     tracing::info!("MCP stdio server started");
 
     server.waiting().await?;
+    Ok(())
+}
 
+/// The stdio cleanup sequence, in order: scheduler stop (a stop, not a
+/// cancellation), await watcher stop, clear notifications, then the
+/// stopped log. The startup guards (`_ingestion_cancel`, scheduler and
+/// health cancellation tokens) drop with `startup` right after.
+async fn stop_stdio_server(startup: StdioServerStartup) {
     startup.cron_scheduler.stop();
     startup.watcher_engine.stop_all().await;
     crate::domain::notification::clear_notifications_on_exit();
     tracing::info!("Stdio server stopped");
-
-    Ok(())
 }
 
 /// Everything `run_stdio_server` needs beyond `db` itself: the handler's
@@ -331,6 +555,10 @@ struct StdioServerStartup {
     graph_engine: Arc<GraphEngine>,
     ingestion: Arc<IngestionManager>,
     dynamic_skills: Arc<crate::dynamic_skills::SkillStore>,
+    /// CB83: captured in `stdio_server_startup`, when this stdio server
+    /// process starts — shared by the handler so `agent_status` Uptime
+    /// matches the process, not a late-built session.
+    start_time: std::time::Instant,
     cron_scheduler: Arc<CronScheduler>,
     scheduler_notify: Arc<tokio::sync::Notify>,
     _ingestion_cancel: tokio_util::sync::CancellationToken,
@@ -379,16 +607,23 @@ async fn stdio_server_startup(db: Arc<Database>, data_dir: &std::path::Path) -> 
     // No announcements client here: this is a stdio MCP server, not the
     // daemon, and the announcements WebSocket is a daemon-only background task.
     startup_personal_rag(Arc::clone(&ingestion), data_dir).await;
+    // CB91: startup maintenance pass — see `run_http_server`'s identical call.
+    ingestion.run_rag_maintenance().await;
 
     if let Err(e) = watcher_engine.reload_from_db().await {
         tracing::error!("Failed to reload watchers: {}", e);
     }
 
-    let cron_scheduler = Arc::new(CronScheduler::with_graphs(
-        Arc::clone(&db),
-        Arc::clone(&executor),
-        Arc::clone(&graph_engine),
-    ));
+    let cron_scheduler = Arc::new(
+        CronScheduler::with_graphs(
+            Arc::clone(&db),
+            Arc::clone(&executor),
+            Arc::clone(&graph_engine),
+        )
+        .with_retry(crate::scheduler::cron_scheduler::RetryPolicy::from_config(
+            &canopy_config.scheduler,
+        )),
+    );
     let scheduler_notify = cron_scheduler.notifier();
     let scheduler_cancel = Arc::clone(&cron_scheduler).start();
 
@@ -403,203 +638,13 @@ async fn stdio_server_startup(db: Arc<Database>, data_dir: &std::path::Path) -> 
         graph_engine,
         ingestion,
         dynamic_skills,
+        start_time: std::time::Instant::now(),
         cron_scheduler,
         scheduler_notify,
         _ingestion_cancel: ingestion_cancel,
         _scheduler_cancel: scheduler_cancel,
         _health_routine_cancel: health_routine_cancel,
     }
-}
-
-/// Scan the personal RAG root for existing files, enqueue them, and start the watcher.
-/// Version of the chunking algorithm; bump to force a full re-index.
-/// v2: merge lexically similar neighbors (size-capped) instead of dissimilar ones.
-const RAG_CHUNKING_VERSION: &str = "v2";
-
-async fn startup_personal_rag(ingestion: Arc<IngestionManager>, data_dir: &std::path::Path) {
-    let config = crate::domain::canopy_config::CanopyConfig::load(data_dir);
-    let personal_roots: Vec<std::path::PathBuf> = config
-        .rag_personal_dirs
-        .iter()
-        .map(std::path::PathBuf::from)
-        .collect();
-
-    if personal_roots.is_empty() {
-        tracing::info!("startup_personal_rag: no directories configured, skipping");
-        // Still initialize snapshot even if no RAG dirs configured
-        ingestion.refresh_snapshot().await;
-        return;
-    }
-
-    for root in &personal_roots {
-        if let Err(e) = std::fs::create_dir_all(root) {
-            tracing::warn!("Could not create personal RAG dir {:?}: {e}", root);
-        }
-    }
-
-    // ── Model-change detection ──────────────────────────────────────────────
-    // If the configured embeddings model differs from the last run, wipe the
-    // vector store and clear the queue so everything is re-indexed with the
-    // new model.  This covers both dimension changes (already handled inside
-    // `open_at`) *and* same-dimension model swaps where old vectors would give
-    // wrong results.
-    let current_model = config.embeddings_model.trim().to_string();
-    if !current_model.is_empty() {
-        let last_model = ingestion
-            .db()
-            .get_state("rag_last_model")
-            .ok()
-            .flatten()
-            .unwrap_or_default();
-
-        if !last_model.is_empty() && last_model != current_model {
-            tracing::warn!(
-                "startup_personal_rag: embeddings model changed '{}' → '{}' \
-                 — wiping vector store and clearing queue for full re-index",
-                last_model,
-                current_model
-            );
-            if let Err(e) =
-                crate::rag::ingestion::wipe_lancedb(ingestion.db(), "model change").await
-            {
-                tracing::error!("startup_personal_rag: LanceDB wipe failed: {e:#}");
-            }
-            ingestion.clear_queue().await;
-        }
-
-        let _ = ingestion.db().set_state("rag_last_model", &current_model);
-    }
-
-    // ── Chunking-algorithm change detection ─────────────────────────────────
-    // Bump RAG_CHUNKING_VERSION whenever chunk boundaries change (e.g. the
-    // v2 switch from merge-dissimilar to merge-similar semantics). Existing
-    // chunks were produced by the old algorithm, so wipe and re-index.
-    let last_chunking = ingestion
-        .db()
-        .get_state("rag_chunking_version")
-        .ok()
-        .flatten()
-        .unwrap_or_default();
-    if last_chunking != RAG_CHUNKING_VERSION {
-        tracing::warn!(
-            "startup_personal_rag: chunking algorithm changed '{}' → '{}' \
-             — wiping vector store and clearing queue for full re-index",
-            if last_chunking.is_empty() {
-                "v1"
-            } else {
-                &last_chunking
-            },
-            RAG_CHUNKING_VERSION
-        );
-        if let Err(e) =
-            crate::rag::ingestion::wipe_lancedb(ingestion.db(), "chunking version change").await
-        {
-            tracing::error!("startup_personal_rag: LanceDB wipe failed: {e:#}");
-        }
-        ingestion.clear_queue().await;
-        let _ = ingestion
-            .db()
-            .set_state("rag_chunking_version", RAG_CHUNKING_VERSION);
-    }
-
-    // ── Ledger vs vector-store reconciliation ───────────────────────────────
-    // A hard crash (e.g. a WSL kill) can destroy the LanceDB directory while
-    // the SQLite ledger (`rag_file_events`) survives on disk. Pure store
-    // deletion doesn't go through the corrupt-store recovery path (which
-    // already clears the ledger), so without this check the daemon would
-    // trust the stale ledger, queue nothing, and the RAG index would stay
-    // silently empty forever.
-    ingestion.reconcile_ledger_with_store().await;
-
-    // Reload any items already in the DB queue from a previous session.
-    let recovered = ingestion
-        .db()
-        .requeue_processing_rag_items(chrono::Utc::now().timestamp())
-        .unwrap_or(0);
-    if recovered > 0 {
-        tracing::warn!(
-            "startup_personal_rag: recovered {recovered} stale processing queue item(s) after previous crash"
-        );
-    }
-
-    // Files that have permanently failed indexing should not be silently
-    // re-queued by the automatic startup rescan/reload; an explicit user
-    // Modify/Create event via the filesystem watcher still gives them a
-    // fresh chance.
-    let failed = ingestion
-        .db()
-        .permanently_failed_rag_files()
-        .unwrap_or_default();
-
-    if let Ok(pending) = ingestion.db_pending_queue() {
-        let mut reloaded = 0usize;
-        for path in &pending {
-            if failed.contains(path) {
-                continue;
-            }
-            ingestion.enqueue(path).await;
-            reloaded += 1;
-        }
-        if reloaded > 0 {
-            tracing::info!("startup_personal_rag: reloaded {reloaded} pending queue items");
-        }
-    }
-
-    // Scan existing files across all personal roots.
-    // Skip files that are already indexed and haven't been modified since.
-    let already_indexed = ingestion
-        .db()
-        .indexed_files_timestamps()
-        .unwrap_or_default();
-    let patterns = crate::rag::ragignore::load_patterns(data_dir);
-    let mut queued = 0usize;
-    for root in &personal_roots {
-        let walker = walkdir::WalkDir::new(root)
-            .follow_links(false)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_file());
-
-        for entry in walker {
-            let path = entry.path();
-            if crate::rag::ragignore::is_ignored(path, root, &patterns) {
-                continue;
-            }
-            let path_str = path.to_string_lossy().to_string();
-            if crate::rag::chunker::detect_lang(&path_str).is_none() {
-                continue;
-            }
-            // Skip if indexed and file hasn't changed since.
-            if let Some(&indexed_at) = already_indexed.get(&path_str) {
-                let mtime = entry
-                    .metadata()
-                    .ok()
-                    .and_then(|m| m.modified().ok())
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs() as i64)
-                    .unwrap_or(i64::MAX);
-                if mtime <= indexed_at {
-                    continue;
-                }
-            }
-            if failed.contains(&path_str) {
-                continue;
-            }
-            ingestion.enqueue(&path_str).await;
-            queued += 1;
-        }
-    }
-    if queued > 0 {
-        tracing::info!("startup_personal_rag: queued {queued} existing file(s) for indexing");
-    }
-
-    // Reconcile orphan chunks from files deleted while the daemon was offline.
-    ingestion.reconcile_orphan_chunks().await;
-    // Keep a persisted snapshot so TUI reads counters without querying LanceDB.
-    ingestion.refresh_snapshot().await;
-
-    // Start the filesystem watcher for live updates.
-    Arc::clone(&ingestion).start_personal_watcher(&personal_roots);
 }
 
 async fn shutdown_signal() {
@@ -700,7 +745,7 @@ mod hang_repro {
             }],
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
         fake_home
     }
 
@@ -750,18 +795,19 @@ mod hang_repro {
 
         let service = rmcp::transport::streamable_http_server::StreamableHttpService::new(
             move || {
-                Ok(TaskTriggerHandler::new(
-                    Arc::clone(&handler_db),
-                    Arc::clone(&handler_executor),
-                    Arc::clone(&handler_watcher_engine),
-                    Arc::clone(&handler_scheduler_notify),
-                    Arc::clone(&handler_graph_engine),
-                    Arc::clone(&handler_notif),
-                    Arc::clone(&handler_sync_manager),
-                    Arc::clone(&handler_ingestion),
-                    Arc::clone(&handler_dynamic_skills),
-                    0,
-                ))
+                Ok(TaskTriggerHandler::with_deps(HandlerDeps {
+                    db: Arc::clone(&handler_db),
+                    executor: Arc::clone(&handler_executor),
+                    watcher_engine: Arc::clone(&handler_watcher_engine),
+                    scheduler_notify: Arc::clone(&handler_scheduler_notify),
+                    graph_engine: Arc::clone(&handler_graph_engine),
+                    notification_service: Arc::clone(&handler_notif),
+                    sync_manager: Arc::clone(&handler_sync_manager),
+                    ingestion: Arc::clone(&handler_ingestion),
+                    dynamic_skills: Arc::clone(&handler_dynamic_skills),
+                    start_time: std::time::Instant::now(),
+                    port: 0,
+                }))
             },
             rmcp::transport::streamable_http_server::session::local::LocalSessionManager::default()
                 .into(),
@@ -961,7 +1007,7 @@ mod hang_repro {
         let dispatch_graph_id = graph_id.clone();
         let dispatch = tokio::spawn(async move {
             graph_engine
-                .run_graph(dispatch_graph_id, None, None, None, None)
+                .run_graph(dispatch_graph_id, None, None, None, None, None)
                 .await
         });
 
@@ -1542,5 +1588,202 @@ mod stdio_startup_reconciliation_tests {
                 "stdio startup must not touch graph '{graph_id}''s uncommitted changes"
             );
         }
+    }
+
+    // ── startup_personal_rag's extracted helpers ────────────────────────
+
+    #[tokio::test]
+    async fn prepare_personal_rag_roots_handles_empty_and_configured_roots() {
+        let dir = tempdir().unwrap();
+        let db = Arc::new(test_db());
+        let ingestion = IngestionManager::new(Arc::clone(&db), dir.path().to_path_buf());
+
+        // No roots configured: the snapshot is still refreshed (so TUI
+        // counters reset to empty) and there is nothing else to do.
+        assert!(!prepare_personal_rag_roots(&ingestion, &[]).await);
+        assert_eq!(
+            db.get_state("rag_indexed_files").unwrap().as_deref(),
+            Some("0")
+        );
+
+        // A configured root: created on disk for the scan and the watcher.
+        let root = dir.path().join("notes");
+        assert!(prepare_personal_rag_roots(&ingestion, std::slice::from_ref(&root)).await);
+        assert!(root.is_dir());
+    }
+
+    #[tokio::test]
+    async fn reload_personal_rag_queue_skips_permanently_failed_files() {
+        let dir = tempdir().unwrap();
+        let db = Arc::new(test_db());
+        let ingestion = IngestionManager::new(Arc::clone(&db), dir.path().to_path_buf());
+        db.enqueue_rag_item("notes/bad.md", chrono::Utc::now().timestamp())
+            .unwrap();
+
+        let mut failed = std::collections::HashSet::new();
+        failed.insert("notes/bad.md".to_string());
+        reload_personal_rag_queue(&ingestion, &failed).await;
+        assert_eq!(
+            ingestion.queue_len().await,
+            0,
+            "a permanently failed file must not be silently re-queued"
+        );
+
+        reload_personal_rag_queue(&ingestion, &std::collections::HashSet::new()).await;
+        assert_eq!(
+            ingestion.queue_len().await,
+            1,
+            "a pending item left by a previous session must be reloaded"
+        );
+    }
+
+    #[tokio::test]
+    async fn queue_existing_personal_rag_files_skips_failed_files_and_queues_the_rest() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("notes");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("good.md"), "# hi").unwrap();
+        std::fs::write(root.join("bad.md"), "# no").unwrap();
+        let db = Arc::new(test_db());
+        let ingestion = IngestionManager::new(Arc::clone(&db), dir.path().to_path_buf());
+
+        let mut failed = std::collections::HashSet::new();
+        failed.insert(root.join("bad.md").to_string_lossy().to_string());
+
+        queue_existing_personal_rag_files(
+            &ingestion,
+            dir.path(),
+            std::slice::from_ref(&root),
+            &failed,
+        )
+        .await;
+
+        assert_eq!(ingestion.queue_len().await, 1);
+        let queued = ingestion.db_pending_queue().unwrap();
+        assert!(
+            queued.iter().any(|p| p.ends_with("good.md")),
+            "an indexable new file must be queued: {queued:?}"
+        );
+        assert!(
+            !queued.iter().any(|p| p.ends_with("bad.md")),
+            "a permanently failed file must be skipped: {queued:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn migrate_personal_rag_model_then_chunking_persists_in_order() {
+        use crate::application::ports::StateRepository;
+        let dir = tempdir().unwrap();
+        let db = Arc::new(test_db());
+        let ingestion = IngestionManager::new(Arc::clone(&db), dir.path().to_path_buf());
+        db.set_state("rag_last_model", "old-model").unwrap();
+        db.set_state("rag_chunking_version", "v1").unwrap();
+        let scratch_store = dir.path().join("vectors.lancedb");
+        std::fs::create_dir_all(&scratch_store).unwrap();
+        std::fs::write(scratch_store.join("marker"), b"stale").unwrap();
+        let config = crate::domain::canopy_config::CanopyConfig {
+            embeddings_model: "new-model".to_string(),
+            ..Default::default()
+        };
+        migrate_personal_rag_model(&ingestion, &config, &scratch_store).await;
+        assert_eq!(
+            db.get_state("rag_last_model").unwrap().as_deref(),
+            Some("new-model")
+        );
+        migrate_personal_rag_chunking(&ingestion, &scratch_store).await;
+        assert_eq!(
+            db.get_state("rag_chunking_version").unwrap().as_deref(),
+            Some(super::RAG_CHUNKING_VERSION)
+        );
+        assert!(
+            !scratch_store.exists(),
+            "the wipe must delete the scratch LanceDB directory, not a home-dir store"
+        );
+    }
+
+    /// RAII guard: sets the real `$HOME` env var to `path` for the test body,
+    /// restoring the previous value on drop. `VectorStore::default_lancedb_path`
+    /// reads `dirs::home_dir()` (real `$HOME`), so a migration test that must
+    /// prove the production default path is untouched needs this to avoid
+    /// touching the real developer's `~/.canopy`. Safe under `cargo nextest`
+    /// (one process per test) but would race under plain `cargo test`.
+    struct HomeVar {
+        prev: Option<std::ffi::OsString>,
+    }
+
+    impl HomeVar {
+        fn set(path: &std::path::Path) -> Self {
+            let prev = std::env::var_os("HOME");
+            unsafe { std::env::set_var("HOME", path) };
+            HomeVar { prev }
+        }
+    }
+
+    impl Drop for HomeVar {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => unsafe { std::env::set_var("HOME", v) },
+                None => unsafe { std::env::remove_var("HOME") },
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn personal_rag_migrations_never_touch_the_home_store() {
+        use crate::application::ports::StateRepository;
+        let home = tempdir().unwrap();
+        let _home = HomeVar::set(home.path());
+
+        let home_store = home.path().join(".canopy/rag/vectors.lancedb");
+        std::fs::create_dir_all(&home_store).unwrap();
+        std::fs::write(home_store.join("marker"), b"live").unwrap();
+
+        let scratch = tempdir().unwrap();
+        let scratch_store = scratch.path().join("vectors.lancedb");
+
+        let db = Arc::new(test_db());
+        let ingestion = IngestionManager::new(Arc::clone(&db), scratch.path().to_path_buf());
+        db.set_state("rag_last_model", "old-model").unwrap();
+        db.set_state("rag_chunking_version", "v1").unwrap();
+        let config = crate::domain::canopy_config::CanopyConfig {
+            embeddings_model: "new-model".to_string(),
+            ..Default::default()
+        };
+
+        migrate_personal_rag_model(&ingestion, &config, &scratch_store).await;
+        migrate_personal_rag_chunking(&ingestion, &scratch_store).await;
+
+        assert!(
+            home_store.join("marker").exists(),
+            "$HOME/.canopy/rag/vectors.lancedb/marker must survive both migrations"
+        );
+    }
+
+    #[test]
+    fn startup_reconciliation_helpers_cover_empty_branches() {
+        use crate::application::ports::StateRepository;
+        let dir = tempdir().unwrap();
+        let db = test_db();
+        reconcile_orphaned_graphs_on_startup(&db, dir.path());
+        reconcile_stranded_queue_specs_on_startup(&db);
+        let _ = db.get_state("port").unwrap();
+    }
+
+    #[tokio::test]
+    async fn capture_interrupted_state_covers_success_branches() {
+        use crate::application::notification_service::DefaultNotificationService;
+        let dir = tempdir().unwrap();
+        let db = Arc::new(test_db());
+        let notif: Arc<dyn NotificationService> = Arc::new(DefaultNotificationService);
+        let executor = Arc::new(Executor::new(Arc::clone(&db), Arc::clone(&notif)));
+        let graph_engine = GraphEngine::new(Arc::clone(&db), Arc::clone(&notif));
+        let watcher = WatcherEngine::new(
+            Arc::clone(&db),
+            Arc::clone(&executor),
+            Arc::new(graph_engine),
+        );
+        let graph_engine2 = GraphEngine::new(Arc::clone(&db), Arc::clone(&notif));
+        capture_interrupted_state(&graph_engine2, &watcher).await;
+        let _ = dir.path().join("placeholder");
     }
 }

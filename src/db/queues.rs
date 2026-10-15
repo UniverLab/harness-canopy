@@ -5,7 +5,7 @@ use std::io::{Error as IoError, ErrorKind};
 
 use crate::db::Database;
 use crate::domain::graphs::GraphSpecStatus;
-use crate::domain::queues::{Queue, QueueDetails};
+use crate::domain::queues::{Queue, QueueDetails, QueueMember};
 
 impl Database {
     pub fn insert_queue(&self, queue: &Queue) -> Result<()> {
@@ -74,6 +74,11 @@ impl Database {
     /// highest existing position, or 1 for an empty queue. `group_name` (RS3)
     /// is the optional context group the member joins — `None` for an
     /// ungrouped member, which never cross-resumes another spec's session.
+    ///
+    /// The production add path goes through [`Self::add_queue_member_grouped`],
+    /// which keeps groups contiguous; this raw append is kept for tests and
+    /// fixtures that need a plain positional append.
+    #[cfg(test)]
     pub fn append_queue_member(
         &self,
         queue_id: &str,
@@ -294,6 +299,103 @@ impl Database {
         Ok(())
     }
 
+    /// `QueueMember`s for `queue_id` in queue order — spec id, group, and whether
+    /// the member is locked (any status but `pending`). One join query; the group
+    /// contiguity invariant is computed from this.
+    pub fn queue_members_in_order(&self, queue_id: &str) -> Result<Vec<QueueMember>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        read_queue_members(&conn, queue_id)
+    }
+
+    /// A member's current queue position, or `None` if it is not a member.
+    #[cfg(test)]
+    pub fn queue_member_position(&self, queue_id: &str, spec_id: &str) -> Result<Option<i64>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        conn.query_row(
+            "SELECT position FROM queue_members WHERE queue_id = ?1 AND spec_id = ?2",
+            params![queue_id, spec_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// Add `spec_id` to `queue_id` with `group`, placing it so every group's
+    /// pending members stay contiguous. `new_member_is_pending` is the added
+    /// spec's current status read by the caller: a finished (non-pending) spec is
+    /// appended and never treated as a pending group sibling. One transaction.
+    pub fn add_queue_member_grouped(
+        &self,
+        queue_id: &str,
+        spec_id: &str,
+        group: Option<&str>,
+        new_member_is_pending: bool,
+    ) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let members = read_queue_members(&conn, queue_id)?;
+        let order: Vec<String> = if new_member_is_pending {
+            crate::domain::queues::pending_after_add(&members, spec_id, group)
+        } else {
+            members
+                .iter()
+                .filter(|m| !m.locked)
+                .map(|m| m.spec_id.clone())
+                .collect()
+        };
+        let tx = conn.unchecked_transaction()?;
+        let next_position: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(position), 0) + 1 FROM queue_members WHERE queue_id = ?1",
+            params![queue_id],
+            |row| row.get(0),
+        )?;
+        tx.execute(
+            "INSERT INTO queue_members (queue_id, spec_id, position, group_name) VALUES (?1, ?2, ?3, ?4)",
+            params![queue_id, spec_id, next_position, group],
+        )?;
+        write_pending_positions(&tx, queue_id, &order)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Set (or with `None`, clear) an existing member's context group, keeping
+    /// every group's pending members contiguous. Returns `false` if `spec_id` is
+    /// not a member. A locked member only has its group column updated — nothing
+    /// is repositioned, so a group change on the running spec takes effect from
+    /// the next dispatch. One transaction.
+    pub fn set_queue_member_group(
+        &self,
+        queue_id: &str,
+        spec_id: &str,
+        group: Option<&str>,
+    ) -> Result<bool> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {}", e))?;
+        let members = read_queue_members(&conn, queue_id)?;
+        if !members.iter().any(|m| m.spec_id == spec_id) {
+            return Ok(false);
+        }
+        let order = crate::domain::queues::pending_after_set_group(&members, spec_id, group);
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE queue_members SET group_name = ?1 WHERE queue_id = ?2 AND spec_id = ?3",
+            params![group, queue_id, spec_id],
+        )?;
+        write_pending_positions(&tx, queue_id, &order)?;
+        tx.commit()?;
+        Ok(true)
+    }
+
     /// The queue's first runnable member, in queue order — queried fresh on
     /// every call rather than off a list frozen at run start. This is what
     /// lets a live queue run pick up `queue_add_spec`/`queue_reorder` calls
@@ -482,6 +584,77 @@ fn map_queue_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Queue> {
         name: row.get(1)?,
         created_at: from_timestamp(row.get(2)?)?,
     })
+}
+
+/// `QueueMember`s for `queue_id` in queue order, from the member rows joined to
+/// their spec status. `pending` is the only movable status; everything else
+/// (running/completed/failed/skipped/interrupted) is locked.
+fn read_queue_members(conn: &rusqlite::Connection, queue_id: &str) -> Result<Vec<QueueMember>> {
+    let mut stmt = conn.prepare(
+        "SELECT pm.spec_id, pm.group_name, ls.status
+         FROM queue_members pm
+         JOIN graph_specs ls ON ls.id = pm.spec_id
+         WHERE pm.queue_id = ?1
+         ORDER BY pm.position ASC",
+    )?;
+    let rows = stmt.query_map(params![queue_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+    rows.map(|row| {
+        let (spec_id, group, status) = row?;
+        Ok(QueueMember {
+            spec_id,
+            group,
+            locked: GraphSpecStatus::from_str(&status) != GraphSpecStatus::Pending,
+        })
+    })
+    .collect()
+}
+
+/// Rewrite the pending members' positions in `order`, densely, starting one
+/// past the highest locked position. Locked members are never touched. Runs
+/// inside the caller's transaction so a crash can never leave two members on one
+/// position or a half-moved group.
+///
+/// `idx_queue_members_position` is UNIQUE, so a one-row-at-a-time rewrite would
+/// transiently collide with a sibling that has not moved yet (moving `c` from 3
+/// to 2 while `b` still holds 2). Every pending member is first parked on a
+/// negative position — disjoint from every positive locked position and from
+/// each other, since positions were already unique — leaving the positive range
+/// free for the dense assignment below.
+fn write_pending_positions(
+    tx: &rusqlite::Transaction<'_>,
+    queue_id: &str,
+    order: &[String],
+) -> Result<()> {
+    let max_locked: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(pm.position), 0)
+         FROM queue_members pm
+         JOIN graph_specs ls ON ls.id = pm.spec_id
+         WHERE pm.queue_id = ?1 AND ls.status != ?2",
+        params![queue_id, GraphSpecStatus::Pending.as_str()],
+        |row| row.get(0),
+    )?;
+    tx.execute(
+        "UPDATE queue_members SET position = -(position + 1)
+         WHERE queue_id = ?1 AND spec_id IN (
+             SELECT pm.spec_id FROM queue_members pm
+             JOIN graph_specs ls ON ls.id = pm.spec_id
+             WHERE pm.queue_id = ?1 AND ls.status = ?2
+         )",
+        params![queue_id, GraphSpecStatus::Pending.as_str()],
+    )?;
+    for (next, spec_id) in (max_locked + 1..).zip(order) {
+        tx.execute(
+            "UPDATE queue_members SET position = ?1 WHERE queue_id = ?2 AND spec_id = ?3",
+            params![next, queue_id, spec_id],
+        )?;
+    }
+    Ok(())
 }
 
 fn from_timestamp(value: i64) -> rusqlite::Result<DateTime<Utc>> {

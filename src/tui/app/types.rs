@@ -3,8 +3,6 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
-
 use super::graph_live_state::GraphLiveState;
 use crate::application::notification_service::NotificationService;
 use crate::db::project::{RagInfoSummary, RagQueueItem};
@@ -19,6 +17,16 @@ use crate::tui::app::dialog::{
     GraphFormDialog, LaunchpadDialog, NewAgentDialog, SimplePromptDialog,
 };
 use crate::tui::app::terminal_search::TerminalSearch;
+
+mod graph_editor;
+mod sidebar;
+
+pub(crate) use graph_editor::{GraphEditorDialog, GraphEditorMode, RouterField, RouterRouteDraft};
+pub use sidebar::{AgentSectionFocus, AutomationKind, PanelFace, ProjectTab, SidebarLayer};
+pub(crate) use sidebar::{
+    GraphLiveFocus, GraphSidebarMeta, ProjectPreviewSummary, SidebarStepMemory,
+};
+
 /// Unified entry in the sidebar.
 #[allow(clippy::large_enum_variant)]
 pub enum AgentEntry {
@@ -88,569 +96,76 @@ impl TerminalSelection {
     }
 }
 
-/// The sidebar's three thematic tabs, shown one at a time below the pinned
-/// RAG summary (top) and above the sysinfo dashboard (bottom).
-/// `App::sidebar_layer` tracks which one is currently active.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum SidebarLayer {
-    /// Interactive agents + terminals — the things with a PTY right now.
-    Live,
-    /// Background agents + graphs — live/recent runs, global across projects.
-    Automation,
-    /// The projects list.
-    Knowledge,
-}
-
-/// Which of Automation's two sub-lists (background agents, graphs) arrow-key
-/// navigation is currently cycling through.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum AutomationKind {
-    Agent,
-    Graph,
-}
-
-/// The right panel's faces (CT1): one panel, three views. Activity is the
-/// resting face when nothing else applies; Knowledge shows activity moved
-/// under it plus the project-relations graph; Graph shows a read-only view
-/// of the running graph.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum PanelFace {
-    #[default]
-    Activity,
-    Knowledge,
-    Graph,
-}
-
-impl PanelFace {
-    pub const ALL: [PanelFace; 3] = [PanelFace::Activity, PanelFace::Knowledge, PanelFace::Graph];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            PanelFace::Activity => "activity",
-            PanelFace::Knowledge => "knowledge",
-            PanelFace::Graph => "graph",
-        }
-    }
-
-    /// Parse the persisted config string. Unknown values map to `None` so a
-    /// config written by a newer binary never breaks this one — the panel
-    /// just stays in automatic mode.
-    pub fn from_str(value: &str) -> Option<PanelFace> {
-        match value {
-            "activity" => Some(PanelFace::Activity),
-            "knowledge" => Some(PanelFace::Knowledge),
-            "graph" => Some(PanelFace::Graph),
-            _ => None,
-        }
-    }
-}
-
-/// Tabs shown inside a project once it's entered (`Focus::Agent` while
-/// `SidebarLayer::Knowledge` is active) — everything project-scoped lives
-/// here instead of as top-level sidebar siblings.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ProjectTab {
-    Overview,
-    Backlog,
-    Knowledge,
-    History,
-}
-
-/// Per-layer selection remembered across a keyboard tab *step*
-/// (`Shift+←/→`), so stepping away and back lands you where you left off —
-/// unlike a direct jump (mouse click, F2), which deliberately always lands
-/// on the tab's edge item. `Live` and `Automation`'s agent sub-list share
-/// `App::selected` as their index space, so a step away from one clobbers
-/// the other's value; this cache is what lets a step back restore it.
-#[derive(Clone, Default)]
-pub(crate) struct SidebarStepMemory {
-    pub(crate) live_selected: Option<usize>,
-    pub(crate) automation_kind: Option<AutomationKind>,
-    pub(crate) automation_selected: Option<usize>,
-    pub(crate) automation_graph_id: Option<String>,
-    pub(crate) knowledge_selected: Option<usize>,
-}
-
-impl ProjectTab {
-    pub const ALL: [ProjectTab; 4] = [
-        ProjectTab::Overview,
-        ProjectTab::Backlog,
-        ProjectTab::Knowledge,
-        ProjectTab::History,
-    ];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            ProjectTab::Overview => "Overview",
-            ProjectTab::Backlog => "Backlog",
-            ProjectTab::Knowledge => "Knowledge",
-            ProjectTab::History => "History",
-        }
-    }
-
-    pub fn hotkey(self) -> char {
-        match self {
-            ProjectTab::Overview => 'o',
-            ProjectTab::Backlog => 'b',
-            ProjectTab::Knowledge => 'k',
-            ProjectTab::History => 'h',
-        }
-    }
-}
-
-/// Cheap, cached summary shown on a project's Preview card (highlighted, not
-/// entered) — recomputed on the normal `App::refresh` cadence, never on a
-/// per-keystroke highlight move (functional requirement 3).
-#[derive(Clone, Default)]
-pub(crate) struct ProjectPreviewSummary {
-    pub pending_backlog: usize,
-    pub knowledge_entries: usize,
-    pub last_activity: Option<i64>,
-    pub graph_running: bool,
-}
-
-/// Per-graph rendering data for the sidebar's `Graphs` section: when the graph
-/// last did something, and whether it is stuck on a reported blocker (a
-/// `Paused` graph whose latest run recorded a `blocker`, see
-/// `graph_report_blocker`). Computed once per refresh cycle
-/// (`App::refresh_graphs`) rather than queried or formatted per frame — the
-/// sidebar just prints `last_run_label` as-is.
-///
-/// Deliberately not a per-graph spec count: that reads `0/0` for a
-/// queue-driven graph, whose specs live on the queue rather than on the graph
-/// itself (the graph focus view's `state.done_count`/`total_count` is the
-/// correct place for that number, and is unaffected by this struct).
+/// CT26: the copy-reflex Ctrl+C guard's state — the one-line sentence the
+/// pane shows, and the confirm window that decides whether the next Ctrl+C is
+/// forwarded on a platform that exits on the first one. One instance lives on
+/// `App`.
 #[derive(Clone)]
-pub(crate) struct GraphSidebarMeta {
-    /// Last recorded activity for this graph: the latest `graph_runs.started_at`
-    /// across every node run belonging to it, or — if it has never run — the
-    /// graph's own `created_at`. A single monotonic "last activity" key that
-    /// is defined for every graph regardless of status — the sort key behind
-    /// `App::sidebar_graphs`' most-recent-first ordering.
-    pub last_activity: DateTime<Utc>,
-    /// Precomputed display text for `last_activity`: a compact relative
-    /// time (`2m`, `1h`, `3d`), `"running"` while the graph is actively
-    /// executing, or `"never"` if it has never run.
-    pub last_run_label: String,
-    pub blocked: bool,
-    /// `"resumes 5m"`-style label when the graph has a pending
-    /// `graph_schedule_autorun`, `None` otherwise.
-    pub autorun_label: Option<String>,
+pub(crate) struct CtrlCState {
+    /// The sentence to show, if any.
+    pub(crate) notice: Option<String>,
+    /// When `notice` was set; drives its TTL.
+    pub(crate) notice_at: std::time::Instant,
+    /// When the first swallowed Ctrl+C arrived on a `ctrl_c_exits` platform;
+    /// `None` when no confirm window is open.
+    pub(crate) armed_at: Option<std::time::Instant>,
 }
 
-impl Default for GraphSidebarMeta {
-    /// Only used as a placeholder before the first `refresh_graphs` populates
-    /// the real map — every graph gets a real entry on every refresh, so this
-    /// value is never actually shown.
-    fn default() -> Self {
+impl CtrlCState {
+    /// A fresh guard: nothing to show, nothing armed (`notice_at` is backdated
+    /// so an expired `None` notice can never be drawn).
+    pub fn initial() -> Self {
         Self {
-            last_activity: DateTime::<Utc>::from_timestamp(0, 0).expect("epoch is representable"),
-            last_run_label: String::new(),
-            blocked: false,
-            autorun_label: None,
-        }
-    }
-}
-
-/// Border-focus sub-section within the `Live` layer (interactive/terminal
-/// agents render as three stacked sub-panels sharing one collapsible layer).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[expect(dead_code)]
-pub enum AgentSectionFocus {
-    Interactive,
-    Terminal,
-    Groups,
-    Brain,
-}
-
-/// Which sub-region of the live graph view owns plain arrow-key navigation:
-/// the node graph (`graph_live_move_highlight`, the long-standing default)
-/// or the spec marker strip at the top (`graph_spec_strip_move_selection`).
-/// Toggled with Tab/BackTab while a graph is the active sidebar selection —
-/// see `on_graph` in `crate::tui::event::home_preview`.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub(crate) enum GraphLiveFocus {
-    #[default]
-    Graph,
-    SpecStrip,
-}
-
-#[derive(Clone)]
-pub(crate) enum GraphEditorMode {
-    AgentPrompt,
-    NodeConfig,
-    /// A [`crate::domain::graphs::GraphNodeKind::Router`] node's structured
-    /// routes/fallback/wiring editor — replaces the raw JSON buffer used by
-    /// [`GraphEditorMode::NodeConfig`] with the `router_*` fields below, since
-    /// wiring an edge per route isn't expressible as node config alone.
-    RouterRoutes,
-    /// A node's outgoing `pass`/`fail`/`always` edges — lets an ordinary
-    /// edge be retargeted or deleted, through the same validated path
-    /// (`daemon::handler::retarget_graph_edge`/`delete_graph_edge_checked`)
-    /// the `graph_update_edge`/`graph_delete_edge` MCP tools use, rather than
-    /// only a router's route edges (see [`GraphEditorMode::RouterRoutes`]).
-    Edges,
-}
-
-/// Which sub-field of the currently-focused route row
-/// [`GraphEditorDialog::router_field`] points at.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum RouterField {
-    Label,
-    Description,
-    Target,
-}
-
-/// One route being edited in the router routes dialog: the declared
-/// label/description (persisted into the node's `config`) plus the target
-/// node its `route` edge should point at (persisted as a separate
-/// [`crate::domain::graphs::GraphEdge`] on save — `None` means not wired yet).
-#[derive(Clone, Default)]
-pub(crate) struct RouterRouteDraft {
-    pub label: String,
-    pub description: String,
-    pub target_node_id: Option<String>,
-}
-
-#[derive(Clone)]
-pub(crate) struct GraphEditorDialog {
-    pub node_id: String,
-    pub node_name: String,
-    pub title: String,
-    pub help: String,
-    pub buffer: String,
-    pub cursor: usize,
-    pub mode: GraphEditorMode,
-    pub parse_error: Option<String>,
-    /// `RouterRoutes` mode only, below — unused (empty) otherwise.
-    pub router_routes: Vec<RouterRouteDraft>,
-    pub router_fallback: String,
-    pub router_route_index: usize,
-    pub router_field: RouterField,
-    /// Candidate `(node_id, node_name)` targets a route can wire to: every
-    /// other node in the router's graph.
-    pub router_targets: Vec<(String, String)>,
-    /// `Edges` mode only, below — unused (empty) otherwise. This node's
-    /// outgoing `pass`/`fail`/`always` edges (route edges are managed via
-    /// `RouterRoutes` instead).
-    pub edge_rows: Vec<crate::domain::graphs::GraphEdge>,
-    pub edge_row_index: usize,
-    /// Candidate `(node_id, node_name)` retarget destinations: every other
-    /// node in the edge's graph — same set as `router_targets`.
-    pub edge_targets: Vec<(String, String)>,
-}
-
-impl GraphEditorDialog {
-    pub fn new(
-        node_id: String,
-        node_name: String,
-        title: String,
-        help: String,
-        buffer: String,
-        mode: GraphEditorMode,
-    ) -> Self {
-        let cursor = buffer.chars().count();
-        Self {
-            node_id,
-            node_name,
-            title,
-            help,
-            buffer,
-            cursor,
-            mode,
-            parse_error: None,
-            router_routes: Vec::new(),
-            router_fallback: String::new(),
-            router_route_index: 0,
-            router_field: RouterField::Label,
-            router_targets: Vec::new(),
-            edge_rows: Vec::new(),
-            edge_row_index: 0,
-            edge_targets: Vec::new(),
+            notice: None,
+            notice_at: std::time::Instant::now() - std::time::Duration::from_secs(10),
+            armed_at: None,
         }
     }
 
-    pub fn new_edges(
-        node_id: String,
-        node_name: String,
-        title: String,
-        help: String,
-        edges: Vec<crate::domain::graphs::GraphEdge>,
-        targets: Vec<(String, String)>,
-    ) -> Self {
-        Self {
-            node_id,
-            node_name,
-            title,
-            help,
-            buffer: String::new(),
-            cursor: 0,
-            mode: GraphEditorMode::Edges,
-            parse_error: None,
-            router_routes: Vec::new(),
-            router_fallback: String::new(),
-            router_route_index: 0,
-            router_field: RouterField::Label,
-            router_targets: Vec::new(),
-            edge_rows: edges,
-            edge_row_index: 0,
-            edge_targets: targets,
-        }
+    pub fn set_notice(&mut self, text: &str) {
+        self.notice = Some(text.to_string());
+        self.notice_at = std::time::Instant::now();
     }
 
-    /// Move the `Edges` mode row focus among this node's outgoing edges,
-    /// wrapping. A no-op with zero or one row.
-    pub fn edge_move_row(&mut self, forward: bool) {
-        if self.edge_rows.is_empty() {
-            return;
-        }
-        self.edge_row_index =
-            crate::tui::selection::move_index(self.edge_row_index, self.edge_rows.len(), forward);
-    }
-
-    /// The edge currently focused in `Edges` mode's row list.
-    pub fn focused_edge(&self) -> Option<&crate::domain::graphs::GraphEdge> {
-        self.edge_rows.get(self.edge_row_index)
-    }
-
-    /// The next/previous candidate destination for the focused edge,
-    /// cycling through `edge_targets` (every other node in the graph).
-    /// Unlike [`Self::cycle_router_target`], an ordinary edge always names a
-    /// concrete `to_node`, so there is no `(none)` state to cycle through.
-    pub fn next_edge_target_candidate(&self, forward: bool) -> Option<String> {
-        let edge = self.focused_edge()?;
-        if self.edge_targets.is_empty() {
-            return None;
-        }
-        let current = self
-            .edge_targets
-            .iter()
-            .position(|(id, _)| id == &edge.to_node);
-        let len = self.edge_targets.len();
-        let next_index = match current {
-            Some(index) => crate::tui::selection::move_index(index, len, forward),
-            None => 0,
-        };
-        Some(self.edge_targets[next_index].0.clone())
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_router_routes(
-        node_id: String,
-        node_name: String,
-        title: String,
-        help: String,
-        routes: Vec<RouterRouteDraft>,
-        fallback: String,
-        targets: Vec<(String, String)>,
-    ) -> Self {
-        Self {
-            node_id,
-            node_name,
-            title,
-            help,
-            buffer: String::new(),
-            cursor: 0,
-            mode: GraphEditorMode::RouterRoutes,
-            parse_error: None,
-            router_routes: routes,
-            router_fallback: fallback,
-            router_route_index: 0,
-            router_field: RouterField::Label,
-            router_targets: targets,
-            edge_rows: Vec::new(),
-            edge_row_index: 0,
-            edge_targets: Vec::new(),
-        }
-    }
-
-    /// The label/description text behind the focused route's focused field,
-    /// if the focus is on a text field (not the target picker).
-    pub fn router_focused_text_mut(&mut self) -> Option<&mut String> {
-        let field = self.router_field;
-        let route = self.router_routes.get_mut(self.router_route_index)?;
-        match field {
-            RouterField::Label => Some(&mut route.label),
-            RouterField::Description => Some(&mut route.description),
-            RouterField::Target => None,
-        }
-    }
-
-    /// Append to the focused route's focused text field. No-op on the
-    /// target field (see [`Self::cycle_router_target`] instead) — fields are
-    /// short single-line labels, so editing is append/pop-at-end only,
-    /// unlike the free-cursor `buffer` used by the other editor modes.
-    pub fn router_push_char(&mut self, value: char) {
-        if let Some(text) = self.router_focused_text_mut() {
-            text.push(value);
-        }
-    }
-
-    /// Drop the last character of the focused route's focused text field.
-    pub fn router_pop_char(&mut self) {
-        if let Some(text) = self.router_focused_text_mut() {
-            text.pop();
-        }
-    }
-
-    /// Unwire the focused route's target (Backspace while it's focused).
-    pub fn router_clear_target(&mut self) {
-        if let Some(route) = self.router_routes.get_mut(self.router_route_index) {
-            route.target_node_id = None;
-        }
-    }
-
-    /// Cycle the focused route's target through `(none) -> targets... ->
-    /// (none)`, in `router_targets` order.
-    pub fn cycle_router_target(&mut self, forward: bool) {
-        let Some(route) = self.router_routes.get_mut(self.router_route_index) else {
-            return;
-        };
-        if self.router_targets.is_empty() {
-            route.target_node_id = None;
-            return;
-        }
-        let current = route
-            .target_node_id
-            .as_deref()
-            .and_then(|id| self.router_targets.iter().position(|(tid, _)| tid == id));
-        // Index space is `[None, targets[0], targets[1], ...]`.
-        let len = self.router_targets.len() + 1;
-        let current_index = current.map(|i| i + 1).unwrap_or(0);
-        let next_index = crate::tui::selection::move_index(current_index, len, forward);
-        route.target_node_id = if next_index == 0 {
-            None
+    /// The notice to draw, or `None` once its TTL has passed.
+    pub fn notice(&self) -> Option<&str> {
+        if self.notice_at.elapsed() <= crate::tui::event::ctrl_c::NOTICE_TTL {
+            self.notice.as_deref()
         } else {
-            Some(self.router_targets[next_index - 1].0.clone())
-        };
-    }
-
-    /// Move route/field focus to the next sub-field, wrapping to the next
-    /// route's first field at the end.
-    pub fn router_next_field(&mut self) {
-        self.router_field = match self.router_field {
-            RouterField::Label => RouterField::Description,
-            RouterField::Description => RouterField::Target,
-            RouterField::Target => {
-                if !self.router_routes.is_empty() {
-                    self.router_route_index = crate::tui::selection::move_index(
-                        self.router_route_index,
-                        self.router_routes.len(),
-                        true,
-                    );
-                }
-                RouterField::Label
-            }
-        };
-    }
-
-    pub fn router_prev_field(&mut self) {
-        self.router_field = match self.router_field {
-            RouterField::Target => RouterField::Description,
-            RouterField::Description => RouterField::Label,
-            RouterField::Label => {
-                if !self.router_routes.is_empty() {
-                    self.router_route_index = crate::tui::selection::move_index(
-                        self.router_route_index,
-                        self.router_routes.len(),
-                        false,
-                    );
-                }
-                RouterField::Target
-            }
-        };
-    }
-
-    /// Move the route selection itself (Up/Down), keeping the focused
-    /// sub-field.
-    pub fn router_move_route(&mut self, forward: bool) {
-        if self.router_routes.is_empty() {
-            return;
-        }
-        self.router_route_index = crate::tui::selection::move_index(
-            self.router_route_index,
-            self.router_routes.len(),
-            forward,
-        );
-    }
-
-    /// Append a fresh, unwired route and focus it (Ctrl+N).
-    pub fn router_add_route(&mut self) {
-        self.router_routes.push(RouterRouteDraft::default());
-        self.router_route_index = self.router_routes.len() - 1;
-        self.router_field = RouterField::Label;
-    }
-
-    /// Drop the focused route (Ctrl+D). If it was the fallback, the fallback
-    /// is cleared — [`crate::domain::graphs::validate_router_routes`] will
-    /// catch an empty/dangling fallback on save.
-    pub fn router_remove_route(&mut self) {
-        if self.router_routes.is_empty() {
-            return;
-        }
-        let removed = self.router_routes.remove(self.router_route_index);
-        if self.router_fallback == removed.label {
-            self.router_fallback.clear();
-        }
-        if self.router_route_index >= self.router_routes.len() {
-            self.router_route_index = self.router_routes.len().saturating_sub(1);
+            None
         }
     }
 
-    /// Set the focused route as the fallback (Ctrl+F).
-    pub fn router_set_fallback(&mut self) {
-        if let Some(route) = self.router_routes.get(self.router_route_index) {
-            self.router_fallback = route.label.clone();
-        }
+    pub fn arm(&mut self) {
+        self.armed_at = Some(std::time::Instant::now());
     }
 
-    pub fn char_len(&self) -> usize {
-        self.buffer.chars().count()
+    pub fn clear_arm(&mut self) {
+        self.armed_at = None;
     }
 
-    pub fn insert_char(&mut self, value: char) {
-        self.insert_str(&value.to_string());
-    }
-
-    pub fn insert_str(&mut self, value: &str) {
-        let byte_index = char_to_byte_index(&self.buffer, self.cursor);
-        self.buffer.insert_str(byte_index, value);
-        self.cursor += value.chars().count();
-    }
-
-    pub fn backspace(&mut self) {
-        if self.cursor == 0 {
-            return;
-        }
-        let start = char_to_byte_index(&self.buffer, self.cursor - 1);
-        let end = char_to_byte_index(&self.buffer, self.cursor);
-        self.buffer.replace_range(start..end, "");
-        self.cursor -= 1;
-    }
-
-    pub fn move_left(&mut self) {
-        self.cursor = self.cursor.saturating_sub(1);
-    }
-
-    pub fn move_right(&mut self) {
-        self.cursor = (self.cursor + 1).min(self.char_len());
-    }
-
-    pub fn move_home(&mut self) {
-        self.cursor = 0;
-    }
-
-    pub fn move_end(&mut self) {
-        self.cursor = self.char_len();
+    /// True only inside the confirm window, so a late second press re-arms
+    /// instead of forwarding.
+    pub fn armed(&self) -> bool {
+        self.armed_at
+            .is_some_and(|at| at.elapsed() <= crate::tui::event::ctrl_c::CTRL_C_CONFIRM_WINDOW)
     }
 }
 
-fn char_to_byte_index(text: &str, char_index: usize) -> usize {
-    text.char_indices()
-        .map(|(index, _)| index)
-        .nth(char_index)
-        .unwrap_or(text.len())
+/// CT26: the platform slugs (`CliConfig::name`) whose registry entry sets
+/// `ctrl_c_exits = true` — the set the Ctrl+C guard consults for the focused
+/// interactive session's platform. Read from the persisted `[[clis]]` table
+/// (the same table `merge_cli_fields` refreshes from the registry), never
+/// inferred from a CLI's name.
+pub(crate) fn ctrl_c_exits_clis(
+    config: &crate::domain::canopy_config::CanopyConfig,
+) -> std::collections::HashSet<String> {
+    config
+        .clis
+        .iter()
+        .filter(|cli| cli.ctrl_c_exits)
+        .map(|cli| cli.name.clone())
+        .collect()
 }
 
 #[derive(Clone, Copy)]
@@ -762,6 +277,11 @@ pub struct App {
     pub(crate) sidebar_brain: Option<crate::tui::brians_brain::BriansBrain>,
     // Brian's Brain for home banner background
     pub(crate) home_brain: Option<crate::tui::brians_brain::BriansBrain>,
+    /// Rect where the home brain was last drawn; pointer seeding is scoped to
+    /// it so a mouse move elsewhere never plants cells.
+    pub(crate) home_brain_rect: Option<ratatui::layout::Rect>,
+    /// Rect where the sidebar brain was last drawn.
+    pub(crate) sidebar_brain_rect: Option<ratatui::layout::Rect>,
 
     // System monitoring (updated asynchronously to avoid UI freezes)
     pub(crate) system_info: crate::system::SystemInfo,
@@ -881,6 +401,9 @@ pub struct App {
     /// reads, so dismissing it can never affect execution. `Some` while
     /// open (including after the node finishes, showing the final banner).
     pub(crate) node_tail_dialog: Option<crate::tui::app::dialog::NodeTailDialog>,
+    /// CT28: usable body height (rows) of the tail pane on the last frame —
+    /// the layout sets it so key handlers can page by half-height.
+    pub(crate) node_tail_pane_body_height: usize,
     /// True while a graph-control dispatch (`graph_run`/`graph_pause`/
     /// `graph_continue`/`graph_reset`/`graph_schedule_autorun`) is in flight on
     /// `graph_action_rx` — guards against a second dispatch racing the first.
@@ -926,10 +449,19 @@ pub struct App {
     pub(crate) hidden_activity_workdirs: HashSet<String>,
     pub(crate) forced_activity_workdirs: HashSet<String>,
     pub(crate) term_width: u16,
-    pub(crate) show_legend: bool,
+    /// CT31: whether the F1 Canopy hub overlay is open.
+    pub(crate) hub_open: bool,
+    /// Cursor of the hub's `Missions & stats` tab.
     pub(crate) legend_selected: usize,
     pub(crate) show_copied: bool,
     pub(crate) copied_at: std::time::Instant,
+    /// CT26: the copy-reflex Ctrl+C guard's state.
+    pub(crate) ctrl_c: CtrlCState,
+    /// CT26: platform slugs whose registry entry sets `ctrl_c_exits = true`.
+    /// Derived from `CanopyConfig` at startup and re-derived on every settings
+    /// revision, so a registry refresh needs no restart. Empty for every
+    /// platform that keeps today's forwarding.
+    pub(crate) ctrl_c_exits_clis: std::collections::HashSet<String>,
     pub(crate) last_scroll_at: std::time::Instant,
     pub(crate) last_panel_inner: (u16, u16),
     pub(crate) last_panel_x: u16,
@@ -959,6 +491,12 @@ pub struct App {
     pub(crate) prompt_raw_content_rect: Option<ratatui::layout::Rect>,
     /// Whether to send OS-level desktop notifications (agent done/failed).
     pub(crate) notifications_enabled: bool,
+    /// CM52: the `[tui]` settings this app renders with (date/time formats,
+    /// panel dwell, scroll steps, brian's-brain and atmosphere toggles). A
+    /// snapshot, reloaded when the daemon publishes a newer settings
+    /// revision — the TUI redraws every frame and cannot reload
+    /// `config.toml` per draw.
+    pub(crate) tui_settings: crate::domain::canopy_config::TuiConfig,
     /// Notification service for sending cross-platform notifications.
     pub(crate) notification_service: Arc<dyn NotificationService>,
     /// IDs of runs that were active on the previous refresh tick.
@@ -1027,10 +565,23 @@ pub struct App {
     /// Whether the face picker overlay is open, and its cursor.
     pub(crate) panel_picker_open: bool,
     pub(crate) panel_picker_idx: usize,
+    /// CM51 (D4): the last `settings_revision` this session has applied. When
+    /// the daemon publishes a newer one (a `config_set`, or a hand edit seen
+    /// by the file watcher), the TUI reloads `CanopyConfig` so the values it
+    /// renders — theme, temperature unit, the pinned face — are current
+    /// without a restart.
+    pub(crate) settings_seen: String,
     /// True while the mouse is pressed/dragging inside the panel or the
     /// panel was clicked into (keyboard focus claimed by the panel).
     /// While set, any pending automatic switch is dropped, not deferred.
     pub(crate) panel_focused: bool,
+    /// CT30: state of the Crews panel face (pairs + crews sections). Keys
+    /// are routed here only while `panel_focused` and the Crews face is
+    /// visible; data arrives through the daemon client only (never SQLite).
+    pub(crate) crews: crate::tui::app::crews_face::CrewsFaceState,
+    /// CT31: the F1 Canopy hub's session-only state (last-used tab, the
+    /// Settings tab's data and editors, the Keys tab's scroll offset).
+    pub(crate) hub: crate::tui::app::hub::HubState,
     /// Set by a mouse-wheel scroll over the panel; consumed (cleared) by
     /// the next panel-face tick, which drops the pending switch with it.
     pub(crate) panel_interacting: bool,

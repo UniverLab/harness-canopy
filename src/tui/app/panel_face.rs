@@ -17,18 +17,16 @@
 use std::time::{Duration, Instant};
 
 use super::types::{App, PanelFace};
+use crate::application::ports::StateRepository;
 use crate::domain::graphs::GraphStatus;
 
-/// How long a knowledge/backlog event holds the panel before it falls back
-/// to the resting face.
-pub(crate) const PANEL_DWELL_SECS: u64 = 10;
-
 /// Picker rows: automatic first (the default), then one per face.
-pub(crate) const PANEL_PICKER_OPTIONS: [Option<PanelFace>; 4] = [
+pub(crate) const PANEL_PICKER_OPTIONS: [Option<PanelFace>; 5] = [
     None,
     Some(PanelFace::Activity),
     Some(PanelFace::Knowledge),
     Some(PanelFace::Graph),
+    Some(PanelFace::Crews),
 ];
 
 impl App {
@@ -56,15 +54,16 @@ impl App {
     }
 
     /// Record a knowledge/backlog event: it takes the panel for a dwell of
-    /// 10 seconds. A newer event during a dwell replaces it and restarts
-    /// the dwell — events never queue. While pinned or interacting the event
-    /// is dropped outright.
+    /// `tui.panel_dwell_seconds` (default 10; 0 disables the dwell). A newer
+    /// event during a dwell replaces it and restarts the dwell — events never
+    /// queue. While pinned or interacting the event is dropped outright.
     pub(crate) fn fire_panel_event(&mut self, face: PanelFace, reason: &str) {
         if self.panel_pinned.is_some() || self.panel_is_interacting() {
             return;
         }
         self.panel_dwell_face = Some(face);
-        self.panel_dwell_until = Some(Instant::now() + Duration::from_secs(PANEL_DWELL_SECS));
+        self.panel_dwell_until =
+            Some(Instant::now() + Duration::from_secs(self.tui_settings.panel_dwell_seconds));
         self.panel_dwell_reason = Some(reason.to_string());
     }
 
@@ -233,6 +232,10 @@ impl App {
                     || !self.graphs.is_empty()
                     || self.activity_panel_state().is_some()
             }
+            // Crews is pin-only: it is always visible once pinned, so this
+            // arm only exists for exhaustiveness (the pin check above
+            // already returned true).
+            PanelFace::Crews => true,
         }
     }
 
@@ -245,18 +248,54 @@ impl App {
             self.clear_panel_dwell();
             self.panel_face = face;
             self.panel_last_reason = None;
+            if face == PanelFace::Crews {
+                // The Crews face refreshes only while it is the visible
+                // face; pinning it is that moment.
+                self.request_crews_refresh();
+            }
         } else {
             self.tick_panel_face();
         }
         self.save_panel_pinned_face();
     }
 
-    fn save_panel_pinned_face(&self) {
-        let home = dirs::home_dir().unwrap_or_default();
-        let canopy_dir = home.join(".canopy");
-        let mut config = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir);
-        config.pinned_panel_face = self.panel_pinned.map(|face| face.label().to_string());
-        let _ = config.save(&canopy_dir);
+    /// CM51 (D5): persist the pin through the daemon's `config_set`, the one
+    /// writer of `config.toml` — the TUI never writes the file itself, so a
+    /// pin can no longer drop the user's comments or race another writer.
+    /// With the daemon down the pin still applies in memory for this session
+    /// and the status banner says so. CT31 keeps this path unchanged: the
+    /// hub's Settings tab writes through the same `config_set`.
+    fn save_panel_pinned_face(&mut self) {
+        let value = self
+            .panel_pinned
+            .map(|face| face.label().to_string())
+            .unwrap_or_else(|| "auto".to_string());
+        let port = self
+            .db
+            .get_state("port")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| crate::resolve_port(None).to_string());
+        let outcome = crate::tui::mcp_client::call_daemon_tool(
+            &port,
+            "config_set",
+            &serde_json::json!({ "key": "pinned_panel_face", "value": value }),
+        );
+        match outcome {
+            Ok(outcome) if !outcome.is_error => {}
+            Ok(outcome) => self.set_status_message(true, outcome.text),
+            Err(_) => self.set_status_message(true, "pin not saved: daemon not running"),
+        }
+    }
+
+    /// Show a daemon response on the app's status banner (same shape and TTL
+    /// as the graph-control banner).
+    fn set_status_message(&mut self, is_error: bool, text: impl Into<String>) {
+        self.graph_action_message = Some(crate::tui::app::dialog::GraphActionMessage {
+            is_error,
+            text: text.into(),
+        });
+        self.graph_action_message_at = std::time::Instant::now();
     }
 
     /// Read the persisted pin back into a face, ignoring unknown values.
@@ -605,6 +644,7 @@ mod tests {
             last_run_ok: None,
             last_triggered_at: None,
             trigger_count: 0,
+            action: crate::domain::models::AgentAction::Headless,
         }
     }
 
@@ -677,18 +717,31 @@ mod tests {
         let badge = app.panel_face_badge().expect("event face shows a reason");
         assert!(badge.contains("new knowledge"), "badge was {badge:?}");
 
-        // The dwell lasts 10 seconds.
+        // The dwell lasts `tui.panel_dwell_seconds` (default 10).
+        let dwell = crate::domain::settings::default_int("tui.panel_dwell_seconds") as u64;
         let wait = app
             .panel_dwell_until
             .expect("dwell deadline is set")
             .saturating_duration_since(Instant::now());
-        assert!(wait <= Duration::from_secs(PANEL_DWELL_SECS));
-        assert!(wait > Duration::from_secs(PANEL_DWELL_SECS - 2));
+        assert!(wait <= Duration::from_secs(dwell));
+        assert!(wait > Duration::from_secs(dwell - 2));
 
         expire_dwell(&mut app);
         app.tick_panel_face();
         assert_eq!(app.panel_face, PanelFace::Activity);
         assert_eq!(app.panel_face_badge(), None);
+    }
+
+    /// CM52: `tui.panel_dwell_seconds = 0` disables the dwell — the event
+    /// never holds the panel.
+    #[test]
+    fn panel_dwell_zero_expires_immediately() {
+        let mut app = test_app();
+        app.tui_settings.panel_dwell_seconds = 0;
+        app.fire_panel_event(PanelFace::Knowledge, "new knowledge");
+        assert!(!app.panel_dwell_valid(), "dwell 0 must be expired at once");
+        app.tick_panel_face();
+        assert_eq!(app.panel_face, PanelFace::Activity);
     }
 
     #[test]
@@ -790,6 +843,67 @@ mod tests {
         app.graphs = vec![make_graph("l1", GraphStatus::Completed)];
         app.tick_panel_face();
         assert!(matches!(app.focus, Focus::Agent));
+    }
+
+    #[test]
+    fn picker_has_five_rows() {
+        assert_eq!(PANEL_PICKER_OPTIONS.len(), 5);
+        assert_eq!(PANEL_PICKER_OPTIONS[4], Some(PanelFace::Crews));
+    }
+
+    /// Crews is a management view: no combination of resting state, graph
+    /// state or knowledge/backlog event may ever select it automatically.
+    #[test]
+    fn crews_is_never_chosen_automatically() {
+        let mut app = test_app();
+        assert_ne!(app.panel_face, PanelFace::Crews);
+
+        // (a) no graphs: resting face is Activity.
+        app.tick_panel_face();
+        assert_ne!(app.panel_face, PanelFace::Crews);
+
+        // (b) a running graph: resting face is Graph.
+        app.graphs = vec![make_graph("l1", GraphStatus::Running)];
+        app.tick_panel_face();
+        assert_ne!(app.panel_face, PanelFace::Crews);
+
+        // (c) a knowledge event: dwell face is Knowledge.
+        app.graphs.clear();
+        app.fire_panel_event(PanelFace::Knowledge, "new knowledge");
+        app.tick_panel_face();
+        assert_ne!(app.panel_face, PanelFace::Crews);
+    }
+
+    #[test]
+    fn crews_from_str() {
+        assert_eq!(PanelFace::from_str("crews"), Some(PanelFace::Crews));
+        assert_eq!(PanelFace::Crews.label(), "crews");
+    }
+
+    /// CT31 requirement 5: the F6 pin must go through the daemon's
+    /// `config_set`, never a direct `CanopyConfig::save` — the TUI must not
+    /// write `config.toml` itself.
+    #[test]
+    fn save_panel_pinned_face_calls_config_set() {
+        use crate::application::ports::StateRepository;
+        use crate::tui::mcp_client::test_support::spawn_fake_daemon;
+
+        let fake = spawn_fake_daemon(serde_json::json!({
+            "content": [{ "type": "text", "text": "{}" }],
+            "isError": false
+        }));
+        let mut app = test_app();
+        app.db.set_state("port", &fake.port).unwrap();
+
+        app.pin_panel_face(Some(PanelFace::Knowledge));
+
+        let calls = fake.recorded_calls();
+        assert_eq!(calls.len(), 1, "exactly one daemon call: {calls:?}");
+        assert_eq!(calls[0]["name"], "config_set");
+        assert_eq!(
+            calls[0]["arguments"],
+            serde_json::json!({ "key": "pinned_panel_face", "value": "knowledge" })
+        );
     }
 
     #[test]

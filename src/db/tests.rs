@@ -287,6 +287,7 @@ fn sample_cron_agent(id: &str) -> Agent {
         last_run_ok: None,
         last_triggered_at: None,
         trigger_count: 0,
+        action: crate::domain::models::AgentAction::Headless,
     }
 }
 
@@ -314,6 +315,7 @@ fn sample_watch_agent(id: &str) -> Agent {
         last_run_ok: None,
         last_triggered_at: None,
         trigger_count: 0,
+        action: crate::domain::models::AgentAction::Headless,
     }
 }
 
@@ -336,6 +338,7 @@ fn sample_manual_agent(id: &str) -> Agent {
         last_run_ok: None,
         last_triggered_at: None,
         trigger_count: 0,
+        action: crate::domain::models::AgentAction::Headless,
     }
 }
 
@@ -1742,7 +1745,7 @@ fn reconcile_orphaned_graphs_pauses_running_graph_and_interrupts_its_run() {
         .unwrap();
 
     let reconciled = db.reconcile_orphaned_graphs(data_dir.path()).unwrap();
-    assert_eq!(reconciled, 1);
+    assert_eq!(reconciled.len(), 1);
 
     // Test 1: the graph is paused, and its dangling run is no longer `running`.
     let lp_after = db.get_graph(&lp.id).unwrap().unwrap();
@@ -1819,7 +1822,10 @@ fn reconcile_orphaned_graphs_marks_queue_member_spec_interrupted() {
     })
     .unwrap();
 
-    assert_eq!(db.reconcile_orphaned_graphs(data_dir.path()).unwrap(), 1);
+    assert_eq!(
+        db.reconcile_orphaned_graphs(data_dir.path()).unwrap().len(),
+        1
+    );
 
     let lp_after = db.get_graph(&lp.id).unwrap().unwrap();
     assert_eq!(lp_after.status, GraphStatus::Paused);
@@ -1923,14 +1929,14 @@ fn reconcile_orphaned_graphs_is_idempotent() {
     db.insert_graph_run(&run).unwrap();
 
     let first_pass = db.reconcile_orphaned_graphs(data_dir.path()).unwrap();
-    assert_eq!(first_pass, 1);
+    assert_eq!(first_pass.len(), 1);
     let lp_after_first = db.get_graph(&lp.id).unwrap().unwrap();
     let run_after_first = db.get_graph_run(&run.id).unwrap().unwrap();
 
     // Test 3: a second reconcile pass finds nothing left to reconcile, and
     // leaves the already-paused graph/run untouched.
     let second_pass = db.reconcile_orphaned_graphs(data_dir.path()).unwrap();
-    assert_eq!(second_pass, 0);
+    assert_eq!(second_pass.len(), 0);
     let lp_after_second = db.get_graph(&lp.id).unwrap().unwrap();
     let run_after_second = db.get_graph_run(&run.id).unwrap().unwrap();
     assert_eq!(lp_after_second.status, lp_after_first.status);
@@ -1997,7 +2003,10 @@ async fn reconcile_orphaned_graphs_kills_survivor_pid_from_same_boot() {
     db.insert_graph_node(&node).unwrap();
     db.insert_graph_run(&run).unwrap();
 
-    assert_eq!(db.reconcile_orphaned_graphs(data_dir.path()).unwrap(), 1);
+    assert_eq!(
+        db.reconcile_orphaned_graphs(data_dir.path()).unwrap().len(),
+        1
+    );
 
     // The kill is fired via a detached task (see
     // `terminate_process_group_async`); poll briefly for the SIGTERM to
@@ -2058,7 +2067,10 @@ fn reconcile_orphaned_graphs_skips_kill_for_mismatched_boot_id() {
     // Must not panic or error even though pid 1 is a real (unkillable by
     // us) process — the boot_id mismatch must short-circuit before any
     // signal is ever attempted.
-    assert_eq!(db.reconcile_orphaned_graphs(data_dir.path()).unwrap(), 1);
+    assert_eq!(
+        db.reconcile_orphaned_graphs(data_dir.path()).unwrap().len(),
+        1
+    );
     let run_after = db.get_graph_run(&run.id).unwrap().unwrap();
     assert_ne!(run_after.status, GraphRunStatus::Running);
 }
@@ -2073,7 +2085,7 @@ fn reconcile_orphaned_graphs_leaves_completed_graph_untouched() {
 
     // Test 4: a `Completed` graph is not reconciled.
     let reconciled = db.reconcile_orphaned_graphs(data_dir.path()).unwrap();
-    assert_eq!(reconciled, 0);
+    assert_eq!(reconciled.len(), 0);
     let lp_after = db.get_graph(&lp.id).unwrap().unwrap();
     assert_eq!(lp_after.status, GraphStatus::Completed);
 }
@@ -2136,7 +2148,8 @@ async fn reconcile_orphaned_graphs_skips_everything_when_foreign_daemon_pid_is_l
 
     let reconciled = db.reconcile_orphaned_graphs(data_dir.path()).unwrap();
     assert_eq!(
-        reconciled, 0,
+        reconciled.len(),
+        0,
         "must not report any graph reconciled while a foreign live daemon owns the pid file"
     );
 
@@ -2221,7 +2234,7 @@ fn reconcile_orphaned_graphs_skips_kill_for_own_ancestor_pid() {
     db.insert_graph_run(&run).unwrap();
 
     let reconciled = db.reconcile_orphaned_graphs(data_dir.path()).unwrap();
-    assert_eq!(reconciled, 1);
+    assert_eq!(reconciled.len(), 1);
 
     // Run must be marked interrupted in DB, but parent process must still be alive.
     let run_after = db.get_graph_run(&run.id).unwrap().unwrap();
@@ -5302,7 +5315,10 @@ fn reconcile_orphaned_graphs_marks_interrupted_and_leaves_dirty_worktree_untouch
     db.insert_graph_node(&node).unwrap();
     db.insert_graph_run(&run).unwrap();
 
-    assert_eq!(db.reconcile_orphaned_graphs(data_dir.path()).unwrap(), 1);
+    assert_eq!(
+        db.reconcile_orphaned_graphs(data_dir.path()).unwrap().len(),
+        1
+    );
 
     assert!(
         !git_is_clean(dir.path()),
@@ -5365,7 +5381,10 @@ fn reconcile_orphaned_graphs_marks_interrupted_for_clean_worktree_too() {
     db.insert_graph_node(&node).unwrap();
     db.insert_graph_run(&run).unwrap();
 
-    assert_eq!(db.reconcile_orphaned_graphs(data_dir.path()).unwrap(), 1);
+    assert_eq!(
+        db.reconcile_orphaned_graphs(data_dir.path()).unwrap().len(),
+        1
+    );
 
     assert!(git_is_clean(dir.path()), "still nothing to touch");
 
@@ -5423,7 +5442,10 @@ fn reconcile_orphaned_graphs_marks_interrupted_in_non_git_workdir() {
     db.insert_graph_node(&node).unwrap();
     db.insert_graph_run(&run).unwrap();
 
-    assert_eq!(db.reconcile_orphaned_graphs(data_dir.path()).unwrap(), 1);
+    assert_eq!(
+        db.reconcile_orphaned_graphs(data_dir.path()).unwrap().len(),
+        1
+    );
 
     assert_eq!(
         std::fs::read_to_string(dir.path().join("truncated.rs")).unwrap(),
@@ -5479,14 +5501,20 @@ fn reconcile_orphaned_graphs_interrupted_marking_is_idempotent_across_two_passes
     db.insert_graph_node(&node).unwrap();
     db.insert_graph_run(&run).unwrap();
 
-    assert_eq!(db.reconcile_orphaned_graphs(data_dir.path()).unwrap(), 1);
+    assert_eq!(
+        db.reconcile_orphaned_graphs(data_dir.path()).unwrap().len(),
+        1
+    );
     let spec_after_first = db.get_graph_spec(&spec.id).unwrap().unwrap();
     assert_eq!(spec_after_first.status, GraphSpecStatus::Interrupted);
 
     // Second pass: the graph is already `Paused`, so it's not even a
     // candidate — nothing should change again, and the worktree stays
     // exactly as it was after the first pass.
-    assert_eq!(db.reconcile_orphaned_graphs(data_dir.path()).unwrap(), 0);
+    assert_eq!(
+        db.reconcile_orphaned_graphs(data_dir.path()).unwrap().len(),
+        0
+    );
     let spec_after_second = db.get_graph_spec(&spec.id).unwrap().unwrap();
     assert_eq!(spec_after_second.status, GraphSpecStatus::Interrupted);
     assert_eq!(
@@ -6263,15 +6291,15 @@ fn insert_and_collect_subagent_run() {
     let db = test_db();
     let now = Utc::now().to_rfc3339();
     let expires = (Utc::now() + Duration::hours(1)).to_rfc3339();
-    db.insert_subagent_run(
-        "run-1",
-        "opencode",
-        Some("model-x"),
-        "do stuff",
-        "/tmp",
-        &now,
-        &expires,
-    )
+    db.insert_subagent_run(NewSubagentRun {
+        id: "run-1",
+        platform: "opencode",
+        model: Some("model-x"),
+        prompt: "do stuff",
+        workdir: "/tmp",
+        started_at: &now,
+        expires_at: &expires,
+    })
     .unwrap();
     db.complete_subagent_run("run-1", 0, "hello", "", Some("blind"), &now)
         .unwrap();
@@ -6292,8 +6320,16 @@ fn collect_while_running_does_not_discard_the_result() {
     let db = test_db();
     let now = Utc::now().to_rfc3339();
     let expires = (Utc::now() + Duration::hours(1)).to_rfc3339();
-    db.insert_subagent_run("run-2", "opencode", None, "p", "/tmp", &now, &expires)
-        .unwrap();
+    db.insert_subagent_run(NewSubagentRun {
+        id: "run-2",
+        platform: "opencode",
+        model: None,
+        prompt: "p",
+        workdir: "/tmp",
+        started_at: &now,
+        expires_at: &expires,
+    })
+    .unwrap();
 
     // A poll before the subagent finishes reports "running" but must NOT
     // delete the row — otherwise the eventual result is lost forever.
@@ -6317,8 +6353,16 @@ fn expire_subagent_runs_deletes_expired() {
     let db = test_db();
     let past = (Utc::now() - Duration::hours(1)).to_rfc3339();
     let now = Utc::now().to_rfc3339();
-    db.insert_subagent_run("run-exp", "opencode", None, "p", "/tmp", &now, &past)
-        .unwrap();
+    db.insert_subagent_run(NewSubagentRun {
+        id: "run-exp",
+        platform: "opencode",
+        model: None,
+        prompt: "p",
+        workdir: "/tmp",
+        started_at: &now,
+        expires_at: &past,
+    })
+    .unwrap();
     let deleted = db.expire_subagent_runs().unwrap();
     assert_eq!(deleted, 1);
     assert!(db.get_subagent_run("run-exp").unwrap().is_none());
@@ -6329,8 +6373,16 @@ fn expire_subagent_runs_keeps_unexpired() {
     let db = test_db();
     let now = Utc::now().to_rfc3339();
     let future = (Utc::now() + Duration::hours(1)).to_rfc3339();
-    db.insert_subagent_run("run-keep", "opencode", None, "p", "/tmp", &now, &future)
-        .unwrap();
+    db.insert_subagent_run(NewSubagentRun {
+        id: "run-keep",
+        platform: "opencode",
+        model: None,
+        prompt: "p",
+        workdir: "/tmp",
+        started_at: &now,
+        expires_at: &future,
+    })
+    .unwrap();
     let deleted = db.expire_subagent_runs().unwrap();
     assert_eq!(deleted, 0);
     assert!(db.get_subagent_run("run-keep").unwrap().is_some());
@@ -6341,8 +6393,16 @@ fn fail_subagent_run_sets_status() {
     let db = test_db();
     let now = Utc::now().to_rfc3339();
     let expires = (Utc::now() + Duration::hours(1)).to_rfc3339();
-    db.insert_subagent_run("run-fail", "opencode", None, "p", "/tmp", &now, &expires)
-        .unwrap();
+    db.insert_subagent_run(NewSubagentRun {
+        id: "run-fail",
+        platform: "opencode",
+        model: None,
+        prompt: "p",
+        workdir: "/tmp",
+        started_at: &now,
+        expires_at: &expires,
+    })
+    .unwrap();
     db.fail_subagent_run("run-fail", "oops", Some("blind"), &now)
         .unwrap();
     let record = db.get_subagent_run("run-fail").unwrap().unwrap();
@@ -6407,8 +6467,16 @@ fn blocking_delivery_sequence_collect_reports_delivered_not_missing() {
     let db = test_db();
     let now = Utc::now().to_rfc3339();
     let expires = (Utc::now() + Duration::hours(1)).to_rfc3339();
-    db.insert_subagent_run("run-block", "opencode", None, "p", "/tmp", &now, &expires)
-        .unwrap();
+    db.insert_subagent_run(NewSubagentRun {
+        id: "run-block",
+        platform: "opencode",
+        model: None,
+        prompt: "p",
+        workdir: "/tmp",
+        started_at: &now,
+        expires_at: &expires,
+    })
+    .unwrap();
     db.complete_subagent_run("run-block", 0, "the answer", "", Some("blind"), &now)
         .unwrap();
 
@@ -6844,6 +6912,36 @@ fn cm9_retype_backlog_nodes() {
     );
 }
 
+/// The refusal bail: a node the `d8c3230b` prefix resolves to exactly that
+/// carries registry metadata is refused (Err), never retyped.
+#[test]
+fn cm9_retype_backlog_nodes_refuses_a_registry_project_node() {
+    let db = test_db();
+    db.upsert_intelligence_node(IntelligenceNodeInput {
+        id: Some("d8c3230b".to_string()),
+        kind: Some("project".to_string()),
+        status: None,
+        title: Some("Real Project".to_string()),
+        body: Some("real project body".to_string()),
+        body_replace: None,
+        metadata: Some(Some(
+            serde_json::json!({"source": "registry", "path": "/x"}),
+        )),
+        project_hash: Some(Some("hash-real".to_string())),
+        session_id: None,
+        relations: None,
+    })
+    .unwrap();
+    // Exact id matches without a LIKE scan, so resolution succeeds and the
+    // registry guard itself fires.
+    let err = db.retype_backlog_project_nodes().unwrap_err();
+    assert!(err.to_string().contains("refusing to retype"));
+    assert_eq!(
+        db.get_intelligence_node("d8c3230b").unwrap().unwrap().kind,
+        "project"
+    );
+}
+
 #[cfg(test)]
 mod hooks_tests {
     use super::*;
@@ -6867,6 +6965,8 @@ mod hooks_tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         }
     }
 
@@ -6911,6 +7011,7 @@ mod hooks_tests {
             boot_id: None,
             executed_platform: None,
             executed_model: None,
+            hook_config: None,
         }
     }
 
@@ -7016,6 +7117,21 @@ mod hooks_tests {
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].event, GraphHookEvent::OnCompleted);
         assert_eq!(runs[0].hook_index, 0);
+    }
+
+    #[test]
+    fn graph_hook_run_config_round_trips() {
+        let db = test_db();
+        let lp = graph_with_hooks("graph1", BTreeMap::new());
+        db.insert_graph(&lp).unwrap();
+        let mut run = sample_hook_run(GraphHookEvent::OnCompleted, 0);
+        run.graph_id = "graph1".to_string();
+        run.hook_config = Some(hook_fixture("claude", "done: {{graph_name}}"));
+        db.insert_graph_completion_hook_run(&run).unwrap();
+
+        let runs = db.list_graph_completion_hook_runs("graph1").unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].hook_config, run.hook_config);
     }
 
     #[test]
@@ -7421,6 +7537,7 @@ fn cb43_all_run_kinds_contribute() {
         boot_id: None,
         executed_platform: Some("p-hook".to_string()),
         executed_model: Some("m-hook".to_string()),
+        hook_config: None,
     })
     .unwrap();
 
@@ -7442,15 +7559,15 @@ fn cb43_all_run_kinds_contribute() {
     .unwrap();
 
     // Subagent run.
-    db.insert_subagent_run(
-        &uuid::Uuid::new_v4().to_string(),
-        "p-sub",
-        Some("m-sub"),
-        "prompt",
-        "/tmp",
-        &now.to_rfc3339(),
-        &(now + Duration::hours(1)).to_rfc3339(),
-    )
+    db.insert_subagent_run(NewSubagentRun {
+        id: &uuid::Uuid::new_v4().to_string(),
+        platform: "p-sub",
+        model: Some("m-sub"),
+        prompt: "prompt",
+        workdir: "/tmp",
+        started_at: &now.to_rfc3339(),
+        expires_at: &(now + Duration::hours(1)).to_rfc3339(),
+    })
     .unwrap();
 
     let rows = db
@@ -7484,6 +7601,7 @@ fn cb46_sources_keep_every_run_kind_attribution() {
         boot_id: None,
         executed_platform: Some("hook-platform".into()),
         executed_model: Some("hook-model".into()),
+        hook_config: None,
     })
     .unwrap();
     db.upsert_agent(&sample_cron_agent("cb46-agent")).unwrap();
@@ -7501,15 +7619,15 @@ fn cb46_sources_keep_every_run_kind_attribution() {
         executed_model: Some("agent-model".into()),
     })
     .unwrap();
-    db.insert_subagent_run(
-        &uuid::Uuid::new_v4().to_string(),
-        "sub-platform",
-        Some("sub-model"),
-        "prompt",
-        "/tmp/cb46",
-        &now.to_rfc3339(),
-        &(now + Duration::hours(1)).to_rfc3339(),
-    )
+    db.insert_subagent_run(NewSubagentRun {
+        id: &uuid::Uuid::new_v4().to_string(),
+        platform: "sub-platform",
+        model: Some("sub-model"),
+        prompt: "prompt",
+        workdir: "/tmp/cb46",
+        started_at: &now.to_rfc3339(),
+        expires_at: &(now + Duration::hours(1)).to_rfc3339(),
+    })
     .unwrap();
 
     let rows = db
@@ -7523,6 +7641,30 @@ fn cb46_sources_keep_every_run_kind_attribution() {
         crate::db::graphs::RecentPairSourceKind::BackgroundAgent { ref agent_id, .. } if agent_id == "cb46-agent")));
     assert!(rows.iter().any(|row| matches!(row.source,
         crate::db::graphs::RecentPairSourceKind::SubagentSpawn { ref workdir } if workdir == "/tmp/cb46")));
+}
+
+/// Rows whose RFC3339 `started_at` cannot be parsed are dropped, never fatal.
+#[test]
+fn cb43_rfc3339_usage_rows_with_unparseable_started_at_are_dropped() {
+    let db = test_db();
+    let now = Utc::now();
+    db.upsert_agent(&sample_cron_agent("bg-cb43-bad-ts"))
+        .unwrap();
+    let good_ts = now.to_rfc3339();
+    db.exec_test_sql(&format!(
+        "INSERT INTO runs (id, background_agent_id, status, trigger_type, summary, started_at, finished_at, exit_code, timeout_at, executed_platform, executed_model) VALUES \
+         ('run-bad-ts', 'bg-cb43-bad-ts', 'success', 'manual', NULL, 'not-a-timestamp', NULL, 0, NULL, 'p-bg', 'm-bg'), \
+         ('run-good-ts', 'bg-cb43-bad-ts', 'success', 'manual', NULL, '{good_ts}', NULL, 0, NULL, 'p-bg', 'm-bg');"
+    ))
+    .unwrap();
+    let rows = db
+        .list_recent_platform_model_usage(now - Duration::days(30), 15)
+        .unwrap();
+    let pair = rows
+        .iter()
+        .find(|r| r.platform == "p-bg" && r.model.as_deref() == Some("m-bg"))
+        .expect("well-formed row present");
+    assert_eq!(pair.count, 1);
 }
 
 /// Splits `s` on commas that are not inside parentheses — used to pull
@@ -8454,3 +8596,877 @@ fn no_retired_vocabulary_in_user_visible_surfaces() {
     );
 }
 // RETIRED-VOCAB-END
+
+// ── CM44: group contiguity on add/set-group ─────────────────────
+
+#[test]
+fn add_member_to_existing_group_lands_after_the_group() {
+    let db = test_db();
+    for id in ["a", "b", "c", "x"] {
+        db.insert_graph_spec(&sample_standalone_spec(id, None))
+            .unwrap();
+    }
+    db.insert_queue(&sample_queue("queue-1")).unwrap();
+    db.append_queue_member("queue-1", "a", Some("g")).unwrap();
+    db.append_queue_member("queue-1", "b", Some("g")).unwrap();
+    db.append_queue_member("queue-1", "c", None).unwrap();
+
+    db.add_queue_member_grouped("queue-1", "x", Some("g"), true)
+        .unwrap();
+
+    assert_eq!(
+        db.list_queue_member_spec_ids("queue-1").unwrap(),
+        vec!["a", "b", "x", "c"]
+    );
+    assert_eq!(
+        db.queue_member_group("queue-1", "x").unwrap().as_deref(),
+        Some("g")
+    );
+}
+
+#[test]
+fn set_group_of_a_middle_member_moves_it_after_its_new_group() {
+    let db = test_db();
+    for id in ["a", "b", "c"] {
+        db.insert_graph_spec(&sample_standalone_spec(id, None))
+            .unwrap();
+    }
+    db.insert_queue(&sample_queue("queue-1")).unwrap();
+    db.append_queue_member("queue-1", "a", Some("g1")).unwrap();
+    db.append_queue_member("queue-1", "b", None).unwrap();
+    db.append_queue_member("queue-1", "c", Some("g1")).unwrap();
+
+    db.set_queue_member_group("queue-1", "b", Some("g1"))
+        .unwrap();
+
+    assert_eq!(
+        db.list_queue_member_spec_ids("queue-1").unwrap(),
+        vec!["a", "c", "b"]
+    );
+    assert_eq!(
+        db.queue_member_group("queue-1", "b").unwrap().as_deref(),
+        Some("g1")
+    );
+}
+
+#[test]
+fn clear_group_moves_member_after_its_old_group_when_stranded() {
+    let db = test_db();
+    for id in ["a", "b", "c"] {
+        db.insert_graph_spec(&sample_standalone_spec(id, None))
+            .unwrap();
+    }
+    db.insert_queue(&sample_queue("queue-1")).unwrap();
+    db.append_queue_member("queue-1", "a", Some("g")).unwrap();
+    db.append_queue_member("queue-1", "b", Some("g")).unwrap();
+    db.append_queue_member("queue-1", "c", Some("g")).unwrap();
+
+    db.set_queue_member_group("queue-1", "b", None).unwrap();
+
+    assert_eq!(
+        db.list_queue_member_spec_ids("queue-1").unwrap(),
+        vec!["a", "c", "b"]
+    );
+    assert!(db.queue_member_group("queue-1", "b").unwrap().is_none());
+}
+
+#[test]
+fn running_member_keeps_its_position() {
+    let db = test_db();
+    for id in ["r", "a", "b", "d", "x"] {
+        db.insert_graph_spec(&sample_standalone_spec(id, None))
+            .unwrap();
+    }
+    db.insert_queue(&sample_queue("queue-1")).unwrap();
+    db.append_queue_member("queue-1", "r", None).unwrap();
+    db.append_queue_member("queue-1", "a", Some("g")).unwrap();
+    db.append_queue_member("queue-1", "b", Some("g")).unwrap();
+    db.append_queue_member("queue-1", "d", None).unwrap();
+    db.update_graph_spec_status("r", GraphSpecStatus::Running, None, None)
+        .unwrap();
+
+    let p = db.queue_member_position("queue-1", "r").unwrap();
+    assert_eq!(p, Some(1));
+
+    db.add_queue_member_grouped("queue-1", "x", Some("g"), true)
+        .unwrap();
+
+    assert_eq!(db.queue_member_position("queue-1", "r").unwrap(), p);
+    assert_eq!(
+        db.list_queue_member_spec_ids("queue-1").unwrap(),
+        vec!["r", "a", "b", "x", "d"]
+    );
+}
+
+#[test]
+fn completed_member_keeps_its_position() {
+    let db = test_db();
+    for id in ["r", "a", "b", "d", "x"] {
+        db.insert_graph_spec(&sample_standalone_spec(id, None))
+            .unwrap();
+    }
+    db.insert_queue(&sample_queue("queue-1")).unwrap();
+    db.append_queue_member("queue-1", "r", None).unwrap();
+    db.append_queue_member("queue-1", "a", Some("g")).unwrap();
+    db.append_queue_member("queue-1", "b", Some("g")).unwrap();
+    db.append_queue_member("queue-1", "d", None).unwrap();
+    db.update_graph_spec_status(
+        "r",
+        GraphSpecStatus::Completed,
+        Some(Utc::now()),
+        Some(Utc::now()),
+    )
+    .unwrap();
+
+    let p = db.queue_member_position("queue-1", "r").unwrap();
+    assert_eq!(p, Some(1));
+
+    db.add_queue_member_grouped("queue-1", "x", Some("g"), true)
+        .unwrap();
+
+    assert_eq!(db.queue_member_position("queue-1", "r").unwrap(), p);
+    assert_eq!(
+        db.list_queue_member_spec_ids("queue-1").unwrap(),
+        vec!["r", "a", "b", "x", "d"]
+    );
+}
+
+// ── CM50: graph_crew ───────────────────────────────────────────
+
+/// CM50: `graph_crew` — every graph's harness/model assignments, in the
+/// shape the MCP tool and `canopy graph crew` both print.
+mod graph_crew_tests {
+    use super::*;
+    use crate::daemon::graph_cli::format::format_graph_crew_table;
+    use crate::db::graph_crew::GraphCrewDbParams;
+    use crate::db::roster_entries::{NewRosterEntry, RosterState};
+    use crate::domain::crews::CrewMember;
+    use crate::domain::graphs::{
+        ArchiveGraphOutcome, CrewRowKind, Ensemble, EnsembleKind, EnsembleMember,
+        GraphCompletionHook, GraphCrewGroup, GraphCrewRow, GraphHookEvent,
+    };
+    use std::collections::BTreeMap;
+
+    /// Prompt text planted in the fixture: it must never appear in any
+    /// serialized `graph_crew` output.
+    const LEAKED_HOOK_PROMPT: &str = "SECRETS FROM THE HOOK PROMPT";
+    const LEAKED_NODE_PROMPT: &str = "SECRETS FROM THE NODE PROMPT_TEMPLATE";
+
+    /// Two graphs: `Crew live` (literal two-member ensemble, a lone agent
+    /// node, an agent hook) and `Crew archived` (one agent node, archived).
+    struct CrewFixture {
+        db: Database,
+        live_id: String,
+        archived_id: String,
+        ensemble_id: String,
+    }
+
+    fn agent_node(
+        spec_id: &str,
+        id: &str,
+        name: &str,
+        position: i64,
+        config: serde_json::Value,
+    ) -> GraphNode {
+        GraphNode {
+            id: id.to_string(),
+            spec_id: Some(spec_id.to_string()),
+            graph_id: None,
+            name: name.to_string(),
+            kind: GraphNodeKind::Agent,
+            config,
+            position,
+            created_at: Utc::now(),
+        }
+    }
+
+    fn static_node(spec_id: &str, id: &str, name: &str, position: i64) -> GraphNode {
+        GraphNode {
+            id: id.to_string(),
+            spec_id: Some(spec_id.to_string()),
+            graph_id: None,
+            name: name.to_string(),
+            kind: GraphNodeKind::Check,
+            config: serde_json::json!({ "command": "true", "success_condition": "exit_code_0" }),
+            position,
+            created_at: Utc::now(),
+        }
+    }
+
+    fn edge(spec_id: &str, from: &str, to: &str, condition: GraphEdgeCondition) -> GraphEdge {
+        GraphEdge {
+            id: format!("{from}->{to}"),
+            spec_id: Some(spec_id.to_string()),
+            graph_id: None,
+            from_node: from.to_string(),
+            to_node: to.to_string(),
+            condition,
+        }
+    }
+
+    fn member(
+        ensemble_id: &str,
+        node_id: &str,
+        position: i64,
+        platform: &str,
+        model: Option<&str>,
+        timeout_minutes: Option<i64>,
+    ) -> EnsembleMember {
+        EnsembleMember {
+            ensemble_id: ensemble_id.to_string(),
+            node_id: node_id.to_string(),
+            position,
+            platform: platform.to_string(),
+            model: model.map(str::to_string),
+            prompt_override: None,
+            timeout_minutes,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
+        }
+    }
+
+    /// One crew member (CM49) for the fixture's crew creation.
+    fn crew_member(position: i64, platform: &str, model: Option<&str>) -> CrewMember {
+        CrewMember {
+            position,
+            platform: platform.to_string(),
+            model: model.map(str::to_string),
+            timeout_minutes: None,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
+        }
+    }
+
+    /// Insert a two-member ensemble wired `entry -> members -> join ->
+    /// exit`, with the two static endpoints this spec's graphs use.
+    /// `crew` binds the ensemble to a crew (CM49) as `(crew id, crew name,
+    /// version applied)` — the id must exist in `crews`, so the caller
+    /// creates it first — instead of leaving its members literal.
+    fn insert_ensemble(
+        db: &Database,
+        spec_id: &str,
+        ensemble_id: &str,
+        name: &str,
+        crew: Option<(&str, &str, i64)>,
+    ) {
+        db.insert_graph_node(&static_node(spec_id, "node-entry", "Entry", 0))
+            .unwrap();
+        db.insert_graph_node(&static_node(spec_id, "node-exit", "Exit", 4))
+            .unwrap();
+
+        let ensemble = Ensemble {
+            id: ensemble_id.to_string(),
+            spec_id: Some(spec_id.to_string()),
+            graph_id: None,
+            name: name.to_string(),
+            prompt_template: "review it: {{spec_content}}".to_string(),
+            join_node_id: "node-join".to_string(),
+            entry_from_node: "node-entry".to_string(),
+            entry_condition: GraphEdgeCondition::Always,
+            min_pass: 2,
+            straggler_timeout_minutes: None,
+            quorum_grace_minutes: None,
+            timeout_minutes: 30,
+            infra_retry_limit: None,
+            infra_crash_max_seconds: None,
+            infra_backoff_seconds: None,
+            on_pass_to: "node-exit".to_string(),
+            on_fail_to: None,
+            kind: EnsembleKind::Parallel,
+            round_robin_index: None,
+            commit_rights: false,
+            created_at: Utc::now(),
+            crew_id: crew.map(|(id, _, _)| id.to_string()),
+            crew_name: crew.map(|(_, name, _)| name.to_string()),
+            crew_version_applied: crew.map(|(_, _, version)| version),
+        };
+        let members = vec![
+            member(ensemble_id, "node-m1", 0, "claude", Some("opus"), Some(10)),
+            member(
+                ensemble_id,
+                "node-m2",
+                1,
+                "opencode-go",
+                Some("gpt-5"),
+                None,
+            ),
+        ];
+        let member_nodes = vec![
+            agent_node(
+                spec_id,
+                "node-m1",
+                "Member one",
+                1,
+                serde_json::json!({ "platform": "claude", "model": "opus" }),
+            ),
+            agent_node(
+                spec_id,
+                "node-m2",
+                "Member two",
+                2,
+                serde_json::json!({ "platform": "opencode-go", "model": "gpt-5" }),
+            ),
+        ];
+        let join = GraphNode {
+            id: "node-join".to_string(),
+            spec_id: Some(spec_id.to_string()),
+            graph_id: None,
+            name: "Quorum".to_string(),
+            kind: GraphNodeKind::Join,
+            config: serde_json::json!({ "ensemble_id": ensemble_id }),
+            position: 3,
+            created_at: Utc::now(),
+        };
+        let edges = vec![
+            edge(spec_id, "node-entry", "node-m1", GraphEdgeCondition::Always),
+            edge(spec_id, "node-entry", "node-m2", GraphEdgeCondition::Always),
+            edge(spec_id, "node-m1", "node-join", GraphEdgeCondition::Always),
+            edge(spec_id, "node-m2", "node-join", GraphEdgeCondition::Always),
+            edge(spec_id, "node-join", "node-exit", GraphEdgeCondition::Pass),
+        ];
+        db.insert_ensemble_unit(&ensemble, &members, &member_nodes, &join, &edges)
+            .unwrap();
+    }
+
+    fn agent_hook(platform: &str, model: &str, prompt: &str) -> GraphCompletionHook {
+        GraphCompletionHook {
+            platform: Some(platform.to_string()),
+            crew: None,
+            model: Some(model.to_string()),
+            effort: None,
+            prompt: Some(prompt.to_string()),
+            command: None,
+            target_session_id: None,
+            target_session_name: None,
+            timeout_minutes: Some(5),
+            target_graph_id: None,
+            queue_id: None,
+            workdir_override: None,
+            idea: None,
+        }
+    }
+
+    /// The spec's fixture database: two graphs, exactly one of them
+    /// archived.
+    fn crew_fixture() -> CrewFixture {
+        let db = test_db();
+
+        let mut live = sample_graph("graph-crew-live");
+        live.name = "Crew live".to_string();
+        db.insert_graph(&live).unwrap();
+        let spec = sample_graph_spec(&live.id, "spec-crew-live", 1);
+        db.insert_graph_spec(&spec).unwrap();
+        insert_ensemble(&db, &spec.id, "ens-crew", "Reviewers", None);
+        // The lone agent node: outside every ensemble, and carrying a
+        // prompt the result must never echo.
+        db.insert_graph_node(&agent_node(
+            &spec.id,
+            "node-lone",
+            "Lone agent",
+            5,
+            serde_json::json!({
+                "platform": "claude",
+                "model": "opus",
+                "timeout_minutes": 10,
+                "prompt_template": LEAKED_NODE_PROMPT,
+            }),
+        ))
+        .unwrap();
+        let mut hooks = BTreeMap::new();
+        hooks.insert(
+            GraphHookEvent::OnCompleted,
+            vec![agent_hook("claude", "sonnet", LEAKED_HOOK_PROMPT)],
+        );
+        db.update_graph_hooks(&live.id, &hooks).unwrap();
+
+        let mut archived = sample_graph("graph-crew-archived");
+        archived.name = "Crew archived".to_string();
+        // Strictly newer than the live graph, so `list_graphs`' created_at
+        // ordering is deterministic when both appear (`include_archived`).
+        archived.created_at = live.created_at + chrono::Duration::seconds(60);
+        db.insert_graph(&archived).unwrap();
+        let archived_spec = sample_graph_spec(&archived.id, "spec-crew-archived", 1);
+        db.insert_graph_spec(&archived_spec).unwrap();
+        db.insert_graph_node(&agent_node(
+            &archived_spec.id,
+            "node-archived",
+            "Archived agent",
+            0,
+            serde_json::json!({ "platform": "opencode-go", "model": "gpt-5" }),
+        ))
+        .unwrap();
+        assert!(matches!(
+            db.archive_graph(&archived.id).unwrap(),
+            ArchiveGraphOutcome::Archived
+        ));
+
+        CrewFixture {
+            db,
+            live_id: live.id,
+            archived_id: archived.id,
+            ensemble_id: "ens-crew".to_string(),
+        }
+    }
+
+    /// Every row of every group, in order — the flat view the row-level
+    /// assertions work on.
+    fn flat(groups: &[GraphCrewGroup]) -> Vec<&GraphCrewRow> {
+        groups.iter().flat_map(|g| g.rows.iter()).collect()
+    }
+
+    fn group<'a>(groups: &'a [GraphCrewGroup], id: &str) -> &'a GraphCrewGroup {
+        groups
+            .iter()
+            .find(|g| g.id == id)
+            .unwrap_or_else(|| panic!("no group for graph {id}"))
+    }
+
+    /// FR2/FR5: one fixture, all three row kinds, with the ensemble's
+    /// kind/min_pass/commit_rights on its members — and the static
+    /// `Entry`/`Quorum` nodes never producing rows of their own.
+    #[test]
+    fn graph_crew_fixture_reports_every_row_kind() {
+        let fixture = crew_fixture();
+        let groups = fixture.db.graph_crew(GraphCrewDbParams::default()).unwrap();
+
+        assert_eq!(groups.len(), 1, "the archived graph stays out by default");
+        let live = &groups[0];
+        assert_eq!(live.id, fixture.live_id);
+        assert_eq!(live.name, "Crew live");
+        assert_eq!(live.status, "draft");
+        assert_eq!(live.workdir, "/tmp/project");
+        assert_eq!(live.rows.len(), 4, "lone node + 2 members + 1 hook");
+
+        let node = live
+            .rows
+            .iter()
+            .find(|r| r.kind == CrewRowKind::Node)
+            .expect("the lone agent node is a row");
+        assert_eq!(node.node_id.as_deref(), Some("node-lone"));
+        assert_eq!(node.name, "Lone agent");
+        assert_eq!(node.platform, "claude");
+        assert_eq!(node.model, "opus");
+        assert_eq!(node.timeout_minutes, Some(10));
+        assert_eq!(node.ensemble_id, None);
+
+        let members: Vec<&GraphCrewRow> = live
+            .rows
+            .iter()
+            .filter(|r| r.kind == CrewRowKind::EnsembleMember)
+            .collect();
+        assert_eq!(members.len(), 2);
+        let first = members
+            .iter()
+            .find(|r| r.position == Some(0))
+            .expect("member at position 0");
+        assert_eq!(
+            first.ensemble_id.as_deref(),
+            Some(fixture.ensemble_id.as_str())
+        );
+        assert_eq!(first.node_id.as_deref(), Some("node-m1"));
+        assert_eq!(first.name, "Reviewers");
+        assert_eq!(first.platform, "claude");
+        assert_eq!(first.model, "opus");
+        assert_eq!(first.timeout_minutes, Some(10));
+        assert_eq!(first.ensemble_kind.as_deref(), Some("parallel"));
+        assert_eq!(first.ensemble_min_pass, Some(2));
+        assert_eq!(first.ensemble_commit_rights, Some(false));
+        let second = members
+            .iter()
+            .find(|r| r.position == Some(1))
+            .expect("member at position 1");
+        assert_eq!(second.platform, "opencode-go");
+        assert_eq!(second.model, "gpt-5");
+        // No member timeout of its own: the ensemble's shared timeout is
+        // what actually applies.
+        assert_eq!(second.timeout_minutes, Some(30));
+
+        let hook = live
+            .rows
+            .iter()
+            .find(|r| r.kind == CrewRowKind::Hook)
+            .expect("the agent hook is a row");
+        assert_eq!(hook.name, "on_completed");
+        assert_eq!(hook.platform, "claude");
+        assert_eq!(hook.model, "sonnet");
+        assert_eq!(hook.timeout_minutes, Some(5));
+
+        assert!(
+            live.rows
+                .iter()
+                .all(|r| r.name != "Entry" && r.name != "Quorum"),
+            "static and join nodes are not crew assignments"
+        );
+    }
+
+    /// FR1: `platform` filters by exact match and leaves only matching
+    /// rows; graphs with none are omitted.
+    #[test]
+    fn graph_crew_filters_by_platform() {
+        let fixture = crew_fixture();
+        let groups = fixture
+            .db
+            .graph_crew(GraphCrewDbParams {
+                platform: Some("opencode-go"),
+                ..GraphCrewDbParams::default()
+            })
+            .unwrap();
+
+        assert_eq!(groups.len(), 1, "only the graph still holding a row");
+        assert_eq!(groups[0].id, fixture.live_id);
+        let rows = flat(&groups);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, CrewRowKind::EnsembleMember);
+        assert_eq!(rows[0].platform, "opencode-go");
+        // No partial match: exact equality, not a substring.
+        assert!(flat(&groups).iter().all(|r| r.platform == "opencode-go"));
+    }
+
+    /// FR1: `model` matches a case-insensitive substring.
+    #[test]
+    fn graph_crew_filters_by_model_substring() {
+        let fixture = crew_fixture();
+        let groups = fixture
+            .db
+            .graph_crew(GraphCrewDbParams {
+                model: Some("OPUS"),
+                ..GraphCrewDbParams::default()
+            })
+            .unwrap();
+
+        let rows = flat(&groups);
+        assert_eq!(rows.len(), 2, "the lone node and member m1");
+        assert!(rows.iter().all(|r| r.model.to_lowercase().contains("opus")));
+    }
+
+    /// FR1: archived graphs are excluded by default and included on request.
+    #[test]
+    fn graph_crew_include_archived() {
+        let fixture = crew_fixture();
+
+        let without = fixture.db.graph_crew(GraphCrewDbParams::default()).unwrap();
+        assert_eq!(without.len(), 1);
+        assert_eq!(without[0].id, fixture.live_id);
+
+        let with = fixture
+            .db
+            .graph_crew(GraphCrewDbParams {
+                include_archived: true,
+                ..GraphCrewDbParams::default()
+            })
+            .unwrap();
+        assert_eq!(with.len(), 2);
+        let archived = group(&with, &fixture.archived_id);
+        assert_eq!(archived.name, "Crew archived");
+        assert_eq!(archived.rows.len(), 1);
+        assert_eq!(archived.rows[0].name, "Archived agent");
+    }
+
+    /// FR1: `graph_id` narrows to that graph alone — and, like every other
+    /// id-addressed read surface, it still reaches an archived graph.
+    #[test]
+    fn graph_crew_graph_id_narrows_to_one_graph() {
+        let fixture = crew_fixture();
+        let groups = fixture
+            .db
+            .graph_crew(GraphCrewDbParams {
+                graph_id: Some(fixture.archived_id.as_str()),
+                ..GraphCrewDbParams::default()
+            })
+            .unwrap();
+
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].id, fixture.archived_id);
+        assert_eq!(groups[0].rows.len(), 1);
+
+        let unknown = fixture
+            .db
+            .graph_crew(GraphCrewDbParams {
+                graph_id: Some("graph-does-not-exist"),
+                ..GraphCrewDbParams::default()
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(unknown.contains("graph-does-not-exist"), "{unknown}");
+    }
+
+    /// FR1: a graph left with no matching row disappears from a filtered
+    /// answer, while an unfiltered answer still lists every graph — even
+    /// one that runs nothing.
+    #[test]
+    fn graph_crew_omits_graphs_with_no_matching_rows() {
+        let fixture = crew_fixture();
+        let only_claude = fixture
+            .db
+            .graph_crew(GraphCrewDbParams {
+                platform: Some("claude"),
+                ..GraphCrewDbParams::default()
+            })
+            .unwrap();
+        assert_eq!(only_claude.len(), 1, "the archived graph has no claude row");
+        assert_eq!(only_claude[0].id, fixture.live_id);
+
+        let nothing = fixture
+            .db
+            .graph_crew(GraphCrewDbParams {
+                platform: Some("mimo"),
+                ..GraphCrewDbParams::default()
+            })
+            .unwrap();
+        assert!(nothing.is_empty());
+
+        // A graph whose nodes are all static still shows up unfiltered…
+        let db = test_db();
+        let mut quiet = sample_graph("graph-crew-quiet");
+        quiet.name = "Quiet".to_string();
+        db.insert_graph(&quiet).unwrap();
+        let spec = sample_graph_spec(&quiet.id, "spec-crew-quiet", 1);
+        db.insert_graph_spec(&spec).unwrap();
+        db.insert_graph_node(&static_node(&spec.id, "node-check", "Check", 0))
+            .unwrap();
+        let quiet_groups = db.graph_crew(GraphCrewDbParams::default()).unwrap();
+        assert_eq!(quiet_groups.len(), 1);
+        assert!(quiet_groups[0].rows.is_empty());
+        // …and drops out of a filtered one.
+        let filtered = db
+            .graph_crew(GraphCrewDbParams {
+                platform: Some("claude"),
+                ..GraphCrewDbParams::default()
+            })
+            .unwrap();
+        assert!(filtered.is_empty());
+    }
+
+    /// FR4: `group_by: "pair"` counts each distinct platform/model pair's
+    /// graphs, ensembles, nodes and hooks, and names the graphs.
+    #[test]
+    fn graph_crew_summary_groups_by_pair() {
+        let fixture = crew_fixture();
+        let summary = fixture
+            .db
+            .graph_crew_summary(GraphCrewDbParams::default())
+            .unwrap();
+
+        assert_eq!(
+            summary.len(),
+            3,
+            "claude/opus, claude/sonnet, opencode-go/gpt-5"
+        );
+        let opus = summary
+            .iter()
+            .find(|s| s.platform == "claude" && s.model == "opus")
+            .expect("claude/opus pair");
+        assert_eq!(opus.graph_count, 1);
+        assert_eq!(opus.ensemble_count, 1, "member m1 runs on the pair");
+        assert_eq!(opus.node_count, 1, "the lone node");
+        assert_eq!(opus.hook_count, 0);
+        assert_eq!(opus.graph_names, vec!["Crew live".to_string()]);
+
+        let sonnet = summary
+            .iter()
+            .find(|s| s.model == "sonnet")
+            .expect("claude/sonnet pair");
+        assert_eq!(sonnet.hook_count, 1);
+        assert_eq!(sonnet.node_count, 0);
+
+        let gpt = summary
+            .iter()
+            .find(|s| s.platform == "opencode-go")
+            .expect("opencode-go/gpt-5 pair");
+        assert_eq!(gpt.graph_count, 1, "archived graphs stay out by default");
+        assert_eq!(gpt.ensemble_count, 1);
+        assert_eq!(gpt.node_count, 0);
+
+        let with_archived = fixture
+            .db
+            .graph_crew_summary(GraphCrewDbParams {
+                include_archived: true,
+                ..GraphCrewDbParams::default()
+            })
+            .unwrap();
+        let gpt = with_archived
+            .iter()
+            .find(|s| s.platform == "opencode-go")
+            .expect("opencode-go/gpt-5 pair");
+        assert_eq!(gpt.graph_count, 2, "live member + archived node");
+        assert_eq!(gpt.node_count, 1);
+        let mut names = gpt.graph_names.clone();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["Crew archived".to_string(), "Crew live".to_string()]
+        );
+    }
+
+    /// Walk every serialized key of a `graph_crew` result: `prompt` and
+    /// `prompt_template` must never appear, at any depth.
+    fn assert_no_prompt_keys(value: &serde_json::Value, path: &str) {
+        match value {
+            serde_json::Value::Object(map) => {
+                for (key, child) in map {
+                    assert_ne!(key.as_str(), "prompt", "prompt leaked at {path}.{key}");
+                    assert_ne!(
+                        key.as_str(),
+                        "prompt_template",
+                        "prompt_template leaked at {path}.{key}"
+                    );
+                    assert_no_prompt_keys(child, &format!("{path}.{key}"));
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for (index, child) in items.iter().enumerate() {
+                    assert_no_prompt_keys(child, &format!("{path}[{index}]"));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// FR2/FR5: no prompt text, ever — neither the key nor the fixture's
+    /// own prompt content, in the grouped result or the pair summary.
+    #[test]
+    fn graph_crew_serialization_contains_no_prompt_fields() {
+        let fixture = crew_fixture();
+        let groups = fixture.db.graph_crew(GraphCrewDbParams::default()).unwrap();
+
+        let json = serde_json::to_string(&groups).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_no_prompt_keys(&value, "$");
+        assert!(!json.contains("prompt"), "no prompt key at all: {json}");
+        assert!(!json.contains(LEAKED_HOOK_PROMPT), "{json}");
+        assert!(!json.contains(LEAKED_NODE_PROMPT), "{json}");
+
+        let summary = fixture
+            .db
+            .graph_crew_summary(GraphCrewDbParams::default())
+            .unwrap();
+        let summary_json = serde_json::to_string(&summary).unwrap();
+        assert!(!summary_json.contains("prompt"), "{summary_json}");
+        assert!(!summary_json.contains(LEAKED_HOOK_PROMPT), "{summary_json}");
+    }
+
+    /// FR2 (CM48): availability comes from the roster — an unavailable
+    /// pair reports `unavailable` with its reason, everything else reads
+    /// `available`.
+    #[test]
+    fn graph_crew_reports_availability_from_the_roster() {
+        let fixture = crew_fixture();
+        fixture
+            .db
+            .roster_upsert(NewRosterEntry {
+                platform: "claude",
+                model_pattern: Some("opus"),
+                state: RosterState::Unavailable,
+                reason: Some("quota exhausted"),
+                until: None,
+            })
+            .unwrap();
+
+        let groups = fixture.db.graph_crew(GraphCrewDbParams::default()).unwrap();
+        let opus_node = flat(&groups)
+            .into_iter()
+            .find(|r| r.kind == CrewRowKind::Node)
+            .cloned()
+            .expect("lone node row");
+        assert_eq!(opus_node.availability.as_deref(), Some("unavailable"));
+        assert_eq!(
+            opus_node.availability_reason.as_deref(),
+            Some("quota exhausted")
+        );
+
+        let hook = flat(&groups)
+            .into_iter()
+            .find(|r| r.kind == CrewRowKind::Hook)
+            .cloned()
+            .expect("hook row");
+        assert_eq!(hook.availability.as_deref(), Some("available"));
+        assert_eq!(hook.availability_reason, None);
+    }
+
+    /// FR2 (CM49): a crew-bound node or ensemble reports its crew and the
+    /// crew version applied — and, having no pair yet, no availability.
+    #[test]
+    fn graph_crew_reports_crew_bindings() {
+        let db = test_db();
+        let mut lp = sample_graph("graph-crew-bound");
+        lp.name = "Bound".to_string();
+        db.insert_graph(&lp).unwrap();
+        let spec = sample_graph_spec(&lp.id, "spec-crew-bound", 1);
+        db.insert_graph_spec(&spec).unwrap();
+
+        // The crew must exist first: `ensembles.crew_id` is a foreign key
+        // into `crews`. Two member-list writes after creation leave it at
+        // version 3, so the reported version is the crew's own — not a
+        // constant.
+        let crew_members = [
+            crew_member(0, "claude", Some("opus")),
+            crew_member(1, "opencode-go", Some("gpt-5")),
+        ];
+        let crew = db.crew_create("reviewers", None, &crew_members).unwrap();
+        for _ in 0..2 {
+            db.crew_update("reviewers", Some(&crew_members), None, None)
+                .unwrap();
+        }
+        insert_ensemble(
+            &db,
+            &spec.id,
+            "ens-bound",
+            "Bound reviewers",
+            Some((crew.id.as_str(), crew.name.as_str(), 3)),
+        );
+        db.insert_graph_node(&agent_node(
+            &spec.id,
+            "node-crew",
+            "Crew bound",
+            5,
+            serde_json::json!({ "crew": "implementers" }),
+        ))
+        .unwrap();
+
+        let groups = db.graph_crew(GraphCrewDbParams::default()).unwrap();
+        let rows = flat(&groups);
+        let member = rows
+            .iter()
+            .find(|r| r.kind == CrewRowKind::EnsembleMember)
+            .expect("ensemble member row");
+        assert_eq!(member.crew.as_deref(), Some("reviewers"));
+        assert_eq!(member.crew_version_applied, Some(3));
+
+        let node = rows
+            .iter()
+            .find(|r| r.kind == CrewRowKind::Node)
+            .expect("crew-bound node row");
+        assert_eq!(node.crew.as_deref(), Some("implementers"));
+        assert_eq!(node.crew_version_applied, None, "nodes track no version");
+        assert_eq!(node.platform, "", "a crew-bound node has no pair yet");
+        assert_eq!(node.availability, None);
+    }
+
+    /// FR3/FR5: the CLI table prints the fixture's name, kind, pair, crew
+    /// and availability columns — the same rows MCP returns.
+    #[test]
+    fn graph_crew_cli_table_format() {
+        let fixture = crew_fixture();
+        let groups = fixture.db.graph_crew(GraphCrewDbParams::default()).unwrap();
+        let rows: Vec<GraphCrewRow> = flat(&groups).into_iter().cloned().collect();
+
+        let table = format_graph_crew_table(&rows);
+        assert!(table.contains("Kind"), "{table}");
+        assert!(table.contains("Lone agent"), "{table}");
+        assert!(table.contains("node"), "{table}");
+        assert!(table.contains("ensemble_member"), "{table}");
+        assert!(table.contains("hook"), "{table}");
+        assert!(table.contains("claude"), "{table}");
+        assert!(table.contains("opus"), "{table}");
+        assert!(table.contains("on_completed"), "{table}");
+        assert!(table.contains("available"), "{table}");
+        assert!(!table.contains("prompt"), "{table}");
+
+        assert_eq!(
+            format_graph_crew_table(&[]),
+            "No matching crew assignments found."
+        );
+    }
+}

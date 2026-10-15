@@ -16,6 +16,8 @@ pub(crate) enum RagAction {
     },
     /// Show a detailed per-file RAG indexing report.
     Report,
+    /// Compact the vector store: merge fragments and prune old versions.
+    Compact,
     /// Index all configured files not yet in the vector store.
     Backfill,
     /// Delete the entire vector store and reset all RAG state.
@@ -66,6 +68,7 @@ pub(crate) async fn handle_rag_action(action: RagAction) -> Result<()> {
             println!("     Run \x1b[1mcanopy rag auto-index start\x1b[0m to resume.");
         }
         RagAction::Report => handle_rag_report(&data_dir, &db).await?,
+        RagAction::Compact => handle_rag_compact(&data_dir).await?,
         RagAction::Backfill => handle_rag_backfill(&data_dir, &db).await?,
         RagAction::Purge { yes } => {
             if !yes {
@@ -301,31 +304,25 @@ pub(crate) fn categorize_rag_files(
 async fn handle_rag_report(data_dir: &std::path::Path, db: &Database) -> Result<()> {
     let config = crate::domain::canopy_config::CanopyConfig::load(data_dir);
 
-    // ── Vector store chunk counts per file ────────────────────────────
-    let chunk_counts = if !config.embeddings_model.trim().is_empty() {
-        let dims = crate::rag::embedding_client::model_dimensions(config.embeddings_model.trim())
-            .unwrap_or(384);
-        match crate::rag::vector_store::VectorStore::open_at(
-            &crate::rag::vector_store::VectorStore::default_lancedb_path()?,
-            dims,
-            Some(config.rag_vector_cache_entries),
-        )
-        .await
-        {
-            Ok(store) => store.count_chunks_per_file().await.unwrap_or_default(),
-            Err(_) => std::collections::HashMap::new(),
-        }
-    } else {
-        std::collections::HashMap::new()
+    let (store, mut store_error) = open_report_store(&config).await?;
+    let chunk_counts: std::collections::HashMap<String, usize> = match &store {
+        Some(store) => store.count_chunks_per_file().await.unwrap_or_default(),
+        None => std::collections::HashMap::new(),
+    };
+    let footprint = match &store {
+        Some(store) => match store.footprint().await {
+            Ok(footprint) => Some(footprint),
+            Err(error) => {
+                store_error = Some(format!("{error:#}"));
+                None
+            }
+        },
+        None => None,
     };
 
-    // ── RAG queue ─────────────────────────────────────────────────────
     let queue_items = db.list_rag_queue(10_000).unwrap_or_default();
 
-    // ── Events ────────────────────────────────────────────────────────
     let all_events = db.list_rag_events(10_000).unwrap_or_default();
-
-    // Group events by file
     let mut events_by_file: std::collections::HashMap<
         String,
         Vec<&crate::db::project::RagFileEvent>,
@@ -337,20 +334,10 @@ async fn handle_rag_report(data_dir: &std::path::Path, db: &Database) -> Result<
             .push(ev);
     }
 
-    // ── Size-based exclusions ────────────────────────────────────────
-    // Recomputed from filesystem metadata (never file contents), not read
-    // from the ledger: a large file that was never ingested has no event,
-    // and the ledger goes stale after a config/path/ragignore change. This
-    // is the authoritative *current* count for the report.
     let max_bytes = config.rag_max_file_bytes();
     let size_scan = crate::rag::size_report::scan(data_dir, &config.rag_personal_dirs, max_bytes)?;
 
-    // A file's *current* oversize status: the fresh metadata scan is
-    // authoritative, and a stale "skipped_oversize" event still flags a file
-    // the scan could not see (e.g. a root later unconfigured). If it shrank
-    // and got re-indexed, it has chunks and the indexed state wins, so it is
-    // not flagged.
-    let mut oversize_paths: Vec<std::path::PathBuf> = size_scan.oversize_files.clone();
+    let mut oversize_paths = size_scan.oversize_files.clone();
     for (file, events) in &events_by_file {
         if events
             .first()
@@ -383,22 +370,79 @@ async fn handle_rag_report(data_dir: &std::path::Path, db: &Database) -> Result<
     all_files.extend(cats.not_yet_indexed.iter().cloned());
 
     if all_files.is_empty() {
-        println!("\n\x1b[1m── Canopy RAG Report ──────────────────────────────────────────\x1b[0m");
-        let cap_mb = max_bytes as f64 / (1024.0 * 1024.0);
-        println!(" Limit:  {cap_mb:.0} MB per file (config.toml: rag_max_file_mb)");
-        println!(
-            " {}",
-            crate::rag::size_report::exclusion_summary(0, max_bytes)
-        );
-        println!(
-            "\n No indexed RAG data found yet. Make sure the daemon is running and RAG dirs are configured."
-        );
+        print_empty_rag_report(max_bytes);
         return Ok(());
     }
 
+    let report = RagReportData {
+        config: &config,
+        chunk_counts: &chunk_counts,
+        queue_items: &queue_items,
+        events_by_file: &events_by_file,
+        cats: &cats,
+        all_files: &all_files,
+        total_on_disk,
+        indexable_on_disk: size_scan.indexable_files.len(),
+        oversize_on_disk: size_scan.oversize_files.len(),
+        max_bytes,
+        footprint,
+        store_error,
+    };
+
+    print_rag_report_summary(db, &report)?;
+    print_rag_report_files(&report);
+
+    println!();
+    Ok(())
+}
+
+/// The report's empty path: the same heading and limit a non-empty report
+/// would print, then the "nothing here yet" line. Returned before any
+/// paused/status DB read so an empty corpus costs no daemon round-trip.
+fn print_empty_rag_report(max_bytes: u64) {
+    println!("\n\x1b[1m── Canopy RAG Report ──────────────────────────────────────────\x1b[0m");
+    let cap_mb = max_bytes as f64 / (1024.0 * 1024.0);
+    println!(" Limit:  {cap_mb:.0} MB per file (config.toml: rag_max_file_mb)");
+    println!(
+        " {}",
+        crate::rag::size_report::exclusion_summary(0, max_bytes)
+    );
+    println!(
+        "\n No indexed RAG data found yet. Make sure the daemon is running and RAG dirs are configured."
+    );
+}
+
+/// Everything `canopy rag report` prints, gathered once: the header and
+/// the listing are two views of the same data, so they can never disagree
+/// (the listing is exactly the union of the four states the header
+/// counts).
+struct RagReportData<'a> {
+    config: &'a crate::domain::canopy_config::CanopyConfig,
+    chunk_counts: &'a std::collections::HashMap<String, usize>,
+    queue_items: &'a [crate::db::project::RagQueueItem],
+    events_by_file:
+        &'a std::collections::HashMap<String, Vec<&'a crate::db::project::RagFileEvent>>,
+    cats: &'a RagFileCategories,
+    all_files: &'a std::collections::BTreeSet<String>,
+    total_on_disk: usize,
+    indexable_on_disk: usize,
+    oversize_on_disk: usize,
+    max_bytes: u64,
+    footprint: Option<crate::rag::vector_store::StoreFootprint>,
+    store_error: Option<String>,
+}
+
+/// Section: the report header — model, live status, counts, limit,
+/// exclusion summary and queue line.
+///
+/// The status is computed here (and only here) from live daemon state, so
+/// the header's one status line can't contradict the per-file listing.
+fn print_rag_report_summary(db: &Database, report: &RagReportData<'_>) -> Result<()> {
+    let config = report.config;
     let is_paused = db.get_state("rag_paused")?.as_deref() == Some("1");
-    let total_chunks: usize = chunk_counts.values().sum();
-    let processing_items = queue_items
+    let total_chunks: usize = report.chunk_counts.values().sum();
+    let processing_items = report
+        .queue_items
         .iter()
         .filter(|q| q.status == "processing")
         .count();
@@ -410,7 +454,7 @@ async fn handle_rag_report(data_dir: &std::path::Path, db: &Database) -> Result<
         crate::rag::status::read_acquisition_state(db, config.embeddings_model.trim()),
     );
 
-    let oversize_count = cats.oversize.len();
+    let oversize_count = report.cats.oversize.len();
 
     println!("\n\x1b[1m── Canopy RAG Report ──────────────────────────────────────────\x1b[0m");
     println!(
@@ -451,20 +495,18 @@ async fn handle_rag_report(data_dir: &std::path::Path, db: &Database) -> Result<
     }
     println!(
         " Total:  {} indexed file(s), {} chunk(s)",
-        cats.indexed.len(),
+        report.cats.indexed.len(),
         total_chunks
     );
-    let cap_mb = max_bytes as f64 / (1024.0 * 1024.0);
+    let cap_mb = report.max_bytes as f64 / (1024.0 * 1024.0);
     println!(
         " On disk: {} file(s) ({} indexable, {} oversize)",
-        total_on_disk,
-        size_scan.indexable_files.len(),
-        size_scan.oversize_files.len()
+        report.total_on_disk, report.indexable_on_disk, report.oversize_on_disk
     );
-    if !cats.not_yet_indexed.is_empty() {
+    if !report.cats.not_yet_indexed.is_empty() {
         println!(
             " Not yet indexed: {} file(s) — run 'canopy rag backfill'",
-            cats.not_yet_indexed.len()
+            report.cats.not_yet_indexed.len()
         );
     }
     println!(" Limit:  {cap_mb:.0} MB per file (config.toml: rag_max_file_mb)");
@@ -477,92 +519,222 @@ async fn handle_rag_report(data_dir: &std::path::Path, db: &Database) -> Result<
     };
     println!(
         " {excl_icon}{}",
-        crate::rag::size_report::exclusion_summary(oversize_count, max_bytes)
+        crate::rag::size_report::exclusion_summary(oversize_count, report.max_bytes)
     );
-    if !queue_items.is_empty() {
-        let queued = queue_items.iter().filter(|q| q.status == "queued").count();
+    if !report.queue_items.is_empty() {
+        let queued = report
+            .queue_items
+            .iter()
+            .filter(|q| q.status == "queued")
+            .count();
         println!(" Queue:  {} queued, {} indexing", queued, processing_items);
     }
+    print_rag_store_block(report);
+    print_rag_health(db);
+    Ok(())
+}
 
+/// Section: the vector store's footprint and its latest computed health.
+/// The footprint comes from the store the report already opened; health is
+/// read from the daemon's persisted last tick (`rag_health_json`), never
+/// recomputed here — a read-only report must not maintain anything.
+fn print_rag_store_block(report: &RagReportData<'_>) {
+    match &report.footprint {
+        Some(footprint) => {
+            println!(
+                " Store:  {} fragment(s), {} version(s), {:.1} MB on disk",
+                footprint.fragments,
+                footprint.versions,
+                footprint.bytes_on_disk as f64 / (1024.0 * 1024.0)
+            );
+        }
+        None => match &report.store_error {
+            Some(error) => println!(" Store:  \x1b[33m⚠\x1b[0m unavailable ({error})"),
+            None => println!(" Store:  unavailable"),
+        },
+    }
+}
+
+fn print_rag_health(db: &Database) {
+    let health = db
+        .get_state(crate::rag::maintenance::RAG_HEALTH_STATE_KEY)
+        .ok()
+        .flatten()
+        .and_then(|json| serde_json::from_str::<crate::rag::maintenance::RagHealth>(&json).ok());
+    let Some(health) = health else {
+        println!(" Health: not checked yet");
+        return;
+    };
+    println!(
+        " Health: \x1b[1m{}\x1b[0m (checked {})",
+        health.status.as_str(),
+        health.checked_at.format("%Y-%m-%d %H:%M UTC")
+    );
+    for reason in &health.reasons {
+        println!("         \x1b[33m⚠\x1b[0m {reason}");
+    }
+}
+
+/// Open the vector store for a read-only report: `None` plus the reason when
+/// there is no model configured, the model's dimensions are unknown, or the
+/// store cannot be opened. Never recreates the table on an unknown model —
+/// guessing dimensions could drop the real store's schema.
+async fn open_report_store(
+    config: &crate::domain::canopy_config::CanopyConfig,
+) -> Result<(
+    Option<crate::rag::vector_store::VectorStore>,
+    Option<String>,
+)> {
+    let model = config.embeddings_model.trim();
+    if model.is_empty() {
+        return Ok((None, Some("no embeddings model configured".to_string())));
+    }
+    let dimensions = match crate::rag::embedding_client::model_dimensions(model) {
+        Ok(dimensions) => dimensions,
+        Err(error) => return Ok((None, Some(format!("unknown model dimensions: {error}")))),
+    };
+    match crate::rag::vector_store::VectorStore::open_at(
+        &crate::rag::vector_store::VectorStore::default_lancedb_path()?,
+        dimensions,
+        Some(config.rag_vector_cache_entries),
+    )
+    .await
+    {
+        Ok(store) => Ok((Some(store), None)),
+        Err(error) => Ok((None, Some(format!("{error:#}")))),
+    }
+}
+
+/// `canopy rag compact`: ask the running daemon to compact (its own handle
+/// does the work), or — daemon down — compact with this process's own store
+/// handle. Prints the before/after footprint either way.
+async fn handle_rag_compact(data_dir: &std::path::Path) -> Result<()> {
+    if crate::daemon::process::read_pid(data_dir)
+        .is_some_and(crate::daemon::process::is_process_running)
+    {
+        let text =
+            crate::daemon::cli_daemon::call_tool(None, "rag_compact", &serde_json::json!({}))?;
+        println!("{text}");
+        return Ok(());
+    }
+
+    let config = crate::domain::canopy_config::CanopyConfig::load(data_dir);
+    let model = config.embeddings_model.trim();
+    if model.is_empty() {
+        println!("\x1b[33m⚠\x1b[0m  No embeddings model configured — nothing to compact.");
+        return Ok(());
+    }
+    let dimensions = crate::rag::embedding_client::model_dimensions(model)
+        .map_err(|e| anyhow::anyhow!("Cannot compact: unknown embedding model dimensions: {e}"))?;
+    let store = crate::rag::vector_store::VectorStore::open_at(
+        &crate::rag::vector_store::VectorStore::default_lancedb_path()?,
+        dimensions,
+        Some(config.rag_vector_cache_entries),
+    )
+    .await?;
+
+    let (before, after) = store.compact().await?;
+    println!("\n\x1b[1m── RAG Compact ───────────────────────────────────────────────\x1b[0m");
+    println!(" Fragments: {} → {}", before.fragments, after.fragments);
+    println!(" Versions:  {} → {}", before.versions, after.versions);
+    println!(
+        " On disk:   {:.1} MB → {:.1} MB",
+        before.bytes_on_disk as f64 / (1024.0 * 1024.0),
+        after.bytes_on_disk as f64 / (1024.0 * 1024.0)
+    );
+    println!();
+    Ok(())
+}
+
+/// Section: the file listing — one entry per configured file, in sorted
+/// order (a `BTreeSet` union of the four states), then the closing blank
+/// line is the caller's.
+fn print_rag_report_files(report: &RagReportData<'_>) {
     println!("\n\x1b[1m── Files ──────────────────────────────────────────────────────\x1b[0m");
 
-    for file in &all_files {
-        let chunks = chunk_counts.get(file).copied().unwrap_or(0);
-        let in_queue = cats.queued.contains(file);
-        let events = events_by_file
-            .get(file)
-            .map(|v| v.as_slice())
-            .unwrap_or(&[]);
+    for file in report.all_files {
+        print_rag_report_file(file, report);
+    }
+}
 
-        let deleted_count = events.iter().filter(|e| e.event_type == "deleted").count();
-        let last_error = events.iter().find(|e| e.event_type == "error");
-        let file_is_oversize = cats.oversize.contains(file);
+/// One file's entry: status icon, path, and whichever of the size / chunk
+/// / queue / purge / error details apply to it, in the fixed order the
+/// report has always printed them.
+fn print_rag_report_file(file: &str, report: &RagReportData<'_>) {
+    let chunks = report.chunk_counts.get(file).copied().unwrap_or(0);
+    let in_queue = report.cats.queued.contains(file);
+    let events = report
+        .events_by_file
+        .get(file)
+        .map(|v| v.as_slice())
+        .unwrap_or(&[]);
 
-        // Status icon
-        let status = if file_is_oversize {
-            "\x1b[35m⊘\x1b[0m"
-        } else if last_error.is_some() && chunks == 0 {
-            "\x1b[31m✗\x1b[0m"
-        } else if in_queue {
-            "\x1b[33m⏳\x1b[0m"
-        } else if chunks > 0 {
-            "\x1b[32m✓\x1b[0m"
-        } else {
-            "\x1b[90m○\x1b[0m"
-        };
+    let deleted_count = events.iter().filter(|e| e.event_type == "deleted").count();
+    let last_error = events.iter().find(|e| e.event_type == "error");
+    let file_is_oversize = report.cats.oversize.contains(file);
 
-        let short = short_path(file);
-        println!("\n  {} {}", status, short);
-        if file_is_oversize {
-            let size_bytes: Option<u64> = events
-                .first()
-                .and_then(|e| e.detail.as_deref())
-                .and_then(|d| d.parse().ok())
-                .or_else(|| std::fs::metadata(file).ok().map(|m| m.len()));
-            if let Some(bytes) = size_bytes {
-                println!(
-                    "     \x1b[35moversize\x1b[0m: {:.1} MB (exceeds {:.0} MB limit — skipped)",
-                    bytes as f64 / (1024.0 * 1024.0),
-                    cap_mb
-                );
-            } else {
-                println!(
-                    "     \x1b[35moversize\x1b[0m: exceeds {:.0} MB limit — skipped",
-                    cap_mb
-                );
-            }
-        }
-        if chunks > 0 {
-            println!("     chunks: {}", chunks);
-        }
-        if cats.not_yet_indexed.contains(file) {
-            println!("     not yet indexed — run 'canopy rag backfill'");
-        }
-        if deleted_count > 0 {
-            println!("     purged:  {} time(s)", deleted_count);
-        }
-        if in_queue {
-            let item = queue_items.iter().find(|q| q.source_path == *file);
-            if let Some(q) = item {
-                println!(
-                    "     queue:   {} (since {})",
-                    q.status,
-                    format_ts(q.queued_at)
-                );
-            }
-        }
-        if let Some(err) = last_error {
-            let detail = err.detail.as_deref().unwrap_or("(no detail)");
+    // Status icon
+    let status = if file_is_oversize {
+        "\x1b[35m⊘\x1b[0m"
+    } else if last_error.is_some() && chunks == 0 {
+        "\x1b[31m✗\x1b[0m"
+    } else if in_queue {
+        "\x1b[33m⏳\x1b[0m"
+    } else if chunks > 0 {
+        "\x1b[32m✓\x1b[0m"
+    } else {
+        "\x1b[90m○\x1b[0m"
+    };
+
+    let cap_mb = report.max_bytes as f64 / (1024.0 * 1024.0);
+    let short = short_path(file);
+    println!("\n  {} {}", status, short);
+    if file_is_oversize {
+        let size_bytes: Option<u64> = events
+            .first()
+            .and_then(|e| e.detail.as_deref())
+            .and_then(|d| d.parse().ok())
+            .or_else(|| std::fs::metadata(file).ok().map(|m| m.len()));
+        if let Some(bytes) = size_bytes {
             println!(
-                "     \x1b[31merror\x1b[0m:   {} — {}",
-                format_ts(err.occurred_at),
-                crate::tui::truncate_str_keep_tail(detail, 120)
+                "     \x1b[35moversize\x1b[0m: {:.1} MB (exceeds {:.0} MB limit — skipped)",
+                bytes as f64 / (1024.0 * 1024.0),
+                cap_mb
+            );
+        } else {
+            println!(
+                "     \x1b[35moversize\x1b[0m: exceeds {:.0} MB limit — skipped",
+                cap_mb
             );
         }
     }
-
-    println!();
-    Ok(())
+    if chunks > 0 {
+        println!("     chunks: {}", chunks);
+    }
+    if report.cats.not_yet_indexed.contains(file) {
+        println!("     not yet indexed — run 'canopy rag backfill'");
+    }
+    if deleted_count > 0 {
+        println!("     purged:  {} time(s)", deleted_count);
+    }
+    if in_queue {
+        let item = report.queue_items.iter().find(|q| q.source_path == *file);
+        if let Some(q) = item {
+            println!(
+                "     queue:   {} (since {})",
+                q.status,
+                format_ts(q.queued_at)
+            );
+        }
+    }
+    if let Some(err) = last_error {
+        let detail = err.detail.as_deref().unwrap_or("(no detail)");
+        println!(
+            "     \x1b[31merror\x1b[0m:   {} — {}",
+            format_ts(err.occurred_at),
+            crate::tui::truncate_str_keep_tail(detail, 120)
+        );
+    }
 }
 
 fn short_path(path: &str) -> String {
@@ -586,6 +758,47 @@ fn format_ts(ts: i64) -> String {
 mod tests {
     use super::*;
     use clap::{CommandFactory, Parser};
+    use std::io::{Read, Write};
+    use std::os::unix::io::FromRawFd;
+
+    /// Redirects fd 1 into a pipe for the lifetime of the guard, so a print
+    /// section that writes straight to stdout can be asserted on. Safe
+    /// because `cargo nextest` — this crate's mandated runner — gives each
+    /// test its own process.
+    struct StdoutCapture {
+        saved_fd: i32,
+        read_end: std::fs::File,
+    }
+
+    impl StdoutCapture {
+        fn start() -> Self {
+            let mut fds = [0i32; 2];
+            let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
+            assert_eq!(rc, 0, "pipe() failed");
+            let (read_fd, write_fd) = (fds[0], fds[1]);
+            let saved_fd = unsafe { libc::dup(1) };
+            assert!(saved_fd >= 0, "dup(1) failed");
+            std::io::stdout().flush().unwrap();
+            let rc = unsafe { libc::dup2(write_fd, 1) };
+            assert_eq!(rc, 1, "dup2 failed");
+            unsafe { libc::close(write_fd) };
+            StdoutCapture {
+                saved_fd,
+                read_end: unsafe { std::fs::File::from_raw_fd(read_fd) },
+            }
+        }
+
+        fn stop(mut self) -> String {
+            std::io::stdout().flush().unwrap();
+            unsafe {
+                libc::dup2(self.saved_fd, 1);
+                libc::close(self.saved_fd);
+            }
+            let mut buf = String::new();
+            self.read_end.read_to_string(&mut buf).unwrap();
+            buf
+        }
+    }
 
     #[derive(Parser)]
     struct TestCli {
@@ -645,7 +858,7 @@ mod tests {
             embeddings_model: "baai/bge-small-en-v1.5".to_string(),
             ..Default::default()
         };
-        config.save(dir.path()).unwrap();
+        config.save_for_tests(dir.path()).unwrap();
         crate::rag::status::mark_downloading(&db, "baai/bge-small-en-v1.5");
         crate::rag::status::mark_failed(&db, "baai/bge-small-en-v1.5", "connection reset");
 
@@ -665,7 +878,7 @@ mod tests {
             embeddings_model: "baai/bge-small-en-v1.5".to_string(),
             ..Default::default()
         };
-        config.save(dir.path()).unwrap();
+        config.save_for_tests(dir.path()).unwrap();
 
         // Must not error and must not fabricate a state where none exists.
         handle_model_retry(dir.path(), &db).unwrap();
@@ -684,7 +897,7 @@ mod tests {
             embeddings_model: "baai/bge-small-en-v1.5".to_string(),
             ..Default::default()
         };
-        config.save(dir.path()).unwrap();
+        config.save_for_tests(dir.path()).unwrap();
         crate::rag::status::mark_downloading(&db, "baai/bge-small-en-v1.5");
 
         handle_model_retry(dir.path(), &db).unwrap();
@@ -1028,5 +1241,255 @@ mod tests {
     fn backfill_parses_as_canopy_rag_backfill() {
         let cli = TestCli::try_parse_from(["test", "backfill"]).expect("'backfill' should parse");
         assert!(matches!(cli.action, RagAction::Backfill));
+    }
+
+    /// Plan §16: the empty path's exact three-section output — heading,
+    /// limit, exclusion summary, then the "nothing here yet" line.
+    #[test]
+    fn print_empty_rag_report_output_is_the_documented_four_lines() {
+        let cap = StdoutCapture::start();
+        print_empty_rag_report(10 * 1024 * 1024);
+        let out = cap.stop();
+
+        assert!(
+            out.contains("── Canopy RAG Report ──"),
+            "heading missing: {out:?}"
+        );
+        assert!(
+            out.contains(" Limit:  10 MB per file"),
+            "limit missing: {out:?}"
+        );
+        assert!(
+            out.contains("No indexed RAG data found yet."),
+            "empty-report line missing: {out:?}"
+        );
+        assert!(
+            !out.contains(" Files ──"),
+            "empty report must stop before the Files section: {out:?}"
+        );
+    }
+
+    /// Plan §16: a mixed indexed / oversize / queued / not-yet-indexed /
+    /// purged / errored report prints the summary and the listing in the
+    /// fixed order, one entry per file, sorted.
+    #[test]
+    fn print_rag_report_output_covers_mixed_states_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::new(&dir.path().join("t.db")).unwrap();
+        let config = crate::domain::canopy_config::CanopyConfig {
+            embeddings_model: "test-model".to_string(),
+            ..Default::default()
+        };
+
+        let mut chunk_counts = std::collections::HashMap::new();
+        chunk_counts.insert("/docs/a.md".to_string(), 3);
+        // An errored file with chunks already indexed still reads as
+        // indexed, so it exercises the `last_error` + `chunks > 0` arm.
+        chunk_counts.insert("/docs/e.md".to_string(), 1);
+
+        let now = chrono::Utc::now().timestamp();
+        let events: Vec<crate::db::project::RagFileEvent> = vec![
+            crate::db::project::RagFileEvent {
+                id: 1,
+                file_path: "/docs/big.md".to_string(),
+                event_type: "skipped_oversize".to_string(),
+                detail: Some((20 * 1024 * 1024).to_string()),
+                occurred_at: now,
+            },
+            crate::db::project::RagFileEvent {
+                id: 2,
+                file_path: "/docs/e.md".to_string(),
+                event_type: "deleted".to_string(),
+                detail: None,
+                occurred_at: now,
+            },
+            crate::db::project::RagFileEvent {
+                id: 3,
+                file_path: "/docs/e.md".to_string(),
+                event_type: "error".to_string(),
+                detail: Some("boom".to_string()),
+                occurred_at: now,
+            },
+        ];
+        let mut events_by_file: std::collections::HashMap<
+            String,
+            Vec<&crate::db::project::RagFileEvent>,
+        > = std::collections::HashMap::new();
+        for ev in &events {
+            events_by_file
+                .entry(ev.file_path.clone())
+                .or_default()
+                .push(ev);
+        }
+
+        let queue_items: Vec<crate::db::project::RagQueueItem> =
+            vec![crate::db::project::RagQueueItem {
+                source_path: "/docs/c.md".to_string(),
+                status: "queued".to_string(),
+                queued_at: now,
+            }];
+
+        let cats = categorize_rag_files(
+            chunk_counts.keys().cloned(),
+            &[std::path::PathBuf::from("/docs/big.md")],
+            &["/docs/c.md".to_string()],
+            &[
+                std::path::PathBuf::from("/docs/a.md"),
+                std::path::PathBuf::from("/docs/d.md"),
+            ],
+        );
+        let mut all_files = std::collections::BTreeSet::new();
+        all_files.extend(cats.indexed.iter().cloned());
+        all_files.extend(cats.oversize.iter().cloned());
+        all_files.extend(cats.queued.iter().cloned());
+        all_files.extend(cats.not_yet_indexed.iter().cloned());
+
+        let report = RagReportData {
+            config: &config,
+            chunk_counts: &chunk_counts,
+            queue_items: &queue_items,
+            events_by_file: &events_by_file,
+            cats: &cats,
+            all_files: &all_files,
+            total_on_disk: 3,
+            indexable_on_disk: 2,
+            oversize_on_disk: 1,
+            max_bytes: 10 * 1024 * 1024,
+            footprint: Some(crate::rag::vector_store::StoreFootprint {
+                fragments: 3,
+                versions: 7,
+                bytes_on_disk: 1024 * 1024,
+            }),
+            store_error: None,
+        };
+
+        let cap = StdoutCapture::start();
+        print_rag_report_summary(&db, &report).expect("summary prints");
+        print_rag_report_files(&report);
+        let out = cap.stop();
+
+        // Summary section first, then the Files heading, then the sorted
+        // per-file entries.
+        let summary_at = out
+            .find("── Canopy RAG Report ──")
+            .unwrap_or_else(|| panic!("report heading missing: {out:?}"));
+        let files_at = out
+            .find("── Files ──")
+            .unwrap_or_else(|| panic!("Files heading missing: {out:?}"));
+        assert!(summary_at < files_at, "summary must precede the listing");
+        assert!(out.contains(" Model:  test-model"), "{out:?}");
+        assert!(
+            out.contains(" Total:  2 indexed file(s), 4 chunk(s)"),
+            "counts must reconcile with the listing: {out:?}"
+        );
+        assert!(
+            out.contains(" Not yet indexed: 1 file(s)"),
+            "not-yet-indexed line missing: {out:?}"
+        );
+        assert!(
+            out.contains(" Queue:  1 queued"),
+            "queue line missing: {out:?}"
+        );
+
+        let entry = |file: &str| {
+            out.find(file)
+                .unwrap_or_else(|| panic!("{file} missing: {out:?}"))
+        };
+        assert!(
+            entry("/docs/a.md") < entry("/docs/big.md"),
+            "entries must be sorted: {out:?}"
+        );
+        assert!(
+            entry("/docs/big.md") < entry("/docs/c.md"),
+            "sorted: {out:?}"
+        );
+        assert!(entry("/docs/c.md") < entry("/docs/d.md"), "sorted: {out:?}");
+        assert!(out.contains("oversize"), "oversize detail missing: {out:?}");
+        assert!(out.contains("chunks: 3"), "chunk detail missing: {out:?}");
+        assert!(
+            out.contains("not yet indexed — run 'canopy rag backfill'"),
+            "backfill hint missing: {out:?}"
+        );
+        assert!(
+            out.contains("purged:  1 time(s)"),
+            "purge count missing: {out:?}"
+        );
+        assert!(
+            out.contains("queue:   queued"),
+            "queue detail missing: {out:?}"
+        );
+        assert!(out.contains("error"), "error detail missing: {out:?}");
+        assert!(
+            out.contains(" Store:  3 fragment(s), 7 version(s), 1.0 MB on disk"),
+            "store footprint line missing: {out:?}"
+        );
+        assert!(
+            out.contains(" Health: not checked yet"),
+            "health line missing: {out:?}"
+        );
+    }
+
+    /// CB91: `canopy rag compact` is a real subcommand.
+    #[test]
+    fn compact_parses_as_canopy_rag_compact() {
+        let cli = TestCli::try_parse_from(["test", "compact"]).expect("'compact' should parse");
+        assert!(matches!(cli.action, RagAction::Compact));
+    }
+
+    /// The report's store opener refuses early — without touching the real
+    /// store — when there is nothing to open it with.
+    #[tokio::test]
+    async fn open_report_store_reports_no_model_without_opening_a_store() {
+        let (store, error) =
+            open_report_store(&crate::domain::canopy_config::CanopyConfig::default())
+                .await
+                .unwrap();
+        assert!(store.is_none());
+        assert!(
+            error.unwrap().contains("no embeddings model configured"),
+            "expected a model-configuration reason"
+        );
+    }
+
+    /// An unknown model must never open (and could otherwise recreate) the
+    /// real store with guessed dimensions.
+    #[tokio::test]
+    async fn open_report_store_reports_unknown_model_dimensions() {
+        let config = crate::domain::canopy_config::CanopyConfig {
+            embeddings_model: "not/a-real-model".to_string(),
+            ..Default::default()
+        };
+        let (store, error) = open_report_store(&config).await.unwrap();
+        assert!(store.is_none());
+        assert!(
+            error.unwrap().contains("unknown model dimensions"),
+            "expected an unknown-model reason"
+        );
+    }
+
+    /// The persisted health reaches `canopy rag report` verbatim, reasons
+    /// included — the report never recomputes it.
+    #[tokio::test]
+    async fn report_prints_persisted_health_with_reasons() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::new(&dir.path().join("test.db")).unwrap();
+        let health = crate::rag::maintenance::RagHealth {
+            status: crate::rag::maintenance::RagHealthStatus::Degraded,
+            reasons: vec!["store needs compaction: 120 fragments — canopy rag compact".to_string()],
+            checked_at: chrono::Utc::now(),
+        };
+        db.set_state(
+            crate::rag::maintenance::RAG_HEALTH_STATE_KEY,
+            &serde_json::to_string(&health).unwrap(),
+        )
+        .unwrap();
+
+        let cap = StdoutCapture::start();
+        print_rag_health(&db);
+        let out = cap.stop();
+
+        assert!(out.contains(" Health: "), "{out:?}");
+        assert!(out.contains("degraded"), "{out:?}");
+        assert!(out.contains("store needs compaction"), "{out:?}");
     }
 }

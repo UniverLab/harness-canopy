@@ -56,6 +56,12 @@ pub struct Platform {
     pub skills_dir: Option<String>,
     #[serde(default)]
     pub instruction_file: Option<String>,
+    /// Files the harness reads INSTEAD of `instruction_file` when present, in
+    /// order (canopy-registry: claude declares
+    /// ["CLAUDE.md", ".claude/CLAUDE.md", "CLAUDE.local.md"]). Empty for
+    /// platforms with no known precedence files.
+    #[serde(default)]
+    pub instruction_precedence: Vec<String>,
     /// Human product identity from the registry (canopy-registry PR #2),
     /// top-level platform keys (siblings of `name`). Copied onto the
     /// `CliConfig` in `to_platform_with_cli`; display-only, never identity.
@@ -160,9 +166,14 @@ pub(crate) fn load_mcp_fs_root(home: &Path) -> String {
 /// Persist the chosen filesystem root path for reuse across setups and updates.
 pub(crate) fn save_mcp_fs_root(home: &Path, root: &str) {
     let canopy_dir = home.join(".canopy");
-    let mut config = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir);
-    config.mcp_filesystem_root = root.to_string();
-    let _ = config.save(&canopy_dir);
+    // CM51: one writer, so the user's comments survive this write.
+    let _ = crate::domain::settings::writer::write_keys(
+        &canopy_dir,
+        &[(
+            "mcp_filesystem_root",
+            Some(toml_edit::Value::from(root.to_string())),
+        )],
+    );
 }
 #[allow(dead_code)]
 pub(crate) fn is_binary_available(binary: &str) -> bool {
@@ -257,6 +268,7 @@ mod tests {
             server_extras: std::collections::HashMap::new(),
             skills_dir: None,
             instruction_file: Some(".instructions/test.md".to_string()),
+            instruction_precedence: vec![],
             cli: Some(serde_json::json!({
                 "binary": "test-cli",
                 "install": {"type": "none"}
@@ -294,6 +306,7 @@ mod tests {
             server_extras: std::collections::HashMap::new(),
             skills_dir: None,
             instruction_file: None,
+            instruction_precedence: vec![],
             cli: None,
 
             provider: None,
@@ -321,6 +334,7 @@ mod tests {
             server_extras: std::collections::HashMap::new(),
             skills_dir: None,
             instruction_file: None,
+            instruction_precedence: vec![],
             cli: Some(serde_json::json!("not an object")),
 
             provider: None,
@@ -348,6 +362,7 @@ mod tests {
             server_extras: std::collections::HashMap::new(),
             skills_dir: None,
             instruction_file: None,
+            instruction_precedence: vec![],
             provider: Some("Mistral AI".to_string()),
             tool_name: Some("Vibe".to_string()),
             cli: Some(serde_json::json!({"binary": "vibe"})),
@@ -377,6 +392,7 @@ mod tests {
             server_extras: std::collections::HashMap::new(),
             skills_dir: None,
             instruction_file: None,
+            instruction_precedence: vec![],
             cli: Some(serde_json::json!({"binary": "ls"})),
 
             provider: None,
@@ -401,6 +417,7 @@ mod tests {
             server_extras: std::collections::HashMap::new(),
             skills_dir: None,
             instruction_file: None,
+            instruction_precedence: vec![],
             cli: Some(serde_json::json!({"binary": "definitely_not_a_real_binary_xyz123"})),
 
             provider: None,
@@ -425,6 +442,7 @@ mod tests {
             server_extras: std::collections::HashMap::new(),
             skills_dir: None,
             instruction_file: None,
+            instruction_precedence: vec![],
             cli: None,
 
             provider: None,
@@ -475,6 +493,7 @@ mod tests {
         assert!(platform.server_extras.is_empty());
         assert!(platform.skills_dir.is_none());
         assert!(platform.instruction_file.is_none());
+        assert!(platform.instruction_precedence.is_empty());
         assert!(platform.cli.is_none());
     }
 
@@ -494,6 +513,7 @@ mod tests {
             "server_extras": {"canopy": {"tools": ["*"]}},
             "skills_dir": ".full/skills",
             "instruction_file": ".full/instructions.md",
+            "instruction_precedence": ["a.md"],
             "cli": {"binary": "full-cli"}
         }"#;
         let platform: Platform = serde_json::from_str(json).unwrap();
@@ -518,6 +538,7 @@ mod tests {
             platform.instruction_file,
             Some(".full/instructions.md".to_string())
         );
+        assert_eq!(platform.instruction_precedence, vec!["a.md".to_string()]);
         assert!(platform.cli.is_some());
     }
 
@@ -537,6 +558,7 @@ mod tests {
             server_extras: std::collections::HashMap::new(),
             skills_dir: None,
             instruction_file: None,
+            instruction_precedence: vec![],
             cli: None,
 
             provider: None,

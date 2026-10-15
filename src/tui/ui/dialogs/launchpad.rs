@@ -5,6 +5,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 use ratatui::Frame;
 
+use crate::tui::app::dialog::LaunchpadDialog;
 use crate::tui::app::types::App;
 
 use super::{centered_rect, truncate_str, ERROR_COLOR};
@@ -65,9 +66,32 @@ pub fn draw_launchpad_dialog(frame: &mut Frame, app: &App, theme: &Theme) {
         area.height.saturating_sub(2),
     );
 
+    let is_new_selected = dialog.is_new_mission_selected();
     let mut lines: Vec<Line> = Vec::new();
-    let mut mission_row: Option<u16> = None;
+    let mission_row = push_new_mission_lines(&mut lines, dialog, inner, theme);
+    push_recent_mission_lines(&mut lines, dialog, theme);
 
+    lines.push(Line::from(""));
+    lines.push(Line::from(""));
+
+    push_launchpad_footer(&mut lines, dialog, theme);
+
+    frame.render_widget(Paragraph::new(lines).block(Block::default()), inner);
+
+    if is_new_selected {
+        place_mission_cursor(frame, dialog, inner, mission_row);
+    }
+}
+
+/// Append the "New mission" entry and, when selected, its editor row and
+/// validation message. Returns the row the mission text landed on.
+fn push_new_mission_lines<'a>(
+    lines: &mut Vec<Line<'a>>,
+    dialog: &'a LaunchpadDialog,
+    inner: Rect,
+    theme: &Theme,
+) -> Option<u16> {
+    let mut mission_row: Option<u16> = None;
     let is_new_selected = dialog.is_new_mission_selected();
     let new_style = if is_new_selected {
         Style::default()
@@ -102,43 +126,55 @@ pub fn draw_launchpad_dialog(frame: &mut Frame, app: &App, theme: &Theme) {
             lines.push(Line::from(Span::styled(format!("  {message}"), style)));
         }
     }
+    mission_row
+}
 
+/// Append the recent-missions list, or a placeholder when there are none.
+fn push_recent_mission_lines<'a>(
+    lines: &mut Vec<Line<'a>>,
+    dialog: &'a LaunchpadDialog,
+    theme: &Theme,
+) {
     if dialog.recent_missions.is_empty() {
         lines.push(Line::from(Span::styled(
             "No previous missions found for this workspace.",
             Style::default().fg(theme.dim_text),
         )));
-    } else {
-        lines.push(Line::from(Span::styled(
-            "Recent missions:",
-            Style::default().fg(theme.dim_text),
-        )));
-        for (i, mission) in dialog.recent_missions.iter().enumerate() {
-            let item_index = i + 1; // 0 is "New mission"
-            let is_selected = dialog.selected_index == item_index;
-            let style = if is_selected {
-                Style::default()
-                    .bg(theme.selected_bg)
-                    .fg(theme.header_color)
-            } else {
-                Style::default().fg(theme.dim_text)
-            };
-            let marker = if is_selected { ">" } else { " " };
-            lines.push(Line::from(Span::styled(
-                format!(
-                    "  {} [{}] {}",
-                    marker,
-                    item_index + 1,
-                    truncate_str(&mission.mission, 72)
-                ),
-                style,
-            )));
-        }
+        return;
     }
+    lines.push(Line::from(Span::styled(
+        "Recent missions:",
+        Style::default().fg(theme.dim_text),
+    )));
+    for (i, mission) in dialog.recent_missions.iter().enumerate() {
+        let item_index = i + 1; // 0 is "New mission"
+        let is_selected = dialog.selected_index == item_index;
+        let style = if is_selected {
+            Style::default()
+                .bg(theme.selected_bg)
+                .fg(theme.header_color)
+        } else {
+            Style::default().fg(theme.dim_text)
+        };
+        let marker = if is_selected { ">" } else { " " };
+        lines.push(Line::from(Span::styled(
+            format!(
+                "  {} [{}] {}",
+                marker,
+                item_index + 1,
+                truncate_str(&mission.mission, 72)
+            ),
+            style,
+        )));
+    }
+}
 
-    lines.push(Line::from(""));
-    lines.push(Line::from(""));
-
+/// Append the Enter / Up-Down / Esc hint row.
+fn push_launchpad_footer<'a>(
+    lines: &mut Vec<Line<'a>>,
+    dialog: &'a LaunchpadDialog,
+    theme: &Theme,
+) {
     lines.push(Line::from(vec![
         Span::styled(
             "Enter",
@@ -169,26 +205,30 @@ pub fn draw_launchpad_dialog(frame: &mut Frame, app: &App, theme: &Theme) {
         ),
         Span::styled(" cancel", Style::default().fg(theme.dim_text)),
     ]));
+}
 
-    frame.render_widget(Paragraph::new(lines).block(Block::default()), inner);
-
-    if is_new_selected {
-        let mission_prefix = "Mission: ";
-        let mission_value_width = inner
-            .width
-            .saturating_sub(mission_prefix.len() as u16)
-            .max(1) as usize;
-        let (_, cursor_col) =
-            mission_view_window(&dialog.new_mission, dialog.cursor, mission_value_width);
-        let mission_row = mission_row.unwrap_or(0);
-        let cursor_x = inner
-            .x
-            .saturating_add(mission_prefix.len() as u16)
-            .saturating_add(cursor_col as u16)
-            .min(inner.x + inner.width.saturating_sub(1));
-        let cursor_y = inner.y.saturating_add(mission_row);
-        frame.set_cursor_position((cursor_x, cursor_y));
-    }
+/// Place the text cursor at the end of the visible mission text.
+fn place_mission_cursor(
+    frame: &mut Frame,
+    dialog: &LaunchpadDialog,
+    inner: Rect,
+    mission_row: Option<u16>,
+) {
+    let mission_prefix = "Mission: ";
+    let mission_value_width = inner
+        .width
+        .saturating_sub(mission_prefix.len() as u16)
+        .max(1) as usize;
+    let (_, cursor_col) =
+        mission_view_window(&dialog.new_mission, dialog.cursor, mission_value_width);
+    let mission_row = mission_row.unwrap_or(0);
+    let cursor_x = inner
+        .x
+        .saturating_add(mission_prefix.len() as u16)
+        .saturating_add(cursor_col as u16)
+        .min(inner.x + inner.width.saturating_sub(1));
+    let cursor_y = inner.y.saturating_add(mission_row);
+    frame.set_cursor_position((cursor_x, cursor_y));
 }
 
 #[cfg(test)]

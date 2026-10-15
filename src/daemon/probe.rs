@@ -24,7 +24,6 @@
 //! error message that doesn't echo the prompt (`Unsupported model ...`,
 //! `Invalid API Key`) correctly fails the check.
 
-use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -33,13 +32,19 @@ use crate::daemon::handler::redact_secrets;
 use crate::daemon::process::{terminate_process_group_async, KILL_GRACE};
 use crate::domain::canopy_config::CanopyConfig;
 use crate::domain::cli_strategy::CliStrategy;
+
+#[cfg(test)]
 use crate::domain::graphs::{GraphDetails, GraphNodeKind};
 
-/// Default bound on how long a single probe waits for a response — this is a
-/// liveness check, not a capability benchmark, so it stays short.
-pub(crate) const DEFAULT_PROBE_TIMEOUT_SECS: u64 = 30;
+mod targets;
+
+pub(crate) use targets::{
+    graph_targets_with_crews, group_recent_usage, probe_targets, unknown_count, would_fail_count,
+    GraphProbeTarget,
+};
+
 pub(crate) const MIN_PROBE_TIMEOUT_SECS: u64 = 5;
-pub(crate) const MAX_PROBE_TIMEOUT_SECS: u64 = 120;
+pub(crate) const MAX_PROBE_TIMEOUT_SECS: u64 = 300;
 
 /// One platform+model pair to probe. `model: None` means "whatever this
 /// platform's CLI defaults to when no model flag is passed" — not "any
@@ -90,6 +95,11 @@ pub(crate) enum ProbeOutcome {
     /// `platform` names a CLI that isn't in `~/.canopy/config.toml` — no
     /// process was ever spawned.
     NotConfigured,
+    /// The platform is configured but marked `headless = false` — it can host
+    /// interactive sessions only. No process was ever spawned; probing it
+    /// headlessly would fail at run time with an "unknown option" parser
+    /// error that says nothing real about the platform (CM35, freebuff).
+    InteractiveOnly,
     /// The command could not even be built/spawned/waited on (binary not
     /// resolvable, permission denied, a `wait()` syscall failure) — distinct
     /// from `Broken` because the harness's own error-reporting was never
@@ -124,6 +134,7 @@ impl ProbeOutcome {
             Self::WrongBinary => "wrong_binary",
             Self::TimedOut => "timed_out",
             Self::NotConfigured => "not_configured",
+            Self::InteractiveOnly => "interactive_only",
             Self::SpawnFailed => "spawn_failed",
             Self::Unknown => "unknown",
             Self::Substituted => "substituted",
@@ -315,18 +326,17 @@ pub(crate) async fn probe_target(
     let start = Instant::now();
 
     let Some(cli_config) = config.get_cli(&target.platform) else {
-        return ProbeReport {
-            platform: target.platform.clone(),
-            model: target.model.clone(),
-            outcome: ProbeOutcome::NotConfigured,
-            duration_ms: start.elapsed().as_millis(),
-            argv: None,
-            error: Some(format!(
-                "Platform '{}' is not configured in canopy (~/.canopy/config.toml).",
-                target.platform
-            )),
-        };
+        return probe_not_configured(target, start);
     };
+
+    // CM35: a platform marked `headless = false` (freebuff v0.1.2) has no
+    // print/headless invocation at all — building one would spawn a process
+    // whose own parser rejects `--print`/`--headless`/`-p` with "unknown
+    // option", a verdict about canopy's command line, not about the platform.
+    // Report it interactive-only without spawning anything.
+    if !cli_config.headless {
+        return probe_interactive_only(target, start);
+    }
 
     let strategy = CliStrategy::from_cli_config(cli_config);
 
@@ -339,392 +349,357 @@ pub(crate) async fn probe_target(
     // exercised.
     if let Some(model) = target.model.as_deref() {
         if !crate::domain::cli_config::model_flag_selects_model(strategy.model_flag.as_deref()) {
-            return ProbeReport {
-                platform: target.platform.clone(),
-                model: target.model.clone(),
-                outcome: ProbeOutcome::Unknown,
-                duration_ms: start.elapsed().as_millis(),
-                argv: None,
-                error: Some(format!(
-                    "Platform '{}' has no configured way to select a model explicitly \
-                     (no usable model_flag) — cannot validate model '{}' end-to-end. Omit \
-                     `model` to probe the platform's own default instead.",
-                    target.platform, model
-                )),
-            };
+            return probe_unknown_model(target, model, start);
         }
     }
 
-    // CB44: identity check before the probe prompt. When the resolved
-    // binary is a different program answering to the same bare name (e.g.
-    // the Blackbox window manager), report WrongBinary with the resolved
-    // absolute path — never a quota, model, or network problem — and do not
-    // run the probe prompt at all. Platforms with no declared check behave
-    // exactly as today. Dispatch never runs this (probe/doctor only).
-    if cli_config.identity_check.is_some() {
-        let resolved_path = match cli_config.resolve() {
-            Ok((p, _step)) => p,
-            Err(error) => {
-                return ProbeReport {
-                    platform: target.platform.clone(),
-                    model: target.model.clone(),
-                    outcome: ProbeOutcome::SpawnFailed,
-                    duration_ms: start.elapsed().as_millis(),
-                    argv: None,
-                    error: Some(redact_secrets(&error.to_string())),
-                };
-            }
-        };
-        if let Err(wb) =
-            crate::domain::cli_strategy::verify_identity_async(cli_config, &resolved_path).await
-        {
-            let check_cmd = cli_config
-                .identity_check
-                .as_ref()
-                .map(|c| c.cmd.as_str())
-                .unwrap_or("");
-            return ProbeReport {
-                platform: target.platform.clone(),
-                model: target.model.clone(),
-                outcome: ProbeOutcome::WrongBinary,
-                duration_ms: start.elapsed().as_millis(),
-                argv: None,
-                error: Some(redact_secrets(&wb.report(&cli_config.binary, check_cmd))),
-            };
-        }
+    // CB44: identity check before the probe prompt — dispatch never runs
+    // this (probe/doctor only).
+    if let Some(report) = probe_target_identity(target, cli_config, start).await {
+        return report;
+    }
+
+    // CB85: a platform whose binary is a different program is "not
+    // installed" — reported as `spawn_failed` with the not-installed
+    // wording, and never probed.
+    if let Some(report) = probe_target_binary_identity(target, cli_config, start).await {
+        return report;
     }
 
     let token = probe_token();
     let prompt = probe_prompt(&token);
 
-    let mut command = match strategy.build_command(&prompt, target.model.as_deref(), workdir) {
-        Ok(command) => command,
-        Err(error) => {
-            return ProbeReport {
-                platform: target.platform.clone(),
-                model: target.model.clone(),
-                outcome: ProbeOutcome::SpawnFailed,
-                duration_ms: start.elapsed().as_millis(),
-                argv: None,
-                error: Some(redact_secrets(&error.to_string())),
+    let (mut command, argv) =
+        match build_probe_command(&strategy, &prompt, target.model.as_deref(), workdir) {
+            Ok(built) => built,
+            Err(message) => {
+                return probe_failure(target, ProbeOutcome::SpawnFailed, start, None, &message);
             }
-        }
-    };
-    let argv = command_argv(&command);
-    command.stdout(std::process::Stdio::piped());
-    command.stderr(std::process::Stdio::piped());
+        };
 
     let child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
+            return probe_failure(
+                target,
+                ProbeOutcome::SpawnFailed,
+                start,
+                Some(argv),
+                &error.to_string(),
+            );
+        }
+    };
+    // Captured before `wait_with_output` takes ownership of `child`.
+    let pid = child.id();
+
+    run_and_classify_probe(target, child, timeout, start, argv, pid, token).await
+}
+
+/// Builds the platform's real headless command for the probe prompt and
+/// captures its redacted argv, with piped stdout/stderr ready to spawn.
+/// `Err(message)` means the command could not be built at all — the caller
+/// reports `SpawnFailed` with no argv, exactly as before.
+fn build_probe_command(
+    strategy: &CliStrategy,
+    prompt: &str,
+    model: Option<&str>,
+    workdir: Option<&str>,
+) -> Result<(tokio::process::Command, String), String> {
+    let mut command = strategy
+        .build_command(prompt, model, workdir, None)
+        .map_err(|e| e.to_string())?;
+    let argv = command_argv(&command);
+    command.stdout(std::process::Stdio::piped());
+    command.stderr(std::process::Stdio::piped());
+    Ok((command, argv))
+}
+
+/// The "nothing to probe" report: the platform isn't in config.toml at all.
+/// Built directly rather than through [`probe_failure`] because this text
+/// is canopy's own guidance, not captured harness output — there is nothing
+/// in it to redact.
+fn probe_not_configured(target: &ProbeTarget, start: Instant) -> ProbeReport {
+    ProbeReport {
+        platform: target.platform.clone(),
+        model: target.model.clone(),
+        outcome: ProbeOutcome::NotConfigured,
+        duration_ms: start.elapsed().as_millis(),
+        argv: None,
+        error: Some(format!(
+            "Platform '{}' is not configured in canopy (~/.canopy/config.toml).",
+            target.platform
+        )),
+    }
+}
+
+/// The report for a configured-but-interactive-only platform (see the check
+/// in [`probe_target`]): nothing was spawned, and the message is the single
+/// shared wording so it matches every handler rejection byte-for-byte.
+fn probe_interactive_only(target: &ProbeTarget, start: Instant) -> ProbeReport {
+    ProbeReport {
+        platform: target.platform.clone(),
+        model: target.model.clone(),
+        outcome: ProbeOutcome::InteractiveOnly,
+        duration_ms: start.elapsed().as_millis(),
+        error: Some(crate::domain::cli_config::interactive_only_reason(
+            &target.platform,
+        )),
+        argv: None,
+    }
+}
+
+/// The report for a requested model the platform has no usable way to
+/// select — see the check in [`probe_target`] for why `Unknown` (and not
+/// `Reachable`) is the only honest verdict here.
+fn probe_unknown_model(target: &ProbeTarget, model: &str, start: Instant) -> ProbeReport {
+    ProbeReport {
+        platform: target.platform.clone(),
+        model: target.model.clone(),
+        outcome: ProbeOutcome::Unknown,
+        duration_ms: start.elapsed().as_millis(),
+        argv: None,
+        error: Some(format!(
+            "Platform '{}' has no configured way to select a model explicitly \
+             (no usable model_flag) — cannot validate model '{}' end-to-end. Omit \
+             `model` to probe the platform's own default instead.",
+            target.platform, model
+        )),
+    }
+}
+
+/// Every report whose message is captured harness/CLI output: secrets are
+/// redacted here so no caller can ever see them, and `argv` carries the
+/// command only once one was actually built (see [`ProbeReport::argv`]).
+fn probe_failure(
+    target: &ProbeTarget,
+    outcome: ProbeOutcome,
+    start: Instant,
+    argv: Option<String>,
+    message: &str,
+) -> ProbeReport {
+    ProbeReport {
+        platform: target.platform.clone(),
+        model: target.model.clone(),
+        outcome,
+        duration_ms: start.elapsed().as_millis(),
+        argv,
+        error: Some(redact_secrets(message)),
+    }
+}
+
+/// CB44: identity check before the probe prompt. When the resolved binary
+/// is a different program answering to the same bare name (e.g. the
+/// Blackbox window manager), report WrongBinary with the resolved absolute
+/// path — never a quota, model, or network problem — and do not run the
+/// probe prompt at all. Platforms with no declared check behave exactly as
+/// today. `None` means the identity check passed (or none is declared) and
+/// the probe may proceed.
+async fn probe_target_identity(
+    target: &ProbeTarget,
+    cli_config: &crate::domain::cli_config::CliConfig,
+    start: Instant,
+) -> Option<ProbeReport> {
+    cli_config.identity_check.as_ref()?;
+    let resolved_path = match cli_config.resolve() {
+        Ok((p, _step)) => p,
+        Err(error) => {
+            return Some(probe_failure(
+                target,
+                ProbeOutcome::SpawnFailed,
+                start,
+                None,
+                &error.to_string(),
+            ));
+        }
+    };
+    if let Err(wb) =
+        crate::domain::cli_strategy::verify_identity_async(cli_config, &resolved_path).await
+    {
+        let check_cmd = cli_config
+            .identity_check
+            .as_ref()
+            .map(|c| c.cmd.as_str())
+            .unwrap_or("");
+        return Some(probe_failure(
+            target,
+            ProbeOutcome::WrongBinary,
+            start,
+            None,
+            &wb.report(&cli_config.binary, check_cmd),
+        ));
+    }
+    None
+}
+
+/// CB85: identity check for the registry's `identity_args`/`identity_pattern`
+/// pair (the dispatch-enforced sibling of CB44's `identity_check`). `None`
+/// means the platform declares no identity fields, or its binary resolved
+/// and identified correctly, and the probe may proceed. A mismatch or a 5 s
+/// timeout reports `SpawnFailed` with the not-installed message naming the
+/// resolved absolute path — never a quota, model, or network problem — and
+/// the probe prompt is never built.
+async fn probe_target_binary_identity(
+    target: &ProbeTarget,
+    cli_config: &crate::domain::cli_config::CliConfig,
+    start: Instant,
+) -> Option<ProbeReport> {
+    let identity = crate::domain::cli_strategy::BinaryIdentity::from_cli_config(cli_config)?;
+    let resolved_path = match cli_config.resolve() {
+        Ok((path, _step)) => path,
+        Err(error) => {
+            return Some(probe_failure(
+                target,
+                ProbeOutcome::SpawnFailed,
+                start,
+                None,
+                &error.to_string(),
+            ));
+        }
+    };
+    match crate::domain::cli_strategy::ensure_binary_identity(&resolved_path, &identity).await {
+        Ok(()) => None,
+        Err(error) => Some(probe_failure(
+            target,
+            ProbeOutcome::SpawnFailed,
+            start,
+            None,
+            &error.message(),
+        )),
+    }
+}
+
+/// Waits for the spawned probe (bounded by `timeout`) and judges how it
+/// ended: it never answered, the wait itself failed, or it answered and
+/// [`classify_probe_output`] reads the answer.
+async fn run_and_classify_probe(
+    target: &ProbeTarget,
+    child: tokio::process::Child,
+    timeout: Duration,
+    start: Instant,
+    argv: String,
+    pid: Option<u32>,
+    token: String,
+) -> ProbeReport {
+    match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        Err(_elapsed) => probe_timeout_report(target, start, argv, pid),
+        Ok(Err(error)) => probe_failure(
+            target,
+            ProbeOutcome::SpawnFailed,
+            start,
+            Some(argv),
+            &error.to_string(),
+        ),
+        Ok(Ok(output)) => classify_probe_output(target, &output, start, argv, &token),
+    }
+}
+
+/// The timeout verdict: kill the child with the same B12 process-group kill
+/// every other detached spawn in the engine uses on timeout — a probe must
+/// not leak a running child any more than a real node run does.
+fn probe_timeout_report(
+    target: &ProbeTarget,
+    start: Instant,
+    argv: String,
+    pid: Option<u32>,
+) -> ProbeReport {
+    if let Some(pid) = pid {
+        terminate_process_group_async(pid as i64, KILL_GRACE);
+    }
+    ProbeReport {
+        platform: target.platform.clone(),
+        model: target.model.clone(),
+        outcome: ProbeOutcome::TimedOut,
+        duration_ms: start.elapsed().as_millis(),
+        argv: Some(argv),
+        error: None,
+    }
+}
+
+/// Judges a probe that actually answered, in the fixed order: substituted
+/// model, then rejected model, then the probe token, then the platform's
+/// own argument-parser text — each earlier verdict wins, because a
+/// substituted-model response can still contain the token (the fallback
+/// model answered it).
+fn classify_probe_output(
+    target: &ProbeTarget,
+    output: &std::process::Output,
+    start: Instant,
+    argv: String,
+    token: &str,
+) -> ProbeReport {
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let duration_ms = start.elapsed().as_millis();
+
+    // Checked before the token match: a substituted-model response
+    // can still contain the probe token (the fallback model
+    // answered it), which would otherwise be reported `Reachable`
+    // for a model nobody actually validated — the 2026-08-13
+    // `gpt-5.6` case.
+    if target.model.is_some() {
+        if let Some(warning) = detect_model_substitution(&stdout, &stderr) {
             return ProbeReport {
                 platform: target.platform.clone(),
                 model: target.model.clone(),
-                outcome: ProbeOutcome::SpawnFailed,
-                duration_ms: start.elapsed().as_millis(),
-                argv: Some(argv.clone()),
-                error: Some(redact_secrets(&error.to_string())),
-            }
+                outcome: ProbeOutcome::Substituted,
+                duration_ms,
+                argv: Some(argv),
+                error: Some(redact_secrets(&warning)),
+            };
         }
-    };
-    // Captured before `wait_with_output` below takes ownership of `child`.
-    let pid = child.id();
-
-    match tokio::time::timeout(timeout, child.wait_with_output()).await {
-        Err(_elapsed) => {
-            // Same B12 process-group kill every other detached spawn in the
-            // engine uses on timeout — a probe must not leak a running child
-            // any more than a real node run does.
-            if let Some(pid) = pid {
-                terminate_process_group_async(pid as i64, KILL_GRACE);
-            }
-            ProbeReport {
+        if let Some(rejection) = detect_model_rejection(&stdout, &stderr) {
+            return ProbeReport {
                 platform: target.platform.clone(),
                 model: target.model.clone(),
-                outcome: ProbeOutcome::TimedOut,
-                duration_ms: start.elapsed().as_millis(),
-                argv: Some(argv.clone()),
-                error: None,
-            }
+                outcome: ProbeOutcome::Broken,
+                duration_ms,
+                argv: Some(argv),
+                error: Some(redact_secrets(&rejection)),
+            };
         }
-        Ok(Err(error)) => ProbeReport {
+    }
+
+    if stdout.contains(token) || stderr.contains(token) {
+        ProbeReport {
             platform: target.platform.clone(),
             model: target.model.clone(),
-            outcome: ProbeOutcome::SpawnFailed,
-            duration_ms: start.elapsed().as_millis(),
-            argv: Some(argv.clone()),
-            error: Some(redact_secrets(&error.to_string())),
-        },
-        Ok(Ok(output)) => {
-            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            let duration_ms = start.elapsed().as_millis();
-
-            // Checked before the token match: a substituted-model response
-            // can still contain the probe token (the fallback model
-            // answered it), which would otherwise be reported `Reachable`
-            // for a model nobody actually validated — the 2026-08-13
-            // `gpt-5.6` case.
-            if target.model.is_some() {
-                if let Some(warning) = detect_model_substitution(&stdout, &stderr) {
-                    return ProbeReport {
-                        platform: target.platform.clone(),
-                        model: target.model.clone(),
-                        outcome: ProbeOutcome::Substituted,
-                        duration_ms,
-                        argv: Some(argv.clone()),
-                        error: Some(redact_secrets(&warning)),
-                    };
-                }
-                if let Some(rejection) = detect_model_rejection(&stdout, &stderr) {
-                    return ProbeReport {
-                        platform: target.platform.clone(),
-                        model: target.model.clone(),
-                        outcome: ProbeOutcome::Broken,
-                        duration_ms,
-                        argv: Some(argv.clone()),
-                        error: Some(redact_secrets(&rejection)),
-                    };
-                }
-            }
-
-            if stdout.contains(&token) || stderr.contains(&token) {
-                ProbeReport {
-                    platform: target.platform.clone(),
-                    model: target.model.clone(),
-                    outcome: ProbeOutcome::Reachable,
-                    duration_ms,
-                    argv: None,
-                    error: None,
-                }
-            } else {
-                // CB61: the platform answered with its own argument-parser
-                // usage/error text — canopy called it wrong, not a
-                // credentials/network/quota failure on the platform's side.
-                // Checked before `raw_error` below moves stdout/stderr.
-                let outcome = if detect_misconfigured_invocation(&stdout, &stderr).is_some() {
-                    ProbeOutcome::Misconfigured
-                } else {
-                    ProbeOutcome::Broken
-                };
-                // Prefer stderr (where an error is conventionally printed)
-                // but fall back to stdout — the mimocode incident printed
-                // its error to stdout with an empty stderr, exit code 0.
-                let raw_error = if !stderr.is_empty() {
-                    stderr
-                } else if !stdout.is_empty() {
-                    stdout
-                } else {
-                    format!(
-                        "exited {} with no output and no probe token in the response",
-                        output.status.code().unwrap_or(-1)
-                    )
-                };
-                ProbeReport {
-                    platform: target.platform.clone(),
-                    model: target.model.clone(),
-                    outcome,
-                    duration_ms,
-                    argv: Some(argv.clone()),
-                    error: Some(redact_secrets(&raw_error)),
-                }
-            }
+            outcome: ProbeOutcome::Reachable,
+            duration_ms,
+            argv: None,
+            error: None,
         }
-    }
-}
-
-/// Count of reports that are *known* to fail a real run — every outcome
-/// except `Reachable` and `Unknown`. Deliberately excludes `Unknown`: a pair
-/// whose validity could not be determined is not a confirmed failure, and
-/// folding it in here would make `would_fail` claim more certainty than the
-/// probe actually has. Shared by `agent_probe` and `graph_preflight` so the
-/// two tools can never disagree about what counts as "would fail".
-pub(crate) fn would_fail_count(reports: &[ProbeReport]) -> usize {
-    reports
-        .iter()
-        .filter(|r| !r.outcome.reachable() && r.outcome != ProbeOutcome::Unknown)
-        .count()
-}
-
-/// Count of reports whose validity could not be determined at all (see
-/// [`ProbeOutcome::Unknown`]). Reported alongside `would_fail` rather than
-/// folded into it — an unknown pair is not a confirmed pass (excluded from
-/// `would_fail`'s complement) and not a confirmed failure (excluded from
-/// `would_fail` itself), so it needs its own count to stay honest about
-/// which pairs were actually validated.
-pub(crate) fn unknown_count(reports: &[ProbeReport]) -> usize {
-    reports
-        .iter()
-        .filter(|r| r.outcome == ProbeOutcome::Unknown)
-        .count()
-}
-
-/// Probe every target concurrently — a single slow/hanging harness must not
-/// serialize the rest of the sweep. Results are returned in the same order
-/// as `targets`.
-pub(crate) async fn probe_targets(
-    config: &CanopyConfig,
-    targets: &[ProbeTarget],
-    workdir: Option<&str>,
-    timeout: Duration,
-) -> Vec<ProbeReport> {
-    let futures = targets
-        .iter()
-        .map(|target| probe_target(config, target, workdir, timeout));
-    futures::future::join_all(futures).await
-}
-
-/// One distinct platform+model pair referenced somewhere in a graph, plus the
-/// human-readable list of nodes/hooks that reference it — so a caller who
-/// sees a pair fail knows which node(s) that affects, without probing the
-/// same pair twice.
-#[derive(Debug, Clone)]
-pub(crate) struct GraphProbeTarget {
-    pub target: ProbeTarget,
-    pub used_by: Vec<String>,
-}
-
-/// Walk a graph's agent nodes (top-level graph and every spec's graph —
-/// ensemble members are themselves ordinary [`GraphNodeKind::Agent`] rows, so
-/// no separate ensemble query is needed) plus every hook in every event, and
-/// return the distinct platform+model pairs they reference. A platform used
-/// by five nodes appears once, with all five names attached.
-pub(crate) fn distinct_targets_for_graph(details: &GraphDetails) -> Vec<GraphProbeTarget> {
-    let mut by_key: HashMap<(String, Option<String>, Option<String>), usize> = HashMap::new();
-    let mut result: Vec<GraphProbeTarget> = Vec::new();
-
-    let mut record =
-        |platform: Option<&str>, model: Option<&str>, effort: Option<&str>, label: String| {
-            let Some(platform) = platform else { return };
-            let key = (
-                platform.to_string(),
-                model.map(str::to_string),
-                effort.map(str::to_string),
-            );
-            if let Some(&idx) = by_key.get(&key) {
-                result[idx].used_by.push(label);
-            } else {
-                by_key.insert(key.clone(), result.len());
-                result.push(GraphProbeTarget {
-                    target: ProbeTarget {
-                        platform: key.0,
-                        model: key.1,
-                        effort: key.2,
-                    },
-                    used_by: vec![label],
-                });
-            }
+    } else {
+        // CB61: the platform answered with its own argument-parser
+        // usage/error text — canopy called it wrong, not a
+        // credentials/network/quota failure on the platform's side.
+        // Checked before `raw_error` below moves stdout/stderr.
+        let outcome = if detect_misconfigured_invocation(&stdout, &stderr).is_some() {
+            ProbeOutcome::Misconfigured
+        } else {
+            ProbeOutcome::Broken
         };
-
-    for (event, hooks) in &details.lp.hooks {
-        for (idx, hook) in hooks.iter().enumerate() {
-            // Command hooks have no platform — they are not agent targets.
-            record(
-                hook.platform.as_deref(),
-                hook.model.as_deref(),
-                hook.effort.as_deref(),
-                format!("{} hook {}", event.as_str(), idx),
-            );
-        }
-    }
-
-    let all_nodes = details
-        .graph_nodes
-        .iter()
-        .chain(details.specs.iter().flat_map(|spec| spec.nodes.iter()));
-    for node in all_nodes {
-        if node.kind != GraphNodeKind::Agent {
-            continue;
-        }
-        let platform = node
-            .config
-            .get("platform")
-            .or_else(|| node.config.get("cli"))
-            .and_then(Value::as_str);
-        let model = node.config.get("model").and_then(Value::as_str);
-        let effort = node.config.get("effort").and_then(Value::as_str);
-        record(platform, model, effort, format!("node: {}", node.name));
-    }
-
-    result
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct RecentProbeTarget {
-    pub target: ProbeTarget,
-    pub used_by: Vec<String>,
-    pub last_run: chrono::DateTime<chrono::Utc>,
-    pub run_count: i64,
-    pub last_outcome: String,
-}
-
-fn recent_source_label(source: &crate::db::graphs::RecentPairSourceKind) -> String {
-    use crate::db::graphs::RecentPairSourceKind::*;
-    match source {
-        GraphNode {
-            graph_id,
-            graph_name,
-            node_id,
-            node_name,
-        } => format!("graph '{graph_name}' ({graph_id}) — node '{node_name}' ({node_id})"),
-        CompletionHook {
-            graph_id,
-            graph_name,
-            event,
-            hook_index,
-        } => format!("graph '{graph_name}' ({graph_id}) — {event} hook {hook_index}"),
-        BackgroundAgent { agent_id, prompt } => {
-            let preview: String = prompt.chars().take(80).collect();
-            let suffix = if preview.chars().count() < prompt.chars().count() {
-                "..."
-            } else {
-                ""
-            };
-            format!("agent {agent_id} (prompt: \"{preview}{suffix}\")")
-        }
-        SubagentSpawn { workdir } => format!("subagent spawn in workdir '{workdir}'"),
-    }
-}
-
-pub(crate) fn group_recent_usage(
-    rows: &[crate::db::graphs::RecentPairSource],
-) -> Vec<RecentProbeTarget> {
-    let mut indexes: HashMap<(String, Option<String>), usize> = HashMap::new();
-    let mut grouped = Vec::new();
-    for row in rows {
-        let key = (row.platform.clone(), row.model.clone());
-        let index = match indexes.get(&key) {
-            Some(index) => *index,
-            None => {
-                let index = grouped.len();
-                indexes.insert(key.clone(), index);
-                grouped.push(RecentProbeTarget {
-                    target: ProbeTarget {
-                        platform: key.0,
-                        model: key.1,
-                        effort: None,
-                    },
-                    used_by: Vec::new(),
-                    last_run: row.started_at,
-                    run_count: 0,
-                    last_outcome: row.status.clone(),
-                });
-                index
-            }
+        // Prefer stderr (where an error is conventionally printed)
+        // but fall back to stdout — the mimocode incident printed
+        // its error to stdout with an empty stderr, exit code 0.
+        let raw_error = if !stderr.is_empty() {
+            stderr
+        } else if !stdout.is_empty() {
+            stdout
+        } else {
+            format!(
+                "exited {} with no output and no probe token in the response",
+                output.status.code().unwrap_or(-1)
+            )
         };
-        let target = &mut grouped[index];
-        target.run_count += 1;
-        if row.started_at > target.last_run {
-            target.last_run = row.started_at;
-            target.last_outcome = row.status.clone();
-        }
-        let label = recent_source_label(&row.source);
-        if !target.used_by.contains(&label) {
-            target.used_by.push(label);
+        ProbeReport {
+            platform: target.platform.clone(),
+            model: target.model.clone(),
+            outcome,
+            duration_ms,
+            argv: Some(argv),
+            error: Some(redact_secrets(&raw_error)),
         }
     }
-    grouped.sort_by_key(|target| std::cmp::Reverse(target.last_run));
-    grouped
 }
 
 #[cfg(test)]
@@ -786,6 +761,49 @@ mod tests {
         let report = probe_target(&config, &target, None, Duration::from_secs(5)).await;
         assert_eq!(report.outcome, ProbeOutcome::NotConfigured);
         assert!(report.error.unwrap().contains("ghost-cli"));
+    }
+
+    /// CM35: a platform marked `headless = false` is reported
+    /// `interactive_only` and **no process is spawned** — proven by a fixture
+    /// that would `touch` a marker file if it ever executed. The marker's
+    /// absence is the "fake spawner receives no call" assertion; the outcome,
+    /// its `as_str`, the exact shared wording, and a `None` argv pin the rest.
+    /// Breaks if the gate moves after `from_cli_config`/spawn, or if the
+    /// outcome is reported as `not_configured`/`spawn_failed`.
+    #[tokio::test]
+    async fn probe_target_reports_interactive_only_without_spawning() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("spawned-marker");
+        let script = write_script(
+            &dir,
+            "freebuff",
+            &format!("touch '{}'\necho should-not-run\n", marker.display()),
+        );
+        let mut config = config_with_cli("freebuff", &script);
+        config.clis[0].headless = false;
+        let target = ProbeTarget {
+            platform: "freebuff".to_string(),
+            model: None,
+            effort: None,
+        };
+        let report = probe_target(&config, &target, None, Duration::from_secs(5)).await;
+        assert_eq!(report.outcome, ProbeOutcome::InteractiveOnly);
+        assert!(!report.outcome.reachable());
+        assert_eq!(report.outcome.as_str(), "interactive_only");
+        // Classification: a confirmed failure for `would_fail` (a graph node
+        // on this platform really would fail), never folded into `unknown`
+        // (its validity was determined — it cannot run headless at all).
+        assert_eq!(would_fail_count(std::slice::from_ref(&report)), 1);
+        assert_eq!(unknown_count(std::slice::from_ref(&report)), 0);
+        assert_eq!(
+            report.error.as_deref(),
+            Some("platform 'freebuff' is interactive-only (no headless mode)")
+        );
+        assert!(report.argv.is_none());
+        assert!(
+            !marker.exists(),
+            "probe must not spawn a process for an interactive-only platform"
+        );
     }
 
     #[tokio::test]
@@ -1258,6 +1276,94 @@ mod tests {
         assert_eq!(report.outcome, ProbeOutcome::Broken);
     }
 
+    /// CB85: the dispatch-enforced identity pair (`identity_args`/
+    /// `identity_pattern`). The resolved binary answers with the window-
+    /// manager usage line, so the probe reports `spawn_failed` — naming the
+    /// resolved path and ending in the consistent not-installed sentence —
+    /// never a quota, model, or network problem, and the probe prompt is never
+    /// built.
+    #[tokio::test]
+    async fn probe_target_reports_spawn_failed_when_identity_args_pattern_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = write_script(
+            &dir,
+            "blackbox",
+            "if [ \"$1\" = \"--version\" ]; then echo \"blackbox: another window manager is already running on display ':0'\"; else echo \"$1\"; fi\n",
+        );
+        let mut config = config_with_cli("blackbox", &script);
+        config.clis[0].identity_args = Some(vec!["--version".to_string()]);
+        config.clis[0].identity_pattern = Some("(?i)blackbox ?ai".to_string());
+        let target = ProbeTarget {
+            platform: "blackbox".to_string(),
+            model: None,
+            effort: None,
+        };
+        let report = probe_target(&config, &target, None, Duration::from_secs(5)).await;
+        assert_eq!(report.outcome, ProbeOutcome::SpawnFailed);
+        assert!(!report.outcome.reachable());
+        assert_eq!(report.outcome.as_str(), "spawn_failed");
+        let error = report.error.unwrap();
+        assert!(
+            error.contains(&script.to_string_lossy().to_string()),
+            "must name the resolved absolute path: {error}"
+        );
+        assert!(
+            error.contains("is not blackbox"),
+            "must say the binary is not the platform: {error}"
+        );
+        assert!(
+            error.contains("identity check failed: blackbox: another window manager"),
+            "must quote the window-manager line: {error}"
+        );
+    }
+
+    /// CB85: once the identity check fails, the probe prompt is never built
+    /// or spawned — the fixture would echo the token (looking healthy) if the
+    /// probe prompt ever ran; `spawn_failed` proves it didn't.
+    #[tokio::test]
+    async fn probe_target_does_not_run_probe_prompt_when_identity_args_fail() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = write_script(
+            &dir,
+            "blackbox-noprompt",
+            "if [ \"$1\" = \"--version\" ]; then echo 'wrong program'; else echo \"$1\"; fi\n",
+        );
+        let mut config = config_with_cli("blackbox-noprompt", &script);
+        config.clis[0].identity_args = Some(vec!["--version".to_string()]);
+        config.clis[0].identity_pattern = Some("expected-token-xyz".to_string());
+        let target = ProbeTarget {
+            platform: "blackbox-noprompt".to_string(),
+            model: None,
+            effort: None,
+        };
+        let report = probe_target(&config, &target, None, Duration::from_secs(5)).await;
+        assert_eq!(report.outcome, ProbeOutcome::SpawnFailed);
+        assert!(!report.outcome.reachable());
+    }
+
+    /// CB85: a binary that passes the identity check proceeds to the normal
+    /// probe prompt and is `Reachable` when it echoes the token.
+    #[tokio::test]
+    async fn probe_target_reachable_when_identity_args_pattern_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = write_script(
+            &dir,
+            "real-bb",
+            "if [ \"$1\" = \"--version\" ]; then echo 'blackbox ai 1.2.3'; else echo \"$1\"; fi\n",
+        );
+        let mut config = config_with_cli("real-bb", &script);
+        config.clis[0].identity_args = Some(vec!["--version".to_string()]);
+        config.clis[0].identity_pattern = Some("(?i)blackbox ?ai".to_string());
+        let target = ProbeTarget {
+            platform: "real-bb".to_string(),
+            model: None,
+            effort: None,
+        };
+        let report = probe_target(&config, &target, None, Duration::from_secs(5)).await;
+        assert_eq!(report.outcome, ProbeOutcome::Reachable);
+        assert!(report.error.is_none());
+    }
+
     #[tokio::test]
     async fn probe_target_redacts_secrets_in_error_text() {
         let dir = tempfile::tempdir().unwrap();
@@ -1565,7 +1671,7 @@ mod tests {
             completion_hook_runs: vec![],
         };
 
-        let targets = distinct_targets_for_graph(&details);
+        let targets = targets::distinct_targets_for_graph(&details);
         assert_eq!(targets.len(), 2);
         let claude = targets
             .iter()
@@ -1595,6 +1701,8 @@ mod tests {
             queue_id: None,
             workdir_override: None,
             idea: None,
+
+            crew: None,
         };
         let details = GraphDetails {
             lp: sample_graph(Some(hook)),
@@ -1604,7 +1712,7 @@ mod tests {
             completion_hook_runs: vec![],
         };
 
-        let targets = distinct_targets_for_graph(&details);
+        let targets = targets::distinct_targets_for_graph(&details);
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].target.platform, "mimo");
         assert_eq!(targets[0].used_by, vec!["on_completed hook 0"]);
@@ -1630,6 +1738,8 @@ mod tests {
                 queue_id: None,
                 workdir_override: None,
                 idea: None,
+
+                crew: None,
             }],
         );
         hooks.insert(
@@ -1647,6 +1757,8 @@ mod tests {
                 queue_id: None,
                 workdir_override: None,
                 idea: None,
+
+                crew: None,
             }],
         );
         hooks.insert(
@@ -1664,6 +1776,8 @@ mod tests {
                 queue_id: None,
                 workdir_override: None,
                 idea: None,
+
+                crew: None,
             }],
         );
         let mut lp = sample_graph(None);
@@ -1676,7 +1790,7 @@ mod tests {
             completion_hook_runs: vec![],
         };
 
-        let targets = distinct_targets_for_graph(&details);
+        let targets = targets::distinct_targets_for_graph(&details);
         assert_eq!(targets.len(), 2);
         let mimo = targets
             .iter()
@@ -1707,7 +1821,7 @@ mod tests {
             completion_hook_runs: vec![],
         };
 
-        assert!(distinct_targets_for_graph(&details).is_empty());
+        assert!(targets::distinct_targets_for_graph(&details).is_empty());
     }
 
     fn report(outcome: ProbeOutcome) -> ProbeReport {

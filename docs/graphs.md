@@ -23,6 +23,16 @@ Graph
   - `check` — executes a shell command.
   - `gate` — validates previous output (e.g. `output_contains`).
   - `router` — classifies and routes by token matching with fallback.
+    With `"decision": true` in its config, a router instead asks the
+    platform's decision model (a fast typed-choice classifier such as
+    `typesafe/jev`, invoked in print mode with the request JSON on stdin)
+    which declared route to take — no agent is spawned. Routes map onto the
+    model's `criteria` as label/description pairs; the rendered
+    `prompt_template` (with `{{previous_output}}` also available) becomes
+    the request state, and an optional `"min_confidence"` (0–1, default 0)
+    sends low-confidence answers to the declared fallback. The platform must
+    declare a decision-model invocation (`decision_args`) in the registry or
+    the node is refused.
   - `quorum` — engine-managed node that closes an
     [ensemble](#ensembles), never created directly.
 - **Edges** — connect nodes with routing conditions: `pass`, `fail`,
@@ -42,11 +52,47 @@ Agent node prompts support these placeholders:
 | `{{node_id}}` | The node's unique ID |
 | `{{previous_feedback}}` | JSON output of the previous node (truncated if oversized) |
 
-Check node commands additionally support `{{spec_start_head}}` — the
-git HEAD commit at the start of the spec run — and
-`{{spec_committed_head}}` — the git HEAD left behind by the last
-`commit_rights: true` node's own execution during *this* spec run,
-empty until one actually commits (see [Commit rights](#commit-rights)).
+### Check node commands
+
+Check node `command` strings have their own marker vocabulary, separate
+from the agent-prompt table above — a check command cannot use
+`{{spec_content}}`, `{{node_id}}`, `{{previous_feedback}}` or
+`{{output:…}}`. Every marker a check command supports:
+
+| Marker | Expands to | Quoting |
+|---|---|---|
+| `{{graph_name}}` | The graph's name | shell-quoted — safe for values with spaces or quotes |
+| `{{workdir}}` | The directory the command runs in (the graph's workdir, or the run's sandbox worktree / `workdir_override` when one applies) | shell-quoted |
+| `{{spec_id}}` | The spec's unique ID | shell-quoted |
+| `{{spec_name}}` | The spec's name (empty on an idea run) | shell-quoted |
+| `{{spec_start_head}}` | The git HEAD commit at the start of the spec run, empty when the workdir is not a Git repository or on a legacy run | raw — a hex SHA |
+| `{{spec_start_dirty}}` | The number of non-ignored entries reported by `git status --porcelain` at the spec boundary, empty when unknown | raw — a number |
+| `{{spec_committed_head}}` | The git HEAD left behind by the last `commit_rights: true` node's own execution during *this* spec run, empty until one actually commits (see [Commit rights](#commit-rights)) | raw — a hex SHA |
+
+The shell-quoted markers expand to a single POSIX-quoted shell word, so a
+name containing spaces or quotes can never break or inject into the
+command. Write them bare (`{{spec_name}}`) or already single-quoted
+(`'{{spec_name}}'` — the engine strips that exact wrapper so the quoting
+is not doubled), never inside other quotes; a `\{{marker}}` escape stays
+literal text. The raw markers expand unquoted exactly as before.
+
+Any other `{{…}}` marker fails the check node before the command runs: the
+run records `unknown marker {{x}} in check command` and nothing reaches
+the shell. `graph_preflight` reports the same defect as an error before
+spending any probe quota.
+
+Every check command also runs with these environment variables (there is
+no `CANOPY_WORKDIR` — the command's working directory already is the
+workdir):
+
+| Variable | Value |
+|---|---|
+| `CANOPY_SPEC_ID` | The spec's unique ID |
+| `CANOPY_SPEC_NAME` | The spec's name; the empty string on an idea run |
+| `CANOPY_GRAPH_ID` | The graph's unique ID |
+| `CANOPY_GRAPH_NAME` | The graph's name |
+| `CANOPY_SPEC_START_HEAD` | The same value as `{{spec_start_head}}`; the empty string when unknown |
+| `CANOPY_SPEC_FILE` | Absolute path of a file holding the spec's full description — the idea text on an idea run, an empty file for a spec with no description. The engine writes it just before the command runs and removes it once the node finishes, so read it inside the command (quote the expansion: `"$CANOPY_SPEC_FILE"`). There is deliberately no `{{spec_content}}` marker in check commands: a file has no quoting problem and no command-length limit |
 
 `{{spec_start_head}}` only proves *some* commit landed since the spec
 began; it's satisfied just as well by a commit from outside this run
@@ -74,7 +120,12 @@ workdir is currently dirty and a spec on that same workdir ended `Failed`,
 whose last recorded run in **this graph** left the workdir dirty
 (`graph_runs` joined to `spec_end_dirty > 0`); when no run of this graph
 recorded dirt the warning says `dirty before this graph ran` and names no
-spec. When the launch proceeds, the warning says why — `allow_dirty_start` is
+spec. A resuming spec is still refused while another spec on the same workdir
+ended dirty: the refusal names the blocking predecessor — its name (id when
+the name is empty), the graph it ran in, its end status and end time — and,
+when the next spec is resuming its own dirt, says so in the same line. Finish,
+reset or remove that blocking spec (or set `allow_dirty_start`) to proceed.
+When the launch proceeds, the warning says why — `allow_dirty_start` is
 set on the graph, or the next spec is resuming the dirty work it left itself —
 instead of telling you to set a flag. When it blocks, the message says
 `not launched` before the `Set allow_dirty_start` hint. Set
@@ -97,9 +148,13 @@ a concurrent commit from outside this run isn't a concern.
 
 ## Ensembles
 
-An **ensemble** is a group of 2-8 `agent` nodes that receive the same
-prompt in parallel, plus a quorum that waits for every member
-before routing onward. It replaces what would otherwise be N member
+An **ensemble** is a group of `agent` nodes that receive the same prompt,
+plus a quorum that waits for every member before routing onward. A
+`parallel` ensemble runs 2–8 members at once by default (up to 16 if you
+raise `graphs.ensemble_max_members_parallel`). A `cascade` or `round_robin`
+ensemble runs its members one at a time, so it takes 2–16 by default (up to
+32 with `graphs.ensemble_max_members_sequential`). Both caps are listed in
+[Tuning the engine](#tuning-the-engine). It replaces what would otherwise be N member
 nodes, N prompts, and 2N+2 edges wired by hand — `graph_add_ensemble`
 creates the whole unit in one call:
 
@@ -156,7 +211,8 @@ source) alongside its expanded nodes.
 The quorum's consolidated output is one document with a
 `## <platform/model> [pass|fail]` section per member, in member order. The
 quorum reports pass when at least `min_pass` members passed. Member
-execution is capped by a global concurrency limit (default 4) so an
+execution is capped by a global concurrency limit
+(`ensemble_concurrency_cap`, default 4, counted across every graph) so an
 8-member ensemble queues rather than forking every member at once.
 
 By default a **parallel** quorum waits for every member branch to
@@ -198,6 +254,82 @@ through to the next member cold only if the resumed one fails again. A
 member's own `resume: false` still forces a cold start. The TUI graph view renders an ensemble
 collapsed as one box (`name [N models]` + quorum) with live per-member
 state while running, expandable on inspect.
+
+### Availability at dispatch
+
+The roster (`roster_set`, or `canopy roster set` — see the
+[CLI reference](cli-reference.md) and [MCP tools](mcp-tools.md)) declares a
+platform/model pair — or a whole platform — out for a while. At dispatch an
+ensemble simply skips members whose pair is effectively unavailable: a
+`parallel` quorum spawns (and counts) only the available members, a
+`cascade` falls through them in order, and a `round_robin` rotation steps
+over them without leaving the full member list's index space, so a member
+that comes back is picked up where the rotation already is. Nothing is
+edited — the member list stays as written, the filter is re-evaluated at
+every dispatch (a pair declared out mid-run is skipped from its next
+dispatch on), and an entry past its `until` simply reads as available
+again.
+
+An ensemble blocks instead of dispatching when the roster leaves it
+unrunnable: every member unavailable (any kind), or a `parallel` ensemble
+with fewer available members than `min_pass`. A single `agent` node or
+agent hook whose pair is unavailable blocks the spec the same way. These
+blocks go through the ordinary blocked path — the graph pauses with a
+blocker naming the pair and its reason, `on_blocked` fires, and no attempt
+is spent, so an availability block never burns the attempt ceiling; clear
+the entry (or wait out its `until`) and relaunch. `graph_preflight` never
+probes an unavailable pair: it lists them under `skipped_unavailable` and
+counts an ensemble the roster would block as `would_fail`.
+
+### Crews
+
+A **crew** is a named, ordered list of members — `(platform, model, timeout,
+infra-retry budget)` — kept in one place, so the same "designer crew" or
+"implementer crew" is written once instead of copied into every graph. The
+tools are `crew_list`, `crew_get`, `crew_create` (`members` or
+`from_ensemble`), `crew_update` and `crew_delete`; the CLI mirrors them as
+`canopy crew list | show | create --from-ensemble | delete` (member editing
+is MCP/TUI only). `from_ensemble` refuses an ensemble whose members carry a
+per-member `prompt_override` — a review panel with its own angles stays
+literal.
+
+An ensemble binds to a crew with `graph_add_ensemble {crew}` or
+`graph_update_ensemble {crew: "name"}`; `crew: null` unbinds and keeps the
+current member rows as literal members. A crew change is its own call — it
+is never combined with a literal `members` list (or any other ensemble
+field) in one update. A bound ensemble renders the shared
+`prompt_template` for every member. Binding replaces the member rows through
+the one sync path and clamps `min_pass` to the crew size. Member order is
+meaningful: `cascade` tries it in order, `round_robin` rotates through it,
+and a crew-bound `agent` node takes the first member the roster reports
+available.
+
+Editing a crew reaches every bound ensemble at its next dispatch: the engine
+re-syncs a bound ensemble's members just before it dispatches (never while a
+member is in flight), and `crew_update` also syncs every bound ensemble whose
+graph is not `running`/`pausing` immediately. A node or hook names a crew in
+its config (`{"crew": "name"}`) instead of `platform`; `crew_delete` is
+refused while anything still binds the crew and the error lists every
+binding.
+
+### No-verdict blocks
+
+A parallel or round-robin ensemble that exits with no verdict and no
+outgoing `Error` edge cannot route — every member infra-failed or walked
+off without filing a verdict. Rather than failing the spec, the graph
+pauses with a blocker that names the ensemble and the member reasons,
+and the spec is marked `interrupted` (not `failed`). That makes the
+block resumable in place: `graph_continue retry_current_node` re-enters
+the ensemble at its join cursor (already-passed nodes such as the entry
+node are not re-run), and `graph_update_ensemble` lets you rewire the
+members before retrying. A `graph_run` on a blocked (paused + blocker)
+graph refuses and reports the blocker, so a blind relaunch never masks a
+crew that is silently filing nothing; clear the blocker first, or
+`graph_reset` the spec. A **directed run** —
+`graph_continue run_from_node` (or `graph_run --from`) — is the general
+escape hatch: it starts a spec at a node you choose, reusing the recorded
+outputs of every earlier node, and accepts a paused, completed or failed
+graph as long as it has no active run.
 
 ## Commit rights
 
@@ -340,6 +472,44 @@ auto-resumes (useful for quota-limited graphs that fail and need to
 wait before retrying). Call it again with `at` omitted to cancel a
 pending schedule.
 
+If the daemon stops while a node is running — a graceful shutdown or a
+crash — the killed run is finalized as interrupted and routes no edge
+(in particular, never its fail edge). On the next start the graph is
+reconciled to `Paused` with the spec `Interrupted`, and
+`graph_continue` with `retry` re-runs the interrupted node itself with
+the same input it had (the same command for a check node, the same
+`previous_feedback` for an ensemble member) — not whichever node an
+edge would have led to.
+
+When a node is terminated, canopy also ends the harness session that node
+started, for platforms that declare how to end a session (opencode does).
+Without that, a terminated opencode session could be resumed by the
+platform's background service after a restart and edit the repo beside the
+next attempt.
+
+A spec interrupted by a no-verdict ensemble block (see
+[No-verdict blocks](#no-verdict-blocks)) is resumed the same way:
+`graph_continue` with `retry` re-enters the blocked ensemble with its
+current member list, without re-running nodes or specs that already
+passed, and `graph_continue` with `skip` marks that blocked spec
+`skipped` and moves on to the next one. `graph_reset` still restarts
+the blocked spec from its entry node.
+
+When the work up to some node is already done and good — after a crash,
+a rewired ensemble, or a hand fix — a **directed run** starts a spec at
+a node you choose instead of at Start: `graph_continue run_from_node
+--spec <spec>` (or `graph_run --from` for the first spec the run
+executes). It reuses every earlier node's most recent recorded output
+for that spec, sets the spec cursor to the start node, and then runs the
+graph with its normal edges, routers, ensembles and gates. The per-node
+iteration counters restart at 1 (earlier attempts stay in the run
+history). A directed run accepts a `pending`, `paused`, `interrupted`,
+`failed` or `completed` spec on a graph with no active run; a running
+graph refuses. An ensemble is targeted by its name (or its fan-out
+node); a join node or a single member is refused, naming the ensemble.
+If a reachable prompt or check references a node with no recorded output
+for the spec, the run is refused and the missing node is named.
+
 ## Concurrency
 
 Running many graphs at once, against different working directories, is
@@ -388,8 +558,18 @@ already happened does not fire. A hook that fails is recorded and never
 changes the graph's own status, and never stops the remaining hooks of that
 event from running.
 
+Editing hooks on a running graph takes effect for that run: the engine reads
+the graph's stored hooks at the moment each event fires, so a `graph_update`
+landing before an event fires is the edit that fires on the current run's
+remaining events — the same way ensembles, nodes and prompts already take
+effect at the next dispatch. When `graph_update` changes hooks while a run is
+active, its response names those remaining events. An edit made after an
+event already fired does not re-fire it.
+
 Every hook run records the event it served and which hook of that event it
-was (`event`, `hook_index`), and is readable from `graph_get`'s
+was (`event`, `hook_index`), plus a copy of the exact hook config that
+actually fired (`hook_config`) — so a later reader can see what ran even
+after the hooks are edited again. Hook runs are readable from `graph_get`'s
 `completion_hook_runs` and `canopy graph info`'s hook-runs listing alongside
 the graph's node runs.
 
@@ -477,30 +657,43 @@ bound specs:
 | Tool | Description |
 |---|---|
 | `queue_create` | Create an empty queue |
-| `queue_add_spec` | Append a spec to the end of a queue |
+| `queue_add_spec` | Append a spec to a queue — a grouped add lands after the group's last pending member |
 | `queue_list` | List a queue's members (or all queues) |
 | `queue_remove_spec` | Remove a spec from a queue |
 | `queue_reorder` | Full replacement of a queue's order |
+| `queue_set_group` | Set or clear a member's context group |
 
-Pass a queue to `graph_run` via `queue_id`.
+Pass a queue to `graph_run` via `queue_id` (or `canopy graph run <graph>
+--queue <queue-id>`).
+
+**Context groups.** A queue member may carry a `group` label. Grouped
+specs stay together: `queue_add_spec` with a `group` lands the spec right
+after the group's last pending member, and `queue_set_group` (or
+`canopy queue group`) moves a member next to its group. `queue_reorder`
+refuses an order that would split a group's pending members, and reports
+the positions that would have split it; nothing changes on refusal. Members
+of one group share a warm harness session: a grouped spec resumes the
+session captured by its previous successfully-completed sibling instead of
+analysing the repo from cold. Ungrouped members never share a session.
 
 Queue membership is unaffected by `graph_run` — specs stay standalone.
 The `graph info` CLI and `graph_get` MCP tool show queue-driven progress
 by reconstructing what ran from the run history.
 
-## The 32 MCP tools
+## The 36 MCP tools
 
 | Stage | Tools |
 |---|---|
-| Authoring | `graph_create`, `graph_update`, `graph_add_spec`, `graph_update_spec`, `graph_add_node`, `graph_update_node`, `graph_add_edge`, `graph_update_edge`, `graph_delete_edge`, `graph_delete_node`, `graph_add_ensemble`, `graph_update_ensemble`, `graph_delete_ensemble`, `graph_copy_node`, `graph_copy_ensemble`, `graph_audit_node_configs` |
+| Authoring | `graph_create`, `graph_update`, `graph_add_spec`, `graph_update_spec`, `graph_remove_spec`, `graph_add_node`, `graph_update_node`, `graph_add_edge`, `graph_update_edge`, `graph_delete_edge`, `graph_delete_node`, `graph_add_ensemble`, `graph_update_ensemble`, `graph_delete_ensemble`, `graph_copy_node`, `graph_copy_ensemble`, `graph_audit_node_configs` |
 | Sharing | `graph_export`, `graph_import`, `graph_archive`, `graph_restore` |
-| Inspection | `graph_get`, `graph_list`, `graph_node_runs_list`, `graph_node_run_get` |
+| Inspection | `graph_get`, `graph_list`, `graph_crew`, `graph_node_runs_list`, `graph_node_run_get`, `graph_events` |
 | Runtime | `graph_run`, `graph_reset`, `graph_schedule_autorun`, `graph_schedule_continue`, `graph_pause`, `graph_continue`, `graph_complete_node`, `graph_report_blocker`, `graph_preflight` |
 
 Graphs can be authored programmatically by agents through these tools,
 or edited in the [TUI graph editor](tui.md) with inline JSON config
 validation. The `canopy graph` CLI subcommands mirror the runtime tools
-from the terminal: `list`/`info`/`export` are read-only inspection, and
+from the terminal: `list`/`info`/`crew`/`export` are read-only
+inspection, and
 `import`/`run`/`pause`/`continue`/`reset`/`autorun` delegate the
 matching MCP tool to the daemon — a second way to drive a graph when an
 MCP client can't reach it. See the
@@ -531,6 +724,13 @@ name it used. The same two operations exist as MCP tools,
 `graph_import { document, workdir?, name? }`, so a graph is drivable end
 to end through MCP as well as the CLI.
 
+Every daemon database connection waits up to 5 s for a concurrent writer
+before giving up, so imports normally queue behind a busy database rather
+than failing. If the wait still expires, `graph_import` returns
+`graph_import: database busy after 5 s — nothing was written, retry`:
+the import is all-or-nothing, nothing partial is left behind, and the
+call is safe to retry as-is.
+
 What the file **excludes** is deliberate: no ids (edges reference
 nodes by `name`, which is what makes the file reviewable and
 hand-editable — node names must therefore be unique within an exported
@@ -558,9 +758,24 @@ An ensemble's `kind` is carried in the document for `cascade` and
 absent `kind` means on import. Import refuses a `kind` value it does
 not know — naming the ensemble and the value — and refuses a document
 that carries any field it does not know how to restore, as part of
-its all-or-nothing contract. `format_version` 4 remains the newest
-accepted version; 1, 2 and 3 documents import unchanged (they carry fewer fields,
-never more).
+its all-or-nothing contract. `format_version` 5 remains the newest
+accepted version; 1, 2, 3 and 4 documents import unchanged (they carry
+fewer fields, never more).
+
+A [crew](#crews)-bound design travels by name, never by its members:
+`graph_export` writes `crew: "<name>"` on a bound ensemble (with no
+`members` array), on a bound agent node's config, and on a bound agent
+hook — and, since version 5, a graph's event-keyed `hooks` ride along
+in the document as well, which is what gives a bound hook something to
+travel in. `graph_import` keeps the reference when a crew of that name
+exists locally: the ensemble binds and re-materializes the crew's
+members, and a bound node or hook resolves its pair at dispatch from
+the crew. When the name is missing locally the import still succeeds,
+lists every unresolved binding under `missing_crews` (next to
+`nodes_missing_platform`) in the MCP response or the CLI output, and
+leaves the binding pending — a pending ensemble cannot dispatch until
+a crew of that name is created, and `graph_preflight` reports it as
+`would_fail`.
 
 An [ensemble](#ensembles) round-trips as one ensemble — not as its
 expanded member/quorum nodes — via its own `ensembles` array entry.
@@ -584,7 +799,7 @@ ensemble of reviewers, and a committer the quorum routes to on pass.
 
 ```json
 {
-  "format_version": 4,
+  "format_version": 5,
   "name": "implement-and-review",
   "description": "Implement a spec, get two model opinions, then commit.",
   "nodes": [
@@ -665,10 +880,7 @@ moved.
 When a graph fails, the node run history lets you diagnose exactly what
 happened:
 
-```
-canopy graph runs <graph_id> [--node <node_id>] [--limit <n>]
-```
-
+The CLI prints the most recent node runs in `canopy graph info <graph>`.
 Over MCP: `graph_node_runs_list { graph_id, node_id?, spec_id?, limit? }`
 returns the most recent runs first (default 20, capped at 200).
 `graph_node_run_get { run_id }` fetches one run's full stored input and
@@ -679,6 +891,80 @@ boundary.
 This is the second step of failure diagnosis: list to find the
 offending run, then fetch its output here — the exact stderr/stdout/
 reported_output the engine recorded.
+
+## Event log
+
+Every graph keeps its own durable, structured history in the `graph_events`
+table — the engine writes one row per event as the run happens:
+
+| Group | Kinds |
+|---|---|
+| Graph | `graph_started`, `graph_paused`, `graph_resumed`, `graph_completed`, `graph_failed`, `graph_blocked` |
+| Spec | `spec_started`, `spec_completed`, `spec_failed`, `spec_skipped` |
+| Node | `node_started`, `node_finished` (payload: `verdict`, `platform`, `model`, `duration_s`) |
+| Hooks | `hook_fired` (payload: `event`, `mode`, `ok`, `error`) |
+| Config | `config_changed` (a node, ensemble or hook edit made while the graph runs) |
+| Notes | `note` (reserved for the CM47 spec-note mechanism; payload: `owner_name`, `chars`) |
+
+Read it from the CLI:
+
+```
+canopy graph log <graph-id-or-name> [--since <id|RFC3339>] [--kind <k>] [--spec <id>] [--follow]
+```
+
+Each line is `<created_at> <KIND> spec=<name> node=<name> <message>`.
+`--follow` polls the daemon every 2 s and prints new events until Ctrl+C.
+Over MCP, `graph_events { graph_id, since_id?, spec_id?, kinds?, limit?,
+include_payload? }` returns events oldest-first with `next_since_id` for
+paging.
+
+**This replaces the `printf … >> file` logging-hook pattern.** You no longer
+need a command hook that appends to a per-graph log file on `on_completed` /
+`on_failed` — the engine records that history itself, intact and queryable.
+Ordinary logging hooks keep working; they simply stop being necessary.
+
+Unlike the shared activity stream (bounded per workdir, free text), this log
+is never pruned by count. `canopy clean` removes events older than
+`graph_event_retention_days` (default 90) for graphs that are not running.
+
+## Spec notes
+
+Every spec carries one working-memory note per owner: a short document a
+node writes while it works, and that every later node, model and iteration
+of the same spec receives in its prompt. Notes are working memory for the
+next agent, not a log — the history of changes lives in the event log's
+`note` rows above.
+
+**Ownership.** The owner of a note is the node that wrote it — except when
+the writer is an ensemble member, in which case the owner is the ensemble,
+so every member shares the one note and a replacing member continues where
+the cut one left off. Each spec has at most one note per owner, plus one
+`operator` note written by people and orchestrators without a run. A node
+can only write its own note: `spec_note_write` takes no owner argument.
+
+**Writing and reading.** An agent writes with `spec_note_write(run_id,
+body)` — the engine resolves the owner from the active run and refuses a
+`run_id` that is no longer running. The body is at most 2 500 characters;
+longer writes are refused naming the limit. `spec_note_write(spec_id, body)`
+without a `run_id` writes the `operator` note. Read with
+`spec_notes_get(spec_id)` (newest first), or `canopy spec notes <spec-id>`.
+
+**Prompt injection.** Every agent-node prompt gets a `[SPEC NOTES]` section
+before `[REPORTING]` with a 5 000-character budget: the caller's own note
+first, then the Designer's note (the owner of the graph's first agent node
+or ensemble after Start), then the rest newest-first. A note is included
+whole or as a stub naming its owner, size and time — never truncated — so
+the same notes always give the same section bytes.
+
+**Lifetime.** Notes survive bounces, resumes, `graph_continue` and node
+retries of the same spec. `graph_reset` keeps them unless called with
+`clear_notes: true`. Deleting the spec deletes its notes.
+
+**Check nodes.** Before a check node's command runs, the engine writes the
+spec's notes to a temp file — one `## <owner_name>` section per note — and
+exports its path as `CANOPY_SPEC_NOTES_FILE`. A presence check like
+`grep -q '^## Designer' "$CANOPY_SPEC_NOTES_FILE"` needs no `canopy`
+binary inside a check command.
 
 ## Node blueprints
 
@@ -703,3 +989,34 @@ Five builtins are seeded automatically at daemon startup if missing
 `blueprint_list`, `blueprint_create`, and `blueprint_delete` (custom
 only). The TUI sidebar lists available blueprints, and the graph editor
 validates blueprint references inline.
+
+## Tuning the engine
+
+These `[graphs]` settings (see `canopy config list`) adjust the engine's
+retry budgets and caps. Each keeps its default until you set it.
+
+| Setting | Default | What it does |
+|---|---|---|
+| `graphs.max_iterations_per_node` | 5 | Node visits a spec may make before it is blocked (the iteration ceiling). |
+| `graphs.infra_retry_limit` | 2 | Infra-crash retries before the infra failure falls through the error edge. |
+| `graphs.infra_crash_max_seconds` | 60 | Longest an infra crash may last before the retry budget is exhausted. |
+| `graphs.infra_backoff_seconds` | 30 | Backoff between infra retries. |
+| `graphs.straggler_timeout_minutes` | 30 | Default timeout (1–480) for a **new** ensemble; existing ensembles keep theirs. |
+| `graphs.ensemble_max_members_parallel` | 8 (range 2–16) | Largest member count a `parallel` ensemble may have. Lowering it never edits an existing ensemble. |
+| `graphs.ensemble_max_members_sequential` | 16 (range 2–32) | Largest member count for a `cascade`/`round_robin` ensemble, and the largest crew. |
+| `graphs.check_output_max_kib` | 64 (range 16–4096) | Check-output tail kept, in KiB. |
+
+Two more engine settings sit outside the `graphs.` prefix (see
+[CLI reference](cli-reference.md#settings-reference)):
+`spec_attempt_limit` (default 3) caps how many separate executions of a spec
+may fail with a verdict before it is blocked, and `ensemble_concurrency_cap`
+(default 4) caps how many ensemble members run at once across every graph.
+
+The three `graphs.infra_*` settings resolve with this precedence, strongest
+first: **member > ensemble > the platform's `clis[]` entry > the global
+setting**. Nothing else supplies a value.
+
+The member caps (`graphs.ensemble_max_members_parallel` /
+`graphs.ensemble_max_members_sequential`) bound **new** writes only:
+lowering a cap below an existing ensemble's member count never edits that
+ensemble, and an over-cap create is refused with the setting key named.

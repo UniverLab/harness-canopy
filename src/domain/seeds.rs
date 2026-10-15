@@ -180,21 +180,19 @@ pub fn is_name_unique(name: &str, exclude_seed_id: Option<&str>) -> Result<bool,
         }
 
         let seed_id = entry.file_name().to_string_lossy().to_string();
-        if let Some(exclude) = exclude_seed_id {
-            if seed_id == exclude {
-                continue;
-            }
+        if exclude_seed_id == Some(seed_id.as_str()) {
+            continue;
         }
 
         let identity_file = entry.path().join("identity.toml");
-        if identity_file.exists() {
-            if let Ok(content) = std::fs::read_to_string(&identity_file) {
-                if let Ok(identity) = SeedIdentity::from_toml(&content) {
-                    if identity.name.to_lowercase() == target {
-                        return Ok(false);
-                    }
-                }
-            }
+        let Ok(content) = std::fs::read_to_string(&identity_file) else {
+            continue;
+        };
+        let Ok(identity) = SeedIdentity::from_toml(&content) else {
+            continue;
+        };
+        if identity.name.to_lowercase() == target {
+            return Ok(false);
         }
     }
     Ok(true)

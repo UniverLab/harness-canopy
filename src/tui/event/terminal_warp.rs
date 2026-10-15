@@ -37,8 +37,6 @@ fn read_clipboard_from_terminal(app: &App, idx: usize) -> Option<String> {
 
 const DIRECT_SYNC_WAIT_MS: u64 = 35;
 const TAB_SYNC_WAIT_MS: u64 = 90;
-const SCROLL_STEP: usize = 3;
-const PAGE_SCROLL_STEP: usize = 15;
 const ETX: u8 = 0x03;
 const EOT: u8 = 0x04;
 const FF: u8 = 0x0c;
@@ -136,8 +134,8 @@ pub fn handle_terminal_warp_key(
         KeyCode::End => move_cursor_to_end(&mut app.terminal_agents[idx]),
         KeyCode::Up => handle_warp_up_key(app, idx),
         KeyCode::Down => handle_warp_down_key(app, idx),
-        KeyCode::PageUp => scroll_up(&mut app.terminal_agents[idx], PAGE_SCROLL_STEP),
-        KeyCode::PageDown => scroll_down(&mut app.terminal_agents[idx], PAGE_SCROLL_STEP),
+        KeyCode::PageUp => scroll_up(&mut app.terminal_agents[idx], app.tui_settings.page_step),
+        KeyCode::PageDown => scroll_down(&mut app.terminal_agents[idx], app.tui_settings.page_step),
         _ => {}
     }
 
@@ -220,7 +218,7 @@ fn handle_warp_up_key(app: &mut App, idx: usize) {
         return;
     }
 
-    scroll_up(&mut app.terminal_agents[idx], SCROLL_STEP);
+    scroll_up(&mut app.terminal_agents[idx], app.tui_settings.scroll_step);
 }
 
 fn handle_warp_down_key(app: &mut App, idx: usize) {
@@ -229,7 +227,7 @@ fn handle_warp_down_key(app: &mut App, idx: usize) {
         return;
     }
 
-    scroll_down(&mut app.terminal_agents[idx], SCROLL_STEP);
+    scroll_down(&mut app.terminal_agents[idx], app.tui_settings.scroll_step);
 }
 
 fn browse_history_up(app: &mut App, idx: usize) {
@@ -709,8 +707,10 @@ mod tests {
     fn constants_are_sensible() {
         assert!(DIRECT_SYNC_WAIT_MS > 0);
         assert!(TAB_SYNC_WAIT_MS > DIRECT_SYNC_WAIT_MS);
-        assert!(SCROLL_STEP > 0);
-        assert!(PAGE_SCROLL_STEP > SCROLL_STEP);
+        let scroll = crate::domain::settings::default_int("tui.scroll_step");
+        let page = crate::domain::settings::default_int("tui.page_step");
+        assert!(scroll > 0);
+        assert!(page > scroll);
     }
 }
 
@@ -955,6 +955,36 @@ mod alternate_screen_key_routing_tests {
         handle_terminal_direct_pty_key(&mut app, 0, KeyCode::Char('a'), KeyModifiers::NONE)
             .expect("content key handling");
         assert_eq!(&*written.lock().expect("lock written bytes"), b"a");
+        app.terminal_agents[0].kill();
+    }
+
+    /// CM52: the terminal scroll step and page step come from
+    /// `tui.scroll_step` / `tui.page_step`.
+    #[test]
+    fn scroll_and_page_steps_read_the_settings() {
+        let agent = InteractiveAgent::spawn_terminal(
+            "cat",
+            "/tmp",
+            80,
+            24,
+            Some("scroll"),
+            &[],
+            Color::White,
+        )
+        .expect("spawn terminal");
+        let mut app = test_app(agent);
+        app.tui_settings.scroll_step = 1;
+        app.tui_settings.page_step = 5;
+        app.terminal_agents[0].scroll_offset = 100;
+
+        handle_terminal_warp_key(&mut app, 0, KeyCode::Down, KeyModifiers::NONE)
+            .expect("scroll down");
+        assert_eq!(app.terminal_agents[0].scroll_offset, 99);
+
+        handle_terminal_warp_key(&mut app, 0, KeyCode::PageDown, KeyModifiers::NONE)
+            .expect("page down");
+        assert_eq!(app.terminal_agents[0].scroll_offset, 94);
+
         app.terminal_agents[0].kill();
     }
 }

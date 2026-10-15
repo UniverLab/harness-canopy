@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 use super::cli_config::CliConfig;
+use super::settings;
 
 /// Top-level canopy configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,10 +53,6 @@ pub struct CanopyConfig {
     /// Migrated to `rag_personal_dirs` on first load.
     #[serde(default, skip_serializing)]
     pub rag_personal_root: String,
-
-    /// Root path used to discover or group related projects.
-    #[serde(default = "default_projects_root")]
-    pub projects_root: String,
 
     /// Seconds of inactivity after which the (lazily-loaded) embedding model
     /// is dropped from memory. Reloaded transparently on next use.
@@ -139,6 +136,297 @@ pub struct CanopyConfig {
     /// `PanelFace` enum — so this domain crate never depends on the TUI.
     #[serde(default)]
     pub pinned_panel_face: Option<String>,
+
+    /// CM46: how long a graph's durable event log (`graph_events`) is kept
+    /// before `canopy clean` prunes it, in days. Separate from
+    /// `clean.retention_days` (which governs sessions and files) so the two
+    /// histories age independently.
+    #[serde(default = "default_graph_event_retention_days")]
+    pub graph_event_retention_days: u64,
+
+    /// `[scheduler]` settings for the cron scheduler's retry policy.
+    /// `CANOPY_RETRY_ENABLED`, `CANOPY_RETRY_DELAY_MINUTES` and
+    /// `CANOPY_RETRY_MAX` still override these when set.
+    #[serde(default)]
+    pub scheduler: SchedulerConfig,
+
+    /// `[graphs]` settings for the graph engine.
+    #[serde(default)]
+    pub graphs: GraphsConfig,
+
+    /// `[agents]` settings for agents and harnesses.
+    #[serde(default)]
+    pub agents: AgentsConfig,
+
+    /// `[activity]` settings for activity log retention.
+    #[serde(default)]
+    pub activity: ActivityConfig,
+
+    /// `[update]` settings for automatic update checks.
+    #[serde(default)]
+    pub update: UpdateConfig,
+
+    /// `[notifications]` settings for desktop notifications.
+    #[serde(default)]
+    pub notifications: NotificationsConfig,
+
+    /// `[tui]` settings for the terminal UI.
+    #[serde(default)]
+    pub tui: TuiConfig,
+}
+
+/// Retry policy of the cron scheduler, read from the `[scheduler]` table in
+/// `config.toml`. A failed scheduled run (e.g. a CLI hitting its quota) is
+/// re-attempted after `retry_delay_minutes`, up to `retry_max` times,
+/// instead of waiting for its next cron slot.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SchedulerConfig {
+    #[serde(default = "default_retry_enabled")]
+    pub retry_enabled: bool,
+    #[serde(default = "default_retry_delay_minutes")]
+    pub retry_delay_minutes: u64,
+    #[serde(default = "default_retry_max")]
+    pub retry_max: u32,
+}
+
+impl Default for SchedulerConfig {
+    fn default() -> Self {
+        Self {
+            retry_enabled: default_retry_enabled(),
+            retry_delay_minutes: default_retry_delay_minutes(),
+            retry_max: default_retry_max(),
+        }
+    }
+}
+
+fn default_retry_enabled() -> bool {
+    settings::default_bool("scheduler.retry_enabled")
+}
+
+fn default_retry_delay_minutes() -> u64 {
+    settings::default_duration_units("scheduler.retry_delay_minutes")
+}
+
+fn default_retry_max() -> u32 {
+    settings::default_int("scheduler.retry_max") as u32
+}
+
+/// Settings for the graph engine. Read from the `[graphs]` table in
+/// `config.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphsConfig {
+    #[serde(default = "default_max_iterations_per_node")]
+    pub max_iterations_per_node: usize,
+    #[serde(default = "default_infra_retry_limit")]
+    pub infra_retry_limit: u32,
+    #[serde(default = "default_infra_crash_max_seconds")]
+    pub infra_crash_max_seconds: u64,
+    #[serde(default = "default_infra_backoff_seconds")]
+    pub infra_backoff_seconds: u64,
+    #[serde(default = "default_straggler_timeout_minutes")]
+    pub straggler_timeout_minutes: u64,
+    #[serde(default = "default_ensemble_max_members_parallel")]
+    pub ensemble_max_members_parallel: usize,
+    #[serde(default = "default_ensemble_max_members_sequential")]
+    pub ensemble_max_members_sequential: usize,
+    #[serde(default = "default_check_output_max_kib")]
+    pub check_output_max_kib: u64,
+}
+
+impl Default for GraphsConfig {
+    fn default() -> Self {
+        Self {
+            max_iterations_per_node: default_max_iterations_per_node(),
+            infra_retry_limit: default_infra_retry_limit(),
+            infra_crash_max_seconds: default_infra_crash_max_seconds(),
+            infra_backoff_seconds: default_infra_backoff_seconds(),
+            straggler_timeout_minutes: default_straggler_timeout_minutes(),
+            ensemble_max_members_parallel: default_ensemble_max_members_parallel(),
+            ensemble_max_members_sequential: default_ensemble_max_members_sequential(),
+            check_output_max_kib: default_check_output_max_kib(),
+        }
+    }
+}
+
+fn default_max_iterations_per_node() -> usize {
+    settings::default_int("graphs.max_iterations_per_node") as usize
+}
+
+fn default_infra_retry_limit() -> u32 {
+    settings::default_int("graphs.infra_retry_limit") as u32
+}
+
+fn default_infra_crash_max_seconds() -> u64 {
+    settings::default_int("graphs.infra_crash_max_seconds") as u64
+}
+
+fn default_infra_backoff_seconds() -> u64 {
+    settings::default_int("graphs.infra_backoff_seconds") as u64
+}
+
+fn default_straggler_timeout_minutes() -> u64 {
+    settings::default_int("graphs.straggler_timeout_minutes") as u64
+}
+
+fn default_ensemble_max_members_parallel() -> usize {
+    settings::default_int("graphs.ensemble_max_members_parallel") as usize
+}
+
+fn default_ensemble_max_members_sequential() -> usize {
+    settings::default_int("graphs.ensemble_max_members_sequential") as usize
+}
+
+fn default_check_output_max_kib() -> u64 {
+    settings::default_int("graphs.check_output_max_kib") as u64
+}
+
+/// Settings for agents and harnesses. Read from the `[agents]` table in
+/// `config.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentsConfig {
+    #[serde(default = "default_probe_timeout_seconds")]
+    pub probe_timeout_seconds: u64,
+}
+
+impl Default for AgentsConfig {
+    fn default() -> Self {
+        Self {
+            probe_timeout_seconds: default_probe_timeout_seconds(),
+        }
+    }
+}
+
+fn default_probe_timeout_seconds() -> u64 {
+    settings::default_int("agents.probe_timeout_seconds") as u64
+}
+
+/// Settings for activity log retention. Read from the `[activity]` table in
+/// `config.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivityConfig {
+    #[serde(default = "default_retention_per_workdir")]
+    pub retention_per_workdir: usize,
+}
+
+impl Default for ActivityConfig {
+    fn default() -> Self {
+        Self {
+            retention_per_workdir: default_retention_per_workdir(),
+        }
+    }
+}
+
+fn default_retention_per_workdir() -> usize {
+    settings::default_int("activity.retention_per_workdir") as usize
+}
+
+/// Settings for automatic update checks. Read from the `[update]` table in
+/// `config.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateConfig {
+    #[serde(default = "default_update_check_enabled")]
+    pub check_enabled: bool,
+    #[serde(default = "default_update_check_interval_hours")]
+    pub check_interval_hours: u64,
+}
+
+impl Default for UpdateConfig {
+    fn default() -> Self {
+        Self {
+            check_enabled: default_update_check_enabled(),
+            check_interval_hours: default_update_check_interval_hours(),
+        }
+    }
+}
+
+fn default_update_check_enabled() -> bool {
+    settings::default_bool("update.check_enabled")
+}
+
+fn default_update_check_interval_hours() -> u64 {
+    settings::default_int("update.check_interval_hours") as u64
+}
+
+/// Settings for desktop notifications. Read from the `[notifications]` table in
+/// `config.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotificationsConfig {
+    #[serde(default = "default_notifications_enabled")]
+    pub enabled: bool,
+}
+
+impl Default for NotificationsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_notifications_enabled(),
+        }
+    }
+}
+
+fn default_notifications_enabled() -> bool {
+    settings::default_bool("notifications.enabled")
+}
+
+/// Settings for the terminal UI. Read from the `[tui]` table in
+/// `config.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TuiConfig {
+    #[serde(default = "default_datetime_format")]
+    pub datetime_format: String,
+    #[serde(default = "default_time_format")]
+    pub time_format: String,
+    #[serde(default = "default_panel_dwell_seconds")]
+    pub panel_dwell_seconds: u64,
+    #[serde(default = "default_brians_brain")]
+    pub brians_brain: bool,
+    #[serde(default = "default_atmosphere")]
+    pub atmosphere: bool,
+    #[serde(default = "default_scroll_step")]
+    pub scroll_step: usize,
+    #[serde(default = "default_page_step")]
+    pub page_step: usize,
+}
+
+impl Default for TuiConfig {
+    fn default() -> Self {
+        Self {
+            datetime_format: default_datetime_format(),
+            time_format: default_time_format(),
+            panel_dwell_seconds: default_panel_dwell_seconds(),
+            brians_brain: default_brians_brain(),
+            atmosphere: default_atmosphere(),
+            scroll_step: default_scroll_step(),
+            page_step: default_page_step(),
+        }
+    }
+}
+
+fn default_datetime_format() -> String {
+    settings::default_string("tui.datetime_format")
+}
+
+fn default_time_format() -> String {
+    settings::default_string("tui.time_format")
+}
+
+fn default_panel_dwell_seconds() -> u64 {
+    settings::default_int("tui.panel_dwell_seconds") as u64
+}
+
+fn default_brians_brain() -> bool {
+    settings::default_bool("tui.brians_brain")
+}
+
+fn default_atmosphere() -> bool {
+    settings::default_bool("tui.atmosphere")
+}
+
+fn default_scroll_step() -> usize {
+    settings::default_int("tui.scroll_step") as usize
+}
+
+fn default_page_step() -> usize {
+    settings::default_int("tui.page_step") as usize
 }
 
 /// Highest per-file indexing cap a user may configure, in MB. Text/PDF
@@ -148,7 +436,7 @@ pub struct CanopyConfig {
 pub const RAG_MAX_FILE_MB_CEILING: u32 = 100;
 
 fn default_rag_max_file_mb() -> u32 {
-    10
+    settings::default_int("rag_max_file_mb") as u32
 }
 
 /// Kept equal to `rag::vector_store::DEFAULT_INDEX_CACHE_ENTRIES` (see that
@@ -157,11 +445,11 @@ fn default_rag_max_file_mb() -> u32 {
 /// `vector_store` at its own crate root via `#[path]`, without a `rag`
 /// module wrapping it — `crate::rag::vector_store` doesn't resolve there.
 fn default_rag_vector_cache_entries() -> u32 {
-    64
+    settings::default_int("rag_vector_cache_entries") as u32
 }
 
 fn default_announcements_enabled() -> bool {
-    true
+    settings::default_bool("announcements_enabled")
 }
 
 /// Validates a configured (or user-entered) per-file indexing size cap.
@@ -224,7 +512,7 @@ fn default_skill_sources() -> Vec<SkillSourceConfig> {
 }
 
 fn default_skill_ttl_minutes() -> u64 {
-    15
+    settings::default_duration_units("skills.ttl_minutes")
 }
 
 /// Settings for `canopy clean` (soft cleanup). Read from the `[clean]` table
@@ -237,14 +525,22 @@ pub struct CleanConfig {
     /// `canopy clean --older-than <days>`.
     #[serde(default = "default_retention_days")]
     pub retention_days: u64,
+    /// Minimum deleted rows to trigger VACUUM during clean.
+    #[serde(default = "default_reclaim_min_deleted_rows")]
+    pub reclaim_min_deleted_rows: usize,
 }
 
 impl Default for CleanConfig {
     fn default() -> Self {
         Self {
             retention_days: default_retention_days(),
+            reclaim_min_deleted_rows: default_reclaim_min_deleted_rows(),
         }
     }
+}
+
+fn default_reclaim_min_deleted_rows() -> usize {
+    settings::default_int("clean.reclaim_min_deleted_rows") as usize
 }
 
 /// Settings for the `agent_models` catalog cache. Read from the `[models]`
@@ -281,11 +577,11 @@ impl Default for ModelsConfig {
 }
 
 fn default_catalog_ttl_minutes() -> u64 {
-    super::models_db::DEFAULT_CATALOG_TTL.as_secs() / 60
+    settings::default_duration_units("models.catalog_ttl_minutes")
 }
 
 fn default_native_ttl_minutes() -> u64 {
-    super::models_db::DEFAULT_NATIVE_TTL.as_secs() / 60
+    settings::default_duration_units("models.native_ttl_minutes")
 }
 
 impl ModelsConfig {
@@ -302,7 +598,7 @@ impl ModelsConfig {
 }
 
 fn default_retention_days() -> u64 {
-    7
+    settings::default_duration_units("clean.retention_days")
 }
 
 /// Preferred unit for temperature display.
@@ -315,40 +611,31 @@ pub enum TemperatureUnit {
 }
 
 fn default_mcp_root() -> String {
-    dirs::home_dir()
-        .map(|h| h.to_string_lossy().to_string())
-        .unwrap_or_else(|| "/".to_string())
+    settings::default_string("mcp_filesystem_root")
 }
 
 fn default_similarity_threshold() -> f32 {
-    0.25
+    settings::default_float("similarity_threshold") as f32
 }
 
 fn default_embeddings_idle_unload_secs() -> u64 {
-    600
+    settings::default_duration_units("embeddings_idle_unload_secs")
 }
 
 fn default_ensemble_concurrency_cap() -> usize {
-    4
+    settings::default_int("ensemble_concurrency_cap") as usize
 }
 
 fn default_spec_attempt_limit() -> usize {
-    3
+    settings::default_int("spec_attempt_limit") as usize
+}
+
+fn default_graph_event_retention_days() -> u64 {
+    settings::default_duration_units("graph_event_retention_days")
 }
 
 fn default_theme() -> String {
-    "classic".to_string()
-}
-
-fn default_projects_root() -> String {
-    if let Some(home) = dirs::home_dir() {
-        let preferred = home.join("Documents").join("Projects");
-        if preferred.exists() {
-            return preferred.to_string_lossy().to_string();
-        }
-        return home.to_string_lossy().to_string();
-    }
-    "/".to_string()
+    settings::default_string("theme")
 }
 
 impl CanopyConfig {
@@ -359,6 +646,10 @@ impl CanopyConfig {
             .ok()
             .and_then(|content| toml::from_str::<CanopyConfig>(&content).ok())
             .unwrap_or_default();
+        // CM51 (D1): the `CANOPY_RETRY_*` variables overlay the `[scheduler]`
+        // table. Injected as a closure so tests never touch the process
+        // environment.
+        settings::apply_env_overrides(&mut config, &|key| std::env::var(key).ok());
         // Migrate legacy single-root field to the new multi-dir vec.
         if config.rag_personal_dirs.is_empty() && !config.rag_personal_root.is_empty() {
             config
@@ -368,8 +659,13 @@ impl CanopyConfig {
         config
     }
 
-    /// Save config to `~/.canopy/config.toml`.
-    pub fn save(&self, canopy_dir: &Path) -> std::io::Result<()> {
+    /// Serialize this config to `~/.canopy/config.toml`.
+    ///
+    /// Test-only since CM51: `config.toml` has one writer
+    /// (`settings::writer`), which edits the file with `toml_edit` so the
+    /// user's comments survive.
+    #[cfg(test)]
+    pub fn save_for_tests(&self, canopy_dir: &Path) -> std::io::Result<()> {
         std::fs::create_dir_all(canopy_dir)?;
         let content = toml::to_string_pretty(self).unwrap_or_default();
         std::fs::write(canopy_dir.join("config.toml"), content)
@@ -425,7 +721,6 @@ impl Default for CanopyConfig {
             similarity_threshold: default_similarity_threshold(),
             rag_personal_dirs: Vec::new(),
             rag_personal_root: String::new(),
-            projects_root: default_projects_root(),
             embeddings_idle_unload_secs: default_embeddings_idle_unload_secs(),
             ensemble_concurrency_cap: default_ensemble_concurrency_cap(),
             spec_attempt_limit: default_spec_attempt_limit(),
@@ -437,6 +732,14 @@ impl Default for CanopyConfig {
             rag_vector_cache_entries: default_rag_vector_cache_entries(),
             announcements_enabled: default_announcements_enabled(),
             pinned_panel_face: None,
+            graph_event_retention_days: default_graph_event_retention_days(),
+            scheduler: SchedulerConfig::default(),
+            graphs: GraphsConfig::default(),
+            agents: AgentsConfig::default(),
+            activity: ActivityConfig::default(),
+            update: UpdateConfig::default(),
+            notifications: NotificationsConfig::default(),
+            tui: TuiConfig::default(),
         }
     }
 }
@@ -499,7 +802,7 @@ mod tests {
             rag_max_file_mb: 25,
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
 
         let loaded = CanopyConfig::load(&canopy_dir);
         assert_eq!(loaded.rag_max_file_mb, 25);
@@ -585,7 +888,7 @@ mod tests {
             },
             ..Default::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
 
         let loaded = CanopyConfig::load(&canopy_dir);
         assert_eq!(loaded.models.catalog_ttl_minutes, 120);
@@ -615,7 +918,7 @@ mod tests {
             theme: "modern".to_string(),
             ..CanopyConfig::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
 
         let loaded = CanopyConfig::load(&canopy_dir);
         assert_eq!(loaded.theme, "modern");
@@ -633,9 +936,8 @@ mod tests {
         config.embeddings_model = "custom-embed".to_string();
         config.similarity_threshold = 0.35;
         config.rag_personal_dirs = vec!["/rag/home".to_string(), "/rag/docs".to_string()];
-        config.projects_root = "/projects".to_string();
 
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
 
         let loaded = CanopyConfig::load(&canopy_dir);
         assert!(loaded.is_configured());
@@ -643,7 +945,9 @@ mod tests {
         assert_eq!(loaded.temperature_unit, TemperatureUnit::Fahrenheit);
         assert_eq!(loaded.embeddings_model, "custom-embed");
         assert_eq!(loaded.rag_personal_dirs, vec!["/rag/home", "/rag/docs"]);
-        assert_eq!(loaded.projects_root, "/projects");
+        // CM51 removed `projects_root`; it must never come back.
+        let text = std::fs::read_to_string(canopy_dir.join("config.toml")).unwrap();
+        assert!(!text.contains("projects_root"), "{text}");
     }
 
     #[test]
@@ -742,7 +1046,7 @@ mod tests {
             },
             ..CanopyConfig::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
 
         let loaded = CanopyConfig::load(&canopy_dir);
         assert_eq!(loaded.skills.sources.len(), 2);
@@ -772,7 +1076,7 @@ mod tests {
             ensemble_concurrency_cap: 8,
             ..CanopyConfig::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
 
         let loaded = CanopyConfig::load(&canopy_dir);
         assert_eq!(loaded.ensemble_concurrency_cap, 8);
@@ -787,7 +1091,7 @@ mod tests {
             spec_attempt_limit: 5,
             ..CanopyConfig::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
 
         let loaded = CanopyConfig::load(&canopy_dir);
         assert_eq!(loaded.spec_attempt_limit, 5);
@@ -837,7 +1141,7 @@ mod tests {
             announcements_enabled: true,
             ..CanopyConfig::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
 
         let loaded = CanopyConfig::load(&canopy_dir);
         assert!(loaded.announcements_enabled);
@@ -853,7 +1157,7 @@ mod tests {
             announcements_enabled: false,
             ..CanopyConfig::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
 
         let loaded = CanopyConfig::load(&canopy_dir);
         assert!(!loaded.announcements_enabled);
@@ -887,7 +1191,7 @@ mod tests {
             pinned_panel_face: Some("knowledge".to_string()),
             ..CanopyConfig::default()
         };
-        config.save(&canopy_dir).unwrap();
+        config.save_for_tests(&canopy_dir).unwrap();
 
         let loaded = CanopyConfig::load(&canopy_dir);
         assert_eq!(loaded.pinned_panel_face.as_deref(), Some("knowledge"));

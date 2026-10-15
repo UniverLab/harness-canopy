@@ -10,6 +10,28 @@ use tokio::process::Command;
 
 use anyhow::{Context, Result};
 
+mod binary_identity;
+mod identity;
+mod template;
+
+use template::TemplateArgs;
+
+#[cfg(test)]
+use identity::{truncate_identity_output, IDENTITY_CHECK_OUTPUT_LIMIT};
+// `examples/rag_search.rs` re-includes `src/domain` via `#[path]` as a private
+// module, so these re-exports look unused in that crate even though the daemon
+// (probe/doctor) uses them. Same pattern as `domain::graphs`' re-export.
+#[allow(unused_imports)]
+pub use identity::{verify_identity, verify_identity_async, WrongBinaryError};
+// Same `#[allow(unused_imports)]` pattern as `identity` above: `examples/rag_search.rs`
+// re-includes `src/domain` via `#[path]` as a private module, so these re-exports
+// look unused in that crate even though probe/dispatch/doctor use them.
+#[allow(unused_imports)]
+pub use binary_identity::{
+    ensure_binary_identity, ensure_binary_identity_blocking, ensure_cli_installed,
+    ensure_cli_installed_in, BinaryIdentity, NotInstalled,
+};
+
 /// Strategy for building CLI commands from registry config.
 #[derive(Clone)]
 pub struct CliStrategy {
@@ -46,6 +68,21 @@ pub struct CliStrategy {
     ///
     /// [`CliConfig::session_id_pattern`]: super::cli_config::CliConfig::session_id_pattern
     pub session_id_pattern: Option<String>,
+    /// Flag that sets the session title at spawn. See
+    /// [`CliConfig::session_title_flag`].
+    ///
+    /// [`CliConfig::session_title_flag`]: super::cli_config::CliConfig::session_title_flag
+    pub session_title_flag: Option<String>,
+    /// Args to list sessions as JSON. See
+    /// [`CliConfig::session_list_args`].
+    ///
+    /// [`CliConfig::session_list_args`]: super::cli_config::CliConfig::session_list_args
+    pub session_list_args: Option<Vec<String>>,
+    /// Args to end a session by id (with `{session_id}` substitution). See
+    /// [`CliConfig::session_end_args`].
+    ///
+    /// [`CliConfig::session_end_args`]: super::cli_config::CliConfig::session_end_args
+    pub session_end_args: Option<Vec<String>>,
     /// Headless flag that resumes a specific session by id (RS2), e.g.
     /// `"--session"` (opencode/mimo/kilo), `"--resume"` (qwen/claude), or
     /// `"--fork"` (cn). The id is appended as the next argument, before the
@@ -65,6 +102,17 @@ pub struct CliStrategy {
     /// Declarative argv template. See [`CliConfig::invocation_template`].
     pub invocation_template: Option<String>,
     pub effort_declaration: Option<super::cli_config::EffortDeclaration>,
+    /// Extra headless flags for decision-model invocation (CB88). See
+    /// [`CliConfig::decision_args`].
+    ///
+    /// [`CliConfig::decision_args`]: super::cli_config::CliConfig::decision_args
+    pub decision_args: Option<String>,
+    /// CB85: identity declaration enforced on dispatch. `None` for every
+    /// platform that does not declare both `identity_args` and
+    /// `identity_pattern` — those keep today's behaviour with no per-call
+    /// tax. Mirrored here (not `identity_check`, see the note on
+    /// [`Self::from_cli_config`]) so the one shared spawn path can check it.
+    pub identity: Option<binary_identity::BinaryIdentity>,
 }
 
 /// A CLI's configured `binary` could not be resolved to an executable.
@@ -177,233 +225,6 @@ fn resolve_binary_with_path(binary: &str, path: &str) -> Result<PathBuf> {
         .map_err(Into::into)
 }
 
-/// How long an identity check may run before it is treated as a failure.
-/// Diagnosis-only (probe/doctor, CB44) — never on dispatch.
-pub const IDENTITY_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-
-/// Maximum characters of captured output kept in a [`WrongBinaryError`].
-pub const IDENTITY_CHECK_OUTPUT_LIMIT: usize = 500;
-
-/// The resolved binary does not identify as the platform it was resolved
-/// for (CB44): the registry's `identity_check` ran against the resolved
-/// path and its output did not contain the expected substring.
-///
-/// The captured output is evidence for the report and nothing else — callers
-/// must not scrape it for quota/model meaning.
-#[derive(Debug, thiserror::Error)]
-#[error("Resolved '{resolved}' which does not identify as the {platform} CLI (expected '{expected}' in output; saw: {output}")]
-pub struct WrongBinaryError {
-    pub platform: String,
-    pub resolved: PathBuf,
-    pub expected: String,
-    pub output: String,
-}
-
-impl WrongBinaryError {
-    /// The full failure text: absolute path, platform, expected substring,
-    /// invoked command, and truncated evidence. This wording (not "platform
-    /// unreachable") is the whole value of CB44 — it ends the months-long
-    /// "blackbox is broken" misdiagnosis by naming what was actually found.
-    pub fn report(&self, binary: &str, cmd: &str) -> String {
-        format!(
-            "Resolved '{}', which does not identify as the {} CLI (expected '{}' in output of '{} {}'; saw: {})",
-            self.resolved.display(),
-            self.platform,
-            self.expected,
-            binary,
-            cmd,
-            self.output,
-        )
-    }
-}
-
-/// Truncate captured output to [`IDENTITY_CHECK_OUTPUT_LIMIT`] chars for
-/// the report, keeping the head (where `--version`-shaped output lives).
-pub fn truncate_identity_output(output: &str) -> String {
-    let trimmed = output.trim();
-    if trimmed.len() <= IDENTITY_CHECK_OUTPUT_LIMIT {
-        return trimmed.to_string();
-    }
-    format!("{}…", &trimmed[..IDENTITY_CHECK_OUTPUT_LIMIT])
-}
-
-/// Case-insensitive substring check of combined stdout+stderr against the
-/// registry's expected token. Pure so unit tests can pin the matching rule
-/// without spawning a process.
-fn identity_output_matches(combined: &str, expected: &str) -> bool {
-    combined.to_lowercase().contains(&expected.to_lowercase())
-}
-
-fn wrong_binary_error(
-    cli: &super::cli_config::CliConfig,
-    resolved: &Path,
-    expected: &str,
-    output: &str,
-) -> WrongBinaryError {
-    WrongBinaryError {
-        platform: cli.name.clone(),
-        resolved: resolved.to_path_buf(),
-        expected: expected.to_string(),
-        output: truncate_identity_output(output),
-    }
-}
-
-/// Synchronous identity check for sync contexts (doctor). Runs
-/// `<resolved> <check.cmd>` with stdin nulled, no network, no credentials,
-/// and judges combined stdout+stderr against `check.contains`.
-///
-/// - `Ok(())` when the platform declares no check (backward compatible) or
-///   the output contains the expected substring.
-/// - Never searches for another candidate binary: reports what was found
-///   and lets a human point at the right one via the absolute-path override.
-/// - Never called on dispatch (constraint 3) — probe/doctor only.
-pub fn verify_identity(
-    cli: &super::cli_config::CliConfig,
-    resolved: &Path,
-) -> std::result::Result<(), WrongBinaryError> {
-    let Some(check) = cli.identity_check.as_ref() else {
-        return Ok(());
-    };
-    let args = match shell_words::split(&check.cmd) {
-        Ok(args) => args,
-        Err(e) => {
-            return Err(wrong_binary_error(
-                cli,
-                resolved,
-                &check.contains,
-                &format!("failed to parse identity check command: {e}"),
-            ));
-        }
-    };
-    let (tx, rx) = std::sync::mpsc::channel();
-    let resolved_owned = resolved.to_path_buf();
-    std::thread::spawn(move || {
-        let out = std::process::Command::new(&resolved_owned)
-            .args(&args)
-            .stdin(std::process::Stdio::null())
-            .output();
-        let _ = tx.send(out);
-    });
-    let output = match rx.recv_timeout(IDENTITY_CHECK_TIMEOUT) {
-        Ok(Ok(out)) => out,
-        Ok(Err(e)) => {
-            return Err(wrong_binary_error(
-                cli,
-                resolved,
-                &check.contains,
-                &format!("failed to run identity check: {e}"),
-            ));
-        }
-        Err(_) => {
-            return Err(wrong_binary_error(
-                cli,
-                resolved,
-                &check.contains,
-                "identity check timed out",
-            ));
-        }
-    };
-    let combined = format!(
-        "{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    if identity_output_matches(&combined, &check.contains) {
-        Ok(())
-    } else {
-        Err(wrong_binary_error(
-            cli,
-            resolved,
-            &check.contains,
-            &combined,
-        ))
-    }
-}
-
-/// Async identity check for async contexts (probe). Same rule as
-/// [`verify_identity`]: `<resolved> <check.cmd>` judged against
-/// `check.contains`, case-insensitively, on combined stdout+stderr.
-pub async fn verify_identity_async(
-    cli: &super::cli_config::CliConfig,
-    resolved: &Path,
-) -> std::result::Result<(), WrongBinaryError> {
-    let Some(check) = cli.identity_check.as_ref() else {
-        return Ok(());
-    };
-    let args = match shell_words::split(&check.cmd) {
-        Ok(args) => args,
-        Err(e) => {
-            return Err(wrong_binary_error(
-                cli,
-                resolved,
-                &check.contains,
-                &format!("failed to parse identity check command: {e}"),
-            ));
-        }
-    };
-    let mut cmd = tokio::process::Command::new(resolved);
-    cmd.args(&args);
-    cmd.stdin(std::process::Stdio::null());
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::piped());
-    #[cfg(unix)]
-    cmd.process_group(0);
-    cmd.kill_on_drop(true);
-    let child = match cmd.spawn() {
-        Ok(child) => child,
-        Err(e) => {
-            return Err(wrong_binary_error(
-                cli,
-                resolved,
-                &check.contains,
-                &format!("failed to run identity check: {e}"),
-            ));
-        }
-    };
-    let output = match tokio::time::timeout(IDENTITY_CHECK_TIMEOUT, child.wait_with_output()).await
-    {
-        Ok(Ok(out)) => out,
-        Ok(Err(e)) => {
-            return Err(wrong_binary_error(
-                cli,
-                resolved,
-                &check.contains,
-                &format!("failed to run identity check: {e}"),
-            ));
-        }
-        Err(_) => {
-            return Err(wrong_binary_error(
-                cli,
-                resolved,
-                &check.contains,
-                "identity check timed out",
-            ));
-        }
-    };
-    let combined = format!(
-        "{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    if identity_output_matches(&combined, &check.contains) {
-        Ok(())
-    } else {
-        Err(wrong_binary_error(
-            cli,
-            resolved,
-            &check.contains,
-            &combined,
-        ))
-    }
-}
-
-/// One parsed piece of a template token: either literal text, or a
-/// `{{marker}}` (required) / `{{marker?}}` (optional) reference.
-enum TokenPart<'a> {
-    Literal(&'a str),
-    Marker { name: &'a str, optional: bool },
-}
-
 impl CliStrategy {
     /// Build a strategy straight from a registry [`CliConfig`] entry — the
     /// one place that lists every field this struct mirrors from it, so
@@ -415,6 +236,11 @@ impl CliStrategy {
     /// builds every command through this strategy, so leaving the check out
     /// keeps verification diagnosis-only (probe/doctor) with zero per-call
     /// tax — a user who never runs doctor or probe keeps today's behaviour.
+    /// CB85 reverses that decision for its own pair: `identity_args`/
+    /// `identity_pattern` ARE mirrored and ARE enforced on dispatch,
+    /// because a platform whose binary is a different program must never be
+    /// invoked as if it were — the cached check makes the per-spawn cost a
+    /// hashmap hit.
     ///
     /// [`CliConfig`]: super::cli_config::CliConfig
     pub fn from_cli_config(cli_config: &super::cli_config::CliConfig) -> Self {
@@ -430,10 +256,15 @@ impl CliStrategy {
             session_list_cmd: cli_config.session_list_cmd.clone(),
             session_list_format_args: cli_config.session_list_format_args.clone(),
             session_id_pattern: cli_config.session_id_pattern.clone(),
+            session_title_flag: cli_config.session_title_flag.clone(),
+            session_list_args: cli_config.session_list_args.clone(),
+            session_end_args: cli_config.session_end_args.clone(),
             session_resume_cmd: cli_config.session_resume_cmd.clone(),
             trust_flag: cli_config.trust_flag.clone(),
             invocation_template: cli_config.invocation_template.clone(),
             effort_declaration: cli_config.effort_declaration.clone(),
+            decision_args: cli_config.decision_args.clone(),
+            identity: binary_identity::BinaryIdentity::from_cli_config(cli_config),
         }
     }
 
@@ -444,6 +275,68 @@ impl CliStrategy {
     fn selectable_model_flag(&self) -> Option<&str> {
         let f = self.model_flag.as_deref()?;
         crate::domain::cli_config::model_flag_selects_model(Some(f)).then_some(f)
+    }
+
+    /// CB84: the `(flag, canopy-<run_id>)` title pair to stamp on a headless
+    /// spawn, or `None` when the platform sets no `session_title_flag` or the
+    /// caller has no run id (probes, conflict-resolution agents, MCP
+    /// subagents keep today's behaviour).
+    fn session_title_for(&self, run_id: Option<&str>) -> Option<(&str, String)> {
+        let flag = self.session_title_flag.as_deref()?;
+        let run_id = run_id?;
+        Some((flag, format!("canopy-{run_id}")))
+    }
+
+    /// Build the command to end a session by id, replacing `{session_id}` in
+    /// `session_end_args`. Returns `None` when the platform has no
+    /// `session_end_args` (or its binary cannot be resolved) — the caller
+    /// keeps today's behaviour.
+    pub fn build_session_end_command(
+        &self,
+        session_id: &str,
+        workdir: &str,
+    ) -> Option<tokio::process::Command> {
+        let end_args = self.session_end_args.as_ref()?;
+        let resolved = resolve_binary(&self.binary).ok()?;
+        let mut cmd = tokio::process::Command::new(resolved);
+        #[cfg(unix)]
+        cmd.process_group(0);
+        cmd.kill_on_drop(true);
+        for (key, value) in &self.env_vars {
+            cmd.env(key, value);
+        }
+        for arg in end_args {
+            cmd.arg(arg.replace("{session_id}", session_id));
+        }
+        cmd.current_dir(workdir);
+        cmd.stdin(std::process::Stdio::null());
+        Some(cmd)
+    }
+
+    /// Build the command to list sessions as JSON. Returns `None` when the
+    /// platform has no `session_list_args` (or its binary cannot be
+    /// resolved). The caller runs it with the run's workdir as cwd — several
+    /// CLIs scope their session list to the current project — and finds the
+    /// entry whose `title` equals `canopy-<run_id>`.
+    pub fn build_session_list_command_by_title(
+        &self,
+        workdir: &str,
+    ) -> Option<tokio::process::Command> {
+        let list_args = self.session_list_args.as_ref()?;
+        let resolved = resolve_binary(&self.binary).ok()?;
+        let mut cmd = tokio::process::Command::new(resolved);
+        #[cfg(unix)]
+        cmd.process_group(0);
+        cmd.kill_on_drop(true);
+        for (key, value) in &self.env_vars {
+            cmd.env(key, value);
+        }
+        for arg in list_args {
+            cmd.arg(arg);
+        }
+        cmd.current_dir(workdir);
+        cmd.stdin(std::process::Stdio::null());
+        Some(cmd)
     }
 
     /// Return a copy of this strategy with `prompt_via_stdin` forced to
@@ -467,8 +360,9 @@ impl CliStrategy {
         prompt: &str,
         model: Option<&str>,
         working_dir: Option<&str>,
+        run_id: Option<&str>,
     ) -> Result<Command> {
-        self.build_command_with_session(prompt, model, working_dir, None, None)
+        self.build_command_with_session(prompt, model, working_dir, None, None, run_id)
     }
 
     /// [`build_command`], additionally injecting a caller-chosen session id
@@ -484,6 +378,7 @@ impl CliStrategy {
         working_dir: Option<&str>,
         session_id: Option<&str>,
         effort: Option<&str>,
+        run_id: Option<&str>,
     ) -> Result<Command> {
         // Cold start: inject the set-at-spawn flag + id only when both the
         // registry flag and a caller-minted id exist.
@@ -491,7 +386,15 @@ impl CliStrategy {
             (Some(flag), Some(id)) => Some((flag, id)),
             _ => None,
         };
-        self.build_headless_command(prompt, model, working_dir, session_arg, None, effort)
+        self.build_headless_command(
+            prompt,
+            model,
+            working_dir,
+            session_arg,
+            None,
+            effort,
+            run_id,
+        )
     }
 
     /// CM5: build a headless command that points the CLI at a canopy-synthesized
@@ -507,8 +410,17 @@ impl CliStrategy {
         working_dir: Option<&str>,
         mcp_config_path: Option<&str>,
         effort: Option<&str>,
+        run_id: Option<&str>,
     ) -> Result<Command> {
-        self.build_headless_command(prompt, model, working_dir, None, mcp_config_path, effort)
+        self.build_headless_command(
+            prompt,
+            model,
+            working_dir,
+            None,
+            mcp_config_path,
+            effort,
+            run_id,
+        )
     }
 
     /// Build a headless command that RESUMES an existing session by id (RS2).
@@ -524,6 +436,7 @@ impl CliStrategy {
         prompt: &str,
         model: Option<&str>,
         working_dir: Option<&str>,
+        run_id: Option<&str>,
     ) -> Result<Command> {
         let flag = self.session_resume_cmd.as_deref().ok_or_else(|| {
             anyhow::anyhow!(
@@ -538,6 +451,7 @@ impl CliStrategy {
             Some((flag, session_id)),
             None,
             None,
+            run_id,
         )
     }
 
@@ -547,205 +461,16 @@ impl CliStrategy {
         self.session_resume_cmd.is_some()
     }
 
-    /// Build argv from the invocation template. Returns the substituted
-    /// argv words (without headless flags) for the given marker values.
-    /// Effort and mcp_config are declared but not yet wired (CB3/CB4).
-    #[allow(clippy::too_many_arguments)]
-    fn build_argv_from_template(
-        &self,
-        template: &str,
-        prompt: &str,
-        model: Option<&str>,
-        working_dir: Option<&str>,
-        session_arg: Option<(&str, &str)>,
-        effort: Option<&str>,
-        mcp_config: Option<&str>,
-    ) -> Vec<String> {
-        let mut markers: HashMap<&str, Option<&str>> = HashMap::new();
-        // When prompt is delivered via stdin, treat {{prompt}} as unavailable
-        // so it and any preceding flag are elided from argv.
-        if self.prompt_via_stdin {
-            markers.insert("prompt", None);
-        } else {
-            markers.insert("prompt", Some(prompt));
-        }
-        markers.insert("model", model);
-        markers.insert("workdir", working_dir);
-        markers.insert("effort", effort);
-        markers.insert("mcp_config", mcp_config);
-        let session_id_val = session_arg.map(|(_, id)| id);
-        markers.insert("session_id", session_id_val);
-        let session_flag_val = session_arg.map(|(flag, _)| flag);
-        markers.insert("session_flag", session_flag_val);
-
-        let tokens: Vec<&str> = template.split_whitespace().collect();
-        let mut argv: Vec<String> = Vec::new();
-        let mut i = 0;
-        while i < tokens.len() {
-            let token = tokens[i];
-            let has_marker = token.contains("{{");
-            if !has_marker {
-                let next_dropped = if i + 1 < tokens.len() {
-                    let next = tokens[i + 1];
-                    next.contains("{{") && Self::resolve_token(next, &markers).is_none()
-                } else {
-                    false
-                };
-                if token.starts_with('-') && next_dropped {
-                    i += 1;
-                    continue;
-                }
-                argv.push(token.to_string());
-                i += 1;
-            } else {
-                if let Some(rendered) = Self::resolve_token(token, &markers) {
-                    argv.push(rendered);
-                }
-                i += 1;
-            }
-        }
-        argv
-    }
-
-    /// FR4: a template's "model-bearing" token (the one carrying the `model`
-    /// marker) must never be able to render empty — that would silently drop
-    /// the whole model argument, the exact defect this spec exists to fix,
-    /// just hidden behind the `?` spelling instead of the old
-    /// drop-whole-token-on-any-missing-marker rule. A token where EVERY marker
-    /// in it (including `model` itself, i.e. spelled `{{model?}}`) is optional
-    /// can do exactly that when model is absent. `{{model}}` (required, the
-    /// only spelling a model-bearing token should ever use) is always safe and
-    /// never triggers this.
-    ///
-    /// `template` is the raw `invocation_template` string (no `None` case here
-    /// — callers only invoke this when a template exists). Returns `Some(msg)`
-    /// naming the platform and the offending token; `None` when the template
-    /// has no unsafe model-bearing token.
-    pub fn unsafe_optional_model_token(template: &str, platform: &str) -> Option<String> {
-        for token in template.split_whitespace() {
-            let parts = Self::parse_token_parts(token);
-            let has_model_marker = parts
-                .iter()
-                .any(|p| matches!(p, TokenPart::Marker { name, .. } if *name == "model"));
-            if !has_model_marker {
-                continue;
-            }
-            let all_optional = parts.iter().all(|p| match p {
-                TokenPart::Marker { optional, .. } => *optional,
-                TokenPart::Literal(_) => true,
-            });
-            if all_optional {
-                return Some(format!(
-                    "platform '{platform}' invocation_template token '{token}' has only \
-                     optional markers including {{{{model?}}}} — it would render empty \
-                     (silently dropping the model argument) whenever model is absent. \
-                     Spell the model marker as required: '{{{{model}}}}'."
-                ));
-            }
-        }
-        None
-    }
-
-    /// One parsed piece of a template token: either literal text, or a
-    /// `{{marker}}` (required) / `{{marker?}}` (optional) reference.
-    fn parse_token_parts(token: &str) -> Vec<TokenPart<'_>> {
-        let mut parts = Vec::new();
-        let mut rest = token;
-        loop {
-            let Some(start) = rest.find("{{") else {
-                if !rest.is_empty() {
-                    parts.push(TokenPart::Literal(rest));
-                }
-                break;
-            };
-            if start > 0 {
-                parts.push(TokenPart::Literal(&rest[..start]));
-            }
-            let after_open = &rest[start + 2..];
-            let Some(end) = after_open.find("}}") else {
-                parts.push(TokenPart::Literal(&rest[start..]));
-                break;
-            };
-            let raw_name = &after_open[..end];
-            let (name, optional) = match raw_name.strip_suffix('?') {
-                Some(n) => (n, true),
-                None => (raw_name, false),
-            };
-            parts.push(TokenPart::Marker { name, optional });
-            rest = &after_open[end + 2..];
-        }
-        parts
-    }
-
-    /// Resolve one template token against the marker values. `None` means the
-    /// token is dropped entirely — either because a REQUIRED marker in it is
-    /// unavailable (today's rule, unchanged: FR3), or because after removing
-    /// every unavailable OPTIONAL marker and its bound literal glue (FR1/FR2)
-    /// nothing is left to render (FR2: "a token that becomes empty is
-    /// dropped"). `Some(rendered)` is the fully substituted token.
-    fn resolve_token(token: &str, markers: &HashMap<&str, Option<&str>>) -> Option<String> {
-        let parts = Self::parse_token_parts(token);
-
-        // FR3: any unavailable REQUIRED marker drops the whole token, exactly
-        // as `all_markers_available` did before — optional markers never
-        // participate in this check.
-        for part in &parts {
-            if let TokenPart::Marker {
-                name,
-                optional: false,
-            } = part
-            {
-                markers.get(name).copied().flatten()?;
-            }
-        }
-
-        // FR1/FR2: render left to right. A literal immediately followed by an
-        // unavailable OPTIONAL marker is the "glue bound to" that marker (FR2)
-        // — both are dropped as a pair. Every other literal, and every
-        // available marker's value, is emitted normally.
-        let mut out = String::new();
-        let mut i = 0;
-        while i < parts.len() {
-            match &parts[i] {
-                TokenPart::Literal(s) => {
-                    let glue_drops = matches!(
-                        parts.get(i + 1),
-                        Some(TokenPart::Marker { name, optional: true })
-                            if markers.get(name).copied().flatten().is_none()
-                    );
-                    if glue_drops {
-                        i += 2;
-                    } else {
-                        out.push_str(s);
-                        i += 1;
-                    }
-                }
-                TokenPart::Marker { name, .. } => {
-                    if let Some(val) = markers.get(name).copied().flatten() {
-                        out.push_str(val);
-                    }
-                    // Unavailable here can only be an optional marker (a
-                    // required-unavailable one already returned above) — skip
-                    // it silently, its own glue (if any) was already consumed
-                    // in the Literal arm above, or there was none to consume.
-                    i += 1;
-                }
-            }
-        }
-
-        if out.is_empty() {
-            None
-        } else {
-            Some(out)
-        }
-    }
-
     /// Shared core for every headless spawn (cold or resume). `session_arg`,
     /// when `Some((flag, id))`, injects that flag + id immediately before the
     /// positional prompt so the id can never be mistaken for the prompt. The
     /// cold path passes the set-at-spawn flag; the resume path passes the
     /// resume flag; a plain `build_command` passes `None`. Keeping this one
     /// function means the cold layout is byte-identical whichever caller runs.
+    /// `run_id`, when `Some` and the platform sets `session_title_flag`,
+    /// appends `<flag> canopy-<run_id>` right after the headless flags so the
+    /// session can later be found by title.
+    #[expect(clippy::too_many_arguments)]
     fn build_headless_command(
         &self,
         prompt: &str,
@@ -754,6 +479,7 @@ impl CliStrategy {
         session_arg: Option<(&str, &str)>,
         mcp_config: Option<&str>,
         effort: Option<&str>,
+        run_id: Option<&str>,
     ) -> Result<Command> {
         let resolved = resolve_binary(&self.binary)?;
         let mut cmd = Command::new(resolved);
@@ -778,16 +504,23 @@ impl CliStrategy {
             let argv = self.build_argv_from_template(
                 template,
                 prompt,
-                model,
-                working_dir,
-                session_arg,
-                effort,
-                mcp_config,
+                TemplateArgs {
+                    model,
+                    working_dir,
+                    session_arg,
+                    effort,
+                    mcp_config,
+                },
             );
 
             // Headless flags are always prepended (not part of template).
             for arg in shell_words::split(&self.headless_mode).unwrap_or_default() {
                 cmd.arg(arg);
+            }
+
+            // CB84: title flag so the session can be found by title later.
+            if let Some((flag, value)) = self.session_title_for(run_id) {
+                cmd.arg(flag).arg(value);
             }
 
             // Deliver prompt via stdin vs argv. When prompt_via_stdin is true,
@@ -816,6 +549,11 @@ impl CliStrategy {
             // Add headless mode flags (before prompt)
             for arg in shell_words::split(&self.headless_mode).unwrap_or_default() {
                 cmd.arg(arg);
+            }
+
+            // CB84: title flag so the session can be found by title later.
+            if let Some((flag, value)) = self.session_title_for(run_id) {
+                cmd.arg(flag).arg(value);
             }
 
             // Inject the session flag + id (set-at-spawn for a cold start, or the
@@ -856,12 +594,12 @@ impl CliStrategy {
                 }
             }
 
-            // Add working directory if supported
-            if self.supports_working_dir {
-                if let Some(dir) = working_dir {
-                    if let Some(ref flag) = self.working_dir_flag {
-                        cmd.arg(flag).arg(dir);
-                    }
+            // Add working directory if supported. `supports_working_dir`
+            // is a plain bool field, so filtering the optional dir on it is
+            // exactly the original nested-if chain one level shorter.
+            if let Some(dir) = working_dir.filter(|_| self.supports_working_dir) {
+                if let Some(ref flag) = self.working_dir_flag {
+                    cmd.arg(flag).arg(dir);
                 }
             }
         }
@@ -957,17 +695,24 @@ mod tests {
             session_list_cmd: None,
             session_list_format_args: None,
             session_id_pattern: None,
+            session_title_flag: None,
+            session_list_args: None,
+            session_end_args: None,
             session_resume_cmd: None,
             trust_flag: None,
             invocation_template: None,
             effort_declaration: None,
+            decision_args: None,
+            identity: None,
         }
     }
 
     #[test]
     fn test_build_command_basic() {
         let strategy = sample_strategy();
-        let cmd = strategy.build_command("test prompt", None, None).unwrap();
+        let cmd = strategy
+            .build_command("test prompt", None, None, None)
+            .unwrap();
 
         let cmd_str = format!("{:?}", cmd);
         assert!(cmd_str.contains("test-cli"));
@@ -977,7 +722,7 @@ mod tests {
     fn test_build_command_with_model() {
         let strategy = sample_strategy();
         let cmd = strategy
-            .build_command("test prompt", Some("gpt-4"), None)
+            .build_command("test prompt", Some("gpt-4"), None, None)
             .unwrap();
 
         let cmd_str = format!("{:?}", cmd);
@@ -989,7 +734,7 @@ mod tests {
     fn test_build_command_with_working_dir() {
         let strategy = sample_strategy();
         let cmd = strategy
-            .build_command("test prompt", None, Some("/tmp/project"))
+            .build_command("test prompt", None, Some("/tmp/project"), None)
             .unwrap();
 
         let cmd_str = format!("{:?}", cmd);
@@ -1003,7 +748,7 @@ mod tests {
         strategy.supports_working_dir = false;
 
         let cmd = strategy
-            .build_command("test prompt", None, Some("/tmp/project"))
+            .build_command("test prompt", None, Some("/tmp/project"), None)
             .unwrap();
 
         let cmd_str = format!("{:?}", cmd);
@@ -1016,7 +761,7 @@ mod tests {
         strategy.model_flag = None;
 
         let cmd = strategy
-            .build_command("test prompt", Some("gpt-4"), None)
+            .build_command("test prompt", Some("gpt-4"), None, None)
             .unwrap();
 
         let cmd_str = format!("{:?}", cmd);
@@ -1031,7 +776,7 @@ mod tests {
         strategy.model_flag = Some(String::new());
 
         let cmd = strategy
-            .build_command("test prompt", Some("gpt-4"), None)
+            .build_command("test prompt", Some("gpt-4"), None, None)
             .unwrap();
 
         let args: Vec<String> = cmd
@@ -1056,7 +801,7 @@ mod tests {
         let strategy = sample_strategy(); // model_flag = Some("--model")
 
         let cmd = strategy
-            .build_command("test prompt", Some("gpt-4"), None)
+            .build_command("test prompt", Some("gpt-4"), None, None)
             .unwrap();
 
         let args: Vec<String> = cmd
@@ -1077,7 +822,9 @@ mod tests {
         let mut strategy = sample_strategy();
         strategy.headless_mode = String::new();
 
-        let cmd = strategy.build_command("test prompt", None, None).unwrap();
+        let cmd = strategy
+            .build_command("test prompt", None, None, None)
+            .unwrap();
 
         let cmd_str = format!("{:?}", cmd);
         assert!(cmd_str.contains("test-cli"));
@@ -1105,7 +852,7 @@ mod tests {
         strategy.prompt_via_stdin = true;
 
         let cmd = strategy
-            .build_command("this must not appear in argv", None, None)
+            .build_command("this must not appear in argv", None, None, None)
             .unwrap();
 
         let cmd_str = format!("{:?}", cmd);
@@ -1125,7 +872,9 @@ mod tests {
         strategy.prompt_via_stdin = true;
 
         let huge_prompt = "x".repeat(500 * 1024);
-        let mut cmd = strategy.build_command(&huge_prompt, None, None).unwrap();
+        let mut cmd = strategy
+            .build_command(&huge_prompt, None, None, None)
+            .unwrap();
         cmd.stdout(std::process::Stdio::piped());
 
         let output = cmd.output().await.unwrap();
@@ -1144,6 +893,7 @@ mod tests {
                 None,
                 Some("11111111-2222-3333-4444-555555555555"),
                 None,
+                None,
             )
             .unwrap();
         let cmd_str = format!("{:?}", cmd);
@@ -1157,7 +907,7 @@ mod tests {
         // silently dropped, never passed as a stray argument.
         let strategy = sample_strategy();
         let cmd = strategy
-            .build_command_with_session("p", None, None, Some("sid-123"), None)
+            .build_command_with_session("p", None, None, Some("sid-123"), None, None)
             .unwrap();
         let cmd_str = format!("{:?}", cmd);
         assert!(!cmd_str.contains("sid-123"));
@@ -1167,16 +917,87 @@ mod tests {
     fn build_command_never_injects_session_flag_without_id() {
         let mut strategy = sample_strategy();
         strategy.session_id_set_flag = Some("--session-id".to_string());
-        let cmd = strategy.build_command("p", None, None).unwrap();
+        let cmd = strategy.build_command("p", None, None, None).unwrap();
         let cmd_str = format!("{:?}", cmd);
         assert!(!cmd_str.contains("--session-id"));
+    }
+
+    #[test]
+    fn build_command_adds_title_flag_when_configured() {
+        let mut s = sample_strategy();
+        s.session_title_flag = Some("--title".to_string());
+        let cmd = s
+            .build_command("prompt", None, None, Some("run-123"))
+            .unwrap();
+        let cmd_str = format!("{:?}", cmd);
+        assert!(cmd_str.contains("--title"));
+        assert!(cmd_str.contains("canopy-run-123"));
+    }
+
+    #[test]
+    fn build_command_omits_title_flag_when_not_configured() {
+        let s = sample_strategy(); // session_title_flag = None
+        let cmd = s
+            .build_command("prompt", None, None, Some("run-123"))
+            .unwrap();
+        let cmd_str = format!("{:?}", cmd);
+        assert!(!cmd_str.contains("--title"));
+        assert!(!cmd_str.contains("canopy-run-123"));
+    }
+
+    #[test]
+    fn build_command_omits_title_flag_when_run_id_none() {
+        let mut s = sample_strategy();
+        s.session_title_flag = Some("--title".to_string());
+        let cmd = s.build_command("prompt", None, None, None).unwrap();
+        let cmd_str = format!("{:?}", cmd);
+        assert!(!cmd_str.contains("--title"));
+    }
+
+    #[test]
+    fn build_command_with_session_adds_title_flag_when_configured() {
+        let mut s = sample_strategy();
+        s.session_title_flag = Some("--title".to_string());
+        let cmd = s
+            .build_command_with_session("prompt", None, None, None, None, Some("run-456"))
+            .unwrap();
+        let cmd_str = format!("{:?}", cmd);
+        assert!(cmd_str.contains("--title"));
+        assert!(cmd_str.contains("canopy-run-456"));
+    }
+
+    #[test]
+    fn build_session_end_command_substitutes_session_id() {
+        let mut s = sample_strategy();
+        s.session_end_args = Some(vec![
+            "api".to_string(),
+            "session.interrupt".to_string(),
+            "--param".to_string(),
+            "sessionID={session_id}".to_string(),
+        ]);
+        let cmd = s.build_session_end_command("ses_abc", "/tmp").unwrap();
+        let cmd_str = format!("{:?}", cmd);
+        assert!(cmd_str.contains("sessionID=ses_abc"));
+        assert!(!cmd_str.contains("{session_id}"));
+    }
+
+    #[test]
+    fn build_session_end_command_none_without_config() {
+        let s = sample_strategy();
+        assert!(s.build_session_end_command("ses_abc", "/tmp").is_none());
+    }
+
+    #[test]
+    fn build_session_list_command_none_without_config() {
+        let s = sample_strategy();
+        assert!(s.build_session_list_command_by_title("/tmp").is_none());
     }
 
     #[test]
     fn test_build_command_all_options() {
         let strategy = sample_strategy();
         let cmd = strategy
-            .build_command("my prompt", Some("claude-3"), Some("/home/project"))
+            .build_command("my prompt", Some("claude-3"), Some("/home/project"), None)
             .unwrap();
 
         let cmd_str = format!("{:?}", cmd);
@@ -1277,7 +1098,7 @@ mod tests {
         let mut s = sample_strategy();
         s.session_resume_cmd = Some("--session".to_string());
         let cmd = s
-            .build_resume_command("ses_abc", "the prompt", None, None)
+            .build_resume_command("ses_abc", "the prompt", None, None, None)
             .unwrap();
         let cmd_str = format!("{:?}", cmd);
         assert!(cmd_str.contains("--session"));
@@ -1295,7 +1116,7 @@ mod tests {
     fn build_resume_command_errors_without_session_resume_cmd() {
         let s = sample_strategy();
         let err = s
-            .build_resume_command("ses_abc", "p", None, None)
+            .build_resume_command("ses_abc", "p", None, None, None)
             .unwrap_err();
         assert!(err.to_string().contains("session_resume_cmd"));
     }
@@ -1307,7 +1128,9 @@ mod tests {
         let mut s = sample_strategy();
         s.session_id_set_flag = Some("--session-id".to_string());
         s.session_resume_cmd = Some("--resume".to_string());
-        let cmd = s.build_resume_command("ses_xyz", "p", None, None).unwrap();
+        let cmd = s
+            .build_resume_command("ses_xyz", "p", None, None, None)
+            .unwrap();
         let cmd_str = format!("{:?}", cmd);
         assert!(cmd_str.contains("--resume"));
         assert!(cmd_str.contains("ses_xyz"));
@@ -1457,7 +1280,14 @@ mod tests {
         s.session_id_set_flag = Some("--session-id".to_string());
 
         let cmd = s
-            .build_command_with_session("the prompt", Some("gpt-4"), None, Some("ses_123"), None)
+            .build_command_with_session(
+                "the prompt",
+                Some("gpt-4"),
+                None,
+                Some("ses_123"),
+                None,
+                None,
+            )
             .unwrap();
         let cmd_str = format!("{:?}", cmd);
 
@@ -1481,7 +1311,7 @@ mod tests {
         s.session_id_set_flag = Some("--session-id".to_string());
 
         let cmd = s
-            .build_command_with_session("the prompt", None, None, Some("ses_456"), None)
+            .build_command_with_session("the prompt", None, None, Some("ses_456"), None, None)
             .unwrap();
         let cmd_str = format!("{:?}", cmd);
 
@@ -1502,7 +1332,9 @@ mod tests {
         let mut s = sample_strategy();
         s.invocation_template = Some("--model={{model}} {{prompt}}".to_string());
 
-        let cmd = s.build_command("the prompt", Some("gpt-4"), None).unwrap();
+        let cmd = s
+            .build_command("the prompt", Some("gpt-4"), None, None)
+            .unwrap();
         let cmd_str = format!("{:?}", cmd);
 
         // Assert: --model=gpt-4 is a single argv word (no space between flag and value).
@@ -1518,11 +1350,13 @@ mod tests {
         let argv = s.build_argv_from_template(
             "{{model}}[context=1m,effort={{effort}},fast=false] {{prompt}}",
             "the prompt",
-            Some("claude-opus-4-8"),
-            None,
-            None,
-            Some("high"),
-            None,
+            TemplateArgs {
+                model: Some("claude-opus-4-8"),
+                working_dir: None,
+                session_arg: None,
+                effort: Some("high"),
+                mcp_config: None,
+            },
         );
 
         assert_eq!(argv.len(), 2);
@@ -1539,7 +1373,7 @@ mod tests {
         let mut s = sample_strategy();
         s.invocation_template = Some("--model {{model}} {{prompt}}".to_string());
 
-        let cmd = s.build_command("the prompt", None, None).unwrap();
+        let cmd = s.build_command("the prompt", None, None, None).unwrap();
         let cmd_str = format!("{:?}", cmd);
 
         assert!(cmd_str.contains("the prompt"));
@@ -1552,7 +1386,7 @@ mod tests {
         let mut s = sample_strategy();
         s.invocation_template = Some("--model={{model}} {{prompt}}".to_string());
 
-        let cmd = s.build_command("the prompt", None, None).unwrap();
+        let cmd = s.build_command("the prompt", None, None, None).unwrap();
         let cmd_str = format!("{:?}", cmd);
 
         assert!(cmd_str.contains("the prompt"));
@@ -1566,11 +1400,13 @@ mod tests {
         let argv = s.build_argv_from_template(
             "{{model}}[context=1m,effort={{effort}},fast=false] {{prompt}}",
             "the prompt",
-            Some("claude-opus-4-8"),
-            None,
-            None,
-            None, // effort unavailable
-            None,
+            TemplateArgs {
+                model: Some("claude-opus-4-8"),
+                working_dir: None,
+                session_arg: None,
+                effort: None,
+                mcp_config: None,
+            },
         );
 
         assert_eq!(argv.len(), 1);
@@ -1582,7 +1418,7 @@ mod tests {
         // Backward compat: no template → legacy fixed-order behavior.
         let s = sample_strategy(); // invocation_template is None
         let cmd = s
-            .build_command("the prompt", Some("gpt-4"), Some("/tmp"))
+            .build_command("the prompt", Some("gpt-4"), Some("/tmp"), None)
             .unwrap();
         let cmd_str = format!("{:?}", cmd);
 
@@ -1603,7 +1439,7 @@ mod tests {
         s.session_id_set_flag = Some("--session-id".to_string());
 
         let cmd = s
-            .build_resume_command("ses_123", "the prompt", None, None)
+            .build_resume_command("ses_123", "the prompt", None, None, None)
             .unwrap();
         let cmd_str = format!("{:?}", cmd);
 
@@ -1623,7 +1459,9 @@ mod tests {
         s.invocation_template = Some("--model {{model}} {{prompt}}".to_string());
         s.prompt_via_stdin = true;
 
-        let cmd = s.build_command("the prompt", Some("gpt-4"), None).unwrap();
+        let cmd = s
+            .build_command("the prompt", Some("gpt-4"), None, None)
+            .unwrap();
         let cmd_str = format!("{:?}", cmd);
 
         assert!(cmd_str.contains("--model"));
@@ -1638,7 +1476,7 @@ mod tests {
         s.invocation_template = Some("--workdir {{workdir}} {{prompt}}".to_string());
 
         let cmd = s
-            .build_command("the prompt", None, Some("/tmp/project"))
+            .build_command("the prompt", None, Some("/tmp/project"), None)
             .unwrap();
         let cmd_str = format!("{:?}", cmd);
         assert!(cmd_str.contains("--workdir"));
@@ -1646,7 +1484,7 @@ mod tests {
         assert!(cmd_str.contains("the prompt"));
 
         // Without workdir, --workdir is elided
-        let cmd2 = s.build_command("the prompt", None, None).unwrap();
+        let cmd2 = s.build_command("the prompt", None, None, None).unwrap();
         let cmd_str2 = format!("{:?}", cmd2);
         assert!(!cmd_str2.contains("--workdir"));
         assert!(cmd_str2.contains("the prompt"));
@@ -1658,11 +1496,13 @@ mod tests {
         let argv = s.build_argv_from_template(
             "-m {{model}}#{{effort?}} {{prompt}}",
             "implement",
-            Some("opencode/big-pickle"),
-            None,
-            None,
-            Some("high"),
-            None,
+            TemplateArgs {
+                model: Some("opencode/big-pickle"),
+                working_dir: None,
+                session_arg: None,
+                effort: Some("high"),
+                mcp_config: None,
+            },
         );
         assert_eq!(argv, vec!["-m", "opencode/big-pickle#high", "implement"]);
     }
@@ -1673,11 +1513,13 @@ mod tests {
         let argv = s.build_argv_from_template(
             "-m {{model}}#{{effort?}} {{prompt}}",
             "implement",
-            Some("opencode/big-pickle"),
-            None,
-            None,
-            None,
-            None,
+            TemplateArgs {
+                model: Some("opencode/big-pickle"),
+                working_dir: None,
+                session_arg: None,
+                effort: None,
+                mcp_config: None,
+            },
         );
         assert_eq!(argv, vec!["-m", "opencode/big-pickle", "implement"]);
         assert!(argv.contains(&"opencode/big-pickle".to_string()));
@@ -1691,21 +1533,25 @@ mod tests {
         let with_effort = s.build_argv_from_template(
             template,
             "go",
-            Some("claude-sonnet-5"),
-            None,
-            None,
-            Some("high"),
-            None,
+            TemplateArgs {
+                model: Some("claude-sonnet-5"),
+                working_dir: None,
+                session_arg: None,
+                effort: Some("high"),
+                mcp_config: None,
+            },
         );
         assert_eq!(with_effort, vec!["--model", "claude-sonnet-5-high", "go"]);
         let without_effort = s.build_argv_from_template(
             template,
             "go",
-            Some("claude-sonnet-5"),
-            None,
-            None,
-            None,
-            None,
+            TemplateArgs {
+                model: Some("claude-sonnet-5"),
+                working_dir: None,
+                session_arg: None,
+                effort: None,
+                mcp_config: None,
+            },
         );
         assert_eq!(without_effort, vec!["--model", "claude-sonnet-5", "go"]);
     }
@@ -1714,7 +1560,17 @@ mod tests {
     fn template_required_marker_still_drops_token_and_flag() {
         let s = sample_strategy();
         let template = "--variant {{effort}} {{prompt}}";
-        let argv = s.build_argv_from_template(template, "go", None, None, None, None, None);
+        let argv = s.build_argv_from_template(
+            template,
+            "go",
+            TemplateArgs {
+                model: None,
+                working_dir: None,
+                session_arg: None,
+                effort: None,
+                mcp_config: None,
+            },
+        );
         assert_eq!(argv, vec!["go"]);
         assert!(!argv.contains(&"--variant".to_string()));
     }
@@ -1723,10 +1579,29 @@ mod tests {
     fn template_optional_marker_alone_in_token_drops_with_flag() {
         let s = sample_strategy();
         let template = "--variant {{effort?}} {{prompt}}";
-        let argv = s.build_argv_from_template(template, "go", None, None, None, None, None);
+        let argv = s.build_argv_from_template(
+            template,
+            "go",
+            TemplateArgs {
+                model: None,
+                working_dir: None,
+                session_arg: None,
+                effort: None,
+                mcp_config: None,
+            },
+        );
         assert_eq!(argv, vec!["go"]);
-        let argv2 =
-            s.build_argv_from_template(template, "go", None, None, None, Some("high"), None);
+        let argv2 = s.build_argv_from_template(
+            template,
+            "go",
+            TemplateArgs {
+                model: None,
+                working_dir: None,
+                session_arg: None,
+                effort: Some("high"),
+                mcp_config: None,
+            },
+        );
         assert_eq!(argv2, vec!["--variant", "high", "go"]);
     }
 
@@ -1783,11 +1658,13 @@ mod tests {
         let argv = s.build_argv_from_template(
             template,
             "fix the bug",
-            Some("gpt-4"),
-            None,
-            None,
-            None,
-            None,
+            TemplateArgs {
+                model: Some("gpt-4"),
+                working_dir: None,
+                session_arg: None,
+                effort: None,
+                mcp_config: None,
+            },
         );
         assert_eq!(argv, vec!["-p", "fix the bug", "--model", "gpt-4"]);
         assert_eq!(argv[0], "-p");
@@ -1797,11 +1674,13 @@ mod tests {
         let argv2 = s.build_argv_from_template(
             template,
             "fix the bug",
-            Some("gpt-4"),
-            None,
-            Some(("--session-id", "uuid-123")),
-            None,
-            None,
+            TemplateArgs {
+                model: Some("gpt-4"),
+                working_dir: None,
+                session_arg: Some(("--session-id", "uuid-123")),
+                effort: None,
+                mcp_config: None,
+            },
         );
         assert_eq!(
             argv2,
@@ -1830,11 +1709,13 @@ mod tests {
         let argv = s.build_argv_from_template(
             template,
             "do the thing",
-            Some("claude-opus-4-8"),
-            None,
-            Some(("--session-id", "ses_abc")),
-            Some("high"),
-            None,
+            TemplateArgs {
+                model: Some("claude-opus-4-8"),
+                working_dir: None,
+                session_arg: Some(("--session-id", "ses_abc")),
+                effort: Some("high"),
+                mcp_config: None,
+            },
         );
         assert_eq!(
             argv,
@@ -1859,11 +1740,13 @@ mod tests {
         let argv = s.build_argv_from_template(
             template,
             "do the thing",
-            Some("claude-opus-4-8"),
-            None,
-            None,
-            None,
-            None,
+            TemplateArgs {
+                model: Some("claude-opus-4-8"),
+                working_dir: None,
+                session_arg: None,
+                effort: None,
+                mcp_config: None,
+            },
         );
         assert_eq!(argv, vec!["--model", "claude-opus-4-8", "do the thing"]);
         assert!(!argv.contains(&"--effort".to_string()));
@@ -1879,11 +1762,13 @@ mod tests {
         let argv = s.build_argv_from_template(
             template,
             "analyze this",
-            Some("gemini-2.5-pro"),
-            None,
-            Some(("--session-id", "ses_gem")),
-            None,
-            None,
+            TemplateArgs {
+                model: Some("gemini-2.5-pro"),
+                working_dir: None,
+                session_arg: Some(("--session-id", "ses_gem")),
+                effort: None,
+                mcp_config: None,
+            },
         );
         assert_eq!(
             argv,
@@ -1900,11 +1785,13 @@ mod tests {
         let argv2 = s.build_argv_from_template(
             template,
             "analyze this",
-            Some("gemini-2.5-pro"),
-            None,
-            None,
-            None,
-            None,
+            TemplateArgs {
+                model: Some("gemini-2.5-pro"),
+                working_dir: None,
+                session_arg: None,
+                effort: None,
+                mcp_config: None,
+            },
         );
         assert_eq!(
             argv2,
@@ -1922,11 +1809,13 @@ mod tests {
         let argv = s.build_argv_from_template(
             template,
             "refactor",
-            Some("o3"),
-            Some("/proj"),
-            None,
-            Some("high"),
-            None,
+            TemplateArgs {
+                model: Some("o3"),
+                working_dir: Some("/proj"),
+                session_arg: None,
+                effort: Some("high"),
+                mcp_config: None,
+            },
         );
         assert_eq!(
             argv,
@@ -1947,11 +1836,13 @@ mod tests {
         let argv2 = s.build_argv_from_template(
             template,
             "refactor",
-            Some("o3"),
-            Some("/proj"),
-            None,
-            None,
-            None,
+            TemplateArgs {
+                model: Some("o3"),
+                working_dir: Some("/proj"),
+                session_arg: None,
+                effort: None,
+                mcp_config: None,
+            },
         );
         assert_eq!(argv2, vec!["-m", "o3", "-C", "/proj", "refactor"]);
         assert!(!argv2.contains(&"-c".to_string()));
@@ -1967,11 +1858,13 @@ mod tests {
         let argv = s.build_argv_from_template(
             template,
             "build ui",
-            Some("claude-opus-4-8"),
-            Some("/proj"),
-            None,
-            Some("high"),
-            None,
+            TemplateArgs {
+                model: Some("claude-opus-4-8"),
+                working_dir: Some("/proj"),
+                session_arg: None,
+                effort: Some("high"),
+                mcp_config: None,
+            },
         );
         assert_eq!(
             argv,
@@ -1998,11 +1891,13 @@ mod tests {
         let argv = s.build_argv_from_template(
             template,
             "build ui",
-            Some("claude-opus-4-8"),
-            Some("/proj"),
-            None,
-            None,
-            None,
+            TemplateArgs {
+                model: Some("claude-opus-4-8"),
+                working_dir: Some("/proj"),
+                session_arg: None,
+                effort: None,
+                mcp_config: None,
+            },
         );
         assert_eq!(argv, vec!["--workspace", "/proj", "build ui"]);
         assert!(!argv.iter().any(|w| w.contains("effort=")));
@@ -2017,11 +1912,13 @@ mod tests {
         let argv = s.build_argv_from_template(
             template,
             "explain",
-            Some("gpt-4"),
-            Some("/proj"),
-            None,
-            Some("medium"),
-            None,
+            TemplateArgs {
+                model: Some("gpt-4"),
+                working_dir: Some("/proj"),
+                session_arg: None,
+                effort: Some("medium"),
+                mcp_config: None,
+            },
         );
         assert_eq!(
             argv,
@@ -2039,11 +1936,13 @@ mod tests {
         let argv2 = s.build_argv_from_template(
             template,
             "explain",
-            Some("gpt-4"),
-            Some("/proj"),
-            None,
-            None,
-            None,
+            TemplateArgs {
+                model: Some("gpt-4"),
+                working_dir: Some("/proj"),
+                session_arg: None,
+                effort: None,
+                mcp_config: None,
+            },
         );
         assert_eq!(argv2, vec!["-m", "gpt-4", "-c", "/proj", "explain"]);
         assert!(!argv2.contains(&"--thinking".to_string()));
@@ -2059,11 +1958,13 @@ mod tests {
         let argv = s.build_argv_from_template(
             template,
             "implement",
-            Some("opencode/big-pickle"),
-            Some("/proj"),
-            None,
-            Some("max"),
-            None,
+            TemplateArgs {
+                model: Some("opencode/big-pickle"),
+                working_dir: Some("/proj"),
+                session_arg: None,
+                effort: Some("max"),
+                mcp_config: None,
+            },
         );
         assert_eq!(
             argv,
@@ -2080,11 +1981,13 @@ mod tests {
         let argv2 = s.build_argv_from_template(
             template,
             "implement",
-            Some("opencode/big-pickle"),
-            Some("/proj"),
-            None,
-            None,
-            None,
+            TemplateArgs {
+                model: Some("opencode/big-pickle"),
+                working_dir: Some("/proj"),
+                session_arg: None,
+                effort: None,
+                mcp_config: None,
+            },
         );
         assert_eq!(
             argv2,
@@ -2100,18 +2003,29 @@ mod tests {
         // effort_declaration = { form = "", values = [] } — declared as not supporting effort.
         let template = "-p {{prompt}} --add-dir {{workdir}}";
         let s = strategy_with_template(template);
-        let argv =
-            s.build_argv_from_template(template, "hello", None, Some("/proj"), None, None, None);
+        let argv = s.build_argv_from_template(
+            template,
+            "hello",
+            TemplateArgs {
+                model: None,
+                working_dir: Some("/proj"),
+                session_arg: None,
+                effort: None,
+                mcp_config: None,
+            },
+        );
         assert_eq!(argv, vec!["-p", "hello", "--add-dir", "/proj"]);
         // Even if effort is passed, template has no {{effort}} marker so argv is unchanged.
         let argv2 = s.build_argv_from_template(
             template,
             "hello",
-            None,
-            Some("/proj"),
-            None,
-            Some("high"),
-            None,
+            TemplateArgs {
+                model: None,
+                working_dir: Some("/proj"),
+                session_arg: None,
+                effort: Some("high"),
+                mcp_config: None,
+            },
         );
         assert_eq!(argv2, vec!["-p", "hello", "--add-dir", "/proj"]);
         assert!(!argv2.iter().any(|w| w.contains("high")));
@@ -2124,11 +2038,13 @@ mod tests {
         let argv = s.build_argv_from_template(
             template,
             "hello",
-            None,
-            None,
-            None,
-            None,
-            Some("/tmp/mcp.json"),
+            TemplateArgs {
+                model: None,
+                working_dir: None,
+                session_arg: None,
+                effort: None,
+                mcp_config: Some("/tmp/mcp.json"),
+            },
         );
         assert!(argv.contains(&"/tmp/mcp.json".to_string()));
         assert!(argv.contains(&"--mcp-config".to_string()));
@@ -2138,7 +2054,17 @@ mod tests {
     fn build_command_with_mcp_config_none_omits_marker() {
         let template = "-p {{prompt}} --mcp-config {{mcp_config}}";
         let s = strategy_with_template(template);
-        let argv = s.build_argv_from_template(template, "hello", None, None, None, None, None);
+        let argv = s.build_argv_from_template(
+            template,
+            "hello",
+            TemplateArgs {
+                model: None,
+                working_dir: None,
+                session_arg: None,
+                effort: None,
+                mcp_config: None,
+            },
+        );
         assert!(!argv.iter().any(|w| w.contains("mcp")));
         assert_eq!(argv, vec!["-p", "hello"]);
     }
@@ -2148,7 +2074,14 @@ mod tests {
         let template = "-p {{prompt}} --mcp-config {{mcp_config}} --effort {{effort}}";
         let s = strategy_with_template(template);
         let cmd = s
-            .build_command_with_mcp_config("hello", None, None, Some("/tmp/mcp.json"), Some("high"))
+            .build_command_with_mcp_config(
+                "hello",
+                None,
+                None,
+                Some("/tmp/mcp.json"),
+                Some("high"),
+                None,
+            )
             .unwrap();
         let cmd_str = format!("{:?}", cmd);
         assert!(cmd_str.contains("--effort"));
@@ -2160,7 +2093,7 @@ mod tests {
         let template = "-p {{prompt}} --mcp-config {{mcp_config}} --effort {{effort}}";
         let s = strategy_with_template(template);
         let cmd = s
-            .build_command_with_mcp_config("hello", None, None, Some("/tmp/mcp.json"), None)
+            .build_command_with_mcp_config("hello", None, None, Some("/tmp/mcp.json"), None, None)
             .unwrap();
         let cmd_str = format!("{:?}", cmd);
         assert!(!cmd_str.contains("--effort"));
@@ -2294,7 +2227,7 @@ mod tests {
     fn agent_dispatch_never_runs_identity_check() {
         for (name, source) in [
             ("executor", include_str!("../executor/mod.rs")),
-            ("graph_engine", include_str!("../graph_engine.rs")),
+            ("graph_engine", include_str!("../graph_engine/mod.rs")),
         ] {
             let production_code = source.split("mod tests {").next().unwrap_or(source);
             for marker in ["verify_identity", "identity_check"] {

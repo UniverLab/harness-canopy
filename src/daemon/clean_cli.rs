@@ -10,20 +10,35 @@
 //! and prompts before deleting each orphan (and every row that references
 //! it) unless `--yes` or `--dry-run` is set.
 
-use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
 use crate::daemon::process;
 use crate::db::Database;
 use crate::domain::canopy_config::CanopyConfig;
-use crate::domain::clean::{
-    self, CleanPlan, FileCandidate, HardCascadeCandidate, HardCascadePlan, ProjectCandidate,
-    SandboxCandidate,
-};
+use crate::domain::clean::{self, CleanPlan, ProjectCandidate, SandboxCandidate};
 use crate::domain::db_paths::database_path;
 use crate::domain::graphs::GraphStatus;
+
+mod hard_cascade;
+mod reclaim;
+mod scans;
+
+use hard_cascade::{build_hard_cascade_plan, projected_hard_cascade_rows, run_hard_cascade};
+use reclaim::{
+    confirm_stop_daemon, print_dry_run_reclaim_window, reclaim_if_warranted,
+    run_reclaim_window_and_report, ReclaimOptions,
+};
+use scans::{format_bytes, scan_log_files, scan_rag_residue, scan_terminal_dirs};
+
+#[cfg(test)]
+use reclaim::{
+    restoration_feasible_from_facts, run_reclaim_window, DaemonOps, DaemonOwnerKind,
+    ReclaimWindowOutcome,
+};
+#[cfg(test)]
+use std::sync::Mutex;
 
 pub async fn handle_clean_action(
     dry_run: bool,
@@ -38,18 +53,25 @@ pub async fn handle_clean_action(
     let db = Database::new_safe(&db_path, &data_dir)?;
     let config = CanopyConfig::load(&data_dir);
     let retention_days = older_than.unwrap_or(config.clean.retention_days);
+    let graph_event_days = older_than.unwrap_or(config.graph_event_retention_days);
     let now_ts = chrono::Utc::now().timestamp();
 
     // Project (read-only, no execution) what a real run would delete, so we
     // only ever consider the stop-daemon reclaim window when it's actually
     // warranted — stopping the daemon to reclaim a handful of rows would
     // just be downtime for nothing.
-    let projected_plan = build_clean_plan(&data_dir, &db, retention_days, now_ts)?;
+    let projected_plan =
+        build_clean_plan(&data_dir, &db, retention_days, graph_event_days, now_ts)?;
     let mut projected_rows = projected_plan.deleted_row_count() as u64;
     if hard {
         projected_rows += projected_hard_cascade_rows(&build_hard_cascade_plan(&db)?);
     }
-    let reclaim_warranted = !no_reclaim && clean::should_reclaim(projected_rows as usize);
+    let canopy_dir = crate::domain::prompts::canopy_dir();
+    let threshold = crate::domain::canopy_config::CanopyConfig::load(&canopy_dir)
+        .clean
+        .reclaim_min_deleted_rows;
+    let reclaim_warranted =
+        !no_reclaim && clean::should_reclaim(projected_rows as usize, threshold);
 
     if !reclaim_warranted {
         return run_clean_without_window(
@@ -60,6 +82,7 @@ pub async fn handle_clean_action(
             hard,
             yes,
             retention_days,
+            graph_event_days,
             now_ts,
             no_reclaim,
         );
@@ -88,6 +111,7 @@ pub async fn handle_clean_action(
                 hard,
                 yes,
                 retention_days,
+                graph_event_days,
                 now_ts,
                 no_reclaim,
             );
@@ -97,10 +121,13 @@ pub async fn handle_clean_action(
     run_reclaim_window_and_report(
         &data_dir,
         &db_path,
-        retention_days,
-        now_ts,
-        hard,
-        yes,
+        ReclaimOptions {
+            retention_days,
+            graph_event_retention_days: graph_event_days,
+            now_ts,
+            hard,
+            yes,
+        },
         daemon_pid,
     )
     .await
@@ -121,10 +148,18 @@ fn run_clean_without_window(
     hard: bool,
     yes: bool,
     retention_days: u64,
+    graph_event_days: u64,
     now_ts: i64,
     no_reclaim: bool,
 ) -> Result<()> {
-    let plan = run_clean(data_dir, db, dry_run, retention_days, now_ts)?;
+    let plan = run_clean(
+        data_dir,
+        db,
+        dry_run,
+        retention_days,
+        graph_event_days,
+        now_ts,
+    )?;
     print_summary(&plan, retention_days, dry_run);
 
     let mut rows_deleted = plan.deleted_row_count() as u64;
@@ -146,9 +181,10 @@ fn run_clean(
     db: &Database,
     dry_run: bool,
     retention_days: u64,
+    graph_event_days: u64,
     now_ts: i64,
 ) -> Result<CleanPlan> {
-    let plan = build_clean_plan(data_dir, db, retention_days, now_ts)?;
+    let plan = build_clean_plan(data_dir, db, retention_days, graph_event_days, now_ts)?;
     if !dry_run {
         execute_plan(db, &plan)?;
     }
@@ -165,6 +201,7 @@ fn build_clean_plan(
     data_dir: &Path,
     db: &Database,
     retention_days: u64,
+    graph_event_days: u64,
     now_ts: i64,
 ) -> Result<CleanPlan> {
     let cutoff_ts = clean::cutoff_timestamp(now_ts, retention_days);
@@ -220,7 +257,28 @@ fn build_clean_plan(
         });
     }
     let sandbox_removals = clean::plan_sandbox_cleanup(&sandbox_candidates);
-    let sandbox_untracked = super::sandbox_cli::scan_untracked_sandbox_dirs(db);
+    // CB92: derive the worktrees root from the injected `data_dir` (equal to
+    // `canopy_dir()` in production) — never the real home — and split the
+    // untracked leaves into proven leaks (dangling gitdir + older than 2 h,
+    // deleted) and the rest (still reported, never touched).
+    let worktrees_base = data_dir.join("worktrees");
+    let untracked_paths = super::sandbox_cli::scan_untracked_sandbox_dirs_in(db, &worktrees_base);
+    let leak_facts = scans::scan_untracked_leak_facts(&untracked_paths);
+    let untracked_leaks = clean::plan_leaked_untracked(&leak_facts, now_ts);
+    let leaked_set: std::collections::HashSet<&PathBuf> = untracked_leaks.iter().collect();
+    let sandbox_untracked: Vec<PathBuf> = untracked_paths
+        .into_iter()
+        .filter(|p| !leaked_set.contains(p))
+        .collect();
+
+    // CM46: aged-out durable graph events, for graphs that are not running.
+    let graph_event_cutoff = clean::cutoff_timestamp(now_ts, graph_event_days);
+    let graph_event_cutoff = chrono::DateTime::from_timestamp(graph_event_cutoff, 0)
+        .map(|at| at.to_rfc3339())
+        .unwrap_or_default();
+    let running_graph_ids = db.list_running_graph_ids()?;
+    let graph_event_deletions =
+        db.count_pruneable_graph_events(&graph_event_cutoff, &running_graph_ids)?;
 
     Ok(CleanPlan {
         session_ids,
@@ -230,211 +288,19 @@ fn build_clean_plan(
         orphaned_projects,
         sandbox_removals,
         sandbox_untracked,
+        untracked_leaks,
+        graph_event_deletions,
+        graph_event_cutoff,
     })
-}
-
-/// `--hard` mode: gather the per-project cascade facts, build the
-/// [`HardCascadePlan`], print it, and (unless `dry_run`) prompt and
-/// execute. Splits the orphan work from `run_clean` so the soft-mode
-/// tests don't pay for the extra DB roundtrips when `--hard` isn't set.
-/// Returns the number of database rows the cascade removed (real run) or
-/// would remove (`--dry-run`'s projection), so the caller can fold it into
-/// the total that decides whether reclaiming space is warranted.
-/// Pure fact-gathering half of `--hard`'s cascade: builds the
-/// [`HardCascadePlan`] without printing or executing anything. Split out so
-/// the reclaim window can project the cascade's row count (to decide
-/// whether reclaiming is warranted) without the double-printed plan a
-/// second `run_hard_cascade` call would otherwise produce.
-fn build_hard_cascade_plan(db: &Database) -> Result<HardCascadePlan> {
-    let candidates: Vec<HardCascadeCandidate> = db
-        .list_projects()?
-        .into_iter()
-        .map(|p| {
-            let workdir_exists = Path::new(&p.path).exists();
-            let counts = db.project_hard_cascade_counts(&p.hash, &p.path)?;
-            let skip_reason = db.project_hard_cascade_skip_reason(&p.path)?;
-            Ok::<_, anyhow::Error>(HardCascadeCandidate {
-                hash: p.hash,
-                name: p.name,
-                path: p.path,
-                workdir_exists,
-                counts,
-                skip_reason,
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-
-    Ok(clean::plan_hard_cascade(&candidates))
-}
-
-/// Projected row count (direct + cascade) the plan's targets would remove,
-/// for the reclaim-warranted projection — never executes anything.
-fn projected_hard_cascade_rows(plan: &HardCascadePlan) -> u64 {
-    plan.targets
-        .iter()
-        .map(|t| (direct_count(&t.counts) + cascade_count(&t.counts)) as u64)
-        .sum()
-}
-
-fn run_hard_cascade(db: &Database, dry_run: bool, yes: bool) -> Result<u64> {
-    let plan = build_hard_cascade_plan(db)?;
-    print_hard_cascade_plan(&plan, dry_run);
-
-    if plan.targets.is_empty() {
-        return Ok(0);
-    }
-
-    if dry_run {
-        // Plan-only: no prompt, no deletes (spec: "deletes nothing, no
-        // confirmation needed"). Project the row count so `--dry-run`
-        // reports the same reclaim figures a real run would.
-        return Ok(projected_hard_cascade_rows(&plan));
-    }
-
-    if !yes {
-        // Interactive confirmation; refuse on no/eof/non-tty.
-        let proceed = match prompt_hard_cascade_confirmation(&plan) {
-            Ok(value) => value,
-            Err(err) => {
-                eprintln!("  {err}\n  Aborting --hard: refusing to run without an explicit yes.");
-                return Ok(0);
-            }
-        };
-        if !proceed {
-            println!("  Aborted by user — nothing deleted.");
-            return Ok(0);
-        }
-    }
-
-    let mut rows_deleted = 0u64;
-    for target in &plan.targets {
-        match db.cascade_delete_orphan_project(&target.hash, &target.missing_path) {
-            Ok(actual) => {
-                rows_deleted += (direct_count(&actual) + cascade_count(&actual)) as u64;
-                println!(
-                    " \x1b[32m✓\x1b[0m  Removed {} ({}): {} direct + {} cascade rows across the project.",
-                    target.name,
-                    target.hash,
-                    direct_count(&actual),
-                    cascade_count(&actual),
-                );
-            }
-            Err(err) => {
-                eprintln!(
-                    " \x1b[31m✗\x1b[0m  Failed to remove {} ({}): {err}",
-                    target.name, target.hash
-                );
-            }
-        }
-    }
-    Ok(rows_deleted)
-}
-
-fn direct_count(c: &clean::HardCascadeCounts) -> i64 {
-    c.graphs
-        + c.interactive_sessions
-        + c.terminal_sessions
-        + c.last_prompts
-        + c.scheduled_sends
-        + c.failed_scheduled_sends
-        + c.sync_messages
-        + c.sync_locks
-        + c.intelligence_nodes
-        + c.operational_sessions
-}
-
-fn cascade_count(c: &clean::HardCascadeCounts) -> i64 {
-    c.graph_specs
-        + c.graph_nodes
-        + c.graph_edges
-        + c.graph_runs
-        + c.graph_completion_hook_runs
-        + c.ensembles
-        + c.ensemble_members
-        + c.queue_members
-        + c.seed_sessions
-        + c.intelligence_edges
-}
-
-fn prompt_hard_cascade_confirmation(plan: &HardCascadePlan) -> Result<bool> {
-    use inquire::Confirm;
-    // Default to no so a stray Enter (or a non-tty env) can't accidentally
-    // confirm a destructive cascade. Scripts that want unattended deletes
-    // must pass `--yes`.
-    let prompt = format!(
-        "Delete these {} orphaned project(s) and every row that references them?",
-        plan.targets.len()
-    );
-    Confirm::new(&prompt)
-        .with_default(false)
-        .with_help_message("y: delete, n/Esc: abort")
-        .prompt()
-        .map_err(|err| anyhow::anyhow!("{err}"))
-}
-
-fn print_hard_cascade_plan(plan: &HardCascadePlan, dry_run: bool) {
-    if plan.is_empty() && plan.skips.is_empty() {
-        println!("\nNo orphaned projects to clean.");
-        return;
-    }
-    let verb = if dry_run {
-        "Would remove"
-    } else {
-        "Will remove"
-    };
-    if !plan.targets.is_empty() {
-        println!("\n\x1b[1m── canopy clean --hard (orphan-project cascade) ──\x1b[0m");
-        println!(" {verb} {} orphaned project(s):", plan.targets.len());
-        for t in &plan.targets {
-            let c = &t.counts;
-            println!(
-                "   {} ({})  missing: {}\n     [{} graph(s), {} interactive session(s), {} terminal session(s),\n      {} last prompt(s), {} scheduled send(s), {} failed send(s),\n      {} sync message(s), {} sync lock(s), {} intelligence node(s), {} operational session(s)]\n     + cascade: [{} graph_spec(s), {} graph_node(s), {} graph_edge(s),\n                 {} graph_run(s), {} completion_hook_run(s),\n                 {} ensemble(s), {} ensemble_member(s), {} queue_member(s),\n                 {} seed_session(s), {} intelligence_edge(s)]",
-                t.name,
-                t.hash,
-                t.missing_path,
-                c.graphs,
-                c.interactive_sessions,
-                c.terminal_sessions,
-                c.last_prompts,
-                c.scheduled_sends,
-                c.failed_scheduled_sends,
-                c.sync_messages,
-                c.sync_locks,
-                c.intelligence_nodes,
-                c.operational_sessions,
-                c.graph_specs,
-                c.graph_nodes,
-                c.graph_edges,
-                c.graph_runs,
-                c.graph_completion_hook_runs,
-                c.ensembles,
-                c.ensemble_members,
-                c.queue_members,
-                c.seed_sessions,
-                c.intelligence_edges,
-            );
-        }
-    }
-    if !plan.skips.is_empty() {
-        println!(
-            "\n\x1b[33m⚠\x1b[0m  Skipped {} project(s) with in-flight state:",
-            plan.skips.len()
-        );
-        for s in &plan.skips {
-            println!(
-                "   {} ({})  missing: {}  — {}",
-                s.name,
-                s.hash,
-                s.missing_path,
-                s.reason.describe()
-            );
-        }
-    }
 }
 
 fn execute_plan(db: &Database, plan: &CleanPlan) -> Result<()> {
     if !plan.session_ids.is_empty() {
         db.delete_interactive_sessions(&plan.session_ids)?;
+    }
+    if plan.graph_event_deletions > 0 {
+        let running_graph_ids = db.list_running_graph_ids()?;
+        db.prune_graph_events(&plan.graph_event_cutoff, &running_graph_ids)?;
     }
     for f in &plan.log_files {
         let _ = std::fs::remove_file(&f.path);
@@ -482,700 +348,15 @@ fn execute_plan(db: &Database, plan: &CleanPlan) -> Result<()> {
             }
         }
     }
-    Ok(())
-}
-
-fn scan_log_files(data_dir: &Path) -> Result<Vec<FileCandidate>> {
-    let dir = data_dir.join("logs");
-    let mut out = Vec::new();
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Ok(out);
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("log") {
-            continue;
-        }
-        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        let Ok(meta) = entry.metadata() else {
-            continue;
-        };
-        out.push(FileCandidate {
-            key: stem.to_string(),
-            path,
-            mtime: mtime_unix(&meta),
-            size_bytes: meta.len(),
-        });
-    }
-    Ok(out)
-}
-
-/// Terminal history lives at `terminals/<session_name>/history.toml`
-/// (`tui::terminal_history`); `terminals/global_catalog.toml` is a shared
-/// file, not a per-session dir, and is skipped by the `is_dir()` check.
-fn scan_terminal_dirs(data_dir: &Path) -> Result<Vec<FileCandidate>> {
-    let dir = data_dir.join("terminals");
-    let mut out = Vec::new();
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Ok(out);
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        let hist_file = path.join("history.toml");
-        let Ok(hist_meta) = std::fs::metadata(&hist_file) else {
-            continue;
-        };
-        out.push(FileCandidate {
-            key: name.to_string(),
-            path,
-            mtime: mtime_unix(&hist_meta),
-            size_bytes: hist_meta.len(),
-        });
-    }
-    Ok(out)
-}
-
-/// Only the top level of `rag/` is scanned, and never descended into —
-/// `vectors.lancedb/` is LanceDB's own on-disk store and must never be
-/// touched by name-based heuristics.
-fn scan_rag_residue(data_dir: &Path) -> Result<Vec<FileCandidate>> {
-    let dir = data_dir.join("rag");
-    let mut out = Vec::new();
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Ok(out);
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            continue;
-        }
-        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        let Ok(meta) = entry.metadata() else {
-            continue;
-        };
-        out.push(FileCandidate {
-            key: name.to_string(),
-            path,
-            mtime: mtime_unix(&meta),
-            size_bytes: meta.len(),
-        });
-    }
-    Ok(out)
-}
-
-fn mtime_unix(meta: &std::fs::Metadata) -> i64 {
-    meta.modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
-fn format_bytes(bytes: u64) -> String {
-    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
-    let mut size = bytes as f64;
-    let mut unit = 0;
-    while size >= 1024.0 && unit < UNITS.len() - 1 {
-        size /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{bytes} B")
-    } else {
-        format!("{size:.1} {}", UNITS[unit])
-    }
-}
-
-/// After a clean run, reclaim the database space its own row deletions
-/// freed — but only when that's actually warranted. Skips automatically
-/// (spec: "skipped automatically when the deletion was trivial") unless
-/// `rows_deleted` clears [`clean::RECLAIM_ROW_THRESHOLD`], skips entirely
-/// when `no_reclaim` opts out for a fast run, and never touches the file
-/// under `--dry-run` — it only prints what a real run would do.
-///
-/// Reclaiming (`VACUUM` + WAL checkpoint) takes an exclusive lock on the
-/// database, so it must not run while the daemon could be mid-write. The
-/// daemon's own singleton lock (`daemon::process::acquire_daemon_lock`) is
-/// a `daemon.pid`-backed flock; this reuses the same pid file (rather than
-/// re-acquiring the flock, which would race the daemon's own re-acquire on
-/// restart) to decide whether a daemon is up before ever calling `VACUUM`.
-fn reclaim_if_warranted(
-    db: &Database,
-    data_dir: &Path,
-    db_path: &Path,
-    dry_run: bool,
-    no_reclaim: bool,
-    rows_deleted: u64,
-) {
-    if no_reclaim || !clean::should_reclaim(rows_deleted as usize) {
-        return;
-    }
-
-    let size_before = std::fs::metadata(db_path).ok().map(|m| m.len());
-
-    if dry_run {
-        if let Some(before) = size_before {
-            println!(
-                "\n Database file: {} — would reclaim space ({rows_deleted} row(s) deleted, ≥ {} threshold; run without --dry-run to apply).",
-                format_bytes(before),
-                clean::RECLAIM_ROW_THRESHOLD,
-            );
-        }
-        return;
-    }
-
-    let daemon_running = crate::daemon::process::read_pid(data_dir)
-        .map(crate::daemon::process::is_process_running)
-        .unwrap_or(false);
-    if daemon_running {
-        println!(
-            "\n \x1b[33m⚠\x1b[0m  Skipped space reclamation: the canopy daemon is running and holds a write connection that a VACUUM's exclusive lock would conflict with. Stop it (`canopy daemon stop`) and re-run `canopy clean` to shrink the database file."
-        );
-        return;
-    }
-
-    match db.reclaim_space() {
-        Ok(()) => {
-            let size_after = std::fs::metadata(db_path).ok().map(|m| m.len());
-            match (size_before, size_after) {
-                (Some(before), Some(after)) => println!(
-                    "\n Database file: {} -> {} ({rows_deleted} row(s) reclaimed via VACUUM + WAL checkpoint)",
-                    format_bytes(before),
-                    format_bytes(after),
-                ),
-                _ => println!(
-                    "\n Reclaimed database space ({rows_deleted} row(s) via VACUUM + WAL checkpoint)."
-                ),
-            }
-        }
-        Err(err) => {
-            eprintln!("\n \x1b[33m⚠\x1b[0m  Could not reclaim database space: {err}");
+    // CB92: delete only the leaf of each proven leak — the parent `<hash>/`
+    // dir is deliberately left alone (pruning it would race with a
+    // concurrent run creating the same project dir).
+    for p in &plan.untracked_leaks {
+        println!("Will remove leaked untracked sandbox dir {}", p.display());
+        if let Err(e) = std::fs::remove_dir_all(p) {
+            eprintln!(" Failed to remove leaked dir {}: {e:#}", p.display());
         }
     }
-}
-
-// ── B2: the stop-daemon reclaim window ───────────────────────────────────
-//
-// `reclaim_if_warranted` above only ever fires when the daemon happens to
-// already be down — normally it never is, so that path is effectively
-// dead. The functions below let `canopy clean` create the exclusive window
-// itself: refuse if busy, stop the daemon, `quick_check` gate, run the
-// existing cleanup, `VACUUM` + WAL checkpoint, and restore the daemon on
-// every exit path — including a panic or Ctrl-C.
-
-/// Interactive consent to stop the daemon, mirroring the `--hard`/`--yes`
-/// precedent in this same command: refuses (rather than hangs or
-/// accidentally confirms) on a non-tty or a stray Enter.
-fn confirm_stop_daemon() -> Result<bool> {
-    use inquire::Confirm;
-    Confirm::new(
-        "Reclaiming this much space requires stopping the canopy daemon. Stop it, reclaim, then restart it?",
-    )
-    .with_default(false)
-    .with_help_message("y: stop/reclaim/restart, n/Esc: skip reclamation")
-    .prompt()
-    .or(Ok(false))
-}
-
-fn print_dry_run_reclaim_window(rows_deleted: u64, db_path: &Path) {
-    let size_before = std::fs::metadata(db_path).ok().map(|m| m.len());
-    println!(
-        "\n Database file: {} — would reclaim space ({rows_deleted} row(s) deleted, ≥ {} threshold).",
-        size_before.map(format_bytes).unwrap_or_default(),
-        clean::RECLAIM_ROW_THRESHOLD,
-    );
-    println!(
-        " Would stop the canopy daemon (if running), run `PRAGMA quick_check`, reclaim space \
-         (VACUUM + WAL checkpoint), then restart the daemon exactly as it was running."
-    );
-}
-
-/// Who currently owns the running daemon process — decides how it must be
-/// stopped and restored (B-decision 4). `Managed` carries the service
-/// manager's name (`"systemd"` on Linux, `"launchd"` on macOS) purely for
-/// logging/reporting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DaemonOwnerKind {
-    Managed(&'static str),
-    Detached,
-}
-
-impl DaemonOwnerKind {
-    fn describe(&self) -> &'static str {
-        match self {
-            DaemonOwnerKind::Managed("systemd") => "systemd",
-            DaemonOwnerKind::Managed("launchd") => "launchd",
-            DaemonOwnerKind::Managed(_) => "the service manager",
-            DaemonOwnerKind::Detached => "a detached process (no owning service unit)",
-        }
-    }
-}
-
-/// Reuses [`process::service_manager_facts`] (systemd/launchd cgroup or
-/// `launchctl` fact-checking already built for `daemon status`) rather than
-/// inventing a second ownership check: the daemon is service-manager-owned
-/// only if that manager's own live-PID fact names exactly this PID.
-fn detect_daemon_owner(daemon_pid: u32) -> DaemonOwnerKind {
-    match process::service_manager_facts() {
-        Some(facts) if facts.pid == Some(daemon_pid) => DaemonOwnerKind::Managed(facts.name),
-        _ => DaemonOwnerKind::Detached,
-    }
-}
-
-/// B-decision 5: detect *before* stopping anything whether restoration is
-/// even possible. A missing/disabled systemd unit must not be discovered
-/// only after the daemon is already down.
-fn restoration_feasible(owner: DaemonOwnerKind) -> std::result::Result<(), String> {
-    let unit_installed = process::service_unit_installed();
-    #[cfg(target_os = "linux")]
-    let (systemd_available, service_enabled) = (
-        process::is_systemd_available(),
-        process::is_service_enabled(),
-    );
-    #[cfg(not(target_os = "linux"))]
-    let (systemd_available, service_enabled) = (true, true);
-    restoration_feasible_from_facts(owner, unit_installed, systemd_available, service_enabled)
-}
-
-/// Pure decision half of [`restoration_feasible`] (B-decision 5), fed
-/// booleans instead of shelling out itself — `systemctl`/the unit file are
-/// absent in some CI containers (see [`process::is_systemd_available`]),
-/// so a test asserting a specific refusal must not depend on the machine
-/// it happens to run on actually having (or lacking) a real canopy unit.
-fn restoration_feasible_from_facts(
-    owner: DaemonOwnerKind,
-    unit_installed: bool,
-    systemd_available: bool,
-    service_enabled: bool,
-) -> std::result::Result<(), String> {
-    match owner {
-        DaemonOwnerKind::Managed(name) => {
-            if !unit_installed {
-                return Err(format!(
-                    "{name} unit is not installed — restoring through {name} is impossible"
-                ));
-            }
-            if name == "systemd" {
-                if !systemd_available {
-                    return Err("the systemd user session is unavailable".to_string());
-                }
-                if !service_enabled {
-                    return Err(format!(
-                        "the {name} unit is disabled — a restart cannot be trusted to bring the daemon back"
-                    ));
-                }
-            }
-            Ok(())
-        }
-        DaemonOwnerKind::Detached => std::env::current_exe()
-            .map(|_| ())
-            .map_err(|err| format!("cannot resolve the canopy executable to relaunch it: {err}")),
-    }
-}
-
-/// The stop/restart mechanics, behind a trait so [`run_reclaim_window`]'s
-/// decision logic — the part the spec requires tests for — is exercisable
-/// with a fake instead of a real subprocess/systemctl dance.
-trait DaemonOps {
-    fn stop(&self, owner: DaemonOwnerKind) -> Result<()>;
-    fn restart(&self, owner: DaemonOwnerKind) -> Result<()>;
-}
-
-struct RealDaemonOps {
-    data_dir: std::path::PathBuf,
-    port: u16,
-}
-
-impl DaemonOps for RealDaemonOps {
-    fn stop(&self, owner: DaemonOwnerKind) -> Result<()> {
-        match owner {
-            // Never a bare SIGTERM here: the installed unit has
-            // `Restart=on-failure`, so signalling the PID directly reads to
-            // the manager as an unclean exit and it respawns the daemon out
-            // from under the exclusive VACUUM this stop is for. Going
-            // through the manager's own stop verb is a stop it won't
-            // immediately undo.
-            DaemonOwnerKind::Managed(name) => {
-                if !process::service_manager_stop() {
-                    anyhow::bail!("failed to stop the {name}-managed daemon");
-                }
-                Ok(())
-            }
-            DaemonOwnerKind::Detached => {
-                let pid = process::read_pid(&self.data_dir)
-                    .or_else(|| process::resolve_port_pid(self.port))
-                    .filter(|&p| process::is_process_running(p));
-                if let Some(pid) = pid {
-                    process::send_signal(pid);
-                    for _ in 0..20 {
-                        std::thread::sleep(std::time::Duration::from_millis(250));
-                        if !process::is_process_running(pid) {
-                            break;
-                        }
-                    }
-                }
-                process::remove_pid_file(&self.data_dir);
-                Ok(())
-            }
-        }
-    }
-
-    fn restart(&self, owner: DaemonOwnerKind) -> Result<()> {
-        match owner {
-            DaemonOwnerKind::Managed(name) => {
-                if !process::service_manager_start() {
-                    anyhow::bail!("failed to restart the {name}-managed daemon");
-                }
-                Ok(())
-            }
-            DaemonOwnerKind::Detached => spawn_detached_daemon(&self.data_dir, self.port),
-        }
-    }
-}
-
-/// Relaunch a detached `canopy serve`, mirroring `canopy daemon start`'s
-/// spawn (setsid, logs appended, stdin null) but deliberately without its
-/// `install_service_if_needed` side effect — restoring a daemon that wasn't
-/// service-manager-owned must not silently switch it to being one.
-fn spawn_detached_daemon(data_dir: &Path, port: u16) -> Result<()> {
-    let exe = std::env::current_exe()?;
-    let mut cmd = std::process::Command::new(&exe);
-    cmd.arg("serve").arg("--port").arg(port.to_string());
-
-    let log_path = data_dir.join("daemon.log");
-    let log_file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)?;
-    let log_file_err = log_file.try_clone()?;
-    cmd.stdout(log_file)
-        .stderr(log_file_err)
-        .stdin(std::process::Stdio::null());
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        unsafe {
-            cmd.pre_exec(|| {
-                libc::setsid();
-                Ok(())
-            });
-        }
-    }
-
-    let child = cmd.spawn()?;
-    let child_pid = child.id();
-    std::thread::sleep(std::time::Duration::from_millis(500));
-    if !process::is_process_running(child_pid) {
-        anyhow::bail!("daemon process exited immediately after restart");
-    }
-    Ok(())
-}
-
-/// What happened inside the reclaim window — every branch reports exactly
-/// what the spec requires (busy names what's busy; a `quick_check` failure
-/// says nothing was modified; the happy path reports every step
-/// distinctly).
-enum ReclaimWindowOutcome {
-    /// Refused before touching anything: either busy (names what) or
-    /// restoration was judged infeasible (names why).
-    Refused(String),
-    /// `quick_check` found a problem — VACUUM was never attempted and the
-    /// existing cleanup never ran, so nothing was modified.
-    QuickCheckFailed {
-        verdict: String,
-        daemon_restored: bool,
-    },
-    Completed(Box<ReclaimWindowReport>),
-}
-
-struct ReclaimWindowReport {
-    daemon_was_running: bool,
-    daemon_owner: Option<DaemonOwnerKind>,
-    quick_check: String,
-    plan: CleanPlan,
-    retention_days: u64,
-    hard_rows: u64,
-    size_before: Option<u64>,
-    size_after: Option<u64>,
-    daemon_restored: bool,
-}
-
-/// Restores the daemon exactly once, no matter how many callers race to
-/// call it (the sync happy/error paths below, and — in the real CLI glue —
-/// a concurrent Ctrl-C handler). `restored` only latches `true` on an
-/// actual success so a failed attempt can still be retried by whichever
-/// caller asks next (idempotent restoration per the spec).
-fn restore_daemon_once(
-    restored: &Mutex<bool>,
-    ops: &dyn DaemonOps,
-    owner: Option<DaemonOwnerKind>,
-) -> bool {
-    let mut done = restored.lock().unwrap_or_else(|e| e.into_inner());
-    if *done {
-        return true;
-    }
-    let ok = match owner {
-        None => true,
-        Some(owner) => ops.restart(owner).is_ok(),
-    };
-    *done = ok;
-    ok
-}
-
-/// The orchestrated window itself (B-decision 1-6, functional
-/// requirements): refuse-if-busy, stop, `quick_check`, existing cleanup,
-/// `VACUUM` + WAL checkpoint, restore — in that order, with the daemon
-/// restored on every exit path via `restored`/[`restore_daemon_once`].
-///
-/// Deliberately synchronous and injected with `ops` rather than calling the
-/// real subprocess/systemctl mechanics directly: this is the part the spec
-/// requires tests for (busy refusal, `quick_check`-gates-VACUUM,
-/// restore-on-failure, infeasible-restoration refusal), and none of that
-/// needs a real daemon process to exercise.
-#[allow(clippy::too_many_arguments)]
-fn run_reclaim_window(
-    db: &Database,
-    data_dir: &Path,
-    db_path: &Path,
-    retention_days: u64,
-    now_ts: i64,
-    hard: bool,
-    yes: bool,
-    daemon_pid: Option<u32>,
-    ops: &dyn DaemonOps,
-    restored: &Mutex<bool>,
-) -> Result<ReclaimWindowOutcome> {
-    let busy = db.busy_reasons()?;
-    if !busy.is_empty() {
-        return Ok(ReclaimWindowOutcome::Refused(format!(
-            "refusing to stop the daemon — busy: {}",
-            busy.join(", ")
-        )));
-    }
-
-    let owner = daemon_pid.map(detect_daemon_owner);
-    if let Some(owner) = owner {
-        if let Err(reason) = restoration_feasible(owner) {
-            return Ok(ReclaimWindowOutcome::Refused(format!(
-                "refusing to stop the daemon — cannot guarantee it can be restored afterward: {reason}"
-            )));
-        }
-    }
-
-    // Daemon wasn't running at all: nothing to stop, so `restored` starts
-    // already-true and every subsequent restore attempt is a no-op.
-    if owner.is_none() {
-        *restored.lock().unwrap_or_else(|e| e.into_inner()) = true;
-    }
-
-    /// Panic safety net: if anything below unwinds, restore on drop rather
-    /// than leaving the daemon down. A no-op once `restore_daemon_once` has
-    /// already succeeded from the normal control flow.
-    struct PanicGuard<'a> {
-        ops: &'a dyn DaemonOps,
-        owner: Option<DaemonOwnerKind>,
-        restored: &'a Mutex<bool>,
-    }
-    impl Drop for PanicGuard<'_> {
-        fn drop(&mut self) {
-            restore_daemon_once(self.restored, self.ops, self.owner);
-        }
-    }
-    let _panic_guard = PanicGuard {
-        ops,
-        owner,
-        restored,
-    };
-
-    if let Some(owner) = owner {
-        ops.stop(owner)?;
-    }
-
-    let quick_check = db.quick_check()?;
-    if quick_check != "ok" {
-        let daemon_restored = restore_daemon_once(restored, ops, owner);
-        return Ok(ReclaimWindowOutcome::QuickCheckFailed {
-            verdict: quick_check,
-            daemon_restored,
-        });
-    }
-
-    let plan = build_clean_plan(data_dir, db, retention_days, now_ts)?;
-    execute_plan(db, &plan)?;
-    let hard_rows = if hard {
-        run_hard_cascade(db, false, yes)?
-    } else {
-        0
-    };
-
-    let size_before = std::fs::metadata(db_path).ok().map(|m| m.len());
-    db.reclaim_space()?;
-    let size_after = std::fs::metadata(db_path).ok().map(|m| m.len());
-
-    let daemon_restored = restore_daemon_once(restored, ops, owner);
-
-    Ok(ReclaimWindowOutcome::Completed(Box::new(
-        ReclaimWindowReport {
-            daemon_was_running: daemon_pid.is_some(),
-            daemon_owner: owner,
-            quick_check,
-            plan,
-            retention_days,
-            hard_rows,
-            size_before,
-            size_after,
-            daemon_restored,
-        },
-    )))
-}
-
-fn print_reclaim_window_outcome(outcome: &ReclaimWindowOutcome) {
-    match outcome {
-        ReclaimWindowOutcome::Refused(reason) => {
-            println!("\n \x1b[33m⚠\x1b[0m  {reason}");
-            println!(
-                "   Skipped space reclamation and left the daemon exactly as it was — retry once that clears."
-            );
-        }
-        ReclaimWindowOutcome::QuickCheckFailed {
-            verdict,
-            daemon_restored,
-        } => {
-            println!(
-                "\n \x1b[31m✗\x1b[0m  PRAGMA quick_check reported a problem with the database file: {verdict}"
-            );
-            println!(
-                "   No reclamation was attempted and nothing was modified — the file was left exactly as found."
-            );
-            println!(
-                "   Daemon restored: {}",
-                if *daemon_restored {
-                    "yes"
-                } else {
-                    "\x1b[31mno — check `canopy daemon status`\x1b[0m"
-                }
-            );
-        }
-        ReclaimWindowOutcome::Completed(report) => {
-            print_summary(&report.plan, report.retention_days, false);
-            println!(
-                " Daemon stopped: {}",
-                if report.daemon_was_running {
-                    format!(
-                        "yes ({})",
-                        report
-                            .daemon_owner
-                            .map(|o| o.describe())
-                            .unwrap_or("unknown")
-                    )
-                } else {
-                    "no (was not running)".to_string()
-                }
-            );
-            println!(" quick_check: {}", report.quick_check);
-            match (report.size_before, report.size_after) {
-                (Some(before), Some(after)) => println!(
-                    " Database file: {} -> {} ({} row(s) reclaimed via VACUUM + WAL checkpoint)",
-                    format_bytes(before),
-                    format_bytes(after),
-                    report.plan.deleted_row_count() as u64 + report.hard_rows,
-                ),
-                _ => println!(
-                    " Reclaimed database space ({} row(s) via VACUUM + WAL checkpoint).",
-                    report.plan.deleted_row_count() as u64 + report.hard_rows
-                ),
-            }
-            println!(
-                " Daemon restored: {}",
-                if report.daemon_restored {
-                    "yes"
-                } else {
-                    "\x1b[31mno — check `canopy daemon status`\x1b[0m"
-                }
-            );
-        }
-    }
-}
-
-/// Real-CLI glue around [`run_reclaim_window`]: runs it on a blocking
-/// thread (it does real subprocess/flock/VACUUM work) while a concurrent
-/// task watches for Ctrl-C. Both sides restore through the same
-/// `restored` flag, so whichever notices first — the window finishing on
-/// its own, or the operator interrupting — is the one that actually
-/// restarts the daemon; the other is a no-op.
-async fn run_reclaim_window_and_report(
-    data_dir: &Path,
-    db_path: &Path,
-    retention_days: u64,
-    now_ts: i64,
-    hard: bool,
-    yes: bool,
-    daemon_pid: Option<u32>,
-) -> Result<()> {
-    let port = crate::daemon::cli::configured_port(data_dir);
-    let owner = daemon_pid.map(detect_daemon_owner);
-    let ops = Arc::new(RealDaemonOps {
-        data_dir: data_dir.to_path_buf(),
-        port,
-    });
-    let restored = Arc::new(Mutex::new(daemon_pid.is_none()));
-
-    let watcher_ops = ops.clone();
-    let watcher_restored = restored.clone();
-    let watcher = tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            eprintln!("\n\x1b[33m⚠\x1b[0m  Interrupted — restoring the daemon before exiting...");
-            let ok = restore_daemon_once(&watcher_restored, watcher_ops.as_ref(), owner);
-            eprintln!(
-                "{}",
-                if ok {
-                    "Daemon restored."
-                } else {
-                    "Failed to restore the daemon — check `canopy daemon status`."
-                }
-            );
-            std::process::exit(130);
-        }
-    });
-
-    let db_owned = db_path.to_path_buf();
-    let db_dir_owned = data_dir.to_path_buf();
-    let blocking_ops = ops.clone();
-    let blocking_restored = restored.clone();
-    let outcome = tokio::task::spawn_blocking({
-        let db = Database::new_safe(&db_owned, &db_dir_owned)?;
-        move || {
-            run_reclaim_window(
-                &db,
-                &db_dir_owned,
-                &db_owned,
-                retention_days,
-                now_ts,
-                hard,
-                yes,
-                daemon_pid,
-                blocking_ops.as_ref(),
-                &blocking_restored,
-            )
-        }
-    })
-    .await;
-
-    watcher.abort();
-
-    let outcome = outcome.map_err(|e| anyhow::anyhow!("reclaim window task panicked: {e}"))??;
-    print_reclaim_window_outcome(&outcome);
     Ok(())
 }
 
@@ -1189,6 +370,12 @@ fn print_summary(plan: &CleanPlan, retention_days: u64, dry_run: bool) {
         " {verb} {} stale interactive session(s) (database rows)",
         plan.session_ids.len()
     );
+    if plan.graph_event_deletions > 0 {
+        println!(
+            " {verb} {} graph event(s) (database rows)",
+            plan.graph_event_deletions
+        );
+    }
     println!(" {verb} {} orphaned log file(s)", plan.log_files.len());
     println!(
         " {verb} {} orphaned terminal history dir(s)",
@@ -1205,6 +392,10 @@ fn print_summary(plan: &CleanPlan, retention_days: u64, dry_run: bool) {
     for t in &plan.sandbox_removals {
         println!("   {} ({}, branch {})", t.id, t.path.display(), t.branch);
     }
+    println!(
+        " {verb} {} leaked untracked sandbox dir(s) (dangling gitdir, older than 2 h)",
+        plan.untracked_leaks.len()
+    );
     if !plan.sandbox_untracked.is_empty() {
         println!(
             " Skipped {} untracked sandbox dir(s) (no sandbox run record; left untouched):",
@@ -1296,7 +487,7 @@ mod tests {
         // Push the clock far enough forward that everything looks old
         // without needing to backdate real file mtimes.
         let now_ts = chrono::Utc::now().timestamp() + 30 * 86_400;
-        let plan = run_clean(data_dir, &db, true, 7, now_ts).unwrap();
+        let plan = run_clean(data_dir, &db, true, 7, 90, now_ts).unwrap();
 
         assert_eq!(plan.session_ids, vec!["s-old".to_string()]);
         assert_eq!(plan.log_files.len(), 1);
@@ -1328,11 +519,61 @@ mod tests {
         touch(&data_dir.join("logs/agent-gone.log"), "log contents");
 
         let now_ts = chrono::Utc::now().timestamp() + 30 * 86_400;
-        let plan = run_clean(data_dir, &db, false, 7, now_ts).unwrap();
+        let plan = run_clean(data_dir, &db, false, 7, 90, now_ts).unwrap();
 
         assert_eq!(plan.session_ids.len(), 1);
         assert_eq!(db.count_interactive_sessions().unwrap(), 0);
         assert!(!data_dir.join("logs/agent-gone.log").exists());
+    }
+
+    /// CM46 req 7: soft `canopy clean` deletes a 91-day-old graph event and
+    /// keeps a 1-day-old one (retention window: `graph_event_retention_days`).
+    #[test]
+    fn real_run_prunes_graph_events_older_than_the_retention_window() {
+        let dir = tempdir().unwrap();
+        let data_dir = dir.path();
+        let db = test_db(data_dir);
+
+        let seed = |graph_id: &str, message: &str| {
+            db.insert_graph_event(&crate::domain::activity::GraphEventRecord {
+                graph_id: graph_id.to_string(),
+                spec_id: None,
+                node_id: None,
+                run_id: None,
+                kind: "graph_started".to_string(),
+                message: message.to_string(),
+                payload: None,
+            })
+            .unwrap()
+        };
+        let old = seed("g-old", "91 days old");
+        seed("g-new", "1 day old");
+        let aged = (chrono::Utc::now() - chrono::Duration::days(91)).to_rfc3339();
+        db.exec_test_sql(&format!(
+            "UPDATE graph_events SET created_at = '{aged}' WHERE id = {old};"
+        ))
+        .unwrap();
+
+        let now_ts = chrono::Utc::now().timestamp();
+        let plan = run_clean(data_dir, &db, false, 7, 90, now_ts).unwrap();
+
+        assert_eq!(
+            plan.graph_event_deletions, 1,
+            "only the 91-day-old event is a deletion candidate"
+        );
+        assert!(
+            db.list_graph_events("g-old", None, None, None, 10)
+                .unwrap()
+                .is_empty(),
+            "the 91-day-old event must be deleted by clean"
+        );
+        assert_eq!(
+            db.list_graph_events("g-new", None, None, None, 10)
+                .unwrap()
+                .len(),
+            1,
+            "the 1-day-old event must survive"
+        );
     }
 
     #[test]
@@ -1354,7 +595,7 @@ mod tests {
         .unwrap();
 
         let now_ts = chrono::Utc::now().timestamp() + 3650 * 86_400;
-        run_clean(data_dir, &db, false, 7, now_ts).unwrap();
+        run_clean(data_dir, &db, false, 7, 90, now_ts).unwrap();
 
         assert_eq!(
             db.get_interactive_session_status("s-active").unwrap(),
@@ -1391,13 +632,14 @@ mod tests {
             last_run_ok: None,
             last_triggered_at: None,
             trigger_count: 0,
+            action: crate::domain::models::AgentAction::Headless,
         })
         .unwrap();
 
         touch(&data_dir.join("logs/agent-keep.log"), "keep me");
 
         let now_ts = chrono::Utc::now().timestamp() + 30 * 86_400;
-        run_clean(data_dir, &db, false, 7, now_ts).unwrap();
+        run_clean(data_dir, &db, false, 7, 90, now_ts).unwrap();
 
         assert!(data_dir.join("logs/agent-keep.log").exists());
     }
@@ -1414,7 +656,7 @@ mod tests {
         );
 
         let now_ts = chrono::Utc::now().timestamp() + 30 * 86_400;
-        let plan = run_clean(data_dir, &db, false, 7, now_ts).unwrap();
+        let plan = run_clean(data_dir, &db, false, 7, 90, now_ts).unwrap();
 
         assert_eq!(plan.terminal_dirs.len(), 1);
         assert!(!data_dir.join("terminals/stray-term").exists());
@@ -1434,7 +676,7 @@ mod tests {
         );
 
         let now_ts = chrono::Utc::now().timestamp() + 30 * 86_400;
-        run_clean(data_dir, &db, false, 7, now_ts).unwrap();
+        run_clean(data_dir, &db, false, 7, 90, now_ts).unwrap();
 
         assert!(data_dir.join("terminals/kept-term").exists());
     }
@@ -1470,7 +712,7 @@ mod tests {
         .unwrap();
 
         let now_ts = chrono::Utc::now().timestamp();
-        let plan = run_clean(data_dir, &db, false, 7, now_ts).unwrap();
+        let plan = run_clean(data_dir, &db, false, 7, 90, now_ts).unwrap();
 
         assert_eq!(plan.orphaned_projects.len(), 1);
         assert_eq!(plan.orphaned_projects[0].hash, "hash-missing");
@@ -1491,7 +733,7 @@ mod tests {
         );
 
         let now_ts = chrono::Utc::now().timestamp() + 30 * 86_400;
-        let plan = run_clean(data_dir, &db, false, 7, now_ts).unwrap();
+        let plan = run_clean(data_dir, &db, false, 7, 90, now_ts).unwrap();
 
         assert_eq!(plan.rag_residue_files.len(), 1);
         assert!(!data_dir.join("rag/leftover.tmp").exists());
@@ -1943,10 +1185,13 @@ mod tests {
             &db,
             data_dir,
             &db_path,
-            7,
-            chrono::Utc::now().timestamp(),
-            false,
-            true,
+            ReclaimOptions {
+                retention_days: 7,
+                graph_event_retention_days: 90,
+                now_ts: chrono::Utc::now().timestamp(),
+                hard: false,
+                yes: true,
+            },
             Some(FAKE_DAEMON_PID),
             &ops,
             &restored,
@@ -1989,10 +1234,13 @@ mod tests {
             &db,
             data_dir,
             &db_path,
-            7,
-            chrono::Utc::now().timestamp(),
-            false,
-            true,
+            ReclaimOptions {
+                retention_days: 7,
+                graph_event_retention_days: 90,
+                now_ts: chrono::Utc::now().timestamp(),
+                hard: false,
+                yes: true,
+            },
             Some(FAKE_DAEMON_PID),
             &ops,
             &restored,
@@ -2034,10 +1282,13 @@ mod tests {
             &db,
             data_dir,
             &db_path,
-            7,
-            now_ts,
-            false,
-            true,
+            ReclaimOptions {
+                retention_days: 7,
+                graph_event_retention_days: 90,
+                now_ts,
+                hard: false,
+                yes: true,
+            },
             Some(FAKE_DAEMON_PID),
             &ops,
             &restored,
@@ -2072,10 +1323,13 @@ mod tests {
             &db,
             data_dir,
             &db_path,
-            7,
-            chrono::Utc::now().timestamp(),
-            false,
-            true,
+            ReclaimOptions {
+                retention_days: 7,
+                graph_event_retention_days: 90,
+                now_ts: chrono::Utc::now().timestamp(),
+                hard: false,
+                yes: true,
+            },
             None,
             &ops,
             &restored,
@@ -2138,10 +1392,13 @@ mod tests {
             &db,
             data_dir,
             &db_path,
-            7,
-            now_ts,
-            false,
-            true,
+            ReclaimOptions {
+                retention_days: 7,
+                graph_event_retention_days: 90,
+                now_ts,
+                hard: false,
+                yes: true,
+            },
             Some(FAKE_DAEMON_PID),
             &ops,
             &restored,
@@ -2182,10 +1439,13 @@ mod tests {
                 &db,
                 data_dir,
                 &db_path,
-                7,
-                now_ts,
-                false,
-                true,
+                ReclaimOptions {
+                    retention_days: 7,
+                    graph_event_retention_days: 90,
+                    now_ts,
+                    hard: false,
+                    yes: true,
+                },
                 Some(FAKE_DAEMON_PID),
                 &ops,
                 &restored,
@@ -2236,10 +1496,13 @@ mod tests {
             &db,
             data_dir,
             &db_path,
-            7,
-            chrono::Utc::now().timestamp(),
-            false,
-            true,
+            ReclaimOptions {
+                retention_days: 7,
+                graph_event_retention_days: 90,
+                now_ts: chrono::Utc::now().timestamp(),
+                hard: false,
+                yes: true,
+            },
             Some(FAKE_DAEMON_PID),
             &ops,
             &restored,
@@ -2339,7 +1602,7 @@ mod tests {
 
         let now_ts = chrono::Utc::now().timestamp() + 30 * 86_400;
         run_clean_without_window(
-            &db, data_dir, &db_path, false, false, true, 7, now_ts, false,
+            &db, data_dir, &db_path, false, false, true, 7, 90, now_ts, false,
         )
         .unwrap();
 
@@ -2374,14 +1637,14 @@ mod tests {
 
         let now_ts = chrono::Utc::now().timestamp() + 30 * 86_400;
 
-        let projected_plan = build_clean_plan(data_dir, &db, 7, now_ts).unwrap();
+        let projected_plan = build_clean_plan(data_dir, &db, 7, 90, now_ts).unwrap();
         let projected_hard = projected_hard_cascade_rows(&build_hard_cascade_plan(&db).unwrap());
         assert_eq!(projected_plan.session_ids.len(), 1);
         assert!(projected_hard > 0);
 
         // A dry run of the soft plan must not touch anything, regardless of
         // whether the projected total would warrant a reclaim window.
-        let dry_plan = run_clean(data_dir, &db, true, 7, now_ts).unwrap();
+        let dry_plan = run_clean(data_dir, &db, true, 7, 90, now_ts).unwrap();
         assert_eq!(dry_plan.session_ids, projected_plan.session_ids);
         assert_eq!(db.count_interactive_sessions().unwrap(), 1);
         assert!(
@@ -2458,7 +1721,7 @@ mod tests {
         db.update_sandbox_run_status(&sandbox.id, "kept").unwrap();
 
         let now_ts = chrono::Utc::now().timestamp();
-        let plan = build_clean_plan(data_dir, &db, 7, now_ts).unwrap();
+        let plan = build_clean_plan(data_dir, &db, 7, 90, now_ts).unwrap();
         // The finished, provably-empty sandbox is named as a removal target.
         assert!(
             plan.sandbox_removals
@@ -2470,7 +1733,7 @@ mod tests {
 
         // A dry run removes nothing: branch, worktree path state, and row
         // are all exactly as before.
-        let dry = run_clean(data_dir, &db, true, 7, now_ts).unwrap();
+        let dry = run_clean(data_dir, &db, true, 7, 90, now_ts).unwrap();
         assert!(dry.sandbox_removals.iter().any(|t| t.id == sandbox.id));
         assert!(git_branch_exists(
             repo_dir.path(),
@@ -2486,5 +1749,61 @@ mod tests {
             .current_dir(repo_dir.path())
             .output()
             .unwrap();
+    }
+
+    // ── CB92: leaked untracked dirs ────────────────────────────────────
+
+    #[test]
+    fn clean_removes_dangling_old_untracked_and_keeps_live() {
+        let dir = tempdir().unwrap();
+        let data_dir = dir.path();
+        let db = test_db(data_dir);
+
+        // A leaked leaf: `.git` points at a gitdir that no longer exists
+        // (the shape the 693 real leaks are in — tempdir repo is gone).
+        let leak_path = data_dir.join("worktrees/hash-a/leak-id");
+        std::fs::create_dir_all(&leak_path).unwrap();
+        std::fs::write(
+            leak_path.join(".git"),
+            format!(
+                "gitdir: /definitely/does/not/exist-{}/x\n",
+                std::process::id()
+            ),
+        )
+        .unwrap();
+
+        // A live leaf: `.git` points at a real dir that stays alive for the
+        // whole test, so its gitdir exists.
+        let live_gitdir = tempdir().unwrap();
+        let live_path = data_dir.join("worktrees/hash-b/live-id");
+        std::fs::create_dir_all(&live_path).unwrap();
+        std::fs::write(
+            live_path.join(".git"),
+            format!("gitdir: {}\n", live_gitdir.path().display()),
+        )
+        .unwrap();
+
+        // Empty test DB → no sandbox rows → both leaves are untracked.
+        // Capture "now" AFTER creating the leaves so their mtimes are never
+        // in the future relative to the injected clock.
+        let now = chrono::Utc::now().timestamp();
+
+        // Too fresh (age ≈ 0 < 2 h): the age gate keeps both, dry run only
+        // projects that decision.
+        let plan = run_clean(data_dir, &db, true, 7, 90, now).unwrap();
+        assert!(
+            plan.untracked_leaks.is_empty(),
+            "fresh dirs must not be leaks: {:?}",
+            plan.untracked_leaks
+        );
+        assert!(leak_path.exists() && live_path.exists());
+
+        // 5 h later: the dangling leaf is a proven leak — deleted in a real
+        // run; the live-gitdir leaf is still reported, never touched.
+        let plan = run_clean(data_dir, &db, false, 7, 90, now + 5 * 3600).unwrap();
+        assert_eq!(plan.untracked_leaks, vec![leak_path.clone()]);
+        assert!(!leak_path.exists(), "dangling old leak must be removed");
+        assert!(live_path.exists(), "live-gitdir dir must be kept");
+        assert!(plan.sandbox_untracked.contains(&live_path));
     }
 }

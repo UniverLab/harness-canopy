@@ -1,6 +1,7 @@
 pub mod chunker;
 pub mod embedding_client;
 pub mod ingestion;
+pub mod maintenance;
 pub mod model_acquisition;
 pub mod ort_runtime;
 pub mod ragignore;

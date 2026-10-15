@@ -1,14 +1,16 @@
 //! Shared banner rendering functionality
 
-pub const BANNER_GRADIENT: [(u8, u8, u8); 8] = [
-    (157, 207, 161),
-    (132, 190, 137),
-    (108, 174, 113),
-    (85, 157, 90),
-    (63, 141, 68),
-    (43, 122, 48),
-    (26, 102, 32),
-    (12, 82, 18),
+use crate::tui::ui::brand::CANOPY_SCALE;
+
+/// The five legible Canopy scale stops, light at the top of the banner to
+/// dark at the bottom. `#003330` (the darkest stop) is excluded: it measures
+/// ~1.4:1 on a dark terminal, so it is a background tone only.
+pub const BANNER_GRADIENT: [(u8, u8, u8); 5] = [
+    CANOPY_SCALE[5], // #52fff6
+    CANOPY_SCALE[4], // #1ffff3
+    CANOPY_SCALE[3], // #00e0d4
+    CANOPY_SCALE[2], // #00a9a0
+    CANOPY_SCALE[1], // #006661
 ];
 
 pub const BANNER: &str = r#"                                                     
@@ -33,8 +35,8 @@ pub fn print_banner_with_gradient(title: &str) {
         println!("\x1b[38;2;{r};{g};{b}m{line}\x1b[0m");
     }
 
-    // Print additional text in light green with custom title
-    println!("\x1b[38;2;100;255;100m  \x1b[1m{}\x1b[0m", title);
+    // Print additional text in the lightest scale stop (#52fff6) with custom title
+    println!("\x1b[38;2;82;255;246m  \x1b[1m{}\x1b[0m", title);
     println!("  ─────────────────────────────────────────────");
     println!();
 }
@@ -44,15 +46,6 @@ pub fn gradient_rgb(index: usize, line_count: usize) -> (u8, u8, u8) {
     let color_index =
         (index as f32 / denominator as f32 * (BANNER_GRADIENT.len() - 1) as f32).round() as usize;
     BANNER_GRADIENT[color_index.min(BANNER_GRADIENT.len() - 1)]
-}
-
-/// Print the banner with a single color (original behavior)
-#[allow(dead_code)]
-pub fn print_banner_single_color() {
-    println!("\x1b[32m{BANNER}\x1b[0m");
-    println!("  \x1b[1mAgent Hub — Setup Wizard\x1b[0m");
-    println!("  ─────────────────────────────────────────────");
-    println!();
 }
 
 #[cfg(test)]
@@ -66,12 +59,12 @@ mod tests {
         assert_eq!((r, g, b), BANNER_GRADIENT[0]);
     }
 
-    /// gradient_rgb at the end returns near-last color (due to rounding)
+    /// The last line of the 11-line banner lands on the darkest legible stop.
     #[test]
     fn gradient_rgb_last_index() {
-        // gradient_rgb(7, 8) = (7/8 * 7).round() = 6.125.round() = 6
-        let (r, g, b) = gradient_rgb(7, 8);
-        assert_eq!((r, g, b), BANNER_GRADIENT[6]);
+        // gradient_rgb(10, 11) = (10/11 * 4).round() = 3.636.round() = 4
+        let (r, g, b) = gradient_rgb(10, 11);
+        assert_eq!((r, g, b), BANNER_GRADIENT[4]);
     }
 
     /// gradient_rgb with line_count=1 returns first color
@@ -140,7 +133,24 @@ mod tests {
     /// BANNER_GRADIENT has expected length
     #[test]
     fn banner_gradient_has_expected_length() {
-        assert_eq!(BANNER_GRADIENT.len(), 8);
+        assert_eq!(BANNER_GRADIENT.len(), 5);
+    }
+
+    /// The darkest scale stop is a background tone, never banner ink.
+    #[test]
+    fn banner_gradient_does_not_contain_deepest_stop() {
+        assert!(
+            !BANNER_GRADIENT.contains(&CANOPY_SCALE[0]),
+            "the banner must not use #003330"
+        );
+    }
+
+    /// The banner is exactly the five legible stops, light → dark.
+    #[test]
+    fn banner_gradient_equals_scale_five_to_one_reversed() {
+        for (i, stop) in BANNER_GRADIENT.iter().enumerate() {
+            assert_eq!(*stop, CANOPY_SCALE[5 - i]);
+        }
     }
 
     /// BANNER_GRADIENT colors are valid RGB tuples
@@ -164,12 +174,5 @@ mod tests {
     fn print_banner_with_gradient_no_panic() {
         // Just verify it doesn't panic - we can't easily test output
         print_banner_with_gradient("Test Title");
-    }
-
-    /// print_banner_single_color doesn't panic (I/O test)
-    #[test]
-    fn print_banner_single_color_no_panic() {
-        // Just verify it doesn't panic - we can't easily test output
-        print_banner_single_color();
     }
 }

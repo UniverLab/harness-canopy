@@ -1,12 +1,9 @@
 use super::types::{AgentEntry, App, Focus};
-use crate::tui::agent::{AgentStatus, InteractiveAgent};
-use crate::tui::terminal_history::save_history;
+use crate::tui::agent::InteractiveAgent;
+use crate::tui::gamification::MissionEvent;
 use regex::Regex;
 use std::sync::LazyLock;
 use std::time::Duration;
-
-const SHADOW_SUMMARY_LINGER_SECS: u64 = 7;
-const SHADOW_SUMMARY_INSTRUCTION: &str = "Session terminated by user. Before exit, call intelligence_upsert with kind='session' and persist a concise summary including: mission outcome, key decisions, pending follow-ups, and any reusable facts/patterns.";
 
 static ANSI_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\x1b\[[0-9;]*[A-Za-z]").expect("invalid ANSI regex"));
@@ -16,7 +13,7 @@ fn strip_ansi_codes(s: &str) -> String {
     ANSI_RE.replace_all(s, "").into_owned()
 }
 
-fn recent_output_snippet(agent: &InteractiveAgent, n: usize) -> String {
+pub(super) fn recent_output_snippet(agent: &InteractiveAgent, n: usize) -> String {
     let clean: Vec<String> = agent
         .last_output_lines(n)
         .into_iter()
@@ -32,12 +29,12 @@ fn recent_output_snippet(agent: &InteractiveAgent, n: usize) -> String {
 }
 
 #[derive(Clone, Copy)]
-enum SessionTarget {
+pub(super) enum SessionTarget {
     Interactive(usize),
     Terminal(usize),
 }
 
-fn reverse_sorted_indices(mut indices: Vec<usize>) -> Vec<usize> {
+pub(super) fn reverse_sorted_indices(mut indices: Vec<usize>) -> Vec<usize> {
     indices.sort_unstable();
     indices.reverse();
     indices
@@ -46,7 +43,7 @@ fn reverse_sorted_indices(mut indices: Vec<usize>) -> Vec<usize> {
 /// Selection index after a session-list mutation: keep the previously-selected
 /// entry by identity when it survived the mutation, otherwise clamp into range.
 /// Pure so the "navigate Down over a reaped session" fix is unit-testable.
-fn selection_after_mutation(
+pub(super) fn selection_after_mutation(
     entry_ids: &[&str],
     anchor: Option<&str>,
     prev_selected: usize,
@@ -68,14 +65,17 @@ fn poll_agents(agents: &mut [InteractiveAgent]) {
     }
 }
 
-fn remove_session_name(sessions: &mut Vec<InteractiveAgent>, idx: usize) -> Option<String> {
+pub(super) fn remove_session_name(
+    sessions: &mut Vec<InteractiveAgent>,
+    idx: usize,
+) -> Option<String> {
     let agent_name = sessions.get(idx).map(|agent| agent.name.clone())?;
 
     sessions.remove(idx);
     Some(agent_name)
 }
 
-fn log_terminal_exit(name: &str, shell: &str, code: i32, output_snippet: &str) {
+pub(super) fn log_terminal_exit(name: &str, shell: &str, code: i32, output_snippet: &str) {
     tracing::warn!(
         "Terminal '{}' ({}) exited with code {code}.{}",
         name,
@@ -89,12 +89,28 @@ fn log_terminal_exit(name: &str, shell: &str, code: i32, output_snippet: &str) {
 }
 
 impl App {
-    pub fn notify_mouse_move(&mut self) {
-        if let Some(ref mut brain) = self.home_brain {
-            brain.notify_mouse();
+    /// Seed Brian's Brain from a pointer move at absolute cell `(col, row)`.
+    /// Each brain seeds only when the position is inside the rect where it was
+    /// last drawn; otherwise its trail is reset so a re-entry plants a fresh
+    /// cluster instead of a line across the field.
+    pub fn notify_mouse_move(&mut self, col: u16, row: u16) {
+        if let Some(rect) = self.home_brain_rect {
+            if let Some(ref mut brain) = self.home_brain {
+                if rect_contains(rect, col, row) {
+                    brain.seed_pointer((col - rect.x) as usize, (row - rect.y) as usize);
+                } else {
+                    brain.reset_trail();
+                }
+            }
         }
-        if let Some(ref mut brain) = self.sidebar_brain {
-            brain.notify_mouse();
+        if let Some(rect) = self.sidebar_brain_rect {
+            if let Some(ref mut brain) = self.sidebar_brain {
+                if rect_contains(rect, col, row) {
+                    brain.seed_pointer((col - rect.x) as usize, (row - rect.y) as usize);
+                } else {
+                    brain.reset_trail();
+                }
+            }
         }
     }
 
@@ -124,15 +140,18 @@ impl App {
         };
 
         if self.atmosphere_ctx.firefly_caught {
-            self.queue_mission_event(crate::tui::gamification::MissionEvent::FireflyCaught);
+            self.queue_mission_event(MissionEvent::FireflyCaught);
             self.atmosphere_ctx.firefly_caught = false;
         }
         self.atmosphere_ctx.mouse_clicked = false;
     }
 
     pub fn tick_banner_animation(&mut self) {
-        if let Some(ref mut brain) = self.home_brain {
-            brain.step();
+        // CM52: `tui.brians_brain = false` keeps the banner static.
+        if self.tui_settings.brians_brain {
+            if let Some(ref mut brain) = self.home_brain {
+                brain.step();
+            }
         }
 
         if self.focus != Focus::Home {
@@ -145,7 +164,7 @@ impl App {
         }
 
         if brain_needs_reinit(&self.home_brain, rows, cols) {
-            self.home_brain = Some(make_brain(rows, cols, 80));
+            self.home_brain = Some(make_brain(rows, cols));
         }
     }
 
@@ -161,22 +180,25 @@ impl App {
         }
 
         if brain_needs_reinit(&self.sidebar_brain, rows, cols) {
-            self.sidebar_brain = Some(make_brain(rows, cols, 60));
+            self.sidebar_brain = Some(make_brain(rows, cols));
         }
 
-        if let Some(ref mut brain) = self.sidebar_brain {
-            brain.step();
+        // CM52: `tui.brians_brain = false` keeps the sidebar brain static too.
+        if self.tui_settings.brians_brain {
+            if let Some(ref mut brain) = self.sidebar_brain {
+                brain.step();
+            }
         }
     }
 
     pub fn dismiss_brain(&mut self) {
         if let Some(ref mut brain) = self.home_brain {
-            *brain = super::super::brians_brain::BriansBrain::new(brain.rows, brain.cols, 80);
+            *brain = super::super::brians_brain::BriansBrain::new(brain.rows, brain.cols);
         }
     }
 
     pub(super) fn dismiss_copied(&mut self) {
-        if self.show_copied && self.copied_at.elapsed() > std::time::Duration::from_secs(2) {
+        if self.show_copied && self.copied_at.elapsed() > Duration::from_secs(2) {
             self.show_copied = false;
         }
     }
@@ -264,41 +286,6 @@ impl App {
         Some(SessionTarget::Terminal(idx))
     }
 
-    fn close_session_target(&mut self, target: SessionTarget, exit_code: i32) -> bool {
-        match target {
-            SessionTarget::Interactive(idx) => self.close_interactive_session_at(idx, exit_code),
-            SessionTarget::Terminal(idx) => self.close_terminal_session_at(idx),
-        }
-    }
-
-    fn remove_session_target(&mut self, target: SessionTarget) -> bool {
-        match target {
-            SessionTarget::Interactive(idx) => self.remove_interactive_session_entry(idx),
-            SessionTarget::Terminal(idx) => self.remove_terminal_session_entry(idx),
-        }
-    }
-
-    fn delete_group_at(&mut self, idx: usize) -> bool {
-        let Some(group_id) = self.split_groups.get(idx).map(|group| group.id.clone()) else {
-            return false;
-        };
-
-        self.delete_group_by_id(&group_id)
-    }
-
-    fn delete_group_by_id(&mut self, id: &str) -> bool {
-        if !self.split_groups.iter().any(|group| group.id == id) {
-            return false;
-        }
-
-        let _ = self.db.delete_group(id);
-        self.split_groups.retain(|group| group.id != id);
-        if self.active_split_id.as_deref() == Some(id) {
-            self.active_split_id = None;
-        }
-        true
-    }
-
     fn mark_selected_terminal_viewed(&mut self) {
         if !matches!(self.focus, Focus::Agent | Focus::Preview) {
             return;
@@ -327,203 +314,6 @@ impl App {
         };
 
         agent.mark_viewed();
-    }
-
-    fn exited_terminal_indices(&self) -> Vec<usize> {
-        self.terminal_agents
-            .iter()
-            .enumerate()
-            .filter(|(_, agent)| matches!(agent.status, AgentStatus::Exited(_)))
-            .map(|(idx, _)| idx)
-            .collect()
-    }
-
-    fn handle_terminal_exit(&mut self, idx: usize) {
-        let Some(agent) = self.terminal_agents.get(idx) else {
-            return;
-        };
-        if agent.exit_notified {
-            return;
-        }
-
-        let AgentStatus::Exited(code) = agent.status else {
-            return;
-        };
-
-        let agent_id = agent.id.clone();
-        let agent_name = agent.name.clone();
-        let shell = agent.shell.clone();
-        let output_snippet = recent_output_snippet(agent, 5);
-
-        let _ = self.db.finish_terminal_session(&agent_id);
-        if code != 0 {
-            log_terminal_exit(&agent_name, &shell, code, &output_snippet);
-        }
-
-        let Some(agent) = self.terminal_agents.get_mut(idx) else {
-            return;
-        };
-        agent.exit_notified = true;
-    }
-
-    fn exited_interactive_indices(&self) -> Vec<usize> {
-        self.interactive_agents
-            .iter()
-            .enumerate()
-            .filter(|(_, agent)| matches!(agent.status, AgentStatus::Exited(_)))
-            .map(|(idx, _)| idx)
-            .collect()
-    }
-
-    fn notify_failed_interactive_exit(
-        &mut self,
-        agent_id: &str,
-        cli: &str,
-        code: i32,
-        output_snippet: &str,
-    ) {
-        tracing::warn!(
-            "Agent '{agent_id}' ({cli}) exited with code {code}.{}",
-            if output_snippet.is_empty() {
-                ""
-            } else {
-                output_snippet
-            }
-        );
-
-        self.whimsg
-            .notify_event(crate::tui::whimsg::WhimContext::AgentFailed);
-        if !self.notifications_enabled {
-            return;
-        }
-
-        let output = output_snippet.trim_start_matches('\n').to_string();
-        self.notification_service
-            .notify_agent_failed(agent_id, cli, code, &output);
-    }
-
-    fn handle_interactive_exit(&mut self, idx: usize) {
-        let Some(agent) = self.interactive_agents.get(idx) else {
-            return;
-        };
-        if agent.exit_notified {
-            return;
-        }
-
-        let AgentStatus::Exited(code) = agent.status else {
-            return;
-        };
-
-        let agent_id = agent.id.clone();
-        let agent_name = agent.name.clone();
-        let working_dir = agent.working_dir.clone();
-        let cli = agent.cli.as_str().to_string();
-        let output_snippet = recent_output_snippet(agent, 5);
-
-        // Finalize nursery if this was a seed creation session
-        if let Some(ref nursery_path_ref) = self.nursery_path {
-            // Clone the path to avoid borrow conflict when we clear self.nursery_path
-            let nursery_path = nursery_path_ref.clone();
-            if nursery_path.to_string_lossy() == working_dir && code == 0 {
-                match crate::domain::nursery::finalize_nursery(&nursery_path) {
-                    Ok(seed_id) => {
-                        // Bind the session to the new seed
-                        let _ = self.db.bind_session_to_seed(&agent_id, &seed_id);
-                        self.queue_mission_event(
-                            crate::tui::gamification::MissionEvent::FirstSeedCreated,
-                        );
-                    }
-                    Err(e) => {
-                        tracing::error!("Nursery finalization failed: {e}");
-                        self.notification_service.notify_nursery_failed(&e);
-                    }
-                }
-            } else if code != 0 {
-                // Clean up temp dir on error exit
-                let _ = std::fs::remove_dir_all(&nursery_path);
-            }
-            // Remove nursery session record from DB — it should not persist as a normal session
-            let _ = self.db.remove_interactive_session(&agent_id);
-            // Also remove the nursery project entry if it was registered
-            let _ = self.db.unregister_project_path(&nursery_path);
-            // Clear nursery state — do this after all uses of nursery_path
-            self.nursery_path = None;
-        } else {
-            let _ = self.db.finish_interactive_session(&agent_id, code);
-        }
-
-        if let Some(ref sb) = self.active_sandbox {
-            let sandbox = sb.clone();
-            let merge_result = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current()
-                    .block_on(async { crate::domain::sandbox::merge_sandbox(&sandbox).await })
-            });
-            match merge_result {
-                Ok(outcome) => {
-                    let status = match &outcome {
-                        crate::domain::sandbox::MergeOutcome::CleanMerge => "merged",
-                        crate::domain::sandbox::MergeOutcome::ConflictResolution => "merged",
-                        crate::domain::sandbox::MergeOutcome::MergeFailed(_) => "failed",
-                    };
-                    let _ = self.db.update_sandbox_run_status(&sandbox.id, status);
-                    if let crate::domain::sandbox::MergeOutcome::MergeFailed(ref reason) = outcome {
-                        tracing::error!("Sandbox merge failed: {reason}");
-                        self.notification_service
-                            .notify_nursery_failed(&format!("Sandbox merge failed: {reason}"));
-                    }
-                }
-                Err(e) => {
-                    tracing::error!("Sandbox merge error: {e}");
-                    let _ = self.db.update_sandbox_run_status(&sandbox.id, "failed");
-                }
-            }
-            self.active_sandbox = None;
-        }
-
-        let _ = self
-            .db
-            .close_agent_missions(&agent_id, &agent_name, &working_dir);
-        if code != 0 {
-            self.notify_failed_interactive_exit(&agent_id, &cli, code, &output_snippet);
-        } else if self.session_args_contain_yolo(&agent_id, &cli) {
-            self.queue_mission_event(crate::tui::gamification::MissionEvent::YoloTaskCompleted);
-        }
-
-        let Some(agent) = self.interactive_agents.get_mut(idx) else {
-            return;
-        };
-        agent.exit_notified = true;
-    }
-
-    fn successful_interactive_exit_indices(&self) -> Vec<usize> {
-        // Keep a successfully-finished session on screen while it is the one the
-        // user is currently viewing — its final output often carries useful
-        // end-of-run stats. It is reaped on a later poll, once the user moves
-        // the selection to another session.
-        let viewing = match self.selected_session_target() {
-            Some(SessionTarget::Interactive(idx)) => Some(idx),
-            _ => None,
-        };
-        self.interactive_agents
-            .iter()
-            .enumerate()
-            .filter(|(idx, agent)| {
-                matches!(agent.status, AgentStatus::Exited(0)) && Some(*idx) != viewing
-            })
-            .map(|(idx, _)| idx)
-            .collect()
-    }
-
-    fn remove_terminal_sessions(&mut self, indices: Vec<usize>) {
-        for idx in reverse_sorted_indices(indices) {
-            let _ = self.remove_session_target(SessionTarget::Terminal(idx));
-        }
-    }
-
-    fn remove_interactive_sessions(&mut self, indices: Vec<usize>) {
-        for idx in reverse_sorted_indices(indices) {
-            let _ = self.remove_session_target(SessionTarget::Interactive(idx));
-        }
     }
 
     fn terminate_active_split_session(&mut self) -> bool {
@@ -713,62 +503,6 @@ impl App {
         }
     }
 
-    pub fn delete_selected(&mut self) -> anyhow::Result<()> {
-        let Some(selected) = self.selected_agent() else {
-            return Ok(());
-        };
-
-        match selected {
-            AgentEntry::Agent(agent) => {
-                use crate::application::ports::AgentRepository;
-                self.db.delete_agent(&agent.id)?;
-            }
-            AgentEntry::Corrupt(corrupt) => {
-                // Deletes by id without parsing the stored row — a corrupt
-                // row must always be removable.
-                use crate::application::ports::AgentRepository;
-                self.db.delete_agent(&corrupt.id)?;
-            }
-            AgentEntry::Group(idx) => {
-                if !self.delete_group_at(*idx) {
-                    return Ok(());
-                }
-            }
-            AgentEntry::Interactive(idx) => {
-                if !self.close_session_target(SessionTarget::Interactive(*idx), 0) {
-                    return Ok(());
-                }
-            }
-            AgentEntry::Terminal(idx) => {
-                if !self.close_session_target(SessionTarget::Terminal(*idx), 0) {
-                    return Ok(());
-                }
-            }
-            AgentEntry::Orphaned(idx) => {
-                // Orphaned sessions are DB-only; just drop the entry.
-                self.orphaned_sessions.remove(*idx);
-                self.finish_session_mutation();
-            }
-        }
-
-        self.finish_session_mutation();
-        Ok(())
-    }
-
-    /// Dissolve all split groups that contain the given session name.
-    fn dissolve_groups_for_session(&mut self, session_name: &str) {
-        let ids_to_dissolve: Vec<String> = self
-            .split_groups
-            .iter()
-            .filter(|group| group.session_a == session_name || group.session_b == session_name)
-            .map(|group| group.id.clone())
-            .collect();
-
-        for id in ids_to_dissolve {
-            let _ = self.delete_group_by_id(&id);
-        }
-    }
-
     pub fn cleanup(&mut self) {
         for agent in &mut self.interactive_agents {
             agent.kill();
@@ -779,213 +513,20 @@ impl App {
         // Clear any lingering toast notifications from the Windows Action Center
         crate::domain::notification::clear_notifications_on_exit();
     }
-
-    /// Terminate the session(s) currently in focus.
-    ///
-    /// - Single agent/terminal: kill it and remove.
-    /// - Active split group: kill both sessions and dissolve the group.
-    pub fn terminate_focused_session(&mut self) {
-        let terminated = if self.active_split_id.is_some() {
-            self.terminate_active_split_session()
-        } else {
-            self.terminate_selected_session()
-        };
-        if !terminated {
-            return;
-        }
-
-        self.finish_session_mutation();
-    }
-
-    /// Kill and remove a session by name (interactive or terminal).
-    fn kill_session_by_name(&mut self, name: &str) {
-        let Some(target) = self.session_target_by_name(name) else {
-            return;
-        };
-
-        let _ = self.close_session_target(target, 0);
-    }
-
-    fn finish_session_mutation(&mut self) {
-        let _ = self.refresh_agents();
-        self.sync_selection_after_session_mutation();
-        self.reset_focus_after_session_mutation();
-    }
-
-    fn selected_entry_identity(&self) -> Option<String> {
-        self.agents
-            .get(self.selected)
-            .map(|entry| entry.id(self).to_string())
-    }
-
-    fn finish_session_mutation_preserving(&mut self, anchor: Option<&str>) {
-        let _ = self.refresh_agents();
-        let ids: Vec<String> = self
-            .agents
-            .iter()
-            .map(|entry| entry.id(self).to_string())
-            .collect();
-        let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
-        self.selected = selection_after_mutation(&id_refs, anchor, self.selected);
-        self.reset_focus_after_session_mutation();
-    }
-
-    fn close_interactive_session_at(&mut self, idx: usize, exit_code: i32) -> bool {
-        let Some(agent_id) = self
-            .interactive_agents
-            .get(idx)
-            .map(|agent| agent.id.clone())
-        else {
-            return false;
-        };
-
-        let _ = self.db.finish_interactive_session(&agent_id, exit_code);
-        let Some(agent) = self.interactive_agents.get(idx) else {
-            return false;
-        };
-        agent.schedule_shadow_shutdown(
-            SHADOW_SUMMARY_INSTRUCTION,
-            Duration::from_secs(SHADOW_SUMMARY_LINGER_SECS),
-        );
-        self.remove_session_target(SessionTarget::Interactive(idx))
-    }
-
-    fn close_terminal_session_at(&mut self, idx: usize) -> bool {
-        let Some(agent_id) = self.terminal_agents.get(idx).map(|agent| agent.id.clone()) else {
-            return false;
-        };
-
-        let _ = self.db.finish_terminal_session(&agent_id);
-        let Some(agent) = self.terminal_agents.get_mut(idx) else {
-            return false;
-        };
-
-        // Design decision: keep scrollback as plain text and exclude
-        // full-screen programs, rather than switch to storing a replayable
-        // raw ANSI byte stream.
-        //
-        // A byte stream would let a full-screen app (vim, htop, a nested
-        // canopy) replay faithfully, but it changes what lands on disk in
-        // ways this spec explicitly flags as needing its own size/safety
-        // review, and it would still have to solve accumulation (the same
-        // append-forever bug that corrupts the current text format).
-        // Excluding full-screen output instead reuses the existing
-        // plain-text, line-capped format and needs no new on-disk shape.
-        //
-        // vt100 already tells us when a full-screen program is active:
-        // `Screen::alternate_screen()` mirrors DECSET 1049, and the crate
-        // never threads the alternate grid into scrollback (it's allocated
-        // with `scrollback_len: 0` — see vt100::Screen::new). So if the
-        // session is still in alternate-screen mode at close time,
-        // `last_lines` would only be able to return the program's current
-        // on-screen frame (there's no line history to fall back to), and
-        // persisting that as scrollback text is exactly the "rendered
-        // frames printed back as literal text" bug. Skip the capture
-        // entirely in that case and keep whatever was already persisted —
-        // once the program exits back to the shell, a later close captures
-        // real shell history again, since alternate-grid content never
-        // reached the primary grid's scrollback in the first place.
-        if !agent.in_alternate_screen() {
-            let scrollback = agent.last_lines(2000);
-            if let Some(hist) = self.terminal_histories.get_mut(&agent.name) {
-                let lines: Vec<String> = scrollback.lines().map(|s| s.to_string()).collect();
-                hist.update_scrollback(&lines);
-                save_history(&self.data_dir, &agent.name, hist);
-            }
-        }
-        agent.kill();
-        self.remove_session_target(SessionTarget::Terminal(idx))
-    }
-
-    fn remove_interactive_session_entry(&mut self, idx: usize) -> bool {
-        let Some(agent_name) = remove_session_name(&mut self.interactive_agents, idx) else {
-            return false;
-        };
-
-        self.dissolve_groups_for_session(&agent_name);
-        true
-    }
-
-    fn remove_terminal_session_entry(&mut self, idx: usize) -> bool {
-        let Some(agent_name) = remove_session_name(&mut self.terminal_agents, idx) else {
-            return false;
-        };
-
-        self.dissolve_groups_for_session(&agent_name);
-        true
-    }
-
-    pub(crate) fn selected_session_is_exited(&self) -> bool {
-        match self.selected_session_target() {
-            Some(SessionTarget::Interactive(idx)) => self
-                .interactive_agents
-                .get(idx)
-                .is_some_and(|agent| matches!(agent.status, AgentStatus::Exited(_))),
-            Some(SessionTarget::Terminal(idx)) => self
-                .terminal_agents
-                .get(idx)
-                .is_some_and(|agent| matches!(agent.status, AgentStatus::Exited(_))),
-            None => false,
-        }
-    }
-
-    pub(crate) fn dismiss_selected_exited_session(&mut self) {
-        // The session already exited (DB was finalized in handle_*_exit); just drop
-        // it from the list and let the selection clamp to a neighbour.
-        let Some(target) = self.selected_session_target() else {
-            return;
-        };
-        if self.remove_session_target(target) {
-            self.finish_session_mutation();
-        }
-    }
-
-    /// Revive a selected orphaned session by re-launching its CLI with stored
-    /// args in its stored workdir.
-    pub(crate) fn revive_selected_orphaned_session(&mut self) {
-        let Some(AgentEntry::Orphaned(idx)) = self.selected_agent() else {
-            return;
-        };
-        let idx = *idx;
-        let Some(session) = self.orphaned_sessions.get(idx).cloned() else {
-            return;
-        };
-
-        let home = dirs::home_dir().unwrap_or_default();
-        let canopy_config = crate::domain::canopy_config::CanopyConfig::load(&home.join(".canopy"));
-        let (cols, rows) = Self::session_panel_size();
-        let current_boot_id = crate::system::boot_id();
-
-        // Remove from orphaned list first.
-        self.orphaned_sessions.remove(idx);
-        self.resume_interactive_session(
-            &session,
-            &canopy_config,
-            cols,
-            rows,
-            current_boot_id.as_deref(),
-        );
-        self.finish_session_mutation();
-    }
-
-    /// Dismiss (remove) a selected orphaned session without reviving it.
-    pub(crate) fn dismiss_selected_orphaned_session(&mut self) {
-        let Some(AgentEntry::Orphaned(idx)) = self.selected_agent() else {
-            return;
-        };
-        let idx = *idx;
-        self.orphaned_sessions.remove(idx);
-        self.finish_session_mutation();
-    }
 }
+
+mod exits;
+mod session_close;
 
 // ── Brain helpers ─────────────────────────────────────────────────
 
-fn make_brain(rows: usize, cols: usize, density: u64) -> super::super::brians_brain::BriansBrain {
-    let mut brain = super::super::brians_brain::BriansBrain::new(rows, cols, density);
-    brain.last_step =
-        std::time::Instant::now() - std::time::Duration::from_millis(brain.step_interval_ms);
-    brain
+fn make_brain(rows: usize, cols: usize) -> super::super::brians_brain::BriansBrain {
+    super::super::brians_brain::BriansBrain::new(rows, cols)
+}
+
+/// Whether `(x, y)` sits inside `rect` (half-open on the far edges).
+fn rect_contains(rect: ratatui::layout::Rect, x: u16, y: u16) -> bool {
+    x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height
 }
 
 fn brain_needs_reinit(
@@ -1136,25 +677,25 @@ mod tests {
 
     #[test]
     fn brain_needs_reinit_matching_dims() {
-        let brain = make_brain(10, 10, 3);
+        let brain = make_brain(10, 10);
         assert!(!brain_needs_reinit(&Some(brain), 10, 10));
     }
 
     #[test]
     fn brain_needs_reinit_different_dims() {
-        let brain = make_brain(10, 10, 3);
+        let brain = make_brain(10, 10);
         assert!(brain_needs_reinit(&Some(brain), 20, 20));
     }
 
     #[test]
     fn brain_needs_reinit_different_rows() {
-        let brain = make_brain(10, 10, 3);
+        let brain = make_brain(10, 10);
         assert!(brain_needs_reinit(&Some(brain), 20, 10));
     }
 
     #[test]
     fn brain_needs_reinit_different_cols() {
-        let brain = make_brain(10, 10, 3);
+        let brain = make_brain(10, 10);
         assert!(brain_needs_reinit(&Some(brain), 10, 20));
     }
 
@@ -1238,7 +779,7 @@ mod tests {
 
     #[test]
     fn brain_needs_reinit_exact_match_no_reinit() {
-        let brain = make_brain(15, 25, 10);
+        let brain = make_brain(15, 25);
         assert!(!brain_needs_reinit(&Some(brain), 15, 25));
     }
 
@@ -1252,6 +793,323 @@ mod tests {
     fn effective_brain_dims_height_exactly_minimum() {
         let (_cols, rows) = effective_brain_dims((100, 3));
         assert_eq!(rows, 3);
+    }
+}
+
+// ── handle_interactive_exit tests ───────────────────────────────────
+
+#[cfg(test)]
+mod handle_interactive_exit_tests {
+    use super::*;
+    use crate::db::Database;
+    use crate::tui::agent::{AgentStatus, InteractiveAgent};
+    use std::sync::Arc;
+    use tempfile::{tempdir, NamedTempFile};
+
+    fn test_db() -> Arc<Database> {
+        let tmp = NamedTempFile::new().expect("create temp file");
+        let path = tmp.path().to_path_buf();
+        std::mem::forget(tmp);
+        Arc::new(Database::new(&path).expect("create test db"))
+    }
+
+    fn spawn_mock_interactive(name: &str) -> InteractiveAgent {
+        InteractiveAgent::spawn_terminal(
+            "cat",
+            "/tmp",
+            80,
+            24,
+            Some(name),
+            &[],
+            ratatui::style::Color::White,
+        )
+        .expect("spawn mock interactive")
+    }
+
+    /// record_interactive_exit_in_db: nursery_path is Some and matches working_dir with code 0
+    #[test]
+    fn record_interactive_exit_in_db_nursery_success() {
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+
+        let nursery_path = data_dir.path().join("nursery-test");
+        std::fs::create_dir_all(&nursery_path).expect("create nursery dir");
+        app.nursery_path = Some(nursery_path.clone());
+
+        let agent_id = "test-agent-1";
+        let working_dir = nursery_path.to_string_lossy().to_string();
+
+        // Should not panic and should clear nursery_path
+        app.record_interactive_exit_in_db(agent_id, &working_dir, 0);
+        assert!(app.nursery_path.is_none());
+    }
+
+    /// record_interactive_exit_in_db: nursery_path is Some but code != 0 (removes nursery)
+    #[test]
+    fn record_interactive_exit_in_db_nursery_failure() {
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+
+        let nursery_path = data_dir.path().join("nursery-fail");
+        std::fs::create_dir_all(&nursery_path).expect("create nursery dir");
+        app.nursery_path = Some(nursery_path.clone());
+
+        let agent_id = "test-agent-2";
+        let working_dir = nursery_path.to_string_lossy().to_string();
+
+        app.record_interactive_exit_in_db(agent_id, &working_dir, 1);
+        assert!(app.nursery_path.is_none());
+        assert!(
+            !nursery_path.exists(),
+            "nursery should be removed on failure"
+        );
+    }
+
+    /// record_interactive_exit_in_db: nursery_path is None (non-nursery path)
+    #[test]
+    fn record_interactive_exit_in_db_no_nursery() {
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+
+        app.nursery_path = None;
+        let agent_id = "test-agent-3";
+        let working_dir = "/some/other/path";
+
+        // Should not panic
+        app.record_interactive_exit_in_db(agent_id, working_dir, 0);
+        assert!(app.nursery_path.is_none());
+    }
+
+    /// record_interactive_exit_in_db: nursery_path is Some but working_dir doesn't match
+    #[test]
+    fn record_interactive_exit_in_db_nursery_mismatch() {
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+
+        let nursery_path = data_dir.path().join("nursery-mismatch");
+        std::fs::create_dir_all(&nursery_path).expect("create nursery dir");
+        app.nursery_path = Some(nursery_path);
+
+        let agent_id = "test-agent-4";
+        let working_dir = "/different/path";
+
+        // Should fall through to non-nursery path
+        app.record_interactive_exit_in_db(agent_id, working_dir, 0);
+        assert!(app.nursery_path.is_none());
+    }
+
+    /// sandbox_merge_run_status returns "merged" for CleanMerge
+    #[test]
+    fn sandbox_merge_run_status_clean_merge() {
+        let status =
+            App::sandbox_merge_run_status(&crate::domain::sandbox::MergeOutcome::CleanMerge);
+        assert_eq!(status, "merged");
+    }
+
+    /// sandbox_merge_run_status returns "merged" for ConflictResolution
+    #[test]
+    fn sandbox_merge_run_status_conflict_resolution() {
+        let status = App::sandbox_merge_run_status(
+            &crate::domain::sandbox::MergeOutcome::ConflictResolution,
+        );
+        assert_eq!(status, "merged");
+    }
+
+    /// sandbox_merge_run_status returns "failed" for MergeFailed
+    #[test]
+    fn sandbox_merge_run_status_merge_failed() {
+        let status = App::sandbox_merge_run_status(
+            &crate::domain::sandbox::MergeOutcome::MergeFailed("reason".into()),
+        );
+        assert_eq!(status, "failed");
+    }
+
+    /// merge_active_sandbox: no active sandbox is a no-op
+    #[test]
+    fn merge_active_sandbox_none() {
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+
+        app.active_sandbox = None;
+        // Should not panic
+        app.merge_active_sandbox();
+        assert!(app.active_sandbox.is_none());
+    }
+
+    /// announce_interactive_exit: code != 0 calls notify_failed_interactive_exit
+    #[test]
+    fn announce_interactive_exit_failure() {
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+
+        // Just verify it doesn't panic - the actual notification is tested elsewhere
+        app.announce_interactive_exit("agent-1", "claude", 1, "error output");
+    }
+
+    /// announce_interactive_exit: code == 0 with yolo args queues YoloTaskCompleted
+    #[test]
+    fn announce_interactive_exit_success_yolo() {
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+
+        // The yolo check is internal; just verify no panic
+        app.announce_interactive_exit("agent-yolo", "claude --yolo", 0, "success");
+    }
+
+    /// announce_interactive_exit: code == 0 without yolo is a no-op
+    #[test]
+    fn announce_interactive_exit_success_no_yolo() {
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+
+        app.announce_interactive_exit("agent-normal", "claude", 0, "success");
+    }
+
+    /// handle_interactive_exit: early return if agent not found
+    #[test]
+    fn handle_interactive_exit_agent_not_found() {
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+
+        app.interactive_agents.clear();
+        // Should not panic
+        app.handle_interactive_exit(0);
+    }
+
+    /// handle_interactive_exit: early return if exit_notified already true
+    #[test]
+    fn handle_interactive_exit_already_notified() {
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+
+        let mut agent = spawn_mock_interactive("test-agent");
+        agent.status = AgentStatus::Exited(0);
+        agent.exit_notified = true;
+        app.interactive_agents.push(agent);
+
+        // Should not panic and not double-process
+        app.handle_interactive_exit(0);
+    }
+
+    /// handle_interactive_exit: early return if status is not Exited
+    #[test]
+    fn handle_interactive_exit_not_exited() {
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+
+        let mut agent = spawn_mock_interactive("test-agent");
+        agent.status = AgentStatus::Running;
+        app.interactive_agents.push(agent);
+
+        // Should not panic
+        app.handle_interactive_exit(0);
+    }
+
+    /// handle_interactive_exit: full non-nursery path finishes the session row
+    /// and marks the agent notified.
+    #[test]
+    fn non_nursery_exit_finishes_session_and_marks_notified() {
+        let db = test_db();
+        let data_dir = tempdir().expect("create data dir");
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .expect("create app");
+
+        let mut agent = spawn_mock_interactive("exit-agent");
+        agent.status = AgentStatus::Exited(1);
+        agent.exit_notified = false;
+        let agent_id = agent.id.clone();
+        db.insert_interactive_session(
+            &agent_id,
+            &agent.name,
+            "opencode",
+            "/tmp",
+            None,
+            None,
+            "interactive",
+            None,
+        )
+        .unwrap();
+        assert_eq!(db.get_active_sessions().unwrap().len(), 1);
+        app.nursery_path = None;
+        app.interactive_agents.push(agent);
+
+        app.handle_interactive_exit(0);
+
+        assert!(app.interactive_agents[0].exit_notified);
+        assert!(
+            db.get_active_sessions().unwrap().is_empty(),
+            "non-nursery exit finishes the session row"
+        );
     }
 }
 

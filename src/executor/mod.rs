@@ -16,6 +16,11 @@ use crate::db::Database;
 use crate::domain::models::{Agent, Cli, RunLog, RunStatus, StartRunOutcome, Trigger, TriggerType};
 use crate::scheduler::substitute_variables;
 
+mod send_to_session;
+
+#[cfg(test)]
+mod send_tests;
+
 #[cfg(test)]
 mod tests;
 
@@ -229,6 +234,10 @@ impl Executor {
 
     /// Core execution logic shared by all trigger types.
     async fn run_agent(&self, agent: &Agent, ctx: ExecutionContext<'_>) -> Result<i32> {
+        if agent.is_send_to_session() {
+            return self.deliver_to_session(agent, &ctx).await;
+        }
+
         self.resolve_timeout(&agent.id);
 
         let Some(run_id) = self.start_run(agent, ctx.trigger_type)? else {
@@ -334,22 +343,7 @@ impl Executor {
     async fn run_cli_process(&self, params: &CliRunParams<'_>) -> Result<CliRunResult> {
         let cli_path = match resolve_cli_binary(params.cli) {
             Ok(path) => path,
-            Err(e) => {
-                tracing::error!("Failed to resolve CLI binary for '{}': {}", params.id, e);
-                append_to_log(
-                    &params.log_path,
-                    params.id,
-                    &params.trigger,
-                    &Utc::now(),
-                    -1,
-                    &[],
-                    e.to_string().as_bytes(),
-                )?;
-                return Ok(CliRunResult {
-                    exit_code: -1,
-                    success: false,
-                });
-            }
+            Err(e) => return cli_start_failure(params, "resolve CLI binary", &e.to_string()),
         };
         let mut cmd = match build_cli_command(
             &cli_path,
@@ -360,22 +354,7 @@ impl Executor {
             params.working_dir,
         ) {
             Ok(cmd) => cmd,
-            Err(e) => {
-                tracing::error!("Failed to build command for '{}': {}", params.id, e);
-                append_to_log(
-                    &params.log_path,
-                    params.id,
-                    &params.trigger,
-                    &Utc::now(),
-                    -1,
-                    &[],
-                    e.to_string().as_bytes(),
-                )?;
-                return Ok(CliRunResult {
-                    exit_code: -1,
-                    success: false,
-                });
-            }
+            Err(e) => return cli_start_failure(params, "build command", &e.to_string()),
         };
 
         tracing::info!(
@@ -385,81 +364,132 @@ impl Executor {
             params.trigger,
         );
 
-        // CM7: a configured `effort` the platform can't honour is recorded in
-        // the agent's own run log (not just the daemon's tracing) — an option
-        // that looks applied and isn't is the failure mode this exists to
-        // prevent.
-        let effort_reason = params.effort.and_then(|e| {
-            crate::domain::cli_config::effort_rejection_reason(
-                params.cli.strategy().effort_declaration.as_ref(),
-                params.cli.as_str(),
-                e,
-            )
-        });
-        if let Some(reason) = &effort_reason {
-            tracing::warn!("agent '{}': effort not applied — {}", params.id, reason);
-        }
-
-        // CB34: same for a `model` a model-flagless platform can't honour —
-        // recorded in the agent's own run log, not silently dropped.
-        let model_reason = params.model.and_then(|m| {
-            crate::domain::cli_config::model_rejection_reason(
-                params.cli.strategy().model_flag.as_deref(),
-                params.cli.as_str(),
-                m,
-            )
-        });
-        if let Some(reason) = &model_reason {
-            tracing::warn!("agent '{}': model not applied — {}", params.id, reason);
-        }
-
-        let with_notices = |stderr: &[u8]| -> Vec<u8> {
-            let mut prefix = String::new();
-            if let Some(reason) = &effort_reason {
-                prefix.push_str(&format!("[canopy] effort not applied: {reason}\n"));
-            }
-            if let Some(reason) = &model_reason {
-                prefix.push_str(&format!("[canopy] model not applied: {reason}\n"));
-            }
-            let mut out = prefix.into_bytes();
-            out.extend_from_slice(stderr);
-            out
-        };
+        let (effort_reason, model_reason) = record_effort_and_model_notices(params);
 
         let started_at = Utc::now();
         let output = cmd.output().await;
 
-        let (exit_code, success) = match output {
-            Ok(out) => {
-                let code = out.status.code().unwrap_or(-1);
-                let success = out.status.success();
-                append_to_log(
-                    &params.log_path,
-                    params.id,
-                    &params.trigger,
-                    &started_at,
-                    code,
-                    &out.stdout,
-                    &with_notices(&out.stderr),
-                )?;
-                (code, success)
-            }
-            Err(e) => {
-                tracing::error!("Failed to spawn CLI for '{}': {}", params.id, e);
-                append_to_log(
-                    &params.log_path,
-                    params.id,
-                    &params.trigger,
-                    &started_at,
-                    -1,
-                    &[],
-                    &with_notices(e.to_string().as_bytes()),
-                )?;
-                (-1, false)
-            }
-        };
-
+        let (exit_code, success) =
+            record_cli_output(params, started_at, output, &effort_reason, &model_reason)?;
         Ok(CliRunResult { exit_code, success })
+    }
+}
+
+/// The two early-error paths of `run_cli_process` (binary resolution and
+/// command building): log the same message, append the same log entry, and
+/// report the same not-started result.
+fn cli_start_failure(
+    params: &CliRunParams<'_>,
+    stage: &str,
+    err_text: &str,
+) -> Result<CliRunResult> {
+    tracing::error!("Failed to {stage} for '{}': {}", params.id, err_text);
+    append_to_log(
+        &params.log_path,
+        params.id,
+        &params.trigger,
+        &Utc::now(),
+        -1,
+        &[],
+        err_text.as_bytes(),
+    )?;
+    Ok(CliRunResult {
+        exit_code: -1,
+        success: false,
+    })
+}
+
+/// Compute — and warn about — the effort/model values this run requested but
+/// the platform cannot honour. The reasons ride along to the log entry via
+/// [`notice_prefixed_stderr`].
+fn record_effort_and_model_notices(params: &CliRunParams<'_>) -> (Option<String>, Option<String>) {
+    // CM7: a configured `effort` the platform can't honour is recorded in
+    // the agent's own run log (not just the daemon's tracing) — an option
+    // that looks applied and isn't is the failure mode this exists to
+    // prevent.
+    let effort_reason = params.effort.and_then(|e| {
+        crate::domain::cli_config::effort_rejection_reason(
+            params.cli.strategy().effort_declaration.as_ref(),
+            params.cli.as_str(),
+            e,
+        )
+    });
+    if let Some(reason) = &effort_reason {
+        tracing::warn!("agent '{}': effort not applied — {}", params.id, reason);
+    }
+
+    // CB34: same for a `model` a model-flagless platform can't honour —
+    // recorded in the agent's own run log, not silently dropped.
+    let model_reason = params.model.and_then(|m| {
+        crate::domain::cli_config::model_rejection_reason(
+            params.cli.strategy().model_flag.as_deref(),
+            params.cli.as_str(),
+            m,
+        )
+    });
+    if let Some(reason) = &model_reason {
+        tracing::warn!("agent '{}': model not applied — {}", params.id, reason);
+    }
+
+    (effort_reason, model_reason)
+}
+
+/// Prepend the `[canopy]` notice lines for any recorded rejection reasons
+/// to the captured stderr bytes.
+fn notice_prefixed_stderr(
+    effort_reason: &Option<String>,
+    model_reason: &Option<String>,
+    stderr: &[u8],
+) -> Vec<u8> {
+    let mut prefix = String::new();
+    if let Some(reason) = effort_reason {
+        prefix.push_str(&format!("[canopy] effort not applied: {reason}\n"));
+    }
+    if let Some(reason) = model_reason {
+        prefix.push_str(&format!("[canopy] model not applied: {reason}\n"));
+    }
+    let mut out = prefix.into_bytes();
+    out.extend_from_slice(stderr);
+    out
+}
+
+/// Turn the spawn result into `(exit_code, success)` and write the run's
+/// log entry (stderr prefixed with any `[canopy]` notices).
+fn record_cli_output(
+    params: &CliRunParams<'_>,
+    started_at: chrono::DateTime<Utc>,
+    output: std::io::Result<std::process::Output>,
+    effort_reason: &Option<String>,
+    model_reason: &Option<String>,
+) -> Result<(i32, bool)> {
+    match output {
+        Ok(out) => {
+            let code = out.status.code().unwrap_or(-1);
+            let success = out.status.success();
+            append_to_log(
+                &params.log_path,
+                params.id,
+                &params.trigger,
+                &started_at,
+                code,
+                &out.stdout,
+                &notice_prefixed_stderr(effort_reason, model_reason, &out.stderr),
+            )?;
+            Ok((code, success))
+        }
+        Err(e) => {
+            tracing::error!("Failed to spawn CLI for '{}': {}", params.id, e);
+            append_to_log(
+                &params.log_path,
+                params.id,
+                &params.trigger,
+                &started_at,
+                -1,
+                &[],
+                &notice_prefixed_stderr(effort_reason, model_reason, e.to_string().as_bytes()),
+            )?;
+            Ok((-1, false))
+        }
     }
 }
 
@@ -477,6 +507,9 @@ fn resolve_cli_binary(cli: &Cli) -> Result<PathBuf> {
 /// `Cli::strategy`): an unknown platform stores the requested model as-is
 /// rather than dropping it.
 fn executed_pair_for_agent(agent: &Agent) -> (Option<String>, Option<String>) {
+    if agent.is_send_to_session() {
+        return (None, None);
+    }
     let platform = agent.cli.as_str().to_string();
     let model = agent
         .model
@@ -503,9 +536,9 @@ fn build_cli_command(
 ) -> Result<Command> {
     let strategy = cli.strategy();
     let mut cmd = if let Some(e) = effort {
-        strategy.build_command_with_session(prompt, model, working_dir, None, Some(e))?
+        strategy.build_command_with_session(prompt, model, working_dir, None, Some(e), None)?
     } else {
-        strategy.build_command(prompt, model, working_dir)?
+        strategy.build_command(prompt, model, working_dir, None)?
     };
 
     // Stdin is already set by `build_command` (null for argv-mode CLIs, or

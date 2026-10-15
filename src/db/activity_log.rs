@@ -7,20 +7,21 @@
 //! exposes workdir-scoped reads plus a ranked search used by the Knowledge
 //! surface.
 //!
-//! Retention: at most [`MAX_ACTIVITY_ENTRIES_PER_WORKDIR`] entries per
-//! workdir, enforced at write time (oldest pruned before insert).
+//! Retention: at most `activity.retention_per_workdir` (default 500) entries
+//! per workdir, enforced at write time (oldest pruned before insert).
 
 use anyhow::Result;
 
 use crate::db::Database;
 use crate::domain::sync::{MessageKind, SyncMessage};
 
-/// Retention rule: how many activity entries are kept per workdir.
-///
-/// Activity is high-frequency and Knowledge is not a dump for an unbounded
-/// stream, so the log is bounded explicitly and pruning runs inside every
-/// write (see [`Database::prune_activity_log`]).
-pub const MAX_ACTIVITY_ENTRIES_PER_WORKDIR: i64 = 500;
+/// Activity retention per workdir (`activity.retention_per_workdir`), read at
+/// each write so a config change takes effect without a restart.
+fn activity_retention() -> i64 {
+    crate::domain::canopy_config::CanopyConfig::load(&crate::domain::prompts::canopy_dir())
+        .activity
+        .retention_per_workdir as i64
+}
 
 /// One persisted activity event.
 ///
@@ -93,7 +94,7 @@ impl Database {
         // Retention is enforced at write time, after the insert, so the
         // steady-state count never exceeds the limit (pruning before the
         // insert would leave limit + 1 rows behind).
-        self.prune_activity_log(workdir, MAX_ACTIVITY_ENTRIES_PER_WORKDIR)?;
+        self.prune_activity_log(workdir, activity_retention())?;
         Ok(ActivityLogEntry {
             id,
             workdir: workdir.to_owned(),
@@ -307,7 +308,8 @@ mod tests {
     fn prune_activity_log_enforces_limit() {
         let db = test_db();
         let workdir = "/tmp/bitacora-prune";
-        for i in 0..MAX_ACTIVITY_ENTRIES_PER_WORKDIR {
+        let retention = 60;
+        for i in 0..retention + 1 {
             db.insert_activity_log_entry(
                 workdir,
                 "sync",
@@ -318,23 +320,14 @@ mod tests {
             )
             .unwrap();
         }
-        // Next inserts prune at write time: count never exceeds the limit.
-        for i in 0..10 {
-            db.insert_activity_log_entry(
-                workdir,
-                "sync",
-                None,
-                "info",
-                &format!("overflow {i}"),
-                None,
-            )
-            .unwrap();
-        }
+        // Prune explicitly at 60: the write-time default (500) leaves all 61
+        // rows in place, so the explicit prune must keep the newest 60.
+        db.prune_activity_log(workdir, retention).unwrap();
         let entries = db
-            .list_activity_log_entries(workdir, (MAX_ACTIVITY_ENTRIES_PER_WORKDIR + 100) as usize)
+            .list_activity_log_entries(workdir, (retention + 100) as usize)
             .unwrap();
-        assert_eq!(entries.len() as i64, MAX_ACTIVITY_ENTRIES_PER_WORKDIR);
-        assert!(entries.iter().any(|e| e.message == "overflow 9"));
+        assert_eq!(entries.len() as i64, retention);
+        assert!(entries.iter().any(|e| e.message == "event 60"));
         assert!(!entries.iter().any(|e| e.message == "event 0"));
     }
 

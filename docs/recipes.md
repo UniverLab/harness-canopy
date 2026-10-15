@@ -210,6 +210,12 @@ arithmetic scheduled its wake-up for 6am *the next day* — a 23-hour stall.
 Let the engine parse the message; let the model only decide which message it
 is looking at.
 
+If this recipe grows a Designer node ahead of implement, have it write the
+plan with `spec_note_write(run_id, body)` rather than a file in the repo —
+the implementer's and reviewer's prompts already carry every note, and a
+verify check reads `grep -q '^## Designer' "$CANOPY_SPEC_NOTES_FILE"`.
+See [Spec notes](graphs.md#spec-notes).
+
 ### Running it
 
 ```json
@@ -236,91 +242,81 @@ skipped on relaunch, so recovery after a crash is just `graph_run` again.
 
 ## Recipe 2 — Spend every free tier before touching a paid one
 
-**Shape:** free-tier cascade (pattern 6). **Requires the router node.**
+**Shape:** free-tier cascade (pattern 6). **Runs as one ensemble node.**
 **What it is for:** four CLIs, four small ceilings, one backlog.
 
 ### The idea
 
-Every implementer is the same node with a different harness. A single router
-receives all their failures and decides where the work goes next, based on
-*why* it failed rather than on the mere fact that it did.
+One `graph_add_ensemble` call with `kind: "cascade"` and four members ordered from
+cheapest to dearest. The engine walks the members one at a time, falls through to the
+next on failure or infra crash, and exits on the first pass — `min_pass: 1`. The
+ensemble is entered by a node before it (e.g. the spec's start or a check node) and
+exits to the next stage on pass, or to a dead end on total failure.
 
-### The nodes
+### The ensemble
 
 ```json
-graph_add_node { graph_id, name: "impl-a", kind: "agent", position: 1,
-  config: { platform: "cursor",      prompt_template: "..." } }
-graph_add_node { graph_id, name: "impl-b", kind: "agent", position: 2,
-  config: { platform: "antigravity", prompt_template: "..." } }
-graph_add_node { graph_id, name: "impl-c", kind: "agent", position: 3,
-  config: { platform: "codex",       prompt_template: "..." } }
-graph_add_node { graph_id, name: "impl-d", kind: "agent", position: 4,
-  config: { platform: "kiro",        prompt_template: "..." } }
-
-graph_add_node {
-  graph_id, name: "triage", kind: "router", position: 5,
-  config: {
-    platform: "opencode", model: "a-free-model",
-    routes: [
-      { label: "exhausted", description: "the CLI ran out of quota, credits or session limit" },
-      { label: "transient", description: "a crash, a network error, a missing dependency" },
-      { label: "broken",    description: "the CLI ran fine and the work itself is wrong" }
-    ],
-    fallback: "exhausted",
-    prompt_template: "..."
-  }
+graph_add_ensemble {
+  graph_id, name: "free-tier-cascade",
+  kind: "cascade",
+  prompt_template: "...",                    // one prompt, shared by every member
+  members: [
+    { platform: "cursor",      timeout_minutes: 10, infra_retry_limit: 0 },
+    { platform: "antigravity", timeout_minutes: 10, infra_retry_limit: 0 },
+    { platform: "codex",       timeout_minutes: 15, infra_retry_limit: 0 },
+    { platform: "kiro",        timeout_minutes: 15, infra_retry_limit: 0 }
+  ],
+  from_node: "entry", condition: "always",   // entry wiring
+  min_pass: 1,
+  on_pass_to: "review",                      // first member that passes → review
+  on_fail_to: "fail"                         // every member failed → dead end
 }
 ```
 
-The routes are three because the decisions are three. Resist adding a fourth
-until a real run produces a failure that fits none of them.
+The members are listed in spending order: the free tiers first, then the paid one last.
+`min_pass: 1` because only one member needs to pass for the cascade to exit. Each
+member sets its own `timeout_minutes` (the leash a flaky free harness needs is shorter
+than the room a careful one gets) and `infra_retry_limit: 0` (an infra crash falls
+through to the next member immediately — no retry, no wasted wall clock). Per-member
+`infra_retry_limit` overrides the ensemble's default; omitting it would inherit the
+engine default of 2 retries, which you do not want here.
 
-### The router's prompt
+You can tune the cascade after creation with `graph_update_ensemble`:
 
-Short, because this node has exactly one decision to make:
-
-```
-# [ROLE]
-An agent CLI just failed. Classify why, in one word.
-
-# [HOW]
-Read the output below. Do not fix anything, do not implement anything, do
-not comment on the code.
-
-- "exhausted" — it ran out of quota, credits, or session limit. This also
-  covers a CLI that simply stopped responding and hit its timeout: some
-  harnesses report a limit, others just go quiet.
-- "transient" — it crashed, lost the network, or hit a missing dependency.
-- "broken" — the CLI worked normally and the work itself is wrong.
-
-# [OUTPUT]
-{{previous_feedback}}
+```json
+graph_update_ensemble {
+  ensemble_id,
+  members: [
+    { platform: "cursor",      timeout_minutes: 8,  infra_retry_limit: 0 },
+    { platform: "antigravity", timeout_minutes: 8,  infra_retry_limit: 0 },
+    { platform: "codex",       timeout_minutes: 12, infra_retry_limit: 0 },
+    { platform: "kiro",        timeout_minutes: 20, infra_retry_limit: 1 }
+  ]
+}
 ```
 
-Notice what the prompt does *not* do: it names no vendor, matches no message,
-parses no format. Every harness ends its quota differently and each one
-changes wording between releases; the model generalizes where a pattern
-cannot.
+This is the pattern this project's Committer uses to land every commit: a cascade
+ensemble of free-tier harnesses, falling through to the paid one only when every free
+tier is spent.
 
-### The edges
+### Routing on why a member failed (optional)
 
-| from | condition | to |
-|---|---|---|
-| impl-a | `fail` | triage |
-| impl-b | `fail` | triage |
-| impl-c | `fail` | triage |
-| impl-d | `fail` | triage |
-| triage | `route:transient` | impl-a |
-| triage | `route:exhausted` | impl-b |
-| triage | `route:broken` | *(no edge — the spec fails)* |
+The cascade falls through on *any* failure. If you need it to route on the *reason* —
+wrong code goes back to a fixer, exhausted quota goes down to the next tier — replace the
+plain `on_pass_to`/`on_fail_to` exits with a router node after the ensemble. The router
+reads the cascade's join output (which names the winner or records "no member produced a
+passing verdict") and routes `route:broken` back to the ensemble's entry, `route:exhausted`
+to a scheduler, `route:transient` to a resilience step. The members themselves stay in
+the cascade; only the exits are reworked. See pattern 6's "Routing on why a member failed"
+subsection for the full variant.
 
 ### The honest limitation
 
-The exhausted route can only point at *one* next harness, so the cascade is
-really "a, then b" per spec rather than a true a→b→c→d walk. Getting the full
-walk needs one router per stage, or a memory of which harnesses are already
-spent — which the engine does not have. Build the two-stage version, get the
-value, and wait for per-harness availability before wiring all four.
+There is still no memory of a spent harness across spec boundaries. If spec 1 burns
+cursor and antigravity, spec 2 re-enters the cascade at cursor and spends an iteration
+rediscovering it is dead — for every remaining spec in the queue. Today the only lever is
+`graph_schedule_autorun`, which parks the *whole graph* until a reset. A per-harness
+"unavailable until" that the cascade could skip past does not exist yet.
 
 ---
 
@@ -649,6 +645,11 @@ on your `$PATH` but not the daemon's fails to spawn mid-run. Use an absolute
 burnt ceiling means a failed spec. Splitting work into specs that finish in
 under half an hour is not tidiness; it is the difference between losing one
 spec and losing a night.
+
+**Queue order can split a group.** A queue reorder that would separate one
+context group's pending specs is refused and nothing changes. Put a spec in
+a group with `queue_add_spec` or `queue_set_group` and the engine keeps the
+group together, so it gets the warm session it shares with its siblings.
 
 **Commit rights are configuration, not instruction.** Three different models
 have committed against a capitalised "you have no commit rights" rule, each

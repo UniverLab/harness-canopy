@@ -250,6 +250,33 @@ pub fn plan_sandbox_cleanup(candidates: &[SandboxCandidate]) -> Vec<SandboxClean
         .collect()
 }
 
+/// A worktree leaf dir with no `sandbox_runs` row, as input to
+/// [`plan_leaked_untracked`].
+#[derive(Debug, Clone)]
+pub struct UntrackedLeakCandidate {
+    pub path: PathBuf,
+    /// False when the leaf's `.git` file names a gitdir that no longer exists.
+    pub gitdir_exists: bool,
+    pub mtime: i64,
+}
+
+/// Max age of an untracked dir we still keep: 2 h. A live run's worktree is
+/// minutes old; the 693 leaked dirs are days old.
+pub const LEAK_MAX_AGE_SECS: i64 = 2 * 3600;
+
+/// Which untracked dirs `canopy clean` (soft mode) may delete: the `.git`
+/// pointer is dangling AND the dir is strictly older than 2 h (same strict
+/// `>` semantics as `cutoff_timestamp` consumers — exactly-2 h-old is kept).
+/// A dir whose gitdir exists stays untouched and keeps being reported.
+pub fn plan_leaked_untracked(candidates: &[UntrackedLeakCandidate], now_ts: i64) -> Vec<PathBuf> {
+    candidates
+        .iter()
+        .filter(|c| !c.gitdir_exists)
+        .filter(|c| c.mtime < now_ts - LEAK_MAX_AGE_SECS)
+        .map(|c| c.path.clone())
+        .collect()
+}
+
 /// Everything a `canopy clean` run decided to do (or, under `--dry-run`,
 /// decided it *would* do).
 #[derive(Debug, Clone, Default)]
@@ -264,6 +291,15 @@ pub struct CleanPlan {
     /// Anonymous worktree directories with no run record. Reported as
     /// skipped — never removed.
     pub sandbox_untracked: Vec<PathBuf>,
+    /// Anonymous leaked dirs proven safe: dangling gitdir + older than 2 h —
+    /// deleted in soft mode.
+    pub untracked_leaks: Vec<PathBuf>,
+    /// CM46: `graph_events` rows older than the graph-event retention window,
+    /// for graphs that are not running.
+    pub graph_event_deletions: usize,
+    /// CM46: the RFC3339 cutoff the `graph_event_deletions` count was computed
+    /// against, so `execute_plan` deletes exactly what was planned.
+    pub graph_event_cutoff: String,
 }
 
 impl CleanPlan {
@@ -282,11 +318,12 @@ impl CleanPlan {
             .sum()
     }
 
-    /// Database rows this plan removes (currently just `interactive_sessions`
-    /// — soft mode's only row-level deletion; `--hard`'s cascade counts are
-    /// tracked separately in [`HardCascadeTarget::counts`]).
+    /// Database rows this plan removes: `interactive_sessions` (soft mode's
+    /// original row-level deletion) plus CM46's aged-out `graph_events`.
+    /// `--hard`'s cascade counts are tracked separately in
+    /// [`HardCascadeTarget::counts`].
     pub fn deleted_row_count(&self) -> usize {
-        self.session_ids.len()
+        self.session_ids.len() + self.graph_event_deletions
     }
 
     /// Whether the plan deletes anything at all (orphaned-project *reports*
@@ -298,21 +335,16 @@ impl CleanPlan {
             && self.terminal_dirs.is_empty()
             && self.rag_residue_files.is_empty()
             && self.sandbox_removals.is_empty()
+            && self.untracked_leaks.is_empty()
+            && self.graph_event_deletions == 0
     }
 }
-
-/// Minimum number of database rows a clean run must have removed before
-/// `canopy clean` bothers reclaiming space with a `VACUUM`. A full `VACUUM`
-/// rewrites the entire database file and takes an exclusive lock, so
-/// running it after deleting a handful of rows would cost far more than it
-/// gives back.
-pub const RECLAIM_ROW_THRESHOLD: usize = 50;
 
 /// Whether a clean run deleted enough database rows to justify reclaiming
 /// space. Pure function over the row count so both the real run and
 /// `--dry-run`'s projection agree on the same threshold.
-pub fn should_reclaim(rows_deleted: usize) -> bool {
-    rows_deleted >= RECLAIM_ROW_THRESHOLD
+pub fn should_reclaim(rows_deleted: usize, threshold: usize) -> bool {
+    rows_deleted >= threshold
 }
 
 /// Cutoff timestamp (unix seconds): a row/file whose age is strictly older
@@ -763,6 +795,9 @@ mod tests {
             orphaned_projects: vec![],
             sandbox_removals: vec![],
             sandbox_untracked: vec![],
+            untracked_leaks: vec![],
+            graph_event_deletions: 0,
+            graph_event_cutoff: String::new(),
         };
         assert_eq!(plan.reclaimed_bytes(), 600);
     }
@@ -782,6 +817,9 @@ mod tests {
             }],
             sandbox_removals: vec![],
             sandbox_untracked: vec![],
+            untracked_leaks: vec![],
+            graph_event_deletions: 0,
+            graph_event_cutoff: String::new(),
         };
         assert_eq!(plan.reclaimed_bytes(), 0);
     }
@@ -798,6 +836,9 @@ mod tests {
             orphaned_projects: vec![],
             sandbox_removals: vec![],
             sandbox_untracked: vec![],
+            untracked_leaks: vec![],
+            graph_event_deletions: 0,
+            graph_event_cutoff: String::new(),
         };
         assert!(!plan.is_empty());
     }
@@ -817,6 +858,9 @@ mod tests {
             orphaned_projects: vec![],
             sandbox_removals: vec![],
             sandbox_untracked: vec![],
+            untracked_leaks: vec![],
+            graph_event_deletions: 0,
+            graph_event_cutoff: String::new(),
         };
         assert!(!plan.is_empty());
     }
@@ -836,6 +880,9 @@ mod tests {
             orphaned_projects: vec![],
             sandbox_removals: vec![],
             sandbox_untracked: vec![],
+            untracked_leaks: vec![],
+            graph_event_deletions: 0,
+            graph_event_cutoff: String::new(),
         };
         assert!(!plan.is_empty());
     }
@@ -1204,19 +1251,26 @@ mod tests {
 
     #[test]
     fn should_reclaim_false_below_threshold() {
-        assert!(!should_reclaim(RECLAIM_ROW_THRESHOLD - 1));
+        assert!(!should_reclaim(49, 50));
     }
 
     #[test]
     fn should_reclaim_true_at_and_above_threshold() {
-        assert!(should_reclaim(RECLAIM_ROW_THRESHOLD));
-        assert!(should_reclaim(RECLAIM_ROW_THRESHOLD + 1));
-        assert!(should_reclaim(957));
+        assert!(should_reclaim(50, 50));
+        assert!(should_reclaim(51, 50));
+        assert!(should_reclaim(957, 50));
     }
 
     #[test]
     fn should_reclaim_false_for_zero() {
-        assert!(!should_reclaim(0));
+        assert!(!should_reclaim(0, 50));
+    }
+
+    #[test]
+    fn should_reclaim_custom_threshold() {
+        assert!(!should_reclaim(9, 10));
+        assert!(should_reclaim(10, 10));
+        assert!(should_reclaim(0, 0));
     }
 
     #[test]
@@ -1234,6 +1288,9 @@ mod tests {
             orphaned_projects: vec![],
             sandbox_removals: vec![],
             sandbox_untracked: vec![],
+            untracked_leaks: vec![],
+            graph_event_deletions: 0,
+            graph_event_cutoff: String::new(),
         };
         // Bytes from log_files must never leak into the row count.
         assert_eq!(plan.deleted_row_count(), 3);
@@ -1296,5 +1353,34 @@ mod tests {
     fn plan_sandbox_cleanup_empty() {
         let plan = plan_sandbox_cleanup(&[]);
         assert!(plan.is_empty());
+    }
+
+    // ── CB92: plan_leaked_untracked ────────────────────────────────────
+
+    fn leak_candidate(path: &str, gitdir_exists: bool, mtime: i64) -> UntrackedLeakCandidate {
+        UntrackedLeakCandidate {
+            path: PathBuf::from(path),
+            gitdir_exists,
+            mtime,
+        }
+    }
+
+    #[test]
+    fn plan_leaked_untracked_removes_only_dangling_and_old() {
+        let now = 1_000_000_i64;
+        let three_hours_ago = now - 3 * 3600;
+        let candidates = vec![
+            leak_candidate("/wt/dangling-old", false, three_hours_ago),
+            leak_candidate("/wt/dangling-fresh", false, now - 3600),
+            leak_candidate("/wt/live-old", true, three_hours_ago),
+            // Exactly 2 h old: age == LEAK_MAX_AGE_SECS, must be kept
+            // (strict `>` semantics, same as cutoff_timestamp consumers).
+            leak_candidate("/wt/dangling-boundary", false, now - LEAK_MAX_AGE_SECS),
+        ];
+        let plan = plan_leaked_untracked(&candidates, now);
+        assert_eq!(plan, vec![PathBuf::from("/wt/dangling-old")]);
+
+        // Empty input → empty plan.
+        assert!(plan_leaked_untracked(&[], now).is_empty());
     }
 }

@@ -521,30 +521,38 @@ impl SuggestionPicker {
         let current = self.cd_current_dir.as_ref()?;
         // Remember the directory name we're leaving
         let leaving_name = current.file_name().map(|n| n.to_string_lossy().to_string());
-        if let Some(parent) = current.parent() {
-            if parent.to_string_lossy().is_empty() {
-                return None;
-            }
-            let parent_path = parent.to_path_buf();
-            let result = parent_path.to_string_lossy().to_string();
-            self.cd_current_dir = Some(parent_path);
-            self.refresh_items(base_cwd);
-            // Position cursor on the directory we came from
-            if let Some(name) = leaving_name {
-                let target = format!("./{name}");
-                if let Some(idx) = self.items.iter().position(|i| i.text == target) {
-                    self.selected = idx;
-                    // Adjust scroll to keep selection visible
-                    if self.selected >= self.scroll_offset + Self::MAX_VISIBLE {
-                        self.scroll_offset = self.selected + 1 - Self::MAX_VISIBLE;
-                    } else if self.selected < self.scroll_offset {
-                        self.scroll_offset = self.selected;
-                    }
-                }
-            }
-            return Some(result);
+        let parent = current.parent()?;
+        if parent.to_string_lossy().is_empty() {
+            return None;
         }
-        None
+        let parent_path = parent.to_path_buf();
+        let result = parent_path.to_string_lossy().to_string();
+        self.cd_current_dir = Some(parent_path);
+        self.refresh_items(base_cwd);
+        self.select_entered_dir(leaving_name);
+        Some(result)
+    }
+
+    /// Position the cursor on the directory we came from, when it is listed.
+    fn select_entered_dir(&mut self, leaving_name: Option<String>) {
+        let Some(name) = leaving_name else {
+            return;
+        };
+        let target = format!("./{name}");
+        let Some(idx) = self.items.iter().position(|i| i.text == target) else {
+            return;
+        };
+        self.selected = idx;
+        self.ensure_selection_visible();
+    }
+
+    /// Adjust scroll to keep the selection visible.
+    fn ensure_selection_visible(&mut self) {
+        if self.selected >= self.scroll_offset + Self::MAX_VISIBLE {
+            self.scroll_offset = self.selected + 1 - Self::MAX_VISIBLE;
+        } else if self.selected < self.scroll_offset {
+            self.scroll_offset = self.selected;
+        }
     }
 
     /// Refresh the items list based on current cd_current_dir.
@@ -1225,5 +1233,88 @@ scrollback = ["demo --help", "demo --help", "demo --help"]
         let hist = load_history(data_dir.path(), "never-existed");
         assert!(hist.scrollback.is_empty());
         assert!(hist.commands.is_empty());
+    }
+
+    #[test]
+    fn navigate_parent_moves_up_and_reselects_the_left_directory() {
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let base = data_dir.path().join("base");
+        let child = base.join("child");
+        let grand = child.join("grand");
+        std::fs::create_dir_all(&grand).expect("create tree");
+
+        let history = SessionHistory::default();
+        let mut picker = SuggestionPicker::for_cd("", base.to_str().unwrap(), &history);
+        picker.cd_current_dir = Some(grand);
+
+        let result = picker.navigate_parent(base.to_str().unwrap());
+
+        assert_eq!(result, Some(child.to_string_lossy().to_string()));
+        assert_eq!(picker.cd_current_dir.as_deref(), Some(child.as_path()));
+        // The refresh listed the parent's children and the cursor sits on the
+        // directory we just left (`./grand`), with the relative input updated.
+        let idx = picker
+            .items
+            .iter()
+            .position(|i| i.text == "./grand")
+            .expect("left directory must be listed after refresh");
+        assert_eq!(picker.selected, idx);
+        assert_eq!(picker.input, "./child");
+    }
+
+    #[test]
+    fn navigate_parent_at_root_returns_none_without_mutation() {
+        let history = SessionHistory::default();
+        let mut picker = SuggestionPicker::for_cd("", "/", &history);
+        picker.cd_current_dir = Some(PathBuf::from("/"));
+
+        // Path::new("/").parent() is None — the old `if let Some(parent)`
+        // fell through to `None` here, and the extracted `?` must too.
+        assert_eq!(picker.navigate_parent("/"), None);
+        assert_eq!(picker.cd_current_dir.as_deref(), Some(Path::new("/")));
+    }
+
+    #[test]
+    fn navigate_parent_with_empty_parent_returns_none_without_mutation() {
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let base = data_dir.path().join("base");
+        std::fs::create_dir_all(&base).expect("create base");
+
+        let history = SessionHistory::default();
+        let mut picker = SuggestionPicker::for_cd("", base.to_str().unwrap(), &history);
+        let input_before = picker.input.clone();
+        // A relative path has an empty parent — the guard must bail out
+        // before any state is touched (no refresh, no cursor move).
+        picker.cd_current_dir = Some(PathBuf::from("relative-child"));
+
+        assert_eq!(picker.navigate_parent(base.to_str().unwrap()), None);
+        assert_eq!(
+            picker.cd_current_dir.as_deref(),
+            Some(Path::new("relative-child"))
+        );
+        assert_eq!(picker.input, input_before);
+    }
+
+    #[test]
+    fn navigate_parent_scrolls_the_selection_into_view() {
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let base = data_dir.path().join("base");
+        std::fs::create_dir_all(&base).expect("create base");
+        for i in 0..12 {
+            std::fs::create_dir(base.join(format!("dir{i:02}"))).expect("create sibling");
+        }
+
+        let history = SessionHistory::default();
+        let mut picker = SuggestionPicker::for_cd("", base.to_str().unwrap(), &history);
+        picker.cd_current_dir = Some(base.join("dir11"));
+
+        assert!(picker.navigate_parent(base.to_str().unwrap()).is_some());
+
+        // Items are sorted, so `./dir11` lands at index 11 — past the
+        // MAX_VISIBLE window the refresh reset to scroll_offset 0. The
+        // extracted `ensure_selection_visible` must clamp the scroll.
+        assert_eq!(picker.items.len(), 12);
+        assert_eq!(picker.selected, 11);
+        assert_eq!(picker.scroll_offset, 11 + 1 - SuggestionPicker::MAX_VISIBLE);
     }
 }

@@ -2,6 +2,7 @@
 //! sidebar, panels, system dashboard, dialogs) consumes this as of T2-T4;
 //! no renderer reads a hardcoded color constant directly anymore.
 
+use super::brand::{self, rgb};
 use ratatui::style::Color;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,7 +31,7 @@ pub struct Theme {
     /// Failed/unavailable state (C4 audit: `Color::Red`).
     pub error: Color,
     /// Active/success indicator distinct from the status-role constants in
-    /// `ui/mod.rs` (C4 audit: `Color::Green`).
+    /// `ui/mod.rs` (C4 audit: a bare green literal).
     pub success: Color,
     /// Input-field background, unfocused (C4 audit: `Color::Rgb(30, 30, 30)`
     /// in the prompt builder's section fields).
@@ -49,28 +50,27 @@ pub struct Theme {
 }
 
 impl Theme {
-    /// Today's look — the exact values the old hardcoded constants held
-    /// (`ACCENT`, `BORDER_COLOR`, `DIM`, `BG_SELECTED` from 54f7b87) before
-    /// T1 centralized them here.
+    /// The web's Canopy `tui` surface: the teal brand palette from
+    /// `univerlab/src/styles/global.css`, with `#00a9a0` as the one essence.
     pub fn classic() -> Self {
         Self {
-            border_color: Color::Rgb(50, 50, 50),
-            panel_bg: Color::Rgb(18, 18, 18),
-            sidebar_bg: Color::Rgb(18, 18, 18),
-            selected_bg: Color::Rgb(45, 45, 45),
-            header_color: Color::Rgb(76, 175, 80),
-            dim_text: Color::Rgb(150, 150, 170),
+            border_color: rgb(brand::LINE),
+            panel_bg: rgb(brand::BG),
+            sidebar_bg: rgb(brand::BG_DEEP),
+            selected_bg: rgb(brand::BG_RAISE),
+            header_color: rgb(brand::ESSENCE),
+            dim_text: rgb(brand::INK_DIM),
             show_borders: true,
-            dialog_bg: Color::Rgb(15, 25, 15),
-            text_primary: Color::White,
-            accent_fg: Color::Black,
-            muted_text: Color::DarkGray,
+            dialog_bg: rgb(brand::BG_RAISE),
+            text_primary: rgb(brand::INK),
+            accent_fg: rgb(brand::BG_DEEP),
+            muted_text: rgb(brand::INK_FAINT),
             warning: Color::Yellow,
             error: Color::Red,
-            success: Color::Green,
-            field_bg: Color::Rgb(30, 30, 30),
-            field_bg_focused: Color::Rgb(40, 40, 40),
-            status_running: Color::Rgb(76, 175, 80),
+            success: rgb(brand::ESSENCE),
+            field_bg: Color::Rgb(2, 46, 43),
+            field_bg_focused: rgb(brand::BG_RAISE),
+            status_running: rgb(brand::ESSENCE),
             status_ok: Color::Rgb(66, 165, 245),
             status_fail: Color::Rgb(229, 57, 53),
             status_disabled: Color::Rgb(120, 120, 120),
@@ -88,7 +88,7 @@ impl Theme {
             panel_bg,
             sidebar_bg: Color::Rgb(14, 14, 22),
             selected_bg: Color::Rgb(44, 44, 62),
-            header_color: Color::Rgb(168, 168, 180),
+            header_color: rgb(brand::ESSENCE),
             dim_text: Color::Rgb(140, 140, 155),
             show_borders: false,
             dialog_bg: Color::Rgb(34, 34, 50),
@@ -97,10 +97,10 @@ impl Theme {
             muted_text: Color::Rgb(130, 130, 145),
             warning: Color::Rgb(215, 180, 90),
             error: Color::Rgb(195, 95, 95),
-            success: Color::Rgb(120, 190, 145),
+            success: rgb(brand::ESSENCE),
             field_bg: Color::Rgb(38, 38, 50),
             field_bg_focused: Color::Rgb(48, 48, 64),
-            status_running: Color::Rgb(76, 175, 80),
+            status_running: rgb(brand::ESSENCE),
             status_ok: Color::Rgb(66, 165, 245),
             status_fail: Color::Rgb(229, 57, 53),
             status_disabled: Color::Rgb(120, 120, 120),
@@ -143,21 +143,23 @@ mod tests {
     #[test]
     fn classic_reproduces_current_constants() {
         let theme = Theme::classic();
-        assert_eq!(theme.border_color, Color::Rgb(50, 50, 50));
-        assert_eq!(theme.panel_bg, Color::Rgb(18, 18, 18));
-        assert_eq!(theme.sidebar_bg, Color::Rgb(18, 18, 18));
-        assert_eq!(theme.selected_bg, Color::Rgb(45, 45, 45));
-        assert_eq!(theme.header_color, Color::Rgb(76, 175, 80));
-        assert_eq!(theme.dim_text, Color::Rgb(150, 150, 170));
+        assert_eq!(theme.border_color, Color::Rgb(26, 60, 58)); // LINE
+        assert_eq!(theme.panel_bg, Color::Rgb(1, 38, 36)); // BG
+        assert_eq!(theme.sidebar_bg, Color::Rgb(1, 29, 28)); // BG_DEEP
+        assert_eq!(theme.selected_bg, Color::Rgb(0, 51, 48)); // BG_RAISE
+        assert_eq!(theme.header_color, rgb(brand::ESSENCE));
+        assert_eq!(theme.dim_text, Color::Rgb(188, 199, 198)); // INK_DIM
         assert!(theme.show_borders);
-        assert_eq!(theme.dialog_bg, Color::Rgb(15, 25, 15));
-        assert_eq!(theme.text_primary, Color::White);
-        assert_eq!(theme.accent_fg, Color::Black);
-        assert_eq!(theme.muted_text, Color::DarkGray);
+        assert_eq!(theme.dialog_bg, rgb(brand::BG_RAISE));
+        assert_eq!(theme.text_primary, Color::Rgb(237, 255, 254)); // INK
+        assert_eq!(theme.accent_fg, rgb(brand::BG_DEEP));
+        assert_eq!(theme.muted_text, Color::Rgb(154, 168, 167)); // INK_FAINT
         assert_eq!(theme.warning, Color::Yellow);
         assert_eq!(theme.error, Color::Red);
-        assert_eq!(theme.success, Color::Green);
-        assert_eq!(theme.status_running, Color::Rgb(76, 175, 80));
+        assert_eq!(theme.success, rgb(brand::ESSENCE));
+        assert_eq!(theme.field_bg, Color::Rgb(2, 46, 43)); // #022e2b
+        assert_eq!(theme.field_bg_focused, rgb(brand::BG_RAISE));
+        assert_eq!(theme.status_running, rgb(brand::ESSENCE));
         assert_eq!(theme.status_ok, Color::Rgb(66, 165, 245));
         assert_eq!(theme.status_fail, Color::Rgb(229, 57, 53));
         assert_eq!(theme.status_disabled, Color::Rgb(120, 120, 120));
@@ -177,7 +179,7 @@ mod tests {
         assert_eq!(theme.border_color, Color::Rgb(42, 42, 60));
         assert_eq!(theme.sidebar_bg, Color::Rgb(14, 14, 22));
         assert_eq!(theme.selected_bg, Color::Rgb(44, 44, 62));
-        assert_eq!(theme.header_color, Color::Rgb(168, 168, 180));
+        assert_eq!(theme.header_color, rgb(brand::ESSENCE));
         assert_eq!(theme.dim_text, Color::Rgb(140, 140, 155));
         assert_eq!(theme.dialog_bg, Color::Rgb(34, 34, 50));
         assert_eq!(theme.muted_text, Color::Rgb(130, 130, 145));
@@ -231,6 +233,19 @@ mod tests {
     }
 
     #[test]
+    fn classic_text_contrast_on_surfaces() {
+        let theme = Theme::classic();
+        assert!(
+            contrast_ratio(theme.text_primary, theme.panel_bg) >= 4.5,
+            "INK on BG must clear 4.5:1"
+        );
+        assert!(
+            contrast_ratio(theme.text_primary, theme.dialog_bg) >= 4.5,
+            "INK on dialog_bg must clear 4.5:1"
+        );
+    }
+
+    #[test]
     fn modern_sidebar_panel_step_is_perceptible() {
         let theme = Theme::modern();
         let sidebar_luminance = rel_luminance(theme.sidebar_bg);
@@ -257,7 +272,6 @@ mod tests {
         assert_ne!(classic.panel_bg, modern.panel_bg);
         assert_ne!(classic.sidebar_bg, modern.sidebar_bg);
         assert_ne!(classic.selected_bg, modern.selected_bg);
-        assert_ne!(classic.header_color, modern.header_color);
         assert_ne!(classic.dim_text, modern.dim_text);
         assert_ne!(classic.dialog_bg, modern.dialog_bg);
         assert_ne!(classic.text_primary, modern.text_primary);
@@ -265,7 +279,6 @@ mod tests {
         assert_ne!(classic.muted_text, modern.muted_text);
         assert_ne!(classic.warning, modern.warning);
         assert_ne!(classic.error, modern.error);
-        assert_ne!(classic.success, modern.success);
         assert_ne!(classic.field_bg, modern.field_bg);
         assert_ne!(classic.field_bg_focused, modern.field_bg_focused);
     }
@@ -273,7 +286,7 @@ mod tests {
     #[test]
     fn classic_has_status_colors() {
         let theme = Theme::classic();
-        assert_eq!(theme.status_running, Color::Rgb(76, 175, 80));
+        assert_eq!(theme.status_running, rgb(brand::ESSENCE));
         assert_eq!(theme.status_ok, Color::Rgb(66, 165, 245));
         assert_eq!(theme.status_fail, Color::Rgb(229, 57, 53));
         assert_eq!(theme.status_disabled, Color::Rgb(120, 120, 120));
@@ -281,7 +294,7 @@ mod tests {
         assert_eq!(theme.kind_router, Color::Rgb(171, 71, 188));
         // Modern intentionally preserves the same semantic values.
         let modern = Theme::modern();
-        assert_eq!(modern.status_running, Color::Rgb(76, 175, 80));
+        assert_eq!(modern.status_running, rgb(brand::ESSENCE));
         assert_eq!(modern.status_ok, Color::Rgb(66, 165, 245));
         assert_eq!(modern.status_fail, Color::Rgb(229, 57, 53));
         assert_eq!(modern.status_disabled, Color::Rgb(120, 120, 120));

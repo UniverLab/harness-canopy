@@ -108,26 +108,13 @@ pub fn draw_warp_input_box(frame: &mut Frame, area: Rect, app: &App, idx: usize)
     // opencode chat input look). The split layout reserves enough rows for
     // the wrapped content; we use them all so the field has visible
     // top/bottom padding around the text rows.
-    let input_bg = Color::Rgb(20, 20, 28);
-    let block = Block::default().style(Style::default().bg(input_bg));
+    let block = Block::default().style(Style::default().bg(WARP_INPUT_BG));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     if inner.height == 0 || inner.width < 4 {
         return;
     }
-
-    // Every text span inside the field must carry the field's background
-    // explicitly, otherwise ratatui falls back to the terminal default
-    // and the text appears to float on the wrong color.
-    let bg = input_bg;
-    let prompt_style = |fg: Color, bold: bool| {
-        let mut s = Style::default().bg(bg).fg(fg);
-        if bold {
-            s = s.add_modifier(Modifier::BOLD);
-        }
-        s
-    };
 
     // Prompt indicator: compact cwd + chevron. Continuation lines are
     // indented by the same width so wrapped/typed text stays aligned.
@@ -137,34 +124,12 @@ pub fn draw_warp_input_box(frame: &mut Frame, area: Rect, app: &App, idx: usize)
     let content_width = inner.width.saturating_sub(prompt_len).max(1) as usize;
 
     if sensitive_input {
-        let line = Line::from(vec![
-            Span::styled(&prompt, prompt_style(accent, true)),
-            Span::styled(
-                "[hidden input]",
-                prompt_style(Color::Rgb(180, 180, 120), false),
-            ),
-        ]);
-        frame.render_widget(Paragraph::new(line), inner);
-        let cx = inner.x + prompt_len;
-        if cx < inner.x + inner.width {
-            frame.set_cursor_position((cx, inner.y));
-        }
+        draw_warp_hidden_input(frame, inner, &prompt, prompt_len, accent);
         return;
     }
 
     if input_text.is_empty() {
-        let line = Line::from(vec![
-            Span::styled(&prompt, prompt_style(accent, true)),
-            Span::styled(
-                "type a command…",
-                prompt_style(Color::Rgb(80, 80, 100), false),
-            ),
-        ]);
-        frame.render_widget(Paragraph::new(line), inner);
-        let cx = inner.x + prompt_len;
-        if cx < inner.x + inner.width {
-            frame.set_cursor_position((cx, inner.y));
-        }
+        draw_warp_placeholder(frame, inner, &prompt, prompt_len, accent);
         return;
     }
 
@@ -173,13 +138,7 @@ pub fn draw_warp_input_box(frame: &mut Frame, area: Rect, app: &App, idx: usize)
 
     // Vertical scroll: keep the cursor's row visible within inner.height rows.
     let visible_rows = inner.height as usize;
-    let scroll_start = if offsets.len() > visible_rows {
-        cursor_line
-            .saturating_sub(visible_rows.saturating_sub(1))
-            .min(offsets.len() - visible_rows)
-    } else {
-        0
-    };
+    let scroll_start = warp_scroll_start(&offsets, cursor_line, visible_rows);
 
     let ghost = if cursor_pos == input_text.len() {
         ghost_for(&app.terminal_histories, &agent.name, &input_text)
@@ -187,53 +146,16 @@ pub fn draw_warp_input_box(frame: &mut Frame, area: Rect, app: &App, idx: usize)
         None
     };
 
-    let mut lines: Vec<Line> = Vec::new();
-    for (row_idx, &(start, end)) in offsets
-        .iter()
-        .enumerate()
-        .skip(scroll_start)
-        .take(visible_rows)
-    {
-        let text_slice = &input_text[start..end];
-        let mut spans = if row_idx == 0 {
-            vec![Span::styled(prompt.clone(), prompt_style(accent, true))]
-        } else {
-            vec![Span::styled(indent.clone(), prompt_style(bg, false))]
-        };
-        spans.push(Span::styled(
-            text_slice.to_string(),
-            prompt_style(Color::White, false),
-        ));
-
-        // Inline ghost-text suggestion on the last visual row, only when the
-        // cursor sits at the very end of the buffer — otherwise accepting it
-        // would interleave with the current cursor position, which is surprising.
-        if row_idx == offsets.len() - 1 {
-            if let Some(ghost) = &ghost {
-                let suffix = &ghost[input_text.len()..];
-                if !suffix.is_empty() {
-                    let used_prefix = if row_idx == 0 {
-                        prompt_len as usize
-                    } else {
-                        indent.chars().count()
-                    };
-                    let used = used_prefix + text_slice.chars().count();
-                    let max_suffix = (inner.width as usize).saturating_sub(used);
-                    let visible_suffix: String = suffix.chars().take(max_suffix).collect();
-                    if !visible_suffix.is_empty() {
-                        spans.push(Span::styled(
-                            visible_suffix,
-                            prompt_style(Color::Rgb(110, 110, 130), false)
-                                .add_modifier(Modifier::ITALIC),
-                        ));
-                    }
-                }
-            }
-        }
-
-        lines.push(Line::from(spans));
-    }
-
+    let ctx = WarpInputCtx {
+        input_text: &input_text,
+        offsets: &offsets,
+        prompt: &prompt,
+        prompt_len,
+        indent: &indent,
+        inner_width: inner.width,
+        accent,
+    };
+    let lines = warp_input_lines(&ctx, scroll_start, visible_rows, ghost.as_deref());
     frame.render_widget(Paragraph::new(lines), inner);
 
     if cursor_line >= scroll_start && cursor_line < scroll_start + visible_rows {
@@ -249,6 +171,167 @@ pub fn draw_warp_input_box(frame: &mut Frame, area: Rect, app: &App, idx: usize)
             frame.set_cursor_position((cx, cy));
         }
     }
+}
+
+/// Background of the field-style input box.
+const WARP_INPUT_BG: Color = Color::Rgb(20, 20, 28);
+
+/// Every text span inside the field must carry the field's background
+/// explicitly, otherwise ratatui falls back to the terminal default
+/// and the text appears to float on the wrong color.
+fn warp_prompt_style(fg: Color, bold: bool) -> Style {
+    let mut s = Style::default().bg(WARP_INPUT_BG).fg(fg);
+    if bold {
+        s = s.add_modifier(Modifier::BOLD);
+    }
+    s
+}
+
+/// Draw the `[hidden input]` field shown while a sensitive prompt is active.
+fn draw_warp_hidden_input(
+    frame: &mut Frame,
+    inner: Rect,
+    prompt: &str,
+    prompt_len: u16,
+    accent: Color,
+) {
+    let line = Line::from(vec![
+        Span::styled(prompt, warp_prompt_style(accent, true)),
+        Span::styled(
+            "[hidden input]",
+            warp_prompt_style(Color::Rgb(180, 180, 120), false),
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(line), inner);
+    let cx = inner.x + prompt_len;
+    if cx < inner.x + inner.width {
+        frame.set_cursor_position((cx, inner.y));
+    }
+}
+
+/// Draw the `type a command…` placeholder shown for an empty buffer.
+fn draw_warp_placeholder(
+    frame: &mut Frame,
+    inner: Rect,
+    prompt: &str,
+    prompt_len: u16,
+    accent: Color,
+) {
+    let line = Line::from(vec![
+        Span::styled(prompt, warp_prompt_style(accent, true)),
+        Span::styled(
+            "type a command…",
+            warp_prompt_style(Color::Rgb(80, 80, 100), false),
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(line), inner);
+    let cx = inner.x + prompt_len;
+    if cx < inner.x + inner.width {
+        frame.set_cursor_position((cx, inner.y));
+    }
+}
+
+/// First wrapped row to display so the cursor's row stays on screen.
+fn warp_scroll_start(offsets: &[(usize, usize)], cursor_line: usize, visible_rows: usize) -> usize {
+    if offsets.len() > visible_rows {
+        cursor_line
+            .saturating_sub(visible_rows.saturating_sub(1))
+            .min(offsets.len() - visible_rows)
+    } else {
+        0
+    }
+}
+
+/// Borrowed values shared by the wrapped-input line builders.
+struct WarpInputCtx<'a> {
+    input_text: &'a str,
+    offsets: &'a [(usize, usize)],
+    prompt: &'a str,
+    prompt_len: u16,
+    indent: &'a str,
+    inner_width: u16,
+    accent: Color,
+}
+
+/// Build the visible wrapped rows, prompt/indent/text plus any ghost suffix.
+fn warp_input_lines(
+    ctx: &WarpInputCtx,
+    scroll_start: usize,
+    visible_rows: usize,
+    ghost: Option<&str>,
+) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line> = Vec::new();
+    for (row_idx, &(start, end)) in ctx
+        .offsets
+        .iter()
+        .enumerate()
+        .skip(scroll_start)
+        .take(visible_rows)
+    {
+        let text_slice = &ctx.input_text[start..end];
+        let mut spans = if row_idx == 0 {
+            vec![Span::styled(
+                ctx.prompt.to_string(),
+                warp_prompt_style(ctx.accent, true),
+            )]
+        } else {
+            vec![Span::styled(
+                ctx.indent.to_string(),
+                warp_prompt_style(WARP_INPUT_BG, false),
+            )]
+        };
+        spans.push(Span::styled(
+            text_slice.to_string(),
+            warp_prompt_style(Color::White, false),
+        ));
+        spans.extend(warp_ghost_spans(
+            ctx,
+            row_idx,
+            ctx.offsets.len(),
+            text_slice,
+            ghost,
+        ));
+
+        lines.push(Line::from(spans));
+    }
+    lines
+}
+
+/// Inline ghost-text suggestion on the last visual row, only when the
+/// cursor sits at the very end of the buffer — otherwise accepting it
+/// would interleave with the current cursor position, which is surprising.
+fn warp_ghost_spans(
+    ctx: &WarpInputCtx,
+    row_idx: usize,
+    offsets_len: usize,
+    text_slice: &str,
+    ghost: Option<&str>,
+) -> Vec<Span<'static>> {
+    if row_idx != offsets_len - 1 {
+        return Vec::new();
+    }
+    let Some(ghost) = ghost else {
+        return Vec::new();
+    };
+    let suffix = &ghost[ctx.input_text.len()..];
+    if suffix.is_empty() {
+        return Vec::new();
+    }
+    let used_prefix = if row_idx == 0 {
+        ctx.prompt_len as usize
+    } else {
+        ctx.indent.chars().count()
+    };
+    let used = used_prefix + text_slice.chars().count();
+    let max_suffix = (ctx.inner_width as usize).saturating_sub(used);
+    let visible_suffix: String = suffix.chars().take(max_suffix).collect();
+    if visible_suffix.is_empty() {
+        return Vec::new();
+    }
+    vec![Span::styled(
+        visible_suffix,
+        warp_prompt_style(Color::Rgb(110, 110, 130), false).add_modifier(Modifier::ITALIC),
+    )]
 }
 
 pub fn render_command_chips(frame: &mut Frame, area: Rect, app: &App, session_name: &str) {

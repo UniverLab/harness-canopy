@@ -11,7 +11,7 @@ use crate::db::Database;
 /// tell which graph, event, or agent sent it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScheduledSendProvenance {
-    /// Provenance kind: `"hook"` or `"agent"`.
+    /// Provenance kind: `"hook"`, `"agent"`, or `"agent_trigger"`.
     pub kind: String,
     /// Id of the graph whose hook enqueued the send. Empty for `"agent"`.
     pub graph_id: String,
@@ -20,6 +20,12 @@ pub struct ScheduledSendProvenance {
     /// Id of the calling session that scheduled an agent send.
     #[serde(default)]
     pub session_id: Option<String>,
+    /// Id of the background agent whose trigger enqueued the send (CM53).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    /// The trigger that fired, `"cron"` or `"watch"` (CM53).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<String>,
     /// The session *name* an interactive hook was aimed at (CM27), when the
     /// hook was configured with `target_session_name` rather than a literal
     /// id — the id it actually resolved to and delivered to is the row's own
@@ -37,6 +43,8 @@ impl ScheduledSendProvenance {
             graph_id: graph_id.to_string(),
             event: event.to_string(),
             session_id: None,
+            agent_id: None,
+            trigger: None,
             target_session_name: None,
         }
     }
@@ -49,6 +57,8 @@ impl ScheduledSendProvenance {
             graph_id: graph_id.to_string(),
             event: event.to_string(),
             session_id: None,
+            agent_id: None,
+            trigger: None,
             target_session_name: Some(target_session_name.to_string()),
         }
     }
@@ -60,6 +70,22 @@ impl ScheduledSendProvenance {
             graph_id: String::new(),
             event: String::new(),
             session_id: Some(session_id.to_string()),
+            agent_id: None,
+            trigger: None,
+            target_session_name: None,
+        }
+    }
+
+    /// Provenance for a message a background agent's cron/watch trigger
+    /// delivered (CM53). `trigger` is `"cron"` or `"watch"`.
+    pub fn agent_trigger(agent_id: &str, trigger: &str) -> Self {
+        Self {
+            kind: "agent_trigger".to_string(),
+            graph_id: String::new(),
+            event: String::new(),
+            session_id: None,
+            agent_id: Some(agent_id.to_string()),
+            trigger: Some(trigger.to_string()),
             target_session_name: None,
         }
     }
@@ -69,7 +95,7 @@ impl ScheduledSendProvenance {
             .transpose()
     }
 
-    fn to_json(value: Option<&Self>) -> Result<Option<String>> {
+    pub(crate) fn to_json(value: Option<&Self>) -> Result<Option<String>> {
         value
             .map(serde_json::to_string)
             .transpose()

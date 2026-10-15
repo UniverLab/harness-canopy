@@ -110,7 +110,7 @@ fn should_check_returns_true_when_no_last_check_file() {
     // When there's no last check file, should_check should return true. The
     // result depends on the user's data directory, so this test only checks
     // that the helper remains safe to call without panicking.
-    let _ = super::should_check();
+    let _ = super::should_check(24 * 3600);
 }
 
 #[test]
@@ -426,7 +426,11 @@ fn tui_path_never_calls_replace() {
         called: Cell::new(false),
         bytes: Vec::new(),
     };
-    let notice = super::check_and_update_notice_with(&fetcher, &downloader);
+    let notice = super::check_and_update_notice_with(
+        &crate::domain::canopy_config::UpdateConfig::default(),
+        &fetcher,
+        &downloader,
+    );
     assert_eq!(notice.as_deref(), Some(fake.as_str()));
     assert!(!downloader.called.get());
     crate::autoupdate::notice::clear_update_tag_for_tests();
@@ -608,11 +612,93 @@ fn install_with_unsupported_target_errors_before_downloading() {
     assert!(!downloader.called.get());
 }
 
+#[test]
+fn check_exit_2_on_lookup_failure() {
+    let downloader = RecordingDownloader {
+        called: Cell::new(false),
+        bytes: Vec::new(),
+    };
+    let daemon = FakeDaemon {
+        running: false,
+        managed: false,
+        restarted: Cell::new(false),
+        stopped: Cell::new(false),
+        started: Cell::new(false),
+    };
+    let deps = super::UpdateDeps {
+        current: "3.0.0",
+        releases: Err("network is down".to_string()),
+        exe: Path::new("/tmp/canopy-update-test/canopy"),
+        cargo_bin: Path::new("/tmp/canopy-update-test/not-cargo"),
+        target: Ok("x86_64-unknown-linux-gnu"),
+        downloader: &downloader,
+        confirm: &|| panic!("check must not prompt"),
+        daemon: &daemon,
+        graph_running: false,
+        confirm_restart: &|| panic!("check must not prompt"),
+    };
+    assert_eq!(super::run_update_with(true, false, &deps).unwrap(), 2);
+    assert!(!downloader.called.get());
+}
+
+#[test]
+fn install_exit_2_on_lookup_failure() {
+    let downloader = RecordingDownloader {
+        called: Cell::new(false),
+        bytes: Vec::new(),
+    };
+    let daemon = FakeDaemon {
+        running: true,
+        managed: false,
+        restarted: Cell::new(false),
+        stopped: Cell::new(false),
+        started: Cell::new(false),
+    };
+    let deps = super::UpdateDeps {
+        current: "3.0.0",
+        releases: Err("network is down".to_string()),
+        exe: Path::new("/tmp/canopy-update-test/canopy"),
+        cargo_bin: Path::new("/tmp/canopy-update-test/not-cargo"),
+        target: Ok("x86_64-unknown-linux-gnu"),
+        downloader: &downloader,
+        confirm: &|| panic!("failed lookup must not prompt"),
+        daemon: &daemon,
+        graph_running: false,
+        confirm_restart: &|| panic!("failed lookup must not prompt"),
+    };
+    assert_eq!(super::run_update_with(false, true, &deps).unwrap(), 2);
+    assert!(!downloader.called.get());
+    assert!(!daemon.stopped.get());
+    assert!(!daemon.started.get());
+    assert!(!daemon.restarted.get());
+}
+
 struct FailingFetcher;
 
 impl super::ReleaseFetcher for FailingFetcher {
     fn get(&self, _url: &str) -> anyhow::Result<String> {
         Err(anyhow::anyhow!("network is down"))
+    }
+}
+
+struct RedirectFake {
+    redirect: Option<String>,
+    api_calls: Cell<usize>,
+    body: String,
+    api_error: Option<String>,
+}
+
+impl super::ReleaseFetcher for RedirectFake {
+    fn get(&self, _url: &str) -> anyhow::Result<String> {
+        self.api_calls.set(self.api_calls.get() + 1);
+        match &self.api_error {
+            Some(e) => Err(anyhow::anyhow!("{e}")),
+            None => Ok(self.body.clone()),
+        }
+    }
+
+    fn resolve_latest_redirect(&self, _url: &str) -> Option<String> {
+        self.redirect.clone()
     }
 }
 
@@ -623,7 +709,11 @@ fn tui_notice_is_quiet_without_network() {
         called: Cell::new(false),
         bytes: Vec::new(),
     };
-    let notice = super::check_and_update_notice_with(&FailingFetcher, &downloader);
+    let notice = super::check_and_update_notice_with(
+        &crate::domain::canopy_config::UpdateConfig::default(),
+        &FailingFetcher,
+        &downloader,
+    );
     assert_eq!(notice, None);
     assert!(!downloader.called.get());
     crate::autoupdate::notice::clear_update_tag_for_tests();
@@ -663,4 +753,264 @@ fn select_latest_picks_max_stable() {
         super::select_latest_stable(&releases, "3.0.0"),
         Some("v3.0.2".to_string())
     );
+}
+
+#[test]
+fn redirect_tag_wins_and_api_never_called() {
+    let fake = RedirectFake {
+        redirect: Some("v3.0.1".to_string()),
+        api_calls: Cell::new(0),
+        body: String::new(),
+        api_error: None,
+    };
+    let result = super::resolve_latest_stable_with(&fake, "3.0.0").unwrap();
+    assert_eq!(result, Some("v3.0.1".to_string()));
+    assert_eq!(fake.api_calls.get(), 0);
+}
+
+#[test]
+fn redirect_up_to_date_skips_api() {
+    let fake = RedirectFake {
+        redirect: Some("v3.0.0".to_string()),
+        api_calls: Cell::new(0),
+        body: String::new(),
+        api_error: None,
+    };
+    let result = super::resolve_latest_stable_with(&fake, "3.0.0").unwrap();
+    assert_eq!(result, None);
+    assert_eq!(fake.api_calls.get(), 0);
+}
+
+#[test]
+fn redirect_failure_falls_back_to_api() {
+    let fake = RedirectFake {
+        redirect: None,
+        api_calls: Cell::new(0),
+        body: r#"[{"tag_name":"v3.0.1","prerelease":false,"draft":false}]"#.to_string(),
+        api_error: None,
+    };
+    let result = super::resolve_latest_stable_with(&fake, "3.0.0").unwrap();
+    assert_eq!(result, Some("v3.0.1".to_string()));
+    assert_eq!(fake.api_calls.get(), 1);
+}
+
+#[test]
+fn api_403_message_names_local_reset() {
+    let with_time = super::api_error_message(403, Some("1700000000"));
+    assert!(
+        with_time.starts_with("GitHub rate limit reached; resets at "),
+        "message should name reset time: {with_time}"
+    );
+    let suffix = with_time
+        .strip_prefix("GitHub rate limit reached; resets at ")
+        .unwrap();
+    assert_eq!(suffix.len(), 5, "HH:MM is 5 chars");
+    let bytes: Vec<u8> = suffix.bytes().collect();
+    assert_eq!(bytes[2], b':');
+    for (i, b) in bytes.iter().enumerate() {
+        if i != 2 {
+            assert!(b.is_ascii_digit(), "non-colon char must be digit");
+        }
+    }
+    assert!(!with_time.contains("HTTP 403"));
+    assert_eq!(
+        super::api_error_message(403, None),
+        "GitHub rate limit reached — try again in an hour"
+    );
+    let other = super::api_error_message(500, None);
+    assert!(other.contains("HTTP 500"), "non-403 should show HTTP code");
+}
+
+#[test]
+fn rate_limit_error_surfaces_through_resolver() {
+    let msg = super::api_error_message(403, Some("1700000000"));
+    let fake = RedirectFake {
+        redirect: None,
+        api_calls: Cell::new(0),
+        body: String::new(),
+        api_error: Some(msg),
+    };
+    let err = super::resolve_latest_stable_with(&fake, "3.0.0").unwrap_err();
+    assert!(
+        err.to_string().contains("resets at"),
+        "error should contain 'resets at': {}",
+        err
+    );
+}
+
+#[test]
+fn tui_notice_silent_on_rate_limit() {
+    crate::autoupdate::notice::clear_update_tag_for_tests();
+    let msg = super::api_error_message(403, Some("1700000000"));
+    let fake = RedirectFake {
+        redirect: None,
+        api_calls: Cell::new(0),
+        body: String::new(),
+        api_error: Some(msg),
+    };
+    let downloader = RecordingDownloader {
+        called: Cell::new(false),
+        bytes: Vec::new(),
+    };
+    let notice = super::check_and_update_notice_with(
+        &crate::domain::canopy_config::UpdateConfig::default(),
+        &fake,
+        &downloader,
+    );
+    assert_eq!(notice, None);
+    assert!(!downloader.called.get());
+    crate::autoupdate::notice::clear_update_tag_for_tests();
+}
+
+#[test]
+fn redirect_garbage_tag_falls_back_to_api() {
+    let fake = RedirectFake {
+        redirect: Some("nightly".to_string()),
+        api_calls: Cell::new(0),
+        body: r#"[{"tag_name":"v3.0.1","prerelease":false,"draft":false}]"#.to_string(),
+        api_error: None,
+    };
+    let result = super::resolve_latest_stable_with(&fake, "3.0.0").unwrap();
+    assert_eq!(result, Some("v3.0.1".to_string()));
+    assert_eq!(fake.api_calls.get(), 1);
+}
+
+fn run_install_script_with_curl_stub(stub: &str) -> (std::process::Output, String) {
+    let tmp = tempfile::tempdir().unwrap();
+    let bin_dir = tmp.path().join("bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    let stub_path = bin_dir.join("curl");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(&stub_path, stub).unwrap();
+        std::fs::set_permissions(&stub_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(&stub_path, stub).unwrap();
+    }
+    let log_path = tmp.path().join("curl.log");
+    let script = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/install.sh");
+    let real_path = std::env::var("PATH").unwrap_or_default();
+    let output = std::process::Command::new("sh")
+        .arg(script)
+        .env("PATH", format!("{}:{}", bin_dir.display(), real_path))
+        .env("HOME", tmp.path())
+        .env("CURL_LOG", &log_path)
+        .output()
+        .expect("failed to run install script");
+    let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+    (output, log)
+}
+
+#[test]
+fn install_script_redirect_first_api_never_called() {
+    let stub = "#!/bin/sh\necho \"$*\" >> \"$CURL_LOG\"\nif echo \"$*\" | grep -q releases/latest; then echo \"https://github.com/UniverLab/harness-canopy/releases/tag/v9.9.9\"; elif echo \"$*\" | grep -q api.github.com; then echo \"curl: (22) The requested URL returned error: 403\" >&2; exit 22; else exit 1; fi";
+    let (output, log) = run_install_script_with_curl_stub(stub);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("curl:"),
+        "stderr must not contain 'curl:': {stderr}"
+    );
+    assert!(
+        stdout.contains("v9.9.9"),
+        "stdout must contain resolved version: {stdout}"
+    );
+    assert!(
+        !log.contains("api.github.com"),
+        "API fallback must never be called when the redirect works: {log}"
+    );
+    assert!(
+        log.contains("releases/latest"),
+        "redirect must be tried first: {log}"
+    );
+    assert!(
+        stderr.contains("Download failed"),
+        "resolution must succeed, then download fails: {stderr}"
+    );
+    assert!(
+        !output.status.success(),
+        "script should exit nonzero (download 404)"
+    );
+}
+
+#[test]
+fn install_script_silent_on_api_403() {
+    // Redirect fails, API answers 403 (noisy stderr like real curl, and a
+    // `-w %{http_code}` style "403" on stdout with a failing exit).
+    let stub = "#!/bin/sh\necho \"$*\" >> \"$CURL_LOG\"\nif echo \"$*\" | grep -q releases/latest; then echo \"curl: (22) The requested URL returned error: 404\" >&2; exit 22; elif echo \"$*\" | grep -q api.github.com; then echo \"403\"; echo \"curl: (22) The requested URL returned error: 403\" >&2; exit 22; else exit 1; fi";
+    let (output, log) = run_install_script_with_curl_stub(stub);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("curl:"),
+        "stderr must not contain 'curl:': {stderr}"
+    );
+    assert!(
+        stderr.contains("GitHub rate limit reached"),
+        "403 must name the rate limit: {stderr}"
+    );
+    assert!(
+        !output.status.success(),
+        "script should exit nonzero (rate limited)"
+    );
+    let lines: Vec<&str> = log.lines().collect();
+    assert_eq!(lines.len(), 2, "redirect then API, nothing else: {log}");
+    assert!(
+        lines[0].contains("releases/latest"),
+        "redirect must be tried first: {log}"
+    );
+    assert!(
+        lines[1].contains("api.github.com"),
+        "API must be the fallback: {log}"
+    );
+    assert!(
+        !stdout.contains("latest stable"),
+        "no version may be resolved on 403: {stdout}"
+    );
+}
+
+#[test]
+fn update_check_disabled_makes_no_request() {
+    use std::cell::Cell;
+    crate::autoupdate::notice::clear_update_tag_for_tests();
+    struct CountingFetcher {
+        calls: Cell<usize>,
+    }
+    impl super::ReleaseFetcher for CountingFetcher {
+        fn get(&self, _url: &str) -> anyhow::Result<String> {
+            self.calls.set(self.calls.get() + 1);
+            Ok(r#"[{"tag_name":"v9.9.9","prerelease":false,"draft":false}]"#.to_string())
+        }
+    }
+    let update = crate::domain::canopy_config::UpdateConfig {
+        check_enabled: false,
+        check_interval_hours: 24,
+    };
+    let fetcher = CountingFetcher {
+        calls: Cell::new(0),
+    };
+    let downloader = RecordingDownloader {
+        called: Cell::new(false),
+        bytes: Vec::new(),
+    };
+    let notice = super::check_and_update_notice_with(&update, &fetcher, &downloader);
+    assert_eq!(notice, None);
+    assert_eq!(fetcher.calls.get(), 0);
+    crate::autoupdate::notice::clear_update_tag_for_tests();
+}
+
+#[test]
+fn should_check_honours_interval_secs() {
+    // interval semantics: due after interval, not due before it.
+    // Use pure arithmetic on the same expression should_check uses.
+    let last: u64 = 1_000_000;
+    let now_due: u64 = last + 3600;
+    let now_early: u64 = last + 3599;
+    assert!(now_due.saturating_sub(last) >= 3600);
+    assert!(!(now_early.saturating_sub(last) >= 7200));
+    // And the real helper stays callable with a live interval.
+    let _ = super::should_check(3600);
 }

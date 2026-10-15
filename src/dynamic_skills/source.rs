@@ -10,6 +10,50 @@ use anyhow::{bail, Context, Result};
 use std::path::Path;
 use std::process::Command;
 
+/// Shown to callers when `fetch_skill` could not retrieve a skill. The
+/// `NotInSource` variant is distinct from a transient failure: it means the
+/// skill directory does not exist at the fetched head, so the store copy is
+/// obsolete and should be removed rather than served.
+#[derive(Debug)]
+pub enum SkillFetchError {
+    NotInSource {
+        name: String,
+        source_url: String,
+        head: String,
+    },
+    Other(anyhow::Error),
+}
+
+impl std::fmt::Display for SkillFetchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotInSource {
+                name,
+                source_url,
+                head,
+            } => {
+                write!(f, "skill '{name}' not found at {source_url} (head {head})")
+            }
+            Self::Other(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for SkillFetchError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::NotInSource { .. } => None,
+            Self::Other(e) => Some(e.as_ref()),
+        }
+    }
+}
+
+impl From<anyhow::Error> for SkillFetchError {
+    fn from(e: anyhow::Error) -> Self {
+        Self::Other(e)
+    }
+}
+
 /// One skill directory found in a source's catalog, with its parsed
 /// one-line description.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -62,7 +106,7 @@ impl GitSource {
     /// Shallow, sparse fetch of a single skill subdirectory into `dest`
     /// (created if missing, overwritten if present). Returns the commit
     /// hash checked out.
-    pub fn fetch_skill(&self, name: &str, dest: &Path) -> Result<String> {
+    pub fn fetch_skill(&self, name: &str, dest: &Path) -> Result<String, SkillFetchError> {
         let tmp = tempfile::tempdir().context("failed to create temp clone dir")?;
         self.shallow_clone(tmp.path(), false)?;
         run_git(tmp.path(), &["sparse-checkout", "init", "--cone"])?;
@@ -71,10 +115,11 @@ impl GitSource {
 
         let skill_src = tmp.path().join(name);
         if crate::skills_module::find_skill_instructions(&skill_src).is_none() {
-            bail!(
-                "skill '{name}' not found at {} (no SKILL.md/INSTRUCTIONS.md)",
-                self.url
-            );
+            return Err(SkillFetchError::NotInSource {
+                name: name.to_string(),
+                source_url: self.url.clone(),
+                head: commit_hash(tmp.path())?,
+            });
         }
 
         if dest.exists() {
@@ -83,7 +128,7 @@ impl GitSource {
         }
         copy_dir_recursive(&skill_src, dest)?;
 
-        commit_hash(tmp.path())
+        commit_hash(tmp.path()).map_err(SkillFetchError::Other)
     }
 
     /// Shallow fetch of the whole registry, returning every skill directory

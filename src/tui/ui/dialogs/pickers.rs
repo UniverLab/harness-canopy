@@ -6,6 +6,7 @@ use ratatui::Frame;
 
 use super::centered_rect;
 use crate::tui::app::types::App;
+use crate::tui::terminal_history::SuggestionPicker;
 use crate::tui::ui::theme::Theme;
 
 pub fn draw_split_picker(frame: &mut Frame, app: &App, theme: &Theme) {
@@ -32,7 +33,7 @@ pub fn draw_split_picker(frame: &mut Frame, app: &App, theme: &Theme) {
     let block = Block::default()
         .title(" Split con... ")
         .borders(crate::tui::ui::dialog_borders_for(theme))
-        .border_style(Style::default().fg(Color::Green))
+        .border_style(Style::default().fg(theme.success))
         .style(Style::default().bg(theme.dialog_bg));
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -63,7 +64,7 @@ pub fn draw_split_picker(frame: &mut Frame, app: &App, theme: &Theme) {
         let style = if selected {
             Style::default()
                 .fg(Color::Black)
-                .bg(Color::Green)
+                .bg(theme.success)
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::White)
@@ -111,57 +112,11 @@ pub fn draw_suggestion_picker(
     };
 
     // Determine the actual area to draw the picker in (respecting split view)
-    let picker_area = if let Some(ref split_id) = app.active_split_id {
-        if let Some(group) = app.split_groups.iter().find(|g| g.id == *split_id) {
-            let orientation = group.orientation;
-            let areas = match orientation {
-                crate::domain::models::SplitOrientation::Horizontal => {
-                    Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
-                        .areas(panel_area)
-                }
-                crate::domain::models::SplitOrientation::Vertical => {
-                    Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)])
-                        .areas(panel_area)
-                }
-            };
-            let [area_a, area_b]: [Rect; 2] = areas;
-            let raw = if app.split_right_focused {
-                area_b
-            } else {
-                area_a
-            };
-            // Account for the split panel border (1px each side)
-            Rect::new(
-                raw.x.saturating_add(1),
-                raw.y.saturating_add(1),
-                raw.width.saturating_sub(2),
-                raw.height.saturating_sub(2),
-            )
-        } else {
-            panel_area
-        }
-    } else {
-        panel_area
-    };
+    let picker_area = suggestion_picker_area(app, panel_area);
 
     if picker.items.is_empty() {
         // Show "no matches" indicator
-        let w = 30u16.min(picker_area.width.saturating_sub(2));
-        let area = ratatui::layout::Rect::new(
-            picker_area.x + 1,
-            picker_area.y + picker_area.height.saturating_sub(3),
-            w,
-            2,
-        );
-        frame.render_widget(Clear, area);
-        let block = Block::default()
-            .borders(crate::tui::ui::dialog_borders_for(theme))
-            .border_style(Style::default().fg(theme.border_color))
-            .style(Style::default().bg(Color::Rgb(15, 15, 25)));
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-        let msg = Paragraph::new("  No matches").style(Style::default().fg(theme.dim_text));
-        frame.render_widget(msg, inner);
+        draw_no_matches_picker(frame, picker_area, theme);
         return;
     }
 
@@ -169,29 +124,7 @@ pub fn draw_suggestion_picker(
     let w = 60u16.min(picker_area.width.saturating_sub(2));
     let h = visible + 2; // items + border
 
-    let total = picker.items.len();
-    let title = match picker.mode {
-        crate::tui::terminal_history::PickerMode::CommandHistory => {
-            let filter_hint = if picker.input.is_empty() {
-                String::new()
-            } else {
-                format!(" | {}", picker.input)
-            };
-            if total > picker.visible_count() {
-                format!(
-                    " History [{}/{}]{} ",
-                    picker.selected + 1,
-                    total,
-                    filter_hint
-                )
-            } else {
-                format!(" History{} ", filter_hint)
-            }
-        }
-        crate::tui::terminal_history::PickerMode::CdDirectory => {
-            format!(" {} ←→ ", picker.input)
-        }
-    };
+    let title = suggestion_picker_title(picker);
 
     // Anchor above the warp input box (3 rows from bottom)
     let area = ratatui::layout::Rect::new(
@@ -236,4 +169,85 @@ pub fn draw_suggestion_picker(
 
     let list = List::new(items);
     frame.render_widget(list, inner);
+}
+
+/// The area the picker draws into, inset from the focused half of an active split.
+fn suggestion_picker_area(app: &App, panel_area: Rect) -> Rect {
+    let Some(ref split_id) = app.active_split_id else {
+        return panel_area;
+    };
+    let Some(group) = app.split_groups.iter().find(|g| g.id == *split_id) else {
+        return panel_area;
+    };
+    let orientation = group.orientation;
+    let areas = match orientation {
+        crate::domain::models::SplitOrientation::Horizontal => {
+            Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .areas(panel_area)
+        }
+        crate::domain::models::SplitOrientation::Vertical => {
+            Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .areas(panel_area)
+        }
+    };
+    let [area_a, area_b]: [Rect; 2] = areas;
+    let raw = if app.split_right_focused {
+        area_b
+    } else {
+        area_a
+    };
+    // Account for the split panel border (1px each side)
+    Rect::new(
+        raw.x.saturating_add(1),
+        raw.y.saturating_add(1),
+        raw.width.saturating_sub(2),
+        raw.height.saturating_sub(2),
+    )
+}
+
+/// Draw the "No matches" indicator in place of the picker list.
+fn draw_no_matches_picker(frame: &mut Frame, picker_area: Rect, theme: &Theme) {
+    let w = 30u16.min(picker_area.width.saturating_sub(2));
+    let area = Rect::new(
+        picker_area.x + 1,
+        picker_area.y + picker_area.height.saturating_sub(3),
+        w,
+        2,
+    );
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(crate::tui::ui::dialog_borders_for(theme))
+        .border_style(Style::default().fg(theme.border_color))
+        .style(Style::default().bg(Color::Rgb(15, 15, 25)));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let msg = Paragraph::new("  No matches").style(Style::default().fg(theme.dim_text));
+    frame.render_widget(msg, inner);
+}
+
+/// Mode-dependent title, with the position indicator when the list overflows.
+fn suggestion_picker_title(picker: &SuggestionPicker) -> String {
+    let total = picker.items.len();
+    match picker.mode {
+        crate::tui::terminal_history::PickerMode::CommandHistory => {
+            let filter_hint = if picker.input.is_empty() {
+                String::new()
+            } else {
+                format!(" | {}", picker.input)
+            };
+            if total > picker.visible_count() {
+                format!(
+                    " History [{}/{}]{} ",
+                    picker.selected + 1,
+                    total,
+                    filter_hint
+                )
+            } else {
+                format!(" History{} ", filter_hint)
+            }
+        }
+        crate::tui::terminal_history::PickerMode::CdDirectory => {
+            format!(" {} ←→ ", picker.input)
+        }
+    }
 }

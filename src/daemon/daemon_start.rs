@@ -10,6 +10,7 @@
 //! a detached spawn no longer bypasses it and become an orphan.
 
 use super::process::{CommandRunner, RealRunner};
+use super::service_reconcile::{self, StartFailureInfo};
 
 /// Why this start was requested. Passed for readability/audit at the call
 /// sites: `start_daemon` itself behaves identically for both intents — it
@@ -51,6 +52,10 @@ pub(crate) struct StartDeps<'a> {
     /// One wait between polls (real: `std::thread::sleep(250ms)`;
     /// tests: no-op so the timeout path is instant).
     pub(crate) tick: &'a dyn Fn(),
+    /// FR3: read the unit's state. Called only when the manager start never
+    /// opened the port, never on the happy path.
+    /// (real: `service_reconcile::read_start_failure_info_live`)
+    pub(crate) diagnose: &'a dyn Fn() -> StartFailureInfo,
 }
 
 /// The one start function all three auto-start paths share (FR1).
@@ -90,9 +95,8 @@ pub(crate) fn start_daemon(
         if (deps.port_open)(port) {
             return Ok(());
         }
-        anyhow::bail!(
-            "service manager start did not open port {port} within 10s — check logs: journalctl --user -u canopy.service (or ~/Library logs on macOS)"
-        );
+        let info = (deps.diagnose)();
+        anyhow::bail!("{}", service_reconcile::start_failure_message(port, &info));
     }
 
     // (c) No unit installed, or no usable manager → direct spawn as today.
@@ -141,6 +145,24 @@ pub(crate) fn spawn_direct_daemon(
     Ok(child.id())
 }
 
+/// Is the platform's service manager usable? (Linux: `systemctl --user
+/// is-system-running` answers; macOS: `launchctl` always exists; elsewhere
+/// `false`.)
+pub(crate) fn manager_available() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        super::process::is_systemd_available()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        true
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        false
+    }
+}
+
 /// The production entry point all three callers use: builds [`StartDeps`]
 /// from live platform values and delegates to [`start_daemon`].
 pub(crate) fn start_daemon_live(
@@ -160,7 +182,7 @@ pub(crate) fn start_daemon_live(
             "start".to_string(),
             super::process::SYSTEMD_UNIT_NAME.to_string(),
         ],
-        super::process::is_systemd_available(),
+        manager_available(),
     );
     #[cfg(target_os = "macos")]
     let (manager_start_prog, manager_start_args, manager_available) = (
@@ -201,14 +223,80 @@ pub(crate) fn start_daemon_live(
         manager_start_args,
         polls: 40,
         tick: &|| std::thread::sleep(std::time::Duration::from_millis(250)),
+        diagnose: &|| service_reconcile::read_start_failure_info_live(),
     };
     start_daemon(port, intent, &deps)
+}
+
+/// CB75 FR2: restart the installed unit as one manager operation and wait
+/// for the port the way `start_daemon` does. Returns `Ok(false)` when there
+/// is no installed unit / no usable manager, so the caller falls back to its
+/// own stop-then-start path.
+///
+/// `canopy daemon restart`'s old stop-then-start pair could never clear a
+/// unit that was already failed: `stop` says nothing about a unit whose
+/// `ExecStart` is gone, and the `start` that follows re-hits `203/EXEC`.
+pub(crate) fn restart_daemon(port: u16, deps: &RestartDeps<'_>) -> anyhow::Result<bool> {
+    if !(deps.unit_installed && deps.manager_available) {
+        return Ok(false);
+    }
+    reload_before_restart(deps.runner);
+    let _ = super::process::service_manager_restart_with(deps.runner);
+    for _ in 0..deps.polls {
+        if (deps.port_open)(port) {
+            return Ok(true);
+        }
+        (deps.tick)();
+    }
+    if (deps.port_open)(port) {
+        return Ok(true);
+    }
+    let info = (deps.diagnose)();
+    anyhow::bail!("{}", service_reconcile::start_failure_message(port, &info));
+}
+
+/// FR2: the reload that must run before a restart so a unit file rewritten
+/// moments ago is actually re-read. Linux: `systemctl --user daemon-reload`;
+/// launchd re-reads a plist on load, so there is nothing to reload.
+#[cfg(target_os = "linux")]
+fn reload_before_restart(runner: &dyn CommandRunner) {
+    let _ = runner.run("systemctl", &["--user", "daemon-reload"]);
+}
+
+#[cfg(not(target_os = "linux"))]
+fn reload_before_restart(_runner: &dyn CommandRunner) {}
+
+/// Everything [`restart_daemon`] touches, injected the same way
+/// [`StartDeps`] is.
+pub(crate) struct RestartDeps<'a> {
+    pub(crate) runner: &'a dyn CommandRunner,
+    pub(crate) unit_installed: bool,
+    pub(crate) manager_available: bool,
+    pub(crate) port_open: &'a dyn Fn(u16) -> bool,
+    pub(crate) diagnose: &'a dyn Fn() -> StartFailureInfo,
+    pub(crate) polls: usize,
+    pub(crate) tick: &'a dyn Fn(),
+}
+
+/// FR2: the production entry point `cli.rs` uses.
+pub(crate) fn restart_daemon_live(port: u16) -> anyhow::Result<bool> {
+    let deps = RestartDeps {
+        runner: &RealRunner,
+        unit_installed: super::process::service_unit_installed(),
+        manager_available: manager_available(),
+        port_open: &|p| super::process::resolve_port_pid(p).is_some(),
+        diagnose: &|| service_reconcile::read_start_failure_info_live(),
+        polls: 40,
+        tick: &|| std::thread::sleep(std::time::Duration::from_millis(250)),
+    };
+    restart_daemon(port, &deps)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::cell::{Cell, RefCell};
+    use std::path::PathBuf;
 
     /// Fake manager: records every `(prog, args)` it is asked to run and
     /// reports `start_ok`. On a successful start/load command it flips
@@ -249,6 +337,13 @@ mod tests {
             }
             self.start_ok
         }
+        fn run_capture(&self, _prog: &str, _args: &[&str]) -> Option<String> {
+            // No test drives the capture path through this runner: the
+            // `systemctl show` seam is exercised by `RecordingRunner` in
+            // `service_reconcile`'s own tests (T14), and the `start_daemon`
+            // diagnosis seam is `StartDeps::diagnose` (T19).
+            None
+        }
     }
 
     const LINUX_UNIT_START: (&str, &[&str]) = ("systemctl", &["--user", "start", "canopy.service"]);
@@ -278,7 +373,14 @@ mod tests {
             manager_start_args: LINUX_UNIT_START.1.iter().map(|s| s.to_string()).collect(),
             polls,
             tick: &noop_tick,
+            diagnose: &no_failure_info,
         }
+    }
+
+    /// The four existing `start_daemon` tests never exercise the failure
+    /// diagnosis, so their deps carry an empty one.
+    fn no_failure_info() -> StartFailureInfo {
+        StartFailureInfo::default()
     }
 
     /// The direct-spawn probe every scenario shares: flips `spawned`
@@ -461,6 +563,158 @@ mod tests {
                     "canopy.service".to_string()
                 ]
             )]
+        );
+    }
+
+    #[test]
+    fn unit_start_timeout_names_the_203_exec_start_binary() {
+        let runner = FakeRunner::new(true);
+        let spawned = Cell::new(false);
+        let never_opens = |_: u16| false;
+        let spawn = spawn_probe(&spawned);
+        let diagnose = || StartFailureInfo {
+            show: Some(
+                "ActiveState=failed\nSubState=exited\nExecMainStatus=203\nResult=exit-code\n"
+                    .to_string(),
+            ),
+            unit_binary: Some(PathBuf::from("/gone/canopy")),
+        };
+        let deps = StartDeps {
+            runner: &runner,
+            unit_installed: true,
+            manager_available: true,
+            port_open: &never_opens,
+            spawn_direct: &spawn,
+            manager_start_prog: LINUX_UNIT_START.0.to_string(),
+            manager_start_args: LINUX_UNIT_START.1.iter().map(|s| s.to_string()).collect(),
+            polls: 2,
+            tick: &noop_tick,
+            diagnose: &diagnose,
+        };
+        let err = start_daemon(7755, StartIntent::Auto, &deps)
+            .expect_err("a 203/EXEC unit start must error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ExecStart binary not executable or missing: /gone/canopy"),
+            "unexpected error: {msg}"
+        );
+        assert!(
+            msg.contains("journalctl --user -u canopy.service"),
+            "unexpected error: {msg}"
+        );
+        assert!(!spawned.get(), "a failed unit start must never spawn");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn restart_runs_reload_then_restart_once() {
+        let runner = FakeRunner::new(true);
+        let open = |_: u16| true;
+        let deps = RestartDeps {
+            runner: &runner,
+            unit_installed: true,
+            manager_available: true,
+            port_open: &open,
+            diagnose: &no_failure_info,
+            polls: 2,
+            tick: &noop_tick,
+        };
+        let ok = restart_daemon(7755, &deps).expect("restart must succeed");
+        assert!(ok);
+        let calls = runner.calls();
+        assert_eq!(
+            calls,
+            vec![
+                (
+                    "systemctl".to_string(),
+                    vec!["--user".to_string(), "daemon-reload".to_string()]
+                ),
+                (
+                    "systemctl".to_string(),
+                    vec![
+                        "--user".to_string(),
+                        "restart".to_string(),
+                        "canopy.service".to_string()
+                    ]
+                ),
+            ]
+        );
+        for (_, args) in &calls {
+            assert!(
+                !args.iter().any(|a| a == "stop" || a == "start"),
+                "restart must not contain a separate stop/start: {calls:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn restart_falls_back_when_no_unit_is_installed() {
+        for (unit_installed, manager_available) in [(false, true), (true, false), (false, false)] {
+            let runner = FakeRunner::new(true);
+            let open = |_: u16| true;
+            let deps = RestartDeps {
+                runner: &runner,
+                unit_installed,
+                manager_available,
+                port_open: &open,
+                diagnose: &no_failure_info,
+                polls: 2,
+                tick: &noop_tick,
+            };
+            let ok = restart_daemon(7755, &deps).expect("fallback must be Ok(false)");
+            assert!(
+                !ok,
+                "installed={unit_installed} available={manager_available}: must fall back"
+            );
+            assert!(
+                runner.calls().is_empty(),
+                "installed={unit_installed} available={manager_available}: no manager call"
+            );
+        }
+    }
+
+    #[test]
+    fn restart_timeout_reports_the_unit_state_and_never_spawns() {
+        let runner = FakeRunner::new(true);
+        let never_opens = |_: u16| false;
+        let diagnose = || StartFailureInfo {
+            show: Some(
+                "ActiveState=failed\nSubState=exited\nExecMainStatus=203\nResult=exit-code\n"
+                    .to_string(),
+            ),
+            unit_binary: Some(PathBuf::from("/gone/canopy")),
+        };
+        let deps = RestartDeps {
+            runner: &runner,
+            unit_installed: true,
+            manager_available: true,
+            port_open: &never_opens,
+            diagnose: &diagnose,
+            polls: 2,
+            tick: &noop_tick,
+        };
+        let err = restart_daemon(7755, &deps).expect_err("a restart that never opens must error");
+        assert!(
+            err.to_string()
+                .contains("not executable or missing: /gone/canopy"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(
+            runner.calls(),
+            vec![
+                (
+                    "systemctl".to_string(),
+                    vec!["--user".to_string(), "daemon-reload".to_string()]
+                ),
+                (
+                    "systemctl".to_string(),
+                    vec![
+                        "--user".to_string(),
+                        "restart".to_string(),
+                        "canopy.service".to_string()
+                    ]
+                ),
+            ]
         );
     }
 

@@ -60,23 +60,18 @@ fn read_abs_range(
 
         for (i, line) in content.lines().enumerate() {
             let abs_idx = page_start_abs + i;
-            if abs_idx == next_expected && abs_idx < to_abs {
-                // Always advance the index — filtering only controls
-                // whether the line is included in output, not whether
-                // subsequent lines are reachable.
-                next_expected += 1;
-                let sanitized = sanitize_line(line).trim_end().to_string();
-                if !sanitized.trim().is_empty() && !is_ui_line(&sanitized) {
-                    // Strip box-drawing borders from response lines (TUI agents
-                    // render output inside │ borders).
-                    let cleaned = strip_borders(&sanitized);
-                    if !cleaned.is_empty() {
-                        collected.push(cleaned.to_string());
-                    } else {
-                        collected.push(sanitized);
-                    }
-                }
+            if abs_idx != next_expected || abs_idx >= to_abs {
+                continue;
             }
+            // Always advance the index — filtering only controls
+            // whether the line is included in output, not whether
+            // subsequent lines are reachable.
+            next_expected += 1;
+            let sanitized = sanitize_line(line).trim_end().to_string();
+            if is_trash_response_line(&sanitized) {
+                continue;
+            }
+            push_stripped_response_line(&mut collected, sanitized);
         }
 
         if next_expected >= to_abs || s == 0 {
@@ -86,6 +81,23 @@ fn read_abs_range(
     }
 
     collected
+}
+
+/// True when a sanitized response line should be dropped (blank or pure UI chrome).
+fn is_trash_response_line(sanitized: &str) -> bool {
+    sanitized.trim().is_empty() || is_ui_line(sanitized)
+}
+
+/// Strip box-drawing borders from a response line; if stripping leaves nothing,
+/// keep the sanitized original (the line was border-only chrome that still
+/// represents a real output row).
+fn push_stripped_response_line(collected: &mut Vec<String>, sanitized: String) {
+    let cleaned = strip_borders(&sanitized);
+    if cleaned.is_empty() {
+        collected.push(sanitized);
+    } else {
+        collected.push(cleaned.to_string());
+    }
 }
 
 /// Divider written after replayed scrollback so a restored terminal can't be
@@ -943,5 +955,32 @@ mod tests {
             screen_text.contains("ordinary line 1"),
             "lost via screen_snapshot"
         );
+    }
+
+    // ── read_abs_range helper coverage ──────────────────────────
+
+    #[test]
+    fn push_stripped_response_line_keeps_cleaned_text() {
+        let mut collected = Vec::new();
+        push_stripped_response_line(&mut collected, "│ hello world │".to_string());
+        // strip_borders removes the │ borders, leaving the inner text.
+        assert_eq!(collected, vec!["hello world".to_string()]);
+    }
+
+    #[test]
+    fn push_stripped_response_line_falls_back_to_sanitized_when_only_borders() {
+        let mut collected = Vec::new();
+        push_stripped_response_line(&mut collected, "│ │".to_string());
+        // Stripping leaves nothing, so the sanitized original is kept.
+        assert_eq!(collected, vec!["│ │".to_string()]);
+    }
+
+    #[test]
+    fn is_trash_response_line_flags_blank_and_ui_lines() {
+        assert!(is_trash_response_line("   "));
+        assert!(is_trash_response_line(""));
+        // A UI line (box-drawing border only) is trash for response purposes.
+        assert!(is_trash_response_line("┌────┐"));
+        assert!(!is_trash_response_line("ordinary output"));
     }
 }
