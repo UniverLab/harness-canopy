@@ -13,6 +13,8 @@ pub(crate) mod hub;
 pub(crate) mod hub_settings;
 mod init;
 pub(crate) mod panel_face;
+mod project_activity;
+mod project_filter;
 mod project_graph;
 mod project_nav;
 mod refresh;

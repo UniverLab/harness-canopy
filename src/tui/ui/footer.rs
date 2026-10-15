@@ -147,6 +147,8 @@ fn footer_hints_preview_knowledge(_app: &App) -> Vec<(&'static str, &'static str
     let mut h = vec![
         ("↑↓", "highlight"),
         ("Enter", "open project"),
+        ("type", "filter"),
+        ("Ctrl+R", "relation"),
         ("Shift+←→", "tab"),
     ];
     h.push(("Esc", "home"));

@@ -253,6 +253,10 @@ pub struct App {
     /// Cheap per-project Preview summary, keyed by project hash and
     /// recomputed on the normal refresh cadence — never per keystroke.
     pub(crate) project_preview_cache: HashMap<String, ProjectPreviewSummary>,
+    /// Last-activity timestamp per project hash, in the same order
+    /// `projects` is ranked by (`Database::list_projects_by_activity`).
+    /// Rendered as the project row's first meta line.
+    pub(crate) project_last_activity: HashMap<String, i64>,
     pub(crate) log_content: String,
     pub(crate) log_scroll: u16,
     pub(crate) running: bool,
@@ -445,6 +449,10 @@ pub struct App {
     pub(crate) knowledge_graph_scroll: u16,
     pub(crate) knowledge_filter: String,
     pub(crate) knowledge_filter_mode: bool,
+    /// Type-ahead over the Knowledge layer's project list (sidebar layer
+    /// Knowledge, no project entered). Deliberately separate from
+    /// `knowledge_filter`, which filters entries *inside* a project.
+    pub(crate) project_filter: String,
     pub(crate) sidebar_visible: bool,
     pub(crate) hidden_activity_workdirs: HashSet<String>,
     pub(crate) forced_activity_workdirs: HashSet<String>,

@@ -5,6 +5,10 @@ use super::*;
 impl App {
     pub fn refresh(&mut self) -> Result<()> {
         self.animation_tick = self.animation_tick.wrapping_add(1);
+        // The project type-ahead only ever applies to the Knowledge layer's
+        // list, so it is dropped here — the one place every way of leaving
+        // that layer (arrows, F2, click, Home) passes through.
+        self.sync_project_filter_to_layer();
         if self.update_available.is_none() {
             self.update_available = crate::autoupdate::update_available_tag();
         }
@@ -218,27 +222,8 @@ impl App {
     // to the first item of that same tab. Inside Knowledge, once a project
     // is entered (`project_focus.is_some()`) arrows navigate that project's
     // active tab list under the same rule (functional requirement 4).
-
-    pub(crate) fn refresh_projects(&mut self) -> Result<()> {
-        self.projects = self.db.list_projects()?;
-        if self.projects.is_empty() {
-            self.selected_project = 0;
-        } else {
-            self.selected_project = self.selected_project.min(self.projects.len() - 1);
-        }
-        self.refresh_project_knowledge()?;
-        self.refresh_backlog_specs()?;
-        self.refresh_project_preview_cache();
-        // Keep an already-open History tab live instead of only loading it
-        // once on first show — cheap (one indexed query) and scoped to just
-        // the project currently being looked at.
-        if self.project_focus == Some(ProjectTab::History) {
-            if let Some(hash) = self.selected_project().map(|p| p.hash.clone()) {
-                self.load_project_history(&hash);
-            }
-        }
-        Ok(())
-    }
+    //
+    // `refresh_projects` itself lives in `project_activity.rs`.
 
     /// Recompute the Knowledge layer's per-project Preview summary cache
     /// (pending backlog count, knowledge entry count, last activity, graph

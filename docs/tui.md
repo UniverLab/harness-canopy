@@ -145,6 +145,25 @@ The sidebar shows sections for the selected project:
 
 Sections are automatically filtered by the selected project's workdir.
 
+## Knowledge tab
+
+The sidebar's **Knowledge** tab lists the registered projects, most recently
+active first — a project's last activity is the newest of its registration,
+its indexing, its knowledge entries and its project history, so the projects
+you are actually working on stay at the top instead of being buried under old
+ones. Each row's first meta line shows how long ago that was, before the
+project hash.
+
+Typing a plain letter filters the list the way a file browser does: the filter
+matches project names case-insensitively, the list keeps its recency order, and
+the selection jumps to the first match. The panel title shows the live
+`/ filter`, and `No project matches "<filter>"` appears when nothing does.
+`Backspace` removes the last character, and `Esc` clears a non-empty filter
+instead of leaving for the Home screen. Because every letter has to be
+typable on this one list, the single-letter shortcuts it used to carry don't
+apply there: arrows, `Enter` and `Esc` still do, the relation dialog moves to
+`Ctrl+R`, and leaving the Knowledge tab clears the filter.
+
 ## Moving context around
 
 - **Scheduled delivery** — `Shift+Enter` (requires Kitty keyboard

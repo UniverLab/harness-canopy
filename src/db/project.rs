@@ -4,10 +4,13 @@
 //! RAG chunks and embeddings are stored in LanceDB (`~/.canopy/rag/vectors.lancedb`).
 //! Only the indexing queue (`rag_queue`) remains in SQLite for coordination.
 
+mod activity;
 mod history;
 mod rag_events;
 mod rag_queue;
 mod remap;
+
+pub use activity::ProjectActivity;
 
 use anyhow::Result;
 use std::path::Path;

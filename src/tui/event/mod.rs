@@ -131,6 +131,7 @@ mod mouse;
 mod new_agent_dialog;
 pub(crate) mod new_agent_mode_step;
 mod paste;
+mod project_filter;
 mod prompt_template;
 mod rag_transfer;
 mod scroll;
