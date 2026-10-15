@@ -3,6 +3,8 @@ name: CI
 on:
   pull_request:
   workflow_dispatch:
+  # release.yml calls it to run CI again on main, where merged PRs meet.
+  workflow_call:
 
 permissions:
   contents: read
@@ -34,4 +36,8 @@ jobs:
       # underneath another — a race that surfaced as a coverage failure with a
       # green check job on the same commit. Same runner here as locally.
       use-nextest: true
+      # Trunk-based (decision 10eadef1): no version bump on PRs, and the
+      # release binaries are built by release.yml when a release is cut.
+      main-pr-checks: false
+      release-build: false
     secrets: inherit
