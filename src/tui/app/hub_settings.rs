@@ -19,6 +19,15 @@ use crate::tui::app::dialog::GraphActionMessage;
 /// Minimum gap between two `config_list` fetches while the tab is visible.
 pub(crate) const SETTINGS_REFRESH_EVERY: Duration = Duration::from_secs(5);
 
+/// Which Settings column holds the focus: the category list or its
+/// properties. ←/→ move between the two levels; ↑↓ move within one.
+#[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum SettingsFocus {
+    #[default]
+    Categories,
+    Properties,
+}
+
 /// One setting as the Settings tab shows it, from a `config_list` row.
 pub(crate) struct SettingRow {
     pub key: String,
@@ -39,6 +48,8 @@ pub(crate) struct SettingsState {
     pub rows: Vec<SettingRow>,
     pub group_idx: usize,
     pub row_idx: usize,
+    /// The category list or the property list (requirement 3).
+    pub focus: SettingsFocus,
     pub filter: String,
     pub filter_mode: bool,
     pub editor: Option<SettingsEditor>,
@@ -426,6 +437,45 @@ impl App {
         }
         self.hub.settings.row_idx =
             crate::tui::selection::move_index(self.hub.settings.row_idx, count, forward);
+    }
+
+    /// `→`/Enter at the categories level: focus the properties with the first
+    /// property selected (requirement 3).
+    pub(crate) fn settings_enter_properties(&mut self) {
+        self.hub.settings.focus = SettingsFocus::Properties;
+        self.hub.settings.row_idx = 0;
+        self.clamp_settings_selection();
+    }
+
+    /// `←`/Esc at the properties level: back to the categories, keeping the
+    /// selected category.
+    pub(crate) fn settings_back_to_categories(&mut self) {
+        self.hub.settings.focus = SettingsFocus::Categories;
+        self.hub.settings.row_idx = 0;
+    }
+
+    /// Enter/Space on the focused property: a bool toggles, an enum cycles
+    /// forward, the editing kinds open their editor, a table does nothing.
+    /// ←/→ never reach here, so they never change a value.
+    pub(crate) fn settings_activate_property(&mut self) {
+        let Some(kind) = self
+            .selected_setting()
+            .and_then(|row| find(&row.key))
+            .map(|def| def.kind)
+        else {
+            return;
+        };
+        match kind {
+            Kind::Bool => self.toggle_bool(),
+            Kind::Enum { .. } => self.cycle_enum(true),
+            Kind::Structured => {}
+            Kind::Int { .. }
+            | Kind::Float { .. }
+            | Kind::Duration { .. }
+            | Kind::String
+            | Kind::ChronoFormat
+            | Kind::PathList => self.open_setting_editor(),
+        }
     }
 
     /// Space on a bool row: flip it through `config_set`.

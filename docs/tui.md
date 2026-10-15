@@ -120,18 +120,23 @@ Missions are checked automatically during normal TUI operation — no
 manual action required. Progress is persisted in the database and
 visible in the TUI's gamification panel.
 
-Press **F1** to open the **Canopy hub**, a full-screen tabbed overlay:
+Press **F1** to open the **Canopy hub**, a centered tabbed dialog:
 **Settings** edits every registry setting in place (with the value's apply
 mode and status), **Keys** is a grouped reference of every shortcut the TUI
-handles, and **Missions & stats** lists the missions above. `Tab`/`1`/`2`/`3`
-switch tabs; `F1` or `Esc` closes it.
+handles, and **Missions & stats** lists the missions above. `Shift+←`/`Shift+→`
+switch tabs, as everywhere else in Canopy; `Tab`/`Shift+Tab` and `1`/`2`/`3`
+also switch. `F1` closes the hub from any state; `Esc` closes it from the top
+level of every tab.
 
-In **Settings**, `Space` flips a bool, `←`/`→` cycle an enum, `Enter` edits a
-number, duration, string or format, and `r` resets the selected setting to its
-default. A path list edits with `a` (add a folder), `d` (delete) and
-`Shift+↑`/`Shift+↓` (reorder). `/` filters every group by key or description.
-Each change goes through the daemon; a refused value keeps the old one and the
-daemon's message shows in the status line.
+In **Settings**, the `↑`/`↓` keys move within the focused column and `→` or
+`Enter` step from the category list into its properties (`←` goes back, keeping
+the same category selected). At the properties level `Enter` edits a number,
+duration, string, format or path list, `Space` toggles a bool or cycles an enum
+forward, and `r` resets the selected setting to its default. A path list edits
+with `a` (add a folder), `d` (delete) and `Shift+↑`/`Shift+↓` (reorder). `/`
+filters every group by key or description. Each change goes through the daemon;
+a refused value keeps the old one and the daemon's message shows in the status
+line. `←`/`→` never change a value.
 
 ## Projects sidebar
 
