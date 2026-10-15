@@ -236,6 +236,18 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_r_does_not_relate_a_project_the_filter_hides() {
+        let (mut app, _dir) = knowledge_app();
+        type_str(&mut app, "zz");
+        assert!(names(&app).is_empty());
+        handle_preview_key(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL).unwrap();
+        assert!(
+            app.project_relation_dialog.is_none(),
+            "the selected project is hidden, so there is nothing to relate"
+        );
+    }
+
+    #[test]
     fn typing_does_nothing_inside_an_entered_project() {
         let (mut app, _dir) = knowledge_app();
         app.project_focus = Some(crate::tui::app::types::ProjectTab::Overview);

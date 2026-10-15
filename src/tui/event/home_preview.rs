@@ -588,7 +588,14 @@ fn preview_graph_meta_key(
             if modifiers.contains(KeyModifiers::CONTROL)
                 && app.sidebar_layer == SidebarLayer::Knowledge =>
         {
-            let _ = app.open_project_relation_dialog();
+            // CT36: a type-ahead that hides the selected project must not
+            // relate that hidden project — the keypress is consumed, nothing opens.
+            if app
+                .visible_project_indices()
+                .contains(&app.selected_project)
+            {
+                let _ = app.open_project_relation_dialog();
+            }
         }
         KeyCode::Char('R') if on_graph && app.graph_view_archived => {
             let _ = app.restore_selected_archived_graph();
