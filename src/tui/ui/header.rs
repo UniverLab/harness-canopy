@@ -20,37 +20,42 @@ fn first_n_chars(s: &str, n: usize) -> &str {
 
 const SPINNER: [&str; 8] = ["⣷", "⣯", "⣟", "⡿", "⢿", "⣻", "⣽", "⣾"];
 
+/// Milliseconds between sweep-head steps: the sweep advances one character
+/// every `SWEEP_STEP_MS`, so a slower value means a slower, calmer motion.
+const SWEEP_STEP_MS: u128 = 140;
+/// Milliseconds the title rests (fully idle) between sweeps.
+const SWEEP_REST_MS: u128 = 2000;
+
 // THEME-EXEMPT: the banner gradient is its own authored animation palette
 // (`BANNER_GRADIENT`), independent of classic/modern — not a theme role.
-fn gradient_wave_color(char_idx: usize, shift: usize) -> Color {
-    let len = BANNER_GRADIENT.len();
-    if len == 0 {
-        // THEME-EXEMPT: see function doc above.
-        return Color::White;
-    }
-    if len == 1 {
-        let (r, g, b) = BANNER_GRADIENT[0];
-        // THEME-EXEMPT: see function doc above.
-        return Color::Rgb(r, g, b);
-    }
-
-    // Mirror cycle to keep a smooth sequence:
-    // 0..N-1..1.. and repeat (no hard jumps between dark/light neighbors).
-    let cycle_len = len * 2 - 2;
-    let pos = (char_idx + shift) % cycle_len;
-    let gradient_idx = if pos < len { pos } else { cycle_len - pos };
+fn sweep_color(char_idx: usize, len: usize, millis: u128) -> Color {
+    let sweep = (len as u128 + 4) * SWEEP_STEP_MS;
+    let t = millis % (sweep + SWEEP_REST_MS);
+    let gradient_idx = if t < sweep {
+        // Head runs from -2 to len+1 so the falloff enters and leaves off-name.
+        let head = -2i128 + (t / SWEEP_STEP_MS) as i128;
+        match (char_idx as i128 - head).abs() {
+            0 => 4,
+            1 => 3,
+            2 => 2,
+            _ => 1,
+        }
+    } else {
+        1
+    };
     let (r, g, b) = BANNER_GRADIENT[gradient_idx];
     // THEME-EXEMPT: see function doc above.
     Color::Rgb(r, g, b)
 }
 
 fn push_animated_gradient_text(spans: &mut Vec<Span>, visible: &str, millis: u128) {
-    let shift = ((millis / 90) as usize) % (BANNER_GRADIENT.len() * 2 - 1).max(1);
-    for (i, ch) in visible.chars().enumerate() {
+    let chars: Vec<char> = visible.chars().collect();
+    let len = chars.len();
+    for (i, ch) in chars.into_iter().enumerate() {
         spans.push(Span::styled(
             ch.to_string(),
             Style::default()
-                .fg(gradient_wave_color(i, shift))
+                .fg(sweep_color(i, len, millis))
                 .add_modifier(Modifier::BOLD),
         ));
     }
@@ -120,5 +125,84 @@ pub(super) fn draw_header(frame: &mut Frame, area: Rect, app: &mut App, theme: &
         )));
         let status_area = Rect::new(area.x + area.width - 2, area.y, 1, 1);
         frame.render_widget(status, status_area);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn darkest() -> Color {
+        let (r, g, b) = BANNER_GRADIENT[4];
+        Color::Rgb(r, g, b)
+    }
+
+    fn idle() -> Color {
+        let (r, g, b) = BANNER_GRADIENT[1];
+        Color::Rgb(r, g, b)
+    }
+
+    /// Cycle length in ms for a name of `len` characters, per the spec.
+    fn cycle_ms(len: usize) -> u128 {
+        (len as u128 + 4) * SWEEP_STEP_MS + SWEEP_REST_MS
+    }
+
+    /// Sweep head position in ms where the sweep completes for a `len`-char name.
+    fn sweep_ms(len: usize) -> u128 {
+        (len as u128 + 4) * SWEEP_STEP_MS
+    }
+
+    /// At most one character wears the darkest tone at any instant.
+    #[test]
+    fn sweep_at_most_one_darkest() {
+        let len = 14;
+        for ms in (0..cycle_ms(len)).step_by(10) {
+            let count = (0..len)
+                .filter(|&i| sweep_color(i, len, ms) == darkest())
+                .count();
+            assert!(
+                count <= 1,
+                "at {ms} ms {count} chars were darkest (expected at most 1)"
+            );
+        }
+    }
+
+    /// During the rest window every character is idle.
+    #[test]
+    fn sweep_rest_all_idle() {
+        let len = 14;
+        for ms in (sweep_ms(len)..cycle_ms(len)).step_by(10) {
+            let count = (0..len)
+                .filter(|&i| sweep_color(i, len, ms) == darkest())
+                .count();
+            assert_eq!(count, 0, "at {ms} ms a char was darkest during rest");
+            for i in 0..len {
+                assert_eq!(
+                    sweep_color(i, len, ms),
+                    idle(),
+                    "at {ms} ms char {i} was not idle during rest"
+                );
+            }
+        }
+    }
+
+    /// The head lands exactly where the `-2 + t/140` formula says it should.
+    #[test]
+    fn sweep_head_positions() {
+        assert_eq!(sweep_color(0, 14, 280), darkest());
+        assert_ne!(sweep_color(0, 14, 420), darkest());
+        assert_eq!(sweep_color(1, 14, 420), darkest());
+    }
+
+    /// Degenerate lengths must not panic or divide by zero.
+    #[test]
+    fn sweep_short_len_no_panic() {
+        let _ = sweep_color(0, 1, 0);
+        let _ = sweep_color(0, 0, 0);
+        for len in 0..=1 {
+            for ms in (0..6000).step_by(140) {
+                let _ = sweep_color(0, len, ms);
+            }
+        }
     }
 }
