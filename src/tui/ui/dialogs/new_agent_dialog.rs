@@ -109,7 +109,7 @@ pub fn draw_new_agent_dialog(frame: &mut Frame, app: &App, theme: &Theme) {
         return;
     };
 
-    let accent = dialog.selected_accent_color(theme);
+    let accent = theme.header_color;
     let filtered_clis = dialog.filtered_cli_indices();
     let field_width = prompt_field_width(frame.area());
     let dir_visible = visible_dir_rows(
@@ -1180,6 +1180,26 @@ mod tests {
             .join("\n")
     }
 
+    fn cell_grid(width: u16, height: u16, app: &App) -> Vec<Vec<(Color, Color)>> {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let theme = Theme::classic();
+        terminal
+            .draw(|frame| draw_new_agent_dialog(frame, app, &theme))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| {
+                        let cell = &buffer[(x, y)];
+                        (cell.fg, cell.bg)
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
     fn app_with_dialog(dialog: NewAgentDialog) -> App {
         let db_file = tempfile::NamedTempFile::new().unwrap();
         let path = db_file.path().to_path_buf();
@@ -1227,7 +1247,7 @@ mod tests {
         let mut dialog = NewAgentDialog::new(Some(root.path().to_string_lossy().as_ref()));
         // 9× ↓ from 0: the list handler ends in selection index 9.
         dialog.dir_selected = 9;
-        let accent = dialog.selected_accent_color(&Theme::classic());
+        let accent = Theme::classic().header_color;
         let app = app_with_dialog(dialog);
         let rows = render_dialog(200, 50, &app);
         let text = join_rows(&rows);
@@ -1297,6 +1317,71 @@ mod tests {
         assert!(
             text.contains("filter:"),
             "filter rows use the plain label: {text}"
+        );
+    }
+
+    #[test]
+    fn harness_accent_only_on_name() {
+        use crate::domain::cli_config::CliConfig;
+        use crate::domain::models::Cli;
+        let mut dialog = NewAgentDialog::new(Some("."));
+        dialog.available_clis = vec![Cli::new("claude")];
+        dialog.cli_configs = vec![Some(CliConfig {
+            name: "claude".to_string(),
+            accent_color: Some([255, 0, 0]),
+            ..Default::default()
+        })];
+        dialog.cli_index = 0;
+        dialog.cli_picker_open = true;
+        dialog.field = 2; // harness row focused, so the name carries its accent
+        let label = dialog.cli_display_label(0);
+        let app = app_with_dialog(dialog);
+        let theme = Theme::classic();
+        let header = theme.header_color;
+        let harness = Color::Rgb(255, 0, 0);
+        assert_ne!(harness, header);
+
+        let rows = render_dialog(200, 50, &app);
+        let grid = cell_grid(200, 50, &app);
+        const BOX_GLYPHS: [char; 11] = ['┌', '┐', '└', '┘', '─', '│', '├', '┤', '┬', '┴', '┼'];
+
+        let mut border_cells = 0;
+        for (row, (text, _)) in rows.iter().enumerate() {
+            for (x, ch) in text.chars().enumerate() {
+                if BOX_GLYPHS.contains(&ch) && grid[row][x].0 == header {
+                    border_cells += 1;
+                }
+            }
+        }
+        assert!(
+            border_cells >= 1,
+            "dialog border must use the canopy header color"
+        );
+
+        for (y, line) in grid.iter().enumerate() {
+            for (x, &(_, bg)) in line.iter().enumerate() {
+                assert_ne!(
+                    bg, harness,
+                    "cell ({x},{y}) must not use the harness accent as background"
+                );
+            }
+        }
+
+        let mut harness_cells = 0;
+        for (row, (text, _)) in rows.iter().enumerate() {
+            for (x, _) in text.chars().enumerate() {
+                if grid[row][x].0 == harness {
+                    harness_cells += 1;
+                    assert!(
+                        text.contains(&label),
+                        "harness accent fg is only for the harness name row, found on: {text:?}"
+                    );
+                }
+            }
+        }
+        assert!(
+            harness_cells >= 1,
+            "the harness name must carry its accent (label {label:?})"
         );
     }
 }

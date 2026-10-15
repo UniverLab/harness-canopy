@@ -318,7 +318,7 @@ fn draw_skills_picker(
         .title(" Tools — Pick a Skill ")
         .borders(crate::tui::ui::dialog_borders_for(theme))
         .border_style(Style::default().fg(accent))
-        .style(Style::default().bg(Color::Rgb(10, 20, 30)));
+        .style(Style::default().bg(theme.dialog_bg));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -395,7 +395,7 @@ fn draw_project_picker(
         .title(title)
         .borders(crate::tui::ui::dialog_borders_for(theme))
         .border_style(Style::default().fg(accent))
-        .style(Style::default().bg(Color::Rgb(10, 20, 30)));
+        .style(Style::default().bg(theme.dialog_bg));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -491,7 +491,7 @@ fn draw_preset_picker(
         .title(" Preset ")
         .borders(crate::tui::ui::dialog_borders_for(theme))
         .border_style(Style::default().fg(accent))
-        .style(Style::default().bg(Color::Rgb(10, 20, 30)));
+        .style(Style::default().bg(theme.dialog_bg));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);

@@ -1,4 +1,4 @@
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use super::fields::{
@@ -215,11 +215,19 @@ fn append_cli_section(
     cli_field: usize,
     theme: &Theme,
 ) {
+    let cli_accent = dialog.cli_accent_color(dialog.cli_index, theme);
     lines.push(Line::from(vec![
         Span::styled("  Harness: ", Style::default().fg(theme.dim_text)),
         Span::styled(
             format!(" {} ", dialog.cli_display_label(dialog.cli_index)),
-            focus_style(dialog.field, cli_field, accent),
+            if dialog.field == cli_field {
+                Style::default()
+                    .fg(cli_accent)
+                    .bg(accent)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                focus_style(dialog.field, cli_field, accent)
+            },
         ),
         Span::styled(
             "  (◂▸ cycle · type/Space pick)",
@@ -269,12 +277,17 @@ fn append_cli_picker_rows(
         {
             let is_selected = i == dialog.cli_picker_idx;
             let style = picker_item_style(accent, is_selected);
+            let label_style = if is_selected {
+                style
+            } else {
+                Style::default().fg(dialog.cli_accent_color(*cli_idx, theme))
+            };
             lines.push(Line::from(vec![
                 Span::styled(
                     format!("    {} ", if is_selected { "›" } else { " " }),
                     style,
                 ),
-                Span::styled(dialog.cli_display_label(*cli_idx), style),
+                Span::styled(dialog.cli_display_label(*cli_idx), label_style),
             ]));
         }
     }

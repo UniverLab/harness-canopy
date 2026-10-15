@@ -21,7 +21,7 @@ mod sections;
 use geometry::{centered_rect_fixed, compute_prompt_geometry};
 use hints::prompt_hint_line;
 use scheduled::{draw_raw_tab_content, draw_scheduled_list, ScheduledList};
-use sections::{draw_prompt_normal_content, prompt_accent};
+use sections::draw_prompt_normal_content;
 
 #[cfg(test)]
 use content::{style_collapsed_paste_blocks, wrap_styled_content};
@@ -211,7 +211,7 @@ pub fn draw_simple_prompt_dialog(
 ) -> Option<((u16, u16), Option<ratatui::layout::Rect>)> {
     let dialog = app.simple_prompt_dialog.as_ref()?;
 
-    let accent = prompt_accent(app, theme);
+    let accent = theme.header_color;
     let pending_scheduled = pending_scheduled_for_selection(app);
 
     // Scheduled-sends list panel geometry (B33).
@@ -945,5 +945,69 @@ mod tests {
         // Hide should have priority 2
         let hide = hints.iter().find(|h| h.key.contains("Esc"));
         assert_eq!(hide.map(|h| h.priority), Some(2));
+    }
+
+    fn app_for_prompt(accent: Color) -> App {
+        use crate::db::Database;
+        use crate::domain::canopy_config::CanopyConfig;
+        use crate::tui::agent::InteractiveAgent;
+        use std::sync::Arc;
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        std::mem::forget(tmp); // keep the sqlite file alive for the test
+        let db = Arc::new(Database::new(&path).unwrap());
+        let data_dir = tempfile::tempdir().unwrap();
+        let workdir = data_dir.path().to_string_lossy().to_string();
+        let mut app = App::new(db, data_dir.path(), &CanopyConfig::default()).unwrap();
+        let agent =
+            InteractiveAgent::spawn_terminal("cat", &workdir, 80, 24, Some("harness"), &[], accent)
+                .expect("spawn cat as a stand-in harness session");
+        app.interactive_agents.push(agent);
+        app.agents.push(AgentEntry::Interactive(0));
+        app.selected = 0;
+        app.simple_prompt_dialog = Some(SimplePromptDialog::new());
+        app
+    }
+
+    #[test]
+    fn no_harness_accent_in_prompt_builder() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let harness = Color::Rgb(255, 0, 0);
+        let app = app_for_prompt(harness);
+        let theme = Theme::classic();
+        assert_ne!(harness, theme.header_color);
+        let backend = TestBackend::new(200, 50);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                draw_simple_prompt_dialog(frame, &app, &theme);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        const BOX_GLYPHS: [char; 11] = ['┌', '┐', '└', '┘', '─', '│', '├', '┤', '┬', '┴', '┼'];
+        let mut border_cells = 0;
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                let cell = &buffer[(x, y)];
+                if cell.symbol().chars().any(|c| BOX_GLYPHS.contains(&c))
+                    && cell.fg == theme.header_color
+                {
+                    border_cells += 1;
+                }
+                assert_ne!(
+                    cell.fg, harness,
+                    "cell ({x},{y}) must not use the harness accent as foreground"
+                );
+                assert_ne!(
+                    cell.bg, harness,
+                    "cell ({x},{y}) must not use the harness accent as background"
+                );
+            }
+        }
+        assert!(
+            border_cells >= 1,
+            "dialog border must use the canopy header color"
+        );
     }
 }

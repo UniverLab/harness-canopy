@@ -465,17 +465,21 @@ impl NewAgentDialog {
             .and_then(|c| c.yolo_flag.clone())
     }
 
-    pub fn selected_accent_color(&self, theme: &Theme) -> Color {
+    pub fn cli_accent_color(&self, idx: usize, theme: &Theme) -> Color {
         if self.task_type == NewTaskType::Terminal {
             return theme.header_color;
         }
 
         self.cli_configs
-            .get(self.cli_index)
+            .get(idx)
             .and_then(|c| c.as_ref())
             .and_then(|c| c.accent_color)
             .map(|[r, g, b]| Color::Rgb(r, g, b))
             .unwrap_or(crate::tui::ui::INTERACTIVE_COLOR)
+    }
+
+    pub fn selected_accent_color(&self, theme: &Theme) -> Color {
+        self.cli_accent_color(self.cli_index, theme)
     }
 
     pub fn set_cli_index(&mut self, idx: usize) {
