@@ -858,7 +858,7 @@ mod tests {
 
         let mut dialog = SimplePromptDialog::new();
         dialog.set_section_content("instruction_1", "do it".to_string());
-        dialog.system_content = Some("[START HERE — required] call get_tools".to_string());
+        dialog.system_content = Some("[CANOPY] call get_tools".to_string());
 
         let prompt = dialog
             .build_prompt_with_resolved_resources(&db, &project_dir)

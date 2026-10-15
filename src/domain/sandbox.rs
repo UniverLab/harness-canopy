@@ -37,36 +37,14 @@ pub enum MergeOutcome {
 }
 
 pub fn canopy_protocol_block() -> &'static str {
-    "You are operating within the Canopy multi-agent framework. Its MCP tools and \
-     skills are how work gets coordinated here — use them proactively, on your own \
-     initiative, not only when the user asks.\n\
-     \n\
-     [START HERE — required]\n\
-     Your FIRST action this session, before answering or touching any file, is to call \
-     get_tools(scope=\"session_start\"). It returns the workspace brief and the exact \
-     tools for the job. Do not skip it.\n\
-     \n\
-     [USE CANOPY TOOLS AT EVERY STEP]\n\
-     - Before editing files: get_tools(scope=\"file_write\", path=\"...\"), then \
-     sync_get_context to detect conflicts and sync_declare_intent to claim the work.\n\
-     - Before tests/builds: get_tools(scope=\"test_run\"), then sync_broadcast the start \
-     and the PASS/FAIL result.\n\
-     - When you learn a durable fact or reusable pattern: intelligence_upsert \
-     (kind=\"fact\"|\"pattern\") — never leave knowledge only in chat history.\n\
-     - Session end: get_tools(scope=\"close_session\") — upsert a kind=\"fact\" \
-     summary and sync_report_status. The daemon closes missions automatically.\n\
-     - Scheduled tasks: report progress with agent_report.\n\
-     Prefer Canopy's native intelligence/sync tools over ad-hoc shell when both can do \
-     the job.\n\
-     \n\
-     [SKILLS — always active]\n\
-     The `execution-mindset` skill governs how you operate (judgment, \
-     verify-before-reporting, security, resourcefulness, token efficiency) and applies to \
-     every task. Reach for `architect-mindset` when designing or writing specs, \
-     `code-engineering` for code work, and Canopy's own tooling skills \
-     (`canopy-intelligence`, `canopy-sync`, `canopy-graph-design`, `canopy-capabilities`) \
-     when working this MCP surface. Apply the skills directly — they are the source of \
-     truth, not this summary."
+    "[CANOPY]\n\
+     This workspace is coordinated by Canopy. Use its MCP tools on your own initiative.\n\
+     1. First action, before anything else: get_tools(scope=\"session_start\").\n\
+     2. Before editing files, before running tests or builds, and before ending the session: \
+     call get_tools with scope file_write, test_run or close_session, and follow what it returns.\n\
+     3. Record durable facts and patterns with intelligence_upsert, never only in chat.\n\
+     Skills: execution-mindset always; architect-mindset for design, code-engineering for code, \
+     the canopy-* skills for this MCP surface."
 }
 
 pub async fn create_sandbox_in(
@@ -840,9 +818,31 @@ mod tests {
     fn test_canopy_protocol_block_is_nonempty() {
         let block = canopy_protocol_block();
         assert!(!block.is_empty());
-        assert!(block.contains("START HERE"));
+        assert!(block.contains("[CANOPY]"));
         assert!(block.contains("Canopy"));
-        assert!(block.contains("SKILLS"));
+        assert!(block.contains("Skills:"));
+    }
+
+    /// FR5: the minimal block must still carry the three action markers the
+    /// behaviour depends on, stay small, and have no trailing newline.
+    #[test]
+    fn test_canopy_protocol_block_is_minimal_but_complete() {
+        let block = canopy_protocol_block();
+        assert!(
+            block.contains("get_tools(scope=\"session_start\")"),
+            "the first-action call must be exact-matchable"
+        );
+        assert!(block.contains("intelligence_upsert"));
+        assert!(block.contains("execution-mindset"));
+        assert!(
+            block.len() <= 700,
+            "block is {} bytes; the minimal protocol must stay under 700",
+            block.len()
+        );
+        assert!(
+            !block.ends_with('\n'),
+            "the block must not carry a trailing newline"
+        );
     }
 
     #[test]

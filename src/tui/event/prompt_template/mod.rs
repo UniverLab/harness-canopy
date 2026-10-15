@@ -1219,7 +1219,7 @@ mod session_protocol_tests {
     use std::sync::Arc;
     use tempfile::{tempdir, NamedTempFile};
 
-    const FIRST_ACTION: &str = "FIRST action";
+    const FIRST_ACTION: &str = "get_tools(scope=\"session_start\")";
 
     fn test_app() -> (App, tempfile::TempDir) {
         let tmp = NamedTempFile::new().expect("create temp file");
@@ -1258,7 +1258,7 @@ mod session_protocol_tests {
 
         let turn_1 = send_turn(&mut app, "do the first thing");
 
-        assert!(turn_1.contains("[START HERE — required]"));
+        assert!(turn_1.contains("[CANOPY]"));
         assert!(turn_1.contains(FIRST_ACTION));
     }
 
@@ -1269,7 +1269,7 @@ mod session_protocol_tests {
         send_turn(&mut app, "do the first thing");
         let turn_2 = send_turn(&mut app, "do the second thing");
 
-        assert!(!turn_2.contains("[START HERE — required]"));
+        assert!(!turn_2.contains("[CANOPY]"));
         assert!(!turn_2.contains(FIRST_ACTION));
     }
 
@@ -1298,7 +1298,7 @@ mod session_protocol_tests {
         let (mut new_session_app, _dir2) = test_app();
         let new_turn_1 = send_turn(&mut new_session_app, "do the first thing, again");
 
-        assert!(new_turn_1.contains("[START HERE — required]"));
+        assert!(new_turn_1.contains("[CANOPY]"));
         assert!(new_turn_1.contains(FIRST_ACTION));
     }
 
@@ -1328,9 +1328,9 @@ mod session_protocol_tests {
 
         // No per-turn condition remains that could re-inject the block.
         let turn_2 = send_turn(&mut app, "do the second thing");
-        assert!(!turn_2.contains("[START HERE — required]"));
+        assert!(!turn_2.contains("[CANOPY]"));
         let turn_3 = send_turn(&mut app, "do the third thing");
-        assert!(!turn_3.contains("[START HERE — required]"));
+        assert!(!turn_3.contains("[CANOPY]"));
     }
 
     #[test]

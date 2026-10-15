@@ -694,8 +694,8 @@ pub(crate) struct ProjectRelationDialog {
 }
 
 /// Tracks session-start protocol block delivery per session for idempotency.
-/// The block is the static "[START HERE — required]" contract, not the
-/// per-turn workspace/intents/chatter context, which is sent every turn
+/// The block is the static "[CANOPY]" contract, not the
+/// per-turn workspace/intents context, which is sent every turn
 /// regardless of this state.
 #[derive(Clone, Default)]
 pub(crate) struct SessionProtocolState {
