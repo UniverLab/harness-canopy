@@ -35,9 +35,13 @@ step instead of launching straight away:
   skipping the mission step; a harness with nothing to resume shows
   `No sessions to resume for <harness> in <dir>` and `New session` stays
   usable.
-- `↑↓` selects, `Enter` confirms, and `Esc` returns to the form with every
+  - `↑↓` selects, `Enter` confirms, and `Esc` returns to the form with every
   value kept. **Background** and **Terminal** launch from the form as
   before — the Mode step is Interactive-only.
+
+> **Note:** The Session/Mode choice is no longer a row on the form itself.
+> Resume is handled entirely on the separate Mode step, so the form never
+> shows a "Resume <dir>" entry that could be mistaken for the launch button.
 
 ## Interactive sessions
 

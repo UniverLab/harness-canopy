@@ -1086,6 +1086,16 @@ mod tests {
         let mut app = app_with(interactive_form("/tmp/proj"));
 
         handle_dialog_key(&mut app, KeyCode::Enter, KeyModifiers::NONE).unwrap();
+
+        // FR 2: first Enter opens the Mode step — the form stays open.
+        {
+            let d = app
+                .new_agent_dialog
+                .as_ref()
+                .expect("form stays open as Mode step");
+            assert_eq!(d.step, DialogStep::Mode, "first Enter opens the Mode step");
+        }
+
         crate::tui::event::new_agent_mode_step::handle_mode_step_key(&mut app, KeyCode::Enter)
             .unwrap();
 

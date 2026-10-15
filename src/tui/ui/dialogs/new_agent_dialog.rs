@@ -220,18 +220,16 @@ fn background_trigger_label(trigger: BackgroundTrigger) -> &'static str {
     }
 }
 
-fn help_text(dialog: &NewAgentDialog) -> &'static str {
-    match dialog.task_type {
-        NewTaskType::Interactive => {
-            "  ↑↓: fields · Shift+↑↓: navigate  (in dirs: → enter  ← up) · Enter: launch · Esc: cancel"
-        }
-        NewTaskType::Background => {
-            "  ↑↓: fields · Shift+↑↓: navigate  (in dirs: → enter  ← up) · Enter: create · Esc: cancel"
-        }
-        NewTaskType::Terminal => {
-            "  ↑↓: fields · Shift+↑↓: navigate  (in dirs: → enter  ← up) · Enter: launch · Esc: cancel"
-        }
-    }
+fn help_text(dialog: &NewAgentDialog) -> String {
+    let enter_label = match dialog.task_type {
+        NewTaskType::Interactive if dialog.is_edit_mode() => "Enter: launch",
+        NewTaskType::Interactive => "Enter: next (Mode)",
+        NewTaskType::Background => "Enter: create",
+        NewTaskType::Terminal => "Enter: launch",
+    };
+    format!(
+        "  ↑↓: fields · Shift+↑↓: navigate  (in dirs: → enter  ← up) · {enter_label} · Esc: cancel"
+    )
 }
 
 pub(super) fn truncate_with_ellipsis(value: &str, max_chars: usize) -> String {
@@ -690,6 +688,15 @@ mod tests {
     fn help_text_interactive() {
         let mut d = NewAgentDialog::new(Some("."));
         d.task_type = NewTaskType::Interactive;
+        let text = help_text(&d);
+        assert!(text.contains("next (Mode)"));
+    }
+
+    #[test]
+    fn help_text_interactive_edit_mode() {
+        let mut d = NewAgentDialog::new(Some("."));
+        d.task_type = NewTaskType::Interactive;
+        d.edit_id = Some("test-id".to_string());
         let text = help_text(&d);
         assert!(text.contains("launch"));
     }
