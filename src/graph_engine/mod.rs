@@ -23236,8 +23236,14 @@ exit 0
             .await;
         assert!(result.is_ok(), "source graph should complete: {result:?}");
 
-        // Give the background task time to run and complete.
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        // The target runs on a background task. Wait for it to finish and
+        // clear the flag instead of sleeping a fixed time: a fixed 500 ms
+        // failed under the full parallel suite on a loaded machine.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while db.is_graph_hook_launched(&target_id).unwrap() && std::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
 
         // After the target graph completes, the hook_launched flag is cleared.
         // So we just verify the target actually ran (completed).
