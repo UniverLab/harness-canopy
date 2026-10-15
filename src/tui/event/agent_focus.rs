@@ -6,6 +6,7 @@ use super::context_transfer::{
 };
 use super::home_preview::handle_playground_key;
 use super::knowledge_dialog::{edit_knowledge_dialog, open_knowledge_dialog};
+use super::knowledge_viewer::open_knowledge_viewer;
 use super::search_picker::handle_suggestion_picker_key;
 #[cfg(test)]
 use super::terminal_warp::handle_terminal_direct_pty_key;
@@ -110,6 +111,9 @@ fn handle_project_focus_key(app: &mut App, code: KeyCode, modifiers: KeyModifier
         }
         KeyCode::Down => app.select_next(),
         KeyCode::Up => app.select_prev(),
+        KeyCode::Enter if app.project_focus == Some(ProjectTab::Knowledge) => {
+            open_knowledge_viewer(app);
+        }
         KeyCode::Char('/') if app.project_focus == Some(ProjectTab::Knowledge) => {
             app.enter_knowledge_filter_mode();
         }
@@ -792,6 +796,40 @@ mod tests {
         handle_project_focus_key(&mut app, KeyCode::Right, KeyModifiers::SHIFT);
 
         assert_eq!(app.project_focus, Some(ProjectTab::Backlog));
+    }
+
+    fn knowledge_node(id: &str, title: &str) -> crate::db::intelligence::IntelligenceNodeRecord {
+        crate::db::intelligence::IntelligenceNodeRecord {
+            id: id.to_string(),
+            kind: "fact".to_string(),
+            status: "noted".to_string(),
+            title: title.to_string(),
+            body: format!("body of {title}"),
+            metadata: None,
+            project_hash: None,
+            session_id: None,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    /// FR2: `Enter` on a row of the Knowledge list opens the read-only viewer
+    /// for the selected entry.
+    #[test]
+    fn enter_on_a_knowledge_row_opens_the_viewer() {
+        let mut app = app_with_project_focus(ProjectTab::Knowledge);
+        app.project_knowledge = vec![
+            knowledge_node("n1", "Entry 1"),
+            knowledge_node("n2", "Entry 2"),
+        ];
+        app.selected_knowledge = 1;
+
+        handle_project_focus_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+        assert!(matches!(app.focus, Focus::KnowledgeViewer));
+        let viewer = app.knowledge_viewer.as_ref().expect("viewer must be open");
+        assert_eq!(viewer.title, "Entry 2");
+        assert_eq!(viewer.kind, "fact");
     }
 
     #[test]

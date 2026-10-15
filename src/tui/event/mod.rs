@@ -56,6 +56,7 @@ fn tick_duration(app: &App) -> Duration {
         | Focus::NewAgentDialog
         | Focus::LaunchpadDialog
         | Focus::KnowledgeDialog
+        | Focus::KnowledgeViewer
         | Focus::ContextTransfer
         | Focus::RagTransfer
         | Focus::PromptTemplateDialog
@@ -126,6 +127,7 @@ mod context_transfer;
 pub(crate) mod ctrl_c;
 mod home_preview;
 pub(crate) mod knowledge_dialog;
+pub(crate) mod knowledge_viewer;
 mod launchpad;
 mod mouse;
 mod new_agent_dialog;
@@ -139,6 +141,7 @@ mod search_picker;
 mod terminal_warp;
 
 use knowledge_dialog::handle_knowledge_dialog_key;
+use knowledge_viewer::handle_knowledge_viewer_key;
 mod crews_keys;
 mod graph_editor;
 mod graph_form;
@@ -304,6 +307,7 @@ fn dispatch_focus_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> 
         Focus::NewAgentDialog => handle_dialog_key(app, code, modifiers),
         Focus::LaunchpadDialog => handle_launchpad_key(app, code),
         Focus::KnowledgeDialog => handle_knowledge_dialog_key(app, code),
+        Focus::KnowledgeViewer => handle_knowledge_viewer_key(app, code),
         Focus::Agent => handle_agent_key(app, code, modifiers),
         Focus::ContextTransfer => handle_context_transfer_key(app, code),
         Focus::RagTransfer => handle_rag_transfer_key(app, code),

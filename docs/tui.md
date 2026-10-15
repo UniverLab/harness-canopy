@@ -164,6 +164,16 @@ typable on this one list, the single-letter shortcuts it used to carry don't
 apply there: arrows, `Enter` and `Esc` still do, the relation dialog moves to
 `Ctrl+R`, and leaving the Knowledge tab clears the filter.
 
+Once a project is entered, its **Knowledge** tab lists every fact and pattern
+of that project as a row: a `[fact]`/`[pattern]` badge in its kind colour, the
+title in bold, and how long ago the entry was last updated. `↑↓` moves the
+selection and the list scrolls to keep it visible (showing `n / total` on its
+first row), and clicking a row selects it. `Enter` opens a read-only viewer for
+the selected entry — `↑↓` and `PageUp`/`PageDown` scroll the body, `e` closes
+the viewer and opens the entry for editing, and `Esc` returns to the list with
+the same row still selected. The list's own keys keep working on the selected
+row: `/` filters, `n` creates, `e` edits and `F4` deletes.
+
 ## Moving context around
 
 - **Scheduled delivery** — `Shift+Enter` (requires Kitty keyboard

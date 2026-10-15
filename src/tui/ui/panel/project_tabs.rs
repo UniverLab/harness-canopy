@@ -104,22 +104,16 @@ pub(super) fn build_project_overview_lines<'a>(
                     .add_modifier(Modifier::BOLD),
             ),
         ]),
-        Line::from(format!("workdir_hash: {}", project.hash)),
-        Line::from(format!("path: {}", project.path)),
-        Line::from(format!("indexed_at: {}", indexed)),
-        Line::from(format!("created_at: {}", created)),
-        Line::from(format!("tags: {}", tags)),
+        overview_meta_line("workdir_hash", &project.hash, theme),
+        overview_meta_line("path", &project.path, theme),
+        overview_meta_line("indexed_at", &indexed, theme),
+        overview_meta_line("created_at", &created, theme),
+        overview_meta_line("tags", tags, theme),
         Line::from(""),
-        Line::from(Span::styled(
-            "description",
-            Style::default().fg(theme.dim_text),
-        )),
+        overview_heading("Description", theme),
         Line::from(description),
         Line::from(""),
-        Line::from(Span::styled(
-            "workspace context",
-            Style::default().fg(theme.dim_text),
-        )),
+        overview_heading("Workspace context", theme),
     ];
 
     if let Some(state) = project_activity {
@@ -137,13 +131,31 @@ pub(super) fn build_project_overview_lines<'a>(
     }
 
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "recent sessions",
-        Style::default().fg(theme.dim_text),
-    )));
+    lines.push(overview_heading("Recent sessions", theme));
     lines.extend(format_recent_session_lines(recent_sessions, theme));
 
     lines
+}
+
+/// Section heading on the Overview tab — `header_color` with BOLD, each
+/// preceded by a blank line, so a label reads as a heading instead of
+/// blending into the white body text (functional requirement 4).
+fn overview_heading(text: &str, theme: &Theme) -> Line<'static> {
+    Line::from(Span::styled(
+        text.to_string(),
+        Style::default()
+            .fg(theme.header_color)
+            .add_modifier(Modifier::BOLD),
+    ))
+}
+
+/// Key/value metadata line on the Overview tab: the key in `dim_text`, the
+/// value in the normal ink (functional requirement 4).
+fn overview_meta_line(key: &str, value: &str, theme: &Theme) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!("{key}: "), Style::default().fg(theme.dim_text)),
+        Span::styled(value.to_string(), Style::default().fg(Color::White)),
+    ])
 }
 
 pub(super) fn draw_project_overview(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
@@ -438,50 +450,66 @@ pub(super) fn draw_backlog_overview(frame: &mut Frame, area: Rect, app: &App, th
     render_wrapped_paragraph(frame, area, lines);
 }
 
-pub(super) fn draw_knowledge_overview(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
-    if app.project_knowledge.is_empty() {
+pub(super) fn draw_knowledge_overview(frame: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
+    let filtered = app.filtered_knowledge_indices();
+    if filtered.is_empty() {
+        let message = if app.project_knowledge.is_empty() {
+            "No knowledge yet. Agents can add facts/patterns."
+        } else {
+            "No knowledge matches the filter."
+        };
         frame.render_widget(
-            Paragraph::new("No knowledge yet. Agents can add facts/patterns.")
-                .style(Style::default().fg(theme.dim_text)),
+            Paragraph::new(message).style(Style::default().fg(theme.dim_text)),
             area,
         );
         return;
     }
 
-    let Some(node) = app.project_knowledge.get(app.selected_knowledge) else {
-        frame.render_widget(
-            Paragraph::new("No knowledge selected").style(Style::default().fg(theme.dim_text)),
-            area,
-        );
-        return;
-    };
+    let height = area.height as usize;
+    let selected_pos = filtered
+        .iter()
+        .position(|&idx| idx == app.selected_knowledge)
+        .unwrap_or(0);
+    let offset = selected_pos.saturating_sub(height.saturating_sub(1));
 
-    let kind_color = if node.kind == "fact" {
-        Color::Cyan
-    } else {
-        Color::Magenta
-    };
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled("Knowledge ", Style::default().fg(theme.dim_text)),
+    for (row, display_idx) in (offset..filtered.len()).take(height).enumerate() {
+        let node_idx = filtered[display_idx];
+        let is_selected = node_idx == app.selected_knowledge;
+        let (style, marker) = selected_row_style(is_selected, theme);
+
+        let node = &app.project_knowledge[node_idx];
+        let kind_color = if node.kind == "fact" {
+            Color::Cyan
+        } else {
+            Color::Magenta
+        };
+        let when = chrono::DateTime::from_timestamp(node.updated_at, 0)
+            .map(|dt| crate::tui::app::utils::relative_time(&dt))
+            .unwrap_or_default();
+        let line = Line::from(vec![
+            Span::styled(marker, style.fg(theme.header_color)),
+            Span::raw(" "),
+            Span::styled(format!("[{}] ", node.kind), style.fg(kind_color)),
             Span::styled(
-                node.title.as_str(),
-                Style::default()
-                    .fg(theme.header_color)
-                    .add_modifier(Modifier::BOLD),
+                truncate_str(&node.title, area.width.saturating_sub(24) as usize),
+                style.fg(Color::White).add_modifier(Modifier::BOLD),
             ),
-            Span::raw("  "),
-            Span::styled(format!("[{}]", node.kind), Style::default().fg(kind_color)),
-        ]),
-        Line::from(""),
-    ];
+            Span::styled(format!("  {when}"), style.fg(theme.dim_text)),
+        ]);
 
-    for line in node.body.lines() {
-        lines.push(Line::from(Span::styled(
-            line,
-            Style::default().fg(Color::White),
-        )));
+        let y = area.y + row as u16;
+        frame.render_widget(Paragraph::new(line), Rect::new(area.x, y, area.width, 1));
+        app.project_tab_row_click_map.push((display_idx, y, y + 1));
     }
 
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), area);
+    if filtered.len() > height {
+        let label = format!("{} / {}", selected_pos + 1, filtered.len());
+        let width = label.chars().count() as u16;
+        if width <= area.width {
+            frame.render_widget(
+                Paragraph::new(label).style(Style::default().fg(theme.dim_text)),
+                Rect::new(area.x + area.width - width, area.y, width, 1),
+            );
+        }
+    }
 }

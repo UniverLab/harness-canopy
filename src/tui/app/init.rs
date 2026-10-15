@@ -42,6 +42,7 @@ macro_rules! app_new_fields {
             new_agent_dialog: None,
             launchpad_dialog: None,
             knowledge_dialog: None,
+            knowledge_viewer: None,
             pending_launch_dialog: None,
             quit_confirm: false,
             delete_project_confirm: false,

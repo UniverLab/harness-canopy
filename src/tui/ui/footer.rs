@@ -108,6 +108,7 @@ fn footer_hints(app: &App, activity_available: bool) -> Vec<(&'static str, &'sta
             ("Enter", "next/save"),
             ("Esc", "cancel"),
         ],
+        Focus::KnowledgeViewer => vec![("↑↓/PgUp PgDn", "scroll"), ("e", "edit"), ("Esc", "close")],
     }
 }
 

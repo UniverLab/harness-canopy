@@ -649,6 +649,122 @@ mod tests {
         );
     }
 
+    fn knowledge_record(id: &str, title: &str) -> crate::db::intelligence::IntelligenceNodeRecord {
+        crate::db::intelligence::IntelligenceNodeRecord {
+            id: id.to_string(),
+            kind: "fact".to_string(),
+            status: "noted".to_string(),
+            title: title.to_string(),
+            body: format!("body of {title}"),
+            metadata: None,
+            project_hash: None,
+            session_id: None,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    fn app_with_test_entries(count: usize) -> App {
+        use crate::db::Database;
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        std::mem::forget(tmp);
+        let db = Arc::new(Database::new(&path).unwrap());
+        let data_dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(
+            Arc::clone(&db),
+            data_dir.path(),
+            &crate::domain::canopy_config::CanopyConfig::default(),
+        )
+        .unwrap();
+        app.project_knowledge = (1..=count)
+            .map(|i| knowledge_record(&format!("n{i}"), &format!("Entry {i}")))
+            .collect();
+        app.knowledge_filter.clear();
+        app
+    }
+
+    /// FR1: the Knowledge tab is a scrolling list, not a one-per-page viewer.
+    /// With 30 entries in a 10-row area and the selection on entry 25, the
+    /// selected row must be scrolled into view while entries above it are
+    /// still rendered (a list), and the `n / total` indicator must appear.
+    #[test]
+    fn knowledge_tab_scrolls_the_selection_into_view() {
+        let mut app = app_with_test_entries(30);
+        app.selected_knowledge = 24; // 0-indexed → "Entry 25"
+
+        let text = render_to_text(60, 10, |frame, area| {
+            draw_knowledge_overview(frame, area, &mut app, &Theme::classic());
+        });
+
+        assert!(
+            text.contains("Entry 25"),
+            "the selected row must be visible:\n{text}"
+        );
+        assert!(
+            text.contains("Entry 16"),
+            "rows above the selection must render too (a list, not one page):\n{text}"
+        );
+        assert!(
+            !text.contains("Entry 15"),
+            "the window must have scrolled past the first entries:\n{text}"
+        );
+        assert!(
+            text.contains("25 / 30"),
+            "the position indicator must show on the first row:\n{text}"
+        );
+    }
+
+    /// FR4: the Overview tab's three section labels are headings in the
+    /// header colour with BOLD, each preceded by a blank line, and the
+    /// metadata keys are dim with the value in the normal ink.
+    #[test]
+    fn overview_sections_render_as_headings() {
+        let theme = Theme::classic();
+        let project = crate::domain::project::Project::new("/tmp/x");
+        let lines = build_project_overview_lines(&project, None, &[], &theme, "%Y-%m-%d");
+
+        for heading in ["Description", "Workspace context", "Recent sessions"] {
+            let idx = lines
+                .iter()
+                .position(|l| l.spans.iter().any(|s| s.content == heading))
+                .unwrap_or_else(|| panic!("missing heading {heading}"));
+            let span = lines[idx]
+                .spans
+                .iter()
+                .find(|s| s.content == heading)
+                .unwrap();
+            assert_eq!(
+                span.style.fg,
+                Some(theme.header_color),
+                "{heading} must use the header colour"
+            );
+            assert!(
+                span.style.add_modifier.contains(Modifier::BOLD),
+                "{heading} must be bold"
+            );
+            assert!(
+                lines[idx - 1].spans.iter().all(|s| s.content.is_empty()),
+                "{heading} must be preceded by exactly one blank line"
+            );
+        }
+
+        let path_line = lines
+            .iter()
+            .find(|l| l.spans.first().is_some_and(|s| s.content == "path: "))
+            .expect("path metadata line");
+        assert_eq!(
+            path_line.spans[0].style.fg,
+            Some(theme.dim_text),
+            "metadata key must be dim"
+        );
+        assert_eq!(
+            path_line.spans[1].style.fg,
+            Some(Color::White),
+            "metadata value must be the normal ink"
+        );
+    }
+
     #[test]
     fn copilot_cursor_no_longer_shifted_without_inverse() {
         let snap = ScreenSnapshot {

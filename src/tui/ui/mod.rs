@@ -241,6 +241,10 @@ fn draw_modal_dialogs(frame: &mut Frame, app: &mut App, theme: &Theme) {
         dialogs::draw_knowledge_dialog(frame, app, theme);
     }
 
+    if app.knowledge_viewer.is_some() {
+        dialogs::draw_knowledge_viewer(frame, app, theme);
+    }
+
     if app.split_picker_open {
         dialogs::draw_split_picker(frame, app, theme);
     }
@@ -571,6 +575,7 @@ mod tests {
             include_str!("dialogs/graph_editor.rs"),
             include_str!("dialogs/graph_form.rs"),
             include_str!("dialogs/knowledge_dialog.rs"),
+            include_str!("dialogs/knowledge_viewer.rs"),
             include_str!("dialogs/launchpad.rs"),
             include_str!("dialogs/new_agent_dialog.rs"),
             include_str!("dialogs/node_tail.rs"),

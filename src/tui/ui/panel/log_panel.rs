@@ -20,6 +20,7 @@ pub(super) fn draw_log_panel_focus(
         Focus::NewAgentDialog => draw_new_agent_dialog_background(frame, area, app, theme),
         Focus::LaunchpadDialog
         | Focus::KnowledgeDialog
+        | Focus::KnowledgeViewer
         | Focus::ContextTransfer
         | Focus::RagTransfer
         | Focus::PromptTemplateDialog
