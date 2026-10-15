@@ -14,7 +14,7 @@
   <a href="https://github.com/UniverLab/harness-canopy/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/UniverLab/harness-canopy/ci.yml?branch=main&style=for-the-badge&label=CI" alt="CI"/></a>
   <a href="https://crates.io/crates/harness-canopy"><img src="https://img.shields.io/crates/v/harness-canopy?style=for-the-badge&logo=rust&logoColor=white" alt="Crates.io"/></a>
   <img src="https://img.shields.io/badge/Status-Active-27AE60?style=for-the-badge" alt="Status"/>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-2E8B57?style=for-the-badge" alt="License"/></a>
+  <a href="LICENSE-MIT"><img src="https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-2E8B57?style=for-the-badge" alt="License"/></a>
 </p>
 
 harness-canopy is a modern, self-contained MCP (Model Context Protocol) server and TUI for orchestrating AI agent sessions, background tasks, and file event triggers. Designed for reliability, modularity, and performance — it enables advanced scheduling, persistent knowledge graphs, multi-agent coordination, graph automation, and interactive terminal management with zero runtime dependencies.
@@ -313,7 +313,7 @@ All state persists in `~/.canopy/`. The TUI shows an update notice at most every
 
 ## License
 
-MIT — see [LICENSE](LICENSE) for details.
+Licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option. Releases up to 3.0.1 were published under MIT only.
 
 ---
 
