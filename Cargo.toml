@@ -1,12 +1,12 @@
 [package]
 name = "harness-canopy"
-version = "3.0.1"
+version = "3.1.0"
 edition = "2021"
 rust-version = "1.91"
 description = "A self-contained MCP server for AI agent task scheduling and file watching"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/UniverLab/harness-canopy"
-homepage = "https://github.com/UniverLab/harness-canopy"
+homepage = "https://univerlab.org/canopy/"
 keywords = ["mcp", "scheduler", "cron", "file-watcher", "ai-agent"]
 categories = ["command-line-utilities", "development-tools"]
 readme = "README.md"
