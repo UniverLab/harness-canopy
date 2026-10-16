@@ -1524,4 +1524,52 @@ mod tests {
             "pending rows are consumed once the members exist"
         );
     }
+
+    /// Requirement 3 (export half): a crew-bound ensemble that is still pending
+    /// — its crew absent, so it has no member nodes and no fan-out edges — must
+    /// still export every wired entry source, read from the pending rows rather
+    /// than the absent edges. The document that comes back is identical to the
+    /// one a graph with the crews materialised exports, so re-importing it on a
+    /// machine that has the crews is lossless.
+    #[test]
+    fn pending_crew_bound_ensemble_exports_its_recorded_wiring() {
+        let source = test_db();
+        let lp = seed_crew_chain_graph(&source);
+        let first = export_graph(&source, &lp.id);
+
+        // Import where the crew is missing: both ensembles stay pending.
+        let pending = test_db();
+        let lp = draft_graph("graph-2", "crew-chain", "/tmp/project");
+        let plan = build_import_plan(&first, "graph-2").unwrap();
+        let missing = pending.import_graph(&lp, &plan).unwrap();
+        assert_eq!(missing, vec!["reviewers".to_string()]);
+        for details in &pending.list_ensembles_for_graph("graph-2").unwrap() {
+            assert!(details.members.is_empty(), "still pending: no members");
+        }
+
+        // Export while pending: the entry wiring must come from the recorded
+        // rows, reproducing the source document exactly.
+        let redone = export_graph(&pending, "graph-2");
+        let team_a = redone
+            .ensembles
+            .iter()
+            .find(|ensemble| ensemble.name == "Team A")
+            .expect("Team A");
+        assert_eq!(
+            team_a.extra_entry_sources,
+            vec![GraphExportEntrySource {
+                from_node: "alt".to_string(),
+                condition: GraphEdgeCondition::Fail,
+            }],
+            "the pending extra entry source must export from the recorded rows"
+        );
+        assert_eq!(
+            first.edges, redone.edges,
+            "edges must round-trip while pending"
+        );
+        assert_eq!(
+            first.ensembles, redone.ensembles,
+            "ensemble wiring must export from the pending rows"
+        );
+    }
 }
