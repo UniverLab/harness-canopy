@@ -577,9 +577,6 @@ pub struct App {
     /// knowledge"`, …). Rendered as a badge so a face never appears
     /// unexplained. `None` after a manual pin/pick.
     pub(crate) panel_last_reason: Option<String>,
-    /// Whether the face picker overlay is open, and its cursor.
-    pub(crate) panel_picker_open: bool,
-    pub(crate) panel_picker_idx: usize,
     /// CM51 (D4): the last `settings_revision` this session has applied. When
     /// the daemon publishes a newer one (a `config_set`, or a hand edit seen
     /// by the file watcher), the TUI reloads `CanopyConfig` so the values it

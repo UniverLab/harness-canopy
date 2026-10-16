@@ -117,7 +117,6 @@ fn footer_hints_home(_app: &App, activity_available: bool) -> Vec<(&'static str,
     let mut h = vec![("↑↓", "select"), ("n", "new")];
     if activity_available {
         h.push(("F3", "activity"));
-        h.push(("F6", "panel"));
     }
     h.push(("Shift+←→", "panels"));
     h.push(("F10", "preview"));
@@ -191,7 +190,6 @@ fn footer_hints_preview_main(
     h.push(("n", "new"));
     if activity_available {
         h.push(("F3", "activity"));
-        h.push(("F6", "panel"));
     }
     h.push(("Esc", "home"));
     h
@@ -267,7 +265,7 @@ fn footer_hints_agent_pty(
 ) -> Vec<(&'static str, &'static str)> {
     // While the focused child has claimed the keyboard (alternate
     // screen or Kitty keyboard protocol), every canopy shortcut
-    // below yields to it except F10, the Shift+arrow frame
+    // below yields to it except F1 (hub), F10, the Shift+arrow frame
     // navigation, Ctrl+T, and Shift+F4 (end) — see
     // `agent_focus::RESERVED_FOCUS_KEYS`. Reflect that here so a
     // shortcut that "did nothing" is explainable instead of
@@ -308,12 +306,9 @@ fn footer_hints_agent_pty(
     h.push(("drag", "to copy"));
     if activity_available {
         h.push(("F3", "activity"));
-        h.push(("F6", "panel"));
     }
     h.push(("Ctrl+N", "new"));
-    if !child_claimed {
-        h.push(("F1", "hub"));
-    }
+    h.push(("F1", "hub"));
     h
 }
 
@@ -332,7 +327,6 @@ fn footer_hints_agent_plain(
     }
     if activity_available {
         h.push(("F3", "activity"));
-        h.push(("F6", "panel"));
     }
     h.push(("Ctrl+N", "new"));
     h.push(("F1", "hub"));

@@ -56,12 +56,6 @@ pub static KEY_REFS: &[KeyRef] = &[
         code: "F3",
     },
     KeyRef {
-        key: "F6",
-        context: "Global",
-        action: "pick the panel face",
-        code: "F6",
-    },
-    KeyRef {
         key: "Ctrl+N",
         context: "Global",
         action: "new agent",

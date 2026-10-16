@@ -168,10 +168,6 @@ use scroll::{
 };
 
 pub fn handle_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> Result<()> {
-    if app.panel_picker_open {
-        handle_panel_picker_key(app, code);
-        return Ok(());
-    }
     // CT30: while the panel is focused on the Crews face (or one of its
     // dialogs is open) the key belongs to the face first; it reports
     // whether it consumed the key so global keys still work otherwise.
@@ -240,12 +236,6 @@ fn handle_global_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> b
 
     if code == KeyCode::F(3) {
         app.toggle_activity_panel();
-        return true;
-    }
-
-    // CT1 multi-face panel picker: pin any face, or back to automatic.
-    if code == KeyCode::F(6) {
-        app.open_panel_picker();
         return true;
     }
 
@@ -319,18 +309,6 @@ fn dispatch_focus_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> 
 }
 
 // ── Mouse: scroll wheel + Shift+Click to copy selection ─────────────
-
-/// CT1 face picker keys: ↑↓/jk move, Enter pins the highlighted row
-/// (Automatic unpins back to the switching rule), Esc closes.
-fn handle_panel_picker_key(app: &mut App, code: KeyCode) {
-    match code {
-        KeyCode::Up | KeyCode::Char('k') => app.move_panel_picker(false),
-        KeyCode::Down | KeyCode::Char('j') => app.move_panel_picker(true),
-        KeyCode::Enter => app.confirm_panel_picker(),
-        KeyCode::Esc => app.close_panel_picker(),
-        _ => {}
-    }
-}
 
 fn open_terminal_search(app: &mut App) {
     let Some((is_terminal, idx)) = selected_terminal_like(app) else {
@@ -841,6 +819,39 @@ mod sidebar_mouse_tests {
         handle_sidebar_mouse(&mut app, &mouse);
 
         assert_eq!(app.sidebar_layer, crate::tui::app::SidebarLayer::Knowledge);
+    }
+
+    #[test]
+    fn f6_no_longer_opens_a_panel_picker_in_preview_or_agent_focus() {
+        // The F6 panel picker is retired: the pin lives in
+        // F1 → Settings → TUI Appearance now. In both surfaces where F6
+        // used to open the picker it must be a no-op — most visibly, the
+        // global handler no longer claims the key.
+        let mut preview = app_with_agents(1);
+        assert!(matches!(preview.focus, Focus::Preview));
+        assert!(
+            !handle_global_key(&mut preview, KeyCode::F(6), KeyModifiers::NONE),
+            "F6 must not be claimed by the global handler anymore"
+        );
+        handle_key(&mut preview, KeyCode::F(6), KeyModifiers::NONE).unwrap();
+        assert!(!preview.hub_open, "F6 must not open the hub in Preview");
+        assert!(
+            matches!(preview.focus, Focus::Preview),
+            "F6 must leave Preview untouched"
+        );
+
+        let mut agent = app_with_agents(1);
+        agent.focus = Focus::Agent;
+        assert!(
+            !handle_global_key(&mut agent, KeyCode::F(6), KeyModifiers::NONE),
+            "F6 must not be claimed by the global handler anymore"
+        );
+        handle_key(&mut agent, KeyCode::F(6), KeyModifiers::NONE).unwrap();
+        assert!(!agent.hub_open, "F6 must not open the hub in Agent focus");
+        assert!(
+            matches!(agent.focus, Focus::Agent),
+            "F6 must leave the focused session untouched"
+        );
     }
 }
 

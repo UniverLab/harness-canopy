@@ -178,8 +178,6 @@ macro_rules! app_new_fields {
             panel_dwell_until: None,
             panel_dwell_reason: None,
             panel_last_reason: None,
-            panel_picker_open: false,
-            panel_picker_idx: 0,
             panel_focused: false,
             crews: crate::tui::app::crews_face::CrewsFaceState::default(),
             hub: crate::tui::app::hub::HubState::default(),

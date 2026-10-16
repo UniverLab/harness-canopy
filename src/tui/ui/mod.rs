@@ -250,12 +250,8 @@ fn draw_modal_dialogs(frame: &mut Frame, app: &mut App, theme: &Theme) {
     }
 }
 
-/// The panel picker, the suggestion picker and the terminal search bar.
+/// The suggestion picker and the terminal search bar.
 fn draw_picker_overlays(frame: &mut Frame, app: &App, theme: &Theme, panel_area: Rect) {
-    if app.panel_picker_open {
-        draw_panel_picker(frame, app, theme);
-    }
-
     if app.suggestion_picker.is_some() {
         dialogs::draw_suggestion_picker(frame, app, panel_area, theme);
     }
@@ -354,82 +350,6 @@ fn draw_top_overlays(frame: &mut Frame, app: &mut App, theme: &Theme) {
 
 // ── Shared helpers ──────────────────────────────────────────────
 
-/// CT1 face picker: pin any panel face, or back to automatic. Rendered as a
-/// small centered overlay like the split picker — keyboard only (↑↓/jk,
-/// Enter, Esc), so it never steals or needs the mouse.
-fn draw_panel_picker(frame: &mut Frame, app: &App, theme: &Theme) {
-    use crate::tui::app::panel_face::PANEL_PICKER_OPTIONS;
-    use ratatui::style::{Modifier, Style};
-    use ratatui::text::{Line, Span};
-    use ratatui::widgets::{Block, Clear, Paragraph};
-
-    let rows: Vec<(String, bool)> = PANEL_PICKER_OPTIONS
-        .iter()
-        .map(|option| {
-            let name = option.map_or("automatic", |face| face.label()).to_string();
-            let pinned = *option == app.panel_pinned;
-            let label = if pinned {
-                format!("{name}  · pinned")
-            } else {
-                name
-            };
-            (label, pinned)
-        })
-        .collect();
-    let width = rows
-        .iter()
-        .map(|(label, _)| label.chars().count())
-        .max()
-        .unwrap_or(9)
-        .max(22) as u16
-        + 6;
-    let height = rows.len() as u16 + 4;
-    let area = centered_rect(40, height, frame.area());
-    let area = Rect::new(
-        area.x,
-        area.y,
-        width.min(frame.area().width.saturating_sub(2)),
-        height.min(frame.area().height.saturating_sub(2)),
-    );
-
-    frame.render_widget(Clear, area);
-    crate::tui::ui::dialogs::draw_dialog_left_wave(frame, area, app.animation_tick.into());
-    let block = Block::default()
-        .title(" panel face · F6 ")
-        .borders(dialog_borders_for(theme))
-        .border_style(Style::default().fg(theme.header_color))
-        .style(Style::default().bg(theme.dialog_bg));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    if inner.width == 0 || inner.height < 3 {
-        return;
-    }
-
-    let mut lines = vec![Line::from(Span::styled(
-        "Enter pins · Esc closes",
-        Style::default().fg(theme.dim_text),
-    ))];
-    for (idx, (label, _)) in rows.iter().enumerate() {
-        let selected = idx == app.panel_picker_idx;
-        let (style, marker) = if selected {
-            (
-                Style::default()
-                    .bg(theme.selected_bg)
-                    .add_modifier(Modifier::BOLD),
-                "›",
-            )
-        } else {
-            (Style::default(), " ")
-        };
-        lines.push(Line::from(vec![
-            Span::styled(marker, style.fg(theme.header_color)),
-            Span::raw(" "),
-            Span::styled(label.clone(), style.fg(Color::White)),
-        ]));
-    }
-    frame.render_widget(Paragraph::new(lines), inner);
-}
-
 /// Create a centered rect of given percentage width and fixed height.
 pub(crate) fn centered_rect(percent_x: u16, height: u16, area: Rect) -> Rect {
     let [_, center, _] = Layout::vertical([
@@ -511,7 +431,7 @@ mod tests {
     /// CM52: `tui.brians_brain = false` stops the banner automaton.
     #[test]
     fn brians_brain_toggle_stops_the_banner_animation() {
-        let (mut app, _data_dir) = picker_test_app();
+        let (mut app, _data_dir) = test_app();
         app.focus = crate::tui::app::types::Focus::Agent;
         app.home_brain = Some(crate::tui::brians_brain::BriansBrain::new(6, 10));
 
@@ -536,7 +456,7 @@ mod tests {
     /// CM52: `tui.atmosphere = false` disables the scene tick and draw.
     #[test]
     fn atmosphere_toggle_gates_the_scene() {
-        let (mut app, _data_dir) = picker_test_app();
+        let (mut app, _data_dir) = test_app();
         app.atmosphere_hidden = false;
         app.tui_settings.atmosphere = false;
         assert!(!atmosphere_active(&app));
@@ -551,7 +471,7 @@ mod tests {
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
 
-        let (mut app, _data_dir) = picker_test_app();
+        let (mut app, _data_dir) = test_app();
         app.theme = Theme::modern();
         app.sidebar_visible = true;
         let backend = TestBackend::new(120, 40);
@@ -706,8 +626,8 @@ mod tests {
         assert_eq!(result.height, 5);
     }
 
-    // CT12 — panel picker shares the dialog chrome (waves rail + opaque body).
-    fn picker_test_app() -> (App, tempfile::TempDir) {
+    /// A bare `App` over a temp database and data dir, for render tests.
+    fn test_app() -> (App, tempfile::TempDir) {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let path = tmp.path().to_path_buf();
         std::mem::forget(tmp);
@@ -722,248 +642,12 @@ mod tests {
         (app, data_dir)
     }
 
-    fn render_picker_buffer(
-        app: &App,
-        theme: &Theme,
-        width: u16,
-        height: u16,
-        behind: Color,
-    ) -> ratatui::buffer::Buffer {
-        use ratatui::backend::TestBackend;
-        use ratatui::widgets::{Paragraph, Wrap};
-        use ratatui::Terminal;
-        let backend = TestBackend::new(width, height);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| {
-                let full = frame.area();
-                // Distinctive backdrop standing in for the graph /
-                // interactive output / knowledge view the picker floats over.
-                let filler = vec!["#".repeat(width as usize); height as usize].join("\n");
-                frame.render_widget(
-                    Paragraph::new(filler)
-                        .style(Style::default().bg(behind).fg(Color::White))
-                        .wrap(Wrap { trim: false }),
-                    full,
-                );
-                draw_panel_picker(frame, app, theme);
-            })
-            .unwrap();
-        terminal.backend().buffer().clone()
-    }
-
-    /// Mirror of `draw_panel_picker`'s size/position math (labels + pinned
-    /// state only — no chrome), so tests can scope assertions to the picker.
-    fn expected_picker_area(app: &App, full: Rect) -> Rect {
-        use crate::tui::app::panel_face::PANEL_PICKER_OPTIONS;
-        let rows: Vec<String> = PANEL_PICKER_OPTIONS
-            .iter()
-            .map(|option| {
-                let name = option.map_or("automatic", |face| face.label()).to_string();
-                if *option == app.panel_pinned {
-                    format!("{name}  · pinned")
-                } else {
-                    name
-                }
-            })
-            .collect();
-        let width = rows
-            .iter()
-            .map(|label| label.chars().count())
-            .max()
-            .unwrap_or(9)
-            .max(22) as u16
-            + 6;
-        let height = rows.len() as u16 + 4;
-        let center = centered_rect(40, height, full);
-        Rect::new(
-            center.x,
-            center.y,
-            width.min(full.width.saturating_sub(2)),
-            height.min(full.height.saturating_sub(2)),
-        )
-    }
-
-    fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {
-        let mut text = String::new();
-        for y in 0..buffer.area.height {
-            for x in 0..buffer.area.width {
-                text.push_str(buffer[(x, y)].symbol());
-            }
-            text.push('\n');
-        }
-        text
-    }
-
-    #[test]
-    fn panel_picker_has_waves_rail() {
-        for theme in [Theme::classic(), Theme::modern()] {
-            let (app, _data_dir) = picker_test_app();
-            let (width, height) = (100u16, 40u16);
-            let buffer = render_picker_buffer(&app, &theme, width, height, Color::Blue);
-            let area = expected_picker_area(&app, Rect::new(0, 0, width, height));
-            assert!(area.x > 0, "picker must leave a gutter column for the rail");
-            let rail_x = area.x.saturating_sub(1);
-            let rail_y = area.y + area.height.saturating_sub(3) / 2;
-            let glyphs: Vec<&str> = (0..3)
-                .map(|i| buffer[(rail_x, rail_y + i as u16)].symbol())
-                .collect();
-            // Same `░▒░` rail the shared `draw_dialog_left_wave` paints.
-            assert_eq!(
-                glyphs,
-                vec!["░", "▒", "░"],
-                "panel picker must draw the shared waves rail"
-            );
-        }
-    }
-
-    #[test]
-    fn panel_picker_body_is_opaque_over_every_background() {
-        for theme in [Theme::classic(), Theme::modern()] {
-            let (app, _data_dir) = picker_test_app();
-            let behind = Color::Blue;
-            assert_ne!(theme.dialog_bg, behind);
-            assert_ne!(theme.selected_bg, behind);
-            let (width, height) = (100u16, 40u16);
-            let buffer = render_picker_buffer(&app, &theme, width, height, behind);
-            let area = expected_picker_area(&app, Rect::new(0, 0, width, height));
-            for y in area.y..area.y + area.height {
-                for x in area.x..area.x + area.width {
-                    let cell = &buffer[(x, y)];
-                    assert_ne!(
-                        cell.symbol(),
-                        "#",
-                        "picker cell ({x},{y}) leaks the backdrop symbol"
-                    );
-                    assert!(
-                        cell.bg == theme.dialog_bg || cell.bg == theme.selected_bg,
-                        "picker cell ({x},{y}) has backdrop bg {:?}, want {:?} or {:?}",
-                        cell.bg,
-                        theme.dialog_bg,
-                        theme.selected_bg
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn panel_picker_border_and_title_match_shared_chrome() {
-        // Classic: box border in the header colour with the F6 title on top.
-        let (app, _data_dir) = picker_test_app();
-        let theme = Theme::classic();
-        let (width, height) = (100u16, 40u16);
-        let buffer = render_picker_buffer(&app, &theme, width, height, Color::Blue);
-        let area = expected_picker_area(&app, Rect::new(0, 0, width, height));
-        let text = buffer_text(&buffer);
-        assert!(
-            text.contains("panel face"),
-            "picker must carry its title\n{text}"
-        );
-        assert_eq!(buffer[(area.x, area.y)].symbol(), "┌");
-        assert_eq!(
-            buffer[(area.x, area.y)].fg,
-            theme.header_color,
-            "picker border must use the shared header colour"
-        );
-        assert_eq!(buffer[(area.x + area.width - 1, area.y)].symbol(), "┐");
-        assert_eq!(
-            buffer[(area.x + 1, area.y)].fg,
-            theme.header_color,
-            "picker top border must use the shared header colour"
-        );
-
-        // Modern keeps the dialog exception: the picker must still have a
-        // visible edge even though panels use `Borders::NONE`.
-        let modern = Theme::modern();
-        let modern_buffer = render_picker_buffer(&app, &modern, width, height, Color::Blue);
-        let modern_area = expected_picker_area(&app, Rect::new(0, 0, width, height));
-        assert_eq!(modern_buffer[(modern_area.x, modern_area.y)].symbol(), "┌");
-        assert_eq!(
-            modern_buffer[(modern_area.x, modern_area.y)].fg,
-            modern.header_color
-        );
-        // The modern picker is still opaque: every cell carries the dialog
-        // background (which equals the panel background on this theme) or
-        // the selected-row background.
-        for y in modern_area.y..modern_area.y + modern_area.height {
-            for x in modern_area.x..modern_area.x + modern_area.width {
-                let cell = &modern_buffer[(x, y)];
-                assert!(
-                    cell.bg == modern.dialog_bg || cell.bg == modern.selected_bg,
-                    "modern picker cell ({x},{y}) has bg {:?}",
-                    cell.bg
-                );
-            }
-        }
-    }
-
     #[test]
     fn dialog_borders_for_always_all() {
         use ratatui::widgets::Borders;
 
         assert_eq!(dialog_borders_for(&Theme::classic()), Borders::ALL);
         assert_eq!(dialog_borders_for(&Theme::modern()), Borders::ALL);
-    }
-
-    #[test]
-    fn panel_picker_and_quit_confirm_share_dialog_bg() {
-        use ratatui::backend::TestBackend;
-        use ratatui::widgets::{Paragraph, Wrap};
-        use ratatui::Terminal;
-        for theme in [Theme::classic(), Theme::modern()] {
-            let (app, _data_dir) = picker_test_app();
-            let (width, height) = (100u16, 40u16);
-            let full = Rect::new(0, 0, width, height);
-            let backend = TestBackend::new(width, height);
-            let mut terminal = Terminal::new(backend).unwrap();
-            terminal
-                .draw(|frame| {
-                    let filler = vec!["#".repeat(width as usize); height as usize].join("\n");
-                    frame.render_widget(
-                        Paragraph::new(filler)
-                            .style(Style::default().bg(Color::Blue).fg(Color::White))
-                            .wrap(Wrap { trim: false }),
-                        full,
-                    );
-                    crate::tui::ui::dialogs::draw_quit_confirm(frame, &theme);
-                })
-                .unwrap();
-            let buffer = terminal.backend().buffer().clone();
-            // `draw_modal_confirm` centers a 40%-wide rect; its height is the
-            // wrapped message lines plus borders.
-            let message = "Press y/Enter to quit, any key to cancel";
-            let dialog_width = width * 40 / 100;
-            let inner_width = dialog_width.saturating_sub(2).max(1) as usize;
-            let needed = message.len().div_ceil(inner_width).max(1) as u16;
-            let quit_area = centered_rect(40, needed + 2, full);
-            let mut saw_dialog_bg = false;
-            for y in quit_area.y..quit_area.y + quit_area.height {
-                for x in quit_area.x..quit_area.x + quit_area.width {
-                    let cell = &buffer[(x, y)];
-                    assert_eq!(
-                        cell.bg, theme.dialog_bg,
-                        "quit confirm cell ({x},{y}) has bg {:?}, want {:?}",
-                        cell.bg, theme.dialog_bg
-                    );
-                    saw_dialog_bg = true;
-                }
-            }
-            assert!(saw_dialog_bg);
-
-            // The picker paints that same background over its own rect.
-            let picker_buffer = render_picker_buffer(&app, &theme, width, height, Color::Blue);
-            let picker_area = expected_picker_area(&app, full);
-            let picker_uses_dialog_bg = (picker_area.y..picker_area.y + picker_area.height)
-                .flat_map(|y| {
-                    (picker_area.x..picker_area.x + picker_area.width).map(move |x| (x, y))
-                })
-                .any(|(x, y)| picker_buffer[(x, y)].bg == theme.dialog_bg);
-            assert!(
-                picker_uses_dialog_bg,
-                "picker must paint the shared dialog background {theme:?}"
-            );
-        }
     }
 
     /// CT26 (FR1/FR2): the notice is drawn on the row just above the footer,
@@ -973,7 +657,7 @@ mod tests {
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
 
-        let (mut app, _data_dir) = picker_test_app();
+        let (mut app, _data_dir) = test_app();
         let theme = Theme::classic();
         app.ctrl_c.set_notice("already copied");
 
