@@ -217,6 +217,15 @@ failure). Platform auto-detected: WSL (PowerShell toasts), macOS
 (`osascript`), Linux (`notify-send`). Set `notifications.enabled = false`
 to silence them.
 
+A message delivered into this session by a graph hook or by an agent's
+`send_to_session` trigger raises one too, naming the sender instead of
+showing a raw id. `Hook message delivered` reads `<graph name> · <event>:
+message delivered to this session` (for example `canopy-tui-polish ·
+on_completed: message delivered to this session`); `Agent message
+delivered` reads `<agent id> (<trigger>): message delivered to this
+session`. When the graph or agent no longer exists, the first 8
+characters of its id stand in for the name.
+
 ## Appearance and behaviour settings
 
 The `[tui]` settings (see `canopy config list`) tune the interface without a
