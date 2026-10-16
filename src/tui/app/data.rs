@@ -277,12 +277,7 @@ impl App {
         };
         match provenance.kind.as_str() {
             "hook" => {
-                let name = self
-                    .db
-                    .get_graph(&provenance.graph_id)
-                    .ok()
-                    .flatten()
-                    .map(|g| g.name);
+                let name = self.hook_graph_name(provenance);
                 crate::domain::notification::send_notification(
                     "Hook message delivered",
                     &hook_delivery_body(provenance, name.as_deref()),
@@ -291,11 +286,7 @@ impl App {
                 true
             }
             "agent_trigger" => {
-                let name = provenance
-                    .agent_id
-                    .as_deref()
-                    .and_then(|id| self.db.get_agent(id).ok().flatten())
-                    .map(|a| a.id);
+                let name = self.trigger_agent_name(provenance);
                 crate::domain::notification::send_notification(
                     "Agent message delivered",
                     &agent_trigger_delivery_body(provenance, name.as_deref()),
@@ -305,6 +296,25 @@ impl App {
             }
             _ => false,
         }
+    }
+
+    /// Name of the graph behind a hook delivery; `None` once it is gone.
+    fn hook_graph_name(&self, provenance: &ScheduledSendProvenance) -> Option<String> {
+        self.db
+            .get_graph(&provenance.graph_id)
+            .ok()
+            .flatten()
+            .map(|g| g.name)
+    }
+
+    /// Name of the agent behind an agent-trigger delivery; `None` once it is
+    /// gone. An agent's name is its id, so the id is what the user sees.
+    fn trigger_agent_name(&self, provenance: &ScheduledSendProvenance) -> Option<String> {
+        provenance
+            .agent_id
+            .as_deref()
+            .and_then(|id| self.db.get_agent(id).ok().flatten())
+            .map(|a| a.id)
     }
 
     fn preserve_dead_scheduled_send(
@@ -807,5 +817,88 @@ mod tests {
             agent_trigger_delivery_body(&prov, Some("nudger")),
             "nudger (cron): message delivered to this session"
         );
+    }
+
+    /// A hook delivery for a graph in the db is announced by its name.
+    #[test]
+    fn hook_delivery_names_an_existing_graph_from_the_db() {
+        use crate::domain::graphs::{Graph, GraphStatus};
+        let (app, _dir) = test_app();
+        app.db
+            .insert_graph(&Graph {
+                archived: false,
+                paused_by_reconciliation: false,
+                allow_dirty_start: false,
+                infra_node_id: None,
+                id: "g-canopy-next".into(),
+                name: "canopy-next".into(),
+                description: None,
+                workdir: "/tmp".into(),
+                status: GraphStatus::Draft,
+                trigger: None,
+                created_at: chrono::Utc::now(),
+                started_at: None,
+                completed_at: None,
+                autorun_at: None,
+                auto_continue_at: None,
+                auto_continue_action: None,
+                active_run_queue_id: None,
+                hooks: std::collections::BTreeMap::new(),
+            })
+            .expect("insert graph");
+
+        let prov = ScheduledSendProvenance::hook("g-canopy-next", "on_completed");
+        let name = app.hook_graph_name(&prov);
+        assert_eq!(
+            hook_delivery_body(&prov, name.as_deref()),
+            "canopy-next · on_completed: message delivered to this session"
+        );
+
+        let unknown =
+            ScheduledSendProvenance::hook("969ee102-0138-4054-95fd-2946ef237431", "on_completed");
+        assert_eq!(app.hook_graph_name(&unknown), None);
+    }
+
+    /// An agent-trigger delivery for an agent in the db is announced by the
+    /// agent's name, and an unknown agent resolves to nothing.
+    #[test]
+    fn agent_trigger_delivery_names_an_existing_agent_from_the_db() {
+        use crate::domain::models::{Agent, AgentAction, Cli, Trigger};
+        let (app, _dir) = test_app();
+        app.db
+            .upsert_agent(&Agent {
+                id: "nudger".into(),
+                prompt: "test".into(),
+                trigger: Some(Trigger::Cron {
+                    schedule_expr: "0 9 * * *".into(),
+                }),
+                cli: Cli::new("claude"),
+                model: None,
+                effort: None,
+                working_dir: None,
+                enabled: true,
+                enable_at: None,
+                created_at: chrono::Utc::now(),
+                log_path: "/tmp/test.log".into(),
+                timeout_minutes: 15,
+                expires_at: None,
+                last_run_at: None,
+                last_run_ok: None,
+                last_triggered_at: None,
+                trigger_count: 0,
+                action: AgentAction::Headless,
+            })
+            .expect("insert agent");
+
+        let prov = ScheduledSendProvenance::agent_trigger("nudger", "cron");
+        let name = app.trigger_agent_name(&prov);
+        assert_eq!(
+            agent_trigger_delivery_body(&prov, name.as_deref()),
+            "nudger (cron): message delivered to this session"
+        );
+
+        let unknown =
+            ScheduledSendProvenance::agent_trigger("969ee102-0138-4054-95fd-2946ef237431", "cron");
+        assert_eq!(app.trigger_agent_name(&unknown), None);
     }
 }
