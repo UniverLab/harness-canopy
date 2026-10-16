@@ -92,6 +92,7 @@ pub(super) fn section_display_label(
             "resources",
             "rag_search",
             "constraints",
+            "canopy_protocol",
         ];
         known
             .iter()

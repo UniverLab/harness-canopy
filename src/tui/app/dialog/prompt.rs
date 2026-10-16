@@ -17,6 +17,9 @@ mod prompt_build;
 use prompt_build::*;
 mod prompt_edit;
 mod prompt_schedule;
+// `prompt_protocol` holds only an `impl SimplePromptDialog` block, so
+// there is nothing to re-export (same as `prompt_edit`/`prompt_schedule`).
+mod prompt_protocol;
 
 /// Picker state for adding/removing sections
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -401,6 +404,9 @@ impl SimplePromptDialog {
             sections.push(("rag_search", "RAG Search"));
         }
         sections.extend([("constraints", "Constraints"), ("tools", "Tools")]);
+        // The manual resend path: a locked, read-only section holding the
+        // canonical protocol block (see `prompt_protocol`).
+        sections.push(("canopy_protocol", "Canopy protocol"));
         sections.push(("preset", "Preset"));
         sections
     }
@@ -553,9 +559,15 @@ impl SimplePromptDialog {
             .insert(section_id.to_string(), label.to_string());
     }
 
-    /// Get section types available to add (can always add more instances)
+    /// Get section types available to add (can always add more instances).
+    /// `Canopy protocol` is single-instance: hidden from this list once a
+    /// `canopy_protocol` section is already enabled, so the picker only
+    /// offers it while a resend is still possible.
     pub fn get_addable_sections(&self) -> Vec<(&'static str, &'static str)> {
         Self::get_available_sections()
+            .into_iter()
+            .filter(|(name, _)| *name != "canopy_protocol" || !self.has_canopy_protocol_section())
+            .collect()
     }
 
     fn section_display_name(section_id: &str) -> String {

@@ -214,6 +214,20 @@ row: `/` filters, `n` creates, `e` edits and `F4` deletes.
   agent references. Press `Ctrl+L` to recall the last prompt you sent
   in the current project, restoring the full prompt text, tools, and
   preset selection.
+- **Canopy protocol — once per session** — the builder prepends the
+  `[CANOPY]` session-start protocol to the *first* prompt of an
+  interactive session, never to the ones that follow. That fact is stored
+  with the session id in the database, so it survives restarting canopy
+  and resuming the session: a conversation that already carries the
+  protocol does not receive it again, and a session resumed under a new
+  id inherits the flag from the one it continues. When the protocol is
+  *not* due, the builder shows nothing extra about it — to resend the
+  block on purpose, add the **Canopy protocol** section from the section
+  picker (`Ctrl+A`): it inserts a locked, read-only section holding the
+  protocol text, the prompt then carries the block exactly once at the
+  very top (before the per-turn workspace context), and that send counts
+  as the session's one delivery. The section can be taken out again with
+  the remove-section picker (`Ctrl+X`) like any other section.
 - **Launchpad** — start new sessions with previous-mission recovery and
   auto-injected context.
 

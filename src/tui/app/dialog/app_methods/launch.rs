@@ -357,20 +357,7 @@ impl App {
         // nursery temp dir by `create_nursery`; normal sessions must never get
         // the Gardener instructions written into their working directory.
 
-        // Append yolo flag to args when yolo mode is enabled
-        let base_args = dialog.selected_args();
-        let args = if dialog.yolo_mode {
-            if let Some(ref flag) = dialog.selected_yolo_flag() {
-                Some(match base_args {
-                    Some(ref a) => format!("{a} {flag}"),
-                    None => flag.clone(),
-                })
-            } else {
-                base_args
-            }
-        } else {
-            base_args
-        };
+        let args = yolo_launch_args(dialog);
         let fallback = dialog.selected_fallback_args();
         let accent = dialog.selected_accent_color(&self.theme);
         let model = if dialog.model.is_empty() {
@@ -425,6 +412,13 @@ impl App {
         // Don't register nursery temp dir as a project — it's ephemeral
         if !is_nursery && crate::domain::project::should_auto_register(Path::new(&dir)) {
             let _ = self.db.register_project_path(Path::new(&dir));
+        }
+        // The New Session Resume step relaunches a listed session under this
+        // fresh agent id: carry the source session's persisted "protocol
+        // sent" flag over, or the inherited conversation would receive the
+        // block a second time (FR3).
+        if let Some(source) = dialog.selected_resume_session.as_ref() {
+            self.inherit_protocol_flag(&source.id, &agent.id);
         }
         let spawned_name = agent.name.clone();
         self.interactive_agents.push(agent);
@@ -573,5 +567,21 @@ impl App {
                 spawned_name,
             ));
         Ok(())
+    }
+}
+
+/// Launch args for an interactive agent: the dialog's base args, with the yolo
+/// flag appended when yolo mode is on.
+fn yolo_launch_args(dialog: &NewAgentDialog) -> Option<String> {
+    let base_args = dialog.selected_args();
+    if !dialog.yolo_mode {
+        return base_args;
+    }
+    match dialog.selected_yolo_flag() {
+        Some(flag) => Some(match base_args {
+            Some(a) => format!("{a} {flag}"),
+            None => flag,
+        }),
+        None => base_args,
     }
 }

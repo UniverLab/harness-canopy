@@ -296,12 +296,15 @@ impl SimplePromptDialog {
     }
 
     /// The invisible system block, rendered so its operating protocol is the
-    /// first thing the agent reads. Empty when there is no system content.
+    /// first thing the agent reads — the session-start protocol once at the
+    /// top when it rides along, then the per-turn context (see
+    /// `system_text`). Empty when there is neither to send.
     pub(super) fn render_system_block(&self) -> String {
-        match &self.system_content {
-            Some(system) => format!("<system>\n{system}\n</system>\n\n"),
-            None => String::new(),
+        let system = self.system_text();
+        if system.is_empty() {
+            return String::new();
         }
+        format!("<system>\n{system}\n</system>\n\n")
     }
 
     /// Build the prompt body (every section except the system block).

@@ -132,6 +132,10 @@ impl App {
                 session.name
             );
         }
+        // Resuming mints a fresh agent id (a new uuid per spawn), so the
+        // source session's persisted "protocol sent" flag has to follow the
+        // new id — the resumed conversation already carries the block.
+        self.inherit_protocol_flag(&session.id, &agent.id);
         self.interactive_agents.push(agent);
     }
 

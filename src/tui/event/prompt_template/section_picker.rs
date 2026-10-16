@@ -87,6 +87,12 @@ pub(super) fn select_addable_section(
         "tools" => open_skills_picker(dialog, workdir),
         "project_context" => open_project_picker(dialog, db)?,
         "preset" => open_preset_picker(dialog),
+        // The manual protocol resend (FR4): insert the locked, pre-filled
+        // `Canopy protocol` section and close the picker like a plain add.
+        "canopy_protocol" => {
+            dialog.add_canopy_protocol_section();
+            dialog.picker_mode = SectionPickerMode::None;
+        }
         _ => {
             dialog.add_section(name);
             dialog.picker_mode = SectionPickerMode::None;

@@ -12,6 +12,7 @@ use crate::application::ports::AgentRepository;
 
 mod launch;
 mod launch_send;
+mod protocol;
 
 impl App {
     pub fn open_edit_dialog(&mut self) {
@@ -95,7 +96,9 @@ impl App {
     /// Restores any persisted session for the current workdir.
     /// Injects an invisible system block on every prompt: per-turn workspace
     /// context always, plus the session-start protocol on the first prompt
-    /// of a session (idempotent per `App::current_prompt_session_key`).
+    /// of a session — remembered in memory for this process and, for an
+    /// interactive session id, persisted in `daemon_state` so a restart or
+    /// resume never repeats it (see `mod protocol`).
     pub fn open_simple_prompt_dialog(
         &mut self,
         initial_content: Option<std::collections::HashMap<String, String>>,
@@ -120,21 +123,25 @@ impl App {
         // The per-turn context (workspace/active missions) is worth its tokens
         // every send, so it is never gated. The session-start protocol
         // ("[CANOPY]", the tool-usage contract, the skills list) is a one-time
-        // opening instruction: send it on the first prompt of a session only.
+        // opening instruction: send it on the first prompt of a session only,
+        // where "already sent" means the in-memory state OR — for an
+        // interactive session — the persisted `prompt_protocol_sent:<id>`
+        // key that survives restarts and resumes. The block itself is no
+        // longer prepended to `system_content`: it rides along in
+        // `SimplePromptDialog::system_text()` when `protocol_included` (or
+        // the manual `Canopy protocol` section) says it should.
         let state = self
             .session_protocol_state
             .get(&session_key)
             .cloned()
             .unwrap_or_default();
-        let should_send_protocol = !state.protocol_sent && self.active_sandbox.is_none();
+        let persisted_sent = session_key
+            .strip_prefix("interactive:")
+            .is_some_and(|session_id| self.protocol_persisted(session_id));
+        let should_send_protocol =
+            !state.protocol_sent && !persisted_sent && self.active_sandbox.is_none();
 
-        let turn_context = self.build_turn_context_block();
-        let content = if should_send_protocol {
-            format!("{}\n\n{turn_context}", self.build_session_protocol_block())
-        } else {
-            turn_context
-        };
-        dialog.system_content = Some(content);
+        dialog.system_content = Some(self.build_turn_context_block());
         dialog.protocol_included = should_send_protocol;
 
         if let Some(content) = initial_content {
@@ -180,17 +187,6 @@ impl App {
         Self::push_intents(&mut lines, &intents);
 
         lines.join("\n")
-    }
-
-    /// Build the session-start protocol block: the opening contract
-    /// ("[CANOPY]", the tool-usage protocol, the skills list). Static across a
-    /// session — sent once, not per turn.
-    ///
-    /// Single source of truth: [`crate::domain::sandbox::canopy_protocol_block`],
-    /// so the text the promptbuilder injects (non-sandbox path) and the text
-    /// materialised into a sandbox's instruction file can never drift apart.
-    fn build_session_protocol_block(&self) -> String {
-        crate::domain::sandbox::canopy_protocol_block().to_string()
     }
 
     /// Extract workdir and intents from activity state or fallback.
