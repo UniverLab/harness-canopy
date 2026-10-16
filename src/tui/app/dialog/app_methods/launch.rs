@@ -426,9 +426,13 @@ impl App {
         if !is_nursery && crate::domain::project::should_auto_register(Path::new(&dir)) {
             let _ = self.db.register_project_path(Path::new(&dir));
         }
+        let spawned_name = agent.name.clone();
         self.interactive_agents.push(agent);
         self.whimsg
-            .notify_event(crate::tui::whimsg::WhimContext::AgentSpawned);
+            .notify_event(crate::tui::whimsg::events::WhimEvent::new(
+                crate::tui::whimsg::events::EventKind::AgentSpawned,
+                spawned_name,
+            ));
         Ok(())
     }
 
@@ -561,9 +565,13 @@ impl App {
         let hist = crate::tui::terminal_history::load_history(&self.data_dir, &agent.name);
         agent.replay_scrollback_lines(&hist.scrollback);
         self.terminal_histories.insert(agent.name.clone(), hist);
+        let spawned_name = agent.name.clone();
         self.terminal_agents.push(agent);
         self.whimsg
-            .notify_event(crate::tui::whimsg::WhimContext::AgentSpawned);
+            .notify_event(crate::tui::whimsg::events::WhimEvent::new(
+                crate::tui::whimsg::events::EventKind::AgentSpawned,
+                spawned_name,
+            ));
         Ok(())
     }
 }

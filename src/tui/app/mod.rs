@@ -18,6 +18,7 @@ mod project_filter;
 mod project_graph;
 mod project_nav;
 mod refresh;
+mod refresh_graph_whimsg;
 mod sessions;
 mod sidebar_nav;
 mod sync;

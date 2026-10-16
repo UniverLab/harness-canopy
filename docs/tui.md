@@ -99,9 +99,12 @@ step instead of launching straight away:
   without blocking while a call is in flight.
 - **Idle visuals** — Brian's Brain cellular automaton, drawn as Braille
   glyphs and seeded by the cursor at a fixed step rate, plus animated
-  kaomoji status messages (whimsg). The header title (`harness-canopy`) and
-  those kaomoji share one slow sweep: a dark highlight travels across the
-  letters, then the text rests for 2 seconds before the next sweep.
+  kaomoji status messages (whimsg). Messages come from curated forest-voice
+  phrases and a pool of deliberate jokes, or — when something just happened —
+  from a real event naming the agent, graph, or spec involved. The header
+  title (`harness-canopy`) and those kaomoji share one slow sweep: a dark
+  highlight travels across the letters, then the text rests for 2 seconds
+  before the next sweep.
 
 ## Gamification
 

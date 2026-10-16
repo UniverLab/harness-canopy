@@ -119,6 +119,8 @@ macro_rules! app_new_fields {
             terminal_selection: None,
             whimsg: crate::tui::whimsg::Whimsg::new(),
             whimsg_last_log_hash: 0,
+            whimsg_graphs: None,
+            whimsg_announced_runs: HashSet::new(),
             context_transfer_modal: None,
             rag_transfer_modal: None,
             context_transfer_config: ContextTransferConfig::default(),

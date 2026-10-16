@@ -482,6 +482,11 @@ pub struct App {
     /// Hash of the last log chunk scanned for whimsg triggers — avoids re-firing
     /// on the same content every tick.
     pub(crate) whimsg_last_log_hash: u64,
+    /// Previous per-graph snapshot for the header's graph events. `None` until
+    /// the first refresh primes it silently (no events on the first sighting).
+    pub(crate) whimsg_graphs: Option<HashMap<String, crate::tui::whimsg::events::GraphSnapshot>>,
+    /// Background run ids already announced by the header, so each fires once.
+    pub(crate) whimsg_announced_runs: HashSet<String>,
     pub(crate) context_transfer_modal: Option<crate::tui::context_transfer::ContextTransferModal>,
     pub(crate) rag_transfer_modal: Option<RagTransferModal>,
     pub(crate) context_transfer_config: crate::tui::context_transfer::ContextTransferConfig,

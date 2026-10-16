@@ -69,7 +69,16 @@ impl App {
             }
         );
 
-        self.whimsg.notify_event(whimsg::WhimContext::AgentFailed);
+        let subject = self
+            .interactive_agents
+            .iter()
+            .find(|agent| agent.id == agent_id)
+            .map(|agent| agent.name.clone())
+            .unwrap_or_else(|| agent_id.to_string());
+        self.whimsg.notify_event(whimsg::events::WhimEvent::new(
+            whimsg::events::EventKind::AgentFailed,
+            subject,
+        ));
         if !self.notifications_enabled {
             return;
         }

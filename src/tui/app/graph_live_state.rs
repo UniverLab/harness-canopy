@@ -356,6 +356,20 @@ fn build_spec_queue(db: &Database, lp: &crate::domain::graphs::Graph) -> Vec<Spe
         .collect()
 }
 
+/// Completed spec names for the header's graph events — queue members
+/// included, since it reads the same source `build_spec_queue` does. Callers
+/// bound this to running graphs so the per-tick query stays small.
+pub(crate) fn completed_spec_names(
+    db: &Database,
+    lp: &crate::domain::graphs::Graph,
+) -> Vec<String> {
+    build_spec_queue(db, lp)
+        .into_iter()
+        .filter(|e| e.status == GraphSpecStatus::Completed)
+        .map(|e| e.spec_name)
+        .collect()
+}
+
 /// Reason a spec ended up `Failed`/`Skipped`, for the marker strip's detail
 /// view: the admin-recorded reason (`completed_via_reason`, set only for
 /// administrative transitions) if present, else the last run's self-reported

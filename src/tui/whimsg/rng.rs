@@ -7,6 +7,13 @@ impl Rng {
         let seed = t.elapsed().as_nanos() as u64 ^ 0xDEAD_BEEF_CAFE_BABE;
         Self(if seed == 0 { 1 } else { seed })
     }
+
+    /// Deterministic seed for tests — a zero seed is nudged off the fixed
+    /// point of the xorshift.
+    #[cfg(test)]
+    pub(crate) fn from_seed(seed: u64) -> Self {
+        Self(if seed == 0 { 1 } else { seed })
+    }
     pub(crate) fn next(&mut self) -> u64 {
         self.0 ^= self.0 << 13;
         self.0 ^= self.0 >> 7;

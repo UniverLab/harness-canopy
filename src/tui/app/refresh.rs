@@ -667,12 +667,12 @@ impl App {
         use crate::tui::whimsg::WhimContext;
 
         if !self.daemon_running {
-            self.whimsg.set_ambient(WhimContext::AgentFailed);
-            self.whimsg.notify_event(WhimContext::AgentFailed);
+            self.whimsg.set_ambient(WhimContext::Idle);
             return;
         }
 
         self.check_recent_run_events();
+        self.notify_whimsg_for_graphs();
 
         if self.last_scroll_at.elapsed() < std::time::Duration::from_secs(5) {
             self.whimsg.set_ambient(WhimContext::Scrolling);
@@ -684,9 +684,9 @@ impl App {
     }
 
     pub(crate) fn check_recent_run_events(&mut self) {
-        use crate::tui::whimsg::WhimContext;
+        use crate::tui::whimsg::events::{EventKind, WhimEvent};
         let now = Utc::now();
-        let statuses: Vec<_> = self
+        let candidates: Vec<(String, String, EventKind)> = self
             .recent_runs
             .iter()
             .filter_map(|run| {
@@ -694,16 +694,19 @@ impl App {
                 if (now - finished).num_seconds() >= 60 {
                     return None;
                 }
-                match run.status {
+                let kind = match run.status {
                     crate::domain::models::RunStatus::Error
-                    | crate::domain::models::RunStatus::Timeout => Some(WhimContext::AgentFailed),
-                    crate::domain::models::RunStatus::Success => Some(WhimContext::AgentDone),
-                    _ => None,
-                }
+                    | crate::domain::models::RunStatus::Timeout => EventKind::AgentFailed,
+                    crate::domain::models::RunStatus::Success => EventKind::AgentDone,
+                    _ => return None,
+                };
+                Some((run.id.clone(), run.background_agent_id.clone(), kind))
             })
             .collect();
-        for ctx in statuses {
-            self.whimsg.notify_event(ctx);
+        for (run_id, subject, kind) in candidates {
+            if self.whimsg_announced_runs.insert(run_id) {
+                self.whimsg.notify_event(WhimEvent::new(kind, subject));
+            }
         }
     }
 
@@ -723,7 +726,13 @@ impl App {
     }
 
     pub(crate) fn notify_whimsg_for_log(&mut self, raw_log: &str) {
-        use crate::tui::whimsg::WhimContext;
+        use crate::tui::whimsg::events::{EventKind, WhimEvent};
+
+        // A log event names a real agent; with none selected there is nothing
+        // to attribute it to, so it is skipped.
+        let Some(subject) = self.selected_live_agent().map(|agent| agent.name.clone()) else {
+            return;
+        };
 
         let log_hash = calculate_log_hash(raw_log);
         if log_hash == self.whimsg_last_log_hash {
@@ -732,13 +741,16 @@ impl App {
         self.whimsg_last_log_hash = log_hash;
 
         let log_up = raw_log.to_uppercase();
-        if log_contains_error(&log_up) {
-            self.whimsg.notify_event(WhimContext::AgentFailed);
+        let kind = if log_contains_error(&log_up) {
+            EventKind::AgentFailed
         } else if log_contains_success(&log_up) {
-            self.whimsg.notify_event(WhimContext::AgentDone);
+            EventKind::AgentDone
         } else if log_contains_spawn(&log_up) {
-            self.whimsg.notify_event(WhimContext::AgentSpawned);
-        }
+            EventKind::AgentSpawned
+        } else {
+            return;
+        };
+        self.whimsg.notify_event(WhimEvent::new(kind, subject));
     }
 
     pub(crate) fn update_ambient_context(&mut self) {
@@ -748,12 +760,10 @@ impl App {
             .iter()
             .filter(|a| a.status == crate::tui::agent::AgentStatus::Running)
             .count();
-        let has_active_runs = !self.active_runs.is_empty();
+        let active_runs = self.active_runs.len();
 
-        let ctx = if running >= 3 || (running >= 1 && has_active_runs) {
-            WhimContext::Busy
-        } else if has_active_runs {
-            WhimContext::TaskRunning
+        let ctx = if running + active_runs > 0 {
+            WhimContext::Busy(running + active_runs)
         } else {
             WhimContext::Idle
         };
