@@ -130,7 +130,7 @@ docs/ is published at univerlab.org/canopy/docs and holds user documentation onl
 - **Seed Identity System** — Persistent, evolvable agent identities stored as structured TOML at `~/.canopy/seeds/<id>/identity.toml`. Each seed has a unique name, family, behavioral directives, and personality traits. Binded sessions receive the seed's prompt injection automatically. The `evolve_identity` MCP tool lets agents refine themselves over time. 4 KB size cap, case-insensitive name uniqueness, and mandatory field validation.
 - **Seed Nursery** — Collaborative workspace for creating new seed identities. Creates a temporary directory with a draft `identity.toml` and CLI-specific instruction files (e.g. `CLAUDE.md`, `AGENTS.md`) that guide the agent to interview the user and define the seed's personality. Validates and registers the seed on completion.
 - **Context Transfer** — Seamlessly transfer conversation context, prompts, and output between agents while preserving session state and scrollback history.
-- **Prompt Builder** — Structured prompt templates with configurable sections (instruction, context, resources, examples), section picker, and @-mention agent references.
+- **Prompt Builder** — Structured prompt templates with configurable sections (instruction, context, resources, examples, Canopy protocol), section picker, and @-mention agent references. The session-start Canopy protocol rides on the first prompt of an interactive session only — persisted per session across restarts and resumes — and the locked **Canopy protocol** section (`Ctrl+A`) resends it on purpose.
 - **Launchpad** — Start new interactive sessions with previous mission recovery, mission input, and auto-injected context.
 
 ### 🧠 Intelligence V2 — Knowledge Graph
