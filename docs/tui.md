@@ -84,8 +84,8 @@ step instead of launching straight away:
   edge, and `,`/`.` step through an ensemble's members. Opening, closing or
   switching the pane never writes to a run.
 - **Crews face** — pin a panel face with the `pinned_panel_face` setting
-  (F1 → Settings → TUI Appearance); **crews** is pin-only (never
-  selected automatically). It lists every harness/model pair in use with its
+  (F1 → Settings → TUI Appearance); **crews** is shown by pinning
+  `crews` there (never selected automatically). It lists every harness/model pair in use with its
   effective availability — `●` available, `○` unavailable, `◐` expired — its
   reason and expiry, and how many graphs and crews use it, plus every crew
   with its member and binding counts. Click the panel to focus it, then `Tab`
