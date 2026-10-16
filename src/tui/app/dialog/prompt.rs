@@ -153,14 +153,17 @@ pub struct SimplePromptDialog {
     pub collapsed_pastes: HashMap<String, String>,
     /// Section IDs that are read-only (auto-filled, cannot be edited).
     pub locked_sections: HashSet<String>,
-    /// Invisible system block rendered at the top of the final prompt so its
-    /// protocol is read before the task. None = omit.
+    /// Invisible per-turn system block (workspace/intents context) rendered
+    /// at the top of the final prompt. Holds no protocol text: `system_text()`
+    /// prepends the one-time protocol ahead of it when it rides along. None =
+    /// omit.
     pub system_content: Option<String>,
-    /// Whether `system_content` (if any) carries the one-time session-start
-    /// protocol block, as opposed to only the per-turn workspace/intents/
-    /// chatter context. Read by `submit_prompt` to decide whether to mark
-    /// the session's protocol as delivered; never persisted across
-    /// openings.
+    /// Whether this send should carry the one-time session-start protocol
+    /// block. `system_text()` prepends the block when this is true or the
+    /// manual `Canopy protocol` section is enabled; read by `submit_prompt`
+    /// to decide whether to mark the session's protocol as delivered. Decided
+    /// when the dialog opens (see `App::open_simple_prompt_dialog`); never
+    /// persisted across openings.
     pub protocol_included: bool,
     /// Send-timing selector (U11): `now` sends immediately, `date`
     /// schedules the delivery at `send_at`.
