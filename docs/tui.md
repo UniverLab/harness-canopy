@@ -85,8 +85,9 @@ step instead of launching straight away:
   switching the pane never writes to a run.
 - **Crews face** — pin a panel face with the `pinned_panel_face` setting
   (F1 → Settings → TUI Appearance); **crews** is shown by pinning
-  `crews` there (never selected automatically). It lists every harness/model pair in use with its
-  effective availability — `●` available, `○` unavailable, `◐` expired — its
+  `crews` there (never selected automatically). It lists every
+  harness/model pair in use with its effective availability — `●`
+  available, `○` unavailable, `◐` expired — its
   reason and expiry, and how many graphs and crews use it, plus every crew
   with its member and binding counts. Click the panel to focus it, then `Tab`
   switches between the Pairs and Crews sections. In Pairs, `Space` toggles the
@@ -141,7 +142,10 @@ handles, and **Missions & stats** lists all the missions above — unlocked
 ones in full colour, locked ones dimmed. `Shift+←`/`Shift+→`
 switch tabs, as everywhere else in Canopy; `Tab`/`Shift+Tab` and `1`/`2`/`3`
 also switch. `F1` closes the hub from any state; `Esc` closes it from the top
-level of every tab.
+level of every tab. `F1` works everywhere — including inside a focused
+interactive session whose harness has claimed the keyboard (alternate screen
+or the Kitty protocol) — the key opens the hub instead of being forwarded to
+the session.
 
 In **Settings**, the `↑`/`↓` keys move within the focused column and `→` or
 `Enter` step from the category list into its properties (`←` goes back, keeping
